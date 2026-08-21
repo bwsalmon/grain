@@ -128,3 +128,38 @@ commits to it, same as any dispatch. What's new is on the controller side:
 Sequenced after item 2 (reuses the same `GitHubClient`/label-move patterns
 PR creation establishes) and item 8 (prove the simpler issue→PR loop end
 to end before adding a second intake path on top of it).
+
+## 10. A session browser: trigger → trajectory, over SSH
+
+- [ ] Done
+
+Nothing today lets an operator look back at a past run — `AutomationState`
+only holds *current* assignments (a released slot's record is gone), and
+`audit.py`'s log is one line per decision, not a transcript. Requested:
+browse past sessions by their trigger (the issue or PR that started them)
+and see the actual trajectory — a text UI, not just the CLI, but still
+usable over SSH (matches `docs/design.md`'s "the only inbound port on this
+host is SSH" — no web UI).
+
+Real open questions to resolve before coding, not assume:
+- **Where do trajectories come from?** `claude -p` writes its own session
+  transcript inside the sandbox; nothing pulls it back to the controller
+  today. Check what `claude -p` actually leaves behind and where. Likely
+  needs the sweeper to fetch it over SSH (same channel `dispatch.py`
+  already uses) *before* a finished sandbox's slot gets reused for the next
+  task — capture-on-completion, not fetch-on-demand, or a later browse
+  finds nothing.
+- **Durable history.** `AutomationState` is deliberately live-pool-only;
+  this needs a separate append-or-archive store keyed by trigger (issue #
+  or PR #) → {sandbox, unit, started_at, finished_at, outcome, transcript
+  path}, most likely under `/data/state/automation/sessions/`.
+- **TUI toolkit vs. the stdlib-only convention.** `pyproject.toml` is
+  deliberately dependency-free ("this runs on a stock Debian host"). Python's
+  built-in `curses` fits that; a richer library (textual, urwid) would be
+  the first dependency this project takes on — a real trade to weigh
+  explicitly, not default past.
+
+Depends on item 2 (PR-triggered sessions need PR creation to exist) and
+item 9 (browsing "issue or PR" needs the PR-trigger path to exist) to be
+fully meaningful, though an issue-only version is useful on its own before
+either lands.
