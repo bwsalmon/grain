@@ -22,6 +22,7 @@ from .adapter.net_linux import LinuxNetwork, render_host_input_rules, render_rul
 from .automation.audit import FileAuditLog
 from .automation.config import AutomationConfig
 from .automation.core import Orchestrator
+from .automation.credential_audit import Verdict, audit_secrets_dir
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.state import AutomationState, utcnow
 from .inventory import Cluster
@@ -132,6 +133,20 @@ def cmd_metadata_sync_audit(args: argparse.Namespace) -> int:
         total += metadata_sync(paths.log_path, state_path, name, audit)
     print(f"forwarded {total} event(s)")
     return 0
+
+
+def cmd_github_audit(args: argparse.Namespace) -> int:
+    secrets_dir = Path(args.data_dir) / "secrets" / "github"
+    results = audit_secrets_dir(RealTransport(), secrets_dir)
+    if not results:
+        print(f"no *.token files found under {secrets_dir}")
+        return 0
+    exit_code = 0
+    for r in results:
+        print(f"{r.name:<12} {r.kind.value:<45} {r.verdict.value:<12} {r.detail}")
+        if r.verdict is Verdict.FLAGGED:
+            exit_code = 1
+    return exit_code
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
@@ -314,6 +329,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?", default="sandboxes",
                     help="sandbox name, or 'sandboxes' for all (default)")
     p.set_defaults(func=cmd_metadata_sync_audit)
+
+    github = sub.add_parser(
+        "github", help="GitHub credential hardening"
+    ).add_subparsers(dest="command", required=True)
+
+    p = github.add_parser(
+        "audit",
+        help="check every credential under secrets/github for withheld scopes",
+    )
+    p.set_defaults(func=cmd_github_audit)
 
     return parser
 
