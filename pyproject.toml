@@ -1,0 +1,9 @@
+[project]
+name = "grain"
+version = "0.1.0"
+description = "Single-node agent cluster: host adapter and services"
+requires-python = ">=3.11"
+dependencies = []          # stdlib only: this runs on a stock Debian host
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

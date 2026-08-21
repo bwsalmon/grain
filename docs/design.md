@@ -954,8 +954,11 @@ ever becomes worth its cost again.
 ## Open questions
 
 1. **Does Lima run well enough on Linux** to be the single VM driver for
-   both platforms? If not, libvirt is the Linux fallback and the adapter
-   grows a second implementation — a cost, not a redesign.
+   both platforms — specifically, can it attach a guest to a host bridge
+   with a fixed address? The [adapter](host-adapter.md) is written and
+   tested, but that `networks:` stanza is the one part no test can cover
+   without a hypervisor, and it is marked `UNVERIFIED` in the source. If it
+   cannot, libvirt replaces `lima.py` and nothing else changes.
 2. **Does 4 vCPU hold two sandboxes plus a controller** under real `kind`
    workloads? This inverts earlier revisions: memory was the binding
    resource, and here it probably is not.
@@ -979,13 +982,13 @@ ever becomes worth its cost again.
 
 1. **Host baseline**: GCP `n2-highmem-4`, Debian, nested virtualization
    enabled, KVM confirmed (`ls /dev/kvm`), 300 GB disk, serial console on.
-2. **Host adapter, first cut**: bring up one Debian VM and reach it. This
-   answers open question 1 and defines the interface everything else codes
-   against.
-3. **Networking**: private network, per-VM addresses, the reachability
-   matrix. Verify the negative cases explicitly — sandbox↔sandbox blocked,
-   controller services unreachable from outside — since a silently
-   permissive rule is the failure that invalidates the security model.
+2. **Host adapter, first cut** — *interface and Linux implementation
+   written; see [notes](host-adapter.md)*. What remains is running it: bring
+   up one Debian VM and reach it, which answers open question 1.
+3. **Networking** — *ruleset written, tested against a real kernel, and
+   verified for the negative cases*. What remains is confirming the
+   reachability matrix with actual VMs on the bridge, since a ruleset the
+   kernel accepts is not yet a ruleset that does what you meant.
 4. **Sandbox image**: the provisioning script, `docker`, `kind`. Confirm
    `kind create cluster` works and measure peak CPU and memory. Open
    question 2 is answered here, and it may change `sandboxCount` or the
