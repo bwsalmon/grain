@@ -5,10 +5,18 @@
 # wasted effort if this fails, so this deliberately contains no orchestrator,
 # no proxies, and no pool.
 #
-# UNVALIDATED: written without a nix evaluator available. Expect to fix option
-# names on first `nix flake check`. Lines marked VERIFY are the ones most
-# likely to need adjustment against the pinned microvm.nix.
+# VALIDATED: evaluates against nixpkgs nixos-unstable (26.11pre) and
+# microvm.nix HEAD 71beea0, once a hardware-configuration.nix supplies the
+# root filesystem and bootloader (see below). NOT booted — no KVM was
+# available in the authoring environment. See docs/spike-0.md.
 { config, lib, pkgs, ... }:
+
+# REQUIRED: this config has no root filesystem or bootloader of its own,
+# because both are machine-specific. Generate them on the target host with
+#   nixos-generate-config --dir /tmp/hw
+# and add ./hardware-configuration.nix to the flake's module list.
+# Without it evaluation fails with "The 'fileSystems' option does not
+# specify your root file system".
 
 let
   bridge = "br-agents";
@@ -54,7 +62,6 @@ in
 
   # --- the sandbox VM -------------------------------------------------------
   microvm.vms.sandbox-0 = {
-    # VERIFY: `config` is the inline-guest option in current microvm.nix.
     # sandbox-spike.nix takes these args and returns a NixOS module; the
     # module system supplies config/lib/pkgs itself.
     config = import ../../modules/sandbox-spike.nix {
@@ -64,5 +71,5 @@ in
 
   environment.systemPackages = with pkgs; [ bridge-utils tcpdump ];
 
-  system.stateVersion = "24.11"; # VERIFY against the pinned nixpkgs.
+  system.stateVersion = "26.05"; # match the nixpkgs release you pin.
 }

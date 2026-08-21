@@ -278,6 +278,9 @@ fits the constraints best:
   [Memory budget](#memory-budget).
 - A minimal device model — less to boot, less attack surface.
 - Fast boot, which [on-demand start](#start-sandboxes-on-demand) leans on.
+  Note it signals readiness over vsock, so each VM needs a distinct
+  `microvm.vsock.cid` — without one the host cannot tell when a guest is
+  actually up, and "started" would not mean "ready to take work".
 
 Two consequences worth knowing up front:
 
@@ -1374,14 +1377,15 @@ the sandbox VM has to be a comfortable host for `docker` and `kind`
 itself. In a VM this is ordinary — a real kernel, an unshared daemon — but
 a few things need arranging, and one could block the whole design.
 
-**Verify the guest kernel first.** microVM guests can run slimmed kernels,
-and Docker and kind need modules a minimal config may omit: `overlay`,
-`br_netfilter`, `ip_tables`/`nf_tables`, `nf_conntrack`, plus cgroup v2.
-If the pinned microvm.nix builds a guest kernel without them, that is a
-blocker to find on day one rather than during the first `kind create
-cluster`. No nested virtualization is required — kind is containers all the
-way down — but anything wanting real VMs inside a sandbox would need nested
-KVM, which is a separate question.
+**The guest kernel checks out — verified statically.** The worry was that
+microVM guests run slimmed kernels missing what Docker and kind need. They
+don't: microvm.nix gives the guest nixpkgs' stock kernel, and inspecting
+its config confirms `overlay`, `br_netfilter`, `veth`, `nf_conntrack`,
+`nf_nat`, cgroup v2 and every namespace symbol are present. Details and the
+one caveat — legacy iptables symbols are absent, the `nf_tables` stack is
+present — are in [spike 0](spike-0.md). No nested virtualization is
+required, since kind is containers all the way down; anything wanting real
+VMs inside a sandbox would need nested KVM, which is a separate question.
 
 **Docker state belongs on the scratch volume.** `/var/lib/docker` holds
 images measured in gigabytes; on a
@@ -1692,10 +1696,15 @@ and both came from the same error — treating a *narrowed* capability as an
 
 Substantially shorter than revision 1 — its two biggest are resolved above.
 
-1. **Does the microVM guest kernel support Docker and kind?** The modules
-   they need may not be in a slimmed guest kernel, and nothing else in the
-   design matters if they aren't. First thing to test — see
-   [Docker and kind inside sandboxes](#docker-and-kind-inside-sandboxes).
+1. **Do Docker and kind actually run in the guest?** Largely de-risked
+   without booting: the guest gets nixpkgs' stock `linux-6.18.44`, not a
+   slimmed kernel, and its config carries `OVERLAY_FS`, `BRIDGE_NETFILTER`,
+   `VETH`, `NF_CONNTRACK`/`NF_NAT`, and all the namespace and cgroup v2
+   symbols. One gap to watch: the legacy `IP_NF_FILTER`/`IP_NF_NAT`/
+   `IP_NF_TARGET_MASQUERADE` symbols are absent while the `nf_tables` stack
+   is present, so anything expecting legacy iptables would need the
+   nftables backend. Still needs a real boot — see
+   [spike 0](spike-0.md).
 2. **Is the lease service worth building?** Registering sandboxes as
    long-lived Agent Canvas backends is materially simpler, but gives up
    per-task reset — one task's repo, `kind` cluster, and stray processes

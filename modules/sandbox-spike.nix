@@ -5,9 +5,9 @@
 # store overlay, no ephemeral encryption, no git proxy, no action execution
 # server. Add those only after this boots and `spike-check` passes.
 #
-# UNVALIDATED: no nix evaluator was available when this was written. Lines
-# marked VERIFY are the likeliest to need adjusting against the pinned
-# microvm.nix.
+# VALIDATED: this evaluates against nixpkgs nixos-unstable (26.11pre) and
+# microvm.nix HEAD 71beea0. It has NOT been booted — no KVM was available
+# in the authoring environment. See docs/spike-0.md.
 { tap, guestIp, hostIp, prefix }:
 
 { config, lib, pkgs, ... }:
@@ -18,7 +18,13 @@
     vcpu = 4;
 
     # Sized for a kind control plane plus a build; see docs/design.md "Sizing".
-    mem = 8192; # VERIFY: option is `mem` (MiB) in current microvm.nix.
+    mem = 8192;
+
+    # cloud-hypervisor signals readiness over vsock; without a CID the host
+    # cannot tell when the guest is actually up. That matters for
+    # on-demand start, where "started" must mean "ready to take work".
+    # Each VM needs a distinct CID (2 is reserved for the host).
+    vsock.cid = 3;
 
     interfaces = [{
       type = "tap";
@@ -42,7 +48,7 @@
       image = "scratch.img";
       mountPoint = "/scratch";
       size = 40960; # MiB
-      autoCreate = true; # VERIFY: may already be the default.
+      autoCreate = true;
     }];
   };
 
@@ -54,7 +60,7 @@
   systemd.network.networks."10-eth" = {
     matchConfig.Name = "eth*";
     address = [ "${guestIp}/${toString prefix}" ];
-    routes = [{ Gateway = hostIp; }]; # VERIFY: routes schema varies by nixpkgs.
+    routes = [{ Gateway = hostIp; }];
     networkConfig.DNS = [ "1.1.1.1" ];
   };
 
@@ -109,5 +115,5 @@
   services.getty.autologinUser = "root";
   users.users.root.password = "spike"; # spike only — never in the real design
 
-  system.stateVersion = "24.11"; # VERIFY against the pinned nixpkgs.
+  system.stateVersion = "26.05"; # match the nixpkgs release you pin.
 }
