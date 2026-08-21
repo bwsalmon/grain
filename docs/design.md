@@ -59,7 +59,7 @@ these are stated with what was actually verified.
 | Issue intake | **[`OpenHands/automation`](#issue-intake)** — cron triggers and filter expressions |
 | GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
 | Sandbox VMs | **[Lima](#the-sandbox-vms) + stock Debian guests** |
-| Host configuration | **nix-darwin** — Nix where config is stable, Debian where it is disposable |
+| Host configuration | **[nix-darwin, or Brewfile + plists](#managing-the-host)** — a preference, not a dependency |
 | Git access control | **Custom** — small smart-HTTP proxy; [FINOS Git Proxy evaluated and rejected](#the-git-proxy-write-it) |
 | GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
 | Branch and workflow protection | **[GitHub rulesets and withheld scopes](#scopes-to-withhold)** — enforced server-side |
@@ -81,7 +81,7 @@ flowchart TB
         gcp["GCP IAM Credentials API"]
     end
 
-    subgraph mac["macOS host (the trusted base, managed by nix-darwin)"]
+    subgraph mac["macOS host (the trusted base)"]
         canvas["Agent Canvas<br/>+ Automation Service<br/>(all GitHub API work)"]
         scripts["recreate + health check<br/>(scripts, not a service)"]
         proxy["Git proxy<br/>(allowlist + creds + audit)"]
@@ -143,6 +143,47 @@ performance and complexity ones stand on their own.)
 So: **macOS is the base, and the sandboxes are ordinary Linux VMs.** Note
 the asymmetry that makes this work — `kind` and Docker are containers, so
 they need no nested virtualization at all. Only microvm.nix did.
+
+### Managing the host
+
+Nothing in this design *requires* Nix on the Mac. Worth stating plainly,
+because dropping Nix from the guests raises the fair question of whether it
+still earns its place on the host. Here is what actually has to be true,
+independent of tooling:
+
+- the orchestrator services run under **launchd**, restart on failure, and
+  come back after a reboot;
+- they **bind to the vmnet address only**, never `0.0.0.0`;
+- supporting tool versions are **pinned and recorded** — Lima,
+  `socket_vmnet`, and the [OpenHands version set](#version-pinning);
+- configuration lives in git and secrets do not;
+- a bad change can be **rolled back**.
+
+**nix-darwin meets all of these**, and is the recommendation *if you
+already run it* — declarative launchd units, pinned tools, generations, one
+`darwin-rebuild switch` to converge. That is a real fit: the host is
+long-lived and worth configuring exactly, which is the half of the
+Nix-versus-Debian split that still favours Nix.
+
+Two caveats keep it from being an obvious call:
+
+- **It does not manage the components that matter most.** Upstream pins
+  Agent Canvas, the agent server and the Automation Service in its own
+  `config/defaults.json` and installs them with `npx`/`uvx`. Nix is not
+  packaging those, so nix-darwin manages the launchd units *around* them,
+  not the versions *inside* them. The pinning that matters is upstream's.
+- **This is a daily-driver laptop.** Adopting nix-darwin for one project is
+  a whole-machine commitment, and macOS upgrades are where that commitment
+  gets tested.
+
+If you are not already a Nix user, the lower-ceremony path is a `Brewfile`
+for tools, launchd plists checked into this repo, and a small `grain` CLI
+to drive them. You lose generations and rollback; you gain a much shorter
+setup. A middle path is plain Nix without nix-darwin: a flake supplying
+pinned tooling and a devshell, with the plists still in the repo — pinned
+versions without Nix owning the machine.
+
+Pick on taste. The rest of the design is unaffected either way.
 
 ### The sandbox VMs
 
@@ -253,8 +294,8 @@ is a straight improvement over the unencrypted raw disk image the Linux
 design used. Backup is Time Machine or an `rsync`, not image snapshots.
 
 The invariant holds unchanged: **no secret is ever a Nix string literal or
-a derivation input.** nix-darwin encodes paths and how services consume
-them; values are placed by hand.
+a derivation input.** Whatever manages the host encodes paths and how
+services consume them; values are placed by hand.
 
 ## Sandbox identity: per-sandbox tokens
 
@@ -924,7 +965,7 @@ per agent.
 | Memory reclaim | virtio-mem free page reporting, KSM | neither |
 | Guest OS | NixOS, declarative, shared host store | Debian, provisioning script |
 | Orchestrator isolation | its own minimal NixOS VM | native on macOS |
-| Reproducibility | one flake, whole cluster | nix-darwin + guest flakes + Lima config |
+| Reproducibility | one flake, whole cluster | host config + a Debian provisioning script |
 
 **Gained:** simpler persistence (a directory, not a volume), FileVault at
 rest, no inbound network surface at all, and no nested virtualization.
@@ -955,8 +996,9 @@ Fusion with VT-x passthrough.
 
 ## Implementation plan
 
-1. **Host baseline**: nix-darwin managing the Mac and the orchestrator
-   services. No Linux builder needed.
+1. **Host baseline**: the orchestrator services under launchd, by
+   [whichever route you prefer](#managing-the-host). No Linux builder
+   needed.
 2. **One sandbox VM**: Debian guest under Lima with docker and kind, from
    the provisioning script. Confirm `kind create cluster` works, and
    measure peak memory and boot time while there.
@@ -996,7 +1038,7 @@ ceiling.
   git-protocol error encoding
 - [`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
 - [Lima](https://lima-vm.io)
-- [nix-darwin](https://github.com/nix-darwin/nix-darwin) — host configuration
+- [nix-darwin](https://github.com/nix-darwin/nix-darwin) — one option for host configuration
 - [GCP downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
 - [microvm.nix](https://github.com/microvm-nix/microvm.nix) — the Linux
   design's foundation, retained in the repo's spike artifacts
