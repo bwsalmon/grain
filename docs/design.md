@@ -59,7 +59,7 @@ these are stated with what was actually verified.
 | Issue intake | **[`OpenHands/automation`](#issue-intake)** — cron triggers and filter expressions |
 | GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
 | Sandbox VMs | **[Lima](#the-sandbox-vms) + stock Debian guests** |
-| Host configuration | **[nix-darwin, or Brewfile + plists](#managing-the-host)** — a preference, not a dependency |
+| Host configuration | **[Brewfile + launchd plists](#managing-the-host)** — nix-darwin viable but `x86_64-darwin` is being sunset |
 | Git access control | **Custom** — small smart-HTTP proxy; [FINOS Git Proxy evaluated and rejected](#the-git-proxy-write-it) |
 | GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
 | Branch and workflow protection | **[GitHub rulesets and withheld scopes](#scopes-to-withhold)** — enforced server-side |
@@ -176,14 +176,31 @@ Two caveats keep it from being an obvious call:
   a whole-machine commitment, and macOS upgrades are where that commitment
   gets tested.
 
-If you are not already a Nix user, the lower-ceremony path is a `Brewfile`
-for tools, launchd plists checked into this repo, and a small `grain` CLI
-to drive them. You lose generations and rollback; you gain a much shorter
-setup. A middle path is plain Nix without nix-darwin: a flake supplying
-pinned tooling and a devshell, with the plists still in the repo — pinned
-versions without Nix owning the machine.
+**And a third caveat that decides it on this hardware: `x86_64-darwin` is
+being sunset.** Nixpkgs 26.05 is the last release to support it, with
+binaries maintained only until that release goes out of support at the end
+of 2026; support is expected to be dropped in 26.11, which is what
+`nixos-unstable` currently builds toward. The trigger is Apple's own —
+macOS 26 is the final version supporting Intel Macs — and Determinate
+Systems stopped shipping their macOS Intel installer in November 2025.
 
-Pick on taste. The rest of the design is unaffected either way.
+After that window, Nix on this machine means building from source on a
+platform Hydra no longer builds. On an 8-core Intel Mac that is a bad place
+to be.
+
+**So on this hardware, prefer the lower-ceremony path**: a `Brewfile` for
+tools, launchd plists checked into this repo, and a small `grain` CLI to
+drive them. You lose generations and rollback; you avoid tying the host
+layer to a platform with months of supported life left. If nix-darwin is
+already running on the machine and working, keep it — but this is not the
+project to adopt it for.
+
+This also sharpens the point in [operations](#operations): the objection to
+the Mac is not only that a laptop is an odd host, but that this machine's
+OS and toolchain support both end soon. That is a real argument for landing
+the eventual home on a Linux box, where
+[the retained microvm.nix design](#what-changed-from-the-linux-design)
+already applies.
 
 ### The sandbox VMs
 
