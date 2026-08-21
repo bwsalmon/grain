@@ -1,0 +1,63 @@
+"""The credential ladder: the narrowest credential that covers a repo.
+
+docs/design.md's shape:
+
+    /data/secrets/github/
+      credentials.json     # repo/owner pattern -> credential name
+      bot.token            # machine account, most repos
+      personal.token       # last resort, only what nothing else reaches
+
+Unlike the allowlist, credentials are not hot-reloaded — docs/design.md
+treats rotation as "replace a file under /data/secrets and restart the one
+service that reads it," so loading once at construction matches the
+intended operational model rather than adding a cache-invalidation path
+nothing asks for.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+from .allowlist import canonicalize
+
+
+@dataclass(frozen=True)
+class Credential:
+    name: str
+    # None means anonymous — no Authorization header at all, which is what
+    # a public repo needs and is a real, deliberate credential shape, not
+    # an error case.
+    token: str | None
+
+
+class CredentialSet:
+    def __init__(self, secrets_dir: Path) -> None:
+        self._dir = secrets_dir
+        mapping_path = secrets_dir / "credentials.json"
+        self._patterns: dict[str, str] = (
+            json.loads(mapping_path.read_text()) if mapping_path.exists() else {}
+        )
+        self._cache: dict[str, Credential] = {}
+
+    def select(self, owner: str, repo: str) -> Credential | None:
+        """The narrowest pattern covering (owner, repo): exact, then
+        `owner/*`, then the global `*` fallback. None if nothing covers it
+        — a distinct, fail-closed condition from "not allow-listed".
+        """
+        owner, repo = canonicalize(owner, repo)
+        for pattern in (f"{owner}/{repo}", f"{owner}/*", "*"):
+            name = self._patterns.get(pattern)
+            if name:
+                return self._load(name)
+        return None
+
+    def _load(self, name: str) -> Credential:
+        if name not in self._cache:
+            if name == "anonymous":
+                token = None
+            else:
+                token = (self._dir / f"{name}.token").read_text().strip()
+            self._cache[name] = Credential(name=name, token=token)
+        return self._cache[name]

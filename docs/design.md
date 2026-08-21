@@ -1078,10 +1078,18 @@ ever becomes worth its cost again.
    to answer properly.
 5. **Controller VM**: `/data` disk, Agent Canvas, and one sandbox
    registered as a backend. OpenHands end to end with no custom code.
-6. **Git proxy**: path whitelist, canonicalize, allowlist, token auth,
-   credential selection, stream through, audit. Verify allow-listed repos
-   clone and push, un-listed ones fail *with a legible git error*, and no
-   credential is ever visible inside a sandbox.
+6. **Git proxy** — *done*: `grain/proxy/` — path whitelist, canonicalize,
+   allowlist, token auth (via HTTP Basic from a git credential helper),
+   credential selection, stream through, audit. Verified live against a
+   real `git` client and real GitHub, not just unit tests: an allow-listed
+   public repo clones end to end; an unlisted-but-real repo fails with
+   `fatal: ... returned error: 403`, not a hung connection; a bad sandbox
+   token fails with git's own `Authentication failed`; and — with a real
+   (dummy) upstream credential configured — `GIT_TRACE_CURL` on the client
+   confirms that credential never appears anywhere in the sandbox side's
+   own output. Push (`git-receive-pack`) is implemented identically to
+   fetch but not yet exercised live, since that needs a real writable
+   allow-listed repo to test against, not just a public read.
 7. **Metadata servers**: one per sandbox, impersonating the narrow service
    account. Verify ADC works unmodified and the key is unreachable.
 8. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
