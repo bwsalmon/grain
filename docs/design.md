@@ -55,7 +55,7 @@ these are stated with what was actually verified.
 
 | Need | Approach |
 |---|---|
-| Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — [no provisioning API to build](#openhands-integration) |
+| Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — [no provisioning API to build](#openhands-integration). [Claude Code is a live alternative](#alternative-agent-runtime-claude-code) |
 | Issue intake | **[`OpenHands/automation`](#issue-intake)** — cron triggers and filter expressions |
 | GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
 | VM lifecycle | **[Lima](#the-host-adapter)**, which runs on both Linux and macOS — libvirt is the Linux-native fallback |
@@ -866,6 +866,54 @@ fails late and confusingly.
   compose — independent confirmation that running docker inside the sandbox
   is the expected shape.
 
+## Alternative agent runtime: Claude Code
+
+Not decided. The plan of record is `openhands-agent-server` per sandbox,
+but Claude Code running in the sandbox is a live option, and the findings
+below are worth recording while they are cheap.
+
+**What it would replace:** Agent Canvas, `openhands-agent-server`, the
+Automation Service, and the version-pin matrix between them — with
+`claude -p` and a small dispatch loop. Given how much churn upstream's
+V0 → V1 → Canvas transition already caused this design, that is not a
+small consideration.
+
+**What it would cost:** issue intake becomes ours again. The Automation
+Service is what currently supplies cron triggers, filter expressions and
+run history; dropping OpenHands drops that too. The replacement is a
+controller-side loop — poll labelled issues through the credential the
+controller already holds, dispatch to a free sandbox, move labels — which
+is genuinely small, but it is code we would own.
+
+**Two things matter specifically because the agent runs in a sandbox that
+clones repositories:**
+
+- **`claude -p` executes repository content by default.** Upstream is
+  explicit that a `-p` session shows no workspace-trust dialog, so it runs
+  the hooks in a cloned repo's `.claude/settings.json` and connects the
+  servers in its `.mcp.json` without prompting. In a disposable VM holding
+  no credentials the blast radius is bounded, but it should be a decision
+  rather than a discovery. `--bare` disables that auto-discovery — at the
+  cost of also skipping the repo's `CLAUDE.md` and skills, which have to be
+  passed back explicitly with `--append-system-prompt-file`, `--settings`
+  and `--mcp-config`.
+- **The sandbox must not hold an API key**, which `--bare` would otherwise
+  require, since it never reads OAuth credentials. Claude Code honours
+  `ANTHROPIC_BASE_URL`, so the controller can run an LLM proxy that injects
+  the key — the same shape as [the git proxy](#the-git-proxy-write-it),
+  the same trust boundary, and one more narrow port in the ruleset. This is
+  what makes the option compatible with the credential model rather than an
+  exception to it.
+
+Also note `-p` starts in Manual permission mode on every plan, so an
+autonomous run needs an explicit `--permission-mode`; `acceptEdits` fits a
+disposable VM, `dontAsk` is the locked-down end.
+
+**Nothing built so far depends on the answer.** The
+[host adapter](host-adapter.md) is agent-agnostic — it manages VMs and a
+network, and neither cares what runs inside. The choice only starts to bind
+when the controller is built.
+
 ## Threat model
 
 **Defended:**
@@ -972,6 +1020,11 @@ ever becomes worth its cost again.
    the split surface.
 5. **How far down the credential ladder can each owner go** — App, machine
    account, or personal token?
+6. **Which agent runtime**: OpenHands, or
+   [Claude Code](#alternative-agent-runtime-claude-code)? The second trades
+   three upstream components and their version matrix for a dispatch loop
+   we own. Nothing built so far depends on the answer, so it can wait until
+   the controller.
 6. **Can `gce_metadata_server` impersonate using ADC** rather than a key
    file? If so, GCP deployments need no service-account key at all — see
    [where credentials should live](#where-credentials-should-live) — and
