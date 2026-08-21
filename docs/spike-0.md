@@ -1,12 +1,12 @@
 # Spike 0 — does a microVM guest run docker and kind?
 
-> **Superseded as the primary path.** The design now targets a
-> [macOS host on Intel](design.md) — microvm.nix needs KVM, which macOS does
-> not have. This document and its Nix files are **retained deliberately**:
-> they evaluate cleanly, and they remain the fastest way to stand the system
-> up on a Linux box later, or to validate the Linux design on the Mac under
-> VMware Fusion with VT-x passthrough. The macOS equivalent of this spike is
-> step 2 of the [implementation plan](design.md#implementation-plan).
+> **Superseded as the primary path.** The [design](design.md) now runs
+> Debian VMs on a Linux host behind a thin
+> [host adapter](design.md#the-host-adapter), rather than microVMs. These
+> Nix files are **retained deliberately**: they evaluate cleanly, and they
+> remain the fastest route to a microVM-based deployment if per-task reset
+> ever becomes worth its cost again. The current equivalent of this spike is
+> steps 2–4 of the [implementation plan](design.md#implementation-plan).
 
 This is [open question 1](design.md#open-questions) and it gates everything
 else. The design assumes agents run `docker` and `kind` *inside* a sandbox

@@ -1,51 +1,51 @@
-# Grain: an agent cluster on an Intel Mac
+# Grain: a single-node agent cluster
 
 ## Status
 
-Revision 4. Rewritten for a **macOS host on Intel hardware** (8 cores,
-32 GB) after revisions 1–3 targeted a NixOS host using
-[`microvm.nix`](https://github.com/microvm-nix/microvm.nix).
+Revision 5. **One host machine runs everything**: a controller VM and a
+small pool of agent sandbox VMs. The host itself runs a hypervisor and
+nothing else.
 
-Two deliberate simplifications since: sandboxes are **long-lived rather
-than reset per task**, which removes the lease service revision 4 had made
-mandatory; and the guests are **Debian rather than NixOS**, which removes
-the Linux builder and the `nix-ld` shim, and lets agents work in an
-environment their training data actually matches. What it trades away is isolation between *sequential* tasks; see
-[what it costs](#what-it-costs).
+The immediate target is a **GCP `n2-highmem-4`** (4 vCPU, 32 GB, Debian,
+nested virtualization enabled). **macOS on Intel stays supported** as a
+future target, and the design is arranged so that switching costs one
+module rather than a rewrite — see
+[the host adapter](#the-host-adapter).
 
-The security architecture, the GitHub and GCP credential models, the
-OpenHands integration and the sandbox guest configuration all carry over
-essentially unchanged. **The host layer does not** — microvm.nix requires
-KVM, which macOS does not have — and one security property is genuinely
-lost in the move. Both are covered below; the Linux design is preserved in
-[what changed and why](#what-changed-from-the-linux-design) rather than
-deleted, since it remains the better production target.
+Earlier revisions targeted a NixOS host using
+[`microvm.nix`](https://github.com/microvm-nix/microvm.nix) (1–3) and then
+macOS with the controller running natively on the host (4). Two decisions
+from those revisions carry forward, both simplifications: sandboxes are
+**long-lived rather than reset per task**, and the guests are **Debian
+rather than NixOS**.
+
+Putting the controller in a VM is what makes this revision portable. It
+also takes every credential off the host, which restores an isolation
+property revision 4 had traded away for RAM.
 
 ## Goals
 
-- One Intel Mac runs the whole system: an orchestrator and a small pool of
-  isolated agent sandboxes.
+- **One machine runs the whole system.** No clustering, no cloud
+  orchestration.
 - OpenHands picks up labelled issues from a target GitHub repo and drives
   an agent in a sandbox.
 - Agents can read and write allow-listed GitHub repos, but **hold no
   GitHub credentials** — their only route out is a git proxy.
-- Agents can obtain short-lived GCP tokens without ever touching the
+- Agents can obtain short-lived GCP tokens without touching the
   service-account key.
 - Each agent gets a **whole VM**, because the workload runs `docker` and
   `kind`, which do not nest into containers.
-- Sandboxes are long-lived for simplicity, with an explicit recreate that
-  clears them; isolation between *concurrent* agents is the property that
-  matters and it is preserved.
-- Configuration and credentials survive rebuilds and are managed
-  declaratively.
+- Sandboxes are long-lived, with an explicit recreate that clears them.
+- **The host-specific surface is one module.** Moving between Linux and
+  macOS should mean replacing VM lifecycle and networking, nothing else.
 
 ## Non-goals
 
-- Running this as always-on production infrastructure. It is a laptop; see
-  [operations](#operations).
 - Multi-host clustering, autoscaling, HA.
 - Defending against malicious *agent output*. Human PR review is that
   control.
+- Isolating *sequential* tasks on one sandbox from each other; see
+  [what it costs](#what-it-costs).
 
 ## Build vs. reuse
 
@@ -58,19 +58,17 @@ these are stated with what was actually verified.
 | Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — [no provisioning API to build](#openhands-integration) |
 | Issue intake | **[`OpenHands/automation`](#issue-intake)** — cron triggers and filter expressions |
 | GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
-| Sandbox VMs | **[Lima](#the-sandbox-vms) + stock Debian guests** |
-| Host configuration | **[Brewfile + launchd plists](#managing-the-host)** — nix-darwin viable but `x86_64-darwin` is being sunset |
+| VM lifecycle | **[Lima](#the-host-adapter)**, which runs on both Linux and macOS — libvirt is the Linux-native fallback |
+| Guest OS | **stock Debian**, provisioned by a script in this repo |
 | Git access control | **Custom** — small smart-HTTP proxy; [FINOS Git Proxy evaluated and rejected](#the-git-proxy-write-it) |
-| GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
+| GitHub API access | **none from sandboxes** — the controller does API work, so there is nothing to filter |
 | Branch and workflow protection | **[GitHub rulesets and withheld scopes](#scopes-to-withhold)** — enforced server-side |
 
 ### What is left to write
 
-Essentially one thing: the [git proxy](#the-git-proxy-write-it), which is
-small and unavoidable. Keeping
-[sandboxes long-lived](#sandbox-lifecycle-long-lived-recreated-on-demand)
-removes the lease service that revision 4 had made mandatory, leaving a
-`recreate` script and a health check in its place.
+Two small things: the [git proxy](#the-git-proxy-write-it), and the
+[host adapter](#the-host-adapter) — of which only the second is
+platform-specific, and it is deliberately kept thin.
 
 ## High-level architecture
 
@@ -79,223 +77,145 @@ flowchart TB
     subgraph outside["Outside"]
         gh["GitHub API"]
         gcp["GCP IAM Credentials API"]
+        admin["Admin (SSH)"]
     end
 
-    subgraph mac["macOS host (the trusted base)"]
-        canvas["Agent Canvas<br/>+ Automation Service<br/>(all GitHub API work)"]
-        scripts["recreate + health check<br/>(scripts, not a service)"]
-        proxy["Git proxy<br/>(allowlist + creds + audit)"]
-        mds["gce_metadata_server<br/>(one per sandbox)"]
-        secrets[("~/.grain/secrets<br/>credential set, GCP key<br/>FileVault at rest")]
+    subgraph host["Host machine — hypervisor + host adapter only, no secrets"]
+        subgraph ctl["controller VM"]
+            canvas["Agent Canvas + Automation<br/>(all GitHub API work)"]
+            proxy["Git proxy<br/>(allowlist + creds + audit)"]
+            mds["gce_metadata_server<br/>(one per sandbox)"]
+            data[("/data — credential set,<br/>GCP key, allowlist<br/>survives sandbox recreate")]
+        end
+
+        subgraph sbs["sandbox VMs (Debian)"]
+            sb0["sandbox-0<br/>agent-server · docker · kind"]
+            sb1["sandbox-1<br/>agent-server · docker · kind"]
+        end
     end
 
-    subgraph vmnet["vmnet shared network 192.168.105.0/24"]
-        sb0["sandbox-0 (Debian VM)<br/>agent-server · docker · kind"]
-        sb1["sandbox-1 (Debian VM)<br/>agent-server · docker · kind"]
-    end
-
+    admin --> ctl
     canvas -->|"conversations"| sb0
     canvas -->|"conversations"| sb1
-    scripts -.->|"recreate, occasional"| sb0
-    scripts -.->|"recreate, occasional"| sb1
-
-    sb0 -->|"git only, per-sandbox token"| proxy
-    sb1 -->|"git only, per-sandbox token"| proxy
+    sb0 -->|"git only, token"| proxy
+    sb1 -->|"git only, token"| proxy
     sb0 -->|"ADC"| mds
     sb1 -->|"ADC"| mds
 
     proxy --> gh
     canvas --> gh
     mds --> gcp
-    proxy -.-> secrets
-    mds -.-> secrets
-    canvas -.-> secrets
+    proxy -.-> data
+    mds -.-> data
+    canvas -.-> data
 ```
 
-Properties this preserves from the Linux design:
+Properties:
 
-- Sandboxes never hold GitHub or GCP credentials — only two narrow local
-  endpoints, allowlist-checked and audit-logged.
-- Sandbox VMs cannot read the macOS filesystem, so the credential boundary
-  is intact even though the orchestrator is no longer its own VM.
-- Concurrent agents cannot reach each other; each has its own kernel,
-  Docker daemon and port space.
+- **The host holds no secrets.** Every credential lives in the controller
+  VM. A host compromise is still fatal — it owns the hypervisor — but the
+  credentials are not sitting in a home directory next to a browser.
+- Sandboxes never hold GitHub or GCP credentials, only two narrow endpoints
+  on the controller, allowlist-checked and audit-logged.
+- Concurrent agents cannot reach each other: separate kernels, separate
+  Docker daemons, separate port spaces.
 
-## Host layer: macOS
+## The host adapter
 
-### Why microvm.nix is gone
-
-microvm.nix is a NixOS-host module and its hypervisors need `/dev/kvm`.
-macOS has no KVM. There is no adaptation — it simply cannot be the base.
-
-The obvious rescue is to nest: run one Linux VM under VMware Fusion or
-Parallels with VT-x passthrough, and run the entire Linux design inside it
-unchanged. That works and is the right way to *validate* the Linux design
-on this hardware. It is not the right base to build on, for one specific
-reason: VMware's own documentation states that **KVM performs relatively
-poorly as a guest hypervisor on Intel using virtualized VT-x**. Paying a
-nesting tax on every operation, plus a third virtualization layer to debug
-through, in exchange for preserving a host layer we can replace, is the
-wrong trade. (Revision 4 also cited fast microVM boots for per-task reset;
-with sandboxes now long-lived that argument no longer applies, but the
-performance and complexity ones stand on their own.)
-
-So: **macOS is the base, and the sandboxes are ordinary Linux VMs.** Note
-the asymmetry that makes this work — `kind` and Docker are containers, so
-they need no nested virtualization at all. Only microvm.nix did.
-
-### Managing the host
-
-Nothing in this design *requires* Nix on the Mac. Worth stating plainly,
-because dropping Nix from the guests raises the fair question of whether it
-still earns its place on the host. Here is what actually has to be true,
-independent of tooling:
-
-- the orchestrator services run under **launchd**, restart on failure, and
-  come back after a reboot;
-- they **bind to the vmnet address only**, never `0.0.0.0`;
-- supporting tool versions are **pinned and recorded** — Lima,
-  `socket_vmnet`, and the [OpenHands version set](#version-pinning);
-- configuration lives in git and secrets do not;
-- a bad change can be **rolled back**.
-
-**nix-darwin meets all of these**, and is the recommendation *if you
-already run it* — declarative launchd units, pinned tools, generations, one
-`darwin-rebuild switch` to converge. That is a real fit: the host is
-long-lived and worth configuring exactly, which is the half of the
-Nix-versus-Debian split that still favours Nix.
-
-Two caveats keep it from being an obvious call:
-
-- **It does not manage the components that matter most.** Upstream pins
-  Agent Canvas, the agent server and the Automation Service in its own
-  `config/defaults.json` and installs them with `npx`/`uvx`. Nix is not
-  packaging those, so nix-darwin manages the launchd units *around* them,
-  not the versions *inside* them. The pinning that matters is upstream's.
-- **This is a daily-driver laptop.** Adopting nix-darwin for one project is
-  a whole-machine commitment, and macOS upgrades are where that commitment
-  gets tested.
-
-**And a third caveat that decides it on this hardware: `x86_64-darwin` is
-being sunset.** Nixpkgs 26.05 is the last release to support it, with
-binaries maintained only until that release goes out of support at the end
-of 2026; support is expected to be dropped in 26.11, which is what
-`nixos-unstable` currently builds toward. The trigger is Apple's own —
-macOS 26 is the final version supporting Intel Macs — and Determinate
-Systems stopped shipping their macOS Intel installer in November 2025.
-
-After that window, Nix on this machine means building from source on a
-platform Hydra no longer builds. On an 8-core Intel Mac that is a bad place
-to be.
-
-**So on this hardware, prefer the lower-ceremony path**: a `Brewfile` for
-tools, launchd plists checked into this repo, and a small `grain` CLI to
-drive them. You lose generations and rollback; you avoid tying the host
-layer to a platform with months of supported life left. If nix-darwin is
-already running on the machine and working, keep it — but this is not the
-project to adopt it for.
-
-This also sharpens the point in [operations](#operations): the objection to
-the Mac is not only that a laptop is an odd host, but that this machine's
-OS and toolchain support both end soon. That is a real argument for landing
-the eventual home on a Linux box, where
-[the retained microvm.nix design](#what-changed-from-the-linux-design)
-already applies.
-
-### The sandbox VMs
-
-[Lima](https://lima-vm.io) manages them. On Intel it uses QEMU with the HVF
-accelerator, which is the native macOS path. **Guests are Debian**, from
-Lima's stock template.
-
-Revision 4 specified NixOS guests, for consistency with the host. That was
-the wrong instinct, and the tell was in the design itself: a whole section
-existed to explain NixOS's peculiarities *to the agent* — no `apt`, use
-`nix shell`, and a `nix-ld` shim so downloaded binaries would run at all.
-When a platform choice needs a README aimed at the thing using it, it is
-the wrong choice for that layer.
-
-Debian is the better fit here for reasons that compound:
-
-- **`apt-get install` works.** This was the single likeliest thing to waste
-  agent turns, and most agent training data assumes Debian. Now it is
-  right.
-- **No `nix-ld` shim.** Debian is FHS, so a downloaded release tarball, a
-  `pip` wheel with a native extension, or a `curl | sh` installer simply
-  runs. An entire class of opaque failure disappears.
-- **Docker and `kind` are the documented path** — official apt repo, stock
-  kernel, and every tutorial the agent has read matches what it finds.
-- **`openhands-agent-server` installs the way upstream installs it**:
-  `uvx --from openhands-agent-server==1.42.1 …`, which is exactly what
-  upstream's own launcher runs. On NixOS that same command needs `nix-ld`
-  to load its wheels.
-- **It removes the Linux builder entirely** — see below.
-
-Nix keeps the job it is good at: the **host**, which is long-lived, stable,
-and worth configuring exactly. It gives up the job it is bad at: a
-disposable machine that an agent is supposed to feel at home in.
-
-The base image is built by a **version-controlled provisioning script** —
-Lima `provision` blocks in the instance template, kept in this repo. That
-is weaker than a Nix derivation, and honestly so: rebuilding the base in
-six months yields whatever the Debian archive holds then. Pin the point
-release, and reach for `snapshot.debian.org` if reproducibility ever
-matters more than convenience. For a sandbox an agent immediately mutates
-anyway, it mostly does not.
-
-Still to verify: Lima's networking must give VMs addresses the host and
-each other can reach, which means `socket_vmnet` shared mode rather than
-the default user-mode NAT. See [open questions](#open-questions).
-
-### No Linux builder needed
-
-Revision 4 required nix-darwin's `nix.linux-builder`: an Intel Mac is
-`x86_64-darwin`, the NixOS guest images were `x86_64-linux`, and Nix cannot
-cross that boundary natively. It cost a VM, 4–6 GB while building, and a
-build path documented as slow.
-
-With Debian guests there is **nothing to cross-build**. Every orchestrator
-service runs natively on macOS — Agent Canvas is Node, the Automation
-Service is Python, `gce_metadata_server` is Go, and the git proxy is ours
-to write in whatever builds for Darwin. The guests are provisioned from
-Debian packages, not Nix closures.
-
-So the builder VM, its memory contention, and its open question all
-disappear. This is the largest single simplification in the revision.
-
-### Networking
-
-`socket_vmnet` puts the VMs on a shared bridge with host-reachable
-addresses (typically `192.168.105.0/24`, with the host at `.1`).
-
-The orchestrator's services — git proxy and metadata servers —
-**bind to the vmnet address only**, never `0.0.0.0`. This matters more on a
-laptop than on a server: `0.0.0.0` would expose the git proxy on whatever
-café WiFi the machine is joined to. Back it with a `pf` rule denying those
-ports on the physical interfaces, so a binding mistake fails closed.
-
-What macOS cannot give us is the per-interface source-address pinning that
-the Linux design relied on. The VMs share one host-side bridge; there is no
-per-VM tap to attach a filter to. That is the one real loss, and it is
-handled in [sandbox identity](#sandbox-identity-per-sandbox-tokens).
-
-Sandbox egress: agents need the internet for dependencies, so the default
-is open, with the same honest caveat as before — a sandbox with general
-egress can exfiltrate anything it can read, and no firewall rule short of a
-domain allowlist changes that. A `pf`-based allowlist is the opt-in
-tightening; note that in-guest `nix` then needs `cache.nixos.org` allowed
-or it silently breaks.
-
-### Persistence and secrets
-
-This gets *simpler* on macOS, which is worth noting because most of the
-move is a loss.
-
-There is no `/persist` volume and no virtiofs share. Credentials and
-configuration live in a plain directory on the Mac:
+The point of this revision. Everything above the hypervisor — the
+controller image, the sandbox image, the services, the credential model —
+is host-agnostic. What is not, and therefore what a port has to replace, is
+deliberately confined to one module with a small interface:
 
 ```
-~/.grain/
+grain-host-adapter
+  create(name, image, cpus, memMb, diskGb)
+  start(name) / stop(name) / destroy(name)
+  address(name) -> ip
+  network_up()        # private network the VMs share
+  egress_policy(mode) # open | allowlist
+```
+
+Two implementations:
+
+| | Linux (now) | macOS (later) |
+|---|---|---|
+| Hypervisor | KVM/QEMU | HVF/QEMU |
+| Driver | Lima, or libvirt | Lima |
+| Private network | bridge + tap per VM | `socket_vmnet` |
+| Filtering | `nftables` | `pf` |
+
+**Prefer Lima on both.** It runs on Linux as well as macOS, so the same
+templates, the same provisioning scripts, and the same `limactl` calls
+serve both — which shrinks the port to *networking alone*. Lima on Linux is
+less travelled than on macOS, so this needs confirming; libvirt is the
+Linux-native fallback and costs a second driver implementation, not a
+redesign.
+
+The discipline that makes this hold: **nothing outside the adapter may
+assume a platform.** No `nftables` in the git proxy, no `launchd` in the
+controller image, no host paths in service configs. When something needs a
+platform-specific fact — an interface name, an address range — it comes
+through the adapter.
+
+### What changes between Linux and macOS, concretely
+
+- **VM lifecycle**: identical if Lima works on both; otherwise a libvirt
+  driver.
+- **Networking**: a Linux bridge with a tap per VM, versus `socket_vmnet`.
+  This is the irreducible difference.
+- **Sandbox identity**: on Linux, `nftables` can pin a source address per
+  tap; macOS cannot. Handled by making tokens the single mechanism and
+  treating source pinning as an extra layer where available — see
+  [sandbox identity](#sandbox-identity).
+- **Admin entry**: SSH to the host, then the controller. On a laptop this
+  is a local console instead.
+
+Nothing else. The controller and sandbox images, the proxy, the metadata
+servers, and every credential decision are the same on both.
+
+### Why not one cloud instance per sandbox
+
+On GCP the obvious alternative is to skip nesting: give each sandbox its
+own instance, which needs no nested virtualization, costs less
+(`e2-highmem-4` is ~$132/month versus `n2-highmem-4` at ~$191), and gets
+source-IP authentication for free because VPC blocks address spoofing.
+
+Rejected for this revision because it is not one machine. It couples the
+design to GCP's networking, IAM, and instance lifecycle, and it forecloses
+the Mac. **Single-node is the simplifying constraint**, and it is worth
+roughly $60/month and one weaker identity mechanism to keep the whole
+system portable and runnable on hardware you already own.
+
+Worth revisiting if this ever outgrows one machine — at which point the
+adapter is the seam to cut along.
+
+## The controller VM
+
+A Debian VM running everything that holds a credential:
+
+- **Agent Canvas** and the **Automation Service** — all GitHub API work,
+  issue intake, and dispatch to sandboxes.
+- **The git proxy** — the only path from a sandbox to GitHub.
+- **`gce_metadata_server`, one per sandbox** — see
+  [sandbox identity](#sandbox-identity) for why one each.
+- **`/data`**, a disk that outlives sandbox recreates and holds the
+  credential set, the GCP key, and the repo allowlist.
+
+Revision 4 ran these natively on macOS to save a VM's worth of RAM. Moving
+them into a VM costs ~3–4 GB and buys three things: the host holds no
+secrets, the controller is reproducible from an image rather than
+accumulated host state, and the port to macOS no longer has to reimplement
+service management under `launchd`.
+
+Admin access is SSH to the host, then to the controller — one externally
+reachable port, which is the property the microvm.nix design had and
+revision 4 lost.
+
+### Secrets on `/data`
+
+```
+/data/
   secrets/
     github/            # credential set + credentials.json
     gcp-service-account.json
@@ -306,107 +226,147 @@ configuration live in a plain directory on the Mac:
     metadata-server/audit.log
 ```
 
-Owned by the user, mode `0600`, encrypted at rest by **FileVault** — which
-is a straight improvement over the unencrypted raw disk image the Linux
-design used. Backup is Time Machine or an `rsync`, not image snapshots.
+Mode `0600`, owned by the service users. On GCP, `/data` is a separate
+persistent disk so it survives rebuilding the controller VM itself;
+encryption at rest is the provider's (or FileVault on a Mac).
 
-The invariant holds unchanged: **no secret is ever a Nix string literal or
-a derivation input.** Whatever manages the host encodes paths and how
-services consume them; values are placed by hand.
+**The invariant is unchanged: no secret is ever baked into an image or a
+provisioning script.** Images encode paths and how services consume them;
+values are placed once, by hand, on first setup.
 
-## Sandbox identity: per-sandbox tokens
+## The sandbox VMs
 
-Both local services need to know which sandbox is calling — for allowlist
-decisions, per-caller audit, and rate limiting.
+Two of them, Debian, each running `docker`, `kind`, and
+`openhands-agent-server`. They are the disposable part of the system: see
+[lifecycle](#sandbox-lifecycle-long-lived-recreated-on-demand).
 
-The Linux design authenticated by **source IP**, made trustworthy by
-per-tap nftables rules that dropped any packet whose source address was not
-the one assigned to that interface. A forged source address could not leave
-the VM, and there was no secret to distribute at all.
+Revision 4 specified NixOS guests, for consistency with a Nix-managed host.
+That was the wrong instinct, and the tell was in the design itself: a whole
+section existed to explain NixOS's peculiarities *to the agent* — no `apt`,
+use `nix shell`, and a `nix-ld` shim so downloaded binaries would run at
+all. When a platform choice needs a README aimed at the thing using it, it
+is the wrong choice for that layer.
 
-**macOS cannot do this.** Under `vmnet` the VMs share a bridge and take
-DHCP addresses; there is no per-VM interface to pin. A source address
-becomes a claim rather than a fact, and stops being authentication.
+Debian removes that friction outright:
 
-So identity is a **random bearer token per sandbox**, generated and
-injected when the sandbox is provisioned. Because
-[sandboxes are long-lived](#sandbox-lifecycle-long-lived-recreated-on-demand),
-provisioning is a natural place to put it — the token lives as long as the
-sandbox generation does, and is replaced when the sandbox is recreated.
+- **`apt-get install` works.** This was the likeliest thing to waste agent
+  turns, and most agent training data assumes Debian.
+- **No `nix-ld` shim.** Debian is FHS, so downloaded release tarballs,
+  `pip` wheels with native extensions, and `curl | sh` installers just run.
+- **Docker and `kind` are the documented path** — official apt repo, stock
+  kernel, and every tutorial the agent has read matches what it finds.
+- **`openhands-agent-server` installs the way upstream installs it**:
+  `uvx --from openhands-agent-server==1.42.1 …`, the same command that
+  needs `nix-ld` on NixOS.
+- **Nothing needs cross-building.** A NixOS guest image would have to be
+  built for `x86_64-linux`; from a Mac that meant a Linux builder VM, 4–6 GB
+  of contention, and a build path documented as slow. Debian images are
+  provisioned from packages, so the builder disappears — and with it one of
+  the two reasons the Mac port was awkward.
 
-This is where an earlier version of this design went wrong. It assumed
-per-*lease* tokens, which required something to mint and deliver one at
-every lease, which made a lease service mandatory. Long-lived sandboxes
-dissolve that: there is no lease, so there is nothing to mint per lease,
-and the token is delivered once by the same step that creates the VM.
+The base image is built by a **version-controlled provisioning script**
+kept in this repo. That is weaker than a Nix derivation, and honestly so:
+rebuilding in six months yields whatever the Debian archive holds then. Pin
+the point release, and reach for `snapshot.debian.org` if reproducibility
+ever matters more than convenience. For a sandbox an agent immediately
+mutates, it mostly does not.
+
+## Networking
+
+One private network shared by the controller and the sandboxes, created by
+the [adapter](#the-host-adapter) — a Linux bridge with a tap per VM now, a
+`socket_vmnet` network on macOS later.
+
+- **Controller services bind to the private network address only**, never
+  `0.0.0.0`. Back it with a host filter rule denying those ports on the
+  external interface, so a binding mistake fails closed.
+- **Sandbox → controller** is permitted to the git proxy and that
+  sandbox's metadata server, and nothing else.
+- **Sandbox ↔ sandbox** is dropped. Agents cannot reach each other.
+- **Inbound** reaches only the host's SSH port.
+
+Sandbox egress is open by default, with the honest caveat: agents need the
+internet for dependencies, and a sandbox with general egress can exfiltrate
+anything it can read. No firewall rule short of a domain allowlist changes
+that. `egress_policy(allowlist)` is the opt-in tightening.
+
+## Sandbox identity
+
+Both controller services need to know which sandbox is calling — for
+allowlist decisions, per-caller audit, and rate limiting.
+
+**A per-sandbox bearer token is the mechanism**, generated and injected
+when the sandbox is provisioned, replaced when it is
+[recreated](#recreating-a-sandbox). One mechanism, both platforms, one code
+path in the proxy.
+
+The alternative was source-IP authentication, which the microvm.nix design
+used: `nftables` rules pinning a source address per tap, so a forged
+address could not leave the VM, and no secret existed to distribute at all.
+It is the stronger mechanism and **it works on Linux** — but not on macOS,
+where VMs share a `vmnet` bridge with DHCP addresses and there is no
+per-VM interface to pin.
+
+Rather than carry two auth mechanisms, use tokens everywhere and apply
+source pinning on Linux as **defense in depth**: the adapter's `nftables`
+rules restrict which addresses may reach the proxy at all, so a stolen
+token is not usable from anywhere else on the network. Linux keeps most of
+the benefit; the proxy stays simple; the port stays cheap.
 
 Properties:
 
 - **Not an SSH key.** Both consumers speak HTTP. An SSH endpoint would
-  cover only the git side, and would mean brokering `git-upload-pack` and
+  cover only the git side and would mean brokering `git-upload-pack` and
   `git-receive-pack` rather than passing smart-HTTP through.
 - **Git consumes it via a credential helper**, so agents never handle it.
-- **Rotation is now explicit**, not free. A per-lease token died with the
-  lease; a per-sandbox token lives until the sandbox is recreated. Fold
-  rotation into [recreate](#recreating-a-sandbox) so it happens on the same
-  cadence rather than never.
-- **Exfiltration is low-impact**: the token is only useful against a vmnet
-  address not routable from outside the Mac. But note it is now worth more
-  than a per-lease token was, because it lasts longer.
+- **Rotation is explicit**, folded into
+  [recreate](#recreating-a-sandbox) so it happens on some cadence rather
+  than never.
 
-**The GCP path does not work this way**, which is easy to miss. A metadata
-server is authenticated *by network position* — that is exactly what lets
+**The GCP path cannot use tokens at all**, which is easy to miss. A
+metadata server is authenticated *by network position* — that is what lets
 ADC work with no client configuration — and Google's client libraries will
-not attach a custom header to metadata requests. A token cannot be handed
-to ADC. So run **one `gce_metadata_server` instance per sandbox**, each
-bound to that sandbox's address, making network position per-VM by
-construction. It costs a small process per sandbox and preserves
-attribution exactly.
+not attach a custom header to metadata requests. So run **one
+`gce_metadata_server` per sandbox**, each bound to that sandbox's address,
+making network position per-VM by construction. It costs a small process
+per sandbox and preserves attribution exactly, on both platforms.
 
 ## Sandbox lifecycle: long-lived, recreated on demand
 
 Sandboxes are **created once and serve many agent runs**. They stay
 running; there is no per-task reset. Recreating one is an explicit,
-occasional operation that may take a reboot.
+occasional operation that takes a reboot.
 
 This is a deliberate simplification, and it buys a lot: no lease service,
-no per-task token minting, no copy-on-write overlay juggling, no reset step
-that can fail silently, and a mental model that fits in a sentence. Given a
-pool of two, most of that machinery was ceremony.
+no per-task token minting, no copy-on-write overlay juggling, and no reset
+step that can fail silently. At a pool of two, most of that was ceremony.
 
 ### What it costs
 
-Worth stating precisely, because the property being traded is real.
-
 **Isolation between *concurrent* agents is unchanged** — that is what the
-VM-per-agent design provides, and it is the important one. What is given up
-is isolation between *sequential* tasks on the same sandbox: task B
+VM-per-agent design provides, and it is the one that matters. What is given
+up is isolation between *sequential* tasks on the same sandbox: task B
 inherits whatever task A left behind.
 
-Concretely, that means:
-
 - A previously cloned private repo is readable by the next task.
-- Containers, `kind` clusters, and stray background processes accumulate.
+- Containers, `kind` clusters and stray processes accumulate.
 - Package caches persist, so a poisoned npm or pip entry outlives the task
   that fetched it.
 - Disk grows monotonically until something is done about it.
 
 The **correctness** consequence is probably larger than the security one: a
-task that inherits a half-finished worktree, a container already bound to
-the port it wants, or a `kind` cluster named `kind` fails in ways that look
+task inheriting a half-finished worktree, a container already bound to the
+port it wants, or a `kind` cluster named `kind` fails in ways that look
 like agent incompetence.
 
-The security consequence is judged acceptable *here* because tasks come
-from the same repo allowlist and run under the same credential set — they
-are not mutually distrusting. That reasoning stops holding if the allowlist
-ever spans repos of genuinely different sensitivity, which is the trigger
-to revisit this.
+The security consequence is acceptable *here* because tasks come from the
+same repo allowlist and run under the same credential set — they are not
+mutually distrusting. That stops holding if the allowlist ever spans repos
+of genuinely different sensitivity, which is the trigger to revisit.
 
 ### Between-task hygiene
 
-Most of the accumulation is cheap to clear without recreating anything. Run
-a cleanup between runs — a systemd unit in the guest, or a hook the agent
-server calls:
+Most accumulation is cheap to clear without recreating anything:
 
 ```sh
 kind delete clusters --all
@@ -414,87 +374,52 @@ docker system prune -af --volumes
 rm -rf "$WORKDIR"
 ```
 
-Be clear about what this is: **hygiene, not isolation.** It stops the
-disk filling and stops the most common cross-task collisions. It does not
-make the previous task's data unrecoverable, and it is not a security
-boundary. Recreate is the boundary.
+Be clear about what this is: **hygiene, not isolation.** It stops the disk
+filling and stops the common cross-task collisions. It does not make the
+previous task's data unrecoverable. Recreate is the boundary.
 
 ### Recreating a sandbox
-
-The real reset, as an explicit operation:
 
 ```sh
 grain sandbox recreate sandbox-0
 ```
 
-which stops the VM, discards its disk, recreates it from the pristine base
-image, starts it, and injects a fresh
-[token](#sandbox-identity-per-sandbox-tokens). Downtime is a boot, and at a
+Stops the VM, destroys it, recreates it from the base image, starts it, and
+injects a fresh [token](#sandbox-identity). Downtime is a boot, and at a
 pool of two it means running at half capacity for a minute.
 
-Recreate when:
+Recreate when the base image changed (this is the deploy path for image
+updates), when disk crosses a watermark (the failure this design is most
+likely to actually hit), when a sandbox is wedged, or on a schedule —
+weekly is reasonable and doubles as token rotation.
 
-- **the base image changed** — this is the deploy path for
-  [image changes](#the-sandbox-image), replacing the old design's
-  reset-on-next-lease convergence;
-- **disk crosses a watermark**, which is the failure this design is most
-  likely to hit in practice;
-- **a sandbox is wedged** — cheaper to recreate than to debug;
-- **on a schedule** — weekly is a reasonable default, and it doubles as
-  token rotation;
-- **before or after anything sensitive**, if the allowlist ever mixes
-  sensitivity levels.
+## Resource budget
 
-### What is left of the lease service
+On the target `n2-highmem-4`: **4 vCPU, 32 GB**.
 
-Very little, which is the point. With long-lived sandboxes there is no
-assignment to broker, no token to mint per task, and no reset to sequence.
-What remains is a couple of scripts — `recreate`, and a health check that
-flags a sandbox as unusable rather than letting Agent Canvas dispatch into
-it.
-
-That drops the custom-code inventory to **the git proxy plus scripts**.
-
-One thing to confirm: whether Agent Canvas distributes conversations across
-registered backends on its own, or expects a human to pick one. At a pool
-of two, picking by hand is fine either way — but if it needs orchestrating,
-that small assigner is the one piece that comes back. See
-[open questions](#open-questions).
-
-## Memory budget
-
-Memory is the binding resource, and on this machine the number is small
-enough to state exactly.
-
-| Consumer | Budget |
+| Consumer | Memory |
 |---|---|
-| macOS itself | ~8 GB |
-| Orchestrator services (Canvas, Automation, proxy, metadata servers) | ~3 GB |
+| Host (Debian, hypervisor only) | ~1–2 GB |
+| Controller VM | ~3–4 GB |
 | Each sandbox (kind control plane + build + test) | ~8 GB |
 
-`32 − 8 − 3 ≈ 21 GB` → **two concurrent agents**, with more headroom than
-revision 4 had, since dropping the Linux builder removed a VM that took
-4–6 GB whenever anything was built. Three agents only if the laptop is
-doing nothing else and the sandboxes are lightly loaded. `sandboxCount`
-should be derived from that arithmetic, not from how many issues you would
-like worked at once.
+`32 − 2 − 4 = 26 GB` → **three sandboxes fit on memory**, two with
+comfortable headroom. That is better than revision 4's laptop budget, where
+macOS itself took ~8 GB.
 
-This is the main reason the orchestrator runs **natively on macOS rather
-than in its own VM**: a fourth VM would cost a sandbox. The trade is
-honest — macOS is a larger and less reproducible attack surface than a
-minimal NixOS VM — but the boundary that matters is preserved, because
-sandbox VMs cannot read the host filesystem either way.
+**But CPU is likely to bind first here, not memory** — which inverts every
+previous revision's conclusion. Four vCPUs across a controller and two
+sandboxes each running a `kind` control plane is thin, and `kind` plus
+compilation is not a bursty workload. Treat `sandboxCount = 2` as the
+starting point, measure CPU saturation before memory, and note that moving
+to `n2-standard-8` (8 vCPU, same 32 GB, ~$284/month versus ~$191) is a
+stop-change-start away if CPU is the constraint.
 
-Two host-level tactics that helped on Linux do not transfer: virtio-mem
-free-page-reporting reclaim, and KSM page merging across near-identical
-guests. macOS gives back neither, which makes the per-sandbox 8 GB a harder
-floor than it was.
-
-Because sandboxes are now long-lived, they simply stay resident — there is
-no start-on-lease to amortise idle memory. At a pool of two that is the
-simpler arrangement and costs nothing that stopping them would recover;
-stopping an idle sandbox remains possible, but it buys back 8 GB you have
-no second use for.
+Cost, for reference: ~$191/month for the instance, ~$30 for a 300 GB
+balanced disk, ~$4 for the IP — about **$225/month running continuously**,
+or roughly **$75/month** if it is stopped outside working hours. Nested
+virtualization itself is free; it only restricts you to Intel N2, since E2
+and N2D cannot do it.
 
 ## The sandbox image
 
@@ -655,7 +580,7 @@ It is not universal, so the proxy holds a **credential set** selected per
 target repo:
 
 ```
-~/.grain/secrets/github/
+/data/secrets/github/
   credentials.json     # repo/owner pattern -> credential
   bot.token            # machine account, most repos
   personal.token       # last resort, only what nothing else reaches
@@ -745,12 +670,12 @@ undisableable React dashboard.
   `/{owner}/{repo}.git/{info/refs,git-upload-pack,git-receive-pack}`,
 - canonicalize and check `(owner, repo)` against the allowlist,
   default-deny,
-- authenticate the caller by [per-sandbox token](#sandbox-identity-per-sandbox-tokens),
+- authenticate the caller by [per-sandbox token](#sandbox-identity),
 - select the credential for that repo and set `Authorization`,
 - stream the body through, and log the tuple.
 
 No pack parsing, no server-side clones, no database, no user accounts. The
-allowlist is read from `~/.grain/config/repo-allowlist.json` and watched, so
+allowlist is read from `/data/config/repo-allowlist.json` and watched, so
 an admin edits a file with no restart.
 
 Two things worth stealing rather than reinventing: Git Proxy's
@@ -766,17 +691,18 @@ refused client just prints *"the remote end hung up unexpectedly"*.
 transition. Its successor is **`OpenHands/automation`**, with a cron
 scheduler, webhook triggers, filter expressions and run history.
 
-On a laptop the choice is made for us: **cron only**. Webhooks require
-GitHub to reach the host, and this machine has no inbound path at all —
-which is a security improvement, not a limitation. Polling also keeps every
-GitHub call flowing outward through our own credential path.
+**Use cron, not webhooks.** Webhooks would require GitHub to reach the
+controller, and the only inbound port on this host is SSH — deliberately.
+Polling keeps the system closed to inbound traffic and keeps every GitHub
+call flowing outward through our own credential path. It also survives the
+instance being stopped overnight, which webhooks would not.
 
 What remains ours, because it is about protecting a two-VM pool and the LLM
 budget rather than issue semantics:
 
 - **Rate limiting** — a cap on runs started per hour, so bulk-labelling
   forty issues cannot consume the pool and a month of spend at once.
-- **A stranded-work sweeper** — if the laptop sleeps or a lease dies
+- **A stranded-work sweeper** — if the host is stopped, or a run dies
   mid-flight, issues need returning to the queue rather than stalling
   silently.
 
@@ -798,12 +724,12 @@ automatically. Point a sandbox at its instance and GCP access just works —
 no wrapper script, no environment plumbing, nothing for the agent to get
 wrong.
 
-- The key lives at `~/.grain/secrets/gcp-service-account.json`, `0600`,
+- The key lives at `/data/secrets/gcp-service-account.json`, `0600`,
   readable only by the metadata service.
 - It is configured to **impersonate a second, minimally-privileged service
   account** rather than serve the primary key's own tokens.
-- **One instance per sandbox**, each bound to that sandbox's vmnet address
-  — see [sandbox identity](#sandbox-identity-per-sandbox-tokens) for why this
+- **One instance per sandbox**, each bound to that sandbox's address
+  — see [sandbox identity](#sandbox-identity) for why this
   is what preserves per-caller attribution on macOS.
 - Every mint is audit-logged.
 
@@ -896,154 +822,140 @@ fails late and confusingly.
 
 **Defended:**
 
-- A compromised sandbox cannot read GitHub or GCP credentials; they are not
-  on the machine, and a VM cannot read the host filesystem.
-- It cannot touch repos outside the allowlist (proxy check, plus GitHub-side
-  scoping when a machine account or App is used).
+- A compromised sandbox cannot read GitHub or GCP credentials; they are in
+  a different VM.
+- It cannot touch repos outside the allowlist (proxy check, plus
+  GitHub-side scoping when a machine account or App is used).
 - It cannot push to protected branches or modify workflows — enforced by
   GitHub, not by our code.
-- It cannot reach a *concurrently running* agent: separate VMs, separate
-  kernels, separate Docker daemons.
-- It cannot persist past a [recreate](#recreating-a-sandbox) — but note it
-  **does** persist between sequential tasks on the same sandbox, which is
-  the deliberate trade described above and is listed again under what is
-  not defended.
+- It cannot reach a concurrently running agent: separate VMs, kernels,
+  Docker daemons.
 - Its access is revocable in minutes and fully audit-logged.
+- **The host holds no secrets**, so credential exposure requires
+  compromising the controller VM specifically, not just the machine.
 
 **Not defended:**
 
-- **Sequential tasks on one sandbox.** Sandboxes are long-lived, so a
-  task inherits the previous task's filesystem — cloned repos, caches,
-  containers. Accepted because tasks share a repo allowlist and credential
-  set; revisit if the allowlist ever mixes sensitivity levels. See
+- **Sequential tasks on one sandbox.** Sandboxes are long-lived, so a task
+  inherits the previous task's filesystem. Accepted because tasks share a
+  repo allowlist and credential set; revisit if that changes. See
   [what it costs](#what-it-costs).
-- **Abuse of legitimate access while compromised.** It can do anything the
-  agent may do, for as long as it is running. The proxy narrows scope and
-  provides audit and a kill switch; it does not distinguish a well-behaved
-  agent from a hostile one making the same calls.
+- **Abuse of legitimate access while compromised.** A sandbox can do
+  anything the agent may do, for as long as it runs. The proxy narrows
+  scope and provides audit and a kill switch; it does not distinguish a
+  well-behaved agent from a hostile one making the same calls.
 - **Exfiltration**, under the default open-egress policy.
 - **Malicious code in agent output.** Human PR review is the control, which
   is why the no-push-to-`main` rules are load-bearing.
-- **A compromised host.** On macOS this is now the laptop itself, which
-  holds every credential. It is a larger and less controlled surface than
-  the minimal NixOS orchestrator VM the Linux design used — an accepted
-  cost of the RAM budget, and the clearest argument for moving to a Linux
-  box if this ever becomes more than a personal tool.
+- **A compromised host.** It owns the hypervisor, so it owns every VM.
+  Moving the controller into a VM does not change that — it changes the
+  *reach of a lesser compromise*, which is the common case.
 - **Prompt injection via issue content.** Anyone who can file an issue can
   put text in front of the agent. Requiring a human to label each issue is
   the mitigation, not a guarantee.
 
 ## Operations
 
-- **It is a laptop.** It sleeps, closes, travels, thermally throttles and
-  takes OS updates. Use `caffeinate` while agents run, and expect the
-  stranded-work sweeper to earn its keep. Do not treat this as always-on
-  infrastructure; the design's premise was a server, and that mismatch is
-  real rather than cosmetic.
-- **Two concurrent agents.** Derive `sandboxCount` from
-  [the memory budget](#memory-budget), and alarm on pool exhaustion — with
-  a pool this small it is a routine condition, not an edge case.
-- **Backup** is `~/.grain` — the only stateful thing. Time Machine or
-  `rsync`; FileVault covers at-rest.
-- **Rotation**: replace a file in `~/.grain/secrets` and restart the one
+- **Two concurrent agents** to start. Derive `sandboxCount` from
+  [the resource budget](#resource-budget), and expect CPU rather than
+  memory to be the limit on `n2-highmem-4`.
+- **Stop the instance when idle.** The design has no inbound dependency —
+  cron polling, no webhooks — so a schedule cuts the bill roughly threefold.
+  Sandboxes come back on boot; the controller's `/data` disk persists.
+- **Recreate sandboxes on a cadence.** This is the routine maintenance
+  operation and the one most likely to be forgotten until something breaks.
+  Watch disk, and put it on a schedule — weekly also rotates the
+  per-sandbox token, which otherwise never rotates. See
+  [recreating a sandbox](#recreating-a-sandbox).
+- **Backup** is the controller's `/data`. Provider snapshots are enough;
+  nothing else in the system is stateful.
+- **Rotation**: replace a file under `/data/secrets` and restart the one
   service that reads it.
 - **Adding a repo**: edit the allowlist, install the App or invite the bot,
   apply branch protection. Hot-reloaded.
-- **Recreating a sandbox** is the routine maintenance operation, and the one
-  most likely to be forgotten until something breaks. Watch disk, and put it
-  on a schedule — weekly also rotates the per-sandbox token, which otherwise
-  never rotates at all. See
-  [recreating a sandbox](#recreating-a-sandbox).
-- **Observability**: the signals that matter are pool free/busy/quarantined,
-  lease durations, proxy denial rate, token mint rate, intake outcomes. A
-  quarantined sandbox and an issue stuck mid-flight are the silent failure
-  modes.
+- **Observability**: pool health, proxy denial rate, token mint rate,
+  intake outcomes. A wedged sandbox and an issue stuck mid-flight are the
+  silent failure modes.
 
-## What changed from the Linux design
+## What earlier revisions traded
 
-Recorded rather than deleted, because the Linux design remains the better
-production target and this is the ledger of what the Mac costs.
+Recorded rather than deleted, because the reasoning is the expensive part.
 
-**Carried over unchanged:** the credential model and ladder, withheld
-scopes, branch protection, split surface, the git proxy design, the GCP
-metadata-server approach and impersonation, the whole OpenHands
-integration, the sandbox guest configuration, and the reasoning for a VM
-per agent.
+**Carried through every revision unchanged:** the credential model and
+ladder, withheld scopes, branch protection, the split surface, the git
+proxy design, the GCP metadata-server approach and impersonation, the
+OpenHands integration, and the reasoning for a VM per agent.
 
-**Lost:**
-
-| Property | Linux | macOS |
+| Property | microvm.nix (rev 1–3) | Now |
 |---|---|---|
-| Sandbox identity | source IP, pinned per tap — no secret at all | per-sandbox bearer token, injected at provisioning |
-| GCP attribution | one metadata server, callers distinguished by IP | one instance per sandbox |
-| Reset | ephemeral dm-crypt volume per lease | explicit recreate; no per-task reset |
+| Sandbox identity | source IP, pinned per tap — no secret at all | per-sandbox token; source pinning kept as an extra layer on Linux |
+| Reset | ephemeral volume per lease, key discarded | explicit recreate; no per-task reset |
 | Boot | ~1s microVM | tens of seconds |
-| Store | one read-only host store shared by all guests | per-VM store; more disk |
-| Memory reclaim | virtio-mem free page reporting, KSM | neither |
 | Guest OS | NixOS, declarative, shared host store | Debian, provisioning script |
-| Orchestrator isolation | its own minimal NixOS VM | native on macOS |
-| Reproducibility | one flake, whole cluster | host config + a Debian provisioning script |
+| Memory reclaim | virtio-mem free page reporting, KSM | neither |
+| Reproducibility | one flake, whole cluster | controller image + a provisioning script |
 
-**Gained:** simpler persistence (a directory, not a volume), FileVault at
-rest, no inbound network surface at all, and no nested virtualization.
+**Gained:** a host that holds no secrets, a host-specific surface confined
+to one module, no cross-building, and an environment agents already know.
 
-The Linux artifacts — `flake.nix`, `hosts/spike/`, `modules/sandbox-spike.nix`
-— are kept. They evaluate cleanly and remain the fastest way to stand this
-up on a Linux box later, or to validate the Linux design under VMware
-Fusion with VT-x passthrough.
+The microvm.nix artifacts — `flake.nix`, `hosts/spike/`,
+`modules/sandbox-spike.nix` — are retained. They evaluate cleanly and
+remain the fastest route to a microVM-based deployment if per-task reset
+ever becomes worth its cost again.
 
 ## Open questions
 
-1. **Does `socket_vmnet` give VM↔VM and VM↔host reachability** with stable
-   enough addressing for the proxy and per-sandbox metadata servers? This
-   is now the only host-layer unknown.
+1. **Does Lima run well enough on Linux** to be the single VM driver for
+   both platforms? If not, libvirt is the Linux fallback and the adapter
+   grows a second implementation — a cost, not a redesign.
+2. **Does 4 vCPU hold two sandboxes plus a controller** under real `kind`
+   workloads? This inverts earlier revisions: memory was the binding
+   resource, and here it probably is not.
 3. **Does Agent Canvas distribute conversations across backends**, or does
-   it expect a human to pick one? At a pool of two, picking by hand is
-   fine — but if orchestration is needed, a small assigner is the one piece
-   of the lease service that comes back. See
-   [what is left of the lease service](#what-is-left-of-the-lease-service).
+   it expect a human to pick one? At a pool of two, by hand is fine — but
+   if orchestration is needed, a small assigner is the one piece of the
+   removed lease service that comes back.
 4. **Does the Automation Service work in cron-only mode**, and what are its
    trigger and dedupe semantics? Also whether anything writes a GitHub
-   token into the sandbox's `origin` remote.
+   token into the sandbox's `origin` remote, which would silently defeat
+   the split surface.
 5. **How far down the credential ladder can each owner go** — App, machine
    account, or personal token?
-6. **Real peak memory** for a sandbox under a kind cluster plus a build.
-   `sandboxCount` follows directly, and at this budget the difference
-   between 6 GB and 10 GB is the difference between two agents and one.
 
 ## Implementation plan
 
-1. **Host baseline**: the orchestrator services under launchd, by
-   [whichever route you prefer](#managing-the-host). No Linux builder
-   needed.
-2. **One sandbox VM**: Debian guest under Lima with docker and kind, from
-   the provisioning script. Confirm `kind create cluster` works, and
-   measure peak memory and boot time while there.
-3. **Networking**: `socket_vmnet`, services bound to the vmnet address
-   only, `pf` denying those ports on physical interfaces. Verify the
-   negative cases explicitly — a silently-permissive binding on a laptop is
-   the failure that matters most.
-4. **OpenHands end to end**: `openhands-agent-server` as a systemd unit in
-   the sandbox (remember the session key), registered as a backend in Agent
-   Canvas on the Mac. No custom code yet.
-5. **Git proxy**: the custom smart-HTTP proxy — path whitelist,
-   canonicalize, allowlist, token auth, credential selection, stream
-   through, audit. Verify allow-listed repos clone and push, un-listed ones
-   are refused *with a legible git error*, and no credential is ever
-   visible inside the sandbox.
-6. **Metadata server**: one instance per sandbox, impersonating the narrow
-   service account. Verify ADC works unmodified and the key is unreachable.
-7. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
-   cleanup hook, a health check, and a disk watermark alarm. Small, but
-   this is what keeps a long-lived pool from silently degrading.
-8. **Automation Service**: cron-mode intake, rate limit, stranded-work
+1. **Host baseline**: GCP `n2-highmem-4`, Debian, nested virtualization
+   enabled, KVM confirmed (`ls /dev/kvm`), 300 GB disk, serial console on.
+2. **Host adapter, first cut**: bring up one Debian VM and reach it. This
+   answers open question 1 and defines the interface everything else codes
+   against.
+3. **Networking**: private network, per-VM addresses, the reachability
+   matrix. Verify the negative cases explicitly — sandbox↔sandbox blocked,
+   controller services unreachable from outside — since a silently
+   permissive rule is the failure that invalidates the security model.
+4. **Sandbox image**: the provisioning script, `docker`, `kind`. Confirm
+   `kind create cluster` works and measure peak CPU and memory. Open
+   question 2 is answered here, and it may change `sandboxCount` or the
+   machine type.
+5. **Controller VM**: `/data` disk, Agent Canvas, and one sandbox
+   registered as a backend. OpenHands end to end with no custom code.
+6. **Git proxy**: path whitelist, canonicalize, allowlist, token auth,
+   credential selection, stream through, audit. Verify allow-listed repos
+   clone and push, un-listed ones fail *with a legible git error*, and no
+   credential is ever visible inside a sandbox.
+7. **Metadata servers**: one per sandbox, impersonating the narrow service
+   account. Verify ADC works unmodified and the key is unreachable.
+8. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
+   cleanup hook, a health check, a disk watermark alarm.
+9. **Automation Service**: cron-mode intake, rate limit, stranded-work
    sweeper. First full issue-to-PR run.
-9. **Hardening**: move repos down the credential ladder, apply branch
-   protection, confirm no credential carries `workflow` scope, write the
-   runbook.
+10. **Hardening**: move repos down the credential ladder, apply branch
+    protection, confirm no credential carries `workflow` scope, write the
+    runbook.
 
-Scale to `sandboxCount = 2` once 1–8 work at one, and expect that to be the
-ceiling.
+Scale to a second sandbox once 1–9 work at one. The macOS adapter is a
+later exercise, and the measure of whether this revision succeeded is that
+it touches only steps 2 and 3.
 
 ## Sources
 
@@ -1055,7 +967,6 @@ ceiling.
   git-protocol error encoding
 - [`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
 - [Lima](https://lima-vm.io)
-- [nix-darwin](https://github.com/nix-darwin/nix-darwin) — one option for host configuration
 - [GCP downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
 - [microvm.nix](https://github.com/microvm-nix/microvm.nix) — the Linux
   design's foundation, retained in the repo's spike artifacts
