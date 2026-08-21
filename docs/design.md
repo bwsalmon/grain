@@ -23,6 +23,10 @@ a critical pass over the security claims:
 - **Added** the sandbox lease/reset lifecycle, issue intake semantics,
   write-safety (protected-branch) enforcement, and operations sections —
   all genuinely missing in revision 1.
+- **Added** a configurable sandbox image — package set, `nix-ld`, store
+  sharing — and a precise account of what a sandbox reboot does and does
+  not reset. See
+  [Sandbox image](#sandbox-image-packages-and-toolchains).
 
 ## Goals
 
@@ -327,11 +331,40 @@ any background process still running. That's both a correctness problem
 private repo readable by task B).
 
 The broker owns the reset. On `/stop`, before a sandbox returns to the free
-pool, it is **rebooted**. microVM boots are fast (order of a second or two)
-and the root is a read-only Nix store image with a writable overlay, so a
-reboot discards the overlay and returns the VM to a known-good state. This
-is far more robust than trying to clean up in userspace, and it's the main
-reason the ephemeral-root property is worth preserving.
+pool, it is **rebooted**. microVM boots are fast (order of a second or two),
+so this is cheap enough to do between every task — and it is far more
+robust than trying to clean up in userspace, where the failure mode is a
+forgotten directory or a surviving background process rather than an
+obvious error.
+
+### What a reboot actually resets
+
+Being precise about this, because the whole isolation story rests on it. A
+sandbox VM's filesystem is:
+
+- **`/` — tmpfs**, RAM-backed and writable. Everything an agent does lives
+  here: `$HOME`, `/tmp`, cloned repos, `node_modules`, pip venvs, any
+  binary it downloaded. Discarded completely on every boot.
+- **`/nix/store` — read-only**, supplied by the host (see
+  [store sharing](#sandbox-image-packages-and-toolchains)). The agent
+  cannot modify it.
+- **No volume, no share.** Deliberately: there is nowhere for a sandbox to
+  write anything that outlives it.
+
+So yes — **a restarted sandbox comes back with nothing the previous agent
+did.** There is no accumulated drift to clean up, and no reachable state
+for one task to leak into the next.
+
+One correction to the natural mental model, though: it is not recreated
+from a *base image* that was fixed when the VM first started. It is
+recreated from **the sandbox definition in the host's currently-activated
+Nix configuration**. Usually those are identical, but they diverge exactly
+when you care — after a `nixos-rebuild switch` that changed the sandbox
+config, the next reboot brings the sandbox up with the *new* definition.
+That is the deploy mechanism for
+[package changes](#sandbox-image-packages-and-toolchains), and it's why
+draining the pool is part of the deploy runbook rather than an
+afterthought.
 
 Lease states: `free` → `leased` (session bound) → `resetting` → `free`. The
 broker persists lease state in memory only; on broker restart, reset every
@@ -548,8 +581,8 @@ because it never entered the Nix store.
 
 - Count fixed by `agentCluster.sandboxCount` (default `4` — a starting
   point tied to host RAM, revisited after measuring real agent memory use).
-- Read-only Nix root plus writable overlay; no share, no volume; rebooted
-  between leases.
+- tmpfs root, read-only store, no share, no volume; rebooted between
+  leases. See [What a reboot actually resets](#what-a-reboot-actually-resets).
 - Runs the OpenHands action execution server, version-pinned in lockstep
   with the orchestrator.
 - Ships a `gh-proxy` client: an `/etc/gitconfig` `insteadOf` rewrite so
@@ -561,6 +594,119 @@ because it never entered the Nix store.
 - Ships the `gcp-token` client described above.
 - No inbound connectivity from outside the host and none from other
   sandboxes.
+
+## Sandbox image: packages and toolchains
+
+Because the root is discarded on every reboot, whatever an agent needs has
+to either be **in the image** or be re-installed by the agent on every
+task. Making the image easy to shape is therefore not a convenience — it's
+what keeps agents from burning their first several minutes (and a chunk of
+context) re-solving environment setup on every run.
+
+### Configuration surface
+
+```nix
+agentCluster.sandbox = {
+  # Replace the default toolchain wholesale.
+  packages = with pkgs; [ ... ];
+
+  # Or, more commonly: keep the defaults and add to them.
+  extraPackages = with pkgs; [ go terraform postgresql ];
+
+  # Escape hatch: an arbitrary NixOS module merged into every sandbox,
+  # for the cases a package list can't express.
+  extraConfig = { pkgs, ... }: {
+    environment.variables.GOFLAGS = "-mod=vendor";
+    services.redis.servers."".enable = true;
+    environment.etc."agent-tools/PROJECT.md".source = ./project-notes.md;
+  };
+};
+```
+
+`extraPackages` is the option to reach for; `packages` exists for the rare
+case of wanting a deliberately minimal image. `extraConfig` matters more
+than it looks: "what's pre-installed" generalises quickly into "a service
+the test suite needs," "an env var the build wants," or "a file the agent
+should read," and without a raw-module escape hatch every one of those
+becomes a change to this repo's modules instead of a change to the
+deployment's config.
+
+Default set, aimed at "an agent can start working without installing
+anything": `git`, `openssh`, `cacert`, `curl`, `jq`, `ripgrep`, `fd`,
+`coreutils`/`findutils`/`gnused`/`gawk`, `gnutar`/`gzip`/`unzip`, `less`,
+`vim`, `gnumake`, `gcc`, `python3` with `uv`, `nodejs` with `pnpm`. Plus
+the `gh-proxy` and `gcp-token` clients and their README.
+
+### nix-ld: the NixOS-specific trap
+
+NixOS has no `/lib64/ld-linux-x86-64.so.2` and no FHS library paths, so a
+dynamically-linked binary that an agent downloads — a release tarball, a
+`pip` wheel with a native extension, a language-server binary, a
+`curl | sh` installer — fails with `cannot execute: required file not
+found`. That error is opaque, agents burn a lot of turns on it, and it
+looks like a broken sandbox rather than a platform difference.
+
+Enable [`nix-ld`](https://github.com/nix-community/nix-ld) in every
+sandbox, with a reasonably generous library set (`stdenv.cc.cc.lib`,
+`zlib`, `openssl`, `curl`, `glibc`, `libxml2`, `sqlite`, and the usual
+graphics/X stubs that headless test suites nonetheless link against). This
+makes downloaded binaries work the way they do on Debian, and it's exposed
+as `agentCluster.sandbox.nixLd.extraLibraries` for the cases it misses.
+
+This is worth calling out at design time because it is invisible until
+agents are actually running, and then it accounts for a surprising share of
+their failures.
+
+### Store sharing
+
+With a generous package set, a per-VM store image would mean N copies of a
+large closure — wasteful in disk and in rebuild time. Instead, mount the
+**host's `/nix/store` read-only** into every sandbox, so the marginal cost
+of the Nth sandbox is approximately zero and adding a package to the image
+costs one host build rather than N.
+
+The confidentiality question this raises is already answered by an
+invariant we hold anyway: [no secret is ever in the Nix
+store](#persistent-storage). What a sandbox gains is the ability to
+enumerate what else the host has built — mild information disclosure, no
+credential exposure — and it cannot write to the store. If even that
+disclosure is unacceptable for a given deployment, `storeOnDisk` builds a
+per-VM image containing only that VM's closure, at the cost of disk and
+build time; make it a config flag rather than a decision baked into the
+modules.
+
+### Runtime installs
+
+Agents can still install things per-task, and should be able to: `uv`/`pip`
+into a venv, `pnpm install` into `node_modules`, `cargo` into a project
+dir, and (with `nix-ld`) downloaded binaries all work fine against the
+tmpfs root. What does *not* work is anything wanting to write to
+`/nix/store` or mutate system state globally — the right mental model for
+an agent is "a normal Linux box where you don't have a system package
+manager, but your project-local tooling is all fine."
+
+A **persistent shared package cache** across sandboxes is deliberately
+rejected, despite the obvious appeal of not re-downloading the same
+dependencies every task. A writable cache shared between leases is a
+channel between tasks: task A poisons an npm or pip cache entry, task B
+silently builds against it, and the isolation that the whole reset design
+exists to provide is gone. If dependency fetch time becomes a real cost,
+the answer is to bake the dependencies into the image — which is what the
+package options above are for, and which is fast, shared, and read-only by
+construction.
+
+The feedback loop is the point: when agents repeatedly install the same
+thing, that's the signal to add it to `extraPackages` and stop paying for
+it. Worth watching for during early operation, since it's cheap to fix and
+otherwise silently taxes every run.
+
+### Deploying a change
+
+Package changes are **not** hot-reloadable the way the repo allowlist is.
+The sequence is: edit config → `nixos-rebuild switch` on the host → drain
+the pool → sandboxes pick up the new definition on their next reboot. Since
+the reset between leases is a reboot anyway, a drained pool converges
+without any extra mechanism. Plan for it as a deploy, not a config tweak.
 
 ## Repo layout (proposed)
 
@@ -575,7 +721,8 @@ modules/agent-cluster/
     github-proxy.nix  gcp-token-service.nix
     admin-ssh.nix  persist.nix
   sandbox/
-    default.nix  action-execution-server.nix
+    default.nix  image.nix                    # packages, nix-ld, store sharing
+    action-execution-server.nix
     github-proxy-client.nix  gcp-token-client.nix
 packages/
   github-proxy/  gcp-token-service/  sandbox-broker/
@@ -588,6 +735,12 @@ docs/design.md
 |---|---|---|---|
 | `adminSshPublicKey` | `str` | — required | Key allowed to SSH to the orchestrator. |
 | `sandboxCount` | `int` | `4` | Fixed pool size; hard concurrency ceiling. |
+| `sandbox.packages` | `list of package` | see defaults | Full override of the sandbox toolchain. |
+| `sandbox.extraPackages` | `list of package` | `[]` | Added to the defaults — the usual knob. |
+| `sandbox.extraConfig` | `module` | `{}` | Arbitrary NixOS module merged into every sandbox. |
+| `sandbox.nixLd.enable` | `bool` | `true` | Make downloaded dynamic binaries runnable. |
+| `sandbox.nixLd.extraLibraries` | `list of package` | `[]` | Extra libs for `nix-ld`'s search path. |
+| `sandbox.shareHostStore` | `bool` | `true` | Share host `/nix/store` vs. per-VM `storeOnDisk`. |
 | `network.bridge` | `str` | `br-agents` | Host bridge name. |
 | `network.subnet` | `str` | `10.100.0.0/24` | Internal subnet. |
 | `network.externalSshPort` | `port` | `2222` | Host port DNAT'd to orchestrator sshd. |
@@ -662,6 +815,10 @@ and both came from the same error — treating a *narrowed* capability as an
   `/persist` and restarting the one service that reads it. No rebuild.
 - **Adding a repo.** Edit the allowlist, install the App on the repo, apply
   branch protection. Hot-reloaded, no rebuild.
+- **Changing sandbox packages.** A rebuild and a pool drain, not a config
+  tweak — see [Deploying a change](#deploying-a-change). Track which
+  packages agents keep installing by hand; each one is a cheap image change
+  that pays back on every subsequent run.
 
 ## Open questions
 
@@ -686,7 +843,10 @@ Substantially shorter than revision 1 — the two biggest are resolved above.
 
 1. **Scaffold**: flake wiring `microvm.nix`; host config with bridge
    network and an `agentCluster` module; orchestrator plus
-   `sandboxCount = 1` to prove the plumbing.
+   `sandboxCount = 1` to prove the plumbing. Includes the sandbox image
+   module — default toolchain, `nix-ld`, shared host store — since the
+   sandbox has to be defined here anyway and `nix-ld` is much cheaper to
+   have from the start than to diagnose later.
 2. **Network + persistence**: nftables (DNAT, per-tap anti-spoofing,
    inter-VM matrix), `/persist` virtiofs share. Verify the reachability
    matrix explicitly — including the negative cases, since a
