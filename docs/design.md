@@ -6,6 +6,11 @@ Revision 4. Rewritten for a **macOS host on Intel hardware** (8 cores,
 32 GB) after revisions 1–3 targeted a NixOS host using
 [`microvm.nix`](https://github.com/microvm-nix/microvm.nix).
 
+Sandboxes are **long-lived rather than reset per task** — a deliberate
+simplification that removes the lease service revision 4 had made
+mandatory. What it trades away is isolation between *sequential* tasks; see
+[what it costs](#what-it-costs).
+
 The security architecture, the GitHub and GCP credential models, the
 OpenHands integration and the sandbox guest configuration all carry over
 essentially unchanged. **The host layer does not** — microvm.nix requires
@@ -26,8 +31,9 @@ deleted, since it remains the better production target.
   service-account key.
 - Each agent gets a **whole VM**, because the workload runs `docker` and
   `kind`, which do not nest into containers.
-- Sandboxes are reset between tasks; nothing an agent does outlives its
-  lease.
+- Sandboxes are long-lived for simplicity, with an explicit recreate that
+  clears them; isolation between *concurrent* agents is the property that
+  matters and it is preserved.
 - Configuration and credentials survive rebuilds and are managed
   declaratively.
 
@@ -60,10 +66,11 @@ these are stated with what was actually verified.
 
 ### What is left to write
 
-Two things: the [git proxy](#the-git-proxy-write-it), small and
-unavoidable, and the [lease service](#the-lease-service), which on macOS is
-**mandatory rather than optional** — see
-[sandbox identity](#sandbox-identity-per-lease-tokens).
+Essentially one thing: the [git proxy](#the-git-proxy-write-it), which is
+small and unavoidable. Keeping
+[sandboxes long-lived](#sandbox-lifecycle-long-lived-recreated-on-demand)
+removes the lease service that revision 4 had made mandatory, leaving a
+`recreate` script and a health check in its place.
 
 ## High-level architecture
 
@@ -76,7 +83,7 @@ flowchart TB
 
     subgraph mac["macOS host (the trusted base, managed by nix-darwin)"]
         canvas["Agent Canvas<br/>+ Automation Service<br/>(all GitHub API work)"]
-        lease["Lease service<br/>(assign, init, reset)"]
+        scripts["recreate + health check<br/>(scripts, not a service)"]
         proxy["Git proxy<br/>(allowlist + creds + audit)"]
         mds["gce_metadata_server<br/>(one per sandbox)"]
         secrets[("~/.grain/secrets<br/>credential set, GCP key<br/>FileVault at rest")]
@@ -90,11 +97,11 @@ flowchart TB
 
     canvas -->|"conversations"| sb0
     canvas -->|"conversations"| sb1
-    lease -->|"start/stop, POST /api/init"| sb0
-    lease -->|"start/stop, POST /api/init"| sb1
+    scripts -.->|"recreate, occasional"| sb0
+    scripts -.->|"recreate, occasional"| sb1
 
-    sb0 -->|"git only, per-lease token"| proxy
-    sb1 -->|"git only, per-lease token"| proxy
+    sb0 -->|"git only, per-sandbox token"| proxy
+    sb1 -->|"git only, per-sandbox token"| proxy
     sb0 -->|"ADC"| mds
     sb1 -->|"ADC"| mds
 
@@ -112,7 +119,8 @@ Properties this preserves from the Linux design:
   endpoints, allowlist-checked and audit-logged.
 - Sandbox VMs cannot read the macOS filesystem, so the credential boundary
   is intact even though the orchestrator is no longer its own VM.
-- Nothing an agent writes outlives its lease.
+- Concurrent agents cannot reach each other; each has its own kernel,
+  Docker daemon and port space.
 
 ## Host layer: macOS
 
@@ -126,10 +134,12 @@ Parallels with VT-x passthrough, and run the entire Linux design inside it
 unchanged. That works and is the right way to *validate* the Linux design
 on this hardware. It is not the right base to build on, for one specific
 reason: VMware's own documentation states that **KVM performs relatively
-poorly as a guest hypervisor on Intel using virtualized VT-x**, and this
-design leans on sub-second microVM boots for per-task reset. Paying a
-nesting tax on the operation performed most often, in exchange for
-preserving a host layer we can replace, is the wrong trade.
+poorly as a guest hypervisor on Intel using virtualized VT-x**. Paying a
+nesting tax on every operation, plus a third virtualization layer to debug
+through, in exchange for preserving a host layer we can replace, is the
+wrong trade. (Revision 4 also cited fast microVM boots for per-task reset;
+with sandboxes now long-lived that argument no longer applies, but the
+performance and complexity ones stand on their own.)
 
 So: **macOS is the base, and the sandboxes are ordinary Linux VMs.** Note
 the asymmetry that makes this work — `kind` and Docker are containers, so
@@ -154,8 +164,7 @@ If nixos-lima does not work out on Intel, the fallback is to build a NixOS
 qcow2 with [`nixos-generators`](https://github.com/nix-community/nixos-generators)
 and drive QEMU directly. That loses Lima's conveniences and costs some
 scripting, but nothing architectural — the guest configuration is the same
-either way, and the [lease service](#the-lease-service) already owns VM
-lifecycle.
+either way, and VM lifecycle is already a script rather than a service.
 
 ### Building Linux on a Mac
 
@@ -174,7 +183,7 @@ competing for the same 32 GB as the sandboxes.
 `socket_vmnet` puts the VMs on a shared bridge with host-reachable
 addresses (typically `192.168.105.0/24`, with the host at `.1`).
 
-The orchestrator's services — git proxy, metadata servers, lease service —
+The orchestrator's services — git proxy and metadata servers —
 **bind to the vmnet address only**, never `0.0.0.0`. This matters more on a
 laptop than on a server: `0.0.0.0` would expose the git proxy on whatever
 café WiFi the machine is joined to. Back it with a `pf` rule denying those
@@ -183,7 +192,7 @@ ports on the physical interfaces, so a binding mistake fails closed.
 What macOS cannot give us is the per-interface source-address pinning that
 the Linux design relied on. The VMs share one host-side bridge; there is no
 per-VM tap to attach a filter to. That is the one real loss, and it is
-handled in [sandbox identity](#sandbox-identity-per-lease-tokens).
+handled in [sandbox identity](#sandbox-identity-per-sandbox-tokens).
 
 Sandbox egress: agents need the internet for dependencies, so the default
 is open, with the same honest caveat as before — a sandbox with general
@@ -220,29 +229,31 @@ The invariant holds unchanged: **no secret is ever a Nix string literal or
 a derivation input.** nix-darwin encodes paths and how services consume
 them; values are placed by hand.
 
-## Sandbox identity: per-lease tokens
+## Sandbox identity: per-sandbox tokens
 
 Both local services need to know which sandbox is calling — for allowlist
 decisions, per-caller audit, and rate limiting.
 
 The Linux design authenticated by **source IP**, made trustworthy by
 per-tap nftables rules that dropped any packet whose source address was not
-the one assigned to that interface. A forged source address could not
-leave the VM. There was no secret to distribute, rotate, or leak, and the
-bootstrap problem for ephemeral VMs did not exist.
+the one assigned to that interface. A forged source address could not leave
+the VM, and there was no secret to distribute at all.
 
 **macOS cannot do this.** Under `vmnet` the VMs share a bridge and take
 DHCP addresses; there is no per-VM interface to pin. A source address
 becomes a claim rather than a fact, and stops being authentication.
 
-So identity moves to a **random per-lease bearer token**, and the reason
-that is now workable is the [lease service](#the-lease-service). The
-original objection to tokens was bootstrap: an unattended ephemeral VM
-cannot obtain a secret without either baking it into the world-readable Nix
-store or authenticating a fetch for which it has no credential. A lease
-service dissolves that from the other side — it starts the VM, so it can
-parameterise that start with a token, and it already knows which VM it just
-started. Delivery is a lease-time step, not a bootstrap problem.
+So identity is a **random bearer token per sandbox**, generated and
+injected when the sandbox is provisioned. Because
+[sandboxes are long-lived](#sandbox-lifecycle-long-lived-recreated-on-demand),
+provisioning is a natural place to put it — the token lives as long as the
+sandbox generation does, and is replaced when the sandbox is recreated.
+
+This is where an earlier version of this design went wrong. It assumed
+per-*lease* tokens, which required something to mint and deliver one at
+every lease, which made a lease service mandatory. Long-lived sandboxes
+dissolve that: there is no lease, so there is nothing to mint per lease,
+and the token is delivered once by the same step that creates the VM.
 
 Properties:
 
@@ -250,60 +261,120 @@ Properties:
   cover only the git side, and would mean brokering `git-upload-pack` and
   `git-receive-pack` rather than passing smart-HTTP through.
 - **Git consumes it via a credential helper**, so agents never handle it.
-- **It rotates for free**, dying with the lease.
+- **Rotation is now explicit**, not free. A per-lease token died with the
+  lease; a per-sandbox token lives until the sandbox is recreated. Fold
+  rotation into [recreate](#recreating-a-sandbox) so it happens on the same
+  cadence rather than never.
 - **Exfiltration is low-impact**: the token is only useful against a vmnet
-  address that is not routable from outside the Mac.
+  address not routable from outside the Mac. But note it is now worth more
+  than a per-lease token was, because it lasts longer.
 
-**The GCP path does not fall back the same way**, which is easy to miss.
-A metadata server is authenticated *by network position* — that is exactly
-what lets ADC work with no client configuration — and Google's client
-libraries will not attach a custom header to metadata requests. A token
-cannot be handed to ADC. The resolution here is to run **one
-`gce_metadata_server` instance per sandbox**, each bound to that sandbox's
-address, so network position is per-VM by construction. It costs a small
-process per sandbox and preserves attribution exactly.
+**The GCP path does not work this way**, which is easy to miss. A metadata
+server is authenticated *by network position* — that is exactly what lets
+ADC work with no client configuration — and Google's client libraries will
+not attach a custom header to metadata requests. A token cannot be handed
+to ADC. So run **one `gce_metadata_server` instance per sandbox**, each
+bound to that sandbox's address, making network position per-VM by
+construction. It costs a small process per sandbox and preserves
+attribution exactly.
 
-**The coupling, stated plainly:** on macOS the identity model and the lease
-service are a package deal. The lease service is not optional.
+## Sandbox lifecycle: long-lived, recreated on demand
 
-## The lease service
+Sandboxes are **created once and serve many agent runs**. They stay
+running; there is no per-task reset. Recreating one is an explicit,
+occasional operation that may take a reboot.
 
-Small, ours, and now load-bearing. Responsibilities:
+This is a deliberate simplification, and it buys a lot: no lease service,
+no per-task token minting, no copy-on-write overlay juggling, no reset step
+that can fail silently, and a mental model that fits in a sentence. Given a
+pool of two, most of that machinery was ceremony.
 
-- **Assign** a free sandbox to a task and mark it busy.
-- **Initialise** it: mint a per-lease token, hand it to the VM at start,
-  and configure the agent server. OpenHands' `deferred_init` and
-  `POST /api/init` exist precisely for warm-pool deployments where servers
-  are pre-started and per-task configuration arrives at lease time.
-- **Reset** it on release (below).
-- **Health-check and quarantine.** A sandbox failing its post-reset check
-  is excluded rather than handed to a task — a stuck sandbox silently
-  shrinking a two-VM pool is exactly the failure that otherwise goes
-  unnoticed for weeks.
+### What it costs
 
-### Lease, reset, and what a reset actually clears
+Worth stating precisely, because the property being traded is real.
 
-Reset is **stop, discard, start**. Each lease runs from a fresh
-copy-on-write overlay over a pristine base image:
+**Isolation between *concurrent* agents is unchanged** — that is what the
+VM-per-agent design provides, and it is the important one. What is given up
+is isolation between *sequential* tasks on the same sandbox: task B
+inherits whatever task A left behind.
+
+Concretely, that means:
+
+- A previously cloned private repo is readable by the next task.
+- Containers, `kind` clusters, and stray background processes accumulate.
+- Package caches persist, so a poisoned npm or pip entry outlives the task
+  that fetched it.
+- Disk grows monotonically until something is done about it.
+
+The **correctness** consequence is probably larger than the security one: a
+task that inherits a half-finished worktree, a container already bound to
+the port it wants, or a `kind` cluster named `kind` fails in ways that look
+like agent incompetence.
+
+The security consequence is judged acceptable *here* because tasks come
+from the same repo allowlist and run under the same credential set — they
+are not mutually distrusting. That reasoning stops holding if the allowlist
+ever spans repos of genuinely different sensitivity, which is the trigger
+to revisit this.
+
+### Between-task hygiene
+
+Most of the accumulation is cheap to clear without recreating anything. Run
+a cleanup between runs — a systemd unit in the guest, or a hook the agent
+server calls:
 
 ```sh
-qemu-img create -f qcow2 -b sandbox-base.qcow2 -F qcow2 lease-0.qcow2
+kind delete clusters --all
+docker system prune -af --volumes
+rm -rf "$WORKDIR"
 ```
 
-Creating the overlay is O(1); deleting it on release destroys everything
-the agent wrote — cloned repos, `node_modules`, Docker images, leaked
-`kind` clusters, stray processes. The base image is never modified.
+Be clear about what this is: **hygiene, not isolation.** It stops the
+disk filling and stops the most common cross-task collisions. It does not
+make the previous task's data unrecoverable, and it is not a security
+boundary. Recreate is the boundary.
 
-This replaces the Linux design's ephemeral dm-crypt volume, and it is
-simpler: there is no key to manage because the data is deleted rather than
-made unreadable, and FileVault covers whatever remains on disk until it is
-overwritten.
+### Recreating a sandbox
 
-The cost is boot time. A Lima VM starts in tens of seconds, not the ~1s of
-a microVM. That sounds bad and mostly is not: agent tasks run for minutes
-to hours, so a 30-second reset between them is noise. What it *does* change
-is [on-demand start](#memory-budget) — at this pool size, keeping the VMs
-running and resetting between leases is likely simpler than stopping them.
+The real reset, as an explicit operation:
+
+```sh
+grain sandbox recreate sandbox-0
+```
+
+which stops the VM, discards its disk, recreates it from the pristine base
+image, starts it, and injects a fresh
+[token](#sandbox-identity-per-sandbox-tokens). Downtime is a boot, and at a
+pool of two it means running at half capacity for a minute.
+
+Recreate when:
+
+- **the base image changed** — this is the deploy path for
+  [image changes](#the-sandbox-image), replacing the old design's
+  reset-on-next-lease convergence;
+- **disk crosses a watermark**, which is the failure this design is most
+  likely to hit in practice;
+- **a sandbox is wedged** — cheaper to recreate than to debug;
+- **on a schedule** — weekly is a reasonable default, and it doubles as
+  token rotation;
+- **before or after anything sensitive**, if the allowlist ever mixes
+  sensitivity levels.
+
+### What is left of the lease service
+
+Very little, which is the point. With long-lived sandboxes there is no
+assignment to broker, no token to mint per task, and no reset to sequence.
+What remains is a couple of scripts — `recreate`, and a health check that
+flags a sandbox as unusable rather than letting Agent Canvas dispatch into
+it.
+
+That drops the custom-code inventory to **the git proxy plus scripts**.
+
+One thing to confirm: whether Agent Canvas distributes conversations across
+registered backends on its own, or expects a human to pick one. At a pool
+of two, picking by hand is fine either way — but if it needs orchestrating,
+that small assigner is the one piece that comes back. See
+[open questions](#open-questions).
 
 ## Memory budget
 
@@ -313,7 +384,7 @@ enough to state exactly.
 | Consumer | Budget |
 |---|---|
 | macOS itself | ~8 GB |
-| Orchestrator services (Canvas, Automation, proxy, metadata, lease) | ~3 GB |
+| Orchestrator services (Canvas, Automation, proxy, metadata servers) | ~3 GB |
 | `linux-builder` | 4–6 GB **while building**; stopped otherwise |
 | Each sandbox (kind control plane + build + test) | ~8 GB |
 
@@ -332,6 +403,12 @@ Two host-level tactics that helped on Linux do not transfer: virtio-mem
 free-page-reporting reclaim, and KSM page merging across near-identical
 guests. macOS gives back neither, which makes the per-sandbox 8 GB a harder
 floor than it was.
+
+Because sandboxes are now long-lived, they simply stay resident — there is
+no start-on-lease to amortise idle memory. At a pool of two that is the
+simpler arrangement and costs nothing that stopping them would recover;
+stopping an idle sandbox remains possible, but it buys back 8 GB you have
+no second use for.
 
 ## The sandbox image
 
@@ -420,11 +497,10 @@ boot.kernel.sysctl = {
 ```
 
 **Pre-load images into the base image.** A kind node image is on the order
-of a gigabyte and the overlay is discarded every lease, so a naive setup
-re-pulls it every task. Bake what the workload needs into the pristine base
-and `docker load` at boot. This is the Docker analogue of baking
-dependencies into the image, and unlike a *writable* shared cache it cannot
-become a channel between tasks.
+of a gigabyte, and every [recreate](#recreating-a-sandbox) discards it, so
+a naive setup re-pulls it each time. Bake what the workload needs into the
+pristine base and `docker load` at boot — that also means the between-task
+`docker system prune` costs nothing to re-fetch.
 
 ### Telling the agent
 
@@ -603,7 +679,7 @@ undisableable React dashboard.
   `/{owner}/{repo}.git/{info/refs,git-upload-pack,git-receive-pack}`,
 - canonicalize and check `(owner, repo)` against the allowlist,
   default-deny,
-- authenticate the caller by [per-lease token](#sandbox-identity-per-lease-tokens),
+- authenticate the caller by [per-sandbox token](#sandbox-identity-per-sandbox-tokens),
 - select the credential for that repo and set `Authorization`,
 - stream the body through, and log the tuple.
 
@@ -661,7 +737,7 @@ wrong.
 - It is configured to **impersonate a second, minimally-privileged service
   account** rather than serve the primary key's own tokens.
 - **One instance per sandbox**, each bound to that sandbox's vmnet address
-  — see [sandbox identity](#sandbox-identity-per-lease-tokens) for why this
+  — see [sandbox identity](#sandbox-identity-per-sandbox-tokens) for why this
   is what preserves per-caller attribution on macOS.
 - Every mint is audit-logged.
 
@@ -717,8 +793,10 @@ deployment.** Nothing to reimplement.
 What upstream does *not* give us is per-task reset: Canvas treats backends
 as long-lived and one server takes many concurrent conversations
 (`max_concurrent_runs`, default 10). Hence the
-[lease service](#the-lease-service), and `max_concurrent_runs = 1` per
-sandbox.
+[deliberate trade](#sandbox-lifecycle-long-lived-recreated-on-demand) —
+long-lived backends are exactly what upstream expects, so this is one place
+where simplifying moved *toward* the grain rather than against it. Set
+`max_concurrent_runs = 1` per sandbox so one task has a VM to itself.
 
 ### Version pinning
 
@@ -758,13 +836,23 @@ fails late and confusingly.
   scoping when a machine account or App is used).
 - It cannot push to protected branches or modify workflows — enforced by
   GitHub, not by our code.
-- It cannot persist: the overlay is discarded every lease.
+- It cannot reach a *concurrently running* agent: separate VMs, separate
+  kernels, separate Docker daemons.
+- It cannot persist past a [recreate](#recreating-a-sandbox) — but note it
+  **does** persist between sequential tasks on the same sandbox, which is
+  the deliberate trade described above and is listed again under what is
+  not defended.
 - Its access is revocable in minutes and fully audit-logged.
 
 **Not defended:**
 
+- **Sequential tasks on one sandbox.** Sandboxes are long-lived, so a
+  task inherits the previous task's filesystem — cloned repos, caches,
+  containers. Accepted because tasks share a repo allowlist and credential
+  set; revisit if the allowlist ever mixes sensitivity levels. See
+  [what it costs](#what-it-costs).
 - **Abuse of legitimate access while compromised.** It can do anything the
-  agent may do, for as long as it holds a lease. The proxy narrows scope and
+  agent may do, for as long as it is running. The proxy narrows scope and
   provides audit and a kill switch; it does not distinguish a well-behaved
   agent from a hostile one making the same calls.
 - **Exfiltration**, under the default open-egress policy.
@@ -797,6 +885,11 @@ fails late and confusingly.
   service that reads it.
 - **Adding a repo**: edit the allowlist, install the App or invite the bot,
   apply branch protection. Hot-reloaded.
+- **Recreating a sandbox** is the routine maintenance operation, and the one
+  most likely to be forgotten until something breaks. Watch disk, and put it
+  on a schedule — weekly also rotates the per-sandbox token, which otherwise
+  never rotates at all. See
+  [recreating a sandbox](#recreating-a-sandbox).
 - **Observability**: the signals that matter are pool free/busy/quarantined,
   lease durations, proxy denial rate, token mint rate, intake outcomes. A
   quarantined sandbox and an issue stuck mid-flight are the silent failure
@@ -817,9 +910,9 @@ per agent.
 
 | Property | Linux | macOS |
 |---|---|---|
-| Sandbox identity | source IP, pinned per tap — no secret at all | per-lease bearer token; lease service becomes mandatory |
+| Sandbox identity | source IP, pinned per tap — no secret at all | per-sandbox bearer token, injected at provisioning |
 | GCP attribution | one metadata server, callers distinguished by IP | one instance per sandbox |
-| Reset | ephemeral dm-crypt volume, key discarded | qcow2 overlay discarded |
+| Reset | ephemeral dm-crypt volume per lease | explicit recreate; no per-task reset |
 | Boot | ~1s microVM | tens of seconds |
 | Store | one read-only host store shared by all guests | per-VM store; more disk |
 | Memory reclaim | virtio-mem free page reporting, KSM | neither |
@@ -842,9 +935,11 @@ Fusion with VT-x passthrough.
    some scripting.
 2. **Does `socket_vmnet` give VM↔VM and VM↔host reachability** with stable
    enough addressing for the proxy and per-sandbox metadata servers?
-3. **Does `POST /api/init` carry what a lease needs?** `deferred_init` is
-   documented for warm pools; confirm what it can set per lease and whether
-   a sandbox can be re-initialised without a restart.
+3. **Does Agent Canvas distribute conversations across backends**, or does
+   it expect a human to pick one? At a pool of two, picking by hand is
+   fine — but if orchestration is needed, a small assigner is the one piece
+   of the lease service that comes back. See
+   [what is left of the lease service](#what-is-left-of-the-lease-service).
 4. **Does the Automation Service work in cron-only mode**, and what are its
    trigger and dedupe semantics? Also whether anything writes a GitHub
    token into the sandbox's `origin` remote.
@@ -876,9 +971,9 @@ Fusion with VT-x passthrough.
    visible inside the sandbox.
 6. **Metadata server**: one instance per sandbox, impersonating the narrow
    service account. Verify ADC works unmodified and the key is unreachable.
-7. **Lease service**: assign, mint token, `POST /api/init`, overlay reset,
-   health check, quarantine. This is where per-task isolation actually
-   arrives.
+7. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
+   cleanup hook, a health check, and a disk watermark alarm. Small, but
+   this is what keeps a long-lived pool from silently degrading.
 8. **Automation Service**: cron-mode intake, rate limit, stranded-work
    sweeper. First full issue-to-PR run.
 9. **Hardening**: move repos down the credential ladder, apply branch
