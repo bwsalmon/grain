@@ -483,6 +483,69 @@ def test_a_real_systemd_unit_reports_failure_then_reaps_to_absent(ssh_runner: Ss
     assert unit_status(ssh_runner, unit) is UnitState.ABSENT
 
 
+# --- grain.automation.health / cleanup against a real sandbox
+# --- (docs/roadmap.md item 5) ----------------------------------------------
+#
+# `booted_sandbox` is deliberately unprovisioned (see its own docstring) —
+# no docker, no kind. That's still useful ground to verify against: it's
+# the live check that `check_disk`'s `df -P /` parser and `check_systemd`'s
+# `is-system-running` reading hold up against a real guest's actual output
+# shape (not just a hand-written FakeRunner fixture), and that a genuinely
+# missing binary is reported as a graceful failure over real SSH rather than
+# a hang or a crash — the same bar docs/design.md's "verify live" history
+# (ssh.py, dispatch.py) has repeatedly found reasoning-alone gets wrong.
+
+def test_check_disk_parses_real_df_output(ssh_runner: SshRunner):
+    from grain.automation.health import check_disk
+
+    result = check_disk(ssh_runner, watermark_percent=95)
+    assert result.ok, result.detail
+    # A freshly booted, unprovisioned cloud image should be nowhere near a
+    # sane watermark — this pins down that the percentage really was parsed
+    # out of `df`'s real column layout, not a lucky "couldn't parse" all
+    # counted as fine.
+    assert "% used on /" in result.detail
+
+
+def test_check_systemd_reports_running_on_a_fresh_boot(ssh_runner: SshRunner):
+    from grain.automation.health import check_systemd
+
+    result = check_systemd(ssh_runner)
+    assert result.ok, result.detail
+    assert result.detail == "state: running"
+
+
+def test_check_health_against_a_real_but_unprovisioned_sandbox(ssh_runner: SshRunner):
+    from grain.automation.health import HealthStatus, check_health
+
+    report = check_health(ssh_runner, watermark_percent=95)
+    # docker isn't installed on this deliberately-bare image, so this can
+    # never be HEALTHY here — the live-verified claim is narrower: ssh,
+    # systemd, and disk all come back genuinely healthy, and the one
+    # failing check is exactly the missing-docker one, not a parsing bug
+    # masquerading as an unrelated failure.
+    assert report.status is HealthStatus.DEGRADED
+    by_name = {c.name: c for c in report.checks}
+    assert by_name["ssh"].ok
+    assert by_name["systemd"].ok
+    assert by_name["disk"].ok
+    assert not by_name["docker"].ok
+
+
+def test_cleanup_against_a_sandbox_with_no_kind_or_docker_installed(ssh_runner: SshRunner):
+    from grain.automation.cleanup import cleanup
+
+    result = cleanup(ssh_runner)  # must not raise or hang
+    assert not result.ok
+    by_name = {s.name: s for s in result.steps}
+    assert not by_name["kind"].ok
+    assert not by_name["docker"].ok
+    # A real "not found" from the remote shell, not an empty/garbled
+    # detail — confirms stderr genuinely round-trips over this SSH path.
+    assert "not found" in by_name["kind"].detail
+    assert "not found" in by_name["docker"].detail
+
+
 def test_dispatch_writes_the_real_prompt_and_clones_the_real_workspace(
     ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
 ):

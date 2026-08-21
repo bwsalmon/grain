@@ -20,10 +20,13 @@ from .adapter.base import EgressMode, VmState
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.net_linux import LinuxNetwork, render_host_input_rules, render_ruleset
 from .automation.audit import FileAuditLog
+from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
+from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
+from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
 from .inventory import Cluster
 from .metadata.audit import FileAuditLog as MetadataFileAuditLog
@@ -33,6 +36,14 @@ from .metadata.launcher import MetadataLauncher, build_launcher
 from .proxy.credentials import CredentialSet
 from .proxy.tokens import SandboxTokenStore
 from .run import DryRunRunner, RealRunner, Runner
+
+# The same defaults `AutomationConfig`'s dataclass fields carry — read from
+# there rather than repeated as literals, so `grain host health`/`cleanup`
+# (which need SSH access but nothing else automation.json holds: no owner,
+# no repo) can't quietly drift from what `grain automation run-once`
+# actually uses.
+_DEFAULT_SSH_USER = AutomationConfig.__dataclass_fields__["ssh_user"].default
+_DEFAULT_SSH_KEY_PATH = AutomationConfig.__dataclass_fields__["ssh_key_path"].default
 
 
 def build_cluster(args: argparse.Namespace) -> Cluster:
@@ -213,6 +224,48 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_ssh_runner(cluster: Cluster, base_runner: Runner, name: str,
+                      args: argparse.Namespace) -> Runner:
+    """The same shape as `Orchestrator._ssh_runner_for`, but standalone: a
+    health check or a cleanup run needs SSH access, not a `GitHubClient` or
+    a sandbox git-proxy token, so this avoids pulling `build_orchestrator`'s
+    whole GitHub/credential wiring into a plain host-lifecycle command —
+    and avoids requiring `automation.json` to exist at all, since `owner`/
+    `repo` (its only fields with no default) are irrelevant here.
+    """
+    return SshRunner(
+        inner=base_runner, user=args.ssh_user,
+        address=cluster.address_of(name), key_path=Path(args.ssh_key),
+    )
+
+
+def cmd_host_cleanup(args: argparse.Namespace) -> int:
+    cluster = build_cluster(args)
+    base_runner = _runner(args)
+    exit_code = 0
+    for name in _sandbox_targets(cluster, args.name):
+        runner = build_ssh_runner(cluster, base_runner, name, args)
+        result = cleanup(runner)
+        for step in result.steps:
+            print(f"{name:<12} {step.name:<8} {'ok' if step.ok else 'FAIL':<5} {step.detail}")
+        if not result.ok:
+            exit_code = 1
+    return exit_code
+
+
+def cmd_host_health(args: argparse.Namespace) -> int:
+    cluster = build_cluster(args)
+    base_runner = _runner(args)
+    exit_code = 0
+    for name in _sandbox_targets(cluster, args.name):
+        runner = build_ssh_runner(cluster, base_runner, name, args)
+        report = check_health(runner, watermark_percent=args.disk_watermark)
+        print(f"{name:<12} {report.status.value:<12} {report.summary()}")
+        if not report.ok:
+            exit_code = 1
+    return exit_code
+
+
 # --- helpers --------------------------------------------------------------
 
 def _runner(args: argparse.Namespace) -> Runner:
@@ -295,6 +348,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = host.add_parser("status", help="show VM states and addresses")
     p.set_defaults(func=cmd_status)
+
+    for name, fn, help_text in (
+        ("cleanup", cmd_host_cleanup,
+         "between-task hygiene: kind delete + docker system prune, over SSH"),
+        ("health", cmd_host_health,
+         "check SSH/docker/systemd/disk on sandbox(es); nonzero exit if unhealthy"),
+    ):
+        p = host.add_parser(name, help=f"{help_text} (sandboxes only)")
+        p.add_argument("name", nargs="?", default="sandboxes",
+                        help="sandbox name, or 'sandboxes' for all (default)")
+        p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER,
+                        help=f"default: {_DEFAULT_SSH_USER}")
+        p.add_argument("--ssh-key", default=str(_DEFAULT_SSH_KEY_PATH),
+                        help=f"default: {_DEFAULT_SSH_KEY_PATH}")
+        if name == "health":
+            p.add_argument("--disk-watermark", type=int,
+                            default=DEFAULT_DISK_WATERMARK_PERCENT,
+                            help=f"percent-used threshold to flag "
+                                 f"(default: {DEFAULT_DISK_WATERMARK_PERCENT})")
+        p.set_defaults(func=fn)
 
     automation = sub.add_parser(
         "automation", help="issue intake and dispatch"

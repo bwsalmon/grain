@@ -143,12 +143,68 @@ and documents that assumption in `metadata/config.py`.
 
 ## 5. Lifecycle scripts
 
-- [ ] Done
+- [x] Done
 
-`grain host recreate` covers destroy-then-rebuild. Still missing, per
-`docs/design.md` step 8: a between-task cleanup hook (docker system prune
-etc., run between agent tasks on a long-lived sandbox), a health check
-command, and a disk-watermark alarm.
+`grain host recreate` already covered destroy-then-rebuild. This item was
+the three pieces `docs/design.md` step 8 still named: a between-task cleanup
+hook, a health check, and a disk-watermark alarm.
+
+**Where the cleanup hook runs, and why:** automatically, from
+`grain/automation/sweeper.py`, the instant a sandbox's slot is freed —
+success, failure, or stranded — rather than as a separate cron job or an
+operator-run script. That's the shape this codebase already has: the
+sweeper is where every other "a run just finished, now what" decision
+already lives (label moves, and, since item 2, PR creation), and folding
+cleanup into the same pass means a freed sandbox is *guaranteed* clean
+before its next dispatch, not "clean once some other job gets around to
+it." `grain host cleanup [name]` (`grain/automation/cleanup.py`, wired into
+`grain/cli.py`) is also exposed standalone, for a sandbox an operator wants
+tidied without waiting on a sweep cycle. One deliberate departure from the
+`docs/design.md` snippet: cleanup does **not** `rm -rf` the workspace —
+that snippet predates `dispatch.py`'s `ensure_workspace()` (item 2), which
+already resets the workspace to a known-clean state on every dispatch;
+wiping it here would only force a full re-clone next time instead of an
+incremental fetch, with no correctness benefit. See `cleanup.py`'s
+docstring for the full reasoning.
+
+**Health check**: `grain/automation/health.py`'s `check_health()` — SSH
+reachability (probed first; everything else is skipped and the whole report
+is `unreachable` if this fails), `systemctl is-system-running` (flags
+`degraded`, not just a hung system), `docker info` actually responding, and
+disk usage against a watermark (`df -P /`, default 85%) — that last check
+*is* the disk-watermark alarm named separately in step 8, not a fourth
+thing; it folds in naturally rather than standing alone. Surfaced as `grain
+host health [name]`, non-zero exit if not fully healthy, matching `grain
+github audit`'s exit-code convention.
+
+**Does the sweeper call it too?** Yes — every sweeper release also runs a
+post-cleanup health check, closing the exact gap `docs/design.md` step 8
+flagged: the sweeper previously only reacted to a dispatched *unit's* state,
+never to the sandbox's general health, so a sandbox libvirt/systemd reports
+as fine but is actually degraded (disk full, docker wedged) was invisible
+between recreates. The result is **visibility, not gating**: an unhealthy
+reading becomes a `"health warning: ..."` line in the same audit log every
+other dispatch/sweep decision already goes to (`core.py`'s `_sweep`), but it
+does not remove the sandbox from the dispatch pool. Quarantining an
+unhealthy sandbox out of rotation would be a real change to
+`AutomationState`'s pool-assignment shape — treated as a deliberate
+boundary for this item, not an oversight; see `sweeper.py`'s docstring.
+
+Unit-tested throughout against `FakeRunner`
+(`tests/test_automation_cleanup.py`, `tests/test_automation_health.py`, plus
+new cases in `tests/test_automation_sweeper.py`, `tests/test_automation_core.py`,
+and `tests/test_cli.py`). Also verified live against a real sandbox VM
+(`tests/test_vm_integration.py`): `check_disk`'s `df -P` parser and
+`check_systemd`'s `is-system-running` reading both hold up against a real
+guest's actual output (not just a hand-written fixture), and — since
+`booted_sandbox` is deliberately unprovisioned, no docker or kind installed
+— `cleanup()` and `check_health()` against a sandbox missing both binaries
+came back exactly as designed: a graceful per-step failure with a real
+"command not found" from the remote shell, never a hang or a crash. Not
+verified live: the fully-healthy path (would need a provisioned sandbox with
+docker/kind actually running) and the disk-watermark alarm actually tripping
+(would need a sandbox with a nearly-full disk) — both are covered only by
+unit tests with scripted `df`/`docker`/`systemctl` output.
 
 ## 6. Load-test harness for open question 2
 
