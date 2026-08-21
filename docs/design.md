@@ -138,6 +138,49 @@ first rather than last. Use the
 as a working reference for the API contract rather than reverse-engineering
 it.
 
+### Doesn't NixOS make the dependency problem moot?
+
+Worth answering directly, because it's the obvious objection and it is
+**half right**. If projects carry flakes and devShells, agents working in
+separate directories on one machine get exact, non-colliding toolchains:
+two tasks needing different compilers, runtimes, or library versions
+coexist without conflict. That is Nix's core competency, and it genuinely
+dissolves the "versioning and packaging" half of the problem — no
+per-project global installs, no `/usr/lib` conflicts, no drift.
+
+But dependency isolation isn't the isolation this workload needs. Nix
+scopes *what is on `PATH` and what a build links against*. It does not
+virtualize:
+
+- **The Docker daemon** — a singleton with one image store and one
+  container namespace. Concurrent agents see each other's containers,
+  collide on container names and image tags, and, since agents genuinely do
+  reach for `docker rm -f $(docker ps -aq)` when tidying up, can destroy
+  each other's work.
+- **The host port space.** Two tasks binding 5432, or two kind clusters
+  binding an API server port, just conflict.
+- **kind's namespace**: default cluster name, `kind-control-plane`
+  container name, a shared docker network, one `~/.kube/config`.
+- **Kernel-global state**: the iptables/nftables rules Docker and kind
+  rewrite, conntrack, sysctls, cgroup layout.
+
+Each has a workaround — a rootless daemon per user, per-agent network
+namespaces, mandated unique cluster names — and each is a step toward
+reimplementing a VM, less well, in a place where the failure mode is one
+agent silently corrupting another's run. A VM supplies all of it as a
+single primitive that already works.
+
+The overhead argument doesn't survive the [sizing math](#sizing) either. A
+microVM costs a couple of hundred megabytes beyond its workload; a kind
+cluster costs gigabytes. At two or three concurrent agents, per-VM overhead
+is a rounding error against what the agents themselves consume — the clean
+answer and the cheap answer are the same one.
+
+So the two are complementary rather than competing. Nix is what makes the
+sandbox images identical, declarative, cheap to rebuild, and nearly free to
+duplicate through the shared store; the VM is what keeps one agent's
+cluster out of another's. Neither substitutes for the other.
+
 ## High-level architecture
 
 ```mermaid
