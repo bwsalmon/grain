@@ -25,3 +25,12 @@ def test_status_reports_an_assigned_sandbox(tmp_path: Path, capsys):
     assert lines[0].split()[:2] == ["sandbox-0", "issue"]
     assert "42" in lines[0]
     assert lines[1].split() == ["sandbox-1", "free"]
+
+
+def test_github_audit_on_an_empty_secrets_dir_reports_none_found(tmp_path: Path, capsys):
+    # No network call happens here — there's nothing to audit, so this is
+    # safe to run with no real credential or connectivity configured.
+    assert main(["--data-dir", str(tmp_path), "github", "audit"]) == 0
+    out = capsys.readouterr().out
+    assert "no *.token files found" in out
+    assert "secrets" in out and "github" in out

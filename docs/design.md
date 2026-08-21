@@ -1225,9 +1225,12 @@ ever becomes worth its cost again.
    [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
    Still open: PR/comment creation once a sandbox's run finishes, and a
    first full issue-to-PR run — see `docs/roadmap.md`.
-10. **Hardening**: move repos down the credential ladder, apply branch
-    protection, confirm no credential carries `workflow` scope, write the
-    runbook.
+10. **Hardening** — *partially done*: the scope-audit tool
+    (`grain github audit`, `grain/automation/credential_audit.py`) and the
+    operator runbook (`docs/runbook.md`) are built and unit-tested. Moving
+    real repos down the credential ladder, applying branch protection, and
+    running the audit against a real credential all need a real target
+    repo/org this environment doesn't have — see `docs/roadmap.md` item 7.
 
 Scale to a second sandbox once 1–9 work at one. The macOS adapter is a
 later exercise, and the measure of whether this revision succeeded is that

@@ -85,13 +85,47 @@ then actually run it and record the numbers here or in `docs/design.md`.
 
 ## 7. Hardening
 
-- [ ] Done
+- [ ] Done — the buildable half is; the rest needs a real repo
 
 `docs/design.md` step 10: move repos down the credential ladder (App →
 fine-grained PAT → machine-account PAT → personal token, per repo), apply
 branch protection on target repos, confirm no credential in
 `/data/secrets/github/` carries `workflow` scope, and write the operator
 runbook the rest of this work has been assuming exists.
+
+**Built and unit-tested**, needing no real credential or target repo:
+
+- `grain github audit` (`grain/automation/credential_audit.py`, wired into
+  `grain/cli.py`) — checks every `*.token` file under `secrets/github/`
+  against the scopes `docs/design.md`'s "Scopes to withhold" names
+  (`workflow`, `delete_repo`, `write:org`, `admin:*`). Classic PATs and
+  OAuth tokens are checked for real, via the `X-OAuth-Scopes` response
+  header GitHub returns on any authenticated call (confirmed against
+  GitHub's docs, not assumed). Fine-grained PATs and GitHub App tokens have
+  no such header — confirmed via GitHub's own maintainers that no API
+  exposes a fine-grained PAT's permissions at all — so the tool reports
+  `unverifiable` for those rather than faking a pass. Unit-tested against
+  `FakeTransport` scripted with GitHub's real response shapes
+  (`tests/test_automation_credential_audit.py`); never run against a real
+  token, since none exists in this environment.
+- `docs/runbook.md` — the operator runbook: first-time setup, host/VM
+  lifecycle, the automation loop and its (currently unshipped) systemd
+  timer, the full `/data/secrets` layout and rotation procedure for each
+  credential, what the sweeper handles automatically versus what needs a
+  human, and the procedure for adding a repo (allowlist, credential,
+  branch protection, `github audit`).
+
+**Still blocked on real infrastructure — not attempted here:**
+
+- Actually moving any real repo down the credential ladder — needs a real
+  repo/org to hold credentials for.
+- Actually applying branch protection / a ruleset on a target repo — needs
+  repo admin access on something real; the procedure is written up in
+  `docs/runbook.md`, "Adding or reconfiguring a target repo," step 3.
+- Actually running `grain github audit` against a real credential and
+  confirming no `flagged` result — needs a token in
+  `/data/secrets/github/` and network access to `api.github.com`, neither
+  of which this environment has.
 
 ## 8. First live issue-to-PR run
 
