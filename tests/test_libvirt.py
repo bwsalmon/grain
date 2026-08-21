@@ -3,7 +3,9 @@ from pathlib import Path
 import pytest
 
 from grain.adapter.base import VmState
-from grain.adapter.libvirt import LibvirtAdapter, mac_for, render_domain_xml
+from grain.adapter.libvirt import (
+    LibvirtAdapter, mac_for, render_domain_xml, render_meta_data,
+)
 from grain.adapter.net_linux import LinuxNetwork
 from grain.inventory import Cluster
 from grain.run import FakeRunner
@@ -37,14 +39,14 @@ def test_address_comes_from_the_inventory_not_the_hypervisor(adapter, cluster):
 
 def test_state_reports_absent_for_a_vm_libvirt_does_not_know(adapter):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list())
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     assert a.state("sandbox-0") is VmState.ABSENT
 
 
 def test_state_maps_virsh_status(adapter):
     a, runner = adapter
     runner.expect(
-        "virsh list --all",
+        "virsh -c qemu:///system list --all",
         stdout=virsh_list(("sandbox-0", "running"), ("sandbox-1", "shut off")),
     )
     assert a.state("sandbox-0") is VmState.RUNNING
@@ -54,7 +56,7 @@ def test_state_maps_virsh_status(adapter):
 def test_foreign_domains_are_ignored(adapter):
     a, runner = adapter
     runner.expect(
-        "virsh list --all",
+        "virsh -c qemu:///system list --all",
         stdout=virsh_list(("someone-elses-vm", "running"), ("sandbox-0", "running")),
     )
     assert [i.name for i in a.list_vms()] == ["sandbox-0"]
@@ -62,15 +64,15 @@ def test_foreign_domains_are_ignored(adapter):
 
 def test_create_refuses_to_adopt_an_existing_vm(adapter, cluster):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list(("sandbox-0", "shut off")))
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list(("sandbox-0", "shut off")))
     with pytest.raises(RuntimeError, match="already exists"):
         a.create(cluster.spec_of("sandbox-0"))
-    assert not runner.ran("virsh define")
+    assert not runner.ran("virsh -c qemu:///system define")
 
 
 def test_create_writes_seed_and_domain_xml_and_defines_it(adapter, cluster, tmp_path):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list())
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     a.create(cluster.spec_of("sandbox-0"))
     xml = (tmp_path / "sandbox-0.xml").read_text()
     assert "<vcpu>2</vcpu>" in xml
@@ -81,25 +83,25 @@ def test_create_writes_seed_and_domain_xml_and_defines_it(adapter, cluster, tmp_
     assert "nameservers" in network_config
     assert runner.ran("qemu-img create")
     assert runner.ran("cloud-localds")
-    assert runner.ran(f"virsh define {tmp_path}/sandbox-0.xml")
+    assert runner.ran(f"virsh -c qemu:///system define {tmp_path}/sandbox-0.xml")
 
 
 def test_destroy_is_idempotent(adapter):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list())
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     a.destroy("sandbox-0")
-    assert not runner.ran("virsh destroy")
-    assert not runner.ran("virsh undefine")
+    assert not runner.ran("virsh -c qemu:///system destroy")
+    assert not runner.ran("virsh -c qemu:///system undefine")
 
 
 def test_destroy_removes_the_files_it_created(adapter, cluster, tmp_path):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list())
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     a.create(cluster.spec_of("sandbox-0"))
     written = list(tmp_path.glob("sandbox-0*"))
     assert written, "create() should have written per-instance files"
 
-    runner.expect("virsh list --all", stdout=virsh_list(("sandbox-0", "shut off")))
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list(("sandbox-0", "shut off")))
     a.destroy("sandbox-0")
     # virsh --remove-all-storage refuses plain (non-pool) files, so the
     # adapter must remove them itself rather than relying on that flag.
@@ -108,9 +110,9 @@ def test_destroy_removes_the_files_it_created(adapter, cluster, tmp_path):
 
 def test_stop_only_stops_a_running_vm(adapter):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list(("sandbox-0", "shut off")))
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list(("sandbox-0", "shut off")))
     a.stop("sandbox-0")
-    assert not runner.ran("virsh shutdown")
+    assert not runner.ran("virsh -c qemu:///system shutdown")
 
 
 def test_domain_xml_pins_the_assigned_address_via_mac(cluster):
@@ -127,9 +129,39 @@ def test_mac_is_deterministic_and_distinct_per_vm(cluster):
     assert mac_for(cluster.address_of("sandbox-0")) == m0
 
 
+def test_meta_data_omits_public_keys_by_default():
+    assert "public-keys" not in render_meta_data("sandbox-0")
+
+
+def test_meta_data_embeds_the_controller_key_when_given():
+    out = render_meta_data("sandbox-0", "ssh-ed25519 AAAAtest controller\n")
+    assert "public-keys:\n  - ssh-ed25519 AAAAtest controller\n" in out
+
+
+def test_create_embeds_the_controller_key_when_present(cluster, tmp_path):
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    key_path = tmp_path / "controller-ssh.pub"
+    key_path.write_text("ssh-ed25519 AAAAtest controller\n")
+    a = LibvirtAdapter(cluster, runner, network, config_dir=tmp_path / "instances",
+                        ssh_public_key_path=key_path)
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    a.create(cluster.spec_of("sandbox-0"))
+    meta_data = (tmp_path / "instances" / "sandbox-0-meta-data").read_text()
+    assert "ssh-ed25519 AAAAtest controller" in meta_data
+
+
+def test_create_omits_public_keys_when_no_key_file_present(adapter, cluster, tmp_path):
+    a, runner = adapter
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    a.create(cluster.spec_of("sandbox-0"))
+    meta_data = (tmp_path / "sandbox-0-meta-data").read_text()
+    assert "public-keys" not in meta_data
+
+
 def test_recreate_destroys_then_creates_then_starts(adapter, cluster):
     a, runner = adapter
-    runner.expect("virsh list --all", stdout=virsh_list())
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     a.recreate("sandbox-0")
-    assert runner.ran("virsh define")
-    assert runner.ran("virsh start sandbox-0")
+    assert runner.ran("virsh -c qemu:///system define")
+    assert runner.ran("virsh -c qemu:///system start sandbox-0")

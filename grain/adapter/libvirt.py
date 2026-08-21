@@ -36,6 +36,15 @@ from ..inventory import Cluster, VmSpec
 from ..run import Runner
 from .base import HostAdapter, Network, VmInfo, VmState
 
+LIBVIRT_URI = "qemu:///system"
+# Explicit, not ambient: a plain `virsh` with no `-c` connects to
+# `qemu:///session` for a non-root caller — a separate, unprivileged
+# libvirtd instance whose networking can't attach to a host bridge like
+# `br-grain` at all. Verified live: `virsh uri` as an ordinary user in the
+# `libvirt` group prints `qemu:///session`, not `qemu:///system`, even
+# though that same user can reach the system instance directly (no `sudo`
+# needed) once told to.
+
 _STATE_MAP = {
     "running": VmState.RUNNING,
     "shut off": VmState.STOPPED,
@@ -114,8 +123,21 @@ def render_domain_xml(cluster: Cluster, spec: VmSpec, disk_path: Path,
 """
 
 
-def render_meta_data(name: str) -> str:
-    return f"instance-id: {name}\nlocal-hostname: {name}\n"
+def render_meta_data(name: str, ssh_public_key: str | None = None) -> str:
+    """cloud-init NoCloud meta-data.
+
+    `public-keys` is honoured independent of the user-data format, so this
+    is the one place to hand the default user an authorized key even though
+    `render_user_data` repurposes user-data as a raw provisioning script
+    rather than a `#cloud-config`. Without it, nothing outside the guest
+    console can reach a sandbox — see docs/design.md, "Admin entry"; this is
+    what gives the controller (not just a human) a way in, for the
+    automation dispatch loop.
+    """
+    meta = f"instance-id: {name}\nlocal-hostname: {name}\n"
+    if ssh_public_key:
+        meta += f"public-keys:\n  - {ssh_public_key.strip()}\n"
+    return meta
 
 
 def render_user_data(provision_script: str | None) -> str:
@@ -154,10 +176,16 @@ def render_network_config(cluster: Cluster, spec: VmSpec) -> str:
 
 class LibvirtAdapter(HostAdapter):
     def __init__(self, cluster: Cluster, runner: Runner, network: Network,
-                 config_dir: Path | None = None) -> None:
+                 config_dir: Path | None = None,
+                 ssh_public_key_path: Path | None = None) -> None:
         super().__init__(cluster, network)
         self.runner = runner
         self.config_dir = config_dir or Path("/var/lib/grain/instances")
+        # Same /data/secrets/... convention as the GitHub credential ladder;
+        # see grain/automation for the controller-side key this pairs with.
+        self.ssh_public_key_path = (
+            ssh_public_key_path or Path("/data/secrets/controller-ssh.pub")
+        )
 
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
@@ -176,7 +204,11 @@ class LibvirtAdapter(HostAdapter):
         meta_data_path = self.config_dir / f"{spec.name}-meta-data"
         user_data_path = self.config_dir / f"{spec.name}-user-data"
         network_config_path = self.config_dir / f"{spec.name}-network-config"
-        meta_data_path.write_text(render_meta_data(spec.name))
+        ssh_public_key = (
+            self.ssh_public_key_path.read_text()
+            if self.ssh_public_key_path.exists() else None
+        )
+        meta_data_path.write_text(render_meta_data(spec.name, ssh_public_key))
         user_data_path.write_text(render_user_data(provision_script))
         network_config_path.write_text(render_network_config(self.cluster, spec))
 
@@ -188,23 +220,23 @@ class LibvirtAdapter(HostAdapter):
 
         xml_path = self.config_dir / f"{spec.name}.xml"
         xml_path.write_text(render_domain_xml(self.cluster, spec, disk_path, seed_path))
-        self.runner.run(["virsh", "define", str(xml_path)])
+        self.runner.run(["virsh", "-c", LIBVIRT_URI, "define", str(xml_path)])
 
     def start(self, name: str) -> None:
-        self.runner.run(["virsh", "start", name])
+        self.runner.run(["virsh", "-c", LIBVIRT_URI, "start", name])
 
     def stop(self, name: str) -> None:
         if self.state(name) is VmState.RUNNING:
-            self.runner.run(["virsh", "shutdown", name])
+            self.runner.run(["virsh", "-c", LIBVIRT_URI, "shutdown", name])
 
     def destroy(self, name: str) -> None:
         if self.state(name) is VmState.ABSENT:
             return
-        self.runner.run(["virsh", "destroy", name], check=False)
+        self.runner.run(["virsh", "-c", LIBVIRT_URI, "destroy", name], check=False)
         # --remove-all-storage only works for storage-pool-managed volumes;
         # these are plain files, so libvirt refuses to touch them and we
         # remove them ourselves (verified: it leaves them behind otherwise).
-        self.runner.run(["virsh", "undefine", name, "--nvram"], check=False)
+        self.runner.run(["virsh", "-c", LIBVIRT_URI, "undefine", name, "--nvram"], check=False)
         for suffix in (".qcow2", "-seed.iso", "-meta-data", "-user-data",
                        "-network-config", ".xml"):
             (self.config_dir / f"{name}{suffix}").unlink(missing_ok=True)
@@ -216,7 +248,7 @@ class LibvirtAdapter(HostAdapter):
         return VmState.ABSENT
 
     def list_vms(self) -> list[VmInfo]:
-        result = self.runner.run(["virsh", "list", "--all"], check=False)
+        result = self.runner.run(["virsh", "-c", LIBVIRT_URI, "list", "--all"], check=False)
         if result.returncode != 0:
             return []
         infos: list[VmInfo] = []
