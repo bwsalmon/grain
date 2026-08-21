@@ -27,6 +27,10 @@ a critical pass over the security claims:
   sharing, a writable store overlay so in-guest `nix` works — and a precise
   account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
+- **Added** a [memory budget](#memory-budget) for a RAM-constrained host:
+  the agent's writable working set moves to an ephemeral encrypted disk
+  volume rather than tmpfs, and the broker starts sandboxes on demand so
+  RAM scales with active agents rather than pool size.
 
 ## Goals
 
@@ -135,8 +139,9 @@ one-number edit rather than copy-pasted modules — see
 [Generating the pool](#generating-the-pool-from-sandboxcount).
 
 microVM guests get a tmpfs root over a read-only `/nix/store` supplied by
-the host — which is exactly the ephemerality we want for sandboxes, and
-exactly what forces the orchestrator's state onto `/persist`.
+the host, with any writable storage attached explicitly — which is exactly
+the ephemerality we want for sandboxes, and exactly what forces the
+orchestrator's state onto `/persist`.
 
 ### Generating the pool from `sandboxCount`
 
@@ -289,7 +294,10 @@ more than the marginal performance difference:
 - Backups are `tar`/`rsync` of a directory, not image-level snapshots.
 - No fixed size to outgrow.
 
-Sandbox VMs get no share and no volume. They are fully ephemeral by design.
+Sandbox VMs get no share and no *persistent* volume — only an ephemeral
+scratch volume that is cryptographically discarded on every boot (see
+[Keeping a disk-backed scratch volume ephemeral](#keeping-a-disk-backed-scratch-volume-ephemeral)).
+Nothing an agent writes outlives its lease.
 
 `/persist` layout:
 
@@ -398,11 +406,13 @@ any background process still running. That's both a correctness problem
 (mysterious cross-task interference) and a security one (task A's cloned
 private repo readable by task B).
 
-The broker owns the reset. On `/stop`, before a sandbox returns to the free
-pool, it is **rebooted**. microVM boots are fast (order of a second or two),
-so this is cheap enough to do between every task — and it is far more
-robust than trying to clean up in userspace, where the failure mode is a
-forgotten directory or a surviving background process rather than an
+The broker owns the reset. On `/stop`, a sandbox is **stopped and started
+again** rather than cleaned up in place — which also releases its memory,
+so idle sandboxes cost nothing (see
+[Start sandboxes on demand](#start-sandboxes-on-demand)). microVM boot is
+on the order of a second, so this is cheap enough to do between every task,
+and it is far more robust than userspace cleanup, where the failure mode is
+a forgotten directory or a surviving background process rather than an
 obvious error.
 
 ### What a reboot actually resets
@@ -410,18 +420,24 @@ obvious error.
 Being precise about this, because the whole isolation story rests on it. A
 sandbox VM's filesystem is:
 
-- **`/` — tmpfs**, RAM-backed and writable. Everything an agent does lives
-  here: `$HOME`, `/tmp`, cloned repos, `node_modules`, pip venvs, any
-  binary it downloaded. Discarded completely on every boot.
-- **`/nix/store` — read-only**, supplied by the host (see
-  [store sharing](#sandbox-image-packages-and-toolchains)). The agent
-  cannot modify it.
-- **No volume, no share.** Deliberately: there is nowhere for a sandbox to
-  write anything that outlives it.
+- **`/` — a small tmpfs**, holding only `/run` and the `/etc` overlay.
+  Discarded on every boot.
+- **An ephemeral scratch volume** carrying everything the agent actually
+  writes: `$HOME`, the cloned repo, `/tmp`, and the writable store
+  overlay. Disk-backed rather than RAM-backed, and made fresh on every boot
+  by a random-key dm-crypt setup — see
+  [Keeping a disk-backed scratch volume ephemeral](#keeping-a-disk-backed-scratch-volume-ephemeral).
+- **`/nix/store` — a read-only lower layer** supplied by the host (see
+  [store sharing](#store-sharing)), with the scratch volume as its
+  writable upper layer.
+- **No share and no persistent volume.** The scratch volume is the only
+  block device, and it is ephemeral by construction: its encryption key
+  lives only in RAM and dies with the VM.
 
 So yes — **a restarted sandbox comes back with nothing the previous agent
 did.** There is no accumulated drift to clean up, and no reachable state
-for one task to leak into the next.
+for one task to leak into the next; the previous lease's data is not just
+unlinked but cryptographically unrecoverable.
 
 One correction to the natural mental model, though: it is not recreated
 from a *base image* that was fixed when the VM first started. It is
@@ -649,8 +665,9 @@ because it never entered the Nix store.
 
 - Count fixed by `agentCluster.sandboxCount` (default `4` — a starting
   point tied to host RAM, revisited after measuring real agent memory use).
-- tmpfs root, read-only store, no share, no volume; rebooted between
-  leases. See [What a reboot actually resets](#what-a-reboot-actually-resets).
+- Small tmpfs root, read-only shared store, one ephemeral encrypted scratch
+  volume; stopped and restarted between leases. See
+  [What a reboot actually resets](#what-a-reboot-actually-resets).
 - Runs the OpenHands action execution server, version-pinned in lockstep
   with the orchestrator.
 - Ships a `gh-proxy` client: an `/etc/gitconfig` `insteadOf` rewrite so
@@ -749,7 +766,7 @@ Mostly yes, but NixOS changes the answer enough that it needs stating
 precisely — and the read-only store specified above has a consequence
 worth being explicit about.
 
-**Works against the tmpfs root, unchanged from any Linux box:** `uv`/`pip`
+**Works against the scratch volume, unchanged from any Linux box:** `uv`/`pip`
 into a venv, `pnpm install` into `node_modules`, `cargo` into a project
 dir, `go` modules, `bundle`, `mvn`. Building from source with the
 toolchain in the image. And — thanks to
@@ -778,26 +795,63 @@ mounts `/nix/store` as an overlayfs — the shared host store as the
 read-only lower layer, a writable upper layer on top — so the guest can
 realise new store paths and `nix` works normally.
 
-**Put the upper layer on tmpfs.** Two reasons, and the second is the one
-that matters:
+The upper layer can be tmpfs or a block volume — not a share, since
+overlayfs won't accept virtiofs/9p as an upper layer. **Use a block
+volume**, which is also microvm.nix's own documented pattern:
 
-- overlayfs is picky about upper-layer filesystems, and virtiofs/9p shares
-  are not usable there. So it's tmpfs or a block volume, not a share.
-- A block volume would **persist across reboots, silently breaking the
-  reset guarantee**. Store paths are hash-addressed, so this is less
-  alarming than a poisoned npm cache, but an agent with root can write
-  arbitrary content into the overlay's upper directory at a path that
-  shadows a legitimate store path — and that would survive into the next
-  lease. tmpfs is discarded on every boot, which is exactly the property
-  [the reset design](#what-a-reboot-actually-resets) depends on.
+```nix
+microvm.writableStoreOverlay = "/nix/.rw-store";
+microvm.volumes = [{
+  image      = "sandbox-${toString index}-scratch.img";
+  mountPoint = config.microvm.writableStoreOverlay;
+  size       = cfg.sandbox.scratchSizeMb;
+}];
+```
 
-The cost is guest RAM: everything the agent realises into the store is
-resident. Size `sandbox.memoryMb` accordingly and cap the overlay with
-`sandbox.writableStore.sizeMb`, so a runaway `nix build` hits a clear
-`ENOSPC` rather than OOM-killing the agent. If a workload genuinely needs
-large in-guest builds, the right answer is a scratch volume that the broker
-wipes as part of reset — deliberately not the default, because it adds a
-reset step that can fail silently.
+tmpfs looks attractive because it's discarded on reboot for free, which
+matches the reset design exactly. But everything the agent realises into
+the store would be **resident in guest RAM**, and a single `nix build` of
+anything substantial can be gigabytes. On a memory-constrained host that
+trades a manageable disk cost for the scarcest resource, and turns a
+routine agent action into an OOM. Disk is the right medium here; the reset
+property has to be re-established another way.
+
+### Keeping a disk-backed scratch volume ephemeral
+
+A volume persists across reboots by default, which would silently break
+[the reset guarantee](#what-a-reboot-actually-resets) — an agent with root
+can write into the overlay's upper directory at a path shadowing a
+legitimate store path, and that would survive into the next lease.
+
+The fix is to make freshness an invariant of the guest's own boot rather
+than a step the broker has to remember: at boot, set up **dm-crypt over
+the raw volume with a randomly generated key** (the same trick NixOS's
+`swapDevices.*.randomEncryption` uses), then `mkfs` and mount. The key
+exists only in RAM and is discarded on shutdown, so the previous lease's
+contents are not merely unlinked but cryptographically unreachable.
+
+This is worth the small cost for three reasons:
+
+- **It fails closed.** If the setup doesn't run, the mount fails, the VM
+  comes up unhealthy, and the broker quarantines it. A missed *wipe* step,
+  by contrast, fails open and silently.
+- **`mkfs` alone is not enough.** It makes old data unreachable through the
+  filesystem, but an agent with root can read the raw block device and
+  recover the previous task's working tree. Cheap attack, cheap defence.
+- **No broker involvement**, so there's no reset step to get wrong.
+
+Two practical notes: enable `discard` through dm-crypt and on the guest
+filesystem, or the sparse image grows monotonically to its high-water mark
+and never gives blocks back — the kind of thing that fills the host disk
+six months in. And crypto overhead is modest with AES-NI, but if it ever
+measures badly the fallback is the broker deleting the image on release
+and letting `autoCreate` rebuild it, accepting the fails-open risk.
+
+Cap the volume with `sandbox.scratchSizeMb` so a runaway build hits a clear
+`ENOSPC` instead of taking the host's disk with it. And note that N sparse
+images can overcommit host disk: either keep `sandboxCount ×
+scratchSizeMb` within real capacity, or monitor for it — a guest that
+thinks it has space while the host has none fails in confusing ways.
 
 Two things make this cheaper than it sounds:
 
@@ -879,6 +933,86 @@ the pool → sandboxes pick up the new definition on their next reboot. Since
 the reset between leases is a reboot anyway, a drained pool converges
 without any extra mechanism. Plan for it as a deploy, not a config tweak.
 
+## Memory budget
+
+The target host is RAM-constrained, which makes memory the binding
+resource for the whole design — it sets the real ceiling on
+`sandboxCount`, not any of the policy above. Worth treating deliberately
+rather than discovering under load.
+
+### Get the writable working set off RAM entirely
+
+The store overlay is not the only thing that would otherwise live in RAM.
+A stock microVM's **tmpfs root** holds the cloned repo, `node_modules`,
+build artifacts, and `/tmp` — for a real project, easily more than the
+store overlay. Moving only the overlay to disk would fix the smaller half
+of the problem.
+
+Put the whole writable working set on the same ephemeral scratch volume —
+`/nix/.rw-store`, the agent's home, `/tmp`, and `/var/tmp` — and leave `/`
+as a small tmpfs holding only `/run` and the `/etc` overlay. The
+random-key encryption then covers the agent's working tree as well as the
+store overlay, which is where the more sensitive material was anyway.
+
+Guest RAM after that is just the kernel, the action execution server, and
+whatever the agent's own processes need — compilers and test suites,
+sized by workload rather than by accumulated files. Page cache over the
+scratch volume uses whatever is free and is reclaimable under pressure,
+which is the behaviour we want.
+
+### Start sandboxes on demand
+
+The larger win: **idle sandboxes need not be running at all.** microVM boot
+is on the order of a second, so the broker can `systemctl start` a sandbox
+when it leases one and `systemctl stop` it on release. Baseline RAM then
+scales with *concurrently active agents* rather than with pool size, and
+`sandboxCount` becomes purely a concurrency ceiling that costs nothing when
+unused.
+
+This also **simplifies the reset**: stop-then-start is a stronger reset
+than a reboot (fresh hypervisor process, fresh scratch volume, fresh
+encryption key) and it's the same mechanism, so there's no separate reset
+path to maintain. The cost is a second or two of lease latency, invisible
+against the length of an agent task. Optionally keep one sandbox warm to
+absorb that for the first task; not worth doing until it's measured.
+
+With on-demand start, the honest RAM formula is
+`orchestrator + (concurrent agents × sandbox.memoryMb)`, and pool
+exhaustion — already surfaced as a metric in
+[Capacity](#capacity-and-backpressure) — becomes the signal for whether
+the host needs more RAM or the ceiling needs lowering.
+
+### Host-level tactics
+
+- **KSM** (`hardware.ksm.enable`). N sandboxes are near-identical NixOS
+  guests running the same binaries, which is close to the ideal case for
+  same-page merging. Costs some CPU scanning; worth measuring here
+  specifically because the workload is so uniform.
+- **virtio-mem / free page reporting.** microvm.nix exposes a `balloon`
+  option (which replaced the older `balloonMem`), and on cloud-hypervisor
+  wires up `hotplug_method=virtio-mem` with `free_page_reporting=on` and
+  `deflate_on_oom=on`. That lets a guest hand back memory it isn't using
+  instead of holding its full allocation — directly useful for sandboxes
+  whose usage spikes during a build and then subsides.
+- **This may decide the hypervisor question.** Revision 2 defaulted to
+  `qemu` for compatibility and listed cloud-hypervisor as a later
+  optimization. Under a RAM constraint, its better virtio-mem support
+  moves from optimization to potentially load-bearing — see
+  [open questions](#open-questions).
+- **Store sharing already helps**, but note the caveat: N guests
+  separately page-cache the same shared store contents unless virtiofs DAX
+  is in play. Whether microvm.nix exposes DAX, and whether it helps here,
+  is worth checking if memory stays tight.
+
+### Sizing
+
+Start from measurement, not guesswork: run one sandbox through a
+representative task, watch peak RSS, and set `sandbox.memoryMb` from that
+with headroom. The default of 8 GB in revision 2 assumed a RAM-rich host
+and a tmpfs-backed store overlay; with the working set on disk, something
+in the 2–4 GB range is a more realistic starting point, and
+`sandboxCount` follows from what the host can actually hold concurrently.
+
 ## Repo layout (proposed)
 
 ```
@@ -912,9 +1046,10 @@ docs/design.md
 | `sandbox.nixLd.enable` | `bool` | `true` | Make downloaded dynamic binaries runnable. |
 | `sandbox.nixLd.extraLibraries` | `list of package` | `[]` | Extra libs for `nix-ld`'s search path. |
 | `sandbox.shareHostStore` | `bool` | `true` | Share host `/nix/store` vs. per-VM `storeOnDisk`. |
-| `sandbox.writableStore.enable` | `bool` | `true` | tmpfs store overlay, so in-guest `nix` works. |
-| `sandbox.writableStore.sizeMb` | `int` | `4096` | Cap on the overlay; bounds its RAM cost. |
-| `sandbox.memoryMb` | `int` | `8192` | Guest RAM; must cover the overlay plus builds. |
+| `sandbox.writableStore.enable` | `bool` | `true` | Store overlay, so in-guest `nix` works. |
+| `sandbox.scratchSizeMb` | `int` | `20480` | Ephemeral disk volume: store overlay, `$HOME`, `/tmp`. |
+| `sandbox.memoryMb` | `int` | `3072` | Guest RAM; set from measured peak, not guessed. |
+| `sandbox.onDemandStart` | `bool` | `true` | Stop idle sandboxes; RAM scales with active agents. |
 | `sandbox.passwordlessSudo` | `bool` | `true` | Safe because the VM, not the user, is the boundary. |
 | `network.bridge` | `str` | `br-agents` | Host bridge name. |
 | `network.subnet` | `str` | `10.100.0.0/24` | Internal subnet. |
@@ -1006,8 +1141,10 @@ Substantially shorter than revision 1 — the two biggest are resolved above.
 2. **Backpressure behavior**: what does OpenHands' remote-runtime client do
    when the API reports no capacity? Determines whether the broker queues
    or errors.
-3. **Hypervisor**: stay on `qemu`, or move to `cloud-hypervisor` for lower
-   per-VM overhead once things work?
+3. **Hypervisor**: `qemu` for compatibility, or `cloud-hypervisor`? No
+   longer a pure optimization — cloud-hypervisor's virtio-mem and
+   free-page-reporting support may be load-bearing on a RAM-constrained
+   host. Decide by measuring both under a real agent workload.
 4. **`sandboxCount` default**, pending measurement of real agent memory
    footprint against host RAM.
 5. **Host exposure**: is the host directly internet-facing (as the DNAT
