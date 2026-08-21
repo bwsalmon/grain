@@ -740,13 +740,32 @@ already provides:
   covers the hot-reloaded allowlist requirement without a bespoke watcher,
 - an audit trail of intercepted pushes.
 
-Two things to verify before committing to it:
+Reading its shipped `proxy.config.json` confirms part of the fit and
+sharpens the doubts:
 
-- **Approval workflow fit.** Git Proxy's default flow holds a push for
-  human approval, which is wrong for autonomous agents. Confirm it can
-  auto-approve on rule match, or that a policy plugin can. If it can't,
-  it's the wrong tool and this reverts to a small custom git proxy — a much
-  smaller thing to build than the REST-filtering version.
+- `authorisedList` is exactly the repo allowlist this design needs, keyed
+  by project/name/URL — default-deny, no bespoke watcher required.
+- `commitConfig` filters pushes by author email, commit message, and *diff
+  content* patterns, so it does the packfile inspection we didn't want to
+  write.
+- `attestationConfig`, though, is a human attestation question — *"I am
+  happy for this to be pushed to the upstream repository"*. The
+  approval-by-a-person step looks central to the tool rather than
+  incidental to it, which is the opposite of what an autonomous agent
+  needs.
+
+So two things to settle before committing:
+
+- **Can it auto-approve?** Either a config/plugin path that approves on
+  rule match, or its approval REST API driven by something on the
+  orchestrator. If neither exists, it is the wrong shape, and this reverts
+  to a small custom git proxy — still a far smaller thing to build than the
+  REST-filtering version, since the surface is now git-only.
+- **Weight.** It's a web application — sessions, CSRF, OIDC/AD auth, a UI,
+  and MongoDB or filesystem storage. That's a lot to run on a
+  [RAM-constrained orchestrator](#memory-budget) for what we actually want
+  from it. Configure filesystem storage rather than Mongo, and measure its
+  footprint before assuming it fits.
 - **Credential injection.** We need per-repo credential selection from the
   [credential set](#lowering-the-ceiling-a-machine-account) on the way out
   to GitHub. Check whether that's configuration or a plugin.
