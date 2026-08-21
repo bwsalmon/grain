@@ -27,6 +27,11 @@ a critical pass over the security claims:
   sharing, a writable store overlay so in-guest `nix` works — and a precise
   account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
+- **Revised** the GitHub auth model for the case where an App cannot be
+  installed everywhere: a per-repo credential set behind the proxy, a
+  machine account to restore GitHub-side scoping, and the hardening the
+  proxy needs once it is the only lock. See
+  [auth model](#auth-model-a-broad-credential-behind-a-narrow-proxy).
 - **Added** a [memory budget](#memory-budget) for a RAM-constrained host:
   the agent's writable working set moves to an ephemeral encrypted disk
   volume rather than tmpfs, and the broker starts sandboxes on demand so
@@ -275,7 +280,7 @@ than a rewrite.
 
 The orchestrator needs state that survives rebuilds:
 
-- GitHub credentials (App private key, or PAT)
+- GitHub credentials (the credential set — see [auth model](#auth-model-a-broad-credential-behind-a-narrow-proxy))
 - The repo allowlist
 - The GCP service-account key
 - SSH host keys (so the admin's `known_hosts` isn't invalidated per deploy)
@@ -306,7 +311,7 @@ Nothing an agent writes outlives its lease.
   ssh/                             # VM host keys (0700 root)
   secrets/
     gcp-service-account.json       # 0600, owned by gcp-token-svc
-    github/                        # App private key or PAT, 0600, owned by github-proxy
+    github/                        # credential set, 0600, owned by github-proxy
   config/
     repo-allowlist.json            # admin-editable, hot-reloaded, no rebuild
   state/
@@ -470,19 +475,130 @@ experienced as "agents seem slow today."
 
 ## GitHub access
 
-### Auth model
+### Auth model: a broad credential behind a narrow proxy
 
-**A GitHub App, not a PAT** (recommended). An App is installed on exactly
-the allow-listed repositories, so its installation tokens are scoped by
-GitHub itself — the allowlist is then enforced in two independent places
-(our proxy's check, and GitHub's own installation scoping) rather than
-resting entirely on our code being correct. A fine-grained PAT is the
-fallback if standing up an App is too much for a first pass; nothing else
-in the design changes.
+Installing a GitHub App on every repository the agents need isn't always
+possible — App installation generally needs admin on the repo or org, and
+plenty of useful repos are ones you're merely a collaborator on. So the
+working assumption is a **broadly-scoped user credential held by the
+proxy, with repos and operations restricted by the proxy itself**.
 
-Permissions: repository contents read/write, issues read/write, pull
-requests read/write. Nothing else — no admin, no webhook management, no
-collaborator management, no delete.
+This is a legitimate pattern, and the design already uses it once: the
+[GCP token service](#gcp-short-lived-tokens) holds one powerful key behind
+a narrow minting interface. There's no principled objection to doing the
+same for GitHub. But it changes the proxy's role from *second lock* to
+*only lock*, and that has consequences worth being deliberate about:
+
+- Defense in depth collapses. Previously a proxy bug meant "the agent
+  reaches a repo it shouldn't, within an App installation that only covers
+  a handful of repos." Now a proxy bug means the agent reaches **anything
+  the credential can reach** — every private repo the account can see.
+- Blast radius of an orchestrator compromise grows correspondingly. It was
+  already the highest-value target; now it holds the keys to the whole
+  account.
+- Every agent action is attributed to the human. Commits, comments, and
+  PRs show up as you, and neither GitHub's audit log nor your collaborators
+  can distinguish agent activity from yours.
+
+None of that makes the approach wrong. It makes two things worth doing:
+lower the ceiling where it's cheap, and hold the proxy to a higher standard
+where it isn't.
+
+### Lowering the ceiling: a machine account
+
+**The highest-value change, and it sidesteps the App-installation problem
+entirely: don't use your own account — create a dedicated machine account
+and invite it as a collaborator to the repos the agents need.**
+
+A classic PAT on that account then reaches exactly the repos it was invited
+to, which restores GitHub-side scoping without any App installs. Inviting a
+collaborator needs repo admin, not org admin, so it clears the bar that
+blocks App installation in many cases. It also fixes attribution: agent
+commits and comments show as `<project>-agent-bot`, which makes the GitHub
+audit log useful and stops collaborators from thinking you personally
+opened forty PRs overnight.
+
+It isn't universal. Some orgs prohibit outside collaborators or charge a
+seat; and for a repo where you're a non-admin collaborator yourself, you
+can invite nobody. So support a **credential set rather than a single
+token**, selected per request by target repo:
+
+```
+/persist/secrets/github/
+  credentials.json     # ordered rules: repo/owner pattern -> credential
+  bot.token            # machine account, covers most repos
+  personal.token       # last resort, only the repos nothing else can reach
+```
+
+The proxy picks the narrowest credential that covers the target repo, and
+**records which credential served each request** in the audit log. This
+keeps the powerful token off the majority of traffic and makes its actual
+usage visible rather than assumed. If the set is later replaced by an App
+for some owners, that's a `credentials.json` edit, not a redesign.
+
+Ordering matters, and the ladder is worth walking in order: GitHub App
+where you can install one → fine-grained PAT scoped to selected repos
+(one per resource owner, since a fine-grained PAT has exactly one owner,
+and note orgs must opt in to fine-grained PATs at all) → machine-account
+classic PAT → personal classic PAT for the remainder.
+
+### Scopes to withhold
+
+Whatever credential type, withhold everything not needed. `delete_repo` is
+a separate classic scope — never grant it. No `admin:*`, no
+`write:org`, no webhook or deploy-key management.
+
+**Do not grant `workflow`** (or `workflows: write` on a fine-grained PAT or
+App). This one is worth calling out because it's a privilege-escalation
+path that isn't obvious: an agent that can modify `.github/workflows/**`
+can make CI run code of its choosing, with whatever secrets the workflow
+has access to and on whatever runner executes it. Withholding the scope
+means GitHub itself rejects such a push — *"refusing to allow a Personal
+Access Token to create or update workflow ... without `workflow` scope"* —
+and the same restriction applies to Apps.
+
+That's the [enforce-at-GitHub principle](#write-safety-enforce-at-github-not-in-a-pack-parser)
+again: a reliable server-side control, requiring no packfile inspection on
+our side, and immune to bugs in our code. Branch protection on the default
+branch is the other half, and both matter more now that they're doing work
+the App installation scope used to do.
+
+### When the proxy is the only control
+
+With a broad credential, these stop being hardening niceties and become the
+security model. Each one is a way an endpoint allowlist gets bypassed in
+practice:
+
+- **Allowlist by parsed route, never by regex over the raw path.** Match
+  `(method, route template)` against a fixed table and extract
+  `{owner}/{repo}` from the parsed result. A regex over a raw URL is how
+  `..`, `%2F`, and unexpected prefixes get through.
+- **Canonicalize before checking**: percent-decode, resolve `.` and `..`,
+  normalize case (GitHub owner/repo are case-insensitive), strip a trailing
+  `.git`. Compare against the allowlist in canonical form, and reject
+  anything that doesn't round-trip cleanly rather than trying to repair it.
+- **Block GraphQL outright.** `POST /graphql` is a single endpoint that
+  expresses arbitrary reads and mutations across the whole account. It
+  cannot be path-filtered, so allowing it makes the entire REST allowlist
+  decorative. If agents ever need it, that's a separate, much harder
+  design problem — query allowlisting — not a config toggle.
+- **Never follow redirects with credentials attached.** GitHub redirects on
+  renamed or transferred repos, and a followed redirect can carry the
+  credential to a resource that was never allowlist-checked. Return the
+  redirect to the caller, or reject it.
+- **Deny by default.** Unknown path, unknown method, unparseable body:
+  reject. Never forward "just in case" — with this credential, the cost of
+  a false allow is unbounded and the cost of a false deny is an error
+  message.
+- **Withhold token-introspection and account endpoints** (`/user`,
+  `/user/repos`, and friends) so a sandbox can't enumerate what the
+  credential can reach. Minor, but free.
+- **Set an expiry on the token** and diary the rotation. A non-expiring
+  credential of this power outliving the project is a bad end state; the
+  rotation path is already a file swap on `/persist` and a service restart.
+
+Permissions to grant, unchanged from before: repository contents
+read/write, issues read/write, pull requests read/write — nothing else.
 
 ### The proxy
 
@@ -496,8 +612,10 @@ and the OpenHands process:
 - **Git smart-HTTP** so `git clone/fetch/push` against
   `http://10.100.0.2:<port>/<owner>/<repo>.git` works transparently. This
   is the only way sandboxes reach git.
-- **Installation token refresh** (1h lifetime) handled internally,
-  invisible to callers.
+- **Credential selection and refresh** handled internally and invisible to
+  callers: the narrowest credential covering the target repo is chosen per
+  request, and App installation tokens (where used) are refreshed on their
+  1h cycle.
 - **Audit log** per request: caller sandbox, repo, operation, outcome.
 - **Hot-reloaded allowlist** from `/persist/config/repo-allowlist.json`, so
   an admin adds or removes a repo over SSH with no rebuild. A Nix option
@@ -514,9 +632,11 @@ before the packfile, and getting that subtly wrong fails *open*. Instead,
 enforce server-side with **GitHub branch protection / repository rulesets**
 on each allow-listed repo:
 
-- default branch: no direct pushes from the App, no force-push, no deletion
+- default branch: no direct pushes from the agent credential, no
+  force-push, no deletion
 - require PRs for changes to protected branches
-- optionally restrict the App to creating branches under an `agent/*` prefix
+- optionally restrict the agent credential to creating branches under an
+  `agent/*` prefix
 
 This is enforced by GitHub, cannot be bypassed by a bug in our code, and is
 declarative. The proxy adds a coarse complementary check it *can* do
@@ -651,9 +771,10 @@ crash-looping. The admin then:
 1. SSHes to `admin@<host>:2222`.
 2. Places the GCP service-account JSON at
    `/persist/secrets/gcp-service-account.json`.
-3. Installs GitHub credentials — the App private key at
-   `/persist/secrets/github/app-private-key.pem` with its app/installation
-   ids alongside, or a PAT if going that route.
+3. Installs the GitHub credential set under `/persist/secrets/github/` —
+   at minimum one token plus a `credentials.json` mapping repos to it. See
+   [auth model](#auth-model-a-broad-credential-behind-a-narrow-proxy) for
+   which credential type to reach for first.
 4. Edits `/persist/config/repo-allowlist.json` and applies branch
    protection to each newly allow-listed repo (see
    [Write safety](#write-safety-enforce-at-github-not-in-a-pack-parser)).
@@ -1076,8 +1197,11 @@ and both came from the same error — treating a *narrowed* capability as an
 
 - A compromised sandbox cannot read GitHub credentials or the GCP key; they
   aren't on the machine.
-- It cannot touch repos outside the allowlist (checked by the proxy, and
-  independently scoped by the GitHub App installation).
+- It cannot touch repos outside the allowlist. How much this rests on the
+  proxy alone depends on the credential: an App installation or a
+  machine-account token is independently scoped by GitHub, a personal token
+  is not. See
+  [when the proxy is the only control](#when-the-proxy-is-the-only-control).
 - It cannot push to protected branches or rewrite history (enforced by
   GitHub, not by our code).
 - It cannot reach other sandboxes, or be reached from outside the host.
@@ -1100,7 +1224,11 @@ and both came from the same error — treating a *narrowed* capability as an
 - **A compromised orchestrator**, which holds every real credential. It is
   the highest-value target in the cluster, and its hardening — minimal
   package set, no listening services beyond sshd and the internal APIs —
-  matters more than anything else here. Compromise there is total.
+  matters more than anything else here. Compromise there is total, and
+  proportionally worse the broader the GitHub credential it holds, which is
+  the main argument for a
+  [machine account](#lowering-the-ceiling-a-machine-account) over a
+  personal token.
 - **A malicious or buggy LLM provider / prompt injection via issue
   content.** An attacker who can file an issue in the target repo can put
   text in front of the agent. The intake label requirement means a human
@@ -1121,7 +1249,7 @@ and both came from the same error — treating a *narrowed* capability as an
   failure modes to alarm on.
 - **Backup.** `/persist` is the only stateful thing in the cluster; back up
   the host directory. Recovery is restoring the directory and rebuilding.
-- **Rotation.** GCP key and GitHub App key rotate by replacing the file on
+- **Rotation.** GCP key and GitHub credentials rotate by replacing the file on
   `/persist` and restarting the one service that reads it. No rebuild.
 - **Adding a repo.** Edit the allowlist, install the App on the repo, apply
   branch protection. Hot-reloaded, no rebuild.
@@ -1132,7 +1260,7 @@ and both came from the same error — treating a *narrowed* capability as an
 
 ## Open questions
 
-Substantially shorter than revision 1 — the two biggest are resolved above.
+Substantially shorter than revision 1 — its two biggest are resolved above.
 
 1. **Remote-runtime API stub compatibility**: confirm OpenHands accepts
    stubbed `/registry_prefix` and `/image_exists` responses and does
@@ -1150,6 +1278,11 @@ Substantially shorter than revision 1 — the two biggest are resolved above.
 5. **Host exposure**: is the host directly internet-facing (as the DNAT
    design assumes), or behind an existing bastion/VPN — in which case the
    orchestrator's sshd needn't be internet-reachable at all?
+6. **How far down the credential ladder can each owner go?** Which repos
+   admit an App install, which admit a machine-account collaborator
+   invite, and which genuinely need the personal token. Worth answering per
+   repo at onboarding, since it decides how much traffic the broad
+   credential ever sees.
 
 ## Implementation plan
 
@@ -1172,17 +1305,21 @@ Substantially shorter than revision 1 — the two biggest are resolved above.
    the proxy.*
 5. **Broker**: full pool management — lease, release, reboot-reset, health
    check, quarantine, drain.
-6. **GitHub proxy v1**: allowlist enforcement, PAT-based REST passthrough,
-   git smart-HTTP, audit log. Test end to end from a sandbox against a
-   throwaway repo.
+6. **GitHub proxy v1**: allowlist enforcement, credential-set selection,
+   REST passthrough, git smart-HTTP, audit log. Build the
+   [only-control hardening](#when-the-proxy-is-the-only-control) in from
+   the start rather than retrofitting it — deny-by-default, parsed-route
+   matching, no GraphQL, no redirect following. Test end to end from a
+   sandbox against a throwaway repo, including the negative cases.
 7. **GCP token service**: minting with impersonation of the narrow SA,
    client script, audit log. Verify expiry and that sandboxes cannot reach
    the key file.
 8. **Issue intake**: label-driven pickup, dedupe transitions, rate limit,
    stranded-label sweeper.
-9. **Hardening**: migrate to a GitHub App, apply branch protection to
-   allow-listed repos, tighten the endpoint allowlist, ship journals to the
-   host, write the admin runbook.
+9. **Hardening**: move as many repos as possible down the credential
+   ladder (machine account, or an App where installable), apply branch
+   protection to allow-listed repos, confirm no credential carries
+   `workflow` scope, ship journals to the host, write the admin runbook.
 
 Scale to `sandboxCount = N` once 1–8 are validated at `sandboxCount = 1`.
 
