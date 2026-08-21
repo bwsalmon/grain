@@ -20,6 +20,47 @@ Deliberately *not* here: the orchestrator, the git proxy, the metadata
 server, the pool broker, the writable store overlay, ephemeral encryption.
 Those come after this passes.
 
+## Getting a host
+
+The spike needs KVM, so it needs a machine that has it. On GCP that means
+nested virtualization, which is off by default and is the single thing most
+likely to waste an afternoon:
+
+```sh
+gcloud compute instances create grain-spike \
+  --project=YOUR_PROJECT \
+  --zone=us-central1-a \
+  --machine-type=n2-standard-4 \
+  --enable-nested-virtualization \
+  --image-family=debian-12 \
+  --image-project=debian-cloud \
+  --boot-disk-size=200GB \
+  --boot-disk-type=pd-balanced
+```
+
+Verify before doing anything else — no KVM, no spike:
+
+```sh
+gcloud compute ssh grain-spike --zone=us-central1-a \
+  --command='grep -c vmx /proc/cpuinfo; ls -l /dev/kvm'
+```
+
+Constraints worth knowing:
+
+- **N2 works; N2D does not.** Nested virtualization requires Intel Haswell
+  or later — AMD platforms aren't supported — and E2, N1-with-GPUs and A2
+  are excluded too.
+- **NixOS is not in GCP's public image catalog**, hence Debian above.
+  Convert in place with [`nixos-infect`](https://github.com/elitak/nixos-infect),
+  or build and import a NixOS GCE image. A step, not a flag.
+- **The 10 GB default boot disk is far too small.** The Nix store, Docker
+  images, the kind node image, and the spike's own 40 GB scratch volume all
+  live on it. The larger disk also buys IOPS, which kind needs.
+- **n2-standard-4 is 4 vCPU / 16 GB** — right for the one sandbox this
+  spike runs, undersized for the real pool. If you want headroom to observe
+  peak memory under a kind cluster rather than collide with it, take
+  n2-standard-8.
+
 ## Before running
 
 1. **Add a `hardware-configuration.nix`.** This config deliberately has no
