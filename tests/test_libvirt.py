@@ -159,6 +159,17 @@ def test_create_omits_public_keys_when_no_key_file_present(adapter, cluster, tmp
     assert "public-keys" not in meta_data
 
 
+def test_ssh_public_key_path_defaults_host_local_not_data(cluster):
+    """/data lives on the controller; this adapter runs on the host, a
+    different machine (docs/design.md's host/controller split) -- so the
+    default must not assume a shared /data.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    a = LibvirtAdapter(cluster, runner, network)
+    assert str(a.ssh_public_key_path) == "/var/lib/grain/controller-ssh.pub"
+
+
 def test_recreate_destroys_then_creates_then_starts(adapter, cluster):
     a, runner = adapter
     runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())

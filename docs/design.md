@@ -1198,11 +1198,18 @@ ever becomes worth its cost again.
    sandboxes plus a controller under real `kind` + build load) is still
    open and needs a second sandbox and an actual build running concurrently
    to answer properly.
-5. **Controller VM**: `/data` disk, plus the automation config/secrets/state
-   layout `grain/automation/` already expects. Not yet provisioned as an
-   actual VM — no `provision/controller.sh` exists yet; testing so far has
-   run the CLI directly against ad-hoc directories, not a real controller.
-   See `docs/roadmap.md`.
+5. **Controller VM** — *done*: `provision/controller.sh` provisions a real
+   VM with the `/data/{secrets,config,state}` layout `grain/automation/`,
+   `grain/proxy/` and `grain/metadata/` already expect, Python 3.11+,
+   `gce_metadata_server`, the `grain-metadata` system user, an idempotently
+   self-generated controller SSH keypair, and the (installed-but-disabled)
+   `grain-automation`/`grain-git-proxy` systemd units. Verified live —
+   `tests/test_controller_integration.py` boots a real controller VM from
+   this script and checks the guest. Deploying this repo's own code to
+   `/opt/grain` and enabling those units both stay manual, for the same
+   reason no credential is ever baked into a provisioning script — see
+   `docs/runbook.md`'s first-time setup checklist and `docs/roadmap.md`
+   item 3.
 6. **Git proxy** — *done*: `grain/proxy/` — path whitelist, canonicalize,
    allowlist, token auth (via HTTP Basic from a git credential helper),
    credential selection, stream through, audit. Verified live against a
@@ -1221,10 +1228,10 @@ ever becomes worth its cost again.
    tailer — verified against a real binary and, at the routing layer, that
    a sandbox's existing default route is enough for its request to
    `169.254.169.254` to reach the right instance with no sandbox-side
-   change needed. Not verified: an actual token mint (needs a real GCP
-   project and key) and the `grain-metadata` system user / key file
-   permissions, which depend on `provision/controller.sh` (step 5, still
-   open). See `docs/roadmap.md` item 4.
+   change needed. The `grain-metadata` system user and the binary itself
+   are now provisioned by `provision/controller.sh` (step 5) and confirmed
+   live on a real controller VM. Not verified: an actual token mint, which
+   needs a real GCP project and key. See `docs/roadmap.md` item 4.
 8. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
    cleanup hook, a health check, a disk watermark alarm.
 9. **Automation loop** — *mostly done*: `grain/automation/` implements

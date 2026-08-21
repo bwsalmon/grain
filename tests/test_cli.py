@@ -69,6 +69,49 @@ def test_missing_tooling_is_reported_not_crashed(capsys):
     assert out.count("absent") == 3
 
 
+def test_provision_with_all_target_is_rejected():
+    """The controller and the sandboxes are provisioned by different
+    scripts now (provision/controller.sh vs. provision/sandbox.sh) — one
+    --provision applied to 'all' would be wrong for one role or the other.
+    """
+    with pytest.raises(SystemExit, match="controller.*sandboxes|sandboxes.*controller"):
+        main(["--dry-run", "host", "create", "all", "--provision", "some/script.sh"])
+
+
+def test_provision_with_a_specific_target_is_still_allowed(tmp_path, capsys):
+    script = tmp_path / "script.sh"
+    script.write_text("#!/bin/bash\necho hi\n")
+    out = run(
+        ["--dry-run", "--config-dir", str(tmp_path / "instances"),
+         "host", "create", "controller", "--provision", str(script)],
+        capsys,
+    )
+    assert "+ virsh -c qemu:///system define" in out
+
+
+def test_ssh_public_key_flows_into_created_vms(tmp_path, capsys):
+    pubkey = tmp_path / "controller-ssh.pub"
+    pubkey.write_text("ssh-ed25519 AAAAtest controller\n")
+    config_dir = tmp_path / "instances"
+    run(
+        ["--dry-run", "--config-dir", str(config_dir),
+         "--ssh-public-key", str(pubkey), "host", "create", "sandbox-0"],
+        capsys,
+    )
+    meta_data = (config_dir / "sandbox-0-meta-data").read_text()
+    assert "ssh-ed25519 AAAAtest controller" in meta_data
+
+
+def test_ssh_public_key_defaults_to_a_host_local_path():
+    """Not /data/... — /data lives on the controller, a different machine
+    from the host this command runs on (docs/design.md's host/controller
+    split). See grain/adapter/libvirt.py's LibvirtAdapter default.
+    """
+    args = build_parser().parse_args(["--dry-run", "host", "status"])
+    assert args.ssh_public_key == "/var/lib/grain/controller-ssh.pub"
+    assert not args.ssh_public_key.startswith("/data")
+
+
 def test_missing_tool_raises_a_legible_error_when_check_is_on():
     from grain.run import CommandError, RealRunner
 

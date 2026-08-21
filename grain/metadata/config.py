@@ -78,10 +78,10 @@ class MetadataConfig:
     # "Secrets on /data".
     key_path: Path = Path("/data/secrets/gcp-service-account.json")
     binary: str = "gce_metadata_server"
-    # System user each instance runs as. provision/controller.sh
-    # (docs/roadmap.md item 3, not yet written) is expected to create it
-    # with read access to key_path and nothing else -- the same
-    # secrets-permission care the git proxy's credential files get.
+    # System user each instance runs as. provision/controller.sh creates
+    # it (docs/roadmap.md item 3); an operator placing key_path by hand
+    # still has to chown it to this user -- see provision/controller.sh's
+    # own comments on /data/secrets' permissions, and docs/runbook.md.
     metadata_user: str = "grain-metadata"
 
     @classmethod

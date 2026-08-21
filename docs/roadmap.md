@@ -67,27 +67,60 @@ GitHub repo/credential (item 8) and full sandbox provisioning (item 3).
 
 ## 3. A provisioned controller VM
 
-- [ ] Done
+- [x] Done
 
-There is no `provision/controller.sh` or equivalent, and no `/data` disk
-layout actually created anywhere — `grain/automation/`'s config/secrets/
-state paths have only been exercised against ad-hoc directories during
-testing. Build the controller's own provisioning script and CLI wiring
-(mirroring `provision/sandbox.sh` and `grain host create`), including the
-controller SSH keypair generation step (`ssh-keygen` at
-`/data/secrets/controller-ssh`) that's currently a manual, undocumented
-prerequisite for `libvirt.py`'s `ssh_public_key_path`.
+`provision/controller.sh` now exists, mirroring `provision/sandbox.sh`'s
+shape (a raw shebang script, delivered as NoCloud cloud-init user-data).
+Verified live: `tests/test_controller_integration.py` boots a real
+controller VM via `LibvirtAdapter` with this script as its user-data and
+checks the guest, not just the script's syntax — Python 3.11+ present,
+`/data/{secrets,config,state}` created with the layout
+`grain/automation`/`grain/proxy`/`grain/metadata` already expect, the
+`grain-metadata` system user exists, `gce_metadata_server` is installed and
+runs, `/opt/grain` exists, and the `grain-automation`/`grain-git-proxy`
+systemd units are installed but correctly *not* enabled yet.
+`tests/test_provision_controller.py` covers the script's content and
+`bash -n` syntax without paying the boot cost, and pins its paths against
+the real Python defaults (`AutomationConfig.ssh_key_path`,
+`MetadataConfig.key_path`/`metadata_user`) so they can't silently drift.
 
-Item 2 narrowed this slightly, worth noting so it isn't rediscovered: sandbox
-git-proxy token *minting and distribution* (`grain/proxy/tokens.py`'s
-`SandboxTokenStore`, wired into `core.py`'s dispatch path) is now done — a
-sandbox without a token yet gets one on its first dispatch, delivered over
-the same SSH channel `dispatch.py` already used. That consumes the
-controller SSH key this item's still-missing keypair-generation step is
-about, but doesn't create it — the controller SSH keypair itself
-(`ssh-keygen` at `/data/secrets/controller-ssh`) is still a manual,
-undocumented prerequisite, same as everything else this item scoped: the
-controller VM, its provisioning script, and its `/data` disk layout.
+**The controller SSH keypair generation step is scripted**, resolving the
+open design question this item flagged: generated *on the controller*, by
+`provision/controller.sh`, idempotently, at
+`/data/secrets/controller-ssh{,.pub}`. This is a real host/controller data-
+flow question, not a detail — the host (running `LibvirtAdapter`, which
+embeds the *public* half into a new VM's cloud-init as an authorized key)
+and the controller (which now generates the keypair and holds the private
+half for `dispatch()`/`SshRunner`) are different machines
+(`docs/design.md`, "One host machine runs everything"). No script running
+on either side alone can close that gap — carrying the public key across
+it is now the one genuinely irreducible manual step, documented as step 5
+of `docs/runbook.md`'s first-time setup checklist. `LibvirtAdapter`'s
+`ssh_public_key_path` default moved accordingly, from
+`/data/secrets/controller-ssh.pub` (which only ever worked because this
+dev environment collapses host and controller into one machine) to
+`/var/lib/grain/controller-ssh.pub` — host-local, matching `config_dir`'s
+existing convention — with a new `--ssh-public-key` CLI flag to point it
+at wherever the copy lands.
+
+**CLI wiring**: `grain host create controller --provision
+provision/controller.sh` already worked mechanically (`_targets` resolves
+`controller` to just that one VM), so no new subcommand was needed — but
+`grain host create all --provision <script>` would have silently applied
+one script to both roles, which is wrong now that they differ. `create`/
+`recreate` reject that combination with a message pointing at running
+`controller` and `sandboxes` separately.
+
+**Deliberately still manual**, and documented as such rather than
+papered over: deploying this repo's own code to the controller's
+`/opt/grain` (no third-party dependencies to install — `pyproject.toml` is
+stdlib-only — but the source itself needs a deploy credential this
+project's own "no secret is ever baked into an image or a provisioning
+script" invariant rules out putting in `provision/controller.sh`), and
+enabling the `grain-automation`/`grain-git-proxy` systemd units once real
+credentials exist under `/data`. Both are steps 7 and 12 of
+`docs/runbook.md`'s first-time setup checklist now, not undocumented
+assumptions.
 
 ## 4. GCP metadata server
 
@@ -136,10 +169,13 @@ token mint succeeding end to end (impersonation calls
 IAM bindings to a real narrow service account) — exercised locally only
 with a syntactically-valid but fake key, which fails at the expected
 point (a parse error on the key, logged and forwarded to the audit log
-exactly as a real permission failure would be). Also not exercised: the
-`--uid=grain-metadata` system user and `provision/controller.sh` itself,
-since neither exists yet (item 3, still open) — the launcher assumes both
-and documents that assumption in `metadata/config.py`.
+exactly as a real permission failure would be). The `--uid=grain-metadata`
+system user and `provision/controller.sh` itself now exist (item 3) and
+`tests/test_controller_integration.py` confirms the user and the
+`gce_metadata_server` binary land on a real controller VM — what's still
+not exercised, for the same "no real GCP project" reason as the token mint
+above, is `MetadataLauncher.start()` actually running against that real
+user/binary pair on a real controller.
 
 ## 5. Lifecycle scripts
 
