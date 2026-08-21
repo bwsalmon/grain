@@ -6,9 +6,11 @@ Revision 4. Rewritten for a **macOS host on Intel hardware** (8 cores,
 32 GB) after revisions 1–3 targeted a NixOS host using
 [`microvm.nix`](https://github.com/microvm-nix/microvm.nix).
 
-Sandboxes are **long-lived rather than reset per task** — a deliberate
-simplification that removes the lease service revision 4 had made
-mandatory. What it trades away is isolation between *sequential* tasks; see
+Two deliberate simplifications since: sandboxes are **long-lived rather
+than reset per task**, which removes the lease service revision 4 had made
+mandatory; and the guests are **Debian rather than NixOS**, which removes
+the Linux builder and the `nix-ld` shim, and lets agents work in an
+environment their training data actually matches. What it trades away is isolation between *sequential* tasks; see
 [what it costs](#what-it-costs).
 
 The security architecture, the GitHub and GCP credential models, the
@@ -56,13 +58,11 @@ these are stated with what was actually verified.
 | Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — [no provisioning API to build](#openhands-integration) |
 | Issue intake | **[`OpenHands/automation`](#issue-intake)** — cron triggers and filter expressions |
 | GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
-| Sandbox VMs | **[Lima](#the-sandbox-vms) + [nixos-lima](https://github.com/nixos-lima/nixos-lima)** — NixOS guests on macOS |
-| Building Linux closures | **[nix-darwin `linux-builder`](#building-linux-on-a-mac)** |
-| Host configuration | **nix-darwin** |
+| Sandbox VMs | **[Lima](#the-sandbox-vms) + stock Debian guests** |
+| Host configuration | **nix-darwin** — Nix where config is stable, Debian where it is disposable |
 | Git access control | **Custom** — small smart-HTTP proxy; [FINOS Git Proxy evaluated and rejected](#the-git-proxy-write-it) |
 | GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
 | Branch and workflow protection | **[GitHub rulesets and withheld scopes](#scopes-to-withhold)** — enforced server-side |
-| Dynamic binaries in guests | **[`nix-ld`](#nix-ld-the-nixos-specific-trap)** |
 
 ### What is left to write
 
@@ -87,12 +87,11 @@ flowchart TB
         proxy["Git proxy<br/>(allowlist + creds + audit)"]
         mds["gce_metadata_server<br/>(one per sandbox)"]
         secrets[("~/.grain/secrets<br/>credential set, GCP key<br/>FileVault at rest")]
-        builder["linux-builder VM<br/>(build only, stopped when idle)"]
     end
 
     subgraph vmnet["vmnet shared network 192.168.105.0/24"]
-        sb0["sandbox-0 (NixOS VM)<br/>agent-server · docker · kind"]
-        sb1["sandbox-1 (NixOS VM)<br/>agent-server · docker · kind"]
+        sb0["sandbox-0 (Debian VM)<br/>agent-server · docker · kind"]
+        sb1["sandbox-1 (Debian VM)<br/>agent-server · docker · kind"]
     end
 
     canvas -->|"conversations"| sb0
@@ -148,35 +147,63 @@ they need no nested virtualization at all. Only microvm.nix did.
 ### The sandbox VMs
 
 [Lima](https://lima-vm.io) manages them. On Intel it uses QEMU with the HVF
-accelerator, which is the native macOS path. Guests are NixOS, via
-[nixos-lima](https://github.com/nixos-lima/nixos-lima), which builds
-Lima-compatible NixOS images — so the entire sandbox guest configuration
-from the Linux design carries over as a NixOS module.
+accelerator, which is the native macOS path. **Guests are Debian**, from
+Lima's stock template.
 
-Two things to verify early, both flagged in
-[open questions](#open-questions): nixos-lima is written primarily for
-`aarch64` guests on Apple Silicon hosts, so **x86_64 support needs
-confirming**; and Lima's networking must give VMs addresses the host and
+Revision 4 specified NixOS guests, for consistency with the host. That was
+the wrong instinct, and the tell was in the design itself: a whole section
+existed to explain NixOS's peculiarities *to the agent* — no `apt`, use
+`nix shell`, and a `nix-ld` shim so downloaded binaries would run at all.
+When a platform choice needs a README aimed at the thing using it, it is
+the wrong choice for that layer.
+
+Debian is the better fit here for reasons that compound:
+
+- **`apt-get install` works.** This was the single likeliest thing to waste
+  agent turns, and most agent training data assumes Debian. Now it is
+  right.
+- **No `nix-ld` shim.** Debian is FHS, so a downloaded release tarball, a
+  `pip` wheel with a native extension, or a `curl | sh` installer simply
+  runs. An entire class of opaque failure disappears.
+- **Docker and `kind` are the documented path** — official apt repo, stock
+  kernel, and every tutorial the agent has read matches what it finds.
+- **`openhands-agent-server` installs the way upstream installs it**:
+  `uvx --from openhands-agent-server==1.42.1 …`, which is exactly what
+  upstream's own launcher runs. On NixOS that same command needs `nix-ld`
+  to load its wheels.
+- **It removes the Linux builder entirely** — see below.
+
+Nix keeps the job it is good at: the **host**, which is long-lived, stable,
+and worth configuring exactly. It gives up the job it is bad at: a
+disposable machine that an agent is supposed to feel at home in.
+
+The base image is built by a **version-controlled provisioning script** —
+Lima `provision` blocks in the instance template, kept in this repo. That
+is weaker than a Nix derivation, and honestly so: rebuilding the base in
+six months yields whatever the Debian archive holds then. Pin the point
+release, and reach for `snapshot.debian.org` if reproducibility ever
+matters more than convenience. For a sandbox an agent immediately mutates
+anyway, it mostly does not.
+
+Still to verify: Lima's networking must give VMs addresses the host and
 each other can reach, which means `socket_vmnet` shared mode rather than
-the default user-mode NAT.
+the default user-mode NAT. See [open questions](#open-questions).
 
-If nixos-lima does not work out on Intel, the fallback is to build a NixOS
-qcow2 with [`nixos-generators`](https://github.com/nix-community/nixos-generators)
-and drive QEMU directly. That loses Lima's conveniences and costs some
-scripting, but nothing architectural — the guest configuration is the same
-either way, and VM lifecycle is already a script rather than a service.
+### No Linux builder needed
 
-### Building Linux on a Mac
+Revision 4 required nix-darwin's `nix.linux-builder`: an Intel Mac is
+`x86_64-darwin`, the NixOS guest images were `x86_64-linux`, and Nix cannot
+cross that boundary natively. It cost a VM, 4–6 GB while building, and a
+build path documented as slow.
 
-An Intel Mac is `x86_64-darwin`; the sandbox images are `x86_64-linux`. Nix
-cannot cross that boundary natively, so a Linux builder is required.
-nix-darwin's `nix.linux-builder` provides one — a small NixOS VM registered
-as a remote builder, with `systems = [ "x86_64-linux" ]` on Intel.
+With Debian guests there is **nothing to cross-build**. Every orchestrator
+service runs natively on macOS — Agent Canvas is Node, the Automation
+Service is Python, `gce_metadata_server` is Go, and the git proxy is ours
+to write in whatever builds for Darwin. The guests are provisioned from
+Debian packages, not Nix closures.
 
-Two practical notes. It is documented as slow at default settings, so give
-it cores and memory deliberately. And it is a **build-time** dependency
-only: stop it during normal operation, which matters because it is
-competing for the same 32 GB as the sandboxes.
+So the builder VM, its memory contention, and its open question all
+disappear. This is the largest single simplification in the revision.
 
 ### Networking
 
@@ -385,11 +412,12 @@ enough to state exactly.
 |---|---|
 | macOS itself | ~8 GB |
 | Orchestrator services (Canvas, Automation, proxy, metadata servers) | ~3 GB |
-| `linux-builder` | 4–6 GB **while building**; stopped otherwise |
 | Each sandbox (kind control plane + build + test) | ~8 GB |
 
-`32 − 8 − 3 ≈ 21 GB` → **two concurrent agents**, three only if the laptop
-is doing nothing else and the sandboxes are lightly loaded. `sandboxCount`
+`32 − 8 − 3 ≈ 21 GB` → **two concurrent agents**, with more headroom than
+revision 4 had, since dropping the Linux builder removed a VM that took
+4–6 GB whenever anything was built. Three agents only if the laptop is
+doing nothing else and the sandboxes are lightly loaded. `sandboxCount`
 should be derived from that arithmetic, not from how many issues you would
 like worked at once.
 
@@ -412,107 +440,87 @@ no second use for.
 
 ## The sandbox image
 
-Because each lease starts from a pristine image, whatever an agent needs
-must be *in the image* or re-installed every task. Making the image easy to
-shape is what keeps agents from re-solving environment setup on every run.
+Because each sandbox is [recreated from a pristine base](#recreating-a-sandbox),
+whatever agents need should be *in the base image* rather than reinstalled
+per task. Shaping it is a provisioning script in this repo, applied by
+Lima:
 
-```nix
-grain.sandbox = {
-  extraPackages = with pkgs; [ go terraform postgresql ];
-  extraConfig = { pkgs, ... }: {          # escape hatch
-    services.redis.servers."".enable = true;
-    environment.variables.GOFLAGS = "-mod=vendor";
-  };
-};
+```yaml
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        git curl jq ripgrep fd-find build-essential python3 python3-venv \
+        pipx tmux unzip ca-certificates
+      # Docker from the official repo, plus kind
+      install -m0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc
+      ...
 ```
 
-`extraConfig` matters more than it looks: "what's pre-installed" becomes "a
-service the test suite needs" or "an env var the build wants" quickly, and
-without a raw-module hatch each becomes a change to this repo instead of
-the deployment's config.
+Keep the package list in one place so "what agents get" is a single
+reviewable diff. `tmux` is not optional —
+[the agent server hard-requires it](#openhands-integration).
 
-Default set: `git`, `openssh`, `cacert`, `curl`, `jq`, `ripgrep`, `fd`,
-coreutils, `gnutar`/`gzip`/`unzip`, `gnumake`, `gcc`, `python3` with `uv`,
-`nodejs` with `pnpm` — plus `tmux`, which
-[the agent server hard-requires](#openhands-integration).
-
-### nix-ld: the NixOS-specific trap
-
-NixOS has no FHS library paths, so a downloaded dynamically-linked binary —
-a release tarball, a `pip` wheel with a native extension, a `curl | sh`
-installer — fails with `cannot execute: required file not found`. That
-error is opaque, agents burn turns on it, and it looks like a broken
-sandbox rather than a platform difference.
-
-Enable [`nix-ld`](https://github.com/nix-community/nix-ld) with a generous
-library set. This is invisible until agents are running, and then it
-accounts for a surprising share of their failures.
-
-### Can an agent install packages at runtime?
-
-Mostly yes, and the answer needs stating precisely because NixOS changes
-it.
-
-**Works normally:** `uv`/`pip` into a venv, `pnpm install`, `cargo`, `go`
-modules, building from source, and — thanks to `nix-ld` — downloaded
-binaries.
-
-**Does not work, and will be tried anyway:** `apt-get install`. There is no
-system package manager on NixOS and much agent training data assumes
-Debian. No design prevents the first attempt; only
-[telling the agent](#telling-the-agent) does.
-
-**In-guest `nix` needs a writable store.** A read-only store would leave
-the agent with neither `apt` nor `nix`. Give the guest a normal writable
-Nix store — on a full VM this is just the disk, which is one incidental
-simplification over the microVM design's overlay arrangement.
-
-Small friction removers, all in the sandbox module: point `npm` and `pip`
-global prefixes at `$HOME` so `npm install -g` behaves as expected;
-passwordless sudo, safe precisely because the VM is disposable and the
-boundary is the VM rather than the unix user.
-
-### Docker and kind inside sandboxes
+### Docker and kind
 
 Since [agents cannot run in containers](#why-a-vm-per-agent), the sandbox
-must host `docker` and `kind` comfortably. In a full Linux VM this is
-ordinary, and the kernel question that dominated the Linux design is
-largely settled: a NixOS VM runs nixpkgs' stock kernel, whose config
-carries `OVERLAY_FS`, `BRIDGE_NETFILTER`, `VETH`, `NF_CONNTRACK`, `NF_NAT`,
-every namespace symbol and cgroup v2. (One caveat found by inspection: the
-legacy `IP_NF_FILTER`/`IP_NF_NAT`/`IP_NF_TARGET_MASQUERADE` symbols are
-absent while the `nf_tables` stack is present, so anything expecting legacy
-iptables needs the nftables backend.)
+has to host `docker` and `kind` comfortably. On Debian in a full VM this is
+the ordinary, documented path: the official Docker apt repository, the
+stock Debian kernel, and no kernel-config question at all — which is what
+dominated the Linux design's risk and is now simply gone.
+
+Two things still need doing, and both are easy to miss:
 
 **Raise the inotify limits.** kind's own guidance is explicit that common
 defaults (8192 watches, 128 instances) cannot bring up a cluster, and the
 failures are opaque — `too many open files`, `failed to create fsnotify
 watcher` — and look nothing like their cause:
 
-```nix
-boot.kernel.sysctl = {
-  "fs.inotify.max_user_watches"   = 524288;
-  "fs.inotify.max_user_instances" = 8192;
-};
+```
+fs.inotify.max_user_watches   = 524288
+fs.inotify.max_user_instances = 8192
 ```
 
-**Pre-load images into the base image.** A kind node image is on the order
-of a gigabyte, and every [recreate](#recreating-a-sandbox) discards it, so
-a naive setup re-pulls it each time. Bake what the workload needs into the
-pristine base and `docker load` at boot — that also means the between-task
-`docker system prune` costs nothing to re-fetch.
+**Pre-load the kind node image** into the base. It is on the order of a
+gigabyte, and both [recreate](#recreating-a-sandbox) and the between-task
+`docker system prune` discard it — so `docker pull` it during provisioning
+and `docker save`/`docker load` it, or accept re-pulling on every cleanup.
+
+Also: passwordless sudo, safe precisely because the VM is disposable and
+the boundary is the VM rather than the unix user.
+
+### Runtime installs
+
+This section used to be long. On Debian it is short: **everything works the
+way an agent expects.** `apt-get install`, `pip`, `npm -g`, `cargo`,
+downloaded binaries, `curl | sh` installers — all of it behaves as the
+agent's training data assumes.
+
+The one thing to keep from the NixOS version is the feedback loop: when
+agents repeatedly install the same package by hand, add it to the
+provisioning script. Cheap to fix, and it silently taxes every run until
+you do.
 
 ### Telling the agent
 
-Ship a short `/etc/agent-tools/README`, referenced from the OpenHands
-system prompt: no `apt`, use `nix shell nixpkgs#pkg`; project-local package
-managers work normally; downloaded binaries work; git pushes go through the
-proxy automatically and GitHub API calls are not available here; GCP works
-through ADC with no setup; everything outside the repo is discarded at task
-end.
+Still worth a short `/etc/agent-tools/README`, referenced from the
+OpenHands system prompt — but it is now about *this system*, not about the
+operating system:
 
-Cheap, and disproportionately effective — the failure it prevents is an
-agent concluding the sandbox is broken and working around it.
+- git pushes go through a proxy automatically; GitHub API calls are not
+  available from here,
+- GCP works through ADC with no setup,
+- the sandbox is shared across tasks and cleaned between them, so do not
+  leave long-running services behind.
+
+The NixOS version of this file also had to explain that `apt` did not
+exist and that downloaded binaries needed a shim. Not needing to say that
+is the point.
 
 ## Why a VM per agent
 
@@ -877,8 +885,6 @@ fails late and confusingly.
 - **Two concurrent agents.** Derive `sandboxCount` from
   [the memory budget](#memory-budget), and alarm on pool exhaustion — with
   a pool this small it is a routine condition, not an edge case.
-- **Stop `linux-builder` when not building.** It competes directly with a
-  sandbox for RAM.
 - **Backup** is `~/.grain` — the only stateful thing. Time Machine or
   `rsync`; FileVault covers at-rest.
 - **Rotation**: replace a file in `~/.grain/secrets` and restart the one
@@ -916,6 +922,7 @@ per agent.
 | Boot | ~1s microVM | tens of seconds |
 | Store | one read-only host store shared by all guests | per-VM store; more disk |
 | Memory reclaim | virtio-mem free page reporting, KSM | neither |
+| Guest OS | NixOS, declarative, shared host store | Debian, provisioning script |
 | Orchestrator isolation | its own minimal NixOS VM | native on macOS |
 | Reproducibility | one flake, whole cluster | nix-darwin + guest flakes + Lima config |
 
@@ -929,12 +936,9 @@ Fusion with VT-x passthrough.
 
 ## Open questions
 
-1. **Does nixos-lima work for x86_64 guests on an Intel host?** It is
-   written primarily for `aarch64` guests on Apple Silicon. If not, fall
-   back to `nixos-generators` plus direct QEMU — no architectural change,
-   some scripting.
-2. **Does `socket_vmnet` give VM↔VM and VM↔host reachability** with stable
-   enough addressing for the proxy and per-sandbox metadata servers?
+1. **Does `socket_vmnet` give VM↔VM and VM↔host reachability** with stable
+   enough addressing for the proxy and per-sandbox metadata servers? This
+   is now the only host-layer unknown.
 3. **Does Agent Canvas distribute conversations across backends**, or does
    it expect a human to pick one? At a pool of two, picking by hand is
    fine — but if orchestration is needed, a small assigner is the one piece
@@ -951,11 +955,10 @@ Fusion with VT-x passthrough.
 
 ## Implementation plan
 
-1. **Host baseline**: nix-darwin managing the Mac; `linux-builder` enabled
-   with `x86_64-linux` and enough cores and memory to be usable.
-2. **One sandbox VM**: NixOS guest under Lima with docker and kind. Answers
-   open questions 1 and 2 — and if either fails, that is known before
-   anything is built on top. Confirm `kind create cluster` works, and
+1. **Host baseline**: nix-darwin managing the Mac and the orchestrator
+   services. No Linux builder needed.
+2. **One sandbox VM**: Debian guest under Lima with docker and kind, from
+   the provisioning script. Confirm `kind create cluster` works, and
    measure peak memory and boot time while there.
 3. **Networking**: `socket_vmnet`, services bound to the vmnet address
    only, `pf` denying those ports on physical interfaces. Verify the
@@ -992,10 +995,8 @@ ceiling.
   rejected for this role, but worth reading for `validGitRequest()` and its
   git-protocol error encoding
 - [`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
-- [Lima](https://lima-vm.io), [nixos-lima](https://github.com/nixos-lima/nixos-lima),
-  [nixos-generators](https://github.com/nix-community/nixos-generators)
-- [nix-darwin `linux-builder`](https://github.com/nix-darwin/nix-darwin/blob/master/modules/nix/linux-builder.nix)
-- [`nix-ld`](https://github.com/nix-community/nix-ld)
+- [Lima](https://lima-vm.io)
+- [nix-darwin](https://github.com/nix-darwin/nix-darwin) — host configuration
 - [GCP downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
 - [microvm.nix](https://github.com/microvm-nix/microvm.nix) — the Linux
   design's foundation, retained in the repo's spike artifacts
