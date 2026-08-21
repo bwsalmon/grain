@@ -1,5 +1,7 @@
 {
-  description = "Agent cluster — spike 0: can a microVM guest run docker and kind?";
+  # SUPERSEDED AS THE PRIMARY PATH — see docs/design.md. Retained for a
+  # future Linux host, or to validate the Linux design under nested virt.
+  description = "Agent cluster — spike 0 (Linux path): microVM guest with docker and kind";
 
   inputs = {
     # Deliberately unstable for the spike; pin to a stable release

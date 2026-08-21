@@ -1,3 +1,8 @@
+# SUPERSEDED AS THE PRIMARY PATH: the design now targets a macOS host on
+# Intel (see docs/design.md); microvm.nix requires KVM, which macOS lacks.
+# Retained deliberately — this evaluates cleanly and remains the fastest
+# route to a Linux deployment later. See docs/spike-0.md.
+#
 # Spike 0 host: one sandbox microVM, nothing else.
 #
 # Purpose: answer open question 1 from docs/design.md — does a microvm.nix
