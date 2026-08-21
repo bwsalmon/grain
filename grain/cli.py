@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from .adapter.base import EgressMode, VmState
-from .adapter.lima import LimaAdapter
+from .adapter.libvirt import LibvirtAdapter
 from .adapter.net_linux import LinuxNetwork, render_host_input_rules, render_ruleset
 from .inventory import Cluster
 from .run import DryRunRunner, RealRunner, Runner
@@ -28,10 +28,12 @@ def build_cluster(args: argparse.Namespace) -> Cluster:
 
 
 def build_adapter(cluster: Cluster, runner: Runner, args: argparse.Namespace):
-    # Only a Linux adapter exists today. A darwin one implements the same
-    # interface with socket_vmnet and pf; see docs/design.md.
+    # libvirt, not Lima: `networks[].lima` (the mechanism lima.py needed) is
+    # macOS-only, verified against Lima 2.2.0. A darwin adapter still
+    # implements the same interface, with socket_vmnet and pf; see
+    # docs/design.md and docs/host-adapter.md.
     network = LinuxNetwork(cluster, runner)
-    return LimaAdapter(cluster, runner, network, config_dir=Path(args.config_dir))
+    return LibvirtAdapter(cluster, runner, network, config_dir=Path(args.config_dir))
 
 
 def cmd_rules(args: argparse.Namespace) -> int:

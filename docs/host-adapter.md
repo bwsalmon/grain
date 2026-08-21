@@ -10,10 +10,59 @@ grain/
   run.py                command execution behind an interface (Real/DryRun/Fake)
   adapter/
     base.py             HostAdapter + Network interfaces, shared types
-    lima.py             VM lifecycle via limactl
+    lima.py             VM lifecycle via limactl — unused on Linux, see below
+    libvirt.py          VM lifecycle via virsh — the Linux driver
     net_linux.py        bridge, nftables ruleset, metadata DNAT
   cli.py                `grain host …`
 ```
+
+## Lima on Linux: verified, and rejected
+
+Open question 1 asked whether Lima could attach a guest to a host bridge
+with a fixed address on Linux. Answer: no, verified against Lima 2.2.0 on
+the target host. `limactl create` rejects the exact `networks: - lima:
+grain` stanza `lima.py` renders:
+
+```
+field `networks[0].lima` is only supported on macOS right now
+```
+
+`limactl network create grain --interface br-grain --mode bridged` happily
+*writes* a network entry — the CLI doesn't validate against the runtime —
+but Lima's bridged/shared/host modes are all implemented via
+`socket_vmnet`, a macOS daemon (its own `networks.yaml` says so: "macOS
+only; ignored on other platforms"). There is no code path that attaches a
+Lima guest to an arbitrary existing Linux bridge with a fixed address.
+
+`libvirt.py` is the replacement, per the design's own contingency. `lima.py`
+is kept but unused on Linux — Lima's bridged mode is real on macOS, so it
+may still serve as that platform's driver.
+
+## The libvirt driver: two things that don't show up in unit tests
+
+Both surfaced only by actually booting a guest — worth recording since nothing
+in the unit tests (which mock the runner) would have caught either:
+
+- **`virsh undefine --remove-all-storage` silently refuses plain files.**
+  It only manages storage-pool volumes; a disk or seed ISO referenced by a
+  bare path is left on disk with an error printed, not deleted. `destroy()`
+  removes the files it created itself instead of relying on that flag.
+- **The NoCloud seed must attach over virtio, not as a SATA/IDE cdrom.**
+  Debian's cloud-optimized kernel has no AHCI/ATA driver at all — a
+  `bus='sata' device='cdrom'` seed is never enumerated, so `blkid` and
+  `ds-identify` see nothing and cloud-init never runs (no `/var/lib/cloud`,
+  no `/var/log/cloud-init.log`, and even the default `debian` user is never
+  created — confirmed by mounting the guest disk offline with `qemu-nbd`
+  after a boot that never found a datasource). Attaching the same seed as a
+  read-only `virtio-blk` disk (`bus='virtio'`) fixes it: cloud-init finds
+  it immediately and configures the assigned static address from
+  `network-config` before the first login prompt appears.
+
+Verified live end-to-end on this host: a real KVM sandbox VM, attached to
+`br-grain` via the exact tap name the firewall's anti-spoofing rules
+expect, comes up at its inventory-assigned address
+(`cloud-init`'s own boot log shows `eth0 10.100.0.10/24`, matching
+`Cluster.address_of("sandbox-0")` exactly) and answers ping from the host.
 
 ## What is verified, and what is not
 
@@ -38,15 +87,19 @@ to a real kernel:
   `stop` are idempotent, and foreign Lima instances on the same host are
   ignored rather than managed.
 
-**Not verified** — no hypervisor was available:
+**Now also verified**, once a hypervisor was available (see above for
+detail): open question 1 (Lima on Linux) came back negative; the `libvirt`
+driver that replaced it has booted a real Debian guest, attached it to
+`br-grain` under its assigned tap name, and confirmed it answers at its
+assigned address — including a full `virsh create → start → destroy` cycle
+with no files left behind.
 
-- **Whether Lima can attach a guest to a host bridge with a fixed address on
-  Linux.** This is [open question 1](design.md#open-questions) and the
-  `networks:` stanza in `lima.py` is marked `UNVERIFIED` in the source. If
-  it cannot, a libvirt driver replaces `lima.py` and nothing else changes —
-  which is the interface earning its keep.
-- Lima's `list --json` field names, and its exact status strings.
-- That a Debian guest comes up on the assigned address at all.
+**Still not verified**:
+
+- Lima's `list --json` field names and status strings — moot on Linux now,
+  but relevant again if `lima.py` becomes the macOS driver.
+- The controller VM and the metadata servers: only a sandbox-shaped VM has
+  been booted so far, not the controller image or its services.
 
 ## Using it
 

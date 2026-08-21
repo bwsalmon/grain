@@ -1012,12 +1012,21 @@ ever becomes worth its cost again.
 
 ## Open questions
 
-1. **Does Lima run well enough on Linux** to be the single VM driver for
-   both platforms — specifically, can it attach a guest to a host bridge
-   with a fixed address? The [adapter](host-adapter.md) is written and
-   tested, but that `networks:` stanza is the one part no test can cover
-   without a hypervisor, and it is marked `UNVERIFIED` in the source. If it
-   cannot, libvirt replaces `lima.py` and nothing else changes.
+1. ~~Does Lima run well enough on Linux~~ **Answered: no.** Verified against
+   Lima 2.2.0 on the target host: `limactl create` rejects the exact
+   `networks: - lima: grain` stanza `lima.py` renders, with `field
+   networks[0].lima is only supported on macOS right now`. Lima's
+   bridged/shared/host network modes all depend on `socket_vmnet`, a macOS
+   daemon; there is no Linux path that attaches a guest to an arbitrary host
+   bridge with a fixed address. `libvirt.py` is the replacement the design
+   already named, and it is now written, unit-tested, and verified live on
+   this host: a real KVM guest, attached to `br-grain` via the exact tap
+   name (`gr-sb0`) the firewall's anti-spoofing rules expect, comes up with
+   the cloud-init-assigned static address (`10.100.0.10`, matching the
+   inventory exactly) and answers ping from the host. Two bugs surfaced and
+   were fixed in the process — see [host-adapter.md](host-adapter.md) for
+   both. `lima.py` is kept, unused for now: Lima's bridged mode is real on
+   macOS, so it may still serve as that platform's driver.
 2. **Does 4 vCPU hold two sandboxes plus a controller** under real `kind`
    workloads? This inverts earlier revisions: memory was the binding
    resource, and here it probably is not.
@@ -1044,15 +1053,18 @@ ever becomes worth its cost again.
 
 ## Implementation plan
 
-1. **Host baseline**: GCP `n2-highmem-4`, Debian, nested virtualization
-   enabled, KVM confirmed (`ls /dev/kvm`), 300 GB disk, serial console on.
-2. **Host adapter, first cut** — *interface and Linux implementation
-   written; see [notes](host-adapter.md)*. What remains is running it: bring
-   up one Debian VM and reach it, which answers open question 1.
-3. **Networking** — *ruleset written, tested against a real kernel, and
-   verified for the negative cases*. What remains is confirming the
-   reachability matrix with actual VMs on the bridge, since a ruleset the
-   kernel accepts is not yet a ruleset that does what you meant.
+1. **Host baseline** — *done, on the dev/test host*: Debian, nested
+   virtualization enabled, KVM confirmed (`/dev/kvm` present), matches the
+   `n2-highmem-4` shape (4 vCPU, 32 GB).
+2. **Host adapter, first cut** — *done*: interface, Linux networking, and
+   now a working VM driver (`libvirt.py`, since Lima answered open question
+   1 negatively — see [notes](host-adapter.md)). A real sandbox VM has been
+   created, started, reached at its assigned address, and destroyed
+   end-to-end on this host.
+3. **Networking** — *done*: ruleset written, tested against a real kernel,
+   verified for the negative cases, and now also confirmed against a real
+   VM on the bridge — the reachability matrix (host ↔ sandbox at the
+   assigned address) matches what the ruleset intends.
 4. **Sandbox image**: the provisioning script, `docker`, `kind`. Confirm
    `kind create cluster` works and measure peak CPU and memory. Open
    question 2 is answered here, and it may change `sandboxCount` or the
