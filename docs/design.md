@@ -1119,6 +1119,24 @@ the identity model and the lease service become a **package deal**. The
 lease service stops being the optional component described above and
 becomes mandatory.
 
+The credential is a random **per-lease bearer token**, not an SSH key —
+both consumers speak HTTP, and an SSH endpoint would cover only the git
+side and would mean brokering `git-upload-pack`/`git-receive-pack` instead
+of the smart-HTTP passthrough. Git consumes it through a credential helper
+so agents never handle it. It rotates for free, dying with the lease, and
+exfiltration is low-impact since the token is only useful against an
+address that isn't routable from outside the host.
+
+**The GCP path does not fall back the same way**, which is easy to miss.
+The metadata server is authenticated *by network position* — that is what
+makes ADC work with no client configuration — and Google's client libraries
+will not attach a custom bearer header to metadata requests. So a token
+cannot simply be handed to ADC. Either run **one metadata server instance
+per sandbox**, bound to that VM's interface so network position is per-VM by
+construction, or accept the loss: every sandbox holds identical GCP
+permissions (the single narrow impersonated account), so what goes is audit
+attribution and per-caller rate limiting, not access control.
+
 ## Admin access
 
 - A dedicated `admin` user (not root) on the orchestrator, with sudo.
