@@ -55,8 +55,8 @@ these are stated with what was actually verified.
 
 | Need | Approach |
 |---|---|
-| Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — [no provisioning API to build](#openhands-integration). [Claude Code is a live alternative](#alternative-agent-runtime-claude-code) |
-| Issue intake | **[`OpenHands/automation`](#issue-intake)** — cron triggers and filter expressions |
+| Agent execution | **Claude Code** (`claude -p`) in the sandbox VM — [decided over `openhands-agent-server`/Agent Canvas](#agent-runtime-claude-code-not-openhands) to avoid that stack's version-pin matrix; the OpenHands research is kept, not deleted — [see why](#openhands-integration) |
+| Issue intake | **[`grain/automation/`](#issue-intake)** — this repo's own poll/dispatch/rate-limit/sweep loop, cron-invoked |
 | GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
 | VM lifecycle | **[Lima](#the-host-adapter)**, which runs on both Linux and macOS — libvirt is the Linux-native fallback |
 | Guest OS | **stock Debian**, provisioned by a script in this repo |
@@ -735,9 +735,10 @@ refused client just prints *"the remote end hung up unexpectedly"*.
 
 ### Issue intake
 
-`openhands-resolver` no longer exists; it was deleted in the V0→V1
-transition. Its successor is **`OpenHands/automation`**, with a cron
-scheduler, webhook triggers, filter expressions and run history.
+Polling, not `OpenHands/automation` — see
+[Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
+`grain/automation/core.py` is the loop; `grain automation run-once`,
+invoked by a systemd timer, is what actually runs it.
 
 **Use cron, not webhooks.** Webhooks would require GitHub to reach the
 controller, and the only inbound port on this host is SSH — deliberately.
@@ -745,8 +746,9 @@ Polling keeps the system closed to inbound traffic and keeps every GitHub
 call flowing outward through our own credential path. It also survives the
 instance being stopped overnight, which webhooks would not.
 
-What remains ours, because it is about protecting a two-VM pool and the LLM
-budget rather than issue semantics:
+What was always going to be ours regardless of the runtime decision,
+because it is about protecting a two-VM pool and the LLM budget rather
+than issue semantics — both built, in `ratelimit.py` and `sweeper.py`:
 
 - **Rate limiting** — a cap on runs started per hour, so bulk-labelling
   forty issues cannot consume the pool and a month of spend at once.
@@ -754,10 +756,13 @@ budget rather than issue semantics:
   mid-flight, issues need returning to the queue rather than stalling
   silently.
 
-One caution carried forward: the old resolver embedded the GitHub token
-directly in the clone URL, so it landed in `.git/config` inside the
-sandbox. If anything in the new stack does the same it silently defeats the
-split surface. Verify what ends up in the sandbox's `origin` remote.
+One caution that mattered before and still does: the old
+`openhands-resolver` embedded the GitHub token directly in the clone URL,
+landing it in `.git/config` inside the sandbox — exactly what would defeat
+the split surface. `dispatch()` never touches the sandbox's `origin`
+remote, so this shouldn't recur, but it hasn't been checked against a
+sandbox with a real git remote configured — worth confirming before the
+first live issue-to-PR run (`docs/roadmap.md`).
 
 ## GCP credentials
 
@@ -800,6 +805,12 @@ one service account and one IAM binding. Optionally add a
 to restrict to specific resources.
 
 ## OpenHands integration
+
+Superseded as the plan of record by
+[Claude Code](#agent-runtime-claude-code-not-openhands) — kept here rather
+than deleted, per this document's own policy elsewhere of recording the
+reasoning because it's the expensive part; revisiting OpenHands later would
+need this research again.
 
 The architecture described in revisions 1–2 no longer exists. Verified
 against the repositories:
@@ -866,24 +877,28 @@ fails late and confusingly.
   compose — independent confirmation that running docker inside the sandbox
   is the expected shape.
 
-## Alternative agent runtime: Claude Code
+## Agent runtime: Claude Code, not OpenHands
 
-Not decided. The plan of record is `openhands-agent-server` per sandbox,
-but Claude Code running in the sandbox is a live option, and the findings
-below are worth recording while they are cheap.
+**Decided.** `grain/automation/` is built against Claude Code running in
+the sandbox, not `openhands-agent-server`/Agent Canvas — the OpenHands
+integration above is what this design *isn't* doing, kept for the same
+reason the rest of that section stays rather than getting deleted. The
+deciding factor: given how much churn upstream's own V0 → V1 → Canvas
+transition already caused this design, trading Agent Canvas,
+`openhands-agent-server`, and the Automation Service's version-pin matrix
+for a dispatch loop this repo owns and can actually read outweighed raw
+feature parity.
 
-**What it would replace:** Agent Canvas, `openhands-agent-server`, the
-Automation Service, and the version-pin matrix between them — with
-`claude -p` and a small dispatch loop. Given how much churn upstream's
-V0 → V1 → Canvas transition already caused this design, that is not a
-small consideration.
-
-**What it would cost:** issue intake becomes ours again. The Automation
-Service is what currently supplies cron triggers, filter expressions and
-run history; dropping OpenHands drops that too. The replacement is a
-controller-side loop — poll labelled issues through the credential the
-controller already holds, dispatch to a free sandbox, move labels — which
-is genuinely small, but it is code we would own.
+**What it cost:** issue intake, which the Automation Service otherwise
+supplies — cron triggers, filter expressions, run history. The
+replacement, `grain/automation/` (`github.py`, `ssh.py`, `dispatch.py`,
+`state.py`, `ratelimit.py`, `sweeper.py`, `core.py`): poll labelled issues
+through the credential the controller already holds, dispatch to a free
+sandbox as a `systemd` unit, rate-limit and sweep stranded or finished
+work, move labels to match. Genuinely small — the module list fits in one
+sentence — but it is code this repo now owns and has to keep working. PR
+and comment creation once a run finishes is not yet part of it; see
+`docs/roadmap.md`.
 
 **Two things matter specifically because the agent runs in a sandbox that
 clones repositories:**
@@ -979,10 +994,59 @@ exfiltrate the credential) needs a real login credential in a test sandbox,
 which wasn't done here — everything above verifies the underlying
 mechanisms independently, which is strong evidence but not the same claim.
 
-**Nothing built so far depends on the answer.** The
-[host adapter](host-adapter.md) is agent-agnostic — it manages VMs and a
-network, and neither cares what runs inside. The choice only starts to bind
-when the controller is built.
+### Dispatch mechanism: what only showed up by actually running it
+
+`grain/automation/ssh.py` and `dispatch.py` reasoned through the
+controller→sandbox path carefully before any of it ran against a real VM;
+live-testing against one anyway (`tests/test_vm_integration.py`) found five
+things that reasoning alone had wrong or missed entirely:
+
+- **`qemu:///system`, not the ambient default.** A bare `virsh` with no
+  `-c` connects to `qemu:///session` for a non-root caller — a separate,
+  unprivileged libvirtd instance that can't attach to `br-grain` at all.
+  `libvirt.py` now pins every `virsh` call to `qemu:///system` explicitly.
+- **SSH host keys can't be pinned.** A sandbox gets a *new* host key every
+  recreate, at the same fixed address — the default `known_hosts` pins the
+  first one it sees, so the very next recreate turns every dispatch into
+  "REMOTE HOST IDENTIFICATION HAS CHANGED." `UserKnownHostsFile=/dev/null`:
+  host-key TOFU isn't a boundary this design relies on anyway — a sandbox
+  is authenticated by its fixed address on a firewalled private bridge and
+  the controller's own key, not by a remembered identity.
+- **`systemd-run` against the system manager needs `sudo`.** Starting or
+  stopping a *system* (not `--user`) transient unit is a privileged D-Bus
+  call; a non-interactive SSH session has no polkit agent to satisfy it,
+  and fails with "Interactive authentication required" even though
+  `--uid=debian` already asks to run the command itself unprivileged.
+  Debian's cloud image grants the default user passwordless `sudo`, which
+  makes the *manager* call while `--uid=debian` still keeps the dispatched
+  command itself unprivileged.
+- **A successful unit vanishes on its own.** With no `--collect` in sight,
+  a transient unit that exits zero still self-unloads within a couple of
+  seconds — `LoadState` goes straight to `not-found`, indistinguishable
+  from a unit that never started. A *failed* unit doesn't get this
+  treatment; that asymmetry is what earlier reasoning (wrongly)
+  generalized to the success case too. `--property=RemainAfterExit=yes`
+  keeps a finished unit `active`/`exited` instead, so its outcome can
+  actually be read back later, on whatever schedule the sweeper polls.
+- **SSH has no real argv array, and an ambient agent can hang the whole
+  connection.** The protocol carries one command string; OpenSSH builds it
+  by joining trailing arguments with a plain, *unquoted* space, so anything
+  containing a space — `bash -c "sleep 5"`, or the real `claude -p ... <
+  file` invocation this dispatches — gets word-split apart on the remote
+  end. `shlex.join(argv)` before handing it to `ssh` is what makes it
+  round-trip correctly. Separately, a stale or unresponsive `SSH_AUTH_SOCK`
+  can leave `ssh` hung indefinitely before authentication even starts, a
+  phase `ConnectTimeout` doesn't cover; `IdentityAgent=none` is enough,
+  since this runner brings its own key and has no use for an agent.
+
+None of these are exotic — every one looks obviously fine on paper and only
+shows up by actually booting a guest and running a command on it, which is
+the same argument, made again, for why this project keeps holding itself to
+a "verify live, not just unit tests" bar.
+
+The [host adapter](host-adapter.md) stays agent-agnostic — it manages VMs
+and a network, and neither cares what runs inside. Everything above binds
+only in `grain/automation/`, which is exactly where the choice now lives.
 
 ## Threat model
 
@@ -1089,22 +1153,21 @@ ever becomes worth its cost again.
 2. **Does 4 vCPU hold two sandboxes plus a controller** under real `kind`
    workloads? This inverts earlier revisions: memory was the binding
    resource, and here it probably is not.
-3. **Does Agent Canvas distribute conversations across backends**, or does
-   it expect a human to pick one? At a pool of two, by hand is fine — but
-   if orchestration is needed, a small assigner is the one piece of the
-   removed lease service that comes back.
-4. **Does the Automation Service work in cron-only mode**, and what are its
-   trigger and dedupe semantics? Also whether anything writes a GitHub
-   token into the sandbox's `origin` remote, which would silently defeat
-   the split surface.
+3. ~~Does Agent Canvas distribute conversations across backends~~ **Moot**:
+   not using Agent Canvas — see question 6. The "small assigner" this
+   worried about is exactly what `grain/automation/core.py`'s
+   `free_sandbox` does.
+4. ~~Does the Automation Service work in cron-only mode~~ **Moot**: not
+   using it — see question 6. The GitHub-token-in-`origin`-remote caution
+   carries over regardless of runtime; see [Issue intake](#issue-intake).
 5. **How far down the credential ladder can each owner go** — App, machine
    account, or personal token?
-6. **Which agent runtime**: OpenHands, or
-   [Claude Code](#alternative-agent-runtime-claude-code)? The second trades
-   three upstream components and their version matrix for a dispatch loop
-   we own. Nothing built so far depends on the answer, so it can wait until
-   the controller.
-6. **Can `gce_metadata_server` impersonate using ADC** rather than a key
+6. ~~Which agent runtime~~ **Answered: Claude Code**, not OpenHands — see
+   [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
+   Traded three upstream components and their version matrix for a
+   dispatch loop this repo owns, `grain/automation/`, verified live against
+   a real sandbox.
+7. **Can `gce_metadata_server` impersonate using ADC** rather than a key
    file? If so, GCP deployments need no service-account key at all — see
    [where credentials should live](#where-credentials-should-live) — and
    the adapter needs to forward the real metadata endpoint into the
@@ -1135,8 +1198,11 @@ ever becomes worth its cost again.
    sandboxes plus a controller under real `kind` + build load) is still
    open and needs a second sandbox and an actual build running concurrently
    to answer properly.
-5. **Controller VM**: `/data` disk, Agent Canvas, and one sandbox
-   registered as a backend. OpenHands end to end with no custom code.
+5. **Controller VM**: `/data` disk, plus the automation config/secrets/state
+   layout `grain/automation/` already expects. Not yet provisioned as an
+   actual VM — no `provision/controller.sh` exists yet; testing so far has
+   run the CLI directly against ad-hoc directories, not a real controller.
+   See `docs/roadmap.md`.
 6. **Git proxy** — *done*: `grain/proxy/` — path whitelist, canonicalize,
    allowlist, token auth (via HTTP Basic from a git credential helper),
    credential selection, stream through, audit. Verified live against a
@@ -1153,8 +1219,12 @@ ever becomes worth its cost again.
    account. Verify ADC works unmodified and the key is unreachable.
 8. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
    cleanup hook, a health check, a disk watermark alarm.
-9. **Automation Service**: cron-mode intake, rate limit, stranded-work
-   sweeper. First full issue-to-PR run.
+9. **Automation loop** — *mostly done*: `grain/automation/` implements
+   cron-invoked intake, dispatch, rate limiting and the stranded-work
+   sweeper, unit-tested and verified live against a real sandbox VM — see
+   [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
+   Still open: PR/comment creation once a sandbox's run finishes, and a
+   first full issue-to-PR run — see `docs/roadmap.md`.
 10. **Hardening**: move repos down the credential ladder, apply branch
     protection, confirm no credential carries `workflow` scope, write the
     runbook.
