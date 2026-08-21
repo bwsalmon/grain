@@ -13,7 +13,7 @@ a critical pass over the security claims:
 - **Resolved** the OpenHands↔sandbox integration question: use OpenHands'
   `remote` runtime and implement its runtime-API on the orchestrator as a
   pool broker over the fixed microVM set. See
-  [OpenHands integration](#openhands-integration-resolved).
+  [OpenHands integration](#openhands-integration).
 - **Resolved** sandbox identity: authenticate sandboxes by source IP with
   per-tap anti-spoofing rules, eliminating the bearer-token distribution
   problem entirely. See [Sandbox identity](#sandbox-identity-and-proxy-auth).
@@ -27,6 +27,14 @@ a critical pass over the security claims:
   sharing, a writable store overlay so in-guest `nix` works — and a precise
   account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
+- **Rebuilt the OpenHands integration on current upstream.** Revision 2
+  described an architecture that no longer exists: the V0 Python monolith
+  and its `SANDBOX_*` settings are gone, `openhands-resolver` is gone, and
+  `OpenHands/OpenHands` is now a TypeScript control centre. The
+  reverse-engineered provisioning API and most of the pool broker are
+  deleted — `RemoteWorkspace` attaches to a fixed URL, so a sandbox running
+  `openhands-agent-server` registered as a backend is the supported
+  deployment. See [OpenHands integration](#openhands-integration).
 - **Established that agents cannot run in containers.** The workload needs
   `docker` and `kind`, which nest badly; separate directories on one host
   would collide on daemons, ports, and tool versions. The microVM pool is
@@ -89,8 +97,8 @@ cluster is built around.
 
 | Need | Approach |
 |---|---|
-| Issue intake | **[openhands-resolver](#issue-intake-use-the-openhands-resolver)** — label-driven pickup, already built |
-| Agent execution | **OpenHands `docker` runtime** in phase 1; custom pool broker only if per-task VM isolation is required |
+| Issue intake | **[`OpenHands/automation`](#issue-intake-the-automation-service)** — cron/webhook triggers, filter expressions |
+| Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — no provisioning API to build |
 | GCP credentials | **[`gce_metadata_server`](#gcp-short-lived-tokens)** — ADC works with no client code at all |
 | Git access control | **[FINOS Git Proxy](#the-git-proxy)** — repo allowlist and push policy |
 | GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
@@ -104,12 +112,13 @@ cluster is built around.
 
 ### The one genuinely custom component
 
-After that audit, the only substantial thing left to write is the **sandbox
-pool broker**. An earlier pass proposed skipping it in phase 1 by running
-OpenHands' stock `docker` runtime — a container per session — inside a
-single sandbox VM. **That doesn't work for this workload**, and the reason
-is worth recording, because it also settles the architecture rather than
-merely constraining it.
+After that audit, the only thing left to write is a thin **lease service**
+— and even that is optional (see
+[what still needs building](#what-still-needs-building-lease-and-reset)).
+An earlier pass proposed running OpenHands' stock `docker` runtime — a
+container per session — inside a single sandbox VM. **That doesn't work for
+this workload**, and the reason is worth recording, because it settles the
+architecture rather than merely constraining it.
 
 Agent tasks here need to run `docker` and `kind` themselves. Nesting those
 inside an agent container means Docker-in-Docker and kind-in-a-container:
@@ -130,13 +139,10 @@ optional hardening step; it's what makes the workload run at all.** The
 broker is required, not deferred, and the isolation it provides is
 load-bearing for correctness before it is ever a security property.
 
-Phase 1 therefore keeps one sandbox VM and a *stub* broker that always
-hands back that VM's endpoint. It's a small program, it validates
-everything else end to end, and it answers the remote-runtime API question
-first rather than last. Use the
-[Kubernetes remote runtime](https://github.com/zparnold/openhands-kubernetes-remote-runtime)
-as a working reference for the API contract rather than reverse-engineering
-it.
+Phase 1 therefore keeps one sandbox VM running `openhands-agent-server`,
+registered directly as a backend — no broker, no stub, no provisioning
+API. That is upstream's supported deployment, so phase 1 is now mostly
+configuration rather than code.
 
 ### Doesn't NixOS make the dependency problem moot?
 
@@ -195,8 +201,8 @@ flowchart TB
         fw["nftables: DNAT / NAT / per-tap filtering"]
 
         subgraph oh["orchestrator microVM: openhands"]
-            openhands["OpenHands + resolver<br/>(issue intake, agent loop,<br/>all GitHub API work)"]
-            broker["Sandbox pool broker<br/>(phase 2 only)"]
+            openhands["Agent Canvas + Automation<br/>(issue intake, agent loop,<br/>all GitHub API work)"]
+            broker["Lease service<br/>(assign + reset; optional)"]
             proxy["Git proxy (FINOS)<br/>(repo allowlist + audit)"]
             tokensvc["GCE metadata server<br/>(impersonated SA)"]
             sshd["sshd (admin login)"]
@@ -204,12 +210,12 @@ flowchart TB
         end
 
         subgraph sb0["sandbox microVM 0"]
-            aes0["OpenHands action<br/>execution server"]
+            aes0["openhands-agent-server<br/>(systemd unit)"]
             cli0["git via proxy (insteadOf)<br/>GCP via ADC"]
         end
 
         subgraph sbN["sandbox microVM N-1"]
-            aesN["OpenHands action<br/>execution server"]
+            aesN["openhands-agent-server<br/>(systemd unit)"]
             cliN["git via proxy (insteadOf)<br/>GCP via ADC"]
         end
     end
@@ -470,78 +476,124 @@ Note the corollary: `/persist` on the host is unencrypted at rest. Host
 disk encryption is the answer if the deployment needs it; that's a host
 provisioning concern outside this doc.
 
-## OpenHands integration (resolved)
+## OpenHands integration
 
-This was revision 1's largest open risk. Research resolves it.
+**The architecture revision 2 described no longer exists.** Verified
+against the repositories on 2026-08-21:
 
-OpenHands' runtime layer is a client/server split: the agent loop sends
-actions to an **action execution server** over HTTP and receives
-observations back, in a tight loop. Which *runtime* implementation is used
-determines only how that server gets provisioned and where it lives. The
-built-in options are `docker` (default, one container per session),
-`local` (same host, no isolation), `kubernetes`, and `remote`.
+| Component | Status |
+|---|---|
+| V0 Python monolith — `openhands/runtime/*`, `SANDBOX_*` env vars, `config.toml [sandbox]` | Ended at 0.62.0 (Nov 2025). `openhands/runtime/__init__.py` is **404 on main** |
+| V1 Python app (`openhands-ai`) | Froze at 1.11.0 (Jul 2026), removed from main |
+| `OpenHands/OpenHands` main | Now **Agent Canvas** — a TypeScript/React control centre |
+| Sandbox-side component | **`openhands-agent-server`**, from `OpenHands/software-agent-sdk` |
+| `openhands-resolver` | **Gone** (404). Successor is `OpenHands/automation` |
 
-The `remote` runtime is the one that fits. It does not manage containers
-itself — it calls out to an external HTTP API to create, pause, resume, and
-stop runtimes, then talks to whatever endpoint that API hands back. The
-surface is small and has been implemented by third parties against
-non-Docker backends; the
-[Kubernetes remote runtime](https://github.com/zparnold/openhands-kubernetes-remote-runtime)
-implements it to spawn Pods, which is structurally the same problem as
-spawning from a fixed microVM pool. Its documented routes:
+Every `SANDBOX_REMOTE_RUNTIME_API_URL`-shaped setting in revision 2 was a
+dead setting. Nothing should be built against them.
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/start` | POST | allocate a runtime for a session |
-| `/stop` | POST | release it |
-| `/pause` | POST | release compute, keep state |
-| `/resume` | POST | bring a paused runtime back |
-| `/list` | GET | enumerate runtimes |
-| `/runtime/{runtime_id}` | GET | runtime detail |
-| `/sessions/{session_id}` | GET | look up by session |
-| `/sessions/batch` | GET | batch session lookup |
-| `/registry_prefix`, `/image_exists` | GET | container-image plumbing |
-| `/health` | GET | health check (unauthenticated) |
+### The provisioning API disappears — and with it most of the broker
 
-All authenticated with an `X-API-Key` header. OpenHands is pointed at it
-with `SANDBOX_REMOTE_RUNTIME_API_URL` and `SANDBOX_API_KEY` (plus
-`SANDBOX_RUNTIME_CONTAINER_IMAGE`), settable via env or `config.toml`'s
-`[sandbox]` section.
+The decisive finding, confirmed in source:
 
-**Design: the pool broker.** We implement this API on the orchestrator,
-backed by the fixed set of sandbox VMs instead of a container scheduler:
+```python
+# software-agent-sdk/openhands-sdk/openhands/sdk/workspace/workspace.py
+class Workspace:
+    """Factory entrypoint that returns a LocalWorkspace or RemoteWorkspace.
 
-- `/start` **leases** a free sandbox from the pool and returns its
-  action-execution-server URL on the internal network. If none is free, it
-  applies backpressure (see [Capacity](#capacity-and-backpressure)).
-- `/stop` **releases** the lease and triggers a reset (see
-  [Sandbox lifecycle](#sandbox-lifecycle-lease-and-reset)).
-- `/pause`/`/resume` map to marking a lease idle vs. active. Since our VMs
-  are a fixed pool rather than elastic compute, "pause" can either hold the
-  lease (simple, wastes a slot) or release-with-state-loss. Hold the lease;
-  the pool is small and sessions are short.
-- `/registry_prefix` and `/image_exists` are container-shaped concepts with
-  no meaning for microVMs. Stub them with static affirmative responses.
-  **This is the one integration wrinkle to verify early**: confirm
-  OpenHands is satisfied by stubs and doesn't do anything else
-  image-specific before starting a session.
+    Usage:
+        - Workspace(working_dir=...) -> LocalWorkspace
+        - Workspace(working_dir=..., host="http://...") -> RemoteWorkspace
+    """
+```
 
-Each sandbox VM runs the OpenHands action execution server as a systemd
-service bound to its internal IP, from the same pinned OpenHands version as
-the orchestrator (a Nix-level version pin, so client and server can't
-drift).
+`RemoteWorkspace` **attaches to an already-running agent server at a fixed
+URL** — no provisioning, no image, no lifecycle. Agent Canvas registers a
+backend as `{host, apiKey, kind}` and can hold several.
 
-Why this over the alternative (subclassing `Runtime`/`ActionExecutionClient`
-in Python to point at fixed endpoints): the broker is a separate service
-speaking a stable HTTP contract, so we never carry a patch against
-OpenHands' internals across upgrades. The custom-subclass route is smaller
-code but means maintaining a fork.
+So the intended deployment is exactly the shape this cluster wants: **N
+sandbox VMs, each running `openhands-agent-server` as a systemd unit with
+its own session key, each registered as a backend.** Revision 2's plan to
+reimplement a reverse-engineered provisioning API was solving a problem
+that upstream had already removed. That work is deleted, along with the
+open question about stubbing `/registry_prefix` and `/image_exists`.
 
-**Residual risk**: the remote-runtime API is defined by OpenHands' client
-implementation rather than by a published spec, so it can change across
-versions. Mitigations: pin the OpenHands version in Nix, and treat broker
-compatibility as something to re-verify on upgrade. This is materially
-smaller than revision 1's "unknown whether this is possible at all."
+### What still needs building: lease and reset
+
+Not all of the broker goes, and it's worth being precise about the
+remainder rather than declaring victory.
+
+Agent Canvas backends are **static registrations**, and one agent server
+serves many concurrent conversations (`max_concurrent_runs`, default 10).
+Upstream's model is "a few long-lived servers", not "one disposable VM per
+task". Adopting it as-is silently gives up the
+[reset between tasks](#sandbox-lifecycle-lease-and-reset) — which was doing
+real work: one task's cloned repo, leaked `kind` cluster, and stray
+processes would otherwise persist into the next.
+
+So a thin **lease service** on the orchestrator still earns its keep:
+
+- assign a free sandbox VM to a task and mark it busy,
+- inject per-lease credentials through `POST /api/init` — `deferred_init`
+  exists in the agent server *specifically* for warm pools, where servers
+  are pre-started and per-user configuration arrives at lease time,
+- stop/start the VM to reset it afterwards.
+
+The difference from revision 2 is that this is now **our own small service
+against documented endpoints**, not a reimplementation of an undocumented
+third-party contract. Setting `max_concurrent_runs = 1` per sandbox keeps
+one task per VM.
+
+Whether per-task reset is worth the lease service at all is a real choice —
+running the VMs as plain long-lived backends is materially simpler, at the
+cost of cross-task isolation. See [open questions](#open-questions).
+
+### Version pinning
+
+`config/defaults.json` on Agent Canvas main is the upstream source of
+truth, and pins move together:
+
+```json
+"versions":      { "agentServer": "1.42.1", "agentCanvas": "1.14.0", "automation": "1.8.0" },
+"compatibility": { "minimumAgentServer": "1.28.0" },
+"constraints":   { "agentClientProtocol": "agent-client-protocol<0.11" }
+```
+
+Pin `openhands-agent-server`, `openhands-sdk`, `openhands-tools`, and
+`openhands-workspace` to one identical version — upstream CI enforces this,
+and inter-package APIs are not expected to survive a mismatch. Carry the
+`agent-client-protocol<0.11` constraint too; upstream documents that 0.11
+breaks the SDK's ACP client. Derive orchestrator and every sandbox from a
+single Nix-level version pin so they cannot drift.
+
+There is no runtime handshake: `GET /server_info` reports versions for
+debugging, but nothing rejects a mismatch. Version skew fails late and
+confusingly, which is an argument for the single pin rather than against
+it.
+
+### Gotchas worth knowing before the first boot
+
+- **The agent server binds loopback unless authentication is configured.**
+  With no `SESSION_API_KEY` / `OH_SESSION_API_KEYS_0` it defaults to
+  `127.0.0.1` — so a sandbox VM would come up looking healthy and be
+  unreachable from the orchestrator. Set a session key per sandbox.
+- **Set `OH_SECRET_KEY`**, or secrets are redacted and lost across restart.
+- **`tmux` is a hard dependency** (imported at module load; the terminal
+  tool is built on it), along with `git`, `curl`, `jq`, `tar`, and the
+  usual coreutils. These belong in the sandbox image's package set.
+- **Upstream's own full agent-server image ships Docker CE, buildx, and
+  compose** — independent confirmation that
+  [running docker inside the sandbox](#docker-and-kind-inside-sandboxes) is
+  the expected shape, not a deviation.
+
+### If a provisioning API is ever built anyway
+
+Recorded because it is a sharp edge and cheap to write down: the V1 client
+has **no retry on the provisioning call**. A 429 or 503 signalling "no
+capacity" propagates immediately and fails the conversation outright — the
+V0 client's 429 retry is gone. The only back-pressure path is to accept the
+call and report the runtime as pending, letting the client's readiness loop
+absorb the wait. Never signal exhaustion with an error status.
 
 ## Sandbox lifecycle: lease and reset
 
@@ -552,10 +604,13 @@ any background process still running. That's both a correctness problem
 (mysterious cross-task interference) and a security one (task A's cloned
 private repo readable by task B).
 
-The broker owns the reset. On `/stop`, a sandbox is **stopped and started
-again** rather than cleaned up in place — which also releases its memory,
-so idle sandboxes cost nothing (see
-[Start sandboxes on demand](#start-sandboxes-on-demand)). microVM boot is
+The lease service owns the reset. When a task finishes, its sandbox is
+**stopped and started again** rather than cleaned up in place — which also
+releases its memory, so idle sandboxes cost nothing (see
+[Start sandboxes on demand](#start-sandboxes-on-demand)).
+This is the part upstream does *not* do for us: Agent Canvas treats
+backends as long-lived, so without a lease service there is no reset
+between tasks at all. microVM boot is
 on the order of a second, so this is cheap enough to do between every task,
 and it is far more robust than userspace cleanup, where the failure mode is
 a forgotten directory or a surviving background process rather than an
@@ -606,13 +661,21 @@ goes unnoticed for weeks.
 
 ### Capacity and backpressure
 
-With a fixed pool, `sandboxCount` is a hard concurrency ceiling. If
-OpenHands requests a runtime when none is free, the broker must not
-silently fail: return a retryable error and have OpenHands queue, or block
-with a bounded timeout. Verify which behavior OpenHands' remote-runtime
-client handles gracefully, and match it. Metric to expose: free vs. leased
-vs. quarantined counts, so pool exhaustion is visible rather than
-experienced as "agents seem slow today."
+With a fixed pool, `sandboxCount` is a hard concurrency ceiling — and on a
+RAM-constrained host running `kind`, a low one. Where the backpressure
+lands depends on the shape chosen in
+[what still needs building](#what-still-needs-building-lease-and-reset):
+
+- **Long-lived backends, no lease service**: there is no admission control
+  at all. Agent Canvas dispatches to a backend and the agent server accepts
+  up to `max_concurrent_runs` (default 10) concurrent conversations on one
+  VM — which on this hardware would exhaust memory rather than queue. Set
+  it to 1 per sandbox.
+- **With a lease service**: it queues, and the Automation Service's own
+  scheduling is the natural throttle.
+
+Either way, expose free vs. busy vs. quarantined counts, so pool exhaustion
+is visible rather than experienced as "agents seem slow today".
 
 ## GitHub access
 
@@ -852,24 +915,38 @@ proxy should refuse to serve a repo whose protection rules it cannot verify
 are in place — failing closed on onboarding is cheap, and it prevents the
 allowlist and the rulesets from silently drifting apart.
 
-### Issue intake: use the OpenHands resolver
+### Issue intake: the Automation Service
 
-Revision 2 designed a label-driven intake from scratch. It shouldn't have:
-**OpenHands ships one**. The
-[resolver](https://www.openhands.dev/blog/open-source-coding-agents-in-your-github-fixing-your-issues)
-picks up issues tagged with a label (`fix-me` by default), works them, and
-opens a PR or reports that it couldn't — the same opt-in-per-issue design
-arrived at independently, already built and already exercised.
+`openhands-resolver` no longer exists — it lived in-repo under
+`openhands/resolver/` and was deleted in the V0→V1 transition (404 on
+main). Its successor is **`OpenHands/automation`** (`openhands-automation`,
+pinned at 1.8.0), a service with a cron scheduler, webhook triggers, filter
+expressions, a dispatcher, and run history. It carries the resolver's DNA
+as a filter rather than a hardcoded label — upstream's own example matches
+on `icontains(comment.body, '@openhands-resolver')`.
 
-Its usual deployment is a GitHub Action running on GitHub's runners, which
-is the opposite of what this cluster is for. The relevant mode is the local
-one — it can also be run against a repository directly — so the
-orchestrator runs the resolver locally and points it at
-`agentCluster.github.targetRepo`.
+That is still the right thing to reuse. But two things need checking, and
+one of them touches the network design:
 
-To verify: whether local mode polls continuously or runs as a one-shot
-batch. If one-shot, wrap it in a systemd timer at
-`github.pollIntervalSeconds` — still far less work than building intake.
+- **Webhooks would break the single-inbound-port property.** Webhook
+  triggers require GitHub to reach us, and
+  [the whole point of the host firewall](#networking) is that exactly one
+  port is exposed, to sshd. Confirm the cron scheduler alone is sufficient
+  — polling keeps the cluster closed to inbound traffic and keeps every
+  GitHub call flowing outward through our own proxy, which is worth
+  preferring even if webhooks were available.
+- **Trigger semantics.** Whether opt-in is by label, by comment mention, or
+  by arbitrary filter expression, and what state it records to avoid
+  double-starting an issue. The V0 resolver's protection here was
+  essentially nothing — it relied on GitHub firing a label event once — so
+  do not assume the successor is better without checking.
+
+One V0 detail worth carrying forward as a caution regardless: the old
+resolver embedded the GitHub token directly in the clone URL, so it landed
+in `.git/config` inside the sandbox. If anything in the new stack does the
+same, it silently defeats
+[the split surface](#split-the-surface-sandboxes-get-git-the-orchestrator-gets-the-api).
+Verify what ends up in the sandbox's `origin` remote.
 
 What remains ours, because it's about protecting a small fixed pool and the
 LLM budget rather than about issue semantics:
@@ -881,9 +958,8 @@ LLM budget rather than about issue semantics:
   left mid-flight need returning to the queue rather than silently
   stalling (see [Operations](#operations)).
 
-Adopt the resolver's label vocabulary rather than the invented
-`agent-ready`/`agent-working` one, so the config surface matches what the
-tool actually does.
+Adopt whatever trigger vocabulary the Automation Service actually uses
+rather than inventing one, so the config surface matches the tool.
 
 ## GCP short-lived tokens
 
@@ -1014,8 +1090,9 @@ because it never entered the Nix store.
 - Small tmpfs root, read-only shared store, one ephemeral encrypted scratch
   volume; stopped and restarted between leases. See
   [What a reboot actually resets](#what-a-reboot-actually-resets).
-- Runs the OpenHands action execution server, version-pinned in lockstep
-  with the orchestrator.
+- Runs `openhands-agent-server` as a systemd unit, version-pinned in
+  lockstep with the orchestrator, with its own session key (without one it
+  binds loopback and is unreachable).
 - Reaches git through an `/etc/gitconfig` `insteadOf` rewrite, so
   `github.com` URLs resolve to the proxy transparently and agents' existing
   git habits — and any tooling that hardcodes GitHub URLs — just work. No
@@ -1354,7 +1431,7 @@ as a small tmpfs holding only `/run` and the `/etc` overlay. The
 random-key encryption then covers the agent's working tree as well as the
 store overlay, which is where the more sensitive material was anyway.
 
-Guest RAM after that is just the kernel, the action execution server, and
+Guest RAM after that is just the kernel, the agent server, and
 whatever the agent's own processes need — compilers and test suites,
 sized by workload rather than by accumulated files. Page cache over the
 scratch volume uses whatever is free and is reclaimable under pressure,
@@ -1484,7 +1561,9 @@ docs/design.md
 | `gcp.projectId` | `str` | — required | Project the minted tokens belong to. |
 | `gcp.impersonateServiceAccount` | `str` | — | Narrow SA the key impersonates (recommended). |
 | `gcp.tokenLifetimeSeconds` | `int` | `300` | Minted token lifetime. |
-| `openhands.version` | `str` | pinned | Pinned for orchestrator and sandboxes together. |
+| `openhands.agentServerVersion` | `str` | `1.42.1` | Pins all four Python packages together. |
+| `openhands.agentCanvasVersion` | `str` | `1.14.0` | Orchestrator control centre. |
+| `openhands.automationVersion` | `str` | `1.8.0` | Issue intake service. |
 
 ## Threat model, and what this does *not* defend against
 
@@ -1566,27 +1645,33 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    they need may not be in a slimmed guest kernel, and nothing else in the
    design matters if they aren't. First thing to test — see
    [Docker and kind inside sandboxes](#docker-and-kind-inside-sandboxes).
-2. **Remote-runtime API**: confirm OpenHands accepts stubbed
-   `/registry_prefix` and `/image_exists` responses; and determine what its
-   remote-runtime client does when the API reports no capacity, which
-   decides whether the broker queues or errors.
-3. **OpenHands V0 vs V1 configuration.** The remote-runtime API surface and
-   `config.toml`/`SANDBOX_*` settings documented here appear to belong to
-   the V0 configuration model, which newer versions treat as legacy. Pin a
-   version early and confirm which model it uses before building anything
-   against those settings.
-4. **Cloud-hypervisor feature coverage**: confirm the pinned microvm.nix
+2. **Is the lease service worth building?** Registering sandboxes as
+   long-lived Agent Canvas backends is materially simpler, but gives up
+   per-task reset — one task's repo, `kind` cluster, and stray processes
+   persist into the next. Deciding this decides whether any custom code
+   ships at all. See
+   [what still needs building](#what-still-needs-building-lease-and-reset).
+3. **Does the Automation Service work in cron-only mode?** Webhook triggers
+   would require inbound access from GitHub, breaking the single-open-port
+   property. Also: what its trigger and dedupe semantics actually are, and
+   whether any component writes a GitHub token into the sandbox's `origin`
+   remote.
+4. **Does `POST /api/init` cover per-lease credential injection?**
+   `deferred_init` is documented as being for warm pools, which is exactly
+   our shape, but confirm what it can set per lease and whether a sandbox
+   can be re-initialised without a restart.
+5. **Cloud-hypervisor feature coverage**: confirm the pinned microvm.nix
    drives everything this design needs on cloud-hypervisor — the virtiofs
    `/persist` share, `autoCreate` volumes, tap networking, and virtio-mem
    reclaim actually returning memory under load. qemu is the fallback and
    `agentCluster.hypervisor` makes the switch a one-line change, including
    per-VM if only one class of VM has trouble.
-5. **`sandboxCount` default**, pending measurement of real agent memory
+6. **`sandboxCount` default**, pending measurement of real agent memory
    footprint against host RAM.
-6. **Host exposure**: is the host directly internet-facing (as the DNAT
+7. **Host exposure**: is the host directly internet-facing (as the DNAT
    design assumes), or behind an existing bastion/VPN — in which case the
    orchestrator's sshd needn't be internet-reachable at all?
-7. **How far down the credential ladder can each owner go?** Which repos
+8. **How far down the credential ladder can each owner go?** Which repos
    admit an App install, which admit a machine-account collaborator
    invite, and which genuinely need the personal token. Worth answering per
    repo at onboarding, since it decides how much traffic the broad
@@ -1613,9 +1698,11 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    Everything else is wasted effort if this doesn't work, so it comes
    first — see
    [Docker and kind inside sandboxes](#docker-and-kind-inside-sandboxes).
-5. **OpenHands end to end**: a stub broker that always returns the one
-   sandbox's action-execution-server URL, answering the remote-runtime API
-   question early. Proves the shape before the real pool exists.
+5. **OpenHands end to end**: `openhands-agent-server` as a systemd unit in
+   the sandbox VM (remember the session key, or it binds loopback and is
+   unreachable), registered as a backend in Agent Canvas on the
+   orchestrator. No custom code — if this doesn't work, the integration
+   assumption is wrong and everything downstream changes.
 6. **Git proxy**: stand up FINOS Git Proxy, answer the
    [auto-approve and credential-injection questions](#the-git-proxy)
    early — they decide build-vs-reuse for this piece. Verify from a
@@ -1625,7 +1712,7 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    service account. Verify ADC works unmodified in a sandbox, tokens carry
    only the narrow SA's permissions, and sandboxes cannot reach the key
    file.
-8. **Resolver**: run openhands-resolver locally against the target repo;
+8. **Automation Service**: cron-mode issue intake against the target repo;
    add the rate limit and the stranded-work sweeper. First full
    issue-to-PR run.
 9. **Hardening**: move as many repos as possible down the credential
@@ -1633,25 +1720,26 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    protection to allow-listed repos, confirm no credential carries
    `workflow` scope, ship journals to the host, write the admin runbook.
 
-At that point the system is useful at `sandboxCount = 1`. **Phase 2**:
-replace the stub with the real pool broker — lease, release, stop/start
-reset, health check, quarantine, drain — and scale to `sandboxCount = N`,
-sized by [available RAM](#sizing) rather than by ambition.
+At that point the system is useful at `sandboxCount = 1`, with no custom
+code written. **Phase 2, if per-task reset is wanted**: the lease service —
+assign, `POST /api/init`, stop/start reset, health check, quarantine,
+drain — and scale to `sandboxCount = N`, sized by
+[available RAM](#sizing) rather than by ambition.
 
 ## Sources
 
 - [OpenHands runtime architecture](https://docs.openhands.dev/openhands/usage/architecture/runtime)
 - [OpenHands runtime source](https://github.com/OpenHands/OpenHands)
-- [openhands-kubernetes-remote-runtime](https://github.com/zparnold/openhands-kubernetes-remote-runtime)
-  — third-party implementation of the remote-runtime API
+- [`OpenHands/software-agent-sdk`](https://github.com/OpenHands/software-agent-sdk)
+  — `openhands-agent-server` and the `Workspace`/`RemoteWorkspace` model
+- [`OpenHands/automation`](https://github.com/OpenHands/automation)
+  — issue intake successor to the resolver
 - [microvm.nix](https://github.com/microvm-nix/microvm.nix),
   [options reference](https://microvm-nix.github.io/microvm.nix/microvm-options.html),
   [shared directories](https://microvm-nix.github.io/microvm.nix/shares.html)
 - [GCP generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken),
   [downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
 
-- [openhands-resolver](https://www.openhands.dev/blog/open-source-coding-agents-in-your-github-fixing-your-issues)
-  — label-driven issue intake, already built
 - [FINOS Git Proxy](https://github.com/finos/git-proxy) and its
   [configuration docs](https://git-proxy.finos.org/docs/configuration/overview/)
 - [`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
