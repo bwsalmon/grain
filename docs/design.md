@@ -40,16 +40,20 @@ a critical pass over the security claims:
   would collide on daemons, ports, and tool versions. The microVM pool is
   therefore required for the workload to run at all, not merely to harden
   it — see
-  [the one genuinely custom component](#the-one-genuinely-custom-component).
+  [the one genuinely custom component](#what-is-left-to-write).
 - **Audited the design for build-vs-reuse**, which removed most of the
   custom code: issue intake becomes the OpenHands resolver, the GCP token
   service becomes a GCE metadata-server emulator, the git proxy becomes
-  FINOS Git Proxy, and the REST-filtering proxy disappears entirely by
+  a small custom git proxy, and the REST-filtering proxy disappears by
   keeping API work on the orchestrator. See
   [build vs. reuse](#build-vs-reuse).
 - **Chose** `cloud-hypervisor` over `qemu`, on the strength of its
   virtio-mem memory reclaim under the RAM constraint, keeping the
   hypervisor a config option so qemu stays a one-line fallback.
+- **Evaluated and rejected FINOS Git Proxy**, which turned out to be a
+  credential pass-through requiring the *client* to hold the GitHub token —
+  architecturally inverted for this design. The replacement is a small
+  custom smart-HTTP proxy. See [the git proxy](#the-git-proxy-write-it).
 - **Revised** the GitHub auth model for the case where an App cannot be
   installed everywhere: a per-repo credential set behind the proxy, a
   machine account to restore GitHub-side scoping, and the hardening the
@@ -100,7 +104,7 @@ cluster is built around.
 | Issue intake | **[`OpenHands/automation`](#issue-intake-the-automation-service)** — cron/webhook triggers, filter expressions |
 | Agent execution | **`openhands-agent-server`** per sandbox VM, registered as an Agent Canvas backend — no provisioning API to build |
 | GCP credentials | **[`gce_metadata_server`](#gcp-short-lived-tokens)** — ADC works with no client code at all |
-| Git access control | **[FINOS Git Proxy](#the-git-proxy)** — repo allowlist and push policy |
+| Git access control | **Custom** — small smart-HTTP proxy; [FINOS Git Proxy evaluated and rejected](#the-git-proxy-write-it) |
 | GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
 | Branch and workflow protection | **[GitHub rulesets + withheld scopes](#scopes-to-withhold)** — enforced server-side |
 | Ephemeral root, persistence | **microvm.nix volumes/shares**; [`impermanence`](https://github.com/nix-community/impermanence) if `/persist` grows complicated |
@@ -110,11 +114,16 @@ cluster is built around.
 | Firewalling, NAT, anti-spoofing | **nftables** |
 | Log shipping, metrics | **`systemd-journal-upload`/promtail, Prometheus exporters** |
 
-### The one genuinely custom component
+### What is left to write
 
-After that audit, the only thing left to write is a thin **lease service**
-— and even that is optional (see
+After that audit, two things remain: the
+[git proxy](#the-git-proxy-write-it), which is small and unavoidable, and
+an optional thin **lease service** (see
 [what still needs building](#what-still-needs-building-lease-and-reset)).
+Note the shape of the custom-code inventory *shifted* rather than shrank:
+the pool broker mostly went away when upstream turned out to support
+attaching to a fixed URL, and the git proxy came back when the off-the-shelf
+one turned out to be a credential pass-through.
 An earlier pass proposed running OpenHands' stock `docker` runtime — a
 container per session — inside a single sandbox VM. **That doesn't work for
 this workload**, and the reason is worth recording, because it settles the
@@ -203,7 +212,7 @@ flowchart TB
         subgraph oh["orchestrator microVM: openhands"]
             openhands["Agent Canvas + Automation<br/>(issue intake, agent loop,<br/>all GitHub API work)"]
             broker["Lease service<br/>(assign + reset; optional)"]
-            proxy["Git proxy (FINOS)<br/>(repo allowlist + audit)"]
+            proxy["Git proxy (custom)<br/>(allowlist + creds + audit)"]
             tokensvc["GCE metadata server<br/>(impersonated SA)"]
             sshd["sshd (admin login)"]
             persist[("/persist<br/>creds, allowlist, GCP key,<br/>ssh host keys, OH state")]
@@ -833,52 +842,93 @@ it's worth accepting: the alternative reintroduces the full REST attack
 surface into the least trusted machine in the cluster, and the resolver
 already creates PRs as part of its normal flow.
 
-### The git proxy
+### The git proxy: write it
 
-**Reuse [FINOS Git Proxy](https://github.com/finos/git-proxy) rather than
-writing one.** It is purpose-built for exactly this — sitting between
-clients and GitHub, intercepting pushes, and applying configurable policy —
-it's a FINOS graduated project in production at several large banks, and it
-already provides:
+[FINOS Git Proxy](https://github.com/finos/git-proxy) was the obvious
+candidate and is a genuinely good project — actively maintained, Apache-2.0,
+in production at several large banks, with a default-deny repository
+allowlist that covers fetch *and* push. It was evaluated properly: source
+read, and the software installed and exercised.
 
-- a repository allowlist in its config (default-deny: an un-listed repo is
-  blocked),
-- push interception with pluggable policy processors, which is precisely
-  the packfile-inspection work
-  [I argued we shouldn't hand-roll](#write-safety-enforce-at-github-not-in-a-pack-parser),
-- dynamic configuration loading from files, HTTP, or a git repo — which
-  covers the hot-reloaded allowlist requirement without a bespoke watcher,
-- an audit trail of intercepted pushes.
+**It is architecturally inverted for this design, in the one way that
+cannot be worked around.** Git Proxy is a credential **pass-through**, not
+a credential holder. It requires the *client* to present the GitHub token:
 
-Reading its shipped `proxy.config.json` confirms part of the fit and
-sharpens the doubts:
+```ts
+// src/proxy/processors/push-action/PullRemoteHTTPS.ts
+const credentials = this.decodeBasicAuth(req.headers?.authorization);
+if (!credentials) {
+  throw new Error('Missing Authorization header for HTTPS clone');
+}
+```
 
-- `authorisedList` is exactly the repo allowlist this design needs, keyed
-  by project/name/URL — default-deny, no bespoke watcher required.
-- `commitConfig` filters pushes by author email, commit message, and *diff
-  content* patterns, so it does the packfile inspection we didn't want to
-  write.
-- `attestationConfig`, though, is a human attestation question — *"I am
-  happy for this to be pushed to the upstream repository"*. The
-  approval-by-a-person step looks central to the tool rather than
-  incidental to it, which is the opposite of what an autonomous agent
-  needs.
+and `authorization` is deliberately absent from the header blocklist, so
+the client's credential is forwarded upstream verbatim. Its own manual
+confirms the intent: *"you authenticate using a Personal Access Token (PAT)
+from the target SCM platform… GitProxy forwards these credentials."*
 
-So two things to settle before committing:
+That is the exact opposite of this design's premise. The whole reason
+sandboxes hold no GitHub credentials is that
+[the proxy holds them](#auth-model-a-broad-credential-behind-a-narrow-proxy).
+Adding injection would mean forking two independent code paths — the clone
+path's own `decodeBasicAuth`, and the header copy into the upstream request
+— to obtain a capability the project was designed not to have. That is a
+permanent fork, not a plugin.
 
-- **Can it auto-approve?** Either a config/plugin path that approves on
-  rule match, or its approval REST API driven by something on the
-  orchestrator. If neither exists, it is the wrong shape, and this reverts
-  to a small custom git proxy — still a far smaller thing to build than the
-  REST-filtering version, since the surface is now git-only.
-- **Weight.** It's a web application — sessions, CSRF, OIDC/AD auth, a UI,
-  and MongoDB or filesystem storage. That's a lot to run on a
-  [RAM-constrained orchestrator](#memory-budget) for what we actually want
-  from it. Configure filesystem storage rather than Mongo, and measure its
-  footprint before assuming it fits.
-- **Credential injection.** We need per-repo credential selection from the
-  [credential set](#lowering-the-ceiling-a-machine-account) on the way out
-  to GitHub. Check whether that's configuration or a plugin.
+The rest of the fit was mediocre anyway, and worth recording so nobody
+re-opens this:
+
+- **Auto-approval works but costs a double push.** `hooks/pre-receive.sh`
+  exiting 0 removes the human, but approval happens *after* the push has
+  already been blocked — so every push must be issued twice, forever.
+- **No source-IP authentication**, which is
+  [our sandbox identity model](#sandbox-identity-and-proxy-auth). Pushes
+  require resolvable per-user accounts and per-repo `canPush` grants, for
+  entities that have no users.
+- **Audit is partial**: fetches aren't written to the database at all, and
+  a re-push overwrites the previous record — a current-state table, not an
+  append-only log.
+- **Dynamic config reload is broken at HEAD** — it calls `proxy.stop()`,
+  which the module doesn't export, so the new configuration is never
+  applied. Verified by running it. The hot-reloaded allowlist was one of
+  the main attractions.
+- **Weight**: ~800 MB of `node_modules`, ~145 MB RSS, a React dashboard
+  that cannot be switched off, and not in nixpkgs — a day or two of
+  packaging work for an app whose data, hook, and scratch paths are all
+  hardcoded relative to the working directory.
+
+**So write it.** The custom proxy is genuinely small, because
+[the surface is git-only](#split-the-surface-sandboxes-get-git-the-orchestrator-gets-the-api):
+
+- match the four legal smart-HTTP paths —
+  `/{owner}/{repo}.git/{info/refs,git-upload-pack,git-receive-pack}`,
+- canonicalize and check `(owner, repo)` against the allowlist, default-deny,
+- authenticate the caller by source IP,
+- select the credential for that repo from the
+  [credential set](#lowering-the-ceiling-a-machine-account) and set
+  `Authorization`,
+- stream the body through, and log the tuple.
+
+No pack parsing, no server-side working clones, no database, no user
+accounts. Source-IP auth — which Git Proxy cannot do at all — is a few
+lines. Hot-reloading the allowlist is a file watch on a Nix-generated JSON,
+which is what `configurationSources` was supposed to provide and currently
+doesn't.
+
+Two things worth stealing rather than reinventing:
+
+- **`validGitRequest()`** (`src/proxy/routes/helper.ts`) — a tight
+  whitelist of the legal smart-HTTP paths, cross-checked against a
+  `git/*` User-Agent and the `application/x-git-*` Accept header. Good
+  hardening in about twenty lines.
+- **Git-protocol-correct rejection encoding** — a `PKT-LINE("ERR …")` for
+  `/info/refs` and a sideband progress packet plus flush for pack POSTs, so
+  a refused client prints a real error instead of *"the remote end hung up
+  unexpectedly"*. Easy to get wrong and miserable to debug.
+
+Reconsider Git Proxy only if the requirement ever shifts from *"the proxy
+holds the credentials"* to *"we want human review of agent pushes"*. That
+is the product it actually is, and it is a good one.
 
 Whatever serves this role keeps the responsibilities the design needs: repo
 allowlist enforcement, credential selection and injection, per-request
@@ -1319,7 +1369,7 @@ Small things that remove a lot of friction, all in the sandbox module:
 
 ### Docker and kind inside sandboxes
 
-Since [running agents in containers is ruled out](#the-one-genuinely-custom-component),
+Since [running agents in containers is ruled out](#what-is-left-to-write),
 the sandbox VM has to be a comfortable host for `docker` and `kind`
 itself. In a VM this is ordinary — a real kernel, an unshared daemon — but
 a few things need arranging, and one could block the whole design.
@@ -1516,7 +1566,7 @@ modules/agent-cluster/
   network.nix                          # bridge, nftables, per-tap anti-spoof
   orchestrator/
     default.nix  openhands.nix  resolver.nix
-    git-proxy.nix                      # FINOS Git Proxy service + config
+    git-proxy.nix                      # git proxy service + allowlist
     metadata-server.nix                # gce_metadata_server service
     broker.nix                         # phase 2 only
     admin-ssh.nix  persist.nix
@@ -1525,7 +1575,8 @@ modules/agent-cluster/
     action-execution-server.nix
     git-access.nix                     # insteadOf rewrite + agent README
 packages/
-  sandbox-broker/                      # phase 2 only; see build vs. reuse
+  git-proxy/                           # small smart-HTTP proxy
+  lease-service/                       # optional; see build vs. reuse
 docs/design.md
 ```
 
@@ -1703,11 +1754,12 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    unreachable), registered as a backend in Agent Canvas on the
    orchestrator. No custom code — if this doesn't work, the integration
    assumption is wrong and everything downstream changes.
-6. **Git proxy**: stand up FINOS Git Proxy, answer the
-   [auto-approve and credential-injection questions](#the-git-proxy)
-   early — they decide build-vs-reuse for this piece. Verify from a
-   sandbox that allow-listed repos clone and push and un-listed ones are
-   refused.
+6. **Git proxy**: the custom smart-HTTP proxy — path whitelist,
+   canonicalize, allowlist check, source-IP auth, credential selection,
+   stream through, audit. Verify from a sandbox that allow-listed repos
+   clone and push, that un-listed ones are refused *with a legible git
+   error*, and that no credential is ever visible inside the sandbox
+   (check `.git/config` and the process environment).
 7. **Metadata server**: `gce_metadata_server` impersonating the narrow
    service account. Verify ADC works unmodified in a sandbox, tokens carry
    only the narrow SA's permissions, and sandboxes cannot reach the key
@@ -1740,8 +1792,9 @@ drain — and scale to `sandboxCount = N`, sized by
 - [GCP generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken),
   [downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
 
-- [FINOS Git Proxy](https://github.com/finos/git-proxy) and its
-  [configuration docs](https://git-proxy.finos.org/docs/configuration/overview/)
+- [FINOS Git Proxy](https://github.com/finos/git-proxy) — evaluated and
+  rejected for this role (credential pass-through), but worth reading for
+  `validGitRequest()` and its git-protocol error encoding
 - [`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
   — metadata-server emulator with service-account impersonation
 - [`nix-ld`](https://github.com/nix-community/nix-ld),
