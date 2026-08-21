@@ -234,6 +234,54 @@ encryption at rest is the provider's (or FileVault on a Mac).
 provisioning script.** Images encode paths and how services consume them;
 values are placed once, by hand, on first setup.
 
+### Where credentials should live
+
+`/data` is the default, but two alternatives are worth having answered.
+
+**GitHub Actions secrets on the config repo: no.** It fails mechanically
+before the security argument even starts — Actions secrets are write-only
+from outside, so `GET /actions/secrets/{name}` returns metadata and never a
+value. Materialising one on the controller would require a **self-hosted
+runner there**, executing whatever workflow code the repo contains, on the
+machine holding every credential.
+
+The security comparison is lopsided anyway:
+
+| | `/data` | GitHub secrets |
+|---|---|---|
+| Who holds the GCP key | you | you *and GitHub* |
+| Who can read it | root on the controller | anyone who can run a workflow — i.e. anyone with repo write |
+| Masking | n/a | best-effort; base64 defeats it |
+| New attack surface | none | a runner executing repo code |
+| Disaster recovery | disk snapshot | automatic |
+
+The second row is decisive *for this system specifically*. We
+[withhold the `workflow` scope](#scopes-to-withhold) because an agent that
+can edit `.github/workflows/**` can make CI run code of its choosing with
+whatever secrets the workflow holds. Today the blast radius of that control
+failing is whatever is in CI, and we put nothing there. Storing the GCP key
+in Actions secrets makes the same failure hand over the cloud project — it
+converts a hygiene control into a single point of catastrophe. Disaster
+recovery, the one real benefit, is available from a disk snapshot instead.
+
+**Better: on GCP, do not have a GCP key file at all.** The instance has an
+attached service account, ADC works through the real metadata server, and
+`gce_metadata_server` can impersonate from ADC rather than from a key.
+A long-lived key never created cannot leak, be exfiltrated, or need
+rotating — and it removes the most sensitive item in `/data` outright.
+
+One wrinkle: the controller is a *nested* VM and will not reach
+`169.254.169.254` by default, so the host must forward it. That is a small
+piece of platform-specific plumbing, and it belongs in
+[the adapter](#the-host-adapter) — on a Mac there is no instance identity,
+so the key file returns and the adapter reports that. **Verify** that
+`gce_metadata_server` accepts ADC as its impersonation source.
+
+That leaves only the GitHub credentials to store. If they should be
+centralised rather than on `/data`, **GCP Secret Manager read via instance
+identity** beats GitHub secrets on every axis here: no third party holding
+them, no runner, no coupling to repo write access, same recovery property.
+
 ## The sandbox VMs
 
 Two of them, Debian, each running `docker`, `kind`, and
@@ -921,6 +969,11 @@ ever becomes worth its cost again.
    the split surface.
 5. **How far down the credential ladder can each owner go** — App, machine
    account, or personal token?
+6. **Can `gce_metadata_server` impersonate using ADC** rather than a key
+   file? If so, GCP deployments need no service-account key at all — see
+   [where credentials should live](#where-credentials-should-live) — and
+   the adapter needs to forward the real metadata endpoint into the
+   controller VM.
 
 ## Implementation plan
 
