@@ -909,6 +909,17 @@ Also note `-p` starts in Manual permission mode on every plan, so an
 autonomous run needs an explicit `--permission-mode`; `acceptEdits` fits a
 disposable VM, `dontAsk` is the locked-down end.
 
+**It would run on metered API billing, not a subscription.** The two
+constraints above compound: `--bare` is what stops cloned-repo hooks from
+executing, and `--bare` does not read `CLAUDE_CODE_OAUTH_TOKEN` — it
+requires `ANTHROPIC_API_KEY` or an `apiKeyHelper`. Subscription credentials
+rank below an API key anyway (7th versus 3rd in the precedence order), and
+in `-p` a present key is used with no prompt. So agent spend here is
+per-token Console billing. That is a cost model to weigh against OpenHands,
+not merely a configuration detail — and it is a further argument for the
+controller-side LLM proxy, which is the only place that spend can be
+metered and capped.
+
 **Nothing built so far depends on the answer.** The
 [host adapter](host-adapter.md) is agent-agnostic — it manages VMs and a
 network, and neither cares what runs inside. The choice only starts to bind
