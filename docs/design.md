@@ -130,12 +130,80 @@ support and the best-debugged path; `cloud-hypervisor` is a later
 optimization once the design is validated.
 
 Two VM classes: `openhands` defined once, and `sandbox-0..{N-1}` generated
-by mapping over `agentCluster.sandboxCount` so changing the pool size is a
-one-number edit rather than copy-pasted modules.
+by mapping over `agentCluster.sandboxCount`, so changing the pool size is a
+one-number edit rather than copy-pasted modules — see
+[Generating the pool](#generating-the-pool-from-sandboxcount).
 
-microVM roots are read-only, built from the host's Nix store, with a
-writable overlay — which is exactly the ephemerality we want for sandboxes,
-and exactly what forces the orchestrator's state onto `/persist`.
+microVM guests get a tmpfs root over a read-only `/nix/store` supplied by
+the host — which is exactly the ephemerality we want for sandboxes, and
+exactly what forces the orchestrator's state onto `/persist`.
+
+### Generating the pool from `sandboxCount`
+
+No preprocessing step, templating layer, or codegen is involved: a NixOS
+configuration is a Nix expression, so N VM definitions are a `map` over a
+range, evaluated at build time. This is the case where Nix's
+config-is-code property actually earns its keep — the equivalent in a
+YAML-based system is what drives people to Helm or jsonnet.
+
+The important part isn't that the VM list is generated; it's that
+**everything index-dependent is derived from the same list**, so the
+pieces cannot drift apart:
+
+```nix
+let
+  cfg     = config.agentCluster;
+  indices = lib.range 0 (cfg.sandboxCount - 1);
+
+  nameOf = i: "sandbox-${toString i}";
+  ipOf   = i: "10.100.0.${toString (10 + i)}";
+  tapOf  = i: "vm-sb${toString i}";
+  macOf  = i: "02:00:00:00:01:${lib.fixedWidthString 2 "0" (lib.toHexString i)}";
+in {
+  # The VMs themselves.
+  microvm.vms = lib.listToAttrs (lib.forEach indices (i:
+    lib.nameValuePair (nameOf i) {
+      config = import ../sandbox {
+        inherit (cfg) sandbox;
+        index   = i;
+        address = ipOf i;
+      };
+    }));
+
+  # The anti-spoofing rules that make source-IP auth trustworthy.
+  networking.nftables.ruleset = lib.concatMapStringsSep "\n" (i: ''
+    iifname "${tapOf i}" ip saddr != ${ipOf i} drop
+  '') indices;
+
+  # The broker's view of the pool.
+  services.sandbox-broker.pool =
+    lib.forEach indices (i: { name = nameOf i; address = ipOf i; });
+}
+```
+
+One edit to `sandboxCount` therefore moves the VM set, the address
+assignments, the per-tap firewall rules, and the broker's pool roster
+together. That property is load-bearing rather than tidy: a sandbox that
+got an address without its matching anti-spoof rule would silently
+undermine the [identity model](#sandbox-identity-and-proxy-auth), and
+hand-maintained parallel lists are exactly how that happens.
+
+Changing the count is a host `nixos-rebuild switch` plus a pool drain — the
+same deploy path as a [package change](#deploying-a-change), not a hot
+reload. And since the pool is a hard concurrency ceiling, sizing it is
+really a question of host RAM against desired parallelism.
+
+**Scaling note.** Each VM is a full NixOS module-system evaluation, so eval
+time grows linearly with the count — unnoticeable at 4, noticeable in the
+tens. Disk is not the constraint (the closures differ by a file or two and
+share the host store almost entirely); evaluation is. If the pool ever
+needs to be large, the escape valve is to make the guests *byte-identical*
+by moving per-VM identity out of the guest closure: assign addresses by
+DHCP reservation keyed on MAC, so the host-side config varies per VM while
+all N guests share a single evaluation and a single system closure. That's
+overkill at the sizes this design targets, so the default is static
+addressing — but it's worth keeping index-dependence confined to one small
+module so the switch stays cheap if it's ever wanted.
 
 ### Networking
 
