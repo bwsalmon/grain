@@ -27,6 +27,9 @@ a critical pass over the security claims:
   sharing, a writable store overlay so in-guest `nix` works — and a precise
   account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
+- **Chose** `cloud-hypervisor` over `qemu`, on the strength of its
+  virtio-mem memory reclaim under the RAM constraint, keeping the
+  hypervisor a config option so qemu stays a one-line fallback.
 - **Revised** the GitHub auth model for the case where an App cannot be
   installed everywhere: a per-repo credential set behind the proxy, a
   machine account to restore GitHub-side scoping, and the hardening the
@@ -134,9 +137,31 @@ Properties this buys:
 ### microvm.nix wiring
 
 The host imports the `microvm.nix` flake's host module and declares each VM
-under `microvm.vms.<name>`. Default hypervisor: `qemu` — broadest device
-support and the best-debugged path; `cloud-hypervisor` is a later
-optimization once the design is validated.
+under `microvm.vms.<name>`.
+
+**Hypervisor: `cloud-hypervisor`.** microvm.nix supports several; this one
+fits the constraints best:
+
+- **Memory reclaim is its strength, and memory is the binding resource
+  here.** microvm.nix's cloud-hypervisor runner wires up
+  `hotplug_method=virtio-mem` with `free_page_reporting=on` and
+  `deflate_on_oom=on`, so a guest returns pages after a build instead of
+  holding its peak allocation for the rest of its lease. See
+  [Memory budget](#memory-budget).
+- A minimal device model — less to boot, less attack surface.
+- Fast boot, which [on-demand start](#start-sandboxes-on-demand) leans on.
+
+Two consequences worth knowing up front:
+
+- **Shares must be virtiofs — cloud-hypervisor does not support 9p.** That
+  is already the choice for `/persist` on performance grounds, so nothing
+  changes; it does remove 9p as a fallback if virtiofs ever misbehaves.
+- **qemu is the better-trodden path** in microvm.nix, so a
+  cloud-hypervisor-specific problem is likelier to be one you debug
+  yourself. The mitigation is cheap and worth keeping: `microvm.hypervisor`
+  is a per-VM option, so `agentCluster.hypervisor` can flip the cluster
+  back to qemu wholesale, or run the orchestrator on qemu and sandboxes on
+  cloud-hypervisor if only one of them gives trouble. Don't hardcode it.
 
 Two VM classes: `openhands` defined once, and `sandbox-0..{N-1}` generated
 by mapping over `agentCluster.sandboxCount`, so changing the pool size is a
@@ -288,7 +313,10 @@ The orchestrator needs state that survives rebuilds:
 
 microvm.nix offers two mechanisms: `microvm.volumes` (a block image with
 `autoCreate`) and `microvm.shares` with `proto = "virtiofs"` (a host
-directory passed through). **Use a virtiofs share** at
+directory passed through — and the only share protocol cloud-hypervisor
+supports, so this is settled by the
+[hypervisor choice](#microvmnix-wiring) anyway). **Use a virtiofs share**
+at
 `/var/lib/microvms/openhands/persist` → `/persist`. Revision 1 specified a
 block volume; a share is better here for operational reasons that matter
 more than the marginal performance difference:
@@ -1110,20 +1138,24 @@ the host needs more RAM or the ceiling needs lowering.
   same-page merging. Costs some CPU scanning; worth measuring here
   specifically because the workload is so uniform.
 - **virtio-mem / free page reporting.** microvm.nix exposes a `balloon`
-  option (which replaced the older `balloonMem`), and on cloud-hypervisor
-  wires up `hotplug_method=virtio-mem` with `free_page_reporting=on` and
-  `deflate_on_oom=on`. That lets a guest hand back memory it isn't using
-  instead of holding its full allocation — directly useful for sandboxes
-  whose usage spikes during a build and then subsides.
-- **This may decide the hypervisor question.** Revision 2 defaulted to
-  `qemu` for compatibility and listed cloud-hypervisor as a later
-  optimization. Under a RAM constraint, its better virtio-mem support
-  moves from optimization to potentially load-bearing — see
-  [open questions](#open-questions).
-- **Store sharing already helps**, but note the caveat: N guests
-  separately page-cache the same shared store contents unless virtiofs DAX
-  is in play. Whether microvm.nix exposes DAX, and whether it helps here,
-  is worth checking if memory stays tight.
+  option (which replaced the older `balloonMem`), and its cloud-hypervisor
+  runner wires up `hotplug_method=virtio-mem` with `free_page_reporting=on`
+  and `deflate_on_oom=on`. That lets a guest hand back memory it isn't
+  using rather than holding its full allocation — directly useful for
+  sandboxes that spike during a build and then subside, and the main reason
+  [cloud-hypervisor is the default](#microvmnix-wiring).
+- **Reconsider store sharing under memory pressure.** A virtiofs share
+  costs one `virtiofsd` process per *running* VM on the host, and each
+  guest page-caches the shared store separately unless virtiofs DAX is in
+  play (worth checking whether microvm.nix exposes it). The alternative is
+  `storeOnDisk`: a read-only erofs image, no virtiofsd at all, and — if the
+  sandbox guests are made byte-identical, per the
+  [scaling note](#generating-the-pool-from-sandboxcount) — the *same* image
+  file attached to every sandbox, so the host page-caches one copy for all
+  of them. The cost is that only the guest's own closure is present, so
+  `nix shell` downloads more. These two ideas compound, and both cut
+  against the current `shareHostStore = true` default: worth measuring
+  early rather than treating as settled.
 
 ### Sizing
 
@@ -1172,6 +1204,7 @@ docs/design.md
 | `sandbox.memoryMb` | `int` | `3072` | Guest RAM; set from measured peak, not guessed. |
 | `sandbox.onDemandStart` | `bool` | `true` | Stop idle sandboxes; RAM scales with active agents. |
 | `sandbox.passwordlessSudo` | `bool` | `true` | Safe because the VM, not the user, is the boundary. |
+| `hypervisor` | `enum` | `cloud-hypervisor` | Per-VM overridable; `qemu` is the fallback. |
 | `network.bridge` | `str` | `br-agents` | Host bridge name. |
 | `network.subnet` | `str` | `10.100.0.0/24` | Internal subnet. |
 | `network.externalSshPort` | `port` | `2222` | Host port DNAT'd to orchestrator sshd. |
@@ -1269,10 +1302,12 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
 2. **Backpressure behavior**: what does OpenHands' remote-runtime client do
    when the API reports no capacity? Determines whether the broker queues
    or errors.
-3. **Hypervisor**: `qemu` for compatibility, or `cloud-hypervisor`? No
-   longer a pure optimization — cloud-hypervisor's virtio-mem and
-   free-page-reporting support may be load-bearing on a RAM-constrained
-   host. Decide by measuring both under a real agent workload.
+3. **Cloud-hypervisor feature coverage**: confirm the pinned microvm.nix
+   drives everything this design needs on cloud-hypervisor — the virtiofs
+   `/persist` share, `autoCreate` volumes, tap networking, and virtio-mem
+   reclaim actually returning memory under load. qemu is the fallback and
+   `agentCluster.hypervisor` makes the switch a one-line change, including
+   per-VM if only one class of VM has trouble.
 4. **`sandboxCount` default**, pending measurement of real agent memory
    footprint against host RAM.
 5. **Host exposure**: is the host directly internet-facing (as the DNAT
@@ -1334,3 +1369,11 @@ Scale to `sandboxCount = N` once 1–8 are validated at `sandboxCount = 1`.
   [shared directories](https://microvm-nix.github.io/microvm.nix/shares.html)
 - [GCP generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken),
   [downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
+
+**Prior art worth reading before implementation** (noted, not consulted —
+it was unreachable from the environment this doc was drafted in):
+Michael Stapelberg, ["Coding Agent VMs on NixOS with
+microvm.nix"](https://michael.stapelberg.ch/posts/2026-02-01-coding-agent-microvm-nix/),
+which appears to cover substantially the same problem and may well have
+already hit the gotchas listed under
+[open questions](#open-questions).
