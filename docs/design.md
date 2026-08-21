@@ -27,6 +27,12 @@ a critical pass over the security claims:
   sharing, a writable store overlay so in-guest `nix` works — and a precise
   account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
+- **Audited the design for build-vs-reuse**, which removed most of the
+  custom code: issue intake becomes the OpenHands resolver, the GCP token
+  service becomes a GCE metadata-server emulator, the git proxy becomes
+  FINOS Git Proxy, and the REST-filtering proxy disappears entirely by
+  keeping API work on the orchestrator. See
+  [build vs. reuse](#build-vs-reuse).
 - **Chose** `cloud-hypervisor` over `qemu`, on the strength of its
   virtio-mem memory reclaim under the RAM constraint, keeping the
   hypervisor a config option so qemu stays a one-line fallback.
@@ -68,6 +74,66 @@ a critical pass over the security claims:
   malicious code). Human PR review is that control — see
   [Threat model](#threat-model-and-what-this-does-not-defend-against).
 
+## Build vs. reuse
+
+Default to existing solutions; write code only where nothing fits. Several
+things revision 2 specified as custom turn out to be solved problems, and
+one of them — issue intake — was reinventing a feature of the tool this
+cluster is built around.
+
+| Need | Approach |
+|---|---|
+| Issue intake | **[openhands-resolver](#issue-intake-use-the-openhands-resolver)** — label-driven pickup, already built |
+| Agent execution | **OpenHands `docker` runtime** in phase 1; custom pool broker only if per-task VM isolation is required |
+| GCP credentials | **[`gce_metadata_server`](#gcp-short-lived-tokens)** — ADC works with no client code at all |
+| Git access control | **[FINOS Git Proxy](#the-git-proxy)** — repo allowlist and push policy |
+| GitHub API access | **none from sandboxes** — the orchestrator does API work, so there is nothing to filter |
+| Branch and workflow protection | **[GitHub rulesets + withheld scopes](#scopes-to-withhold)** — enforced server-side |
+| Ephemeral root, persistence | **microvm.nix volumes/shares**; [`impermanence`](https://github.com/nix-community/impermanence) if `/persist` grows complicated |
+| Secrets at rest | **`sops-nix`/`agenix`** for config-time secrets; `/persist` for admin-provided ones |
+| Dynamic binaries in guests | **[`nix-ld`](#nix-ld-the-nixos-specific-trap)** |
+| Egress allowlist (optional) | **squid or Envoy**, not a bespoke filter |
+| Firewalling, NAT, anti-spoofing | **nftables** |
+| Log shipping, metrics | **`systemd-journal-upload`/promtail, Prometheus exporters** |
+
+### The one genuinely custom component
+
+After that audit, the only substantial thing left to write is the **sandbox
+pool broker** — and it's worth asking whether phase 1 needs it at all.
+
+OpenHands' standard `docker` runtime already does pool management: a
+container per session, created and torn down by code that is already
+maintained and tested. Running that inside a *single* sandbox VM gives:
+
+- zero custom orchestration code,
+- the [lease/reset problem](#sandbox-lifecycle-lease-and-reset) solved by
+  container lifecycle rather than by our broker,
+- the credential boundary preserved intact — agents still cannot reach
+  GitHub or GCP credentials, because those live on a different VM.
+
+What it gives up is VM-level isolation *between concurrent agent tasks*: a
+container escape reaches other agents' work, where separate microVMs would
+not. That is precisely what the microVM pool buys, and whether it's worth a
+custom broker depends on whether concurrent tasks are mutually distrusting
+— agents working issues in the same repo, from the same credential set,
+mostly are not.
+
+**Recommendation: phase it.** Build phase 1 on the Docker runtime in one
+sandbox VM. That validates the networking, the git proxy, the metadata
+server, the resolver, and the whole credential model with no custom
+orchestration, and it sidesteps the largest open question — remote-runtime
+API compatibility — entirely. Add the broker and the microVM pool in phase
+2 if per-task VM isolation turns out to be required, at which point
+everything else is known-good and the broker is the only variable.
+
+This does deviate from the original "fixed number of sandbox VMs" shape, so
+it's a call worth making deliberately rather than by default. If per-task
+VM isolation is a hard requirement, skip phase 1 and build the broker — and
+use the
+[Kubernetes remote runtime](https://github.com/zparnold/openhands-kubernetes-remote-runtime)
+as a working reference for the API contract rather than reverse-engineering
+it.
+
 ## High-level architecture
 
 ```mermaid
@@ -82,22 +148,22 @@ flowchart TB
         fw["nftables: DNAT / NAT / per-tap filtering"]
 
         subgraph oh["orchestrator microVM: openhands"]
-            openhands["OpenHands server<br/>(issue intake, agent loop)"]
-            broker["Sandbox pool broker<br/>(OpenHands remote-runtime API)"]
-            proxy["GitHub proxy<br/>(allowlist + audit)"]
-            tokensvc["GCP token minting service"]
+            openhands["OpenHands + resolver<br/>(issue intake, agent loop,<br/>all GitHub API work)"]
+            broker["Sandbox pool broker<br/>(phase 2 only)"]
+            proxy["Git proxy (FINOS)<br/>(repo allowlist + audit)"]
+            tokensvc["GCE metadata server<br/>(impersonated SA)"]
             sshd["sshd (admin login)"]
             persist[("/persist<br/>creds, allowlist, GCP key,<br/>ssh host keys, OH state")]
         end
 
         subgraph sb0["sandbox microVM 0"]
             aes0["OpenHands action<br/>execution server"]
-            cli0["gh-proxy + gcp-token<br/>client scripts"]
+            cli0["git via proxy (insteadOf)<br/>GCP via ADC"]
         end
 
         subgraph sbN["sandbox microVM N-1"]
             aesN["OpenHands action<br/>execution server"]
-            cliN["gh-proxy + gcp-token<br/>client scripts"]
+            cliN["git via proxy (insteadOf)<br/>GCP via ADC"]
         end
     end
 
@@ -111,8 +177,8 @@ flowchart TB
     openhands -->|"actions/observations"| aes0
     openhands -->|"actions/observations"| aesN
 
-    cli0 -->|src-IP authed| proxy
-    cliN -->|src-IP authed| proxy
+    cli0 -->|git only, src-IP authed| proxy
+    cliN -->|git only, src-IP authed| proxy
     cli0 -->|src-IP authed| tokensvc
     cliN -->|src-IP authed| tokensvc
 
@@ -338,14 +404,14 @@ Nothing an agent writes outlives its lease.
 /persist/
   ssh/                             # VM host keys (0700 root)
   secrets/
-    gcp-service-account.json       # 0600, owned by gcp-token-svc
-    github/                        # credential set, 0600, owned by github-proxy
+    gcp-service-account.json       # 0600, owned by metadata-server
+    github/                        # credential set, 0600, owned by git-proxy
   config/
     repo-allowlist.json            # admin-editable, hot-reloaded, no rebuild
   state/
     openhands/                     # OpenHands working state
-    github-proxy/audit.log
-    gcp-token-svc/audit.log
+    git-proxy/audit.log
+    metadata-server/audit.log
 ```
 
 **Invariant**: no secret value is ever a Nix string literal, a derivation
@@ -628,26 +694,69 @@ practice:
 Permissions to grant, unchanged from before: repository contents
 read/write, issues read/write, pull requests read/write — nothing else.
 
-### The proxy
+### Split the surface: sandboxes get git, the orchestrator gets the API
 
-A small internal HTTP service on `10.100.0.2`, reachable only by sandboxes
-and the OpenHands process:
+The single most useful simplification available here. Revision 2 had the
+proxy filtering both git transport *and* a REST allowlist, which is what
+made the [only-lock hardening](#when-the-proxy-is-the-only-control) list so
+long — GraphQL, route parsing, redirect handling, canonicalization are all
+REST-surface problems.
 
-- **REST passthrough** for a *fixed allow-list of endpoints* (branches,
-  contents/commits, issues, PRs) — not arbitrary GitHub API paths —
-  forwarding to `api.github.com` with real credentials injected, after
-  checking the target repo against `repo-allowlist.json`.
-- **Git smart-HTTP** so `git clone/fetch/push` against
-  `http://10.100.0.2:<port>/<owner>/<repo>.git` works transparently. This
-  is the only way sandboxes reach git.
-- **Credential selection and refresh** handled internally and invisible to
-  callers: the narrowest credential covering the target repo is chosen per
-  request, and App installation tokens (where used) are refreshed on their
-  1h cycle.
-- **Audit log** per request: caller sandbox, repo, operation, outcome.
-- **Hot-reloaded allowlist** from `/persist/config/repo-allowlist.json`, so
-  an admin adds or removes a repo over SSH with no rebuild. A Nix option
-  seeds the file on first boot only; thereafter the file is authoritative.
+But sandboxes don't need the GitHub API. **OpenHands runs on the
+orchestrator**, where it can hold a credential directly and do all the API
+work itself: reading issues, commenting, opening PRs. What an agent inside
+a sandbox actually needs is `git clone`, `git fetch`, and `git push`.
+
+So draw the line there:
+
+- **Sandboxes: git transport only.** No REST, no GraphQL, no `gh` against
+  the API. The proxy exposes git smart-HTTP and nothing else, which removes
+  the entire class of API-filtering bypasses rather than defending against
+  them.
+- **Orchestrator: API operations**, performed by OpenHands with a
+  credential the sandboxes cannot reach, on the machine that already holds
+  every other secret.
+
+The cost is that agents can't run `gh pr create` themselves; PR and comment
+creation happens through OpenHands instead. That is a real constraint, and
+it's worth accepting: the alternative reintroduces the full REST attack
+surface into the least trusted machine in the cluster, and the resolver
+already creates PRs as part of its normal flow.
+
+### The git proxy
+
+**Reuse [FINOS Git Proxy](https://github.com/finos/git-proxy) rather than
+writing one.** It is purpose-built for exactly this — sitting between
+clients and GitHub, intercepting pushes, and applying configurable policy —
+it's a FINOS graduated project in production at several large banks, and it
+already provides:
+
+- a repository allowlist in its config (default-deny: an un-listed repo is
+  blocked),
+- push interception with pluggable policy processors, which is precisely
+  the packfile-inspection work
+  [I argued we shouldn't hand-roll](#write-safety-enforce-at-github-not-in-a-pack-parser),
+- dynamic configuration loading from files, HTTP, or a git repo — which
+  covers the hot-reloaded allowlist requirement without a bespoke watcher,
+- an audit trail of intercepted pushes.
+
+Two things to verify before committing to it:
+
+- **Approval workflow fit.** Git Proxy's default flow holds a push for
+  human approval, which is wrong for autonomous agents. Confirm it can
+  auto-approve on rule match, or that a policy plugin can. If it can't,
+  it's the wrong tool and this reverts to a small custom git proxy — a much
+  smaller thing to build than the REST-filtering version.
+- **Credential injection.** We need per-repo credential selection from the
+  [credential set](#lowering-the-ceiling-a-machine-account) on the way out
+  to GitHub. Check whether that's configuration or a plugin.
+
+Whatever serves this role keeps the responsibilities the design needs: repo
+allowlist enforcement, credential selection and injection, per-request
+audit (caller sandbox, repo, operation, outcome), and the allowlist read
+from `/persist/config/repo-allowlist.json` so an admin can change it over
+SSH with no rebuild. A Nix option seeds that file on first boot only;
+thereafter the file is authoritative.
 
 ### Write safety: enforce at GitHub, not in a pack parser
 
@@ -677,46 +786,70 @@ proxy should refuse to serve a repo whose protection rules it cannot verify
 are in place — failing closed on onboarding is cheap, and it prevents the
 allowlist and the rulesets from silently drifting apart.
 
-### Issue intake semantics
+### Issue intake: use the OpenHands resolver
 
-Revision 1 said "OpenHands polls the target repo for issues" and left the
-actual behavior undefined, which hides several decisions that determine
-whether this thing is usable or a runaway:
+Revision 2 designed a label-driven intake from scratch. It shouldn't have:
+**OpenHands ships one**. The
+[resolver](https://www.openhands.dev/blog/open-source-coding-agents-in-your-github-fixing-your-issues)
+picks up issues tagged with a label (`fix-me` by default), works them, and
+opens a PR or reports that it couldn't — the same opt-in-per-issue design
+arrived at independently, already built and already exercised.
 
-- **Trigger**: only issues carrying a specific label (e.g.
-  `agent-ready`), never all open issues. Opt-in per issue is the difference
-  between a tool and a machine that opens PRs on every bug report ever
-  filed.
-- **Dedupe**: on pickup, the agent removes `agent-ready` and applies
-  `agent-working`, then comments with a link to the run. Label transitions
-  are the lock; without one, a poll cycle overlapping a slow run starts a
-  second agent on the same issue.
-- **Completion**: on success, `agent-working` → `agent-done` plus the PR
-  link; on failure, → `agent-failed` with the error. A human re-labels to
-  retry, which keeps retry an explicit human decision.
-- **Poll interval**: 60s default. GitHub's rate limits are not a concern
-  at this scale, and polling through our own proxy keeps the audit trail
-  complete.
-- **Rate limiting**: a cap on runs started per hour, so a bulk labeling
-  action can't consume the entire pool and the LLM budget at once.
+Its usual deployment is a GitHub Action running on GitHub's runners, which
+is the opposite of what this cluster is for. The relevant mode is the local
+one — it can also be run against a repository directly — so the
+orchestrator runs the resolver locally and points it at
+`agentCluster.github.targetRepo`.
+
+To verify: whether local mode polls continuously or runs as a one-shot
+batch. If one-shot, wrap it in a systemd timer at
+`github.pollIntervalSeconds` — still far less work than building intake.
+
+What remains ours, because it's about protecting a small fixed pool and the
+LLM budget rather than about issue semantics:
+
+- **Rate limiting**: a cap on runs started per hour, so bulk-labelling
+  forty issues can't consume the whole pool and a month of LLM spend at
+  once.
+- **A stranded-work sweeper**: if a rebuild kills in-flight runs, issues
+  left mid-flight need returning to the queue rather than silently
+  stalling (see [Operations](#operations)).
+
+Adopt the resolver's label vocabulary rather than the invented
+`agent-ready`/`agent-working` one, so the config surface matches what the
+tool actually does.
 
 ## GCP short-lived tokens
 
-- The key lives at `/persist/secrets/gcp-service-account.json`, `0600`,
-  owned by the token service's dedicated user — readable by neither
-  OpenHands nor the broker.
-- One internal endpoint, `POST /token`, authenticated by source IP, returns
-  an OAuth2 access token with `agentCluster.gcp.tokenLifetimeSeconds`
-  (default 300) minted via the IAM Credentials API's
-  [`generateAccessToken`](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken),
-  rather than ever handing out the key.
-- A client script `gcp-token` on each sandbox fetches one and exports it as
-  `CLOUDSDK_AUTH_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN`, so agents run
-  it immediately before a `gcloud`/`gsutil`/API call rather than holding a
-  standing credential.
-- Every mint is audit-logged.
+**Don't build this service — emulate GCE's metadata server.**
+[`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
+serves the real metadata-server contract from a service-account file,
+workload identity federation, or **service-account impersonation**, which
+is exactly the shape this design needs.
 
-**What the 5-minute lifetime actually buys** — this is where revision 1 was
+The payoff is that it eliminates the client side entirely. Every Google SDK
+— `gcloud`, `gsutil`, the Python/Go/Java libraries — discovers credentials
+through Application Default Credentials, which probes the metadata server
+automatically. Point a sandbox at the orchestrator (`GCE_METADATA_HOST`, or
+a hosts entry for `metadata.google.internal`) and GCP access *just works*
+with no wrapper script, no environment plumbing, and nothing for the agent
+to learn or get wrong. A custom `POST /token` endpoint plus a `gcp-token`
+client script would have been strictly more code doing strictly less.
+
+- The key lives at `/persist/secrets/gcp-service-account.json`, `0600`,
+  owned by the metadata service's dedicated user — readable by neither
+  OpenHands nor the broker.
+- The emulator is configured to **impersonate a second, minimally-
+  privileged service account** rather than serve the primary key's own
+  tokens (see below for why this matters more than the lifetime does).
+- Reachable only from sandbox VMs, authenticated by source IP, every mint
+  audit-logged.
+- Verify: whether the emulator lets the impersonated token's lifetime be
+  set down to `agentCluster.gcp.tokenLifetimeSeconds`, or whether it serves
+  the default hour. If it's fixed at an hour, that weakens revocation
+  speed but not the privilege ceiling — which is the part that matters.
+
+**What a short lifetime actually buys** — this is where revision 1 was
 wrong, and it matters. A sandbox can call `/token` again the moment a token
 expires, indefinitely. Short lifetimes therefore do **not** limit what a
 compromised sandbox can do while it is compromised. What they do buy:
@@ -728,19 +861,17 @@ compromised sandbox can do while it is compromised. What they do buy:
 
 Both are real and worth having. Neither is "the agent only has 5 minutes of
 access." To actually reduce steady-state privilege, downscope the token
-itself. Options, in increasing order of effort:
+itself:
 
-1. Mint for a **second, minimally-privileged service account** that the
-   primary key only impersonates, so the sandbox's ceiling is that
-   account's permissions rather than the primary's.
-2. Apply a
+1. **Impersonate a second, minimally-privileged service account**, so the
+   sandbox's ceiling is that account's permissions rather than the
+   primary's. The emulator supports this natively, so it costs one extra
+   service account and one IAM binding — do it from the start. It is the
+   difference between "the primary SA's full permissions, renewable
+   forever" and a genuinely bounded capability.
+2. Optionally add a
    [Credential Access Boundary](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
-   to restrict tokens to specific buckets/resources.
-
-Recommendation: do (1) from the start. It costs one extra service account
-and one IAM binding, and it is the difference between "5 minutes of the
-primary SA's full permissions, renewable forever" and a genuinely bounded
-capability.
+   to restrict tokens further to specific buckets or resources.
 
 ## Sandbox identity and proxy auth
 
@@ -819,13 +950,14 @@ because it never entered the Nix store.
   [What a reboot actually resets](#what-a-reboot-actually-resets).
 - Runs the OpenHands action execution server, version-pinned in lockstep
   with the orchestrator.
-- Ships a `gh-proxy` client: an `/etc/gitconfig` `insteadOf` rewrite so
-  `github.com` URLs transparently resolve to the proxy (agents' existing
-  git habits and any tooling that hardcodes GitHub URLs just work), plus a
-  small wrapper for issue/PR API calls. Ship both the script and short
-  written instructions in the sandbox image, since an agent that can read
-  `/etc/agent-tools/README` recovers from a confusing git error on its own.
-- Ships the `gcp-token` client described above.
+- Reaches git through an `/etc/gitconfig` `insteadOf` rewrite, so
+  `github.com` URLs resolve to the proxy transparently and agents' existing
+  git habits — and any tooling that hardcodes GitHub URLs — just work. No
+  client script needed. There is deliberately no API client, per
+  [the split surface](#split-the-surface-sandboxes-get-git-the-orchestrator-gets-the-api).
+- Needs no GCP client tooling at all: Application Default Credentials
+  finds the orchestrator's [metadata server](#gcp-short-lived-tokens) on
+  its own.
 - No inbound connectivity from outside the host and none from other
   sandboxes.
 
@@ -869,7 +1001,7 @@ Default set, aimed at "an agent can start working without installing
 anything": `git`, `openssh`, `cacert`, `curl`, `jq`, `ripgrep`, `fd`,
 `coreutils`/`findutils`/`gnused`/`gawk`, `gnutar`/`gzip`/`unzip`, `less`,
 `vim`, `gnumake`, `gcc`, `python3` with `uv`, `nodejs` with `pnpm`. Plus
-the `gh-proxy` and `gcp-token` clients and their README.
+the `/etc/agent-tools/README` described below.
 
 ### nix-ld: the NixOS-specific trap
 
@@ -1051,8 +1183,9 @@ An agent that knows the rules doesn't burn turns discovering them. Ship a
 short `/etc/agent-tools/README` — and reference it from the OpenHands
 system prompt — covering: no `apt`, use `nix shell nixpkgs#pkg` for
 one-offs; project-local package managers work normally; downloaded
-binaries work; `gh-proxy` for GitHub and `gcp-token` for GCP; everything
-outside the repo is discarded at task end.
+binaries work; git pushes go through the proxy automatically and GitHub
+API calls are not available from here; GCP works through ADC with no setup;
+everything outside the repo is discarded at task end.
 
 This is cheap and disproportionately effective — the failure it prevents
 is an agent concluding the sandbox is broken and working around it.
@@ -1175,15 +1308,17 @@ modules/agent-cluster/
   default.nix                          # agentCluster.* options
   network.nix                          # bridge, nftables, per-tap anti-spoof
   orchestrator/
-    default.nix  openhands.nix  broker.nix
-    github-proxy.nix  gcp-token-service.nix
+    default.nix  openhands.nix  resolver.nix
+    git-proxy.nix                      # FINOS Git Proxy service + config
+    metadata-server.nix                # gce_metadata_server service
+    broker.nix                         # phase 2 only
     admin-ssh.nix  persist.nix
   sandbox/
     default.nix  image.nix                    # packages, nix-ld, store sharing
     action-execution-server.nix
-    github-proxy-client.nix  gcp-token-client.nix
+    git-access.nix                     # insteadOf rewrite + agent README
 packages/
-  github-proxy/  gcp-token-service/  sandbox-broker/
+  sandbox-broker/                      # phase 2 only; see build vs. reuse
 docs/design.md
 ```
 
@@ -1210,7 +1345,7 @@ docs/design.md
 | `network.externalSshPort` | `port` | `2222` | Host port DNAT'd to orchestrator sshd. |
 | `network.egressPolicy` | `enum` | `open` | `open` \| `allowlist` (see egress trade-off). |
 | `github.targetRepo` | `str` | — required | `owner/repo` scanned for labeled issues. |
-| `github.intakeLabel` | `str` | `agent-ready` | Label that opts an issue in. |
+| `github.intakeLabel` | `str` | `fix-me` | Resolver's label that opts an issue in. |
 | `github.pollIntervalSeconds` | `int` | `60` | Issue poll cadence. |
 | `github.maxRunsPerHour` | `int` | `10` | Guard against bulk-label runaway. |
 | `github.allowlistedReposDefault` | `list of str` | `[]` | Seeds the allowlist on first boot only. |
@@ -1272,13 +1407,13 @@ and both came from the same error — treating a *narrowed* capability as an
 - **Rebuilds interrupt work.** `nixos-rebuild switch` on the host restarts
   VMs, killing in-flight agent runs. The broker should expose a drain mode
   (stop granting leases, wait for actives to finish, bounded by a timeout)
-  and the deploy runbook should use it. Issues left in `agent-working` need
-  a sweeper that returns them to `agent-ready` after a timeout, or they
-  silently strand.
+  and the deploy runbook should use it. Issues the resolver had picked up
+  need a sweeper that returns them to the intake label after a timeout, or
+  they silently strand.
 - **Observability.** Forward VM journals to the host. The signals that
   matter: pool free/leased/quarantined counts, lease durations, proxy
   request rate and denial rate, token mint rate, issue intake outcomes. A
-  quarantined sandbox and a stuck `agent-working` label are the two silent
+  quarantined sandbox and an issue stuck mid-flight are the two silent
   failure modes to alarm on.
 - **Backup.** `/persist` is the only stateful thing in the cluster; back up
   the host directory. Recovery is restoring the directory and rebuilding.
@@ -1295,25 +1430,30 @@ and both came from the same error — treating a *narrowed* capability as an
 
 Substantially shorter than revision 1 — its two biggest are resolved above.
 
-1. **Remote-runtime API stub compatibility**: confirm OpenHands accepts
-   stubbed `/registry_prefix` and `/image_exists` responses and does
-   nothing else image-specific before starting a session. This is the first
-   thing to spike; it's the last real unknown in the integration.
-2. **Backpressure behavior**: what does OpenHands' remote-runtime client do
-   when the API reports no capacity? Determines whether the broker queues
-   or errors.
-3. **Cloud-hypervisor feature coverage**: confirm the pinned microvm.nix
+1. **Does phase 2 happen at all?** Whether concurrent agent tasks need
+   VM-level isolation from each other decides whether the pool broker is
+   built. See [build vs. reuse](#the-one-genuinely-custom-component).
+2. **Phase 2, if it happens**: confirm OpenHands accepts stubbed
+   `/registry_prefix` and `/image_exists` responses; and determine what its
+   remote-runtime client does when the API reports no capacity, which
+   decides whether the broker queues or errors.
+3. **OpenHands V0 vs V1 configuration.** The remote-runtime API surface and
+   `config.toml`/`SANDBOX_*` settings documented here appear to belong to
+   the V0 configuration model, which newer versions treat as legacy. Pin a
+   version early and confirm which model it uses before building anything
+   against those settings.
+4. **Cloud-hypervisor feature coverage**: confirm the pinned microvm.nix
    drives everything this design needs on cloud-hypervisor — the virtiofs
    `/persist` share, `autoCreate` volumes, tap networking, and virtio-mem
    reclaim actually returning memory under load. qemu is the fallback and
    `agentCluster.hypervisor` makes the switch a one-line change, including
    per-VM if only one class of VM has trouble.
-4. **`sandboxCount` default**, pending measurement of real agent memory
+5. **`sandboxCount` default**, pending measurement of real agent memory
    footprint against host RAM.
-5. **Host exposure**: is the host directly internet-facing (as the DNAT
+6. **Host exposure**: is the host directly internet-facing (as the DNAT
    design assumes), or behind an existing bastion/VPN — in which case the
    orchestrator's sshd needn't be internet-reachable at all?
-6. **How far down the credential ladder can each owner go?** Which repos
+7. **How far down the credential ladder can each owner go?** Which repos
    admit an App install, which admit a machine-account collaborator
    invite, and which genuinely need the personal token. Worth answering per
    repo at onboarding, since it decides how much traffic the broad
@@ -1334,29 +1474,31 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    security model — and that `/persist` survives `nixos-rebuild switch`.
 3. **Admin SSH**: hardened sshd, single key, host keys on `/persist`.
    Verify external login and stable host keys across rebuilds.
-4. **Spike open question 1**: stub broker returning a hand-run action
-   execution server's URL; confirm OpenHands drives a session end to end.
-   *Everything downstream depends on this, so it comes before real work on
-   the proxy.*
-5. **Broker**: full pool management — lease, release, reboot-reset, health
-   check, quarantine, drain.
-6. **GitHub proxy v1**: allowlist enforcement, credential-set selection,
-   REST passthrough, git smart-HTTP, audit log. Build the
-   [only-control hardening](#when-the-proxy-is-the-only-control) in from
-   the start rather than retrofitting it — deny-by-default, parsed-route
-   matching, no GraphQL, no redirect following. Test end to end from a
-   sandbox against a throwaway repo, including the negative cases.
-7. **GCP token service**: minting with impersonation of the narrow SA,
-   client script, audit log. Verify expiry and that sandboxes cannot reach
-   the key file.
-8. **Issue intake**: label-driven pickup, dedupe transitions, rate limit,
-   stranded-label sweeper.
-9. **Hardening**: move as many repos as possible down the credential
+4. **OpenHands end to end, no custom code**: OpenHands on the
+   orchestrator driving its stock `docker` runtime inside one sandbox VM.
+   Proves the shape works before anything bespoke exists.
+5. **Git proxy**: stand up FINOS Git Proxy, answer the
+   [auto-approve and credential-injection questions](#the-git-proxy)
+   early — they decide build-vs-reuse for this piece. Verify from a
+   sandbox that allow-listed repos clone and push and un-listed ones are
+   refused.
+6. **Metadata server**: `gce_metadata_server` impersonating the narrow
+   service account. Verify ADC works unmodified in a sandbox, tokens carry
+   only the narrow SA's permissions, and sandboxes cannot reach the key
+   file.
+7. **Resolver**: run openhands-resolver locally against the target repo;
+   add the rate limit and the stranded-work sweeper. First full
+   issue-to-PR run.
+8. **Hardening**: move as many repos as possible down the credential
    ladder (machine account, or an App where installable), apply branch
    protection to allow-listed repos, confirm no credential carries
    `workflow` scope, ship journals to the host, write the admin runbook.
 
-Scale to `sandboxCount = N` once 1–8 are validated at `sandboxCount = 1`.
+At that point the system is useful. **Phase 2, only if per-task VM
+isolation is required**: build the pool broker (lease, release,
+stop/start reset, health check, quarantine, drain), spike the
+[remote-runtime API question](#open-questions) against it, and scale to
+`sandboxCount = N`.
 
 ## Sources
 
@@ -1369,6 +1511,16 @@ Scale to `sandboxCount = N` once 1–8 are validated at `sandboxCount = 1`.
   [shared directories](https://microvm-nix.github.io/microvm.nix/shares.html)
 - [GCP generateAccessToken](https://cloud.google.com/iam/docs/reference/credentials/rest/v1/projects.serviceAccounts/generateAccessToken),
   [downscoping with credential access boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
+
+- [openhands-resolver](https://www.openhands.dev/blog/open-source-coding-agents-in-your-github-fixing-your-issues)
+  — label-driven issue intake, already built
+- [FINOS Git Proxy](https://github.com/finos/git-proxy) and its
+  [configuration docs](https://git-proxy.finos.org/docs/configuration/overview/)
+- [`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
+  — metadata-server emulator with service-account impersonation
+- [`nix-ld`](https://github.com/nix-community/nix-ld),
+  [`impermanence`](https://github.com/nix-community/impermanence)
+- [GitHub PAT `workflow` scope restriction](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 
 **Prior art worth reading before implementation** (noted, not consulted —
 it was unreachable from the environment this doc was drafted in):
