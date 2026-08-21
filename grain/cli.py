@@ -45,7 +45,10 @@ def build_adapter(cluster: Cluster, runner: Runner, args: argparse.Namespace):
     # implements the same interface, with socket_vmnet and pf; see
     # docs/design.md and docs/host-adapter.md.
     network = LinuxNetwork(cluster, runner)
-    return LibvirtAdapter(cluster, runner, network, config_dir=Path(args.config_dir))
+    return LibvirtAdapter(
+        cluster, runner, network, config_dir=Path(args.config_dir),
+        ssh_public_key_path=Path(args.ssh_public_key),
+    )
 
 
 def build_orchestrator(cluster: Cluster, runner: Runner,
@@ -174,11 +177,30 @@ def cmd_egress(args: argparse.Namespace) -> int:
 
 def cmd_create(args: argparse.Namespace) -> int:
     cluster = build_cluster(args)
+    _check_provision_target(cluster, args)
     adapter = build_adapter(cluster, _runner(args), args)
     script = Path(args.provision).read_text() if args.provision else None
     for name in _targets(cluster, args.name):
         adapter.create(cluster.spec_of(name), script)
     return 0
+
+
+def _check_provision_target(cluster: Cluster, args: argparse.Namespace) -> None:
+    """`--provision` applies one script to every named target. The
+    controller and the sandboxes are provisioned by different scripts
+    (`provision/controller.sh` vs. `provision/sandbox.sh`) — 'all' would
+    silently apply whichever one was given to both, which is wrong for
+    either. Create/recreate the controller and the sandboxes as separate
+    invocations instead.
+    """
+    if args.name == "all" and args.provision:
+        raise SystemExit(
+            "--provision with target 'all' would apply one script to both "
+            "the controller and the sandboxes, which is almost certainly "
+            "wrong now that they differ. Run this once for 'controller' "
+            "with provision/controller.sh, and once for 'sandboxes' with "
+            "provision/sandbox.sh."
+        )
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -195,6 +217,7 @@ def cmd_destroy(args: argparse.Namespace) -> int:
 
 def cmd_recreate(args: argparse.Namespace) -> int:
     cluster = build_cluster(args)
+    _check_provision_target(cluster, args)
     adapter = build_adapter(cluster, _runner(args), args)
     script = Path(args.provision).read_text() if args.provision else None
     for name in _targets(cluster, args.name):
@@ -256,6 +279,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sandboxes", type=int, default=2,
                         help="number of sandbox VMs (default: 2)")
     parser.add_argument("--config-dir", default="/var/lib/grain/instances")
+    parser.add_argument(
+        "--ssh-public-key", default="/var/lib/grain/controller-ssh.pub",
+        help="host-local copy of the controller's SSH public key, embedded "
+             "as each created VM's authorized key (see docs/runbook.md, "
+             "'Generate the controller SSH keypair')",
+    )
     parser.add_argument("--data-dir", default="/data",
                         help="where automation config/secrets/state live")
     parser.add_argument("--dry-run", action="store_true",

@@ -181,10 +181,17 @@ class LibvirtAdapter(HostAdapter):
         super().__init__(cluster, network)
         self.runner = runner
         self.config_dir = config_dir or Path("/var/lib/grain/instances")
-        # Same /data/secrets/... convention as the GitHub credential ladder;
-        # see grain/automation for the controller-side key this pairs with.
+        # Host-local, deliberately not /data/secrets/... — /data lives on
+        # the *controller* VM, and this adapter runs on the *host*, a
+        # different machine (docs/design.md, "One host machine runs
+        # everything"). The controller generates its own SSH keypair on
+        # first boot (provision/controller.sh) and this is only ever the
+        # *public* half, copied here once by an operator (docs/runbook.md,
+        # "Generate the controller SSH keypair") — not a secret, so this
+        # being a plain host path with no special protection is fine.
+        # Mirrors `config_dir`'s own host-local default one directory up.
         self.ssh_public_key_path = (
-            ssh_public_key_path or Path("/data/secrets/controller-ssh.pub")
+            ssh_public_key_path or Path("/var/lib/grain/controller-ssh.pub")
         )
 
     # --- lifecycle --------------------------------------------------------
