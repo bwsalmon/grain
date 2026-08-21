@@ -1088,12 +1088,36 @@ same Nix module as the address assignments, generated from one source of
 truth so an added sandbox can't get an address without also getting its
 filter rule.
 
-Bearer tokens remain available as defense-in-depth if the host firewall is
-ever not fully trusted (e.g. if a future revision puts sandboxes on a
-network shared with something else). At that point the broker — which runs
-on the orchestrator with access to `/persist` — is the natural place to
-issue a token to each sandbox at lease time, over the already-authenticated
-internal channel, avoiding the bootstrap problem entirely.
+Note what it does *not* claim. It authenticates the VM, not a user or
+process inside it — which is right here, since the VM is the isolation unit
+and there is one task per VM. It is not cryptographic, so it assumes no
+on-path attacker within the bridge; the topology supplies that. And it
+breaks under any NAT between sandbox and proxy, since NAT rewrites the
+source address.
+
+### If source-IP auth isn't available
+
+It depends on a host that can pin a source address per VM interface —
+nftables plus taps on Linux. A host without that (macOS `vmnet`, where VMs
+share a bridge and take DHCP addresses; or any future topology putting
+sandboxes on a shared network) turns the source address back into a claim
+rather than a fact, and it stops being authentication at all.
+
+Bearer tokens are then the fallback, and they are workable *provided a
+[lease service](#what-still-needs-building-lease-and-reset) exists* — which
+is what changed since the tokens-vs-IP question was first settled. The
+original objection was the bootstrap: an unattended ephemeral VM cannot
+obtain a secret without either baking it into the world-readable Nix store
+or authenticating a fetch it has no credential for. A lease service
+dissolves that from the other side: it starts the VM, so it can parameterise
+that start with a per-lease token, and it already knows which VM it just
+started. Delivery is a lease-time step, not a bootstrap problem.
+
+The coupling is worth stating plainly, because it is easy to miss when
+costing out a host change: on a host without per-interface source pinning,
+the identity model and the lease service become a **package deal**. The
+lease service stops being the optional component described above and
+becomes mandatory.
 
 ## Admin access
 
