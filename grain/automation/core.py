@@ -102,6 +102,15 @@ class Orchestrator:
         for outcome in (*result.failed, *result.stranded):
             reason = "failed" if outcome in result.failed else "stranded"
             self._requeue(outcome, reason)
+        for warning in result.health_warnings:
+            # Visibility only (docs/roadmap.md item 5) — a health problem
+            # doesn't change the sandbox's dispatch eligibility, see
+            # sweeper.py's own docstring for why not. This is the same
+            # audit trail an operator already checks for dispatch/sweep
+            # outcomes, so a sandbox quietly degrading shows up in the one
+            # place already worth reading after an unexpected run.
+            self.audit.record(sandbox=warning.sandbox, issue=None,
+                               outcome=f"health warning: {warning.detail}")
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
         branch = branch_name(outcome.issue)

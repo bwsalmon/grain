@@ -112,6 +112,48 @@ def test_ssh_public_key_defaults_to_a_host_local_path():
     assert not args.ssh_public_key.startswith("/data")
 
 
+def test_dry_run_cleanup_prints_commands_for_every_sandbox(capsys):
+    out = run(["--dry-run", "--sandboxes", "2", "host", "cleanup"], capsys)
+    assert out.count("+ ssh") == 4  # kind + docker prune, per sandbox
+    assert "kind delete clusters --all" in out
+    assert "docker system prune -af --volumes" in out
+    assert "sandbox-0" in out and "sandbox-1" in out
+    # cleanup never touches the controller's own address.
+    assert "10.100.0.2 " not in out and "@10.100.0.2 " not in out
+
+
+def test_dry_run_cleanup_targets_one_named_sandbox(capsys):
+    out = run(["--dry-run", "--sandboxes", "2", "host", "cleanup", "sandbox-1"], capsys)
+    assert "sandbox-1" in out
+    assert "sandbox-0" not in out
+
+
+def test_dry_run_health_prints_a_status_line_per_sandbox(capsys):
+    # Not the `run()` helper: a dry run has no real df/systemctl/docker
+    # output to parse, so a nonzero (unhealthy) exit is the expected
+    # outcome here, not an error to assert away.
+    main(["--dry-run", "--sandboxes", "2", "host", "health"])
+    out = capsys.readouterr().out
+    lines = [l for l in out.splitlines() if l.startswith("sandbox-")]
+    assert len(lines) == 2
+    assert all("ssh=ok" in l for l in lines)
+
+
+def test_health_exit_code_is_nonzero_when_unhealthy():
+    # A dry run never produces real df/systemctl/docker output, so every
+    # health check here reports degraded/unparseable — the CLI's own exit
+    # code has to reflect that, matching `grain github audit`'s
+    # nonzero-on-flagged convention.
+    assert main(["--dry-run", "host", "health"]) == 1
+
+
+def test_cleanup_ssh_user_and_key_are_overridable(capsys):
+    out = run(["--dry-run", "host", "cleanup", "sandbox-0",
+               "--ssh-user", "op", "--ssh-key", "/tmp/id_ed25519"], capsys)
+    assert "op@" in out
+    assert "-i /tmp/id_ed25519" in out
+
+
 def test_missing_tool_raises_a_legible_error_when_check_is_on():
     from grain.run import CommandError, RealRunner
 

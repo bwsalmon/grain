@@ -235,6 +235,35 @@ def test_dispatch_mints_a_sandbox_token_and_configures_the_credential_helper(tmp
     assert token in credential_dd
 
 
+# --- health visibility from the sweep pass (docs/roadmap.md item 5) -------
+
+def test_an_unhealthy_freed_sandbox_is_logged_but_still_reused():
+    # No health-check extras scripted: systemd/docker/disk probes over
+    # `runner` fall through to FakeRunner's empty-output default, which
+    # fails to parse -> degraded -> a health-warning audit line, per
+    # sweeper.py's own docstring on why this is visibility, not a new
+    # dispatch-eligibility state.
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(pr_flow_response(42))
+
+    orchestrator.run_once(NOW)
+
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("health warning:") for o in outcomes)
+    warning_entries = [e for e in orchestrator.audit.entries
+                        if e["outcome"].startswith("health warning:")]
+    assert warning_entries[0]["sandbox"] == "sandbox-0"
+    # Still freed and still gets its PR — health doesn't block the sweep's
+    # own success handling.
+    assert "sandbox-0" not in orchestrator.state.assignments
+    assert any("opened PR #42" in o for o in outcomes)
+
+
 def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_path):
     token_store = SandboxTokenStore(tmp_path / "sandbox-tokens.json")
     orchestrator, _ = make_orchestrator(issues=[issue_json(1)], token_store=token_store)

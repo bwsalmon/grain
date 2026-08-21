@@ -25,6 +25,8 @@ host — the controller is where `/data` and every credential live.
 | `grain host rules [--dry-run]` | Prints the firewall ruleset without applying it | host |
 | `grain automation run-once` | Sweep stranded work, then poll GitHub and dispatch | controller |
 | `grain automation status` | Show current sandbox↔issue assignments | controller |
+| `grain host cleanup [name]` | Between-task hygiene over SSH (`kind delete clusters --all`, `docker system prune -af --volumes`); also runs automatically after every sweep-freed sandbox | controller |
+| `grain host health [name]` | SSH/systemd/docker/disk-watermark check over SSH; nonzero exit if unhealthy | controller |
 | `grain github audit` | Check every credential under `secrets/github/` for withheld scopes | controller |
 | `python3 -m grain.proxy.server` | Runs the git proxy (not wired into `grain` yet — its own entry point) | controller |
 
@@ -324,16 +326,41 @@ credential is configured, per `docs/roadmap.md` items 7 and 8.
 ## Stranded sandboxes: automatic vs. manual
 
 `grain automation run-once` sweeps before it dispatches
-(`grain/automation/sweeper.py`), and handles three cases **automatically**,
+(`grain/automation/sweeper.py`), and handles these cases **automatically**,
 with no operator action:
 
 - The dispatched unit finished successfully → label moved back off
-  in-progress, sandbox freed.
+  in-progress, sandbox freed, PR opened once the pushed branch is verified
+  to exist.
 - The unit finished with a failure → issue re-labelled with the trigger
   label (put back in the queue), sandbox freed.
 - The unit is missing entirely (never started, or the sandbox was recreated
   out from under it) or has run past `max_runtime_minutes` → treated as
   stranded, issue re-labelled, sandbox freed.
+- **Every one of the three releases above also runs between-task cleanup**
+  (`kind delete clusters --all`, `docker system prune -af --volumes` — not
+  a clone-directory wipe, see below) **and a post-cleanup health check**
+  (`docs/roadmap.md` item 5, `grain/automation/cleanup.py` and
+  `grain/automation/health.py`). A sandbox is guaranteed clean the moment
+  its slot is freed for reuse — no separate cron job, no manual step. A
+  health problem found this way (SSH unreachable, `docker info` failing,
+  a degraded `systemctl is-system-running`, or disk at/above the 85%
+  watermark) is written to `/data/state/automation/audit.log` as a
+  `"health warning: ..."` line, **but does not remove the sandbox from the
+  dispatch pool** — this is visibility, not gating; see
+  `grain/automation/sweeper.py`'s docstring for the reasoning. Note that
+  cleanup deliberately does **not** clear the workspace directory —
+  `dispatch.py`'s `ensure_workspace()` already resets it to a known-clean
+  state on every dispatch, so wiping it here would only force a slower
+  full re-clone next time with no correctness benefit.
+- **`grain host cleanup [name]`** and **`grain host health [name]`** run the
+  same two checks standalone, for a sandbox that isn't mid-sweep at all (a
+  free sandbox, or before waiting on a cron cycle). `health`'s exit code is
+  nonzero if any sandbox comes back less than fully healthy, matching
+  `grain github audit`'s convention. Both default to `--ssh-user debian
+  --ssh-key /data/secrets/controller-ssh` (`AutomationConfig`'s own
+  defaults) and don't require `automation.json` to exist, unlike
+  `grain automation run-once`.
 
 What is **not automatic**:
 
@@ -345,13 +372,12 @@ What is **not automatic**:
   grain-task-<sandbox>`, and either wait it out or manually stop the unit
   (`sudo systemctl stop grain-task-<sandbox>` on the sandbox) and re-run
   `automation run-once` to let the sweep pick it up as stranded.
-- **Between-task hygiene** (`kind delete clusters --all`, `docker system
-  prune -af --volumes`, clearing the work directory) — `docs/design.md`
-  describes this but no hook runs it automatically yet
-  (`docs/roadmap.md` item 5). Run it by hand over SSH between tasks on a
-  sandbox you're reusing, or just recreate the sandbox.
-- **Disk-watermark and health checks** — also not built yet (same roadmap
-  item). Watch disk manually for now: `ssh ... df -h /`.
+- **Acting on an unhealthy reading.** `grain host health` and the sweeper's
+  own post-cleanup check both *report* a problem; neither one recreates,
+  quarantines, or stops dispatching to a degraded sandbox. If
+  `grain host health` (or an audit-log `"health warning"` line) flags one,
+  the operator decides: `grain host recreate <name>` is the usual fix for
+  anything short of "watch it."
 - **Base-image updates** — recreate is the deploy path
   (`grain host recreate <name> --provision provision/sandbox.sh`), but
   nothing schedules it; `docs/design.md` suggests weekly.
@@ -395,8 +421,13 @@ repo doesn't have yet. Tracked in `docs/roadmap.md`:
 - **`recreate()` does not rotate the sandbox token** despite the design
   describing rotation as folded into it — do it as a separate manual step
   (see [Credential audit](#credential-audit) / rotation above).
-- **No between-task cleanup hook, health check, or disk-watermark alarm**
-  (roadmap item 5).
+- **A health warning doesn't quarantine a sandbox** — `grain host health`
+  and the sweeper's own post-cleanup check both only report; recreating a
+  degraded sandbox is still an operator decision (roadmap item 5). Also not
+  verified live: the fully-healthy path (needs a provisioned sandbox with
+  docker/kind actually running — the live suite's `booted_sandbox` is
+  deliberately bare) and the disk-watermark alarm actually tripping (needs
+  a sandbox with a nearly-full disk).
 - **Moving any real repo down the credential ladder, and applying branch
   protection, needs a real repo/org with admin access** — nothing to
   script here without one; procedure is above in
