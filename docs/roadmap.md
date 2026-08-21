@@ -55,13 +55,55 @@ prerequisite for `libvirt.py`'s `ssh_public_key_path`.
 
 ## 4. GCP metadata server
 
-- [ ] Done
+- [x] Done
 
 `docs/design.md` step 7: one `gce_metadata_server` instance per sandbox,
 serving impersonated tokens for a narrow second service account.
 `inventory.py` and `net_linux.py` already reserve the ports and DNAT rules
 for this (`Cluster.metadata_port`, the anycast DNAT in
 `render_ruleset`); nothing serves them yet.
+
+`grain/metadata/` (`config.py`, `audit.py`, `launcher.py`) plus a `grain
+metadata start|stop|status|sync-audit` CLI group. Verified live against a
+real `gce_metadata_server` v4.2.5 binary (installed, not built from
+source): `-interface`/`-port` bind exactly the address given (no
+`0.0.0.0` fallback — confirmed a request to a different local address
+fails to connect); `--impersonate` reads the *source* credential from
+`GOOGLE_APPLICATION_CREDENTIALS`, never `-serviceAccountFile`, and its own
+startup log line confirms the *target* principal is the config file's
+`serviceAccounts.default.email`, not the source key's own identity —
+exactly the "impersonate a second account, don't serve the primary key's
+tokens" shape. `-logTarget` is a real file path (its own `cmd/main.go`),
+so each instance logs JSON per request there and `metadata/audit.py`'s
+`sync` tails it into a `FileAuditLog` (same shape as `proxy/audit.py` and
+`automation/audit.py`) — the "every mint is audit-logged" line. The
+parser was corrected against a captured real trace: the outcome-bearing
+`ERROR` line is not the line immediately after a `msg="request"` line (an
+intermediate `"using service account context"` line sits between them),
+which unit tests now pin down using that real trace rather than an
+assumed shape.
+
+Also verified live, at the routing layer, the claim that a sandbox needs
+"no wrapper script, no environment plumbing": with only a default route
+present (matching a sandbox's cloud-init `gateway4`, already what
+`render_network_config` sets — no change needed there), a forwarded
+packet to `169.254.169.254` resolves via that default route without any
+sandbox-specific host route, confirmed with `ip route get ... iif
+br-grain` against a scratch routing table. Combined with `net_linux.py`'s
+existing DNAT rule, that's the whole path from "ADC's default probe" to
+"the right per-sandbox instance" with nothing for `provision/sandbox.sh`
+to add.
+
+Not verified, and not verifiable without a real GCP project: an actual
+token mint succeeding end to end (impersonation calls
+`iamcredentials.googleapis.com`, which needs a real primary key with real
+IAM bindings to a real narrow service account) — exercised locally only
+with a syntactically-valid but fake key, which fails at the expected
+point (a parse error on the key, logged and forwarded to the audit log
+exactly as a real permission failure would be). Also not exercised: the
+`--uid=grain-metadata` system user and `provision/controller.sh` itself,
+since neither exists yet (item 3, still open) — the launcher assumes both
+and documents that assumption in `metadata/config.py`.
 
 ## 5. Lifecycle scripts
 

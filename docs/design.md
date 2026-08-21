@@ -1215,8 +1215,16 @@ ever becomes worth its cost again.
    own output. Push (`git-receive-pack`) is implemented identically to
    fetch but not yet exercised live, since that needs a real writable
    allow-listed repo to test against, not just a public read.
-7. **Metadata servers**: one per sandbox, impersonating the narrow service
-   account. Verify ADC works unmodified and the key is unreachable.
+7. **Metadata servers** — *mostly done*: `grain/metadata/` launches one
+   `gce_metadata_server` instance per sandbox, impersonating the narrow
+   service account, plus a `grain metadata` CLI group and an audit-log
+   tailer — verified against a real binary and, at the routing layer, that
+   a sandbox's existing default route is enough for its request to
+   `169.254.169.254` to reach the right instance with no sandbox-side
+   change needed. Not verified: an actual token mint (needs a real GCP
+   project and key) and the `grain-metadata` system user / key file
+   permissions, which depend on `provision/controller.sh` (step 5, still
+   open). See `docs/roadmap.md` item 4.
 8. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
    cleanup hook, a health check, a disk watermark alarm.
 9. **Automation loop** — *mostly done*: `grain/automation/` implements

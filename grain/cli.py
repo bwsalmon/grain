@@ -25,6 +25,10 @@ from .automation.core import Orchestrator
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.state import AutomationState, utcnow
 from .inventory import Cluster
+from .metadata.audit import FileAuditLog as MetadataFileAuditLog
+from .metadata.audit import sync as metadata_sync
+from .metadata.config import instance_paths
+from .metadata.launcher import MetadataLauncher, build_launcher
 from .proxy.credentials import CredentialSet
 from .run import DryRunRunner, RealRunner, Runner
 
@@ -82,6 +86,48 @@ def cmd_automation_status(args: argparse.Namespace) -> int:
         else:
             print(f"{name:<12} issue #{assignment.issue:<6} "
                   f"since {assignment.started_at.isoformat()}")
+    return 0
+
+
+def build_metadata_launcher(cluster: Cluster, runner: Runner,
+                             args: argparse.Namespace) -> MetadataLauncher:
+    return build_launcher(Path(args.data_dir), cluster, runner)
+
+
+def cmd_metadata_start(args: argparse.Namespace) -> int:
+    cluster = build_cluster(args)
+    launcher = build_metadata_launcher(cluster, _runner(args), args)
+    for name in _sandbox_targets(cluster, args.name):
+        launcher.start(name)
+    return 0
+
+
+def cmd_metadata_stop(args: argparse.Namespace) -> int:
+    cluster = build_cluster(args)
+    launcher = build_metadata_launcher(cluster, _runner(args), args)
+    for name in _sandbox_targets(cluster, args.name):
+        launcher.stop(name)
+    return 0
+
+
+def cmd_metadata_status(args: argparse.Namespace) -> int:
+    cluster = build_cluster(args)
+    launcher = build_metadata_launcher(cluster, _runner(args), args)
+    for name in _sandbox_targets(cluster, args.name):
+        print(f"{name:<12} {launcher.status(name).value}")
+    return 0
+
+
+def cmd_metadata_sync_audit(args: argparse.Namespace) -> int:
+    cluster = build_cluster(args)
+    data_dir = Path(args.data_dir)
+    audit = MetadataFileAuditLog(data_dir / "state" / "metadata-server" / "audit.log")
+    total = 0
+    for name in _sandbox_targets(cluster, args.name):
+        paths = instance_paths(data_dir, name)
+        state_path = data_dir / "state" / "metadata-server" / f"{name}.audit-offset.json"
+        total += metadata_sync(paths.log_path, state_path, name, audit)
+    print(f"forwarded {total} event(s)")
     return 0
 
 
@@ -165,6 +211,20 @@ def _targets(cluster: Cluster, name: str) -> list[str]:
     return [name]
 
 
+def _sandbox_targets(cluster: Cluster, name: str) -> list[str]:
+    # Metadata servers exist only for sandboxes -- there is no controller
+    # instance (Cluster.metadata_port raises for the controller's own
+    # name), so this is the same shape as _targets minus "all" meaning
+    # "including the controller."
+    if name in ("all", "sandboxes"):
+        return cluster.sandbox_names
+    if name not in cluster.sandbox_names:
+        raise SystemExit(
+            f"unknown sandbox: {name} (known: {', '.join(cluster.sandbox_names)})"
+        )
+    return [name]
+
+
 def _lifecycle(args: argparse.Namespace, action: str) -> int:
     cluster = build_cluster(args)
     adapter = build_adapter(cluster, _runner(args), args)
@@ -229,6 +289,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = automation.add_parser("status", help="show the current pool assignments")
     p.set_defaults(func=cmd_automation_status)
+
+    metadata = sub.add_parser(
+        "metadata", help="per-sandbox gce_metadata_server instances"
+    ).add_subparsers(dest="command", required=True)
+
+    for name, fn, help_text in (
+        ("start", cmd_metadata_start, "start metadata server instance(s)"),
+        ("stop", cmd_metadata_stop, "stop metadata server instance(s)"),
+        ("status", cmd_metadata_status, "show instance unit states"),
+    ):
+        p = metadata.add_parser(name, help=help_text)
+        p.add_argument("name", nargs="?", default="sandboxes",
+                        help="sandbox name, or 'sandboxes' for all (default)")
+        p.set_defaults(func=fn)
+
+    p = metadata.add_parser(
+        "sync-audit",
+        help="forward new per-mint log lines into the audit log",
+    )
+    p.add_argument("name", nargs="?", default="sandboxes",
+                    help="sandbox name, or 'sandboxes' for all (default)")
+    p.set_defaults(func=cmd_metadata_sync_audit)
 
     return parser
 
