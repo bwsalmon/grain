@@ -104,3 +104,27 @@ actually logged in (still a manual step per `docs/design.md`). Blocked on
 items 2 and 3 above at minimum. This is the point where the whole pipeline
 gets checked end to end, the same "verify live" bar every other piece of
 this project has been held to.
+
+## 9. Dispatch to an existing PR, not just a labelled issue
+
+- [ ] Done
+
+A second intake path, alongside labelled-issue polling: point an agent at
+an *existing* PR to address review feedback, fix CI, or continue work —
+"send an agent to a PR and have it address issues," not just originate
+one. Fits the split-surface boundary unchanged — the sandbox still only
+ever does `git`; it checks out the PR's existing branch and pushes more
+commits to it, same as any dispatch. What's new is on the controller side:
+- **Trigger**: a label on the PR, a "changes requested" review state, or a
+  comment containing a trigger phrase — needs a decision, don't assume.
+- **Context**: the dispatched prompt needs the PR's diff and review
+  comments instead of (or alongside) an issue's title/body — `github.py`
+  needs a `list_pull_requests`/`get_pull_request_comments`-shaped read path
+  it doesn't have yet.
+- **Pool/state**: `AutomationState` currently keys assignments by issue
+  number; decide whether a PR-triggered run reuses that shape or needs its
+  own.
+
+Sequenced after item 2 (reuses the same `GitHubClient`/label-move patterns
+PR creation establishes) and item 8 (prove the simpler issue→PR loop end
+to end before adding a second intake path on top of it).
