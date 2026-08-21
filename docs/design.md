@@ -27,6 +27,12 @@ a critical pass over the security claims:
   sharing, a writable store overlay so in-guest `nix` works — and a precise
   account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
+- **Established that agents cannot run in containers.** The workload needs
+  `docker` and `kind`, which nest badly; separate directories on one host
+  would collide on daemons, ports, and tool versions. The microVM pool is
+  therefore required for the workload to run at all, not merely to harden
+  it — see
+  [the one genuinely custom component](#the-one-genuinely-custom-component).
 - **Audited the design for build-vs-reuse**, which removed most of the
   custom code: issue intake becomes the OpenHands resolver, the GCP token
   service becomes a GCE metadata-server emulator, the git proxy becomes
@@ -99,37 +105,35 @@ cluster is built around.
 ### The one genuinely custom component
 
 After that audit, the only substantial thing left to write is the **sandbox
-pool broker** — and it's worth asking whether phase 1 needs it at all.
+pool broker**. An earlier pass proposed skipping it in phase 1 by running
+OpenHands' stock `docker` runtime — a container per session — inside a
+single sandbox VM. **That doesn't work for this workload**, and the reason
+is worth recording, because it also settles the architecture rather than
+merely constraining it.
 
-OpenHands' standard `docker` runtime already does pool management: a
-container per session, created and torn down by code that is already
-maintained and tested. Running that inside a *single* sandbox VM gives:
+Agent tasks here need to run `docker` and `kind` themselves. Nesting those
+inside an agent container means Docker-in-Docker and kind-in-a-container:
+privileged containers, storage-driver contortions, and cgroup-layout
+fights. That would become the dominant source of failures — and failures
+that present as the agent being incompetent rather than the platform being
+wrong, which is the worst kind to debug.
 
-- zero custom orchestration code,
-- the [lease/reset problem](#sandbox-lifecycle-lease-and-reset) solved by
-  container lifecycle rather than by our broker,
-- the credential boundary preserved intact — agents still cannot reach
-  GitHub or GCP credentials, because those live on a different VM.
+Running agents in separate *directories* on one machine trades that for a
+different problem: a shared Docker daemon, colliding `kind` cluster names
+and host ports, one set of globally-installed tool versions, and shared
+caches. Version and packaging conflicts between concurrent tasks then
+depend on luck.
 
-What it gives up is VM-level isolation *between concurrent agent tasks*: a
-container escape reaches other agents' work, where separate microVMs would
-not. That is precisely what the microVM pool buys, and whether it's worth a
-custom broker depends on whether concurrent tasks are mutually distrusting
-— agents working issues in the same repo, from the same credential set,
-mostly are not.
+A VM per agent solves both at once — a real kernel, its own Docker daemon,
+its own port space, its own toolchain. **So the microVM pool isn't an
+optional hardening step; it's what makes the workload run at all.** The
+broker is required, not deferred, and the isolation it provides is
+load-bearing for correctness before it is ever a security property.
 
-**Recommendation: phase it.** Build phase 1 on the Docker runtime in one
-sandbox VM. That validates the networking, the git proxy, the metadata
-server, the resolver, and the whole credential model with no custom
-orchestration, and it sidesteps the largest open question — remote-runtime
-API compatibility — entirely. Add the broker and the microVM pool in phase
-2 if per-task VM isolation turns out to be required, at which point
-everything else is known-good and the broker is the only variable.
-
-This does deviate from the original "fixed number of sandbox VMs" shape, so
-it's a call worth making deliberately rather than by default. If per-task
-VM isolation is a hard requirement, skip phase 1 and build the broker — and
-use the
+Phase 1 therefore keeps one sandbox VM and a *stub* broker that always
+hands back that VM's endpoint. It's a small program, it validates
+everything else end to end, and it answers the remote-runtime API question
+first rather than last. Use the
 [Kubernetes remote runtime](https://github.com/zparnold/openhands-kubernetes-remote-runtime)
 as a working reference for the API contract rather than reverse-engineering
 it.
@@ -1189,12 +1193,64 @@ Small things that remove a lot of friction, all in the sandbox module:
   worst case is a broken VM that the next reset repairs. Note that sudo
   still doesn't make the store's lower layer writable — that's the
   overlay's job.
-- **Docker, when a test suite needs it** (testcontainers and friends).
-  Namespaces and cgroups work fine inside the guest, so
-  `virtualisation.docker.enable = true` via
-  [`extraConfig`](#configuration-surface) is enough; it's left opt-in
-  rather than default because it's a meaningful chunk of image size and
-  boot time for something most tasks don't use.
+- **Docker and kind** are enabled by default rather than opt-in, because
+  this workload depends on them — see
+  [Docker and kind inside sandboxes](#docker-and-kind-inside-sandboxes).
+
+### Docker and kind inside sandboxes
+
+Since [running agents in containers is ruled out](#the-one-genuinely-custom-component),
+the sandbox VM has to be a comfortable host for `docker` and `kind`
+itself. In a VM this is ordinary — a real kernel, an unshared daemon — but
+a few things need arranging, and one could block the whole design.
+
+**Verify the guest kernel first.** microVM guests can run slimmed kernels,
+and Docker and kind need modules a minimal config may omit: `overlay`,
+`br_netfilter`, `ip_tables`/`nf_tables`, `nf_conntrack`, plus cgroup v2.
+If the pinned microvm.nix builds a guest kernel without them, that is a
+blocker to find on day one rather than during the first `kind create
+cluster`. No nested virtualization is required — kind is containers all the
+way down — but anything wanting real VMs inside a sandbox would need nested
+KVM, which is a separate question.
+
+**Docker state belongs on the scratch volume.** `/var/lib/docker` holds
+images measured in gigabytes; on a
+[RAM-constrained host](#memory-budget) it must never land on tmpfs. It goes
+on the [ephemeral scratch volume](#keeping-a-disk-backed-scratch-volume-ephemeral)
+with everything else the agent writes, and is discarded with it — which
+also means a wedged daemon or a leaked `kind` cluster is cleaned up by the
+lease reset for free.
+
+**Raise the inotify limits.** kind's own known-issues guidance is explicit
+that the common defaults (`max_user_watches` 8192, `max_user_instances`
+128) are too low to bring up a cluster, and the resulting failures are
+opaque — `too many open files`, `failed to create fsnotify watcher`,
+eviction-manager errors — and look nothing like their cause. Set them in
+the sandbox module rather than leaving agents to discover this:
+
+```nix
+boot.kernel.sysctl = {
+  "fs.inotify.max_user_watches"  = 524288;
+  "fs.inotify.max_user_instances" = 8192;
+};
+```
+
+**Pre-load images into the sandbox image.** A kind node image is on the
+order of a gigabyte, and the scratch volume is wiped every lease, so a
+naive setup re-pulls it for every task — slow, and repeated across every
+sandbox. Bake the images the workload needs into the read-only sandbox
+image and `docker load` them from the Nix store at boot. This is the Docker
+analogue of [baking dependencies into the image](#deliberately-not-shared),
+and it is consistent with rejecting a *writable* shared cache: the source
+is read-only and Nix-built, so it cannot become a channel between tasks.
+Expose it as `agentCluster.sandbox.docker.preloadImages`.
+
+**Both sizing defaults move.** A kind control plane plus a build and a test
+suite is several gigabytes of RAM and tens of gigabytes of disk, per active
+sandbox. See [Sizing](#sizing) — this is the main reason concurrency on a
+constrained host will be low, and the main reason
+[on-demand start](#start-sandboxes-on-demand) matters rather than merely
+helping.
 
 ### Telling the agent
 
@@ -1313,10 +1369,22 @@ the host needs more RAM or the ceiling needs lowering.
 
 Start from measurement, not guesswork: run one sandbox through a
 representative task, watch peak RSS, and set `sandbox.memoryMb` from that
-with headroom. The default of 8 GB in revision 2 assumed a RAM-rich host
-and a tmpfs-backed store overlay; with the working set on disk, something
-in the 2–4 GB range is a more realistic starting point, and
-`sandboxCount` follows from what the host can actually hold concurrently.
+with headroom.
+
+Moving the writable working set to disk pulled this number down; **the
+`kind` workload pushes it back up, and further**. A kind control plane is
+one to two gigabytes before the agent has built or tested anything, so a
+realistic default is 8 GB per *active* sandbox rather than the 2–4 GB that
+a plain build workload would need.
+
+The honest consequence on a RAM-constrained host is that **concurrency will
+be low — likely two or three active agents**, and `sandboxCount` should be
+set from `available RAM ÷ sandbox.memoryMb` rather than from how many
+issues you'd like worked at once. This is what makes
+[on-demand start](#start-sandboxes-on-demand) essential rather than merely
+efficient: at 8 GB apiece, idle sandboxes holding memory would dominate the
+budget. It's also the strongest argument for measuring KSM, since several
+identical guests each running a kind node have a lot of shared pages.
 
 ## Repo layout (proposed)
 
@@ -1354,9 +1422,11 @@ docs/design.md
 | `sandbox.nixLd.extraLibraries` | `list of package` | `[]` | Extra libs for `nix-ld`'s search path. |
 | `sandbox.shareHostStore` | `bool` | `true` | Share host `/nix/store` vs. per-VM `storeOnDisk`. |
 | `sandbox.writableStore.enable` | `bool` | `true` | Store overlay, so in-guest `nix` works. |
-| `sandbox.scratchSizeMb` | `int` | `20480` | Ephemeral disk volume: store overlay, `$HOME`, `/tmp`. |
-| `sandbox.memoryMb` | `int` | `3072` | Guest RAM; set from measured peak, not guessed. |
+| `sandbox.scratchSizeMb` | `int` | `61440` | Ephemeral disk: store overlay, `$HOME`, `/tmp`, `/var/lib/docker`. |
+| `sandbox.memoryMb` | `int` | `8192` | Guest RAM; sized for a `kind` cluster plus a build. |
 | `sandbox.onDemandStart` | `bool` | `true` | Stop idle sandboxes; RAM scales with active agents. |
+| `sandbox.docker.enable` | `bool` | `true` | Default-on: the workload needs `docker` and `kind`. |
+| `sandbox.docker.preloadImages` | `list of package` | `[]` | Images `docker load`ed at boot, e.g. the kind node image. |
 | `sandbox.passwordlessSudo` | `bool` | `true` | Safe because the VM, not the user, is the boundary. |
 | `hypervisor` | `enum` | `cloud-hypervisor` | Per-VM overridable; `qemu` is the fallback. |
 | `network.bridge` | `str` | `br-agents` | Host bridge name. |
@@ -1449,10 +1519,11 @@ and both came from the same error — treating a *narrowed* capability as an
 
 Substantially shorter than revision 1 — its two biggest are resolved above.
 
-1. **Does phase 2 happen at all?** Whether concurrent agent tasks need
-   VM-level isolation from each other decides whether the pool broker is
-   built. See [build vs. reuse](#the-one-genuinely-custom-component).
-2. **Phase 2, if it happens**: confirm OpenHands accepts stubbed
+1. **Does the microVM guest kernel support Docker and kind?** The modules
+   they need may not be in a slimmed guest kernel, and nothing else in the
+   design matters if they aren't. First thing to test — see
+   [Docker and kind inside sandboxes](#docker-and-kind-inside-sandboxes).
+2. **Remote-runtime API**: confirm OpenHands accepts stubbed
    `/registry_prefix` and `/image_exists` responses; and determine what its
    remote-runtime client does when the API reports no capacity, which
    decides whether the broker queues or errors.
@@ -1493,31 +1564,36 @@ Substantially shorter than revision 1 — its two biggest are resolved above.
    security model — and that `/persist` survives `nixos-rebuild switch`.
 3. **Admin SSH**: hardened sshd, single key, host keys on `/persist`.
    Verify external login and stable host keys across rebuilds.
-4. **OpenHands end to end, no custom code**: OpenHands on the
-   orchestrator driving its stock `docker` runtime inside one sandbox VM.
-   Proves the shape works before anything bespoke exists.
-5. **Git proxy**: stand up FINOS Git Proxy, answer the
+4. **Docker and kind in a sandbox VM**: confirm the guest kernel carries
+   the modules they need, `/var/lib/docker` lives on the scratch volume,
+   the inotify sysctls are raised, and `kind create cluster` succeeds.
+   Everything else is wasted effort if this doesn't work, so it comes
+   first — see
+   [Docker and kind inside sandboxes](#docker-and-kind-inside-sandboxes).
+5. **OpenHands end to end**: a stub broker that always returns the one
+   sandbox's action-execution-server URL, answering the remote-runtime API
+   question early. Proves the shape before the real pool exists.
+6. **Git proxy**: stand up FINOS Git Proxy, answer the
    [auto-approve and credential-injection questions](#the-git-proxy)
    early — they decide build-vs-reuse for this piece. Verify from a
    sandbox that allow-listed repos clone and push and un-listed ones are
    refused.
-6. **Metadata server**: `gce_metadata_server` impersonating the narrow
+7. **Metadata server**: `gce_metadata_server` impersonating the narrow
    service account. Verify ADC works unmodified in a sandbox, tokens carry
    only the narrow SA's permissions, and sandboxes cannot reach the key
    file.
-7. **Resolver**: run openhands-resolver locally against the target repo;
+8. **Resolver**: run openhands-resolver locally against the target repo;
    add the rate limit and the stranded-work sweeper. First full
    issue-to-PR run.
-8. **Hardening**: move as many repos as possible down the credential
+9. **Hardening**: move as many repos as possible down the credential
    ladder (machine account, or an App where installable), apply branch
    protection to allow-listed repos, confirm no credential carries
    `workflow` scope, ship journals to the host, write the admin runbook.
 
-At that point the system is useful. **Phase 2, only if per-task VM
-isolation is required**: build the pool broker (lease, release,
-stop/start reset, health check, quarantine, drain), spike the
-[remote-runtime API question](#open-questions) against it, and scale to
-`sandboxCount = N`.
+At that point the system is useful at `sandboxCount = 1`. **Phase 2**:
+replace the stub with the real pool broker — lease, release, stop/start
+reset, health check, quarantine, drain — and scale to `sandboxCount = N`,
+sized by [available RAM](#sizing) rather than by ambition.
 
 ## Sources
 
