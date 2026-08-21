@@ -1,7 +1,8 @@
 """The GitHub REST calls the orchestrator needs: list labelled issues, move
-labels. Nothing else — no comments, no PRs; see docs/design.md's split
-surface ("Orchestrator: API operations... sandboxes: git transport only")
-and the plan's explicitly-out-of-scope note on PR/comment creation.
+labels, confirm a branch exists, open a PR. Still no comments and still no
+sandbox-side access — see docs/design.md's split surface ("Orchestrator: API
+operations... sandboxes: git transport only"). PR creation is what
+docs/roadmap.md item 2 added; comment creation remains out of scope.
 
 Same shape as `grain/proxy/forward.py`: a `Transport` protocol wrapping
 `http.client` so `GitHubClient`'s logic is testable without a real call to
@@ -82,6 +83,12 @@ class Issue:
     body: str
     html_url: str
     labels: frozenset[str]
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    number: int
+    html_url: str
 
 
 def _next_page_path(link_header: str | None) -> str | None:
@@ -171,6 +178,45 @@ class GitHubClient:
         if resp.status not in (200, 404):
             raise GitHubError(resp.status, resp.body)
 
+    def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
+        """Whether `branch` is really on the remote.
+
+        The design decision behind why this exists at all (docs/roadmap.md
+        item 2, docs/design.md's split surface): `dispatch()` tells the
+        agent exactly what branch to push to, but the prompt it received
+        came from untrusted issue content, so the controller confirms the
+        branch is real via the API before opening a PR against it rather
+        than trusting the agent's own report of what it did.
+        """
+        resp = self.transport.request(
+            method="GET",
+            # GitHub's branch-get endpoint requires `/` within the branch
+            # name itself percent-encoded (`%2F`), not left as a path
+            # separator — quote(..., safe="") is what does that.
+            path=f"/repos/{owner}/{repo}/branches/{quote(branch, safe='')}",
+            headers=self._headers(), body=None,
+        )
+        if resp.status == 200:
+            return True
+        if resp.status == 404:
+            return False
+        raise GitHubError(resp.status, resp.body)
+
+    def create_pull_request(self, owner: str, repo: str, *, head: str, base: str,
+                             title: str, body: str = "") -> PullRequest:
+        resp = self.transport.request(
+            method="POST",
+            path=f"/repos/{owner}/{repo}/pulls",
+            headers=self._headers(json_body=True),
+            body=json.dumps(
+                {"title": title, "head": head, "base": base, "body": body}
+            ).encode(),
+        )
+        if resp.status != 201:
+            raise GitHubError(resp.status, resp.body)
+        data = json.loads(resp.body)
+        return PullRequest(number=data["number"], html_url=data["html_url"])
+
 
 @dataclass
 class DryRunGitHubClient:
@@ -189,3 +235,11 @@ class DryRunGitHubClient:
 
     def remove_label(self, owner: str, repo: str, number: int, label: str) -> None:
         print(f"+ remove label {label!r} from {owner}/{repo}#{number}")
+
+    def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
+        return self.inner.branch_exists(owner, repo, branch)
+
+    def create_pull_request(self, owner: str, repo: str, *, head: str, base: str,
+                             title: str, body: str = "") -> PullRequest:
+        print(f"+ open PR {owner}/{repo}: {head!r} -> {base!r} ({title!r})")
+        return PullRequest(number=0, html_url=f"(dry run) {owner}/{repo}: {head} -> {base}")

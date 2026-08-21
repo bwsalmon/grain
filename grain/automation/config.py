@@ -20,6 +20,11 @@ class AutomationConfig:
     # already labelled are ever picked up.
     trigger_label: str = "grain-agent"
     in_progress_label: str = "grain-agent-in-progress"
+    # The PR base branch — the target repo's own default, almost always,
+    # but not assumed: `git`'s "default branch" concept lives in the repo,
+    # not here, and `core.py` has no other source for it since it never
+    # clones anything itself.
+    base_branch: str = "main"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 10

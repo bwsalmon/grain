@@ -29,16 +29,41 @@ now document from live testing) with what's actually true.
 
 ## 2. PR creation after a sandbox pushes
 
-- [ ] Done
+- [x] Done
 
-The most obvious gap: a sandbox pushes its branch through the git proxy,
-but nothing opens the PR — sandboxes hold no GitHub API access by design
-(the split surface, `docs/design.md` "GitHub access"). `core.py`'s sweep
-already detects a successfully-finished run; extend that path (or a
-sibling step) to open a PR via `GitHubClient`, using the same credential
-selection `CredentialSet` already does for issue labels. Needs a design
-decision on how the controller knows what branch/commit the sandbox
-pushed — worth resolving before coding, not assuming.
+The branch/commit question resolved as: deterministic, not self-reported.
+`dispatch.py`'s `branch_name(issue)` (`grain/issue-<N>`) is computed by both
+`dispatch()` (to tell the agent exactly what to push to, in the prompt) and
+`core.py` (to verify via `GitHubClient.branch_exists` before opening a PR)
+— never trusted from the agent's own report, since the prompt it received
+came from untrusted issue content. A succeeded run whose branch doesn't
+exist is requeued through the same path as a failed/stranded one, audited
+as `"succeeded but branch ... does not exist"` rather than silently treated
+as done. `GitHubClient` gained `branch_exists`/`create_pull_request`
+(`github.py`), following the existing `Transport`/`FakeTransport` pattern.
+
+This also closed the two gaps item 2 depended on and nothing else provided:
+`dispatch()` now clones (or fetches-and-resets, for a reused long-lived
+sandbox) a fixed workspace path through the git proxy before starting
+`claude -p` (`ensure_workspace`), and sandbox git-proxy tokens are now
+minted and distributed — `grain/proxy/tokens.py` gained `SandboxTokenStore`
+(the write side of the file `SandboxTokens` already read), and
+`configure_git_credentials` points the sandbox's git credential helper at
+its token over the same stdin-not-argv channel the prompt already uses, so
+neither the token nor the clone URL ever needs to carry it. Verified live
+against a real sandbox VM: `tests/test_vm_integration.py` now stands up a
+real bare git repo, served over real smart-HTTP by `git http-backend`,
+behind a real `GitProxy` (only its `Forwarder` swapped from `RealForwarder`'s
+hardcoded HTTPS for a plain-HTTP equivalent, to avoid provisioning a TLS
+cert for a throwaway test) — the sandbox clones through it, a wrong token is
+rejected, and a second `ensure_workspace` call on an already-cloned
+workspace picks up a new upstream commit and discards a simulated leftover
+file. Found live: the bare cloud image this suite boots (deliberately
+unprovisioned, to keep boot time down) has no `git` binary at all —
+`provision/sandbox.sh` installs it in a real deployment, but nothing here
+had needed it until this item's workspace-clone step; fixed with a
+session-scoped `git_installed` fixture. What's still not exercised: a real
+GitHub repo/credential (item 8) and full sandbox provisioning (item 3).
 
 ## 3. A provisioned controller VM
 
@@ -52,6 +77,17 @@ testing. Build the controller's own provisioning script and CLI wiring
 controller SSH keypair generation step (`ssh-keygen` at
 `/data/secrets/controller-ssh`) that's currently a manual, undocumented
 prerequisite for `libvirt.py`'s `ssh_public_key_path`.
+
+Item 2 narrowed this slightly, worth noting so it isn't rediscovered: sandbox
+git-proxy token *minting and distribution* (`grain/proxy/tokens.py`'s
+`SandboxTokenStore`, wired into `core.py`'s dispatch path) is now done — a
+sandbox without a token yet gets one on its first dispatch, delivered over
+the same SSH channel `dispatch.py` already used. That consumes the
+controller SSH key this item's still-missing keypair-generation step is
+about, but doesn't create it — the controller SSH keypair itself
+(`ssh-keygen` at `/data/secrets/controller-ssh`) is still a manual,
+undocumented prerequisite, same as everything else this item scoped: the
+controller VM, its provisioning script, and its `/data` disk layout.
 
 ## 4. GCP metadata server
 

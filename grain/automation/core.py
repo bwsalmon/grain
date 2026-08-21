@@ -5,17 +5,31 @@ docs/design.md" convention:
 
     sweep first, so a sandbox a finished or stranded run just freed is
     available to the same cycle's dispatch pass rather than sitting idle
-    for one more `run-once` interval,
+    for one more `run-once` interval — a *successful* sweep also verifies
+    the pushed branch and opens the PR, since that is the other half of
+    "this run is really done", not a separate pass,
     list open trigger-labelled issues not already tracked as in-progress,
     oldest first, so a backlog drains in the order it was filed,
-    while a free sandbox exists and the rate limit allows it, dispatch,
-    move the label, and record the assignment,
+    while a free sandbox exists and the rate limit allows it, mint the
+    sandbox's git-proxy token if it doesn't have one yet, dispatch, move the
+    label, and record the assignment,
     stop — cron will call again.
 
 Cron, not a loop: docs/design.md's issue-intake section is explicit that
 polling (not webhooks) is what keeps the host closed to inbound traffic.
 `Orchestrator.run_once` is meant to be invoked by a systemd timer, once per
 call, not run as a daemon.
+
+PR creation (docs/roadmap.md item 2) is a `_sweep`-side concern, not a new
+pass: a sweep only calls a run "succeeded" once the unit exited zero, and
+whether that success produced a real, mergeable branch is the next question
+about the exact same event, checked with `GitHubClient.branch_exists` before
+`create_pull_request` — never the agent's own claim about what it pushed,
+since the prompt it received came from untrusted issue content
+(docs/design.md's split surface). A success with no branch is requeued
+through the same `_requeue` path as a failed or stranded run: `sweeper.py`
+still knows nothing about GitHub, and a run that produced nothing usable is
+not meaningfully different from one that failed outright.
 """
 
 from __future__ import annotations
@@ -27,12 +41,13 @@ from typing import Callable
 from . import ratelimit
 from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
-from .dispatch import dispatch
+from .dispatch import branch_name, dispatch
 from .github import GitHubClient
 from .ssh import SshRunner
 from .state import AutomationState
 from .sweeper import Outcome, sweep
-from ..inventory import Cluster
+from ..inventory import GIT_PROXY_PORT, Cluster
+from ..proxy.tokens import SandboxTokenStore
 from ..run import Runner
 
 
@@ -43,6 +58,10 @@ class Orchestrator:
     config: AutomationConfig
     state: AutomationState
     base_runner: Runner
+    # Where sandbox git-proxy tokens are minted and recorded — the same file
+    # `grain/proxy/tokens.py`'s `SandboxTokens` reads on the proxy side. See
+    # `_dispatch`'s use of `ensure_token`.
+    token_store: SandboxTokenStore
     audit: AuditLog | None = None
     # Overridable seam for tests: production leaves this None and gets a
     # real `SshRunner` per sandbox; a test can inject a lookup straight to
@@ -63,6 +82,14 @@ class Orchestrator:
             key_path=self.config.ssh_key_path,
         )
 
+    def _remote_url(self) -> str:
+        # Always through the git proxy, on the controller's own address —
+        # never GitHub directly (docs/design.md, "GitHub access").
+        return (
+            f"http://{self.cluster.controller_ip}:{GIT_PROXY_PORT}/"
+            f"{self.config.owner}/{self.config.repo}.git"
+        )
+
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
         self._dispatch(now)
@@ -71,15 +98,39 @@ class Orchestrator:
     def _sweep(self, now: datetime) -> None:
         result = sweep(self.state, self._ssh_runner_for, self.config, now)
         for outcome in result.succeeded:
-            self.github.remove_label(
-                self.config.owner, self.config.repo,
-                outcome.issue, self.config.in_progress_label,
-            )
-            self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
-                               outcome="succeeded")
+            self._finish_succeeded(outcome)
         for outcome in (*result.failed, *result.stranded):
             reason = "failed" if outcome in result.failed else "stranded"
             self._requeue(outcome, reason)
+
+    def _finish_succeeded(self, outcome: Outcome) -> None:
+        branch = branch_name(outcome.issue)
+        if not self.github.branch_exists(self.config.owner, self.config.repo, branch):
+            # The unit exited zero, but that is not the same claim as "a PR
+            # can be opened" — the agent may never have pushed, or pushed
+            # somewhere other than the branch dispatch() told it to. Verify,
+            # don't trust (docs/roadmap.md item 2), and make the gap visible
+            # rather than treating a branchless "success" as done.
+            self._requeue(outcome, f"succeeded but branch {branch!r} does not exist")
+            return
+
+        # PR first, in-progress label off second: if create_pull_request
+        # fails partway (a 422 from a stale PR, a transient 5xx), the issue
+        # stays visibly in-progress rather than looking finished with
+        # nothing to show for it.
+        pr = self.github.create_pull_request(
+            self.config.owner, self.config.repo,
+            head=branch, base=self.config.base_branch,
+            title=f"grain: fix #{outcome.issue}",
+            body=f"Closes #{outcome.issue}.\n\nOpened automatically after "
+                 f"issue #{outcome.issue} finished on {outcome.sandbox}.",
+        )
+        self.github.remove_label(
+            self.config.owner, self.config.repo,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
+                           outcome=f"opened PR #{pr.number}: {pr.html_url}")
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
         # Back to the trigger label, per docs/design.md: "issues need
@@ -118,7 +169,9 @@ class Orchestrator:
                 break
 
             runner = self._ssh_runner_for(sandbox)
-            unit = dispatch(runner, sandbox, issue)
+            token = self.token_store.ensure_token(sandbox)
+            unit = dispatch(runner, sandbox, issue,
+                             remote_url=self._remote_url(), token=token)
             self.state.assign(sandbox, issue.number, unit, now)
             self.state.record_run(now)
             self.github.remove_label(

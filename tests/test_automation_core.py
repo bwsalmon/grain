@@ -1,5 +1,7 @@
 import json
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
@@ -7,6 +9,7 @@ from grain.automation.core import Orchestrator
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient
 from grain.automation.state import AutomationState
 from grain.inventory import Cluster
+from grain.proxy.tokens import SandboxTokenStore
 from grain.run import FakeRunner
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -20,7 +23,26 @@ def issue_json(number: int) -> dict:
     }
 
 
-def make_orchestrator(*, issues=(), state=None, runner=None):
+def pr_flow_response(pr_number: int) -> list[ApiResponse]:
+    """The three responses one `_finish_succeeded` call consumes, in exact
+    call order: `branch_exists` (200 -> the branch is really there),
+    `create_pull_request` (201, with the fields `GitHubClient` reads back),
+    then `remove_label` (in-progress comes off). `FakeTransport.responses`
+    is a strict FIFO queue regardless of which call consumes each entry, so
+    a test with more than one succeeded outcome needs this whole triple per
+    outcome, in order, or a later call silently eats an earlier outcome's
+    response.
+    """
+    return [
+        ApiResponse(200, {}, b"{}"),
+        ApiResponse(201, {}, json.dumps(
+            {"number": pr_number, "html_url": f"https://github.com/o/r/pull/{pr_number}"}
+        ).encode()),
+        ApiResponse(200, {}, b"{}"),
+    ]
+
+
+def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -35,10 +57,12 @@ def make_orchestrator(*, issues=(), state=None, runner=None):
     github = GitHubClient(transport, token="t")
     config = AutomationConfig(owner="o", repo="r")
     fake_runner = runner if runner is not None else FakeRunner()
+    if token_store is None:
+        token_store = SandboxTokenStore(Path(tempfile.mkdtemp()) / "sandbox-tokens.json")
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=state if state is not None else AutomationState(),
-        base_runner=fake_runner,
+        base_runner=fake_runner, token_store=token_store,
         audit=RecordingAuditLog(),
         # Bypass SshRunner's argv wrapping here — that integration is
         # covered by test_automation_ssh.py; these tests target
@@ -104,7 +128,8 @@ def test_a_finished_run_is_swept_and_its_slot_reused_in_the_same_pass():
                  now=NOW - timedelta(hours=1))
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
-    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
+    orchestrator, transport = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
+    transport.responses.extend(pr_flow_response(1) + pr_flow_response(2))
     orchestrator.run_once(NOW)
     # Both prior runs finished and were freed; the new issue lands on one.
     assert 1 in {a.issue for a in orchestrator.state.assignments.values()}
@@ -124,3 +149,101 @@ def test_a_failed_run_is_requeued_via_labels_not_state():
     assert "failed" in outcomes
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     assert len(mutating) == 2  # remove in-progress, add trigger back
+
+
+# --- PR creation on a successful run (docs/roadmap.md item 2) -------------
+
+def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(pr_flow_response(42))
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    branch_call = transport.calls[0]
+    assert branch_call["method"] == "GET"
+    assert branch_call["path"] == "/repos/o/r/branches/grain%2Fissue-5"
+    pr_call = transport.calls[1]
+    assert pr_call["method"] == "POST"
+    assert pr_call["path"] == "/repos/o/r/pulls"
+    sent = json.loads(pr_call["body"])
+    assert sent["head"] == "grain/issue-5"
+    assert sent["base"] == "main"
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("opened PR #42" in o for o in outcomes)
+    # The in-progress label comes off; the trigger label is never re-added
+    # for a genuinely finished run.
+    mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
+    label_mutations = [c for c in mutating if "labels" in c["path"]]
+    assert len(label_mutations) == 1
+
+
+def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
+    # The unit exited zero, but the agent never pushed (or pushed somewhere
+    # other than the branch dispatch() told it to) — this must not look
+    # like a silent success: no PR, and the issue goes back on the queue.
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b"not found"))
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("does not exist" in o for o in outcomes)
+    # No PR call was ever made — no POST to the pulls endpoint.
+    assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
+    mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
+    assert len(mutating) == 2  # remove in-progress, add trigger back
+
+
+# --- workspace/token wiring into dispatch() (docs/roadmap.md item 2) ------
+
+def test_dispatch_points_the_workspace_clone_at_the_git_proxy():
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)])
+    orchestrator.run_once(NOW)
+    runner = orchestrator.base_runner
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert clone_calls
+    script = clone_calls[0][2]
+    # Cluster(sandbox_count=2)'s default subnet puts the controller at
+    # 10.100.0.2; GIT_PROXY_PORT is 8080 — never GitHub directly.
+    assert "http://10.100.0.2:8080/o/r.git" in script
+
+
+def test_dispatch_mints_a_sandbox_token_and_configures_the_credential_helper(tmp_path):
+    token_store = SandboxTokenStore(tmp_path / "sandbox-tokens.json")
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], token_store=token_store)
+    orchestrator.run_once(NOW)
+
+    token = json.loads((tmp_path / "sandbox-tokens.json").read_text())["sandbox-0"]
+    assert token
+    runner = orchestrator.base_runner
+    credential_dd = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "dd" and argv[1] == "of=/home/debian/.git-credentials"
+    )
+    assert token in credential_dd
+
+
+def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_path):
+    token_store = SandboxTokenStore(tmp_path / "sandbox-tokens.json")
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], token_store=token_store)
+    orchestrator.run_once(NOW)
+    first_token = json.loads((tmp_path / "sandbox-tokens.json").read_text())["sandbox-0"]
+
+    # Free the slot and dispatch a second issue to the same (only free) sandbox.
+    orchestrator.state.release("sandbox-0")
+    orchestrator.run_once(NOW)
+    second_token = json.loads((tmp_path / "sandbox-tokens.json").read_text())["sandbox-0"]
+
+    assert first_token == second_token

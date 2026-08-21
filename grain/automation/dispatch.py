@@ -37,14 +37,48 @@ stdin when no positional argument is given). Untrusted issue content never
 becomes a shell-interpolated argument anywhere in this path — the only
 thing built as a shell string is the fixed `bash -c` wrapper below, and its
 only variable component is a unit-derived path, never issue content.
+
+Two more pieces landed here for docs/roadmap.md item 2, both upstream of
+`start_unit`:
+
+- **The branch name is decided here, not reported by the agent.** `core.py`
+  must verify a branch exists before opening a PR against it, and the only
+  thing worth trusting for that check is a name the controller itself
+  picked — never the agent's own claim about what it pushed, since the
+  prompt it received came from untrusted issue content. `branch_name()` is
+  a pure function of the issue number so both `dispatch()` (to put in the
+  prompt) and `core.py` (to verify) compute the identical name with no
+  round-trip through agent output.
+- **`dispatch()` ensures the workspace itself.** Sandboxes are long-lived
+  (docs/design.md, "sandbox lifecycle") — provisioning does not leave a
+  freshly cloned repo waiting, and a reused sandbox already has whatever the
+  previous task left in it. `ensure_workspace()` clones on a sandbox's first
+  task and fetches-plus-resets on every one after, always through the git
+  proxy (docs/design.md, "GitHub access"), never GitHub directly — the same
+  caution `docs/design.md`'s dispatch-mechanism section already flagged
+  ("the old `openhands-resolver` embedded the GitHub token directly in the
+  clone URL... hasn't been checked against a sandbox with a real git remote
+  configured"). `configure_git_credentials()` is what keeps the token out of
+  that URL: a `git-credential-store` line delivered over the same
+  stdin-not-argv channel the prompt uses, consumed by git's own credential
+  helper machinery, so neither the clone URL nor the agent's own commands
+  ever need to carry it.
 """
 
 from __future__ import annotations
 
+import shlex
 from enum import Enum
+from urllib.parse import urlsplit
 
 from .github import Issue
 from ..run import Runner
+
+# Fixed across every dispatch to a sandbox — long-lived sandboxes reuse the
+# same checkout rather than getting a fresh one per task; see
+# ensure_workspace()'s docstring.
+WORKSPACE_PATH = "/home/debian/workspace"
+_CREDENTIALS_PATH = "/home/debian/.git-credentials"
 
 
 class UnitState(Enum):
@@ -61,15 +95,96 @@ def unit_name(sandbox: str) -> str:
     return f"grain-task-{sandbox}"
 
 
-def _prompt(issue: Issue) -> str:
+def branch_name(issue: int) -> str:
+    """The exact branch a dispatch for this issue must push to.
+
+    Deterministic and derived from the issue number alone — never the
+    agent's own report of what it did (docs/roadmap.md item 2). Both
+    `dispatch()` (to put in the prompt) and `core.py` (to verify the branch
+    exists before opening a PR) call this, so they can never disagree.
+    """
+    return f"grain/issue-{issue}"
+
+
+def _prompt(issue: Issue, branch: str, workspace: str) -> str:
     return (
         f"You are working GitHub issue #{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n\n"
         f"Issue URL: {issue.html_url}\n\n"
-        "Push your work as a branch through the git remote already "
-        "configured in this workspace. You have no GitHub API access from "
-        "here — do not attempt to open a PR or comment directly."
+        f"A clone of the target repository is already checked out at "
+        f"{workspace}, with its git remote already configured — do your "
+        "work there.\n\n"
+        "When you are done, commit your changes and push them with exactly "
+        "this command:\n"
+        f"    git push origin HEAD:{branch}\n"
+        "The controller opens the pull request itself once it sees that "
+        "branch — you have no GitHub API access from here, so do not "
+        "attempt to open a PR or comment directly."
     )
+
+
+def _credential_line(remote_url: str, token: str) -> str:
+    """One `git-credential-store` line covering the proxy's origin.
+
+    The store format matches on protocol+host+port, not path, so one line
+    covers every repo this sandbox might be pointed at through the same
+    proxy. The username is a fixed placeholder — `grain/proxy/tokens.py`'s
+    `extract_basic_auth_token` ignores it; only the token (the password
+    half) identifies the sandbox.
+    """
+    split = urlsplit(remote_url)
+    netloc = f"{split.hostname}:{split.port}" if split.port else split.hostname
+    return f"{split.scheme}://sandbox:{token}@{netloc}\n"
+
+
+def configure_git_credentials(runner: Runner, remote_url: str, token: str) -> None:
+    """Points the sandbox's git at its proxy token via a credential helper,
+    so neither the clone URL nor any command the agent runs ever needs to
+    carry it — docs/design.md: "git consumes it via a credential helper, so
+    agents never handle it." The token reaches the sandbox over the same
+    stdin-not-argv channel `dispatch()` already uses for the prompt, so it
+    is never a literal argv element either (an argv element would land in
+    `ps` output and this runner's own command logging).
+    """
+    runner.run(["git", "config", "--global", "credential.helper", "store"])
+    runner.run(
+        ["dd", f"of={_CREDENTIALS_PATH}", "status=none"],
+        stdin=_credential_line(remote_url, token),
+    )
+    runner.run(["chmod", "600", _CREDENTIALS_PATH])
+
+
+def ensure_workspace(runner: Runner, remote_url: str,
+                      path: str = WORKSPACE_PATH) -> None:
+    """Makes sure `path` holds a checkout of `remote_url`'s current default
+    branch, cloning on a sandbox's first dispatch and fetching-plus-resetting
+    on every one after.
+
+    Sandboxes are long-lived (docs/design.md, "sandbox lifecycle: long-lived,
+    recreated on demand") — nothing resets `path` between tasks on its own,
+    so a reused sandbox's workspace can hold whatever branch, commit, and
+    untracked files the previous task left behind. `git clean -fdx` plus a
+    forced detached checkout of `origin/HEAD` discards all of that
+    unconditionally, regardless of what local state existed, rather than
+    trying to reconcile it — the design's own tradeoff (correctness over
+    isolation for *sequential* tasks on one sandbox) says a clean, known
+    starting point matters more here than preserving anything left over.
+    `origin/HEAD` (not a hardcoded branch name like `main`) is what makes
+    this agnostic to the target repo's actual default branch.
+    """
+    script = (
+        "set -eu\n"
+        f"if [ -d {shlex.quote(path)}/.git ]; then\n"
+        f"  git -C {shlex.quote(path)} remote set-url origin {shlex.quote(remote_url)}\n"
+        f"  git -C {shlex.quote(path)} fetch --prune origin\n"
+        f"  git -C {shlex.quote(path)} remote set-head origin -a\n"
+        f"  git -C {shlex.quote(path)} clean -fdx\n"
+        f"  git -C {shlex.quote(path)} checkout -f --detach origin/HEAD\n"
+        "else\n"
+        f"  git clone {shlex.quote(remote_url)} {shlex.quote(path)}\n"
+        "fi\n"
+    )
+    runner.run(["bash", "-c", script])
 
 
 def start_unit(runner: Runner, unit: str, command: str) -> None:
@@ -87,14 +202,31 @@ def start_unit(runner: Runner, unit: str, command: str) -> None:
     ])
 
 
-def dispatch(runner: Runner, sandbox: str, issue: Issue) -> str:
+def dispatch(runner: Runner, sandbox: str, issue: Issue, *,
+             remote_url: str, token: str) -> str:
     """Starts the task on the sandbox `runner` targets. Returns the unit
     name — the caller records it in `AutomationState` to poll later.
+
+    `remote_url` is the git-proxy URL for the target repo
+    (`http://<controller>:<port>/<owner>/<repo>.git`) and `token` is this
+    sandbox's own git-proxy bearer token (`grain/proxy/tokens.py`'s
+    `SandboxTokenStore.ensure_token` mints it on first use) — both supplied
+    by `core.py`, which is the only layer that knows the controller's
+    address and holds the token store.
     """
+    configure_git_credentials(runner, remote_url, token)
+    ensure_workspace(runner, remote_url)
+    branch = branch_name(issue.number)
     unit = unit_name(sandbox)
     prompt_path = f"/tmp/{unit}.md"
-    runner.run(["dd", f"of={prompt_path}", "status=none"], stdin=_prompt(issue))
-    start_unit(runner, unit, f"claude -p --permission-mode acceptEdits < {prompt_path}")
+    runner.run(
+        ["dd", f"of={prompt_path}", "status=none"],
+        stdin=_prompt(issue, branch, WORKSPACE_PATH),
+    )
+    start_unit(
+        runner, unit,
+        f"cd {WORKSPACE_PATH} && claude -p --permission-mode acceptEdits < {prompt_path}",
+    )
     return unit
 
 

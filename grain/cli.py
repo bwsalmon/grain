@@ -26,6 +26,7 @@ from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.state import AutomationState, utcnow
 from .inventory import Cluster
 from .proxy.credentials import CredentialSet
+from .proxy.tokens import SandboxTokenStore
 from .run import DryRunRunner, RealRunner, Runner
 
 
@@ -55,9 +56,11 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         github = DryRunGitHubClient(github)
     state_path = data_dir / "state" / "automation" / "state.json"
     audit = FileAuditLog(data_dir / "state" / "automation" / "audit.log")
+    token_store = SandboxTokenStore(data_dir / "secrets" / "sandbox-tokens.json")
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
-        state=AutomationState.load(state_path), base_runner=runner, audit=audit,
+        state=AutomationState.load(state_path), base_runner=runner,
+        token_store=token_store, audit=audit,
     )
     return orchestrator, state_path
 

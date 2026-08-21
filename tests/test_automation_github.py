@@ -4,6 +4,7 @@ import pytest
 
 from grain.automation.github import (
     ApiResponse, DryRunGitHubClient, FakeTransport, GitHubClient, GitHubError,
+    PullRequest,
 )
 
 
@@ -89,18 +90,72 @@ def test_anonymous_client_sends_no_authorization_header():
     assert "Authorization" not in transport.calls[0]["headers"]
 
 
+def test_branch_exists_true_on_200():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b"{}")])
+    assert GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1") is True
+
+
+def test_branch_exists_false_on_404():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    assert GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1") is False
+
+
+def test_branch_exists_percent_encodes_the_slash_in_the_branch_name():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b"{}")])
+    GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1")
+    assert transport.calls[0]["path"] == "/repos/o/r/branches/grain%2Fissue-1"
+
+
+def test_branch_exists_raises_on_other_errors():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1")
+
+
+def test_create_pull_request_posts_head_base_and_title():
+    body = json.dumps({"number": 42, "html_url": "https://github.com/o/r/pull/42"}).encode()
+    transport = FakeTransport(responses=[ApiResponse(201, {}, body)])
+    pr = GitHubClient(transport, token="t").create_pull_request(
+        "o", "r", head="grain/issue-1", base="main", title="grain: fix #1",
+    )
+    assert pr == PullRequest(number=42, html_url="https://github.com/o/r/pull/42")
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/r/pulls"
+    sent = json.loads(call["body"])
+    assert sent["head"] == "grain/issue-1"
+    assert sent["base"] == "main"
+    assert sent["title"] == "grain: fix #1"
+
+
+def test_create_pull_request_raises_on_a_non_201():
+    transport = FakeTransport(responses=[ApiResponse(422, {}, b"already exists")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").create_pull_request(
+            "o", "r", head="grain/issue-1", base="main", title="x",
+        )
+
+
 def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
-    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps([issue_json(1)]).encode())])
+    transport = FakeTransport(responses=[
+        ApiResponse(200, {}, json.dumps([issue_json(1)]).encode()),
+        ApiResponse(200, {}, b"{}"),
+    ])
     real = GitHubClient(transport, token="t")
     dry = DryRunGitHubClient(real)
 
     issues = dry.list_issues("o", "r", "grain-agent")
     assert [i.number for i in issues] == [1]
+    assert dry.branch_exists("o", "r", "grain/issue-1") is True
 
     dry.add_label("o", "r", 1, "grain-agent-in-progress")
     dry.remove_label("o", "r", 1, "grain-agent")
+    pr = dry.create_pull_request("o", "r", head="grain/issue-1", base="main", title="x")
     out = capsys.readouterr().out
     assert "add label" in out
     assert "remove label" in out
-    # Only the read actually reached the transport.
-    assert len(transport.calls) == 1
+    assert "open PR" in out
+    assert isinstance(pr, PullRequest)
+    # Only the two reads (list_issues, branch_exists) actually reached the
+    # transport — every mutation, including PR creation, only printed.
+    assert len(transport.calls) == 2
