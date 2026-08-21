@@ -78,6 +78,7 @@ def test_create_writes_seed_and_domain_xml_and_defines_it(adapter, cluster, tmp_
     assert cluster.interface_of("sandbox-0") in xml
     network_config = (tmp_path / "sandbox-0-network-config").read_text()
     assert str(cluster.address_of("sandbox-0")) in network_config
+    assert "nameservers" in network_config
     assert runner.ran("qemu-img create")
     assert runner.ran("cloud-localds")
     assert runner.ran(f"virsh define {tmp_path}/sandbox-0.xml")

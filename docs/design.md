@@ -1065,10 +1065,17 @@ ever becomes worth its cost again.
    verified for the negative cases, and now also confirmed against a real
    VM on the bridge — the reachability matrix (host ↔ sandbox at the
    assigned address) matches what the ruleset intends.
-4. **Sandbox image**: the provisioning script, `docker`, `kind`. Confirm
-   `kind create cluster` works and measure peak CPU and memory. Open
-   question 2 is answered here, and it may change `sandboxCount` or the
-   machine type.
+4. **Sandbox image** — *done*: `provision/sandbox.sh` written and verified
+   live — a real sandbox VM installed Docker and kind, applied the inotify
+   sysctls, pre-pulled the kind node image, and `kind create cluster`
+   succeeded end to end (single control-plane node, `Ready` and reachable).
+   Guest showed `7.8Gi` memory with `6.7Gi` still available after cluster
+   creation; the qemu process sat around 29% CPU / ~5 GB RSS at idle
+   post-creation on the host side. That is one data point at rest, not a
+   sustained-load benchmark — open question 2 (whether 4 vCPU holds two
+   sandboxes plus a controller under real `kind` + build load) is still
+   open and needs a second sandbox and an actual build running concurrently
+   to answer properly.
 5. **Controller VM**: `/data` disk, Agent Canvas, and one sandbox
    registered as a backend. OpenHands end to end with no custom code.
 6. **Git proxy**: path whitelist, canonicalize, allowlist, token auth,

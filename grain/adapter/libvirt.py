@@ -147,6 +147,8 @@ def render_network_config(cluster: Cluster, spec: VmSpec) -> str:
         "      set-name: eth0\n"
         f"      addresses: [{address}/{cluster.subnet.prefixlen}]\n"
         f"      gateway4: {cluster.host_ip}\n"
+        "      nameservers:\n"
+        "        addresses: [8.8.8.8, 1.1.1.1]\n"
     )
 
 
