@@ -24,8 +24,8 @@ a critical pass over the security claims:
   write-safety (protected-branch) enforcement, and operations sections —
   all genuinely missing in revision 1.
 - **Added** a configurable sandbox image — package set, `nix-ld`, store
-  sharing — and a precise account of what a sandbox reboot does and does
-  not reset. See
+  sharing, a writable store overlay so in-guest `nix` works — and a precise
+  account of what a sandbox reboot does and does not reset. See
   [Sandbox image](#sandbox-image-packages-and-toolchains).
 
 ## Goals
@@ -743,15 +743,118 @@ per-VM image containing only that VM's closure, at the cost of disk and
 build time; make it a config flag rather than a decision baked into the
 modules.
 
-### Runtime installs
+### Can an agent install packages at runtime?
 
-Agents can still install things per-task, and should be able to: `uv`/`pip`
+Mostly yes, but NixOS changes the answer enough that it needs stating
+precisely — and the read-only store specified above has a consequence
+worth being explicit about.
+
+**Works against the tmpfs root, unchanged from any Linux box:** `uv`/`pip`
 into a venv, `pnpm install` into `node_modules`, `cargo` into a project
-dir, and (with `nix-ld`) downloaded binaries all work fine against the
-tmpfs root. What does *not* work is anything wanting to write to
-`/nix/store` or mutate system state globally — the right mental model for
-an agent is "a normal Linux box where you don't have a system package
-manager, but your project-local tooling is all fine."
+dir, `go` modules, `bundle`, `mvn`. Building from source with the
+toolchain in the image. And — thanks to
+[`nix-ld`](#nix-ld-the-nixos-specific-trap) — downloading and running a
+dynamically-linked binary.
+
+**Does not work, and will be tried anyway:** `apt-get install`. There is no
+system package manager on NixOS, and a large share of agent training data
+assumes Debian. This is the single most likely thing to waste an agent's
+turns, and no amount of design prevents the first attempt — only telling
+the agent up front does. See [Telling the agent](#telling-the-agent).
+
+**The one I got wrong initially:** a read-only `/nix/store` means `nix`
+itself doesn't work either. `nix shell`, `nix profile install`,
+`nix-shell -p`, `nix develop` all need to realise paths into the store. So
+the naive version of this design gives the agent a NixOS box with *neither*
+`apt` nor `nix` — a fixed appliance, where the only recourse for a missing
+tool is a language-level package manager or a downloaded binary. That's a
+worse environment than it needs to be.
+
+### A writable store overlay
+
+microvm.nix solves this directly:
+[`microvm.writableStoreOverlay`](https://microvm-nix.github.io/microvm.nix/shares.html)
+mounts `/nix/store` as an overlayfs — the shared host store as the
+read-only lower layer, a writable upper layer on top — so the guest can
+realise new store paths and `nix` works normally.
+
+**Put the upper layer on tmpfs.** Two reasons, and the second is the one
+that matters:
+
+- overlayfs is picky about upper-layer filesystems, and virtiofs/9p shares
+  are not usable there. So it's tmpfs or a block volume, not a share.
+- A block volume would **persist across reboots, silently breaking the
+  reset guarantee**. Store paths are hash-addressed, so this is less
+  alarming than a poisoned npm cache, but an agent with root can write
+  arbitrary content into the overlay's upper directory at a path that
+  shadows a legitimate store path — and that would survive into the next
+  lease. tmpfs is discarded on every boot, which is exactly the property
+  [the reset design](#what-a-reboot-actually-resets) depends on.
+
+The cost is guest RAM: everything the agent realises into the store is
+resident. Size `sandbox.memoryMb` accordingly and cap the overlay with
+`sandbox.writableStore.sizeMb`, so a runaway `nix build` hits a clear
+`ENOSPC` rather than OOM-killing the agent. If a workload genuinely needs
+large in-guest builds, the right answer is a scratch volume that the broker
+wipes as part of reset — deliberately not the default, because it adds a
+reset step that can fail silently.
+
+Two things make this cheaper than it sounds:
+
+- The shared host store already contains every package the host has built,
+  not just this guest's closure. A generously-provisioned host means many
+  `nix shell` requests resolve to paths that are *already present and
+  read-only*, costing no RAM and no download. This argues for pre-building
+  a broad package set on the host even beyond the sandbox image's own set.
+  (Worth verifying empirically: whether the guest's Nix database treats
+  pre-existing host store paths as valid, or re-downloads them anyway. If
+  it re-downloads, the cost is time, not correctness.)
+- Pin the guest's flake registry to the same nixpkgs the image was built
+  from, so `nix shell nixpkgs#foo` resolves without fetching a channel and
+  matches the image's versions.
+
+Under the default open-egress policy this all just works. Under the
+[allowlist egress policy](#sandbox-egress-an-explicit-trade-off),
+`cache.nixos.org` has to be on the allowlist or in-guest Nix stops working
+— an easy interaction to miss, since it turns a working sandbox into a
+mysteriously broken one at the moment egress is tightened.
+
+### Making conventional installs work
+
+Small things that remove a lot of friction, all in the sandbox module:
+
+- **Global-install prefixes pointed at `$HOME`.** By default `npm -g` and
+  `pip install --user` try to write into the store and fail. Set
+  `npm_config_prefix=$HOME/.npm-global`, keep `PIP_USER` working against
+  `~/.local`, and put `~/.local/bin` and `~/.npm-global/bin` on `PATH`.
+  Then `npm install -g` behaves the way the agent expects.
+- **Passwordless sudo.** Reasonable here specifically *because* the VM is
+  disposable: the security boundary is the microVM and the absence of
+  credentials, not the guest's unix user. Root in a sandbox buys the agent
+  the ability to bind low ports, mount things, and start services, and the
+  worst case is a broken VM that the next reset repairs. Note that sudo
+  still doesn't make the store's lower layer writable — that's the
+  overlay's job.
+- **Docker, when a test suite needs it** (testcontainers and friends).
+  Namespaces and cgroups work fine inside the guest, so
+  `virtualisation.docker.enable = true` via
+  [`extraConfig`](#configuration-surface) is enough; it's left opt-in
+  rather than default because it's a meaningful chunk of image size and
+  boot time for something most tasks don't use.
+
+### Telling the agent
+
+An agent that knows the rules doesn't burn turns discovering them. Ship a
+short `/etc/agent-tools/README` — and reference it from the OpenHands
+system prompt — covering: no `apt`, use `nix shell nixpkgs#pkg` for
+one-offs; project-local package managers work normally; downloaded
+binaries work; `gh-proxy` for GitHub and `gcp-token` for GCP; everything
+outside the repo is discarded at task end.
+
+This is cheap and disproportionately effective — the failure it prevents
+is an agent concluding the sandbox is broken and working around it.
+
+### Deliberately not shared
 
 A **persistent shared package cache** across sandboxes is deliberately
 rejected, despite the obvious appeal of not re-downloading the same
@@ -809,6 +912,10 @@ docs/design.md
 | `sandbox.nixLd.enable` | `bool` | `true` | Make downloaded dynamic binaries runnable. |
 | `sandbox.nixLd.extraLibraries` | `list of package` | `[]` | Extra libs for `nix-ld`'s search path. |
 | `sandbox.shareHostStore` | `bool` | `true` | Share host `/nix/store` vs. per-VM `storeOnDisk`. |
+| `sandbox.writableStore.enable` | `bool` | `true` | tmpfs store overlay, so in-guest `nix` works. |
+| `sandbox.writableStore.sizeMb` | `int` | `4096` | Cap on the overlay; bounds its RAM cost. |
+| `sandbox.memoryMb` | `int` | `8192` | Guest RAM; must cover the overlay plus builds. |
+| `sandbox.passwordlessSudo` | `bool` | `true` | Safe because the VM, not the user, is the boundary. |
 | `network.bridge` | `str` | `br-agents` | Host bridge name. |
 | `network.subnet` | `str` | `10.100.0.0/24` | Internal subnet. |
 | `network.externalSshPort` | `port` | `2222` | Host port DNAT'd to orchestrator sshd. |
