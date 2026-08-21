@@ -920,6 +920,65 @@ not merely a configuration detail — and it is a further argument for the
 controller-side LLM proxy, which is the only place that spend can be
 metered and capped.
 
+### Interim choice: a login credential in the sandbox, hardened rather than avoided
+
+The controller-side LLM proxy above is the right answer eventually, but for
+now the working plan is simpler and accepts the trade-off directly: Claude
+Code runs *in* the sandbox VM with a login credential, breaking the
+"sandboxes never hold GitHub or GCP credentials" property for the first
+time — this is a new category of secret-on-sandbox, not an extension of the
+existing git-proxy/metadata-server model, and the design's threat model
+should be read with that in mind. Given that, "make it hard to get to"
+rather than "impossible" is the goal, layered rather than relying on one
+mechanism:
+
+- **`sandbox.credentials.files: [{path: "~/.claude/.credentials.json", mode:
+  "deny"}]`**, Claude Code's own bubblewrap-backed sandbox setting. Verified
+  live on a throwaway VM (not just read about): a command run through the
+  sandbox with the credential path denied gets a clean `ENOENT`, while an
+  ordinary work file bound in alongside it stays fully readable and
+  writable — the mechanism doesn't collaterally break normal agent work.
+  This protects the credential from commands the agent's Bash tool spawns;
+  it does not touch the harness process's own (legitimate) access.
+- **`kernel.yama.ptrace_scope = 2`**, closing a gap file-masking alone
+  doesn't: verified that at the kernel default (0) an unrelated same-UID
+  process can read another process's live memory via `/proc/<pid>/mem` —
+  we pulled the ELF magic bytes straight out of a victim process with no
+  special privilege, just a shared UID — and that `ptrace_scope=2` turns
+  the identical attempt into a clean `Permission denied` at `open()`. Now
+  in `provision/sandbox.sh` alongside the existing inotify tuning.
+- **Both verified not to break `docker`/`kind`**, which was the obvious risk
+  given ["why a VM per agent"](#why-a-vm-per-agent) exists specifically
+  because container-in-container isolation causes exactly this class of
+  opaque failure. `kind create cluster` succeeds cleanly on a sandbox
+  provisioned with bubblewrap present and `ptrace_scope=2` active — the
+  reasoning (docker/kind are thin clients to `dockerd`, which runs
+  unsandboxed; the sandbox jails only the agent-invoked command, not the
+  daemon) held up live, not just on paper.
+- **Landlock (kernel LSM, `CONFIG_SECURITY_LANDLOCK`), a further,
+  unverified-in-this-project option**, worth recording because it is
+  structurally stronger than the above where it applies: an unprivileged
+  process can call `landlock_restrict_self()` to *irrevocably* deny itself
+  (and every future child) access to a specific path — including the
+  harness process's own future opens, not just what it spawns. Confirmed
+  present and active in the sandbox kernel's LSM stack (`6.1.0-52-cloud`,
+  well past the 5.13 filesystem-scope minimum). Not something Claude Code
+  uses natively (its own sandbox is bubblewrap+seccomp); applying it here
+  would mean a small wrapper that reads the credential once, calls
+  `landlock_restrict_self()` on that path, then execs into `claude` — and
+  it would need confirming that Claude Code never needs to re-read the
+  credential file after startup, since the restriction can't be lifted.
+- **Rotate on recreate**: re-authenticate fresh each time a sandbox is
+  recreated rather than letting one login persist for the sandbox's whole
+  life, matching the rotation discipline already applied to per-sandbox
+  bearer tokens.
+
+What's still open: a full Claude-Code-mediated end-to-end test (a real
+agentic turn, with `sandbox.enabled` on, actually attempting and failing to
+exfiltrate the credential) needs a real login credential in a test sandbox,
+which wasn't done here — everything above verifies the underlying
+mechanisms independently, which is strong evidence but not the same claim.
+
 **Nothing built so far depends on the answer.** The
 [host adapter](host-adapter.md) is agent-agnostic — it manages VMs and a
 network, and neither cares what runs inside. The choice only starts to bind

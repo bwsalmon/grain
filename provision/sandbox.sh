@@ -10,7 +10,7 @@ KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553
 apt-get update
 apt-get install -y --no-install-recommends \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
-  pipx tmux unzip ca-certificates
+  pipx tmux unzip ca-certificates bubblewrap
 
 # Docker, from the official repo — the documented path on Debian, no
 # kernel-config question at all.
@@ -46,6 +46,49 @@ sysctl --system
 # gigabyte, and both recreate and the between-task `docker system prune`
 # discard it otherwise.
 docker pull "${KIND_NODE_IMAGE}"
+
+# Claude Code runs in-VM with a login credential (see docs/design.md,
+# "Alternative agent runtime: Claude Code" and the credential-isolation
+# notes below). Two things narrow how far that credential reaches if this
+# agent is ever steered into trying to exfiltrate it — both verified live
+# on a throwaway test VM before landing here, not just reasoned about:
+#
+# 1. kernel.yama.ptrace_scope: at the kernel default (0), we read the raw
+#    ELF header straight out of an unrelated same-user process's live
+#    memory via /proc/<pid>/mem — no special privilege needed, just the
+#    same UID. At ptrace_scope=2 the identical attempt fails at open()
+#    with "Permission denied". This closes the "read the credential out of
+#    the Claude Code process's own memory" path that file-level protection
+#    alone does not.
+cat > /etc/sysctl.d/99-grain-security.conf <<'SYSCTL'
+kernel.yama.ptrace_scope = 2
+SYSCTL
+sysctl --system
+
+# 2. Claude Code's own `sandbox.credentials.files` (bubblewrap-backed on
+#    Linux): a command the agent runs through the sandbox gets `mode:
+#    "deny"` on the credential file — verified to come back as a clean
+#    ENOENT, not a permission error that would hint something is being
+#    hidden, while an ordinary work file bound in alongside it stays fully
+#    readable and writable. This is what actually needs `sandbox.enabled`
+#    turned on to take effect; the settings below only matter once Claude
+#    Code itself is installed and logged in, which is a manual first-setup
+#    step, not something this script can do unattended.
+sudo -u debian bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+install -d -o debian -g debian /home/debian/.claude
+cat > /home/debian/.claude/settings.json <<'CLAUDESETTINGS'
+{
+  "sandbox": {
+    "enabled": true,
+    "credentials": {
+      "files": [
+        {"path": "~/.claude/.credentials.json", "mode": "deny"}
+      ]
+    }
+  }
+}
+CLAUDESETTINGS
+chown debian:debian /home/debian/.claude/settings.json
 
 mkdir -p /etc/agent-tools
 cat > /etc/agent-tools/README <<'DOC'
