@@ -35,8 +35,16 @@ gcloud compute instances create grain-spike \
   --image-family=debian-12 \
   --image-project=debian-cloud \
   --boot-disk-size=200GB \
-  --boot-disk-type=pd-balanced
+  --boot-disk-type=pd-balanced \
+  --metadata=serial-port-enable=TRUE
 ```
+
+The serial console matters more than it looks: this spike reconfigures the
+host's bridge, NAT and nftables, so a bad `nixos-rebuild switch` can take
+SSH with it. `gcloud compute connect-to-serial-port grain-spike
+--zone=us-central1-a` still gets you in when the network doesn't. Prefer
+`nixos-rebuild test` over `switch` for host-networking changes too — it
+activates without changing the boot default, so a reboot undoes a mistake.
 
 Verify before doing anything else — no KVM, no spike:
 
@@ -52,7 +60,9 @@ Constraints worth knowing:
   are excluded too.
 - **NixOS is not in GCP's public image catalog**, hence Debian above.
   Convert in place with [`nixos-infect`](https://github.com/elitak/nixos-infect),
-  or build and import a NixOS GCE image. A step, not a flag.
+  or build and import a NixOS GCE image. A step, not a flag — and note it
+  replaces the OS, so convert *before* installing any tooling on the box,
+  not after.
 - **The 10 GB default boot disk is far too small.** The Nix store, Docker
   images, the kind node image, and the spike's own 40 GB scratch volume all
   live on it. The larger disk also buys IOPS, which kind needs.
