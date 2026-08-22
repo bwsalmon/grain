@@ -21,7 +21,7 @@ module in this repo uses, so the parsing/aggregation/verdict logic is
 unit-testable against captured `ps`/`free`/`/proc/loadavg` shapes without a
 real hypervisor -- see tests/test_loadtest.py. The live boot-and-measure
 part obviously cannot be a unit test; run it with
-`python3 -m loadtest.loadtest` from the repo root, on a host that already
+`python3 -m tests.loadtest` from the repo root, on a host that already
 has KVM, `br-grain`, and the cached base image (the same precondition
 tests/test_vm_integration.py gates on).
 """

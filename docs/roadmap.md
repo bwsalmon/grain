@@ -253,7 +253,7 @@ small script that brings up two sandboxes, drives concurrent `kind`
 cluster creation and a build in each, and records CPU/memory pressure —
 then actually run it and record the numbers here or in `docs/design.md`.
 
-`loadtest/loadtest.py` — booted the controller plus two fully-provisioned
+`tests/loadtest.py` — booted the controller plus two fully-provisioned
 sandboxes (`provision/sandbox.sh`/`provision/controller.sh`, via the same
 `LibvirtAdapter`/`Cluster` machinery every live test in this repo uses, not
 a parallel VM-boot mechanism), then drove real concurrent load in both
@@ -602,3 +602,39 @@ into the expected event sequence. What's not verified live: an actual
 interactive `curses` terminal session (needs a real TTY, not something a
 test harness can drive) and a real `claude -p` run producing this format
 itself (item 8's own gap, not reopened here).
+
+## 11. Collapse setup from fourteen steps to one command
+
+- [ ] Not started — designed in [`docs/bootstrap.md`](bootstrap.md)
+
+`docs/runbook.md`'s first-time checklist is fourteen steps, two of which it
+documents as irreducibly manual. Only three are genuinely irreducible (one
+secret paste, one interactive Claude login per sandbox, and a machine that
+exists); the rest is unsequenced, and one is blocked by a live bug rather
+than a real constraint.
+
+- **The bug, and why step 5 reads as irreducible.** `LibvirtAdapter.create()`
+  injects one public key from one path into *every* VM. At controller-create
+  time that path is empty — the controller generates its keypair itself, at
+  first boot — so the controller comes up with no authorized key, and step 5
+  then tells the operator to SSH into it. The documented sequence only works
+  if the operator pre-places their own key at the path step 5 subsequently
+  overwrites: one path, two keys, two purposes, swapped mid-setup. cloud-init
+  takes a *list* of `public-keys`, so splitting admin (every VM) from
+  controller (sandboxes only) both fixes the bug and makes the key read-back
+  scriptable. Worth landing on its own.
+- **Step 7 needs no deploy credential.** Its premise was `git clone` from
+  GitHub. The host is already running this code — the deployment is a 664 KB
+  file copy over the SSH path that has to exist anyway.
+- **Step 10 is already unnecessary.** `SandboxTokenStore.ensure_token()`
+  mints and records a token per sandbox, idempotently, on first dispatch.
+  The runbook is stale.
+- **No state file.** Every stage converges from observed reality, the same
+  call `state()`/`list_vms()` already make. A second record of what exists
+  is a second thing that can disagree with the inventory.
+
+Target: `grain host bootstrap --repo owner/name --github-token-file -`,
+then one `grain sandbox login` per sandbox. Four landable phases (key roles,
+cluster-as-a-file, three new verbs, the sequencer), then a live run on the
+dev host — the unit suite cannot verify the boot/SSH/cloud-init chain, which
+is where `docs/design.md`'s five dispatch bugs all came from.
