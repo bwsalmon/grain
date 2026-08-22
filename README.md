@@ -18,6 +18,9 @@ host (Debian, KVM, no secrets)
 └── sandbox-1            claude · docker · kind
 ```
 
+- **[`docs/system-diagram.md`](docs/system-diagram.md)** — the picture:
+  every component, VM, port, and secret, and which trust boundary each
+  arrow crosses.
 - **[`docs/design.md`](docs/design.md)** — the reasoning: why a VM per
   agent, the credential ladder, the threat model, what earlier revisions
   traded away.
