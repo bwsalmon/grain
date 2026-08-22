@@ -1129,9 +1129,18 @@ OpenHands integration, and the reasoning for a VM per agent.
 to one module, no cross-building, and an environment agents already know.
 
 The microvm.nix artifacts — `flake.nix`, `hosts/spike/`,
-`modules/sandbox-spike.nix` — are retained. They evaluate cleanly and
-remain the fastest route to a microVM-based deployment if per-task reset
-ever becomes worth its cost again.
+`modules/sandbox-spike.nix`, and the `docs/spike-0.md` that described
+them — were retained for a while on the argument that they evaluated
+cleanly and were the fastest route back to a microVM deployment. They are
+now **deleted**, and `git log` is where they live. Two things retired that
+argument: the Linux deployment they were a shortcut to is written and
+verified live (`libvirt.py`, `provision/sandbox.sh`), and per-task reset —
+the one property microVMs bought that this design misses — was
+deliberately traded away for long-lived sandboxes above. They were also
+never booted, and "evaluates cleanly" was pinned to `nixos-unstable` and a
+microvm.nix commit, which is a claim that expires on its own. Restoring
+them to chase per-task reset again would mean re-verifying against current
+inputs regardless, which is the work, not the files.
 
 ## Open questions
 
@@ -1153,7 +1162,7 @@ ever becomes worth its cost again.
 2. ~~Does 4 vCPU hold two sandboxes plus a controller~~ **Answered: yes, on
    this host, with headroom — but CPU, not memory, is the resource actually
    under pressure**, confirming this inverts earlier revisions. Verified
-   live with `loadtest/loadtest.py` (docs/roadmap.md item 6): on this
+   live with `tests/loadtest.py` (docs/roadmap.md item 6): on this
    dev/test host (4 vCPU, 32106 MiB — closely matches the n2-highmem-4
    target below, so this is directly informative for it, not a
    differently-shaped stand-in), two fully-provisioned sandboxes plus the

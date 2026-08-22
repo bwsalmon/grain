@@ -253,7 +253,7 @@ small script that brings up two sandboxes, drives concurrent `kind`
 cluster creation and a build in each, and records CPU/memory pressure —
 then actually run it and record the numbers here or in `docs/design.md`.
 
-`loadtest/loadtest.py` — booted the controller plus two fully-provisioned
+`tests/loadtest.py` — booted the controller plus two fully-provisioned
 sandboxes (`provision/sandbox.sh`/`provision/controller.sh`, via the same
 `LibvirtAdapter`/`Cluster` machinery every live test in this repo uses, not
 a parallel VM-boot mechanism), then drove real concurrent load in both

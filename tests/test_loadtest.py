@@ -1,4 +1,4 @@
-"""Unit tests for loadtest/loadtest.py -- docs/roadmap.md item 6.
+"""Unit tests for tests/loadtest.py -- docs/roadmap.md item 6.
 
 The live boot-and-measure path (booting real VMs, driving real kind/build
 load, sampling a real host) is exercised by actually running the harness,
@@ -19,7 +19,7 @@ import pytest
 
 from grain.inventory import Cluster
 from grain.run import Result
-from loadtest.loadtest import (
+from loadtest import (
     HostSample, ProcessSample, Verdict, booted_vms, build_arg_parser,
     evaluate, parse_free_m, parse_loadavg, parse_qemu_processes,
     per_process_stats, render_report, summarize_tasks,

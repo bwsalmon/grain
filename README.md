@@ -445,7 +445,7 @@ so the command above is safe anywhere. They come in when the machine can:
 | `test_live_issue_to_pr.py` | the same — a full issue→PR run against a mocked GitHub |
 
 ```sh
-python3 -m loadtest.loadtest   # boot the real pool and measure it under kind + build load
+python3 -m tests.loadtest      # boot the real pool and measure it under kind + build load
 ```
 
 This project holds itself to **verify live, not just unit tests**, and
@@ -468,7 +468,9 @@ grain/
   proxy/              the git proxy: allowlist, tokens, credentials, audit
   metadata/           per-sandbox gce_metadata_server instances
 provision/            controller.sh, sandbox.sh — cloud-init user-data
-loadtest/             the harness behind the resource-budget numbers
+tests/
+  loadtest.py         the harness behind the resource-budget numbers
+  test_*.py           unit suites, plus the live suites in the table above
 ```
 
 Addresses are **assigned, never discovered**: the inventory decides them
