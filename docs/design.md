@@ -1150,9 +1150,26 @@ ever becomes worth its cost again.
    were fixed in the process — see [host-adapter.md](host-adapter.md) for
    both. `lima.py` is kept, unused for now: Lima's bridged mode is real on
    macOS, so it may still serve as that platform's driver.
-2. **Does 4 vCPU hold two sandboxes plus a controller** under real `kind`
-   workloads? This inverts earlier revisions: memory was the binding
-   resource, and here it probably is not.
+2. ~~Does 4 vCPU hold two sandboxes plus a controller~~ **Answered: yes, on
+   this host, with headroom — but CPU, not memory, is the resource actually
+   under pressure**, confirming this inverts earlier revisions. Verified
+   live with `loadtest/loadtest.py` (docs/roadmap.md item 6): on this
+   dev/test host (4 vCPU, 32106 MiB — closely matches the n2-highmem-4
+   target below, so this is directly informative for it, not a
+   differently-shaped stand-in), two fully-provisioned sandboxes plus the
+   controller, each sandbox running a real `kind create cluster` and a real
+   `./configure && make -j$(nproc)` CPython build concurrently for 255s:
+   1-minute host load average ranged 2.16–4.19 (peak briefly over the 4
+   physical vCPU — real but mild contention, short of clear overload),
+   available memory never dropped below 17922 MiB of 32106 MiB total. Host
+   side, per VM: each sandbox averaged ~122% CPU (of its 2-vCPU allocation,
+   peaking at ~150%) and ~5.6 GiB RSS; the idle controller averaged 13.7%
+   CPU and ~1.05 GiB RSS. Worth noting even though memory never got close
+   to binding: the *allocated* total (controller 4096 MiB + 2 × 8192 MiB
+   sandbox_mem_mb, `inventory.py`'s `Cluster`) already overcommits vCPU
+   5-to-4 on this host before any VM does a single thing — the measured
+   headroom is real, but it is headroom under overcommitted allocation, not
+   evidence the allocation itself is conservative.
 3. ~~Does Agent Canvas distribute conversations across backends~~ **Moot**:
    not using Agent Canvas — see question 6. The "small assigner" this
    worried about is exactly what `grain/automation/core.py`'s
@@ -1193,11 +1210,15 @@ ever becomes worth its cost again.
    succeeded end to end (single control-plane node, `Ready` and reachable).
    Guest showed `7.8Gi` memory with `6.7Gi` still available after cluster
    creation; the qemu process sat around 29% CPU / ~5 GB RSS at idle
-   post-creation on the host side. That is one data point at rest, not a
+   post-creation on the host side. That was one data point at rest, not a
    sustained-load benchmark — open question 2 (whether 4 vCPU holds two
-   sandboxes plus a controller under real `kind` + build load) is still
-   open and needs a second sandbox and an actual build running concurrently
-   to answer properly.
+   sandboxes plus a controller under real `kind` + build load) needed a
+   second sandbox and an actual build running concurrently to answer
+   properly. Now answered — see open question 2 above and
+   `docs/roadmap.md` item 6: under real concurrent `kind create cluster` +
+   a real from-source build in both sandboxes, each sandbox's qemu process
+   rose to ~122% mean CPU (of its 2-vCPU allocation) and ~5.6 GiB RSS, well
+   past the at-rest data point above, as expected under load.
 5. **Controller VM** — *done*: `provision/controller.sh` provisions a real
    VM with the `/data/{secrets,config,state}` layout `grain/automation/`,
    `grain/proxy/` and `grain/metadata/` already expect, Python 3.11+,
