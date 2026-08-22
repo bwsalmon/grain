@@ -30,6 +30,35 @@ since the prompt it received came from untrusted issue content
 through the same `_requeue` path as a failed or stranded run: `sweeper.py`
 still knows nothing about GitHub, and a run that produced nothing usable is
 not meaningfully different from one that failed outright.
+
+docs/roadmap.md item 9 adds a second intake path: dispatching to an
+*existing* PR instead of a labelled issue, to address review feedback, fix
+CI, or continue work. It reuses this same pool and rate limit rather than
+adding a second budget — a PR-triggered run occupies a sandbox exactly like
+an issue-triggered one, and the whole point of `runs_per_hour` is capping
+total dispatch volume regardless of what triggered it. What's new:
+
+- **`_dispatch` polls both `list_issues` and `list_pull_requests`** (same
+  `trigger_label`, since the human-gate reasoning is identical either way —
+  a label a person applied), merges the two candidate lists, and sorts the
+  merge by number alone. That sort is sound with no separate interleaving
+  policy because issues and PRs share one number sequence per GitHub repo (a
+  PR is a special kind of issue in GitHub's own data model) — a PR and an
+  issue can never tie, so "process the oldest-numbered trigger first"
+  already means "process whichever was filed/opened first," across both
+  kinds at once.
+- **`AutomationState.Assignment` carries a `kind`.** An issue assignment's
+  branch is always recomputable from `branch_name(issue)`; a PR assignment's
+  branch is whatever the PR's author already called it, so it's recorded at
+  dispatch time instead — see `state.py`'s `Assignment` docstring.
+- **`_finish_succeeded` branches on `outcome.kind`.** An issue success still
+  means "open a new PR"; a PR success means the PR already exists and the
+  agent just pushed more commits to it — verified the same way (does the
+  branch it was told to push to still exist?), but with no PR to create and
+  no new label story: only the in-progress label comes off. Both branches
+  route through the same `_requeue` on failure/no-branch, unchanged — a
+  requeue only ever needs the trigger's own number, which is `outcome.issue`
+  regardless of kind.
 """
 
 from __future__ import annotations
@@ -41,10 +70,10 @@ from typing import Callable
 from . import ratelimit
 from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
-from .dispatch import branch_name, dispatch
-from .github import GitHubClient
+from .dispatch import branch_name, dispatch, dispatch_pr
+from .github import GitHubClient, Issue, PullRequestDetail
 from .ssh import SshRunner
-from .state import AutomationState
+from .state import AutomationState, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.tokens import SandboxTokenStore
@@ -113,6 +142,12 @@ class Orchestrator:
                                outcome=f"health warning: {warning.detail}")
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
+        if outcome.kind is TriggerKind.PR:
+            self._finish_succeeded_pr(outcome)
+        else:
+            self._finish_succeeded_issue(outcome)
+
+    def _finish_succeeded_issue(self, outcome: Outcome) -> None:
         branch = branch_name(outcome.issue)
         if not self.github.branch_exists(self.config.owner, self.config.repo, branch):
             # The unit exited zero, but that is not the same claim as "a PR
@@ -141,6 +176,36 @@ class Orchestrator:
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"opened PR #{pr.number}: {pr.html_url}")
 
+    def _finish_succeeded_pr(self, outcome: Outcome) -> None:
+        # A PR assignment always carries its branch (recorded at dispatch
+        # time — see state.py's Assignment docstring for why it can't be
+        # recomputed the way an issue's can); sweeper.py always fills it in
+        # from the assignment it just freed, so this is never actually None
+        # in practice.
+        branch = outcome.branch
+        assert branch is not None, "a PR outcome must carry the branch it was assigned"
+        if not self.github.branch_exists(self.config.owner, self.config.repo, branch):
+            # Same "verify, don't trust" bar as the issue path (docs/roadmap.md
+            # item 2): the unit exiting zero isn't proof the agent pushed
+            # anything, or pushed to the branch it was told to.
+            self._requeue(outcome, f"succeeded but branch {branch!r} does not exist")
+            return
+
+        # No PR to open — it already exists, which is the whole premise of
+        # this trigger — so a successful finish is just "stop marking it
+        # in-progress." Unlike the issue path there is no trigger label to
+        # withhold either: the PR is simply no longer being worked, and a
+        # human can label it again for another round if more feedback comes
+        # in, the same way they would for a fresh issue.
+        self.github.remove_label(
+            self.config.owner, self.config.repo,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.audit.record(
+            sandbox=outcome.sandbox, issue=outcome.issue,
+            outcome=f"pushed additional commits to PR #{outcome.issue} ({branch!r})",
+        )
+
     def _requeue(self, outcome: Outcome, reason: str) -> None:
         # Back to the trigger label, per docs/design.md: "issues need
         # returning to the queue rather than stalling silently."
@@ -156,40 +221,58 @@ class Orchestrator:
 
     # --- dispatch -------------------------------------------------------
     def _dispatch(self, now: datetime) -> None:
-        candidates = self.github.list_issues(
+        issue_candidates = self.github.list_issues(
+            self.config.owner, self.config.repo, self.config.trigger_label
+        )
+        pr_candidates = self.github.list_pull_requests(
             self.config.owner, self.config.repo, self.config.trigger_label
         )
         in_progress = self.state.in_progress_issues()
-        queue = sorted(
-            (i for i in candidates if i.number not in in_progress),
-            key=lambda i: i.number,
+        # Issues and PRs share one number sequence per GitHub repo (a PR is
+        # a special kind of issue in GitHub's own data model), so merging
+        # both lists and sorting by number alone already processes the
+        # combined backlog oldest-first — no separate interleaving policy
+        # needed between the two trigger kinds.
+        queue: list[tuple[int, Issue | PullRequestDetail]] = sorted(
+            [(i.number, i) for i in issue_candidates if i.number not in in_progress]
+            + [(p.number, p) for p in pr_candidates if p.number not in in_progress],
+            key=lambda t: t[0],
         )
 
-        for issue in queue:
+        for number, item in queue:
             sandbox = self.state.free_sandbox(self.cluster.sandbox_names)
             if sandbox is None:
-                self.audit.record(sandbox=None, issue=issue.number,
+                self.audit.record(sandbox=None, issue=number,
                                    outcome="skipped: no free sandbox")
                 break
             if not ratelimit.allow(self.state.run_timestamps, now,
                                     self.config.runs_per_hour):
-                self.audit.record(sandbox=None, issue=issue.number,
+                self.audit.record(sandbox=None, issue=number,
                                    outcome="skipped: rate limit")
                 break
 
             runner = self._ssh_runner_for(sandbox)
             token = self.token_store.ensure_token(sandbox)
-            unit = dispatch(runner, sandbox, issue,
-                             remote_url=self._remote_url(), token=token)
-            self.state.assign(sandbox, issue.number, unit, now)
+            if isinstance(item, PullRequestDetail):
+                comments = self.github.list_review_comments(
+                    self.config.owner, self.config.repo, number
+                )
+                unit = dispatch_pr(runner, sandbox, item, comments,
+                                    remote_url=self._remote_url(), token=token)
+                self.state.assign(sandbox, number, unit, now,
+                                   kind=TriggerKind.PR, branch=item.head_ref)
+            else:
+                unit = dispatch(runner, sandbox, item,
+                                 remote_url=self._remote_url(), token=token)
+                self.state.assign(sandbox, number, unit, now)
             self.state.record_run(now)
             self.github.remove_label(
                 self.config.owner, self.config.repo,
-                issue.number, self.config.trigger_label,
+                number, self.config.trigger_label,
             )
             self.github.add_label(
                 self.config.owner, self.config.repo,
-                issue.number, self.config.in_progress_label,
+                number, self.config.in_progress_label,
             )
-            self.audit.record(sandbox=sandbox, issue=issue.number,
+            self.audit.record(sandbox=sandbox, issue=number,
                                outcome="dispatched")

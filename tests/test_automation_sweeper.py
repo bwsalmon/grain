@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from grain.automation.config import AutomationConfig
-from grain.automation.state import AutomationState
+from grain.automation.state import AutomationState, TriggerKind
 from grain.automation.sweeper import Outcome, sweep
 from grain.run import FakeRunner
 
@@ -185,3 +185,23 @@ def test_an_unreachable_sandbox_is_reported_unreachable_not_crashed():
     result = sweep(state, lambda name: runner, config(), NOW)  # must not raise
     assert len(result.health_warnings) == 1
     assert "unreachable" in result.health_warnings[0].detail
+
+
+# --- PR-triggered assignments carry their kind/branch through a sweep
+# --- (docs/roadmap.md item 9) ----------------------------------------------
+
+def test_a_swept_pr_assignment_carries_its_kind_and_branch_into_the_outcome():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0", now=NOW,
+                 kind=TriggerKind.PR, branch="feature-x")
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, config(), NOW)
+    assert result.succeeded == [Outcome("sandbox-0", 9, kind=TriggerKind.PR, branch="feature-x")]
+
+
+def test_an_issue_assignment_still_defaults_to_issue_kind_with_no_branch():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, config(), NOW)
+    assert result.succeeded[0].kind is TriggerKind.ISSUE
+    assert result.succeeded[0].branch is None

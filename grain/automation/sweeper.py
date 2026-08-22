@@ -50,7 +50,7 @@ from .cleanup import cleanup
 from .config import AutomationConfig
 from .dispatch import UnitState, reap, unit_name, unit_status
 from .health import check_health
-from .state import AutomationState
+from .state import AutomationState, TriggerKind
 from ..run import Runner
 
 
@@ -58,6 +58,13 @@ from ..run import Runner
 class Outcome:
     sandbox: str
     issue: int
+    # Carried straight from the freed Assignment (docs/roadmap.md item 9) —
+    # this module still knows nothing about GitHub, but core.py's
+    # `_finish_succeeded` needs to know which kind of trigger this was and,
+    # for a PR, which branch to verify, and the assignment is gone the
+    # instant `_release` below calls `state.release`.
+    kind: TriggerKind = TriggerKind.ISSUE
+    branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,7 +103,8 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
         runner = ssh_runner_for(sandbox)
         unit = unit_name(sandbox)
         status = unit_status(runner, unit)
-        outcome = Outcome(sandbox=sandbox, issue=assignment.issue)
+        outcome = Outcome(sandbox=sandbox, issue=assignment.issue,
+                           kind=assignment.kind, branch=assignment.branch)
 
         if status is UnitState.DONE_SUCCESS:
             reap(runner, unit)

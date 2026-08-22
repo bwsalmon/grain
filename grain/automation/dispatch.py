@@ -63,6 +63,27 @@ Two more pieces landed here for docs/roadmap.md item 2, both upstream of
   stdin-not-argv channel the prompt uses, consumed by git's own credential
   helper machinery, so neither the clone URL nor the agent's own commands
   ever need to carry it.
+
+docs/roadmap.md item 9 adds a second entry point, `dispatch_pr()`, for
+pointing an agent at an *existing* PR rather than a labelled issue — to
+address review feedback, fix CI, or continue work already in flight. The
+sandbox side is genuinely unchanged: still only `git`, still credentials via
+the same helper, still a prompt over stdin never argv. Two things differ:
+
+- **`ensure_workspace()` gained an optional `branch`.** A fresh issue
+  dispatch always lands on the remote's own default branch (`origin/HEAD`);
+  a PR dispatch must land on the *PR's own existing branch* instead — the
+  agent is continuing that branch's history, not starting a new one — so
+  `branch` swaps the reset target from `origin/HEAD` to `origin/<branch>`
+  and checks it out as a real local branch of the same name (`checkout -f -B
+  <branch> origin/<branch>`), not detached, so `git push origin HEAD:<branch>`
+  (the same push instruction the issue prompt already uses) pushes exactly
+  where the agent's `HEAD` already sits.
+- **The prompt is PR-shaped (`_pr_prompt`), not issue-shaped.** It has to
+  tell the agent this is *not* a fresh task — the branch already carries
+  commits and review history — and it carries the PR's review comments
+  (`GitHubClient.list_review_comments`) as the feedback to address, in place
+  of an issue's title/body.
 """
 
 from __future__ import annotations
@@ -71,7 +92,7 @@ import shlex
 from enum import Enum
 from urllib.parse import urlsplit
 
-from .github import Issue
+from .github import Issue, PullRequestDetail, ReviewComment
 from ..run import Runner
 
 # Fixed across every dispatch to a sandbox — long-lived sandboxes reuse the
@@ -123,6 +144,38 @@ def _prompt(issue: Issue, branch: str, workspace: str) -> str:
     )
 
 
+def _format_review_comment(comment: ReviewComment) -> str:
+    location = f"{comment.path}:{comment.line}" if comment.line is not None else comment.path
+    return f"- {comment.user} on {location}:\n  {comment.body}"
+
+
+def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str) -> str:
+    feedback = (
+        "\n\n".join(_format_review_comment(c) for c in comments)
+        if comments else "(no inline review comments)"
+    )
+    return (
+        f"You are continuing existing work on GitHub pull request "
+        f"#{pr.number}: {pr.title}\n\n"
+        f"{pr.body}\n\n"
+        f"PR URL: {pr.html_url}\n\n"
+        f"A clone of the target repository is already checked out at "
+        f"{workspace}, on the PR's existing branch ({pr.head_ref!r}) with its "
+        "git remote already configured. This is NOT a fresh task: the branch "
+        "already has commits and review history behind it — your job is to "
+        "continue that work (address the feedback below, fix CI, finish what "
+        "was started), not to start over or open a competing branch.\n\n"
+        "Review feedback on this pull request so far:\n\n"
+        f"{feedback}\n\n"
+        "When you are done, commit your changes and push them with exactly "
+        "this command:\n"
+        f"    git push origin HEAD:{pr.head_ref}\n"
+        "The controller is already tracking this pull request — you have no "
+        "GitHub API access from here, so do not attempt to comment on or "
+        "modify the PR directly."
+    )
+
+
 def _credential_line(remote_url: str, token: str) -> str:
     """One `git-credential-store` line covering the proxy's origin.
 
@@ -154,36 +207,63 @@ def configure_git_credentials(runner: Runner, remote_url: str, token: str) -> No
     runner.run(["chmod", "600", _CREDENTIALS_PATH])
 
 
-def ensure_workspace(runner: Runner, remote_url: str,
-                      path: str = WORKSPACE_PATH) -> None:
-    """Makes sure `path` holds a checkout of `remote_url`'s current default
-    branch, cloning on a sandbox's first dispatch and fetching-plus-resetting
-    on every one after.
+def ensure_workspace(runner: Runner, remote_url: str, path: str = WORKSPACE_PATH,
+                      *, branch: str | None = None) -> None:
+    """Makes sure `path` holds a checkout of `remote_url`, cloning on a
+    sandbox's first dispatch and fetching-plus-resetting on every one after.
+    With `branch` unset, resets to the remote's current default branch
+    (`origin/HEAD`) — the fresh-issue-task shape. With `branch` given
+    (docs/roadmap.md item 9's PR-continuation dispatch), resets to that
+    branch's own tip (`origin/<branch>`) and checks it out as a real local
+    branch of the same name instead — the agent must land on the PR's
+    existing branch, with its existing history, not the default branch.
 
     Sandboxes are long-lived (docs/design.md, "sandbox lifecycle: long-lived,
     recreated on demand") — nothing resets `path` between tasks on its own,
     so a reused sandbox's workspace can hold whatever branch, commit, and
     untracked files the previous task left behind. `git clean -fdx` plus a
-    forced detached checkout of `origin/HEAD` discards all of that
-    unconditionally, regardless of what local state existed, rather than
-    trying to reconcile it — the design's own tradeoff (correctness over
-    isolation for *sequential* tasks on one sandbox) says a clean, known
-    starting point matters more here than preserving anything left over.
-    `origin/HEAD` (not a hardcoded branch name like `main`) is what makes
-    this agnostic to the target repo's actual default branch.
+    forced checkout discards all of that unconditionally, regardless of what
+    local state existed, rather than trying to reconcile it — the design's
+    own tradeoff (correctness over isolation for *sequential* tasks on one
+    sandbox) says a clean, known starting point matters more here than
+    preserving anything left over. `origin/HEAD` (not a hardcoded branch name
+    like `main`) is what makes the default-branch path agnostic to the
+    target repo's actual default branch.
     """
-    script = (
-        "set -eu\n"
-        f"if [ -d {shlex.quote(path)}/.git ]; then\n"
-        f"  git -C {shlex.quote(path)} remote set-url origin {shlex.quote(remote_url)}\n"
-        f"  git -C {shlex.quote(path)} fetch --prune origin\n"
-        f"  git -C {shlex.quote(path)} remote set-head origin -a\n"
-        f"  git -C {shlex.quote(path)} clean -fdx\n"
-        f"  git -C {shlex.quote(path)} checkout -f --detach origin/HEAD\n"
-        "else\n"
-        f"  git clone {shlex.quote(remote_url)} {shlex.quote(path)}\n"
-        "fi\n"
+    target = f"origin/{branch}" if branch else "origin/HEAD"
+    if branch:
+        checkout_line = (
+            f"  git -C {shlex.quote(path)} checkout -f -B "
+            f"{shlex.quote(branch)} {shlex.quote(target)}\n"
+        )
+    else:
+        checkout_line = f"  git -C {shlex.quote(path)} checkout -f --detach {target}\n"
+    # origin/HEAD only means anything for the default-branch path; a branch
+    # dispatch doesn't need it, and `remote set-head` would just be a wasted
+    # network round trip.
+    head_sync_line = (
+        "" if branch else f"  git -C {shlex.quote(path)} remote set-head origin -a\n"
     )
+    lines = [
+        "set -eu",
+        f"if [ -d {shlex.quote(path)}/.git ]; then",
+        f"  git -C {shlex.quote(path)} remote set-url origin {shlex.quote(remote_url)}",
+        f"  git -C {shlex.quote(path)} fetch --prune origin",
+    ]
+    if head_sync_line:
+        lines.append(head_sync_line.rstrip("\n"))
+    lines.append(f"  git -C {shlex.quote(path)} clean -fdx")
+    lines.append(checkout_line.rstrip("\n"))
+    lines.append("else")
+    lines.append(f"  git clone {shlex.quote(remote_url)} {shlex.quote(path)}")
+    if branch:
+        # A plain clone lands on the remote's default branch, not the PR's
+        # own — the same checkout used on the reset path also has to run
+        # here, or a sandbox's very first dispatch to a PR would silently
+        # start on the wrong branch.
+        lines.append(checkout_line.rstrip("\n"))
+    lines.append("fi")
+    script = "\n".join(lines) + "\n"
     runner.run(["bash", "-c", script])
 
 
@@ -202,10 +282,33 @@ def start_unit(runner: Runner, unit: str, command: str) -> None:
     ])
 
 
+def _start_task(runner: Runner, sandbox: str, prompt: str, *,
+                 remote_url: str, token: str, branch: str | None = None) -> str:
+    """The common tail of both `dispatch()` and `dispatch_pr()`: credentials,
+    workspace, prompt file, unit. `branch` unset gets the fresh-issue
+    workspace (default branch); `branch` given gets `ensure_workspace`'s
+    PR-continuation path (docs/roadmap.md item 9) — see its docstring.
+    """
+    configure_git_credentials(runner, remote_url, token)
+    ensure_workspace(runner, remote_url, branch=branch)
+    unit = unit_name(sandbox)
+    prompt_path = f"/tmp/{unit}.md"
+    runner.run(
+        ["dd", f"of={prompt_path}", "status=none"],
+        stdin=prompt,
+    )
+    start_unit(
+        runner, unit,
+        f"cd {WORKSPACE_PATH} && claude -p --permission-mode acceptEdits < {prompt_path}",
+    )
+    return unit
+
+
 def dispatch(runner: Runner, sandbox: str, issue: Issue, *,
              remote_url: str, token: str) -> str:
-    """Starts the task on the sandbox `runner` targets. Returns the unit
-    name — the caller records it in `AutomationState` to poll later.
+    """Starts an issue-triggered task on the sandbox `runner` targets.
+    Returns the unit name — the caller records it in `AutomationState` to
+    poll later.
 
     `remote_url` is the git-proxy URL for the target repo
     (`http://<controller>:<port>/<owner>/<repo>.git`) and `token` is this
@@ -214,20 +317,31 @@ def dispatch(runner: Runner, sandbox: str, issue: Issue, *,
     by `core.py`, which is the only layer that knows the controller's
     address and holds the token store.
     """
-    configure_git_credentials(runner, remote_url, token)
-    ensure_workspace(runner, remote_url)
     branch = branch_name(issue.number)
-    unit = unit_name(sandbox)
-    prompt_path = f"/tmp/{unit}.md"
-    runner.run(
-        ["dd", f"of={prompt_path}", "status=none"],
-        stdin=_prompt(issue, branch, WORKSPACE_PATH),
+    return _start_task(
+        runner, sandbox, _prompt(issue, branch, WORKSPACE_PATH),
+        remote_url=remote_url, token=token,
     )
-    start_unit(
-        runner, unit,
-        f"cd {WORKSPACE_PATH} && claude -p --permission-mode acceptEdits < {prompt_path}",
+
+
+def dispatch_pr(runner: Runner, sandbox: str, pr: PullRequestDetail,
+                 comments: list[ReviewComment], *, remote_url: str, token: str) -> str:
+    """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
+    `dispatch()`, but the workspace lands on the PR's *own* existing branch
+    (`pr.head_ref`) instead of the default branch, and the prompt carries the
+    PR's title/body/review-comments instead of an issue's title/body — see
+    `_pr_prompt` and `ensure_workspace`'s `branch` parameter.
+
+    `pr` and `comments` come from `GitHubClient.get_pull_request`/
+    `list_pull_requests` and `list_review_comments` respectively — `core.py`
+    reads both before calling this, same division of labour as `dispatch()`
+    (all GitHub API work stays on the controller; this module only ever
+    speaks git and SSH to the sandbox).
+    """
+    return _start_task(
+        runner, sandbox, _pr_prompt(pr, comments, WORKSPACE_PATH),
+        remote_url=remote_url, token=token, branch=pr.head_ref,
     )
-    return unit
 
 
 def _parse_show(stdout: str) -> dict[str, str]:

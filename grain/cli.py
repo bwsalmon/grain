@@ -102,7 +102,7 @@ def cmd_automation_status(args: argparse.Namespace) -> int:
         if assignment is None:
             print(f"{name:<12} free")
         else:
-            print(f"{name:<12} issue #{assignment.issue:<6} "
+            print(f"{name:<12} {assignment.kind.value} #{assignment.issue:<6} "
                   f"since {assignment.started_at.isoformat()}")
     return 0
 

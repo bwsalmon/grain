@@ -198,8 +198,14 @@ image or a provisioning script.**
 ## Running automation
 
 `grain automation run-once` does one pass: sweep stranded/finished work,
-poll `owner/repo` for open issues carrying `trigger_label`, and dispatch to
-any free sandbox within the rate limit. It is meant to be **invoked
+poll `owner/repo` for open issues *and open pull requests* carrying
+`trigger_label`, and dispatch to any free sandbox within the rate limit —
+both share the same pool and the same budget, since it's the same finite set
+of sandboxes either way. An issue-triggered dispatch opens a new PR once its
+branch shows up; a PR-triggered dispatch (docs/roadmap.md item 9 — label an
+*existing* PR to have an agent address review feedback, fix CI, or continue
+work already in flight) just pushes more commits to that PR's own branch,
+already checked out — no new PR to open. It is meant to be **invoked
 periodically by something else, not run as a daemon** — `docs/design.md`
 says "invoked by a systemd timer."
 
