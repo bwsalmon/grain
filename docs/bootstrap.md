@@ -12,6 +12,7 @@ unsequenced.
 
 - [What the fourteen steps actually are](#what-the-fourteen-steps-actually-are)
 - [The bug: one key path, two roles](#the-bug-one-key-path-two-roles)
+- [The Claude credential](#the-claude-credential)
 - [Design](#design)
   - [Phase 1 — key roles](#phase-1--key-roles)
   - [Phase 2 — the cluster is a file](#phase-2--the-cluster-is-a-file)
@@ -37,11 +38,11 @@ unsequenced.
 | 10. `sandbox-tokens.json` | **already unnecessary.** `SandboxTokenStore.ensure_token()` mints and records one per sandbox, idempotently, on first dispatch. The runbook is stale |
 | 11. `automation.json` | two fields with no default, `owner` and `repo` |
 | 12. Enable proxy + timer | scriptable once its preconditions hold, which is the only reason provisioning leaves it undone |
-| 13. Claude login per sandbox | irreducible today: an interactive OAuth flow. Dies when the controller-side LLM proxy lands |
+| 13. Claude login per sandbox | **one login total, not N** — see [The Claude credential](#the-claude-credential). Same shape as step 8: a credential placed once on the controller and injected onward |
 | 14. Verify | should be the tail of whatever did the work |
 
-So: **one irreducible secret paste, one irreducible interactive login per
-sandbox, and one machine that must exist.** Everything else is sequencing.
+So: **two credentials placed once, and one machine that must exist.**
+Everything else is sequencing.
 
 Step 7's premise was `git clone` from GitHub, which would indeed need a
 credential. But the host is already running this code — the deployment is a
@@ -96,6 +97,83 @@ controller's own key back the moment it boots — step 5 becomes a scripted
 stage, not a human. As a side effect the operator can reach a sandbox
 directly, which is what step 13's login needs and currently has to reach by
 hopping through the controller.
+
+## The Claude credential
+
+Step 13 reads as N interactive logins because `provision/sandbox.sh` sets
+Claude Code up per sandbox and the runbook says to SSH in and run the login
+flow on each. It does not have to work that way. On Linux the credential is
+a file — `~/.claude/.credentials.json` — holding an OAuth access token,
+a refresh token, and an expiry. Nothing in it is bound to the machine, so
+**one login produces a file that can be placed on every sandbox.**
+
+**It belongs on the controller, not the host.** Logging in on the host and
+copying from there works, but it puts a credential on the machine
+specifically chosen to hold none, and buys nothing: the controller is the
+designated secret-holder, and it already has the SSH path to every sandbox.
+So log in once *anywhere* — your laptop, the host, a throwaway VM — and
+place the result at `/data/secrets/claude-credentials.json`, `0600`, beside
+every other credential. Injection is then the same mechanism
+`configure_git_credentials` already uses for the git-proxy token: over SSH
+stdin, never argv, on each dispatch or at sandbox create.
+
+That makes it the *same kind of step* as the GitHub token — a file placed
+once — rather than a per-sandbox interactive ritual, and it re-injects
+automatically on recreate instead of needing a human each time.
+
+**It does not conflict with the sandbox hardening.** `provision/sandbox.sh`
+sets `sandbox.credentials.files: [{path: "~/.claude/.credentials.json",
+mode: "deny"}]`, which blocks *the agent's own Bash tool* from reading the
+file. The file is placed by the dispatch path, running as `debian` over SSH
+— not by the agent — so the deny rule is unaffected either way.
+
+### The open question: concurrent refresh
+
+**This must be verified live before the design relies on it.** The
+credential carries a refresh token, and refresh tokens commonly rotate on
+use — the server issues a new one and invalidates the old. If N sandboxes
+each hold a copy of the *same* credential and each refreshes independently
+when its access token expires, they may invalidate one another.
+
+The failure mode is nasty precisely because it is not immediate: every
+sandbox works for hours, then runs start failing authentication
+sporadically and non-deterministically, looking like agent flakiness rather
+than a credential problem.
+
+Whether Anthropic's OAuth actually rotates on refresh is not something this
+project should assume in either direction. The test is cheap and belongs in
+the dev-host pass: place the same credential on two sandboxes, drive both
+past the access-token expiry, and see whether both survive a refresh. If
+they do, this design stands as written. If they do not, the options are one
+login per sandbox after all (back to N, but only at recreate), or the
+controller-side LLM proxy, which removes the credential from sandboxes
+outright and is the right answer regardless.
+
+### What it costs
+
+Two properties weaken, and `design.md` should say so rather than have it
+happen quietly:
+
+- **"Rotate on recreate"** (`design.md`: *"re-authenticate fresh each time a
+  sandbox is recreated rather than letting one login persist"*) becomes
+  re-*inject* on recreate. One credential now spans every sandbox and
+  survives recreates, so rotation is a deliberate global act rather than a
+  natural consequence of routine maintenance.
+- **Blast radius**: compromising any one sandbox exposes a credential all of
+  them share.
+
+Defensible here, and worth stating why: `design.md` already establishes that
+sandboxes are *not* mutually distrusting — same repo allowlist, same
+credential set — so sharing one Claude login is consistent with the existing
+posture rather than a new category of exposure. That stops holding if the
+allowlist ever spans repos of genuinely different sensitivity, which is
+already the documented trigger to revisit.
+
+One honest note on top of the mechanics: a subscription credential driving N
+parallel automated agents is a different usage pattern from a person using
+it on N devices. `design.md` already concludes this path runs on metered
+Console billing rather than a subscription; that conclusion is unchanged, and
+it is the other reason the controller-side LLM proxy is the real destination.
 
 ## Design
 
@@ -167,6 +245,7 @@ credential, no network egress, no `git` on the far side.
 | `--repo owner/name` | `/data/config/automation.json`, `/data/config/repo-allowlist.json` |
 | `--github-token-file PATH \| -` | `/data/secrets/github/<name>.token`, `0600` |
 | `--credential-name` (default `bot`) | `/data/secrets/github/credentials.json` |
+| `--claude-credentials-file PATH` | `/data/secrets/claude-credentials.json`, `0600` |
 
 The token goes over SSH **stdin**, never argv and never user-data. This is
 not a new mechanism: `dispatch.configure_git_credentials` already writes the
@@ -180,7 +259,11 @@ sits on host disk at rest.
 
 ### Phase 4 — the sequencer
 
-`grain host bootstrap --repo owner/name --github-token-file -`
+```sh
+grain host bootstrap --repo owner/name \
+    --github-token-file - \
+    --claude-credentials-file ~/.claude/.credentials.json
+```
 
 **No state file.** Every stage converges from observed reality. This is the
 same call the adapter already makes — `state()` and `list_vms()` exist
@@ -199,7 +282,7 @@ inventory.
 | 6 | Controller key | read back over SSH; write if changed | **5** |
 | 7 | Deploy | push the tree to `/opt/grain` (unconditional; it is a sync) | **7** |
 | 8 | Configure | write `/data` config; token only if one was supplied | 8, 9, 11 |
-| 9 | Sandboxes | per sandbox: `ABSENT` → create with both keys; `STOPPED` → start | 6 |
+| 9 | Sandboxes | per sandbox: `ABSENT` → create with both keys; `STOPPED` → start; then inject the Claude credential if one is on the controller | 6, **13** |
 | 10 | Enable | `systemctl enable --now` proxy + timer | 12 |
 | 11 | Verify | `automation status`, `github audit`, `host health` | 14 |
 
@@ -309,6 +392,8 @@ with a search:
 | …and the test that asserts it, to mirror | `tests/test_automation_dispatch.py:46` |
 | `_host_ready()` + `skipif`, the gate for new live tests | `tests/test_vm_integration.py:106`, `:124` |
 | `ensure_token`, why runbook step 10 is already dead | `grain/proxy/tokens.py:74` |
+| Claude credential deny rule, unaffected by injection | `provision/sandbox.sh:79-90` |
+| "Rotate on recreate", the claim that narrows | `docs/design.md:986` |
 | Fourteen-step checklist, to rewrite last | `docs/runbook.md`, "First-time setup checklist" |
 | Gap list that shrinks as phases land | `docs/runbook.md`, "Gaps" |
 
@@ -329,6 +414,13 @@ disk plus a mount unit in `provision/controller.sh`, roughly 20 lines, and
 it makes the design's own prose true. Worth its own roadmap item rather
 than being smuggled into this one.
 
-**Step 13.** The per-sandbox Claude login stays interactive until the
-controller-side LLM proxy exists. `grain sandbox login <name>` can at least
-be the SSH hop instead of a hand-assembled command.
+**The controller-side LLM proxy.** It removes the Claude credential from
+sandboxes entirely, which resolves both the shared-credential blast radius
+and the concurrent-refresh question above at a stroke, and is the only place
+agent spend can be metered and capped. Everything in
+[The Claude credential](#the-claude-credential) is an interim arrangement
+that this replaces.
+
+**`grain sandbox login <name>`.** Still worth having as the SSH hop, for
+the case where the refresh test comes back badly and per-sandbox logins are
+needed after all.

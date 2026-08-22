@@ -988,6 +988,21 @@ mechanism:
   life, matching the rotation discipline already applied to per-sandbox
   bearer tokens.
 
+**One login, not one per sandbox** (`docs/bootstrap.md`): on Linux the
+credential is a file, `~/.claude/.credentials.json`, and nothing in it is
+bound to a machine — so a single login can be placed on the controller at
+`/data/secrets/claude-credentials.json` and injected into each sandbox over
+the SSH path that already carries the git-proxy token. That narrows "rotate
+on recreate" above to *re-inject* on recreate, and makes one credential span
+the pool. Acceptable on the same grounds the rest of this section rests on —
+sandboxes here are not mutually distrusting — and it is interim either way,
+since the LLM proxy removes the credential from sandboxes entirely.
+**Unverified and load-bearing**: whether concurrent refreshes from several
+sandboxes sharing one credential invalidate each other. Rotating refresh
+tokens are common, and the failure mode is sporadic auth failures hours
+later that look like agent flakiness. Test before relying on it; see open
+question 8.
+
 What's still open: a full Claude-Code-mediated end-to-end test (a real
 agentic turn, with `sandbox.enabled` on, actually attempting and failing to
 exfiltrate the credential) needs a real login credential in a test sandbox,
@@ -1193,6 +1208,16 @@ inputs regardless, which is the work, not the files.
    Traded three upstream components and their version matrix for a
    dispatch loop this repo owns, `grain/automation/`, verified live against
    a real sandbox.
+8. **Does one Claude credential survive concurrent refresh across several
+   sandboxes?** `docs/bootstrap.md` collapses the per-sandbox login into a
+   single credential injected everywhere, which is what takes setup to one
+   command. If refresh tokens rotate on use, sandboxes sharing one
+   credential will invalidate each other — not immediately, but as
+   sporadic auth failures once access tokens start expiring. Cheap to
+   settle: place the same credential on two sandboxes, drive both past
+   expiry, watch both refresh. Answer decides whether the interim login
+   stays one-per-pool or goes back to one-per-sandbox until the LLM proxy
+   lands.
 7. **Can `gce_metadata_server` impersonate using ADC** rather than a key
    file? If so, GCP deployments need no service-account key at all — see
    [where credentials should live](#where-credentials-should-live) — and
