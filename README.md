@@ -24,6 +24,8 @@ host (Debian, KVM, no secrets)
 - **[`docs/design.md`](docs/design.md)** — the reasoning: why a VM per
   agent, the credential ladder, the threat model, what earlier revisions
   traded away.
+- **[`docs/bootstrap.md`](docs/bootstrap.md)** — the design for collapsing
+  the fourteen-step setup into one command.
 - **[`docs/runbook.md`](docs/runbook.md)** — the operator procedure, in
   more detail than this file, including rotation, stranded sandboxes, and
   the known gaps.
