@@ -72,6 +72,7 @@ from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
 from .dispatch import branch_name, dispatch, dispatch_pr
 from .github import GitHubClient, Issue, PullRequestDetail
+from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
 from .state import AutomationState, TriggerKind
 from .sweeper import Outcome, sweep
@@ -92,6 +93,12 @@ class Orchestrator:
     # `_dispatch`'s use of `ensure_token`.
     token_store: SandboxTokenStore
     audit: AuditLog | None = None
+    # docs/roadmap.md item 10: where a finished sandbox's captured
+    # trajectory gets recorded, keyed by trigger. None (production's
+    # default when nothing is wired in) falls back to a no-op, same shape
+    # as `audit` above -- `cli.py`'s `build_orchestrator` supplies a real
+    # `FileSessionHistory` under /data/state/automation/sessions.
+    history: SessionHistory | None = None
     # Overridable seam for tests: production leaves this None and gets a
     # real `SshRunner` per sandbox; a test can inject a lookup straight to
     # per-sandbox fakes without needing to match SshRunner's exact argv.
@@ -100,6 +107,8 @@ class Orchestrator:
     def __post_init__(self) -> None:
         if self.audit is None:
             self.audit = NullAuditLog()
+        if self.history is None:
+            self.history = NullSessionHistory()
 
     def _ssh_runner_for(self, sandbox: str) -> Runner:
         if self.ssh_runner_factory is not None:
@@ -125,7 +134,8 @@ class Orchestrator:
 
     # --- sweep --------------------------------------------------------
     def _sweep(self, now: datetime) -> None:
-        result = sweep(self.state, self._ssh_runner_for, self.config, now)
+        result = sweep(self.state, self._ssh_runner_for, self.config, now,
+                        history=self.history)
         for outcome in result.succeeded:
             self._finish_succeeded(outcome)
         for outcome in (*result.failed, *result.stranded):

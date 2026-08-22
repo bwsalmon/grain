@@ -26,8 +26,10 @@ from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
+from .automation.history import FileSessionHistory
 from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
+from .automation import tui as sessions_tui
 from .inventory import Cluster
 from .metadata.audit import FileAuditLog as MetadataFileAuditLog
 from .metadata.audit import sync as metadata_sync
@@ -76,10 +78,11 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     state_path = data_dir / "state" / "automation" / "state.json"
     audit = FileAuditLog(data_dir / "state" / "automation" / "audit.log")
     token_store = SandboxTokenStore(data_dir / "secrets" / "sandbox-tokens.json")
+    history = FileSessionHistory(data_dir / "state" / "automation" / "sessions")
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
-        token_store=token_store, audit=audit,
+        token_store=token_store, audit=audit, history=history,
     )
     return orchestrator, state_path
 
@@ -104,6 +107,33 @@ def cmd_automation_status(args: argparse.Namespace) -> int:
         else:
             print(f"{name:<12} {assignment.kind.value} #{assignment.issue:<6} "
                   f"since {assignment.started_at.isoformat()}")
+    return 0
+
+
+def build_session_history(args: argparse.Namespace) -> FileSessionHistory:
+    return FileSessionHistory(Path(args.data_dir) / "state" / "automation" / "sessions")
+
+
+def cmd_sessions_list(args: argparse.Namespace) -> int:
+    history = build_session_history(args)
+    records = history.all()
+    if args.kind:
+        records = [r for r in records if r.kind.value == args.kind]
+    if args.outcome:
+        records = [r for r in records if r.outcome == args.outcome]
+    if args.trigger is not None:
+        records = [r for r in records if r.issue == args.trigger]
+    if not records:
+        print("no sessions recorded yet")
+        return 0
+    for record in records:
+        print(sessions_tui.format_row(record))
+    return 0
+
+
+def cmd_sessions_browse(args: argparse.Namespace) -> int:
+    history = build_session_history(args)
+    sessions_tui.run(history)
     return 0
 
 
@@ -409,6 +439,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = automation.add_parser("status", help="show the current pool assignments")
     p.set_defaults(func=cmd_automation_status)
+
+    sessions = sub.add_parser(
+        "sessions", help="browse past dispatch sessions by trigger (docs/roadmap.md item 10)"
+    ).add_subparsers(dest="command", required=True)
+
+    p = sessions.add_parser(
+        "list", help="list recorded sessions, optionally filtered"
+    )
+    p.add_argument("--kind", choices=["issue", "pr"], help="only this trigger kind")
+    p.add_argument("--outcome", choices=["succeeded", "failed", "stranded"],
+                    help="only this outcome")
+    p.add_argument("--trigger", type=int, help="only sessions for this issue/PR number")
+    p.set_defaults(func=cmd_sessions_list)
+
+    p = sessions.add_parser(
+        "browse", help="interactive text UI (curses) to browse sessions and view trajectories"
+    )
+    p.set_defaults(func=cmd_sessions_browse)
 
     metadata = sub.add_parser(
         "metadata", help="per-sandbox gce_metadata_server instances"

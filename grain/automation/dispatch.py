@@ -84,6 +84,17 @@ the same helper, still a prompt over stdin never argv. Two things differ:
   commits and review history — and it carries the PR's review comments
   (`GitHubClient.list_review_comments`) as the feedback to address, in place
   of an issue's title/body.
+
+docs/roadmap.md item 10 adds one more piece to the unit's own command line:
+`--output-format stream-json --verbose`, redirected to `transcript_path(unit)`.
+This is the session browser's raw material — see `grain/automation/capture.py`'s
+docstring for what was actually checked (not assumed) about what `claude -p`
+leaves behind on disk, and why this project captures a redirected stream
+rather than depending on Claude Code's own session-persistence file location.
+`transcript_path()` is computed the same "once, shared" way `branch_name()`
+already is: `dispatch()` uses it to build the redirect, `capture.py` uses the
+identical function to know what to `cat` back off the sandbox before its slot
+is freed.
 """
 
 from __future__ import annotations
@@ -114,6 +125,19 @@ def unit_name(sandbox: str) -> str:
     # trade, carried over from the OpenHands path) — a fixed name per
     # sandbox rather than one per task, reused across dispatches.
     return f"grain-task-{sandbox}"
+
+
+def transcript_path(unit: str) -> str:
+    """The fixed path this dispatch's `claude -p --output-format
+    stream-json` output is redirected to (docs/roadmap.md item 10) —
+    computed once here so `_start_task`'s own redirect and
+    `capture.py`'s later `cat` of the same path can never disagree,
+    the same "compute once, share" shape `branch_name()` already uses.
+    Reused verbatim by the next dispatch to this sandbox (`unit_name()` is
+    fixed per sandbox, not per task), which is exactly why `capture.py`'s
+    docstring calls capture-before-slot-reuse load-bearing, not a nicety.
+    """
+    return f"/tmp/{unit}.transcript.jsonl"
 
 
 def branch_name(issue: int) -> str:
@@ -297,9 +321,12 @@ def _start_task(runner: Runner, sandbox: str, prompt: str, *,
         ["dd", f"of={prompt_path}", "status=none"],
         stdin=prompt,
     )
+    out_path = transcript_path(unit)
     start_unit(
         runner, unit,
-        f"cd {WORKSPACE_PATH} && claude -p --permission-mode acceptEdits < {prompt_path}",
+        f"cd {WORKSPACE_PATH} && claude -p --permission-mode acceptEdits "
+        f"--output-format stream-json --verbose "
+        f"< {shlex.quote(prompt_path)} > {shlex.quote(out_path)}",
     )
     return unit
 
