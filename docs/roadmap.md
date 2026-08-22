@@ -244,7 +244,7 @@ unit tests with scripted `df`/`docker`/`systemctl` output.
 
 ## 6. Load-test harness for open question 2
 
-- [ ] Done
+- [x] Done
 
 Design doc open question 2: does 4 vCPU hold two sandboxes plus a
 controller under real `kind` + build load? One sandbox at rest was
@@ -252,6 +252,42 @@ measured (`docs/design.md`'s implementation-plan step 4 notes). Build a
 small script that brings up two sandboxes, drives concurrent `kind`
 cluster creation and a build in each, and records CPU/memory pressure —
 then actually run it and record the numbers here or in `docs/design.md`.
+
+`loadtest/loadtest.py` — booted the controller plus two fully-provisioned
+sandboxes (`provision/sandbox.sh`/`provision/controller.sh`, via the same
+`LibvirtAdapter`/`Cluster` machinery every live test in this repo uses, not
+a parallel VM-boot mechanism), then drove real concurrent load in both
+sandboxes: `kind create cluster` plus a real `./configure && make
+-j$(nproc)` build of CPython's own source tree (chosen over cloning a real
+repo like redis live — redis's own deps are git submodules a GitHub tag
+tarball doesn't include, which would fail on missing headers rather than
+exercise CPU; CPython's tarball has no submodules and is large enough to be
+a genuine multi-minute, multi-core compile, not a synthetic stress tool and
+not trivial). Host-side qemu process and overall load/memory were sampled
+throughout and rendered into a report a human can read a verdict off, not
+just raw numbers — `evaluate()`'s two explicit thresholds (peak 1-minute
+load vs. physical vCPU count, minimum available memory vs. a floor).
+
+**Actually run**, not just built: this dev/test host is 4 vCPU / 32106 MiB
+— close enough to the n2-highmem-4 design target (4 vCPU / 32768 MiB) that
+the numbers below are directly informative for it, not a differently-shaped
+stand-in. Two sandboxes + controller, 255s of concurrent `kind create
+cluster` + CPython build in both sandboxes (all four tasks finished `ok`):
+1-minute host load average ranged 2.16–4.19 (peak briefly over the 4
+physical vCPU — real but mild contention, short of clear overload);
+available memory never dropped below 17922 of 32106 MiB total. Per VM, host
+side: each sandbox averaged ~122% CPU of its 2-vCPU allocation (peak
+~150%) and ~5.6 GiB RSS — well past the single-idle-sandbox baseline
+(~29% CPU / ~5 GB RSS) this needed to beat; the controller, idle throughout,
+averaged 13.7% CPU / ~1.05 GiB RSS. Verdict: **holds**, confirming CPU
+(not memory) is the resource actually under pressure, as open question 2
+already suspected — though note the allocated total already overcommits
+vCPU 5-to-4 on this host before any VM does anything, so this is headroom
+under an overcommitted allocation, not evidence the allocation is
+conservative. Numbers also recorded in `docs/design.md`, open question 2
+and implementation-plan step 4. VMs cleaned up on exit — `booted_vms()`
+destroys everything it created even on failure, verified both live and by
+`tests/test_loadtest.py`'s `FakeAdapter`-based cleanup tests.
 
 ## 7. Hardening
 
