@@ -48,6 +48,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -56,12 +57,16 @@ import pytest
 from grain.adapter.base import VmState
 from grain.adapter.libvirt import LIBVIRT_URI, LibvirtAdapter
 from grain.adapter.net_linux import LinuxNetwork
+from grain.automation.config import AutomationConfig
 from grain.automation.dispatch import (
     WORKSPACE_PATH, UnitState, configure_git_credentials, dispatch,
-    ensure_workspace, reap, start_unit, unit_status,
+    ensure_workspace, reap, start_unit, transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Issue, PullRequestDetail, ReviewComment
+from grain.automation.history import FileSessionHistory
 from grain.automation.ssh import SshRunner
+from grain.automation.state import AutomationState
+from grain.automation.sweeper import sweep
 from grain.inventory import Cluster
 from grain.proxy.allowlist import Allowlist
 from grain.proxy.core import GitProxy
@@ -745,3 +750,131 @@ def test_dispatch_pr_writes_the_real_prompt_and_checks_out_the_prs_branch(
     finally:
         reap(ssh_runner, unit)
         ssh_runner.run(["rm", "-rf", WORKSPACE_PATH], check=False)
+
+
+# --- trajectory capture against a real sandbox (docs/roadmap.md item 10) ---
+#
+# No real `claude -p` login exists in this environment (same constraint item
+# 8 has for the agent itself — see the module docstring above), so this
+# doesn't run claude for real. What it verifies live is the mechanism this
+# item is actually about: a plausible, realistically-shaped trajectory file
+# — in the exact JSONL, per-line `type`-tagged format `capture.py`'s
+# docstring documents having confirmed against a real Claude Code session
+# transcript — is written to the real path `dispatch.py`'s
+# `transcript_path()` computes, on a real sandbox; `sweeper.py`'s real
+# `sweep()` (not a hand-called `capture_trajectory()`) pulls it off over real
+# SSH as part of releasing a real, freshly-finished systemd unit; and a real
+# `FileSessionHistory` records the session with the captured content intact,
+# byte for byte, before the sandbox's slot is freed for reuse.
+
+_SIMULATED_TRAJECTORY = "\n".join([
+    json.dumps({
+        "type": "system", "subtype": "init", "session_id": "sim-session-1",
+        "model": "claude-sonnet-5", "cwd": WORKSPACE_PATH,
+    }),
+    json.dumps({
+        "type": "user", "session_id": "sim-session-1",
+        "message": {"role": "user", "content": "You are working GitHub issue #123..."},
+    }),
+    json.dumps({
+        "type": "assistant", "session_id": "sim-session-1",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I'll look at the failing test first."},
+                {
+                    "type": "tool_use", "id": "toolu_sim_1", "name": "Bash",
+                    "input": {"command": "pytest -q", "description": "run the suite"},
+                },
+            ],
+        },
+    }),
+    json.dumps({
+        "type": "user", "session_id": "sim-session-1",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_sim_1",
+                "content": "1 failed, 41 passed", "is_error": False,
+            }],
+        },
+    }),
+    json.dumps({
+        "type": "assistant", "session_id": "sim-session-1",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Fixed the off-by-one error and pushed."}],
+        },
+    }),
+    json.dumps({
+        "type": "result", "session_id": "sim-session-1", "is_error": False,
+        "result": "Fixed the off-by-one error and pushed.",
+        "total_cost_usd": 0.1234, "num_turns": 3, "duration_ms": 4200,
+    }),
+]) + "\n"
+
+
+def test_sweep_captures_a_real_trajectory_file_before_freeing_the_slot(
+    ssh_runner: SshRunner, booted_sandbox: Sandbox, tmp_path: Path,
+):
+    from grain.automation.transcript import parse_transcript
+
+    sandbox = booted_sandbox.name  # "sandbox-0"
+    unit = unit_name(sandbox)
+    out_path = transcript_path(unit)
+    reap(ssh_runner, unit)  # in case a previous test left it behind
+    ssh_runner.run(["rm", "-f", out_path], check=False)
+
+    try:
+        # Stand in for "claude -p --output-format stream-json --verbose
+        # > out_path" having already run and written its transcript — the
+        # exact redirect dispatch.py's start_unit now builds.
+        ssh_runner.run(["dd", f"of={out_path}", "status=none"], stdin=_SIMULATED_TRAJECTORY)
+        written = ssh_runner.run(["cat", out_path]).stdout
+        assert written == _SIMULATED_TRAJECTORY, "the file didn't land byte-for-byte before the sweep"
+
+        # A trivial real unit standing in for the dispatched claude -p
+        # process itself (same substitution test_a_real_systemd_unit_goes_
+        # active_then_done_success uses) -- what sweep() actually reads to
+        # decide this task is DONE_SUCCESS.
+        start_unit(ssh_runner, unit, "true")
+        time.sleep(2)
+        assert unit_status(ssh_runner, unit) is UnitState.DONE_SUCCESS
+
+        state = AutomationState()
+        started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        state.assign(sandbox, issue=123, unit=unit, now=started_at)
+        history = FileSessionHistory(tmp_path / "sessions")
+        config = AutomationConfig(owner="o", repo="r")
+
+        result = sweep(
+            state, lambda name: ssh_runner, config, datetime.now(timezone.utc),
+            history=history,
+        )
+
+        # The slot is freed -- capture ran as part of releasing it, not on
+        # some later fetch-on-demand path.
+        assert sandbox not in state.assignments
+        assert [o.issue for o in result.succeeded] == [123]
+
+        records = history.for_trigger(123)
+        assert len(records) == 1
+        record = records[0]
+        assert record.sandbox == sandbox
+        assert record.unit == unit
+        assert record.outcome == "succeeded"
+        assert record.transcript_path is not None
+
+        captured = history.read_transcript(record)
+        assert captured == _SIMULATED_TRAJECTORY
+
+        # And it's genuinely usable by the session browser's own parser --
+        # not just bytes that happen to round-trip.
+        events = parse_transcript(captured)
+        assert [e.role for e in events] == [
+            "system", "user", "assistant", "user", "assistant", "result",
+        ]
+        assert "Fixed the off-by-one error" in events[-1].summary
+    finally:
+        reap(ssh_runner, unit)
+        ssh_runner.run(["rm", "-f", out_path], check=False)

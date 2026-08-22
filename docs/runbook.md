@@ -27,6 +27,8 @@ host — the controller is where `/data` and every credential live.
 | `grain automation status` | Show current sandbox↔issue assignments | controller |
 | `grain host cleanup [name]` | Between-task hygiene over SSH (`kind delete clusters --all`, `docker system prune -af --volumes`); also runs automatically after every sweep-freed sandbox | controller |
 | `grain host health [name]` | SSH/systemd/docker/disk-watermark check over SSH; nonzero exit if unhealthy | controller |
+| `grain sessions list [--kind/--outcome/--trigger]` | List past dispatch sessions (trigger, sandbox, outcome, whether a trajectory was captured) | controller |
+| `grain sessions browse` | Interactive text UI (curses) to browse sessions and read a captured trajectory, over SSH | controller |
 | `grain github audit` | Check every credential under `secrets/github/` for withheld scopes | controller |
 | `python3 -m grain.proxy.server` | Runs the git proxy (not wired into `grain` yet — its own entry point) | controller |
 
@@ -235,6 +237,50 @@ Every dispatch/sweep decision is appended to
 (`dispatched`, `succeeded`, `failed`, `stranded`, or a `skipped: ...`
 reason). This is the first place to look when a run behaves unexpectedly.
 
+## Browsing past sessions (docs/roadmap.md item 10)
+
+`AutomationState`/`audit.log` above are both about the *live* pool and a
+one-line-per-decision log — neither lets an operator go back and read what
+an agent actually did on a past run. `grain sessions list` and `grain
+sessions browse` do, keyed by the trigger (the issue or PR number) that
+started each session:
+
+```
+$ grain --data-dir /data sessions list
+2026-01-01 12:00  issue#42   succeeded  sandbox-0    transcript=yes grain-task-sandbox-0
+2026-01-01 11:40  pr#7       failed     sandbox-1    transcript=yes grain-task-sandbox-1
+2026-01-01 10:05  issue#41   stranded   sandbox-0    transcript=no  grain-task-sandbox-0
+$ grain --data-dir /data sessions list --kind pr --outcome failed
+$ grain --data-dir /data sessions browse   # interactive: list, filter, select, read
+```
+
+`sessions browse` is a `curses` text UI — list sessions, cycle the kind/
+outcome filter (`k`/`o`), select one (arrow keys, `enter`) to read its
+captured trajectory, `q` to go back or quit. It needs a real terminal (an
+SSH session is one); `sessions list` is the same data for a script or a
+plain non-interactive shell.
+
+**Where the data comes from**: `sweeper.py`'s release path — the same place
+`grain/automation/cleanup.py` and `health.py` already hook into (see
+"Stranded sandboxes" below) — pulls the finished session's trajectory off
+the sandbox over SSH *before* the slot is freed for reuse, and records it
+into `/data/state/automation/sessions/`. This is capture-on-completion, not
+fetch-on-demand: a sandbox is long-lived and its next task's `claude -p`
+run overwrites the same fixed transcript path, so a later "fetch it when
+someone wants to browse" would find nothing or the wrong task's content.
+`claude -p` is run with `--output-format stream-json --verbose`, redirected
+to that fixed path (`grain/automation/dispatch.py`'s `transcript_path()`) —
+see `grain/automation/capture.py`'s module docstring for what was actually
+checked (not assumed) about the real format Claude Code's session
+persistence uses on disk, and why this project captures a redirected stream
+at a location it controls rather than depending on that internal,
+undocumented file-naming scheme.
+
+A session with no captured trajectory (`transcript=no` above) means the
+unit never got far enough to write one — most commonly a genuinely stranded
+run (never started, or the sandbox was recreated out from under it); the
+session record itself is still kept, just without transcript content.
+
 ## Credential file layout and rotation
 
 ```
@@ -250,6 +296,7 @@ reason). This is the first place to look when a run behaves unexpectedly.
     automation.json                      # AutomationConfig
   state/
     automation/state.json, audit.log
+    automation/sessions/<key>.json, <key>.jsonl   # session history + captured trajectories
     git-proxy/audit.log
 ```
 
@@ -343,7 +390,10 @@ with no operator action:
 - The unit is missing entirely (never started, or the sandbox was recreated
   out from under it) or has run past `max_runtime_minutes` → treated as
   stranded, issue re-labelled, sandbox freed.
-- **Every one of the three releases above also runs between-task cleanup**
+- **Every one of the three releases above also captures the session's
+  trajectory** (`docs/roadmap.md` item 10, `grain/automation/capture.py` —
+  see ["Browsing past sessions"](#browsing-past-sessions-docsroadmapmd-item-10)
+  above) **, runs between-task cleanup**
   (`kind delete clusters --all`, `docker system prune -af --volumes` — not
   a clone-directory wipe, see below) **and a post-cleanup health check**
   (`docs/roadmap.md` item 5, `grain/automation/cleanup.py` and

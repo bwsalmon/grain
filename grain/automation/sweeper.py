@@ -38,6 +38,21 @@ is (visibility, per docs/design.md step 8's own "log line... just
 visibility" bar, not new lifecycle machinery). `core.py` turns each warning
 into an audit-log line an operator can see; `grain host health` is what
 finds the same thing on demand, for a sandbox that isn't mid-sweep at all.
+
+**docs/roadmap.md item 10: every release also captures the session's
+trajectory, before the slot is freed.** This is the same "guaranteed before
+slot reuse" argument that already governs cleanup/health here: a browse
+attempted later would otherwise find nothing (a reused sandbox's next task
+overwrites the same fixed transcript path — see `dispatch.py`'s
+`transcript_path`, keyed only by sandbox, not by task) or, worse, another
+task's content passed off as this one's. `capture.py`'s `capture_trajectory`
+never raises (same discipline `cleanup()`/`check_health()` already hold to
+for this call site), so a capture problem — nothing written, a `cat`
+failure — never blocks a sandbox's slot from freeing; it just means this
+session's history entry records no transcript. Recorded into an injected
+`SessionHistory` (`history.py`) — `NullSessionHistory` by default, so every
+existing caller of `sweep()` that doesn't care about history keeps working
+unchanged; `core.py` wires in a real `FileSessionHistory` in production.
 """
 
 from __future__ import annotations
@@ -46,11 +61,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
 
+from .capture import capture_trajectory
 from .cleanup import cleanup
 from .config import AutomationConfig
 from .dispatch import UnitState, reap, unit_name, unit_status
 from .health import check_health
-from .state import AutomationState, TriggerKind
+from .history import NullSessionHistory, SessionHistory
+from .state import Assignment, AutomationState, TriggerKind
 from ..run import Runner
 
 
@@ -81,12 +98,27 @@ class SweepResult:
     health_warnings: list[HealthWarning] = field(default_factory=list)
 
 
-def _release(state: AutomationState, runner: Runner, sandbox: str) -> HealthWarning | None:
-    """Runs the between-task hook and a post-cleanup health check, then
-    frees the slot. Called from every branch below that frees a sandbox, so
-    the cleanup/health behaviour is identical regardless of why the slot is
-    being freed.
+def _release(state: AutomationState, runner: Runner, sandbox: str, *,
+             history: SessionHistory, assignment: Assignment, unit: str,
+             outcome_label: str, now: datetime) -> HealthWarning | None:
+    """Captures the session's trajectory, runs the between-task hook and a
+    post-cleanup health check, then frees the slot. Called from every
+    branch below that frees a sandbox, so the capture/cleanup/health
+    behaviour is identical regardless of why the slot is being freed.
+
+    Capture runs first, before cleanup or the state release — a transcript
+    is what `claude -p` already wrote under `/tmp` (docs/roadmap.md item
+    10), and neither `cleanup()` nor freeing the slot touches that path, but
+    reading it before either still keeps "capture happens before a sandbox
+    could possibly be reused" true by construction rather than by the
+    accident of what cleanup happens not to touch today.
     """
+    transcript_text = capture_trajectory(runner, unit)
+    history.record(
+        issue=assignment.issue, kind=assignment.kind, sandbox=sandbox, unit=unit,
+        started_at=assignment.started_at, finished_at=now, outcome=outcome_label,
+        transcript_text=transcript_text,
+    )
     cleanup(runner)
     report = check_health(runner)
     state.release(sandbox)
@@ -96,7 +128,10 @@ def _release(state: AutomationState, runner: Runner, sandbox: str) -> HealthWarn
 
 
 def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
-          config: AutomationConfig, now: datetime) -> SweepResult:
+          config: AutomationConfig, now: datetime,
+          history: SessionHistory | None = None) -> SweepResult:
+    if history is None:
+        history = NullSessionHistory()
     result = SweepResult()
     max_runtime = timedelta(minutes=config.max_runtime_minutes)
     for sandbox, assignment in list(state.assignments.items()):
@@ -108,21 +143,29 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
 
         if status is UnitState.DONE_SUCCESS:
             reap(runner, unit)
-            warning = _release(state, runner, sandbox)
+            warning = _release(state, runner, sandbox, history=history,
+                                assignment=assignment, unit=unit,
+                                outcome_label="succeeded", now=now)
             result.succeeded.append(outcome)
         elif status is UnitState.DONE_FAILED:
             reap(runner, unit)
-            warning = _release(state, runner, sandbox)
+            warning = _release(state, runner, sandbox, history=history,
+                                assignment=assignment, unit=unit,
+                                outcome_label="failed", now=now)
             result.failed.append(outcome)
         elif status is UnitState.ABSENT:
             # Assigned in our state but the unit isn't there — never
             # started (a dispatch that failed partway) or the sandbox was
             # recreated out from under it. Nothing to reap.
-            warning = _release(state, runner, sandbox)
+            warning = _release(state, runner, sandbox, history=history,
+                                assignment=assignment, unit=unit,
+                                outcome_label="stranded", now=now)
             result.stranded.append(outcome)
         elif now - assignment.started_at > max_runtime:
             reap(runner, unit)
-            warning = _release(state, runner, sandbox)
+            warning = _release(state, runner, sandbox, history=history,
+                                assignment=assignment, unit=unit,
+                                outcome_label="stranded", now=now)
             result.stranded.append(outcome)
         else:
             # ACTIVE and within budget — leave it running, and leave its

@@ -154,6 +154,79 @@ def test_cleanup_ssh_user_and_key_are_overridable(capsys):
     assert "-i /tmp/id_ed25519" in out
 
 
+# --- grain sessions (docs/roadmap.md item 10) -------------------------------
+
+def test_sessions_list_reports_nothing_recorded_yet(tmp_path, capsys):
+    out = run(["--data-dir", str(tmp_path), "sessions", "list"], capsys)
+    assert "no sessions recorded yet" in out
+
+
+def test_sessions_list_prints_a_row_per_recorded_session(tmp_path, capsys):
+    from datetime import datetime, timezone
+
+    from grain.automation.history import FileSessionHistory
+    from grain.automation.state import TriggerKind
+
+    history = FileSessionHistory(tmp_path / "state" / "automation" / "sessions")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    history.record(issue=7, kind=TriggerKind.ISSUE, sandbox="sandbox-0",
+                    unit="grain-task-sandbox-0", started_at=now, finished_at=now,
+                    outcome="succeeded", transcript_text="hi\n")
+    history.record(issue=8, kind=TriggerKind.PR, sandbox="sandbox-1",
+                    unit="grain-task-sandbox-1", started_at=now, finished_at=now,
+                    outcome="failed", transcript_text=None)
+
+    out = run(["--data-dir", str(tmp_path), "sessions", "list"], capsys)
+    assert "issue#7" in out
+    assert "pr#8" in out
+
+
+def test_sessions_list_filters_by_kind(tmp_path, capsys):
+    from datetime import datetime, timezone
+
+    from grain.automation.history import FileSessionHistory
+    from grain.automation.state import TriggerKind
+
+    history = FileSessionHistory(tmp_path / "state" / "automation" / "sessions")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    history.record(issue=7, kind=TriggerKind.ISSUE, sandbox="sandbox-0", unit="u0",
+                    started_at=now, finished_at=now, outcome="succeeded",
+                    transcript_text=None)
+    history.record(issue=8, kind=TriggerKind.PR, sandbox="sandbox-1", unit="u1",
+                    started_at=now, finished_at=now, outcome="succeeded",
+                    transcript_text=None)
+
+    out = run(["--data-dir", str(tmp_path), "sessions", "list", "--kind", "pr"], capsys)
+    assert "issue#7" not in out
+    assert "pr#8" in out
+
+
+def test_sessions_list_filters_by_trigger_number(tmp_path, capsys):
+    from datetime import datetime, timezone
+
+    from grain.automation.history import FileSessionHistory
+    from grain.automation.state import TriggerKind
+
+    history = FileSessionHistory(tmp_path / "state" / "automation" / "sessions")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    history.record(issue=7, kind=TriggerKind.ISSUE, sandbox="sandbox-0", unit="u0",
+                    started_at=now, finished_at=now, outcome="succeeded",
+                    transcript_text=None)
+    history.record(issue=8, kind=TriggerKind.ISSUE, sandbox="sandbox-1", unit="u1",
+                    started_at=now, finished_at=now, outcome="succeeded",
+                    transcript_text=None)
+
+    out = run(["--data-dir", str(tmp_path), "sessions", "list", "--trigger", "7"], capsys)
+    assert "issue#7" in out
+    assert "issue#8" not in out
+
+
+def test_sessions_browse_is_wired_to_the_tui_entry_point():
+    args = build_parser().parse_args(["sessions", "browse"])
+    from grain.cli import cmd_sessions_browse
+    assert args.func is cmd_sessions_browse
+
+
 def test_missing_tool_raises_a_legible_error_when_check_is_on():
     from grain.run import CommandError, RealRunner
 

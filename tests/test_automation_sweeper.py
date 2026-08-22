@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
 from grain.automation.config import AutomationConfig
+from grain.automation.dispatch import transcript_path, unit_name
+from grain.automation.history import RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.automation.sweeper import Outcome, sweep
 from grain.run import FakeRunner
@@ -205,3 +207,93 @@ def test_an_issue_assignment_still_defaults_to_issue_kind_with_no_branch():
     result = sweep(state, lambda name: runner, config(), NOW)
     assert result.succeeded[0].kind is TriggerKind.ISSUE
     assert result.succeeded[0].branch is None
+
+
+# --- trajectory capture on release (docs/roadmap.md item 10) --------------
+
+def test_sweep_with_no_history_argument_still_works_unchanged():
+    # Every existing caller of sweep() (including every test above) doesn't
+    # pass history= at all -- must keep working exactly as before.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, config(), NOW)
+    assert result.succeeded == [Outcome("sandbox-0", 1)]
+
+
+def test_a_successful_release_captures_the_transcript_and_records_it():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    runner.expect(
+        f"cat {transcript_path(unit_name('sandbox-0'))}",
+        stdout='{"type": "result", "result": "done"}\n',
+    )
+    history = RecordingSessionHistory()
+    sweep(state, lambda name: runner, config(), NOW, history=history)
+    assert len(history.calls) == 1
+    call = history.calls[0]
+    assert call["issue"] == 1
+    assert call["sandbox"] == "sandbox-0"
+    assert call["unit"] == "grain-task-sandbox-0"
+    assert call["outcome"] == "succeeded"
+    assert call["started_at"] == NOW
+    assert call["finished_at"] == NOW
+    assert call["transcript_text"] == '{"type": "result", "result": "done"}\n'
+
+
+def test_a_failed_release_is_recorded_with_outcome_failed():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("failed", "exit-code")
+    history = RecordingSessionHistory()
+    sweep(state, lambda name: runner, config(), NOW, history=history)
+    assert history.calls[0]["outcome"] == "failed"
+
+
+def test_a_stranded_absent_release_is_recorded_with_no_transcript():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", returncode=1)
+    for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
+        runner.expect(prefix, stdout=stdout, returncode=returncode)
+    # No `cat` scripted -- a never-started unit never wrote a transcript;
+    # FakeRunner's empty default response is what a real `cat` of a missing
+    # file's failure collapses to here too (capture_trajectory -> None).
+    history = RecordingSessionHistory()
+    sweep(state, lambda name: runner, config(), NOW, history=history)
+    assert history.calls[0]["outcome"] == "stranded"
+    assert history.calls[0]["transcript_text"] is None
+
+
+def test_a_run_past_max_runtime_is_captured_before_release_too():
+    started = NOW - timedelta(minutes=200)
+    state = state_with("sandbox-0", issue=1, started_at=started)
+    runner = runner_reporting("active")
+    runner.expect(
+        f"cat {transcript_path(unit_name('sandbox-0'))}",
+        stdout='{"type": "system"}\n',
+    )
+    history = RecordingSessionHistory()
+    sweep(state, lambda name: runner, config(max_runtime_minutes=120), NOW, history=history)
+    assert history.calls[0]["outcome"] == "stranded"
+    assert history.calls[0]["transcript_text"] == '{"type": "system"}\n'
+
+
+def test_capture_happens_before_the_slot_is_freed_in_state():
+    # A capture step that reads history.record()'s own record of the
+    # assignment must see the pre-release Assignment (kind/branch included)
+    # -- checked indirectly here via a PR-kind assignment carrying its
+    # branch through into the history call.
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0", now=NOW,
+                 kind=TriggerKind.PR, branch="feature-x")
+    runner = runner_reporting("inactive", "success")
+    history = RecordingSessionHistory()
+    sweep(state, lambda name: runner, config(), NOW, history=history)
+    assert history.calls[0]["kind"] is TriggerKind.PR
+
+
+def test_a_still_active_run_within_budget_captures_nothing():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    history = RecordingSessionHistory()
+    sweep(state, lambda name: runner, config(), NOW, history=history)
+    assert history.calls == []

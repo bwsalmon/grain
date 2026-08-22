@@ -419,35 +419,100 @@ end are unverified beyond the mechanism.
 
 ## 10. A session browser: trigger → trajectory, over SSH
 
-- [ ] Done
+- [x] Done
 
-Nothing today lets an operator look back at a past run — `AutomationState`
-only holds *current* assignments (a released slot's record is gone), and
-`audit.py`'s log is one line per decision, not a transcript. Requested:
-browse past sessions by their trigger (the issue or PR that started them)
-and see the actual trajectory — a text UI, not just the CLI, but still
-usable over SSH (matches `docs/design.md`'s "the only inbound port on this
-host is SSH" — no web UI).
+Nothing before this let an operator look back at a past run —
+`AutomationState` only held *current* assignments (a released slot's record
+was gone), and `audit.py`'s log is one line per decision, not a transcript.
+Built: browse past sessions by their trigger (the issue or PR that started
+them) and see the actual trajectory — a text UI, still usable over SSH
+(matches `docs/design.md`'s "the only inbound port on this host is SSH" —
+no web UI). The three open questions resolved as:
 
-Real open questions to resolve before coding, not assume:
-- **Where do trajectories come from?** `claude -p` writes its own session
-  transcript inside the sandbox; nothing pulls it back to the controller
-  today. Check what `claude -p` actually leaves behind and where. Likely
-  needs the sweeper to fetch it over SSH (same channel `dispatch.py`
-  already uses) *before* a finished sandbox's slot gets reused for the next
-  task — capture-on-completion, not fetch-on-demand, or a later browse
-  finds nothing.
-- **Durable history.** `AutomationState` is deliberately live-pool-only;
-  this needs a separate append-or-archive store keyed by trigger (issue #
-  or PR #) → {sandbox, unit, started_at, finished_at, outcome, transcript
-  path}, most likely under `/data/state/automation/sessions/`.
-- **TUI toolkit vs. the stdlib-only convention.** `pyproject.toml` is
-  deliberately dependency-free ("this runs on a stock Debian host"). Python's
-  built-in `curses` fits that; a richer library (textual, urwid) would be
-  the first dependency this project takes on — a real trade to weigh
-  explicitly, not default past.
+- **Where trajectories come from — checked, not assumed.** Claude Code
+  persists a session transcript to disk by default, for `-p` the same as an
+  interactive session (`--no-session-persistence` is the opt-out, confirmed
+  against Claude Code's own docs). Its default location,
+  `~/.claude/projects/<cwd, "/" replaced with "-">/<session-id>.jsonl`, was
+  confirmed directly against a real transcript file (not guessed): one JSON
+  object per line, each carrying a `type` field (`user`/`assistant`/
+  `system`/...), a user/assistant line's `message` shaped like an Anthropic
+  API message (`role`, `content` blocks — `text`, `tool_use`, `tool_result`,
+  `thinking`). That default path depends on an *undocumented* encoding of
+  the cwd and a session ID Claude Code assigns itself, which this project
+  chose not to reverse-engineer inside a bare sandbox. Instead
+  `dispatch.py` asks for the *documented* stream explicitly —
+  `claude -p --output-format stream-json --verbose`, redirected to a fixed
+  path both `dispatch.py` and the new `capture.py` derive from
+  `unit_name()` alone (`dispatch.transcript_path`) — same JSONL, same
+  per-line event shape (Claude Code's docs: "the last line of the stream is
+  a `result` message with the final response text, cost, and session
+  metadata"), at a location this project controls. `sweeper.py`'s release
+  path (`_release`, called from every branch that frees a sandbox — the
+  same "guaranteed before slot reuse" argument `cleanup.py`/`health.py`
+  already rest on) pulls that file over the same SSH channel `dispatch.py`
+  already uses, before the slot frees — capture-on-completion, exactly as
+  asked, since a reused sandbox's next dispatch overwrites the identical
+  path.
+- **Durable history**: `grain/automation/history.py`. Separate from
+  `AutomationState` as that module's own docstring requires — one
+  `<key>.json` (`SessionRecord`: issue, kind, sandbox, unit, started/
+  finished times, outcome, transcript path) plus a sibling `<key>.jsonl`
+  (the raw captured content) per session, under
+  `/data/state/automation/sessions/`, atomic-write per file (temp +
+  rename, same discipline as `AutomationState.save`). `FileSessionHistory`
+  is the real store; `NullSessionHistory`/`RecordingSessionHistory` follow
+  `audit.py`'s existing `NullAuditLog`/`RecordingAuditLog` shape exactly,
+  so `Orchestrator.history` and `sweep()`'s new `history` parameter both
+  default to a no-op and every pre-existing test and call site kept working
+  unchanged.
+- **TUI toolkit vs. stdlib-only — kept stdlib, on purpose.** Built with
+  `curses` (`grain/automation/tui.py`), not a third-party library.
+  `pyproject.toml`'s dependency-free convention held: this is an
+  occasionally-used, browse-only admin tool reachable over SSH — list,
+  filter, select, scroll text — squarely inside what `curses` does well,
+  and `curses` ships with CPython on every POSIX target this project runs
+  on. A richer library (`textual`, `urwid`) would have been the first
+  third-party dependency this repo takes on for a feature that doesn't
+  need what they'd add (mouse support, richer widgets). Recorded here as
+  the trade actually being weighed, not defaulted past — see `tui.py`'s own
+  module docstring. Split deliberately for testability: `SessionListState`/
+  `DetailState`/`format_*` (which rows show, under which filter, which is
+  selected) are plain data with no `curses` import, covered by
+  `tests/test_automation_tui.py`; `_draw_*`/`run` are the actual curses
+  mechanics, exercised only by hand (`grain sessions browse`) — curses
+  screens are hard to unit test directly, so the split is what makes the
+  logic testable at all rather than skipping tests because curses is
+  involved.
 
-Depends on item 2 (PR-triggered sessions need PR creation to exist) and
-item 9 (browsing "issue or PR" needs the PR-trigger path to exist) to be
-fully meaningful, though an issue-only version is useful on its own before
-either lands.
+Wired into `grain/cli.py` as a new `grain sessions` subcommand group:
+`list` (filterable by `--kind`/`--outcome`/`--trigger`, for a script or a
+plain shell) and `browse` (the curses TUI). `grain/automation/transcript.py`
+is the trajectory parser — pure, no curses — turning a captured JSONL
+trajectory into renderable events; built against the same real-transcript
+shape `capture.py` confirmed, not an invented one, and degrades to showing
+raw JSON for an event type it doesn't recognize rather than crashing a
+whole session unbrowsable.
+
+Unit-tested throughout, `FakeRunner`-based for the capture/dispatch pieces
+matching every existing convention in this package —
+`tests/test_automation_capture.py`, `_history.py`, `_transcript.py`,
+`_tui.py`, plus new cases in `_dispatch.py`, `_sweeper.py`, `_core.py`,
+`_cli.py`. Verified live against a real sandbox VM
+(`tests/test_vm_integration.py`,
+`test_sweep_captures_a_real_trajectory_file_before_freeing_the_slot`): a
+plausible, realistically-shaped simulated trajectory (the exact JSONL
+shape above — system/init, user, assistant text + tool_use, user
+tool_result, assistant text, final result) is written to the real path
+`transcript_path()` computes on a real sandbox; a real transient systemd
+unit stands in for the dispatched `claude -p` process (same substitution
+`docs/design.md`'s dispatch-mechanism section already uses, since no real
+Claude Code login exists in this environment — item 8's constraint, not
+this item's to solve); the real `sweeper.sweep()` — not a hand-called
+capture function — pulls the file off over real SSH and a real
+`FileSessionHistory` records it, byte-for-byte, before the slot frees; and
+the captured content round-trips through the real `transcript.py` parser
+into the expected event sequence. What's not verified live: an actual
+interactive `curses` terminal session (needs a real TTY, not something a
+test harness can drive) and a real `claude -p` run producing this format
+itself (item 8's own gap, not reopened here).

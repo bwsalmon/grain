@@ -1,6 +1,6 @@
 from grain.automation.dispatch import (
     UnitState, branch_name, configure_git_credentials, dispatch, dispatch_pr,
-    ensure_workspace, reap, unit_name, unit_status,
+    ensure_workspace, reap, transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
@@ -132,6 +132,37 @@ def test_dispatch_runs_claude_from_inside_the_workspace():
     dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
     unit_call = next(c for c in runner.commands if "systemd-run" in c)
     assert "cd /home/debian/workspace &&" in unit_call
+
+
+# --- captured trajectory (docs/roadmap.md item 10) -------------------------
+
+def test_transcript_path_is_a_pure_function_of_the_unit():
+    assert transcript_path("grain-task-sandbox-0") == "/tmp/grain-task-sandbox-0.transcript.jsonl"
+    assert transcript_path("grain-task-sandbox-0") == transcript_path("grain-task-sandbox-0")
+    assert transcript_path("grain-task-sandbox-0") != transcript_path("grain-task-sandbox-1")
+
+
+def test_dispatch_asks_claude_for_stream_json_output():
+    runner = FakeRunner()
+    dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    unit_call = next(c for c in runner.commands if "systemd-run" in c)
+    assert "--output-format stream-json --verbose" in unit_call
+
+
+def test_dispatch_redirects_claude_output_to_the_transcript_path():
+    runner = FakeRunner()
+    unit = dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    unit_call = next(c for c in runner.commands if "systemd-run" in c)
+    assert f"> {transcript_path(unit)}" in unit_call
+
+
+def test_dispatch_pr_also_redirects_to_the_transcript_path():
+    runner = FakeRunner()
+    unit = dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+                        remote_url=REMOTE_URL, token=TOKEN)
+    unit_call = next(c for c in runner.commands if "systemd-run" in c)
+    assert f"> {transcript_path(unit)}" in unit_call
+    assert "--output-format stream-json --verbose" in unit_call
 
 
 def test_dispatch_sets_remain_after_exit():

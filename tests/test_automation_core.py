@@ -6,7 +6,9 @@ from pathlib import Path
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
+from grain.automation.dispatch import transcript_path, unit_name
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient
+from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.inventory import Cluster
 from grain.proxy.tokens import SandboxTokenStore
@@ -66,7 +68,7 @@ def pr_flow_response(pr_number: int) -> list[ApiResponse]:
     ]
 
 
-def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None):
+def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None, history=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -87,7 +89,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None):
         cluster=cluster, github=github, config=config,
         state=state if state is not None else AutomationState(),
         base_runner=fake_runner, token_store=token_store,
-        audit=RecordingAuditLog(),
+        audit=RecordingAuditLog(), history=history,
         # Bypass SshRunner's argv wrapping here — that integration is
         # covered by test_automation_ssh.py; these tests target
         # Orchestrator's own decisions against a plain FakeRunner.
@@ -418,3 +420,33 @@ def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     assert len(mutating) == 2  # remove in-progress, add trigger back — same
                                # requeue path a failed/stranded run takes
+
+
+# --- session history wiring (docs/roadmap.md item 10) -----------------------
+
+def test_orchestrator_defaults_to_a_null_session_history():
+    orchestrator, _ = make_orchestrator(issues=[])
+    assert isinstance(orchestrator.history, NullSessionHistory)
+
+
+def test_a_swept_success_is_recorded_into_the_injected_history():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    runner.expect(
+        f"cat {transcript_path(unit_name('sandbox-0'))}",
+        stdout='{"type": "result", "result": "done"}\n',
+    )
+    history = RecordingSessionHistory()
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner,
+                                                 history=history)
+    transport.responses.extend(pr_flow_response(42))
+
+    orchestrator.run_once(NOW)
+
+    assert len(history.calls) == 1
+    assert history.calls[0]["issue"] == 5
+    assert history.calls[0]["outcome"] == "succeeded"
+    assert history.calls[0]["transcript_text"] == '{"type": "result", "result": "done"}\n'
