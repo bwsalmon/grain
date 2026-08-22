@@ -335,15 +335,101 @@ runbook the rest of this work has been assuming exists.
 
 ## 8. First live issue-to-PR run
 
-- [ ] Done
+- [x] Done — the whole mechanical pipeline; not against real GitHub or a
+  real agent
 
-Verification, not implementation — flagged separately because it needs
-things no agent can provide on its own: a real target GitHub repo, a real
-credential in `/data/secrets/github/`, and a sandbox with Claude Code
-actually logged in (still a manual step per `docs/design.md`). Blocked on
-items 2 and 3 above at minimum. This is the point where the whole pipeline
-gets checked end to end, the same "verify live" bar every other piece of
-this project has been held to.
+Verification, not implementation — flagged separately because a *fully*
+real run needs things no agent can provide on its own: a real target GitHub
+repo, a real credential in `/data/secrets/github/`, and a sandbox with
+Claude Code actually logged in (still a manual step per `docs/design.md`).
+None of those exist in this environment, so — following the same precedent
+item 2 set with `git_proxy_target` rather than skipping live verification
+outright — this substitutes exactly two things, both because the real
+things genuinely don't exist here, and runs the real `Orchestrator.run_once`
+(`grain/automation/core.py`) against everything else real:
+
+- **A realistic mock of the GitHub REST API** (`RealGitHubMock`,
+  `tests/test_live_issue_to_pr.py`), wired into the real `GitHubClient`
+  through its own `Transport` protocol — the identical seam
+  `github.py`'s own `FakeTransport` uses for unit tests, so the code under
+  test is the real `GitHubClient` (path building, pagination, status
+  handling, field extraction) and the real `Orchestrator`/`sweeper.py`
+  decision logic, not a reimplementation of either. Implements exactly the
+  endpoints `GitHubClient` calls: `list_issues`/`list_pull_requests` (the
+  shared `/issues` listing, seeded with one fake issue carrying the
+  trigger label), `add_label`, `remove_label`, `create_pull_request`, and
+  `branch_exists` — the one endpoint a canned answer would make dishonest,
+  so it runs a real `git show-ref` against the same real bare repo the
+  sandbox clones from and pushes to.
+- **A fake `claude` binary** at `/usr/local/bin/claude` on the sandbox's
+  `PATH`, standing in for a real login. Reads the real prompt `dispatch()`
+  piped to its stdin, parses the branch out of the literal `git push
+  origin HEAD:<branch>` instruction the way a real agent reads its own
+  instructions, and either makes a real commit and pushes it, or
+  deliberately doesn't — three scripted variants exercise the happy path
+  and both failure shapes. `dispatch.py`/`core.py` are not touched or
+  special-cased; only the sandbox-side binary is fake.
+
+Everything else is the real thing: a real sandbox VM (booted the same way
+item 2's live suite boots one), the real bare-repo-behind-a-real-`GitProxy`
+rig item 2 built, the real `SshRunner`/systemd-unit dispatch mechanism, the
+real `AutomationState` pool bookkeeping, the real sweeper's cleanup/health
+hooks. Three scenarios ran end to end against it: (1) issue discovered,
+dispatched, sandbox clones through the real proxy, fake agent pushes a real
+commit to the real deterministic branch, sweep verifies the branch via a
+real git query and opens a PR — recorded by the mock with the right
+head/base/title; (2) the fake agent exits nonzero without touching the
+repo — requeued (trigger label restored, no PR), not treated as done; (3)
+the fake agent exits zero but never pushes — also requeued, via the exact
+`"succeeded but branch ... does not exist"` path `core.py`'s docstring
+describes, which is the one case a naive "unit exited 0 means success"
+sweep would get wrong and this environment can now actually exercise.
+
+Two things found live while building this, worth recording the way every
+other "verify live" item in this file does:
+
+- **`git http-backend` denies push (`git-receive-pack`) by default**, even
+  with `GIT_HTTP_EXPORT_ALL=1` — that variable only covers the read side.
+  The fake agent's first push came back a real `403`, forwarded straight
+  through the proxy from upstream, until the test's bare repo set
+  `http.receivepack true` explicitly. Item 2 never hit this because nothing
+  in its suite pushes; this is what "needs a real writable allow-listed
+  repo to test against, not just a public read" (item 2's own note) turned
+  out to mean in practice.
+- **This host is shared across concurrent agent sessions**, and
+  `test_vm_integration.py`'s fixtures hardcode global resources with no
+  per-session isolation: a fixed sandbox name/address (`sandbox-0`/
+  `10.100.0.10`) and a fixed `Cluster.controller_ip` (`10.100.0.2`). Two
+  collisions happened live — `virsh define`: `domain 'sandbox-0' already
+  exists`, and later a real concurrently-booted controller VM claiming
+  `10.100.0.2` for real, breaking an earlier version of this suite's
+  approach of aliasing that same address on the host bridge. Fixed by
+  giving this suite its own sandbox at a different index (`sandbox-1` —
+  not arbitrary: `Cluster()`'s own default is `sandbox_count=2`, and the
+  host's already-applied firewall ruleset was confirmed live to already
+  cover `gr-sb1` too) and by pointing `Orchestrator`'s `cluster.
+  controller_ip` at the host's own bridge address (`10.100.0.1`, the same
+  address item 2's `git_proxy_target` binds to, which no VM is ever
+  assigned) via a small duck-typed stand-in — `Orchestrator`'s own code
+  reads `cluster.controller_ip`/`cluster.sandbox_names`/`cluster.
+  address_of()` and nothing else, so this exercises the real code
+  unmodified while giving it a collision-free resource to report.
+
+**What this proves**: the entire mechanical pipeline, for real — issue
+discovery, dispatch, a real clone through a real proxy, a real pushed
+commit, sweep-time success detection against real git state (not a mock's
+say-so), and PR creation with the right head/base/title, plus both
+requeue paths.
+
+**What this does not prove, and only a genuinely live run closes**: nothing
+about real GitHub's actual API behavior or quirks — rate limits, exact
+error-response shapes, auth edge cases the mock was never asked to get
+wrong — and nothing about a real Claude Code agent's actual behavior. A
+scripted stand-in structurally cannot fail the way a real agent might: push
+somewhere unexpected, hang, misread its instructions, or behave in some
+way nobody scripted for. That gap is real, and closing it needs the three
+things listed at the top of this item — a real repo, a real credential, a
+real login — none of which exist in this environment.
 
 ## 9. Dispatch to an existing PR, not just a labelled issue
 
