@@ -1,8 +1,8 @@
 from grain.automation.dispatch import (
-    UnitState, branch_name, configure_git_credentials, dispatch,
+    UnitState, branch_name, configure_git_credentials, dispatch, dispatch_pr,
     ensure_workspace, reap, unit_name, unit_status,
 )
-from grain.automation.github import Issue
+from grain.automation.github import Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
 
 REMOTE_URL = "http://10.100.0.2:8080/o/r.git"
@@ -12,6 +12,18 @@ TOKEN = "sandbox-token"
 def make_issue(number=1) -> Issue:
     return Issue(number=number, title="fix the thing", body="details here",
                  html_url="https://github.com/o/r/issues/1", labels=frozenset())
+
+
+def make_pr(number=1, head_ref="feature-x") -> PullRequestDetail:
+    return PullRequestDetail(
+        number=number, title="a distinctive PR title", body="a distinctive PR body",
+        html_url="https://github.com/o/r/pull/1", head_ref=head_ref, base_ref="main",
+    )
+
+
+def make_comments() -> list[ReviewComment]:
+    return [ReviewComment(id=1, user="reviewer", body="please fix this",
+                           path="src/thing.py", line=12)]
 
 
 def test_unit_name_is_stable_per_sandbox():
@@ -180,3 +192,126 @@ def test_reap_stops_and_clears_failed_state():
     reap(runner, "grain-task-sandbox-0")
     assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
     assert runner.ran("sudo systemctl reset-failed grain-task-sandbox-0")
+
+
+# --- ensure_workspace's branch parameter (docs/roadmap.md item 9) ---------
+
+def test_ensure_workspace_with_no_branch_is_unchanged_from_before():
+    # Exact regression guard for the default-branch path — item 9 must not
+    # change a single byte of what the existing issue-dispatch path sends.
+    runner = FakeRunner()
+    ensure_workspace(runner, REMOTE_URL, path="/home/debian/workspace")
+    script = runner.calls[0][0][2]
+    assert "git clone http://10.100.0.2:8080/o/r.git /home/debian/workspace" in script
+    assert "checkout -f --detach origin/HEAD" in script
+    assert "-B" not in script
+
+
+def test_ensure_workspace_with_a_branch_resets_to_that_branch_not_head():
+    runner = FakeRunner()
+    ensure_workspace(runner, REMOTE_URL, path="/home/debian/workspace", branch="feature-x")
+    script = runner.calls[0][0][2]
+    assert "checkout -f -B feature-x origin/feature-x" in script
+    # The default-branch reset must not also be present.
+    assert "checkout -f --detach" not in script
+    assert "origin/HEAD" not in script
+
+
+def test_ensure_workspace_with_a_branch_skips_the_remote_set_head_call():
+    # remote set-head only matters for the default-branch path; a branch
+    # dispatch has no use for origin/HEAD at all.
+    runner = FakeRunner()
+    ensure_workspace(runner, REMOTE_URL, path="/home/debian/workspace", branch="feature-x")
+    script = runner.calls[0][0][2]
+    assert "remote set-head" not in script
+
+
+def test_ensure_workspace_checks_out_the_branch_on_first_clone_too():
+    # A plain `git clone` lands on the remote's default branch, not the
+    # PR's own — the first-dispatch (no existing workspace) path must also
+    # explicitly check out the requested branch, or a sandbox's very first
+    # PR dispatch would silently start on the wrong branch.
+    runner = FakeRunner()
+    ensure_workspace(runner, REMOTE_URL, path="/home/debian/workspace", branch="feature-x")
+    script = runner.calls[0][0][2]
+    else_clause = script.split("else\n", 1)[1]
+    assert "checkout -f -B feature-x origin/feature-x" in else_clause
+
+
+# --- dispatch_pr (docs/roadmap.md item 9) ----------------------------------
+
+def test_dispatch_pr_checks_out_the_prs_own_branch():
+    runner = FakeRunner()
+    dispatch_pr(runner, "sandbox-0", make_pr(head_ref="feature-x"), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert clone_calls
+    assert "checkout -f -B feature-x origin/feature-x" in clone_calls[0][2]
+
+
+def test_dispatch_pr_writes_a_prompt_carrying_title_body_and_comments():
+    runner = FakeRunner()
+    dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+    )
+    assert "a distinctive PR title" in prompt_stdin
+    assert "a distinctive PR body" in prompt_stdin
+    assert "please fix this" in prompt_stdin
+    assert "src/thing.py" in prompt_stdin
+    # Untrusted PR/comment content never appears as a literal argv element.
+    for argv, _ in runner.calls:
+        assert not any("a distinctive PR title" in a for a in argv)
+        assert not any("please fix this" in a for a in argv)
+
+
+def test_dispatch_pr_prompt_tells_the_agent_this_is_not_a_fresh_task():
+    runner = FakeRunner()
+    dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+    )
+    assert "not a fresh task" in prompt_stdin.lower() or "not a fresh" in prompt_stdin.lower()
+
+
+def test_dispatch_pr_prompt_tells_the_agent_the_exact_branch_to_push():
+    runner = FakeRunner()
+    dispatch_pr(runner, "sandbox-0", make_pr(head_ref="feature-x"), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+    )
+    assert "git push origin HEAD:feature-x" in prompt_stdin
+
+
+def test_dispatch_pr_prompt_handles_no_review_comments():
+    runner = FakeRunner()
+    dispatch_pr(runner, "sandbox-0", make_pr(), [], remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+    )
+    assert "no inline review comments" in prompt_stdin
+
+
+def test_dispatch_pr_starts_a_systemd_unit_named_for_the_sandbox():
+    runner = FakeRunner()
+    unit = dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+                        remote_url=REMOTE_URL, token=TOKEN)
+    assert unit == "grain-task-sandbox-0"
+    assert runner.ran(f"sudo systemd-run --unit={unit}")
+
+
+def test_dispatch_pr_configures_credentials_before_the_workspace():
+    runner = FakeRunner()
+    dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    commands = runner.commands
+    credential_index = next(i for i, c in enumerate(commands) if c.startswith("git config"))
+    clone_index = next(i for i, c in enumerate(commands) if c.startswith("bash -c"))
+    assert credential_index < clone_index

@@ -16,14 +16,44 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+
+
+class TriggerKind(Enum):
+    """What started this assignment — which decides what a *successful*
+    finish means (docs/roadmap.md item 9): an issue-triggered run needs a
+    new PR opened once its branch shows up; a PR-triggered run already has
+    its PR, so a successful finish just means new commits landed on the
+    branch it was pointed at. Stored alongside the assignment rather than
+    inferred, since `core.py`'s sweep-time handling has no other way to tell
+    the two apart once `AutomationState` is reloaded from disk on a fresh
+    `run-once` invocation.
+    """
+    ISSUE = "issue"
+    PR = "pr"
 
 
 @dataclass(frozen=True)
 class Assignment:
+    # The trigger's number — an issue number for an ISSUE assignment, a PR
+    # number for a PR one. Never ambiguous: GitHub gives issues and PRs one
+    # shared number sequence per repo (a PR *is* a special kind of issue in
+    # its own data model), so one repo can never have both an issue #5 and a
+    # PR #5 to confuse this field's meaning.
     issue: int
     unit: str
     started_at: datetime
+    kind: TriggerKind = TriggerKind.ISSUE
+    # The branch this assignment is working on. For an ISSUE assignment this
+    # is left unset — `dispatch.branch_name(issue)` recomputes it as a pure
+    # function of the number whenever it's needed, per docs/roadmap.md item
+    # 2's "deterministic, not self-reported" precedent. A PR assignment has
+    # no such deterministic name to recompute (the branch is whatever the PR
+    # author already called it), so it's recorded once here, at dispatch
+    # time, when `GitHubClient.get_pull_request`/`list_pull_requests` already
+    # had to read it anyway.
+    branch: str | None = None
 
 
 @dataclass
@@ -40,6 +70,12 @@ class AutomationState:
             name: Assignment(
                 issue=a["issue"], unit=a["unit"],
                 started_at=datetime.fromisoformat(a["started_at"]),
+                # .get() with a default, not a required key: an
+                # already-on-disk state file written before item 9 has
+                # neither field, and every assignment it could hold was
+                # necessarily an issue dispatch with no recorded branch.
+                kind=TriggerKind(a.get("kind", TriggerKind.ISSUE.value)),
+                branch=a.get("branch"),
             )
             for name, a in raw.get("assignments", {}).items()
         }
@@ -54,6 +90,7 @@ class AutomationState:
                 name: {
                     "issue": a.issue, "unit": a.unit,
                     "started_at": a.started_at.isoformat(),
+                    "kind": a.kind.value, "branch": a.branch,
                 }
                 for name, a in self.assignments.items()
             },
@@ -71,8 +108,11 @@ class AutomationState:
                 return name
         return None
 
-    def assign(self, sandbox: str, issue: int, unit: str, now: datetime) -> None:
-        self.assignments[sandbox] = Assignment(issue=issue, unit=unit, started_at=now)
+    def assign(self, sandbox: str, issue: int, unit: str, now: datetime, *,
+               kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None) -> None:
+        self.assignments[sandbox] = Assignment(
+            issue=issue, unit=unit, started_at=now, kind=kind, branch=branch
+        )
 
     def release(self, sandbox: str) -> None:
         self.assignments.pop(sandbox, None)

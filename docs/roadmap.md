@@ -347,27 +347,75 @@ this project has been held to.
 
 ## 9. Dispatch to an existing PR, not just a labelled issue
 
-- [ ] Done
+- [x] Done
 
 A second intake path, alongside labelled-issue polling: point an agent at
-an *existing* PR to address review feedback, fix CI, or continue work —
-"send an agent to a PR and have it address issues," not just originate
-one. Fits the split-surface boundary unchanged — the sandbox still only
-ever does `git`; it checks out the PR's existing branch and pushes more
-commits to it, same as any dispatch. What's new is on the controller side:
-- **Trigger**: a label on the PR, a "changes requested" review state, or a
-  comment containing a trigger phrase — needs a decision, don't assume.
-- **Context**: the dispatched prompt needs the PR's diff and review
-  comments instead of (or alongside) an issue's title/body — `github.py`
-  needs a `list_pull_requests`/`get_pull_request_comments`-shaped read path
-  it doesn't have yet.
-- **Pool/state**: `AutomationState` currently keys assignments by issue
-  number; decide whether a PR-triggered run reuses that shape or needs its
-  own.
+an *existing* PR to address review feedback, fix CI, or continue work.
+Fits the split-surface boundary unchanged — the sandbox still only ever
+does `git`; it checks out the PR's existing branch and pushes more commits
+to it, same as any dispatch. The three open questions resolved as:
 
-Sequenced after item 2 (reuses the same `GitHubClient`/label-move patterns
-PR creation establishes) and item 8 (prove the simpler issue→PR loop end
-to end before adding a second intake path on top of it).
+- **Trigger: the same label, applied to a PR.** Matches the issue trigger
+  exactly — same human-gate reasoning (`docs/design.md`'s "Prompt injection
+  via issue content... Requiring a human to label each issue is the
+  mitigation" applies identically to review comments, which are just as
+  untrusted), one config field (`trigger_label`) covers both, and GitHub
+  itself makes this free: a PR *is* an issue in its own data model, so the
+  existing `add_label`/`remove_label` calls already work against a PR
+  number with zero new code. A review-state or comment-phrase trigger would
+  have meant a second detection mechanism for no real gain.
+- **Context: `GitHubClient` gained `get_pull_request`, `list_pull_requests`,
+  and `list_review_comments`** (`github.py`), reading real field shapes
+  pinned against GitHub's REST reference rather than guessed (`head.ref`/
+  `head.sha`, `base.ref`, and the review-comment object's `id`/
+  `user.login`/`body`/`path`/`line`) — confirmed live via GitHub's own docs,
+  not assumed. `list_pull_requests` walks the same `/issues?labels=...`
+  listing `list_issues` already uses (labels are an issues-API concept; the
+  pulls-list endpoint has no `labels` filter of its own) and hydrates each
+  match with one `get_pull_request` call for `head`/`base`, which the
+  issues listing never carries. `dispatch.py` gained a PR-shaped
+  `_pr_prompt`/`dispatch_pr`, and `ensure_workspace` gained an optional
+  `branch` — resetting to `origin/<branch>` and checking it out as a real
+  local branch instead of `origin/HEAD`, so the agent lands on the PR's own
+  history rather than the default branch. Same stdin-not-argv discipline as
+  the issue path throughout: PR title/body/review-comment content never
+  becomes a shell-interpolated argument.
+- **Pool/state: the "one number sequence" fact, leveraged directly.**
+  `AutomationState`'s `issue: int` key needed no parallel shape — an issue
+  number and a PR number can never collide in one repo, so `Assignment`
+  just gained a `kind: TriggerKind` (`ISSUE`/`PR`) and an optional `branch`
+  (unlike an issue's, a PR's branch isn't recomputable from the number
+  alone, so it's recorded once at dispatch time). Both trigger kinds share
+  the same free-sandbox pool and the same `runs_per_hour` budget — one
+  finite pool, one cap, regardless of what triggered a dispatch.
+  `core.py._dispatch` polls `list_issues` and `list_pull_requests` together,
+  merges the two candidate lists, and sorts by number alone; since the
+  numbers can't tie across kinds, that's already "oldest trigger first"
+  across both. `sweeper.py`'s `Outcome` carries the assignment's `kind`/
+  `branch` through a sweep so `core.py._finish_succeeded` can tell "this
+  needs a new PR opened" (issue path, unchanged) from "this just needs the
+  in-progress label removed — the PR already exists" (new
+  `_finish_succeeded_pr`, verified the same "does the branch really exist"
+  way as the issue path before declaring success).
+
+Built: `grain/automation/github.py`, `dispatch.py`, `core.py`, `state.py`,
+`sweeper.py`, `config.py`, `cli.py` (status output now shows `issue`/`pr`
+per assignment). Unit-tested throughout against `FakeTransport`/
+`FakeRunner`/`RecordingAuditLog`, matching every existing convention —
+`tests/test_automation_github.py`, `_dispatch.py`, `_core.py`, `_state.py`,
+`_sweeper.py`, `_cli.py`. Verified live (`tests/test_vm_integration.py`,
+extending the same real-bare-repo-behind-a-real-`GitProxy` rig item 2
+built, now seeded with a second branch standing in for a PR's own): a
+sandbox with no prior workspace clones straight onto the PR's branch, not
+the default one; a sandbox reused from an *earlier, unrelated* dispatch on
+the default branch correctly resets onto the PR's branch instead of
+fetch-and-resetting back to `origin/HEAD`; and `dispatch_pr` writes the
+real PR-shaped prompt (title/body/review comments) and leaves the
+workspace checked out on the right branch, over the real proxy, before the
+unit itself starts. What's not verified live, for the same reason item 8
+names: no real GitHub repo, credential, or PR exists in this environment,
+so the *trigger* (a human labelling a real PR) and the full loop end to
+end are unverified beyond the mechanism.
 
 ## 10. A session browser: trigger → trajectory, over SSH
 

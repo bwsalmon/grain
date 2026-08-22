@@ -7,7 +7,7 @@ from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient
-from grain.automation.state import AutomationState
+from grain.automation.state import AutomationState, TriggerKind
 from grain.inventory import Cluster
 from grain.proxy.tokens import SandboxTokenStore
 from grain.run import FakeRunner
@@ -20,6 +20,30 @@ def issue_json(number: int) -> dict:
         "number": number, "title": f"issue {number}", "body": "do it",
         "html_url": f"https://github.com/o/r/issues/{number}",
         "labels": [{"name": "grain-agent"}],
+    }
+
+
+def pr_trigger_json(number: int) -> dict:
+    """The `/issues?labels=...` listing shape for a labelled PR — what
+    `list_pull_requests`'s own preliminary call filters *to* (the opposite
+    of `list_issues`'s filter). Missing `head`/`base`, same as a real PR item
+    on this endpoint — that's exactly why hydration via a separate
+    `get_pull_request` call is needed.
+    """
+    return {
+        "number": number, "title": f"pr {number}", "body": "please review",
+        "html_url": f"https://github.com/o/r/pull/{number}",
+        "labels": [{"name": "grain-agent"}],
+        "pull_request": {"url": "..."},
+    }
+
+
+def pr_detail_json(number: int, head_ref: str = "feature-x", base_ref: str = "main") -> dict:
+    return {
+        "number": number, "title": f"pr {number}", "body": "please review",
+        "html_url": f"https://github.com/o/r/pull/{number}",
+        "head": {"ref": head_ref, "sha": "abc123", "label": f"o:{head_ref}"},
+        "base": {"ref": base_ref, "label": f"o:{base_ref}"},
     }
 
 
@@ -276,3 +300,121 @@ def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_pat
     second_token = json.loads((tmp_path / "sandbox-tokens.json").read_text())["sandbox-0"]
 
     assert first_token == second_token
+
+
+# --- PR-triggered dispatch (docs/roadmap.md item 9) ------------------------
+
+def test_a_labelled_pr_is_dispatched_to_its_own_existing_branch():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([]).encode()),                       # list_issues
+        ApiResponse(200, {}, json.dumps([pr_trigger_json(7)]).encode()),     # list_pull_requests: candidate
+        ApiResponse(200, {}, json.dumps(pr_detail_json(7, head_ref="feature-x")).encode()),  # hydration
+        ApiResponse(200, {}, b"[]"),                                          # list_review_comments
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert assignment.issue == 7
+    assert assignment.kind is TriggerKind.PR
+    assert assignment.branch == "feature-x"
+    runner = orchestrator.base_runner
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert any("checkout -f -B feature-x origin/feature-x" in c[2] for c in clone_calls)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "dispatched" in outcomes
+
+
+def test_issues_and_prs_are_merged_and_sorted_by_number_together():
+    # Two candidates for two sandboxes: PR #2 and issue #5. Since GitHub
+    # gives issues and PRs one shared number sequence per repo, sorting the
+    # merged candidate list by number alone is already "oldest trigger
+    # first" across both kinds -- #2 gets dispatched (and thus a sandbox)
+    # before #5.
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(5)]).encode()),          # list_issues
+        ApiResponse(200, {}, json.dumps([pr_trigger_json(2)]).encode()),     # list_pull_requests: candidate
+        ApiResponse(200, {}, json.dumps(pr_detail_json(2)).encode()),        # hydration
+        ApiResponse(200, {}, b"[]"),                                          # list_review_comments
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 2
+    assert orchestrator.state.assignments["sandbox-0"].kind is TriggerKind.PR
+    assert orchestrator.state.assignments["sandbox-1"].issue == 5
+    assert orchestrator.state.assignments["sandbox-1"].kind is TriggerKind.ISSUE
+
+
+def test_a_pr_candidate_is_skipped_when_the_pool_is_full_same_as_an_issue():
+    # The shared-budget decision: a PR-triggered candidate competes for the
+    # same free-sandbox pool as an issue-triggered one, no separate budget.
+    state = AutomationState()
+    state.assign("sandbox-0", issue=1, unit="grain-task-sandbox-0", now=NOW)
+    state.assign("sandbox-1", issue=2, unit="grain-task-sandbox-1", now=NOW)
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
+    )
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([]).encode()),                       # list_issues
+        ApiResponse(200, {}, json.dumps([pr_trigger_json(9)]).encode()),     # list_pull_requests: candidate
+        ApiResponse(200, {}, json.dumps(pr_detail_json(9)).encode()),        # hydration (candidates are
+                                                                               # always hydrated up front,
+                                                                               # same as list_issues already
+                                                                               # fully reads every issue)
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments  # still occupied, untouched
+    assert "sandbox-1" in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: no free sandbox" in outcomes
+
+
+def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),   # branch_exists("feature-x"): true
+        ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("pushed additional commits to PR #7" in o for o in outcomes)
+    # No PR-creation call at all -- the PR this dispatch worked already existed.
+    assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
+    mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
+    assert len(mutating) == 1  # only the in-progress label comes off
+
+
+def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b"not found"))  # branch_exists: false
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("does not exist" in o for o in outcomes)
+    assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
+    mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
+    assert len(mutating) == 2  # remove in-progress, add trigger back — same
+                               # requeue path a failed/stranded run takes

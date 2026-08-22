@@ -60,7 +60,7 @@ from grain.automation.dispatch import (
     WORKSPACE_PATH, UnitState, configure_git_credentials, dispatch,
     ensure_workspace, reap, start_unit, unit_status,
 )
-from grain.automation.github import Issue
+from grain.automation.github import Issue, PullRequestDetail, ReviewComment
 from grain.automation.ssh import SshRunner
 from grain.inventory import Cluster
 from grain.proxy.allowlist import Allowlist
@@ -360,6 +360,12 @@ class GitProxyTarget:
     # need to push a *second* commit (to exercise ensure_workspace's
     # fetch-and-reset path) push from here rather than through the sandbox.
     seed_clone: Path
+    # A second branch, pushed alongside `main` with distinct content — what
+    # docs/roadmap.md item 9's checkout-existing-branch tests reset/clone
+    # onto, standing in for a real PR's own branch (the equivalent of the
+    # single `main` branch every earlier test in this suite assumed was the
+    # only one that mattered).
+    pr_branch: str
 
 
 def _run_ok(argv: list[str], **kwargs) -> None:
@@ -388,6 +394,17 @@ def git_proxy_target(tmp_path: Path):
     _run_ok(["git", "-C", str(seed), "branch", "-M", "main"])
     _run_ok(["git", "-C", str(seed), "push", "-q", "origin", "main"])
     _run_ok(["git", "-C", str(bare), "symbolic-ref", "HEAD", "refs/heads/main"])
+
+    # A second branch, standing in for an existing PR's own branch
+    # (docs/roadmap.md item 9) — distinct content from main, so a test can
+    # tell "landed on the PR's branch" apart from "landed on the default
+    # branch" by what the checked-out file actually says.
+    pr_branch = "pr-feature-x"
+    _run_ok(["git", "-C", str(seed), "checkout", "-q", "-b", pr_branch])
+    (seed / "README.md").write_text("hello from the PR's own branch\n")
+    _run_ok(["git", "-C", str(seed), "commit", "-q", "-am", "pr work"])
+    _run_ok(["git", "-C", str(seed), "push", "-q", "origin", pr_branch])
+    _run_ok(["git", "-C", str(seed), "checkout", "-q", "main"])
 
     handler_cls = type(
         "BoundGitBackendHandler", (_GitBackendHandler,),
@@ -420,6 +437,7 @@ def git_proxy_target(tmp_path: Path):
         yield GitProxyTarget(
             remote_url=f"http://{_PROXY_HOST}:{_PROXY_PORT}/o/r.git",
             token=SANDBOX_TOKEN, bare_repo=bare, seed_clone=seed,
+            pr_branch=pr_branch,
         )
     finally:
         upstream.shutdown()
@@ -638,3 +656,92 @@ def test_ensure_workspace_fetches_and_resets_an_already_cloned_workspace(
         assert leftover.returncode != 0, "clean -fdx should have removed the leftover file"
     finally:
         ssh_runner.run(["rm", "-rf", workspace], check=False)
+
+
+# --- ensure_workspace(branch=...) / dispatch_pr against the real proxy
+# --- (docs/roadmap.md item 9): checking out an *existing* PR branch is new
+# --- territory even though ensure_workspace already existed for the
+# --- fresh-clone/default-branch case (item 2) — this is what actually
+# --- proves it against a real git client and a real (if throwaway) proxy,
+# --- not just the FakeRunner-scripted unit tests in test_automation_dispatch.py.
+
+def test_ensure_workspace_with_a_branch_clones_straight_onto_that_branch(
+    ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
+):
+    # First-ever dispatch to this sandbox for this PR: no existing workspace
+    # at all, so this exercises ensure_workspace's post-clone checkout —
+    # a plain `git clone` alone would land on `main`, not the PR's branch.
+    workspace = f"{WORKSPACE_PATH}-pr-first-clone-test"
+    try:
+        ensure_workspace(ssh_runner, git_proxy_target.remote_url, path=workspace,
+                          branch=git_proxy_target.pr_branch)
+        content = ssh_runner.run(["cat", f"{workspace}/README.md"]).stdout
+        assert content == "hello from the PR's own branch\n"
+        branch = ssh_runner.run(
+            ["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"]
+        ).stdout.strip()
+        assert branch == git_proxy_target.pr_branch
+    finally:
+        ssh_runner.run(["rm", "-rf", workspace], check=False)
+
+
+def test_ensure_workspace_with_a_branch_resets_an_existing_default_branch_checkout(
+    ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
+):
+    # The realistic PR-dispatch scenario on a long-lived sandbox: the
+    # workspace already exists from an *earlier, unrelated* dispatch on the
+    # default branch (an issue task), and this dispatch must land on the
+    # PR's own branch instead — not fetch-and-reset back onto origin/HEAD.
+    workspace = f"{WORKSPACE_PATH}-pr-reset-test"
+    try:
+        ensure_workspace(ssh_runner, git_proxy_target.remote_url, path=workspace)
+        first = ssh_runner.run(["cat", f"{workspace}/README.md"]).stdout
+        assert first == "hello from the live test upstream\n"
+
+        ensure_workspace(ssh_runner, git_proxy_target.remote_url, path=workspace,
+                          branch=git_proxy_target.pr_branch)
+        second = ssh_runner.run(["cat", f"{workspace}/README.md"]).stdout
+        assert second == "hello from the PR's own branch\n"
+        branch = ssh_runner.run(
+            ["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"]
+        ).stdout.strip()
+        assert branch == git_proxy_target.pr_branch
+    finally:
+        ssh_runner.run(["rm", "-rf", workspace], check=False)
+
+
+def test_dispatch_pr_writes_the_real_prompt_and_checks_out_the_prs_branch(
+    ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
+):
+    from grain.automation.dispatch import dispatch_pr
+
+    pr = PullRequestDetail(
+        number=11, title="a distinctive PR title marker",
+        body="a distinctive PR body marker",
+        html_url="https://github.com/o/r/pull/11",
+        head_ref=git_proxy_target.pr_branch, base_ref="main",
+    )
+    comments = [ReviewComment(id=1, user="reviewer", body="a distinctive comment marker",
+                               path="README.md", line=1)]
+    unit = dispatch_pr(
+        ssh_runner, "sandbox-0", pr, comments,
+        remote_url=git_proxy_target.remote_url, token=git_proxy_target.token,
+    )
+    try:
+        prompt = ssh_runner.run(["cat", f"/tmp/{unit}.md"]).stdout
+        assert "a distinctive PR title marker" in prompt
+        assert "a distinctive PR body marker" in prompt
+        assert "a distinctive comment marker" in prompt
+        assert f"git push origin HEAD:{git_proxy_target.pr_branch}" in prompt
+        # The workspace really landed on the PR's own branch, over the
+        # network, through the real GitProxy — before the unit (expected to
+        # fail: no `claude` binary on the stock image) was even started.
+        readme = ssh_runner.run(["cat", f"{WORKSPACE_PATH}/README.md"]).stdout
+        assert readme == "hello from the PR's own branch\n"
+        branch = ssh_runner.run(
+            ["git", "-C", WORKSPACE_PATH, "rev-parse", "--abbrev-ref", "HEAD"]
+        ).stdout.strip()
+        assert branch == git_proxy_target.pr_branch
+    finally:
+        reap(ssh_runner, unit)
+        ssh_runner.run(["rm", "-rf", WORKSPACE_PATH], check=False)

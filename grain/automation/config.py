@@ -16,8 +16,11 @@ from pathlib import Path
 class AutomationConfig:
     owner: str
     repo: str
-    # The prompt-injection gate from docs/design.md: only issues a human has
-    # already labelled are ever picked up.
+    # The prompt-injection gate from docs/design.md: only issues — and,
+    # since docs/roadmap.md item 9, only pull requests — a human has already
+    # labelled are ever picked up. One label, one human-gate meaning, for
+    # both trigger kinds; see core.py's module docstring for why a PR needs
+    # no separate label.
     trigger_label: str = "grain-agent"
     in_progress_label: str = "grain-agent-in-progress"
     # The PR base branch — the target repo's own default, almost always,
