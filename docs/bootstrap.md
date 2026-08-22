@@ -290,6 +290,34 @@ by actually booting a guest."* A bootstrap sequencer is exactly the kind of
 code where that is true again, which is why Phase 5 is a live run on the dev
 host and a runbook rewrite, not a green unit suite.
 
+## Where the code is
+
+Every touch point this design implies, so implementation does not start
+with a search:
+
+| What | Where |
+|---|---|
+| One key, all VMs — **the bug** | `grain/adapter/libvirt.py:214-218` (in `create`) |
+| Emits a single `public-keys` entry | `grain/adapter/libvirt.py:126` `render_meta_data` |
+| The single key path, and its default | `grain/adapter/libvirt.py:178-194` `__init__` |
+| `--ssh-public-key`, to split in two | `grain/cli.py:366` |
+| `Cluster(sandbox_count=…)` — every other field a source default | `grain/cli.py:52` |
+| `--sandboxes`, superseded by the cluster file | `grain/cli.py:362` |
+| `VmSpec.role`, which the key selection keys off | `grain/inventory.py`, `Role` / `VmSpec` |
+| `_wait_for_ssh`, `_wait_for_provisioning`, `booted_vms` — lift into `grain/adapter/` | `tests/loadtest.py:112`, `:129`, `:154` |
+| stdin-not-argv secret write, the shape to reuse | `grain/automation/dispatch.py:217` `configure_git_credentials` |
+| …and the test that asserts it, to mirror | `tests/test_automation_dispatch.py:46` |
+| `_host_ready()` + `skipif`, the gate for new live tests | `tests/test_vm_integration.py:106`, `:124` |
+| `ensure_token`, why runbook step 10 is already dead | `grain/proxy/tokens.py:74` |
+| Fourteen-step checklist, to rewrite last | `docs/runbook.md`, "First-time setup checklist" |
+| Gap list that shrinks as phases land | `docs/runbook.md`, "Gaps" |
+
+Docs to update when the phases land: `docs/runbook.md` (the checklist and
+the gap list), `docs/design.md` (the narrowed "host holds no secrets"
+claim), `docs/system-diagram.md` (its "Where the diagram is aspirational"
+section names the `--image` gap), and this file's status in
+`docs/roadmap.md`.
+
 ## Deferred
 
 **`/data` on its own disk.** `design.md` says *"on GCP, `/data` is a
