@@ -28,7 +28,7 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_claude_credentials, configure_github_credential, configure_repo,
+    configure_claude_token, configure_github_credential, configure_repo,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
@@ -390,7 +390,7 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     """`grain controller configure` -- docs/bootstrap.md Phase 3's third
     missing verb: writes `/data/config/automation.json`,
     `repo-allowlist.json`, and, if supplied, the GitHub token/credential
-    mapping and the Claude Code credential file. See
+    mapping and the Claude Code OAuth token. See
     `grain/automation/configure.py`.
     """
     cluster = build_cluster(args)
@@ -410,8 +410,8 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
         configure_github_credential(
             ssh, owner, repo, token, credential_name=args.credential_name,
         )
-    if args.claude_credentials_file:
-        configure_claude_credentials(ssh, Path(args.claude_credentials_file).read_text())
+    if args.claude_token_file:
+        configure_claude_token(ssh, Path(args.claude_token_file).read_text())
     return 0
 
 
@@ -429,16 +429,16 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
             sys.stdin.read() if args.github_token_file == "-"
             else Path(args.github_token_file).read_text()
         )
-    claude_credentials = (
-        Path(args.claude_credentials_file).read_text()
-        if args.claude_credentials_file else None
+    claude_token = (
+        Path(args.claude_token_file).read_text()
+        if args.claude_token_file else None
     )
     owner, _, repo = args.repo.partition("/")
     if not owner or not repo:
         raise SystemExit(f"--repo must be 'owner/name', got {args.repo!r}")
     config = BootstrapConfig(
         owner=owner, repo=repo, github_token=github_token,
-        credential_name=args.credential_name, claude_credentials=claude_credentials,
+        credential_name=args.credential_name, claude_token=claude_token,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
@@ -667,9 +667,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
                     help="credentials.json entry name for --github-token-file (default: bot)")
-    p.add_argument("--claude-credentials-file",
-                    help="path to a Claude Code ~/.claude/.credentials.json to place on the "
-                         "controller and inject into every sandbox")
+    p.add_argument("--claude-token-file",
+                    help="path to a file holding a Claude Code OAuth token (from `claude "
+                         "setup-token`) to place on the controller and inject into the "
+                         "grain-agent account's environment at dispatch time")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
@@ -764,9 +765,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
                     help="credentials.json entry name for --github-token-file (default: bot)")
-    p.add_argument("--claude-credentials-file",
-                    help="path to a Claude Code ~/.claude/.credentials.json to place on the "
-                         "controller")
+    p.add_argument("--claude-token-file",
+                    help="path to a file holding a Claude Code OAuth token (from `claude "
+                         "setup-token`) to place on the controller")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")

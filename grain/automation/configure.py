@@ -19,17 +19,13 @@ import json
 import secrets
 from pathlib import PurePosixPath
 
+from .dispatch import CONTROLLER_AGENT_TOKEN_PATH
 from ..run import Runner
 
 DATA_CONFIG = "/data/config"
 DATA_SECRETS_GITHUB = "/data/secrets/github"
-CLAUDE_CREDENTIALS_PATH = "/data/secrets/claude-credentials.json"
+CLAUDE_TOKEN_PATH = "/data/secrets/claude-oauth-token"
 SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
-# Where the live copy `claude -p` actually reads goes now that it runs on
-# the controller as the dedicated `grain-agent` account (docs/roadmap.md
-# item 8's "Update", provision/controller.sh) instead of on a sandbox.
-_AGENT_CREDENTIALS_DIR = "/home/grain-agent/.claude"
-_AGENT_CREDENTIALS_PATH = f"{_AGENT_CREDENTIALS_DIR}/.credentials.json"
 
 
 def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
@@ -89,23 +85,33 @@ def configure_github_credential(runner: Runner, owner: str, repo: str, token: st
     )
 
 
-def configure_claude_credentials(runner: Runner, credentials_json: str) -> None:
-    """Places a Claude Code OAuth credential on the controller -- one login
+def configure_claude_token(runner: Runner, token: str) -> None:
+    """Places a Claude Code OAuth token on the controller -- one token
     placed once, not one per sandbox (docs/bootstrap.md, "The Claude
-    credential"). Two copies, both written here now (docs/roadmap.md item
-    8's "Update" folded the old per-sandbox injection loop, formerly in
+    credential"). Two copies, both written here (docs/roadmap.md item 8's
+    "Update" folded the old per-sandbox injection loop, formerly in
     `grain/bootstrap.py` stage 9, into this single controller-side step,
     since `claude -p` runs on the controller now and no sandbox needs any
     Claude credential at all):
 
-    - `CLAUDE_CREDENTIALS_PATH`, a root-owned reference copy under
+    - `CLAUDE_TOKEN_PATH`, a root-owned reference copy under
       `/data/secrets`, matching every other credential this module places;
-    - `_AGENT_CREDENTIALS_PATH`, the live copy `claude -p` actually reads,
-      owned by the dedicated `grain-agent` account it runs as
+    - `CONTROLLER_AGENT_TOKEN_PATH`, the live copy `dispatch.py`'s own
+      unit script reads into `CLAUDE_CODE_OAUTH_TOKEN` at runtime, owned by
+      the dedicated `grain-agent` account it runs as
       (`provision/controller.sh`) rather than root.
+
+    `token` is a bare `claude setup-token` value (e.g. `sk-ant-oat01-...`),
+    not a full `~/.claude/.credentials.json` -- deliberately a *different*
+    credential from any operator's own interactive `claude login` session,
+    kept separate so this deployment's dispatch traffic never rides on a
+    personal login (`dispatch.py`'s `CONTROLLER_AGENT_TOKEN_PATH` docstring
+    has the full reasoning for the env-var delivery this implies, including
+    why it's safe now in a way it wasn't when `claude -p` ran on a sandbox).
     """
-    _write_remote_file(runner, CLAUDE_CREDENTIALS_PATH, credentials_json, mode="600")
-    _write_remote_file(runner, _AGENT_CREDENTIALS_PATH, credentials_json, mode="600",
+    stripped = token.strip()
+    _write_remote_file(runner, CLAUDE_TOKEN_PATH, stripped, mode="600")
+    _write_remote_file(runner, CONTROLLER_AGENT_TOKEN_PATH, stripped, mode="600",
                         owner="grain-agent")
 
 

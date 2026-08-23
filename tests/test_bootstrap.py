@@ -256,7 +256,7 @@ def test_claude_credentials_reach_the_controllers_grain_agent_account_not_any_sa
         sandbox_states=[("sandbox-0", "running")],
     )
     config = BootstrapConfig(
-        owner="acme", repo="widgets", claude_credentials='{"accessToken": "x"}',
+        owner="acme", repo="widgets", claude_token="sk-ant-oat01-fake",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
@@ -264,15 +264,15 @@ def test_claude_credentials_reach_the_controllers_grain_agent_account_not_any_sa
     controller_dd_calls = [
         stdin for argv, stdin in runner.calls
         if argv and argv[0] == "ssh" and "dd" in argv[-1]
-        and "/home/grain-agent/.claude/.credentials.json" in argv[-1]
+        and "/home/grain-agent/.claude-oauth-token" in argv[-1]
         and shlex.join(argv).startswith(controller_prefix)
     ]
-    assert controller_dd_calls == ['{"accessToken": "x"}']
+    assert controller_dd_calls == ["sk-ant-oat01-fake"]
 
     sandbox_prefix = ssh_prefix("debian", str(cluster.address_of("sandbox-0")), admin_private)
     sandbox_claude_calls = [
         argv for argv, _ in runner.calls
-        if argv and argv[0] == "ssh" and ".claude" in argv[-1]
+        if argv and argv[0] == "ssh" and "claude" in argv[-1].lower()
         and shlex.join(argv).startswith(sandbox_prefix)
     ]
     assert sandbox_claude_calls == []

@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 
 from grain.automation.configure import (
-    configure_claude_credentials, configure_github_credential, configure_repo,
+    configure_claude_token, configure_github_credential, configure_repo,
     ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
@@ -161,11 +161,33 @@ def test_ensure_sandbox_tokens_is_a_no_op_when_every_sandbox_already_has_one():
     assert not any("dd of=/data/secrets/sandbox-tokens.json" in c for c in inner.commands)
 
 
-def test_configure_claude_credentials_writes_to_the_fixed_path_mode_600():
+def test_configure_claude_token_writes_the_reference_copy_mode_600():
     ssh, inner = make_ssh()
-    configure_claude_credentials(ssh, '{"accessToken": "x"}')
-    content = stdin_for(inner, "/data/secrets/claude-credentials.json")
-    assert content == '{"accessToken": "x"}'
+    configure_claude_token(ssh, "sk-ant-oat01-fake\n")
+    content = stdin_for(inner, "/data/secrets/claude-oauth-token")
+    assert content == "sk-ant-oat01-fake"  # stripped
     assert any(
-        "sudo chmod 600 /data/secrets/claude-credentials.json" in c for c in inner.commands
+        "sudo chmod 600 /data/secrets/claude-oauth-token" in c for c in inner.commands
     )
+
+
+def test_configure_claude_token_writes_the_live_copy_owned_by_grain_agent():
+    ssh, inner = make_ssh()
+    configure_claude_token(ssh, "sk-ant-oat01-fake")
+    content = stdin_for(inner, "/home/grain-agent/.claude-oauth-token")
+    assert content == "sk-ant-oat01-fake"
+    assert any(
+        "sudo chmod 600 /home/grain-agent/.claude-oauth-token" in c for c in inner.commands
+    )
+    assert any(
+        "sudo chown grain-agent:grain-agent /home/grain-agent/.claude-oauth-token" in c
+        for c in inner.commands
+    )
+
+
+def test_configure_claude_token_is_never_in_argv():
+    ssh, inner = make_ssh()
+    secret = "sk-ant-oat01-supersecretvalue"
+    configure_claude_token(ssh, secret)
+    for argv, _ in inner.calls:
+        assert all(secret not in arg for arg in argv)

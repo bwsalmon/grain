@@ -49,10 +49,15 @@ id -u grain-metadata >/dev/null 2>&1 || \
 # spawns as a child — grain/automation/mcp_server.py) runs as, per dispatch
 # (docs/roadmap.md item 8's "Update"). Unlike grain-metadata this one needs
 # a real home directory: `claude`'s own installer targets ~/.local/bin, and
-# its OAuth credential lives at ~/.claude/.credentials.json (placed by
-# `configure_claude_credentials`, grain/automation/configure.py). Never
-# root, and never the account grain-automation.service itself runs as —
-# this is specifically the account that runs untrusted-issue-driven agent
+# its own OAuth token lives at ~/.claude-oauth-token (placed by
+# `configure_claude_token`, grain/automation/configure.py) — a bare `claude
+# setup-token` value, deliberately kept separate from any operator's own
+# `claude login` session, read into `CLAUDE_CODE_OAUTH_TOKEN` at runtime by
+# `dispatch.py`'s own unit script rather than a `~/.claude/.credentials.json`
+# file (see `CONTROLLER_AGENT_TOKEN_PATH`'s docstring in dispatch.py for why
+# an env var is safe here, unlike when `claude -p` ran on the sandbox).
+# Never root, and never the account grain-automation.service itself runs as
+# — this is specifically the account that runs untrusted-issue-driven agent
 # sessions, and the whole point of moving `claude -p` here from the sandbox
 # was to stop giving that session anything worth taking.
 id -u grain-agent >/dev/null 2>&1 || \
@@ -214,8 +219,9 @@ Still manual, per docs/runbook.md's first-time setup checklist:
 - copying /data/secrets/controller-ssh.pub to the host, for
   LibvirtAdapter.ssh_public_key_path to embed into sandboxes it creates
 - enabling grain-git-proxy.service and grain-automation.timer
-- a Claude Code login for grain-agent, placed via
-  `configure_claude_credentials` (grain/automation/configure.py) — one
-  login for the whole pool, never one per sandbox, and never touching a
-  sandbox at all now
+- a Claude Code OAuth token (`claude setup-token`, deliberately separate
+  from any operator's own `claude login` session) for grain-agent, placed
+  via `configure_claude_token` (grain/automation/configure.py) — one token
+  for the whole pool, never one per sandbox, and never touching a sandbox
+  at all now
 DOC

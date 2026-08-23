@@ -33,7 +33,7 @@ from .adapter.deploy import deploy_tree
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
-    configure_claude_credentials, configure_github_credential, configure_repo,
+    configure_claude_token, configure_github_credential, configure_repo,
     ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
@@ -49,7 +49,7 @@ class BootstrapConfig:
     repo: str
     github_token: str | None = None
     credential_name: str = "bot"
-    claude_credentials: str | None = None
+    claude_token: str | None = None
     github_host: str = "api.github.com"
     git_forward_host: str = "github.com"
     github_use_tls: bool = True
@@ -182,8 +182,8 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
             admin_ssh, config.owner, config.repo, config.github_token,
             credential_name=config.credential_name,
         )
-    if config.claude_credentials:
-        configure_claude_credentials(admin_ssh, config.claude_credentials)
+    if config.claude_token:
+        configure_claude_token(admin_ssh, config.claude_token)
 
     # Stage 9: sandboxes.
     log("stage 9/11: sandboxes")
@@ -211,10 +211,10 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
             ])
         # No Claude credential is ever placed on a sandbox (docs/roadmap.md
         # item 8's "Update") -- `claude -p` runs on the controller now, and
-        # stage 8's `configure_claude_credentials` call already places both
-        # the controller's own reference copy and the live copy the
-        # controller-side `grain-agent` account actually reads. A sandbox
-        # holds nothing worth protecting anymore.
+        # stage 8's `configure_claude_token` call already places both the
+        # controller's own reference copy and the live copy the
+        # controller-side `grain-agent` account reads into its environment
+        # at dispatch time. A sandbox holds nothing worth protecting anymore.
 
     # Mint every sandbox's git-proxy token before the proxy itself starts
     # (stage 10) -- see `ensure_sandbox_tokens`'s own docstring for the

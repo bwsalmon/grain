@@ -43,7 +43,7 @@ from grain.adapter.deploy import deploy_tree
 from grain.adapter.libvirt import LIBVIRT_URI, LibvirtAdapter
 from grain.adapter.net_linux import LinuxNetwork
 from grain.adapter.wait import wait_for_provisioning, wait_for_ssh
-from grain.automation.configure import configure_claude_credentials, configure_repo
+from grain.automation.configure import configure_claude_token, configure_repo
 from grain.automation.ssh import SshRunner
 from grain.inventory import Cluster
 from grain.run import RealRunner
@@ -250,30 +250,31 @@ def test_configure_repo_writes_real_files_as_root_over_ssh(two_key_sandbox, admi
     assert "acme/widgets" in allowlist
 
 
-def test_configure_claude_credentials_writes_mode_600(two_key_sandbox, admin_ssh):
-    admin_ssh.run(["sudo", "rm", "-f", "/data/secrets/claude-credentials.json"])
-    configure_claude_credentials(admin_ssh, '{"accessToken": "tok"}')
+def test_configure_claude_token_writes_mode_600(two_key_sandbox, admin_ssh):
+    admin_ssh.run(["sudo", "rm", "-f", "/data/secrets/claude-oauth-token"])
+    configure_claude_token(admin_ssh, "sk-ant-oat01-fake")
     # 600, root-owned: the unprivileged admin SSH user must NOT be able to
     # read this directly -- verifying that is as much the point here as
     # verifying the content is right via sudo.
-    denied = admin_ssh.run(["cat", "/data/secrets/claude-credentials.json"], check=False)
+    denied = admin_ssh.run(["cat", "/data/secrets/claude-oauth-token"], check=False)
     assert denied.returncode != 0
     assert "Permission denied" in denied.stderr
-    result = admin_ssh.run(["sudo", "cat", "/data/secrets/claude-credentials.json"])
-    assert result.stdout == '{"accessToken": "tok"}'
+    result = admin_ssh.run(["sudo", "cat", "/data/secrets/claude-oauth-token"])
+    assert result.stdout == "sk-ant-oat01-fake"
     mode = admin_ssh.run(
-        ["sudo", "stat", "-c", "%a", "/data/secrets/claude-credentials.json"]
+        ["sudo", "stat", "-c", "%a", "/data/secrets/claude-oauth-token"]
     ).stdout.strip()
     assert mode == "600"
 
-    # docs/roadmap.md item 8's "Update": the live copy claude -p actually
-    # reads now, owned by the dedicated grain-agent account it runs as
-    # (provision/controller.sh) -- not any sandbox.
+    # docs/roadmap.md item 8's "Update": the live copy dispatch.py's own
+    # unit script reads into CLAUDE_CODE_OAUTH_TOKEN at runtime, owned by
+    # the dedicated grain-agent account it runs as (provision/controller.sh)
+    # -- not any sandbox.
     live_mode = admin_ssh.run(
-        ["sudo", "stat", "-c", "%a %U:%G", "/home/grain-agent/.claude/.credentials.json"]
+        ["sudo", "stat", "-c", "%a %U:%G", "/home/grain-agent/.claude-oauth-token"]
     ).stdout.strip()
     assert live_mode == "600 grain-agent:grain-agent"
     live_content = admin_ssh.run(
-        ["sudo", "cat", "/home/grain-agent/.claude/.credentials.json"]
+        ["sudo", "cat", "/home/grain-agent/.claude-oauth-token"]
     ).stdout
-    assert live_content == '{"accessToken": "tok"}'
+    assert live_content == "sk-ant-oat01-fake"
