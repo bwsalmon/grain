@@ -195,7 +195,7 @@ def booted_sandbox(base_image, controller_key):
     network = LinuxNetwork(cluster, runner)
     adapter = LibvirtAdapter(
         cluster, runner, network, config_dir=config_dir,
-        ssh_public_key_path=public_key,
+        controller_public_key_path=public_key,
     )
     name = "sandbox-0"
     try:

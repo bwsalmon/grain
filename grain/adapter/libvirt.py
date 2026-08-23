@@ -30,9 +30,10 @@ object at all — one less layer than Lima's own network abstraction required.
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Sequence
 from pathlib import Path
 
-from ..inventory import Cluster, VmSpec
+from ..inventory import Cluster, Role, VmSpec
 from ..run import Runner
 from .base import HostAdapter, Network, VmInfo, VmState
 
@@ -123,20 +124,29 @@ def render_domain_xml(cluster: Cluster, spec: VmSpec, disk_path: Path,
 """
 
 
-def render_meta_data(name: str, ssh_public_key: str | None = None) -> str:
+def render_meta_data(name: str, ssh_public_keys: Sequence[str] = ()) -> str:
     """cloud-init NoCloud meta-data.
 
     `public-keys` is honoured independent of the user-data format, so this
     is the one place to hand the default user an authorized key even though
     `render_user_data` repurposes user-data as a raw provisioning script
     rather than a `#cloud-config`. Without it, nothing outside the guest
-    console can reach a sandbox — see docs/design.md, "Admin entry"; this is
-    what gives the controller (not just a human) a way in, for the
-    automation dispatch loop.
+    console can reach a VM — see docs/design.md, "Admin entry"; this is what
+    gives both a human admin and the controller (for the automation dispatch
+    loop) a way in.
+
+    Takes a *sequence* of keys, not one (docs/bootstrap.md Phase 1): cloud-init
+    accepts one `public-keys` entry per key, which is what lets a VM carry
+    two independently-purposed keys at once — an admin key (controller and
+    every sandbox, for setup/repair/debugging) and the controller's own key
+    (sandboxes only, for automation dispatch) — see `LibvirtAdapter.create`.
+    Blank/falsy entries are skipped, so callers can pass a fixed two-item
+    list built from possibly-absent files without filtering it themselves.
     """
     meta = f"instance-id: {name}\nlocal-hostname: {name}\n"
-    if ssh_public_key:
-        meta += f"public-keys:\n  - {ssh_public_key.strip()}\n"
+    keys = [k.strip() for k in ssh_public_keys if k and k.strip()]
+    if keys:
+        meta += "public-keys:\n" + "".join(f"  - {k}\n" for k in keys)
     return meta
 
 
@@ -177,21 +187,36 @@ def render_network_config(cluster: Cluster, spec: VmSpec) -> str:
 class LibvirtAdapter(HostAdapter):
     def __init__(self, cluster: Cluster, runner: Runner, network: Network,
                  config_dir: Path | None = None,
-                 ssh_public_key_path: Path | None = None) -> None:
+                 admin_public_key_path: Path | None = None,
+                 controller_public_key_path: Path | None = None) -> None:
         super().__init__(cluster, network)
         self.runner = runner
         self.config_dir = config_dir or Path("/var/lib/grain/instances")
-        # Host-local, deliberately not /data/secrets/... — /data lives on
-        # the *controller* VM, and this adapter runs on the *host*, a
+        # Both host-local, deliberately not /data/secrets/... — /data lives
+        # on the *controller* VM, and this adapter runs on the *host*, a
         # different machine (docs/design.md, "One host machine runs
-        # everything"). The controller generates its own SSH keypair on
-        # first boot (provision/controller.sh) and this is only ever the
-        # *public* half, copied here once by an operator (docs/runbook.md,
-        # "Generate the controller SSH keypair") — not a secret, so this
-        # being a plain host path with no special protection is fine.
-        # Mirrors `config_dir`'s own host-local default one directory up.
-        self.ssh_public_key_path = (
-            ssh_public_key_path or Path("/var/lib/grain/controller-ssh.pub")
+        # everything"). Mirrors `config_dir`'s own host-local default one
+        # directory up. Two keys, two roles (docs/bootstrap.md Phase 1 — the
+        # bug this replaces: one key path fed to every VM, which left the
+        # controller with no authorized key at all until an operator's own
+        # key was pasted in and then overwritten):
+        #
+        #   admin       -> controller AND every sandbox. For setup, repair,
+        #                  and admin debugging access — see docs/design.md,
+        #                  "Admin entry". Not a secret at this path; only
+        #                  the *public* half ever lives here.
+        #   controller  -> sandboxes only. The automation dispatch path;
+        #                  the controller generates this keypair itself on
+        #                  first boot (provision/controller.sh) and this is
+        #                  only ever the *public* half, read back by
+        #                  `grain host bootstrap` once the controller is up
+        #                  (docs/runbook.md's old "copy the pubkey to the
+        #                  host" step, now scripted).
+        self.admin_public_key_path = (
+            admin_public_key_path or Path("/var/lib/grain/admin-ssh.pub")
+        )
+        self.controller_public_key_path = (
+            controller_public_key_path or Path("/var/lib/grain/controller-ssh.pub")
         )
 
     # --- lifecycle --------------------------------------------------------
@@ -211,11 +236,20 @@ class LibvirtAdapter(HostAdapter):
         meta_data_path = self.config_dir / f"{spec.name}-meta-data"
         user_data_path = self.config_dir / f"{spec.name}-user-data"
         network_config_path = self.config_dir / f"{spec.name}-network-config"
-        ssh_public_key = (
-            self.ssh_public_key_path.read_text()
-            if self.ssh_public_key_path.exists() else None
+        admin_key = (
+            self.admin_public_key_path.read_text()
+            if self.admin_public_key_path.exists() else ""
         )
-        meta_data_path.write_text(render_meta_data(spec.name, ssh_public_key))
+        controller_key = (
+            self.controller_public_key_path.read_text()
+            if self.controller_public_key_path.exists() else ""
+        )
+        # Role -> keys: the controller trusts only the admin key (it has no
+        # automation dispatch path pointed at itself); a sandbox trusts both
+        # — the admin key for direct debugging access, the controller key
+        # for automation dispatch. See __init__'s docstring.
+        keys = [admin_key] if spec.role is Role.CONTROLLER else [admin_key, controller_key]
+        meta_data_path.write_text(render_meta_data(spec.name, keys))
         user_data_path.write_text(render_user_data(provision_script))
         network_config_path.write_text(render_network_config(self.cluster, spec))
 

@@ -133,22 +133,55 @@ def test_meta_data_omits_public_keys_by_default():
     assert "public-keys" not in render_meta_data("sandbox-0")
 
 
-def test_meta_data_embeds_the_controller_key_when_given():
-    out = render_meta_data("sandbox-0", "ssh-ed25519 AAAAtest controller\n")
+def test_meta_data_embeds_one_key():
+    out = render_meta_data("sandbox-0", ["ssh-ed25519 AAAAtest controller\n"])
     assert "public-keys:\n  - ssh-ed25519 AAAAtest controller\n" in out
 
 
-def test_create_embeds_the_controller_key_when_present(cluster, tmp_path):
+def test_meta_data_embeds_multiple_keys_one_entry_each():
+    out = render_meta_data("sandbox-0", ["ssh-ed25519 AAAAtest admin", "ssh-ed25519 BBBBtest controller"])
+    assert out.count("  - ") == 2
+    assert "  - ssh-ed25519 AAAAtest admin\n" in out
+    assert "  - ssh-ed25519 BBBBtest controller\n" in out
+
+
+def test_meta_data_skips_blank_keys():
+    out = render_meta_data("sandbox-0", ["", "ssh-ed25519 AAAAtest admin"])
+    assert out.count("  - ") == 1
+
+
+def test_create_embeds_the_admin_key_on_the_controller_only(cluster, tmp_path):
     runner = FakeRunner()
     network = LinuxNetwork(cluster, runner)
-    key_path = tmp_path / "controller-ssh.pub"
-    key_path.write_text("ssh-ed25519 AAAAtest controller\n")
+    admin_key = tmp_path / "admin-ssh.pub"
+    admin_key.write_text("ssh-ed25519 AAAAtest admin\n")
+    controller_key = tmp_path / "controller-ssh.pub"
+    controller_key.write_text("ssh-ed25519 BBBBtest controller\n")
     a = LibvirtAdapter(cluster, runner, network, config_dir=tmp_path / "instances",
-                        ssh_public_key_path=key_path)
+                        admin_public_key_path=admin_key,
+                        controller_public_key_path=controller_key)
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    a.create(cluster.spec_of("controller"))
+    meta_data = (tmp_path / "instances" / "controller-meta-data").read_text()
+    assert "ssh-ed25519 AAAAtest admin" in meta_data
+    assert "ssh-ed25519 BBBBtest controller" not in meta_data
+
+
+def test_create_embeds_both_keys_on_a_sandbox(cluster, tmp_path):
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    admin_key = tmp_path / "admin-ssh.pub"
+    admin_key.write_text("ssh-ed25519 AAAAtest admin\n")
+    controller_key = tmp_path / "controller-ssh.pub"
+    controller_key.write_text("ssh-ed25519 BBBBtest controller\n")
+    a = LibvirtAdapter(cluster, runner, network, config_dir=tmp_path / "instances",
+                        admin_public_key_path=admin_key,
+                        controller_public_key_path=controller_key)
     runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     a.create(cluster.spec_of("sandbox-0"))
     meta_data = (tmp_path / "instances" / "sandbox-0-meta-data").read_text()
-    assert "ssh-ed25519 AAAAtest controller" in meta_data
+    assert "ssh-ed25519 AAAAtest admin" in meta_data
+    assert "ssh-ed25519 BBBBtest controller" in meta_data
 
 
 def test_create_omits_public_keys_when_no_key_file_present(adapter, cluster, tmp_path):
@@ -159,7 +192,7 @@ def test_create_omits_public_keys_when_no_key_file_present(adapter, cluster, tmp
     assert "public-keys" not in meta_data
 
 
-def test_ssh_public_key_path_defaults_host_local_not_data(cluster):
+def test_key_paths_default_host_local_not_data(cluster):
     """/data lives on the controller; this adapter runs on the host, a
     different machine (docs/design.md's host/controller split) -- so the
     default must not assume a shared /data.
@@ -167,7 +200,8 @@ def test_ssh_public_key_path_defaults_host_local_not_data(cluster):
     runner = FakeRunner()
     network = LinuxNetwork(cluster, runner)
     a = LibvirtAdapter(cluster, runner, network)
-    assert str(a.ssh_public_key_path) == "/var/lib/grain/controller-ssh.pub"
+    assert str(a.admin_public_key_path) == "/var/lib/grain/admin-ssh.pub"
+    assert str(a.controller_public_key_path) == "/var/lib/grain/controller-ssh.pub"
 
 
 def test_recreate_destroys_then_creates_then_starts(adapter, cluster):

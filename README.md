@@ -8,11 +8,13 @@ the controller turns into a PR.
 The point of the design is the credential boundary: **agents hold no
 GitHub or GCP credentials.** A sandbox's only routes out are a git proxy
 and a metadata server, both on the controller, both allowlist-checked and
-audit-logged. The host itself holds nothing — every secret lives on the
-controller's `/data`.
+audit-logged. The host itself holds no *system* credential — no GitHub
+token, no GCP key, no sandbox token — every one of those lives on the
+controller's `/data`. It does hold one thing: an admin SSH key, for direct
+setup/repair/debugging access to the controller and every sandbox.
 
 ```
-host (Debian, KVM, no secrets)
+host (Debian, KVM, no system credentials)
 ├── controller VM        automation loop · git proxy · one metadata server per sandbox · /data
 ├── sandbox-0            claude · docker · kind
 └── sandbox-1            claude · docker · kind
@@ -24,8 +26,9 @@ host (Debian, KVM, no secrets)
 - **[`docs/design.md`](docs/design.md)** — the reasoning: why a VM per
   agent, the credential ladder, the threat model, what earlier revisions
   traded away.
-- **[`docs/bootstrap.md`](docs/bootstrap.md)** — the design for collapsing
-  the fourteen-step setup into one command.
+- **[`docs/bootstrap.md`](docs/bootstrap.md)** — the design behind
+  `grain host bootstrap`, which collapses the old fourteen-step setup into
+  one command.
 - **[`docs/runbook.md`](docs/runbook.md)** — the operator procedure, in
   more detail than this file, including rotation, stranded sandboxes, and
   the known gaps.
@@ -118,6 +121,26 @@ grain --dry-run host up           # print every command, run none
 
 ## Bring it up
 
+### The one-command path
+
+```sh
+sudo python3 -m grain.cli host bootstrap \
+  --repo your-org/your-repo \
+  --github-token-file /path/to/token          # or '-' to pipe it in
+  # --claude-credentials-file ~/.claude/.credentials.json   # optional
+```
+
+`docs/bootstrap.md`'s sequencer (`grain/bootstrap.py`): network up,
+controller created and booted, an admin SSH keypair generated if none
+exists yet (`/var/lib/grain/admin-ssh{,.pub}` by default — trusted by the
+controller *and* every sandbox, see "Admin access" below), the
+controller's own key read back automatically, this tree deployed to
+`/opt/grain`, `/data` configured, every sandbox created, the git proxy and
+automation timer enabled. `--dry-run` previews every command with nothing
+touched; every stage checks what's already converged, so a re-run after a
+failure resumes rather than redoing completed work. The sections below walk
+through what each stage does, for debugging it or doing a step by hand.
+
 ### 1. Network
 
 ```sh
@@ -160,20 +183,45 @@ It deliberately does **not** deploy this repo's code and does **not**
 enable any service. No secret is ever baked into a provisioning script,
 and both of those steps need real data.
 
-**Carry the controller's public key to the host.** This is the one step
-nothing here can script: the key is generated *on* the controller, and
-`LibvirtAdapter` — which runs *on the host* — needs it to inject as each
-sandbox's authorized key. Do this before creating sandboxes; a sandbox
-created first gets no authorized key at all and is silently unreachable.
+**Carry the controller's public key to the host.** The key is generated
+*on* the controller, and `LibvirtAdapter` — which runs *on the host* —
+needs it to inject as each sandbox's authorized key. Do this before
+creating sandboxes; a sandbox created first gets no controller-role
+authorized key at all and is unreachable from the automation dispatch path
+(though still reachable by the admin key below).
+
+This is scripted now — `grain host wait` blocks until the controller
+answers SSH and finishes cloud-init, and reading the key back only needs a
+non-interactive SSH hop if the host already holds an **admin** key the
+controller trusts (see "Admin access" below):
 
 ```sh
-# on the host, once the controller has booted (10.100.0.2 by default)
-ssh debian@10.100.0.2 cat /data/secrets/controller-ssh.pub \
+sudo python3 -m grain.cli host wait controller
+ssh -i /var/lib/grain/admin-ssh debian@10.100.0.2 \
+  cat /data/secrets/controller-ssh.pub \
   | sudo tee /var/lib/grain/controller-ssh.pub > /dev/null
 ```
 
-`/var/lib/grain/controller-ssh.pub` is the default `--ssh-public-key`
-path; override the flag to keep it elsewhere.
+`/var/lib/grain/controller-ssh.pub` is the default
+`--controller-ssh-public-key` path; override the flag to keep it elsewhere.
+(`host bootstrap` above does all of this automatically.)
+
+### Admin access
+
+Two keys, two purposes (`grain/adapter/libvirt.py`, `LibvirtAdapter.create`):
+an **admin** key, trusted by the controller *and* every sandbox, for setup,
+repair, and debugging; the **controller**'s own key, trusted by sandboxes
+only, for the automation dispatch path. `host bootstrap` generates the
+admin key itself if `--admin-ssh-public-key` doesn't exist yet.
+
+```sh
+sudo python3 -m grain.cli sandbox login sandbox-0     # or 'controller'
+```
+
+Direct, interactive SSH using the admin key — no hop through the
+controller first. For a stuck `kind` cluster, a wedged docker daemon,
+anything `grain host health`/`cleanup`/`sessions browse` doesn't give
+enough visibility into.
 
 ### 3. Sandbox VMs
 
@@ -190,17 +238,28 @@ node image, and sets `kernel.yama.ptrace_scope = 2`.
 ### 4. Deploy the code to the controller
 
 ```sh
-ssh debian@10.100.0.2 sudo git clone <your-remote> /opt/grain
+sudo python3 -m grain.cli host deploy
 ```
 
-`/opt/grain` is created empty by the provisioning script. Since `grain`
-has no third-party dependencies, the source tree is the whole deployment.
+No credential needed — `grain/adapter/deploy.py` pipes a `tar` of this
+working tree over the admin SSH path and extracts it as root; `/opt/grain`
+is created empty by the provisioning script. Since `grain` has no
+third-party dependencies, the source tree is the whole deployment. (The
+manual equivalent, `ssh debian@10.100.0.2 sudo git clone <remote>
+/opt/grain`, still works if you'd rather deploy from a remote directly.)
 
 ## Configure
 
 Everything below lives on the controller, under `/data`. Nothing here is
 generated for you — this is the per-deployment data that a provisioning
 script has no business holding.
+
+`grain controller configure --repo owner/name --github-token-file PATH`
+writes `automation.json`, `repo-allowlist.json`, the token file, and the
+`credentials.json` entry pointing at it, over the admin SSH path (stdin,
+never argv). `host bootstrap` calls this for you; running it on its own is
+for adding a repo, rotating a token, or placing a Claude credential later
+without a full bootstrap re-run.
 
 ```
 /data/

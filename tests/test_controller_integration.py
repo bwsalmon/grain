@@ -18,7 +18,7 @@ for the sandbox side. This checks that the *provisioning* left the guest in
 the state the rest of docs/runbook.md's first-time setup checklist assumes:
 the right packages, users, directory layout, and unit files.
 
-The SSH key injected here via `ssh_public_key_path` is a throwaway *test*
+The SSH key injected here via `admin_public_key_path` is a throwaway *test*
 identity used only so this suite can log in and inspect the guest -- it is
 not standing in for the controller's own dispatch keypair (which the
 script generates *on* the controller, at `/data/secrets/controller-ssh`,
@@ -138,7 +138,7 @@ def booted_controller(base_image, admin_key):
     network = LinuxNetwork(cluster, runner)
     adapter = LibvirtAdapter(
         cluster, runner, network, config_dir=config_dir,
-        ssh_public_key_path=public_key,
+        admin_public_key_path=public_key,
     )
     name = cluster.controller_name
     address = cluster.address_of(name)

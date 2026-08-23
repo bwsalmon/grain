@@ -89,27 +89,50 @@ def test_provision_with_a_specific_target_is_still_allowed(tmp_path, capsys):
     assert "+ virsh -c qemu:///system define" in out
 
 
-def test_ssh_public_key_flows_into_created_vms(tmp_path, capsys):
-    pubkey = tmp_path / "controller-ssh.pub"
-    pubkey.write_text("ssh-ed25519 AAAAtest controller\n")
+def test_admin_ssh_public_key_flows_into_created_vms(tmp_path, capsys):
+    pubkey = tmp_path / "admin-ssh.pub"
+    pubkey.write_text("ssh-ed25519 AAAAtest admin\n")
     config_dir = tmp_path / "instances"
     run(
         ["--dry-run", "--config-dir", str(config_dir),
-         "--ssh-public-key", str(pubkey), "host", "create", "sandbox-0"],
+         "--admin-ssh-public-key", str(pubkey), "host", "create", "sandbox-0"],
         capsys,
     )
     meta_data = (config_dir / "sandbox-0-meta-data").read_text()
-    assert "ssh-ed25519 AAAAtest controller" in meta_data
+    assert "ssh-ed25519 AAAAtest admin" in meta_data
 
 
-def test_ssh_public_key_defaults_to_a_host_local_path():
+def test_controller_ssh_public_key_flows_into_created_sandboxes_only(tmp_path, capsys):
+    pubkey = tmp_path / "controller-ssh.pub"
+    pubkey.write_text("ssh-ed25519 BBBBtest controller\n")
+    config_dir = tmp_path / "instances"
+    run(
+        ["--dry-run", "--config-dir", str(config_dir),
+         "--controller-ssh-public-key", str(pubkey), "host", "create", "sandbox-0"],
+        capsys,
+    )
+    meta_data = (config_dir / "sandbox-0-meta-data").read_text()
+    assert "ssh-ed25519 BBBBtest controller" in meta_data
+
+    run(
+        ["--dry-run", "--config-dir", str(config_dir),
+         "--controller-ssh-public-key", str(pubkey), "host", "create", "controller"],
+        capsys,
+    )
+    controller_meta = (config_dir / "controller-meta-data").read_text()
+    assert "ssh-ed25519 BBBBtest controller" not in controller_meta
+
+
+def test_ssh_public_keys_default_to_host_local_paths():
     """Not /data/... — /data lives on the controller, a different machine
     from the host this command runs on (docs/design.md's host/controller
-    split). See grain/adapter/libvirt.py's LibvirtAdapter default.
+    split). See grain/adapter/libvirt.py's LibvirtAdapter defaults.
     """
     args = build_parser().parse_args(["--dry-run", "host", "status"])
-    assert args.ssh_public_key == "/var/lib/grain/controller-ssh.pub"
-    assert not args.ssh_public_key.startswith("/data")
+    assert args.admin_ssh_public_key == "/var/lib/grain/admin-ssh.pub"
+    assert args.controller_ssh_public_key == "/var/lib/grain/controller-ssh.pub"
+    assert not args.admin_ssh_public_key.startswith("/data")
+    assert not args.controller_ssh_public_key.startswith("/data")
 
 
 def test_dry_run_cleanup_prints_commands_for_every_sandbox(capsys):
@@ -225,6 +248,90 @@ def test_sessions_browse_is_wired_to_the_tui_entry_point():
     args = build_parser().parse_args(["sessions", "browse"])
     from grain.cli import cmd_sessions_browse
     assert args.func is cmd_sessions_browse
+
+
+# --- grain host wait/deploy/bootstrap, grain controller configure, grain
+# --- sandbox login (docs/bootstrap.md) --------------------------------------
+
+def test_dry_run_wait_probes_ssh_and_cloud_init_for_every_target(capsys):
+    out = run(["--dry-run", "--sandboxes", "1", "host", "wait"], capsys)
+    assert out.count("+ ssh") == 4  # (probe + cloud-init) x (controller + sandbox-0)
+    assert "controller" in out and "ready" in out
+    assert "sandbox-0" in out
+
+
+def test_dry_run_deploy_prints_the_tar_over_ssh_pipeline(capsys):
+    out = run(["--dry-run", "host", "deploy"], capsys)
+    assert "tar -czf -" in out
+    assert "/opt/grain" in out
+
+
+def test_deploy_rejects_a_sandbox_target():
+    with pytest.raises(SystemExit, match="controller"):
+        main(["--dry-run", "host", "deploy", "sandbox-0"])
+
+
+def test_dry_run_controller_configure_writes_automation_json_over_ssh(capsys, tmp_path):
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets"], capsys,
+    )
+    assert "dd of=/data/config/automation.json" in out
+    assert "dd of=/data/config/repo-allowlist.json" in out
+    assert "credentials.json" not in out  # no --github-token-file given
+
+
+def test_dry_run_controller_configure_with_a_github_token_file(capsys, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("ghp_dryruntoken\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--github-token-file", str(token_file)],
+        capsys,
+    )
+    assert "dd of=/data/secrets/github/bot.token" in out
+    assert "dd of=/data/secrets/github/credentials.json" in out
+    # The token itself never appears in the printed command line -- it
+    # travels as the (also printed, but separately, after <<'EOF') stdin
+    # heredoc, not as an argv element.
+    for line in out.splitlines():
+        if line.startswith("+ ssh") and "dd of=" in line:
+            assert "ghp_dryruntoken" not in line
+
+
+def test_repo_without_a_slash_is_rejected():
+    with pytest.raises(SystemExit, match="owner/name"):
+        main(["--dry-run", "controller", "configure", "--repo", "not-a-repo-slug"])
+
+
+def test_dry_run_bootstrap_runs_every_stage_without_touching_a_real_vm(tmp_path, capsys):
+    out = run(
+        ["--dry-run", "--sandboxes", "1", "--config-dir", str(tmp_path / "instances"),
+         "--admin-ssh-public-key", str(tmp_path / "admin-ssh.pub"),
+         "--controller-ssh-public-key", str(tmp_path / "controller-ssh.pub"),
+         "host", "bootstrap", "--repo", "acme/widgets",
+         "--admin-ssh-private-key", str(tmp_path / "admin-ssh")],
+        capsys,
+    )
+    assert "+ ssh-keygen -t ed25519" in out
+    assert "+ virsh -c qemu:///system define" in out
+    assert "grain-git-proxy.service" in out
+    assert "grain-automation.timer" in out
+
+
+def test_sandbox_login_dry_run_prints_the_ssh_command_and_does_not_exec(capsys):
+    out = run(["--dry-run", "--sandboxes", "2", "sandbox", "login", "sandbox-0"], capsys)
+    assert out.startswith("+ ssh")
+    assert "10.100.0.10" in out
+
+
+def test_sandbox_login_rejects_an_unknown_name():
+    with pytest.raises(SystemExit, match="unknown VM"):
+        main(["--dry-run", "sandbox", "login", "not-a-real-vm"])
+
+
+def test_sandbox_login_can_reach_the_controller_too(capsys):
+    out = run(["--dry-run", "sandbox", "login", "controller"], capsys)
+    assert "10.100.0.2" in out
 
 
 def test_missing_tool_raises_a_legible_error_when_check_is_on():

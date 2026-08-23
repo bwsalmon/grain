@@ -19,10 +19,15 @@ host — the controller is where `/data` and every credential live.
 
 | Command | What it does | Runs on |
 |---|---|---|
+| `grain host bootstrap --repo owner/name [...]` | One command: network, controller, deploy, configure, sandboxes, enable (docs/bootstrap.md) — replaces steps 1–12 below | host |
 | `grain host up` | Creates the private bridge/network and applies the firewall policy | host |
 | `grain host create/start/stop/destroy/recreate <name>` | VM lifecycle | host |
+| `grain host wait <name>` | Blocks until VM(s) answer SSH and finish cloud-init | host |
+| `grain host deploy [controller]` | Pushes this working tree to `/opt/grain` on the controller, no credential needed | host |
 | `grain host status` | Lists VM state + assigned address | host |
 | `grain host rules [--dry-run]` | Prints the firewall ruleset without applying it | host |
+| `grain controller configure --repo owner/name [...]` | Writes `automation.json`/`repo-allowlist.json` and, optionally, GitHub/Claude credentials to `/data` | host (over SSH) |
+| `grain sandbox login <name>` | Direct interactive admin SSH to one sandbox or the controller — for debugging | host |
 | `grain automation run-once` | Sweep stranded work, then poll GitHub and dispatch | controller |
 | `grain automation status` | Show current sandbox↔issue assignments | controller |
 | `grain host cleanup [name]` | Between-task hygiene over SSH (`kind delete clusters --all`, `docker system prune -af --volumes`); also runs automatically after every sweep-freed sandbox | controller |
@@ -32,20 +37,99 @@ host — the controller is where `/data` and every credential live.
 | `grain github audit` | Check every credential under `secrets/github/` for withheld scopes | controller |
 | `python3 -m grain.proxy.server` | Runs the git proxy (not wired into `grain` yet — its own entry point) | controller |
 
-`--data-dir` (default `/data`), `--sandboxes` (default `2`), and
-`--ssh-public-key` (default `/var/lib/grain/controller-ssh.pub`, **host**-
-local — see step 5 below) are **global flags on `grain` itself, before the
-subcommand group** — e.g. `grain --data-dir /data automation run-once`, not
-`grain automation run-once --data-dir /data`.
+`--data-dir` (default `/data`), `--sandboxes` (default `2`, or
+`--cluster-file`'s `sandbox_count`), `--image` (a real qcow2 path,
+overriding `--cluster-file`), and `--admin-ssh-public-key`/
+`--controller-ssh-public-key` (defaults `/var/lib/grain/admin-ssh.pub` /
+`/var/lib/grain/controller-ssh.pub`, both **host**-local — see "Key roles"
+below) are **global flags on `grain` itself, before the subcommand group**
+— e.g. `grain --data-dir /data automation run-once`, not `grain automation
+run-once --data-dir /data`.
 
-## First-time setup checklist
+## First-time setup: one command
 
-Most of this is scripted (`provision/controller.sh`, `provision/sandbox.sh`);
-what's left is genuinely one-time, per-deployment data — a GitHub
-credential, a repo allowlist, and (once) copying a public key across the
-host/controller boundary — that no script can responsibly bake in. See
-`docs/design.md`, "Secrets on /data": **no secret is ever baked into an
-image or a provisioning script.**
+```sh
+sudo python3 -m grain.cli host bootstrap \
+  --repo your-org/your-repo \
+  --github-token-file /path/to/token   # or '-' to pipe it in on stdin
+  # --claude-credentials-file ~/.claude/.credentials.json   # optional, see below
+```
+
+This is `docs/bootstrap.md`'s sequencer (`grain/bootstrap.py`) — it replaces
+every step below with one idempotent command: brings the network up,
+generates an admin keypair if none exists, creates and boots the controller,
+reads its own SSH key back (only possible because the admin key it just
+generated is trusted by the controller too — see "Key roles"), deploys this
+tree to `/opt/grain`, writes `automation.json`/`repo-allowlist.json` and, if
+given, the GitHub token and Claude credential, creates and boots every
+sandbox, and enables the git proxy and automation timer. `--dry-run` prints
+every command it would run without touching anything. Safe to re-run: every
+stage checks what's actually there before acting, so a re-run after a
+failure resumes rather than redoing completed work.
+
+**What it does not do**: place a GitHub token or Claude credential if you
+don't pass one (add them with `grain controller configure` later, or a
+second `host bootstrap` run), and log in to Claude Code for you — see
+"Claude Code credential" below, still the one genuinely manual step.
+
+**Verify**: `grain --data-dir /data automation status` should list every
+sandbox as `free`, `grain --data-dir /data github audit` should print no
+`flagged` verdicts, and `grain host health` should report every sandbox
+healthy.
+
+### Key roles
+
+Two keys, two purposes (`grain/adapter/libvirt.py`, `LibvirtAdapter.create`):
+
+| Key | Default path (host-local) | Trusted by | Purpose |
+|---|---|---|---|
+| **admin** | `/var/lib/grain/admin-ssh.pub` | controller *and* every sandbox | setup, repair, and admin debugging access (`grain sandbox login`) |
+| **controller** | `/var/lib/grain/controller-ssh.pub` | sandboxes only | the automation dispatch path — generated *on* the controller at first boot |
+
+`host bootstrap` generates the admin keypair itself if `--admin-ssh-public-key`
+doesn't exist yet (announced on stdout; back the private half up somewhere —
+it's the only way in if the controller's own key is ever lost) and reads the
+controller's key back automatically. Supplying your own admin key ahead of
+time (`--admin-ssh-public-key ~/.ssh/id_ed25519.pub`) is the better habit for
+a real deployment.
+
+### Admin access: `grain sandbox login`
+
+```sh
+sudo python3 -m grain.cli sandbox login sandbox-0     # or 'controller'
+```
+
+Direct, interactive SSH using the admin key — no hop through the controller
+first. For debugging: a stuck `kind` cluster, a wedged docker daemon,
+anything `grain host health`/`cleanup`/`sessions browse` doesn't give enough
+visibility into. This works because of the key-roles split above: the admin
+key is embedded as an authorized key on every VM at create time, not just
+informally reachable through whoever holds the controller's own dispatch
+key. Holding the admin *private* key is what gates this, the same way
+holding any other SSH key gates any other login.
+
+### Claude Code credential
+
+One login, not one per sandbox (`docs/bootstrap.md`, "The Claude
+credential"): on Linux the credential is a file,
+`~/.claude/.credentials.json`, and nothing in it is bound to a machine. Log
+in once anywhere — your laptop, the host, a throwaway VM — and pass the
+result to `host bootstrap --claude-credentials-file <path>` (or `grain
+controller configure --claude-credentials-file <path>` on its own). It is
+placed at `/data/secrets/claude-credentials.json` on the controller and
+injected into every sandbox over the same stdin-not-argv SSH path the
+git-proxy token already uses. **Unverified and load-bearing**: whether
+concurrent refreshes from several sandboxes sharing one credential
+invalidate each other — see `docs/design.md`, open question 8, before
+relying on this for more than a couple of sandboxes.
+
+## First-time setup checklist (manual, step by step)
+
+The bootstrap command above is a sequencer over exactly these steps — read
+this section when something needs doing by hand (a step failed, you want to
+understand what a stage actually does, or you're intentionally stopping
+short of giving the host a GitHub/Claude credential — see
+`docs/bootstrap.md`, "What must not break" for that variant).
 
 1. **Host baseline.** Debian, nested virtualization enabled, `/dev/kvm`
    present. Confirm with `ls /dev/kvm`.
@@ -56,28 +140,21 @@ image or a provisioning script.**
    ```
    This creates the `br-grain` bridge and applies the default-open-egress
    nftables policy. Idempotent — safe to re-run after any inventory change.
-3. **Fetch a base image**, shared by the controller and every sandbox.
-   `LibvirtAdapter.create()` passes `Cluster.image` straight to `qemu-img
-   create -b <image>` as a backing file — it must be a **local path to a
-   qcow2 image**, not a name Lima or libvirt resolves for you
-   (`grain/adapter/libvirt.py`'s own docstring is explicit about this: "no
-   automatic image download"). The live integration suites
-   (`tests/test_vm_integration.py`, `tests/test_controller_integration.py`)
-   fetch:
+3. **Fetch a base image**, shared by the controller and every sandbox, and
+   point `--image` at it (or set it in `--cluster-file`'s TOML — see
+   `docs/bootstrap.md` Phase 2):
    ```sh
    sudo mkdir -p /var/lib/grain/images
    curl -fsSL -o /var/lib/grain/images/debian-12.qcow2 \
      https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+   sudo python3 -m grain.cli --image /var/lib/grain/images/debian-12.qcow2 host create ...
    ```
-   **Known gap**: `Cluster.image` (`grain/inventory.py`) defaults to the
-   bare string `"debian-12"`, and there is no `--image` flag on `grain
-   host create`/`recreate` to point it at the path above. Today the only
-   way to use a real image is to edit `Cluster.image`'s default in
-   `grain/inventory.py`, or drive `LibvirtAdapter`/`Cluster` directly from
-   a Python script the way the integration tests do
-   (`Cluster(sandbox_count=..., image=str(base_image), ...)`). Worth fixing
-   before this is used for real — flagged again in
-   [Gaps](#gaps-what-this-runbook-cant-yet-tell-you-to-automate).
+   `LibvirtAdapter.create()` passes `Cluster.image` straight to `qemu-img
+   create -b <image>` as a backing file — it must be a **local path to a
+   qcow2 image**, not a name Lima or libvirt resolves for you.
+   `Cluster.image`'s own default is still the bare string `"debian-12"`,
+   which is not a real path — always pass `--image` (or set it in the
+   cluster file) before creating anything.
 4. **Create the controller VM**, provisioned by `provision/controller.sh`
    (run this **on the host**):
    ```sh
@@ -90,41 +167,37 @@ image or a provisioning script.**
    system user, the `/data/{secrets,config,state}` layout every module in
    `grain/automation`, `grain/proxy` and `grain/metadata` expects, the
    systemd units for the automation timer and the git proxy (installed but
-   not enabled), and — new — **generates the controller's own SSH
-   keypair**, `/data/secrets/controller-ssh{,.pub}`, idempotently, on the
-   controller itself. It does not deploy this repo's own code, and it does
-   not enable any service; both need real data (this repo's source, and
-   the credentials below) that a provisioning script has no business
-   holding. See the script's own comments, or `/etc/grain-tools/README` on
-   the controller once it's booted.
-5. **Copy the controller's SSH public key to the host.** This is the one
-   step this repo genuinely cannot script end to end: the host (running
-   `grain host create`) and the controller (running everything else) are
-   different machines (`docs/design.md`, "One host machine runs
-   everything"), so a file that's generated *on* the controller has to be
-   carried across that gap by hand before `LibvirtAdapter` (which runs *on
+   not enabled), and **generates the controller's own SSH keypair**,
+   `/data/secrets/controller-ssh{,.pub}`, idempotently, on the controller
+   itself. It does not deploy this repo's own code, and it does not enable
+   any service; both need real data that a provisioning script has no
+   business holding. See the script's own comments, or
+   `/etc/grain-tools/README` on the controller once it's booted.
+5. **Wait for it, then copy the controller's SSH public key to the host.**
+   The host (running `grain host create`) and the controller (running
+   everything else) are different machines (`docs/design.md`, "One host
+   machine runs everything"), so a file generated *on* the controller has
+   to be carried across that gap before `LibvirtAdapter` (which runs *on
    the host*) can embed it into a sandbox's cloud-init as an authorized
-   key. It is a public key, not a secret, so this copy needs no special
-   handling beyond getting the bytes across correctly:
+   key. This only works non-interactively if the host already holds an
+   **admin** key the controller trusts (see "Key roles" above) — with one
+   present:
    ```sh
-   # From the host, once the controller has finished booting (its address
-   # is Cluster().controller_ip, 10.100.0.2 by default):
-   ssh debian@10.100.0.2 cat /data/secrets/controller-ssh.pub \
+   sudo python3 -m grain.cli host wait controller
+   ssh -i /var/lib/grain/admin-ssh debian@10.100.0.2 \
+     cat /data/secrets/controller-ssh.pub \
      | sudo tee /var/lib/grain/controller-ssh.pub > /dev/null
    ```
-   (Substitute whatever key/method gives you SSH access to the freshly
-   created controller — that's a separate, ordinary admin-access question,
-   not something `provision/controller.sh` sets up.) `/var/lib/grain/
-   controller-ssh.pub` is `LibvirtAdapter`'s default `--ssh-public-key`
-   path — override it with that flag if you'd rather keep the copy
-   elsewhere. A sandbox created *before* this file exists on the host gets
-   no authorized key at all (`render_meta_data` treats a missing file as
-   "no key to inject" rather than erroring), so do this before the next
-   step.
+   It is a public key, not a secret, so this copy needs no special handling
+   beyond getting the bytes across correctly. A sandbox created *before*
+   this file exists on the host gets no controller-role authorized key at
+   all (`render_meta_data` treats a missing file as "no key to inject"
+   rather than erroring), so do this before the next step.
 6. **Create the sandbox VMs**, provisioned by `provision/sandbox.sh` (also
    on the host):
    ```sh
    sudo python3 -m grain.cli host create sandboxes --provision provision/sandbox.sh
+   sudo python3 -m grain.cli host wait sandboxes
    sudo python3 -m grain.cli host status
    ```
 7. **Deploy this repo's code to the controller**, at `/opt/grain` (created,
@@ -132,13 +205,12 @@ image or a provisioning script.**
    dependencies (`pyproject.toml` — stdlib only), so this is the only thing
    missing before `python3 -m grain.cli` works there:
    ```sh
-   ssh debian@10.100.0.2 sudo git clone <your-remote> /opt/grain
+   sudo python3 -m grain.cli host deploy
    ```
-   `provision/controller.sh` deliberately doesn't do this itself — it would
-   need a deploy credential baked into a provisioning script, which is
-   exactly what "no secret is ever baked into an image or a provisioning
-   script" rules out. Use your own credentials, the same way you'd deploy
-   any other private repo.
+   No credential needed — `grain/adapter/deploy.py` pipes a `tar` of this
+   working tree over the same admin SSH path, and extracts it as root. (The
+   manual equivalent, `ssh debian@10.100.0.2 sudo git clone <remote>
+   /opt/grain`, still works if you'd rather deploy from a remote directly.)
 8. **GitHub credential files**, under `/data/secrets/github/`:
    ```
    /data/secrets/github/
@@ -146,39 +218,37 @@ image or a provisioning script.**
      bot.token             # e.g. the machine-account PAT
      personal.token         # last resort
    ```
-   Every value in `credentials.json` other than the literal string
-   `"anonymous"` must have a matching `<name>.token` file next to it
-   (`grain/proxy/credentials.py`) — a `0600` file holding the raw token,
-   trailing whitespace is stripped. `chmod 0600` every token file. **Do not
-   grant `workflow`, `delete_repo`, `write:org`, or any `admin:*` scope to
-   any of these** — see [Credential audit](#credential-audit) below.
+   `grain controller configure --repo owner/name --github-token-file PATH`
+   writes both, over the admin SSH path (stdin, never argv — see
+   `grain/automation/configure.py`). Doing it by hand: every value in
+   `credentials.json` other than the literal string `"anonymous"` must have
+   a matching `<name>.token` file next to it (`grain/proxy/credentials.py`)
+   — a `0600` file holding the raw token, trailing whitespace stripped.
+   **Do not grant `workflow`, `delete_repo`, `write:org`, or any `admin:*`
+   scope to any of these** — see [Credential audit](#credential-audit)
+   below.
 9. **The repo allowlist**, `/data/config/repo-allowlist.json` — a plain
    JSON array of `"owner/repo"` strings, default-deny, hot-reloaded
    (`grain/proxy/allowlist.py` re-reads it on every request, no restart
-   needed). A repo must be on this list *and* covered by a
-   `credentials.json` pattern before the proxy will forward anything for
-   it.
-10. **Sandbox tokens**, `/data/secrets/sandbox-tokens.json` — maps sandbox
-    name to its bearer token:
-    ```json
-    {"sandbox-0": "<random token>", "sandbox-1": "<random token>"}
-    ```
-    Generate with e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`
-    per sandbox. This is what the sandbox's git credential helper presents to
-    the proxy as the HTTP Basic password (`grain/proxy/tokens.py`) — nothing
-    provisions or injects this automatically today; wiring it into the
-    sandbox's cloud-init user-data (so a fresh sandbox's git credential
-    helper is actually configured to use it) is also still manual.
+   needed). Written by `grain controller configure` alongside
+   `automation.json` (step 11) — both derive from the same `--repo`. A repo
+   must be on this list *and* covered by a `credentials.json` pattern
+   before the proxy will forward anything for it.
+10. **Sandbox tokens**, `/data/secrets/sandbox-tokens.json` — already
+    unnecessary: `SandboxTokenStore.ensure_token()`
+    (`grain/proxy/tokens.py`) mints and records one per sandbox,
+    idempotently, on first dispatch. Nothing to do here.
 11. **`automation.json`**, `/data/config/automation.json` — the only two
     fields with no default (`AutomationConfig`, `grain/automation/config.py`):
     ```json
     {"owner": "your-org", "repo": "your-repo"}
     ```
+    Written by `grain controller configure --repo owner/name` (step 8).
     Everything else has a default worth knowing: `trigger_label:
     "grain-agent"`, `in_progress_label: "grain-agent-in-progress"`,
     `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
     `runs_per_hour: 10`, `max_runtime_minutes: 120`. Override any of them by
-    including the key in this file.
+    editing the file directly.
 12. **Enable the git proxy and the automation timer**, now that `/opt/grain`
     holds real code and `/data` holds real credentials (SSH to the
     controller for this — `provision/controller.sh` installed these units
@@ -187,11 +257,10 @@ image or a provisioning script.**
     sudo systemctl enable --now grain-git-proxy.service
     sudo systemctl enable --now grain-automation.timer
     ```
-13. **Claude Code login in each sandbox.** Per `docs/design.md`'s
-    "Interim choice" section, this is a manual, per-sandbox step — SSH in as
-    `debian` and run whatever `claude` login flow is current. There is no
-    automation for this and none is planned until the controller-side LLM
-    proxy design lands.
+13. **Claude Code login.** See "Claude Code credential" above — one login
+    placed once via `grain controller configure
+    --claude-credentials-file`/`host bootstrap`, not a per-sandbox ritual
+    anymore. The refresh-token caveat there still applies.
 14. **Verify before trusting it**: `grain --data-dir /data automation
     status` should list every configured sandbox as `free`, and `grain
     --data-dir /data github audit` should print one line per credential
@@ -322,16 +391,20 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   sandbox does *not* rotate its token; do that as a separate, manual step.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing
-  `/data/secrets/controller-ssh`). To rotate it: delete both files on the
-  controller, re-run the keygen line from `provision/controller.sh` by
-  hand (or re-provision the controller, which loses everything else under
-  `/data` too unless it's on a separate persistent disk — see
-  `docs/design.md`, "Secrets on `/data`"), redo step 5 of first-time setup
-  (copy the new `.pub` to the host's `--ssh-public-key` path), then
-  re-run `grain host create`/`recreate` for every sandbox — the public key
-  is baked into each sandbox's cloud-init seed at creation time, not
-  re-read later, so this is a full sandbox recreation cycle, not a
-  hot-swap.
+  `/data/secrets/controller-ssh`). `grain host recreate controller` followed
+  by `grain host bootstrap --repo owner/name` (no need to repeat the
+  GitHub/Claude credential flags — see below) now handles rotation without a
+  full sandbox recreation cycle: stage 6 reads the *new* key back over the
+  admin SSH path (only possible because of the "key roles" split — see
+  above) and, since it differs from what's on file, stage 9 repairs every
+  already-existing sandbox by appending the new key to `authorized_keys`
+  over that same admin path, rather than baking it in at creation time as
+  before (`docs/bootstrap.md`, "Repairing a recreated controller"). Doing it
+  by hand instead: delete both files on the controller, re-run the keygen
+  line from `provision/controller.sh`, copy the new `.pub` to the host's
+  `--controller-ssh-public-key` path, then either re-run `host bootstrap` or
+  manually `ssh -i <admin key> ... "echo <new pubkey> >> ~/.ssh/authorized_keys"`
+  against each sandbox.
 
 ## Credential audit
 
@@ -461,19 +534,19 @@ What is **not automatic**:
 Everything below needs either a real target GitHub repo/org, or code this
 repo doesn't have yet. Tracked in `docs/roadmap.md`:
 
-- **This repo's own code still has to be deployed to the controller by
-  hand** (`/opt/grain`, first-time setup step 7) — `provision/controller.sh`
-  deliberately doesn't do this itself, since it would need a deploy
-  credential baked into a provisioning script (roadmap item 3, closed as
-  "as scripted as it responsibly gets").
-- **The controller's public SSH key still has to cross the host/controller
-  boundary by hand** (first-time setup step 5) — this is inherent to the
-  host and controller being different machines, not something a script on
-  either side alone can close.
-- **No `--image` flag** on `grain host create`/`recreate` — `Cluster.image`
-  has to be edited in source or set by driving the adapter from a script
-  directly (see step 3 of first-time setup above). Small, but blocks a
-  clean "just run this command" story.
+- **Deploying this repo's own code and copying the controller's public key
+  across the host/controller boundary** (first-time setup steps 5 and 7) —
+  both now scripted by `grain host deploy`/`grain host bootstrap`
+  (`docs/bootstrap.md`), closing what used to be listed here as
+  irreducible. Doing either by hand (steps 5/7 above) still works and is
+  occasionally useful for debugging the sequencer itself.
+- **`--image`/`--cluster-file`** — closed (`docs/bootstrap.md` Phase 2):
+  `Cluster.load()` reads sandbox count, subnet, bridge, image, and per-role
+  sizing from a TOML file, and `--image` overrides just the image inline.
+  `Cluster.image`'s own dataclass default is still the placeholder string
+  `"debian-12"`, so an explicit `--image` (or cluster file) is still
+  required before creating anything real — that part isn't automatic, only
+  no-longer-requiring-a-source-edit.
 - **`recreate()` does not rotate the sandbox token** despite the design
   describing rotation as folded into it — do it as a separate manual step
   (see [Credential audit](#credential-audit) / rotation above).

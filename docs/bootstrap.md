@@ -421,6 +421,7 @@ agent spend can be metered and capped. Everything in
 [The Claude credential](#the-claude-credential) is an interim arrangement
 that this replaces.
 
-**`grain sandbox login <name>`.** Still worth having as the SSH hop, for
-the case where the refresh test comes back badly and per-sandbox logins are
-needed after all.
+~~**`grain sandbox login <name>`.**~~ Built alongside this design rather
+than left deferred — direct interactive admin SSH to a sandbox or the
+controller, over the admin key Phase 1 makes every VM trust. See
+`docs/roadmap.md` item 11.
