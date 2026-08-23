@@ -122,24 +122,61 @@ Two ways to close it, either acceptable:
   example is updated to pass the flag; `tests/test_cli.py` covers refuse/
   allow for both `controller` and `all`, and that `sandboxes` needs no flag.
 
-### 3. The resource budget predates the move, and concurrency is unverified
+### 3. The resource budget predates the move — now verified live, concurrency included
 
-The controller is 1 vCPU / 4 GB (`Cluster.controller_cpus`/`controller_mem_mb`,
-`grain/inventory.py`). It now hosts every concurrent `claude -p` *and* its
-MCP server child, on top of the git proxy and one metadata server per
-sandbox. `tests/loadtest.py`'s numbers — and `docs/design.md`'s resource
-budget that quotes them — were measured with the agent work happening on
-the sandboxes and the controller nearly idle. That budget no longer
-describes this system. The one real dispatch done so far only ever
-exercised one `claude -p`/MCP-server pair at a time; with `sandbox_count=2`,
-two can now run concurrently on the controller as the same `grain-agent`
-account, and nothing in `mcp_server.py` was written with that concurrency
-in mind, because nothing forced the question yet.
+**Resolved.** Two real, concurrent dispatches ran to completion on the
+default 1 vCPU / 4 GB controller (`Cluster.controller_cpus`/
+`controller_mem_mb`, `grain/inventory.py`) against a real `bwsalmon/test1`
+deployment — not a toy task either: one scaffolded a full kubebuilder-based
+Kubernetes controller from scratch (installing Go/kubectl/kubebuilder,
+iterating through real build/toolchain issues, running `make test`), the
+other a comparable-sized task. Both finished successfully (100–101 turns,
+~$1.85 each, `is_error: false`) and both opened real PRs.
 
-**Verify:** re-run `python3 -m tests.loadtest` with real dispatches in
-flight — ideally two concurrent ones — and watch the controller
-specifically. Expect to raise `controller_cpus`/`controller_mem_mb`, which
-on a 4-vCPU host means revisiting the sandbox count too.
+Peak memory across the whole ~32-minute concurrent run: **~984 MB of 3.9 GB
+total** — comfortable headroom, not a squeeze. Load average never exceeded
+~0.15 on the single vCPU; both `claude -p` sessions spend most of their time
+blocked on API round-trips, not burning CPU. Back down to ~350 MB the moment
+both sandboxes freed. **No evidence the 1 vCPU/4 GB budget needs raising**
+at this concurrency level (two sandboxes) — revisit only if running more
+than two concurrently, or if a future task turns out to be genuinely
+CPU-bound on the controller side (unlikely, since the actual work happens
+on the sandbox over SSH).
+
+**A real bug surfaced getting to this test, not from it, but the same class
+already flagged above for `controller configure`, and now fixed:** adding a
+second sandbox to an already-bootstrapped deployment
+(`grain host bootstrap --sandboxes 2` against a deployment that started with
+`--sandboxes 1`) minted the new sandbox's git-proxy token but did **not**
+restart the already-running `grain-git-proxy.service` — stage 10 was
+`systemctl enable --now`, a no-op if the unit is already active. The proxy
+process only ever loads `sandbox-tokens.json` once at startup (same caching
+shape as `automation.json`'s `git_forward_host`), so the new sandbox's token
+was invisible to it until a manual restart. Symptom hit live: every
+`run_once` that tried to dispatch to the new sandbox crashed uncaught
+(`fatal: Authentication failed` cloning through the proxy → `CommandError`
+propagating out of `_dispatch`, killing that cycle's `run_once` entirely)
+until `grain-git-proxy.service` was restarted by hand. **Fixed**: stage 10
+now runs `enable` (persist across reboots) and `restart` (unconditional,
+not `--now`) as two separate calls — `restart` starts a stopped unit exactly
+like `--now` would, and reloads an already-running one either way. Covered
+by `tests/test_bootstrap.py::test_stage_10_restarts_the_proxy_not_just_enables_it`.
+
+**Also fixed, unrelated to the sandbox-count bug above:** `_dispatch` had no
+try/except around `dispatch()`/`dispatch_pr()` at all — a `CommandError`
+from *any* cause partway through starting a unit (not just the
+proxy-restart case above) crashed the whole `run_once` uncaught, taking down
+every other candidate in that cycle's queue too, not just the one that
+failed. **Fixed**: `_dispatch` now catches `CommandError` around the
+`dispatch()`/`dispatch_pr()` call specifically, logs "dispatch failed" to
+the audit trail, and `continue`s to the next queued candidate — the failed
+sandbox is never assigned and the issue's labels are left untouched, so both
+are simply retried on a later cycle, the same "log and move on" discipline
+`_requeue`/`_finish_question` already apply to a GitHub-side 404. Any
+non-`CommandError` exception still propagates (a real bug, not dispatch's
+one expected failure mode). Covered by
+`tests/test_automation_core.py::test_a_dispatch_failure_does_not_crash_the_rest_of_the_cycle`
+and `::test_a_non_command_error_from_dispatch_still_raises`.
 
 ## Will bite in the first week
 
@@ -210,9 +247,11 @@ on a 4-vCPU host means revisiting the sandbox count too.
    not happening this session) — it is the only irrecoverable failure
    here.~~ **Done** — see item 2 above. The real fix (a second disk for
    `/data`) is still open.
-2. **Item 3**, now that a real target repo exists to dispatch against for
+2. ~~**Item 3**, now that a real target repo exists to dispatch against for
    real — the measurement needs real dispatches in flight, ideally
-   concurrent ones.
+   concurrent ones.~~ **Done** — see item 3 above. Two new bugs surfaced
+   doing it (proxy restart on sandbox-count change, `_dispatch`'s missing
+   crash tolerance), both still open.
 3. **Item 1**, which needs admin on the target repo.
 
 ## Reproduce / verify

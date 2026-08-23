@@ -225,9 +225,25 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
     # token existed.
     ensure_sandbox_tokens(admin_ssh, list(cluster.sandbox_names))
 
-    # Stage 10: enable.
+    # Stage 10: enable. `restart`, not `enable --now`, for the proxy
+    # specifically -- `--now` only starts a not-yet-running unit; on a
+    # controller re-bootstrapped to add a sandbox (the proxy is already
+    # active from the first run), it is a no-op, and the already-running
+    # process never re-reads `sandbox-tokens.json` on its own (same
+    # once-at-startup caching `configure.py`'s docstring already flags for
+    # `automation.json`'s `git_forward_host`). Found live
+    # (docs/next-session.md): every dispatch to a sandbox added by a second
+    # `host bootstrap` call failed "Authentication failed" against the
+    # proxy until it was restarted by hand, because `ensure_sandbox_tokens`
+    # just above mints that sandbox's token only on disk, not into the
+    # already-running proxy's memory. `restart` covers both cases: it
+    # starts a stopped unit exactly like `--now` would, and reloads a
+    # running one. `enable` (separately, no `--now`) still only needs to
+    # run once to persist across reboots; running it again on an
+    # already-enabled unit is a harmless no-op.
     log("stage 10/11: enable the git proxy and the automation timer")
-    admin_ssh.run(["sudo", "systemctl", "enable", "--now", "grain-git-proxy.service"])
+    admin_ssh.run(["sudo", "systemctl", "enable", "grain-git-proxy.service"])
+    admin_ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     admin_ssh.run(["sudo", "systemctl", "enable", "--now", "grain-automation.timer"])
 
     # Stage 11: verify -- left to the CLI command, which runs `automation

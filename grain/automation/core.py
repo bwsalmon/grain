@@ -82,7 +82,7 @@ from .state import AutomationState, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.tokens import SandboxTokenStore
-from ..run import Runner
+from ..run import CommandError, Runner
 
 # The same trust tier "can apply a label" implies -- write access to the
 # repo, in one of GitHub's own shapes for it (docs/roadmap.md item 13). A
@@ -473,19 +473,41 @@ class Orchestrator:
             thread_comments = self.github.list_comments(
                 self.config.owner, self.config.repo, number
             )
+            # A `CommandError` here (an SSH/command failure anywhere in
+            # dispatch()/dispatch_pr()'s path -- ensure_workspace,
+            # configure_git_credentials, starting the unit) must not take
+            # down every other candidate still queued this cycle. Found
+            # live (docs/next-session.md): a proxy-auth failure on one
+            # sandbox crashed `run_once` before it ever reached the next
+            # candidate. Neither the sandbox nor the issue's labels are
+            # touched below on failure -- the sandbox stays free and the
+            # issue keeps its trigger label, so both are simply retried on
+            # a later cycle, same "log and move on" discipline
+            # `_requeue`/`_finish_question` already apply to a GitHub-side
+            # 404. Only `CommandError` specifically: anything else is a
+            # real bug, not an expected failure mode, and should still
+            # surface immediately.
+            try:
+                if isinstance(item, PullRequestDetail):
+                    comments = self.github.list_review_comments(
+                        self.config.owner, self.config.repo, number
+                    )
+                    unit = dispatch_pr(sandbox_runner, self.base_runner, sandbox, target,
+                                        item, comments, remote_url=self._remote_url(), token=token,
+                                        thread_comments=thread_comments)
+                else:
+                    unit = dispatch(sandbox_runner, self.base_runner, sandbox, target, item,
+                                     remote_url=self._remote_url(), token=token,
+                                     comments=thread_comments)
+            except CommandError as exc:
+                self.audit.record(sandbox=sandbox, issue=number,
+                                   outcome=f"dispatch failed: {exc}")
+                continue
+
             if isinstance(item, PullRequestDetail):
-                comments = self.github.list_review_comments(
-                    self.config.owner, self.config.repo, number
-                )
-                unit = dispatch_pr(sandbox_runner, self.base_runner, sandbox, target,
-                                    item, comments, remote_url=self._remote_url(), token=token,
-                                    thread_comments=thread_comments)
                 self.state.assign(sandbox, number, unit, now,
                                    kind=TriggerKind.PR, branch=item.head_ref)
             else:
-                unit = dispatch(sandbox_runner, self.base_runner, sandbox, target, item,
-                                 remote_url=self._remote_url(), token=token,
-                                 comments=thread_comments)
                 self.state.assign(sandbox, number, unit, now)
             self.state.record_run(now)
             self.github.remove_label(

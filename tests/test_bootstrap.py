@@ -217,6 +217,21 @@ def test_enable_runs_after_sandboxes_are_up(env):
     assert sandbox_create_index < enable_index
 
 
+def test_stage_10_restarts_the_proxy_not_just_enables_it(env):
+    """`enable --now` is a no-op on an already-running proxy -- exactly the
+    re-bootstrap-to-add-a-sandbox case (docs/next-session.md, found live):
+    the new sandbox's token, minted just above by `ensure_sandbox_tokens`,
+    would otherwise be invisible to a proxy process that was already
+    running before this bootstrap call started. `restart` is what actually
+    picks it up, whether the proxy was already active or not.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(runner, cluster, admin_private)
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert any("systemctl enable grain-git-proxy.service" in c for c in runner.commands)
+    assert any("systemctl restart grain-git-proxy.service" in c for c in runner.commands)
+
+
 def test_resume_after_a_mid_chain_failure_skips_already_converged_stages(env):
     """A failure injected at deploy (stage 7): re-running from the top must
     not recreate the controller, regenerate the admin key, or recreate any

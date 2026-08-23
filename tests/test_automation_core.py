@@ -121,6 +121,44 @@ def test_dispatch_uses_only_one_sandbox_for_one_issue():
     assert assigned == ["sandbox-0"]
 
 
+def test_a_dispatch_failure_does_not_crash_the_rest_of_the_cycle():
+    """A `CommandError` from dispatch()/dispatch_pr() (an SSH/auth failure
+    reaching one sandbox, e.g. a stale git-proxy token) must not take down
+    every other candidate queued this cycle (docs/next-session.md, found
+    live). Both candidates here hit the identical failing runner, so both
+    fail -- the point is that the *second* one is even attempted at all,
+    proving the loop continues past the first failure rather than crashing.
+    """
+    runner = FakeRunner()
+    runner.expect("bash -c", returncode=128, stderr="fatal: Authentication failed")
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1), issue_json(2)], runner=runner)
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    # Neither dispatch actually succeeded, so neither sandbox was assigned
+    # and neither issue's labels were touched -- both stay eligible for a
+    # retry on a later cycle, exactly like a fresh, untouched candidate.
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    failures = [o for o in outcomes if "dispatch failed" in o]
+    assert len(failures) == 2
+    assert any("Authentication failed" in f for f in failures)
+
+
+def test_a_non_command_error_from_dispatch_still_raises(monkeypatch):
+    """Only a `CommandError` is tolerated -- anything else is a real bug,
+    not dispatch()'s one expected failure mode, and must still surface.
+    """
+    monkeypatch.setattr(
+        core_module, "dispatch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("not a CommandError")),
+    )
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)])
+
+    with pytest.raises(ValueError):
+        orchestrator.run_once(NOW)
+
+
 def test_two_candidates_fill_the_whole_pool():
     orchestrator, _ = make_orchestrator(issues=[issue_json(1), issue_json(2)])
     orchestrator.run_once(NOW)
