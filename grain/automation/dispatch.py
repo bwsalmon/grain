@@ -158,6 +158,33 @@ _GIT_IDENTITY_EMAIL = "grain-agent@localhost"
 # `grain-automation.service` itself runs as. See provision/controller.sh.
 CONTROLLER_AGENT_USER = "grain-agent"
 
+# Where CONTROLLER_AGENT_USER's own Claude Code OAuth token lives (a bare
+# `claude setup-token` value, placed by `grain/automation/configure.py`'s
+# `configure_claude_token`, mode 600, owned by that account — kept separate
+# from any personal `claude login` session on purpose, so this deployment's
+# dispatch traffic never rides on an operator's own credential). Read into
+# the unit's own environment at runtime (`export CLAUDE_CODE_OAUTH_TOKEN=
+# "$(cat ...)"` in `_start_task`'s command string below), never passed as a
+# `systemd-run --setenv=`/`--property=Environment=` argument — either of
+# those would put the raw token in this process's own argv, and therefore
+# in `ps` output, the exact class of leak this project avoids everywhere
+# else (see `configure_git_credentials`'s docstring for the identical
+# stdin-not-argv reasoning applied to the sandbox's own git-proxy token).
+#
+# A bare env var is safe here in a way it wasn't when `claude -p` ran on
+# the sandbox (docs/roadmap.md item 8's "Update", found live: the token
+# leaked into any unsandboxed Bash subprocess's environment trivially): the
+# agent has no native Bash tool anymore (`--tools ""`), and its only
+# execution surface (`mcp_server.py`'s `run_command`) runs exclusively on
+# the *sandbox* over SSH, never in this process's own environment — there
+# is no tool call that reads or forwards this process's env vars. The
+# tradeoff, made deliberately rather than by default: this is a structural
+# guarantee resting on `--tools ""` staying complete, not on the secret
+# being structurally unreachable regardless of tool restrictions the way a
+# credentials-file-only design would be -- chosen anyway so this
+# deployment's own token stays separate from an operator's personal login.
+CONTROLLER_AGENT_TOKEN_PATH = "/home/grain-agent/.claude-oauth-token"
+
 # Where a unit's controller-local files (prompt, MCP config, transcript)
 # live — under /data, not /tmp: the controller is now a shared, multi-
 # tenant machine running every concurrent dispatch's agent process, not a
@@ -470,6 +497,11 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     out_path = transcript_path(unit)
     start_unit(
         controller_runner, unit,
+        # The token is read from CONTROLLER_AGENT_TOKEN_PATH into this
+        # process's own environment at runtime, not passed as a systemd-run
+        # argument -- see that constant's own docstring for why (argv would
+        # land in `ps` output).
+        f"export CLAUDE_CODE_OAUTH_TOKEN=\"$(cat {shlex.quote(CONTROLLER_AGENT_TOKEN_PATH)})\" && "
         f"cd /opt/grain && claude -p "
         f"--tools '' "
         f"--mcp-config {shlex.quote(m_path)} --strict-mcp-config "

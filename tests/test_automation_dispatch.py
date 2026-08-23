@@ -1,9 +1,9 @@
 import json
 
 from grain.automation.dispatch import (
-    CONTROLLER_AGENT_USER, SandboxTarget, UnitState, branch_name,
-    configure_git_credentials, dispatch, dispatch_pr, ensure_workspace, reap,
-    transcript_path, unit_name, unit_status,
+    CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, SandboxTarget, UnitState,
+    branch_name, configure_git_credentials, dispatch, dispatch_pr, ensure_workspace,
+    reap, transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
@@ -192,6 +192,20 @@ def test_dispatch_runs_claude_from_opt_grain_with_no_native_tools():
     # Edit/Write tools' prompts -- meaningless once --tools '' empties the
     # roster, and must not be carried over.
     assert "--permission-mode" not in unit_call
+
+
+def test_dispatch_exports_the_oauth_token_from_a_file_not_argv():
+    # The token itself never appears in the systemd-run command -- only a
+    # `cat` of CONTROLLER_AGENT_TOKEN_PATH does, read into the environment
+    # at runtime so the raw value never lands in `ps` output.
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    unit_call = next(argv[-1] for argv, _ in runner.calls if "systemd-run" in argv)
+    export_line = f'export CLAUDE_CODE_OAUTH_TOKEN="$(cat {CONTROLLER_AGENT_TOKEN_PATH})"'
+    assert export_line in unit_call
+    # Exported before claude -p is ever invoked.
+    assert unit_call.index(export_line) < unit_call.index("claude -p")
 
 
 # --- captured trajectory (docs/roadmap.md item 10) -------------------------
