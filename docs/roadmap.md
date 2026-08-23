@@ -605,36 +605,94 @@ itself (item 8's own gap, not reopened here).
 
 ## 11. Collapse setup from fourteen steps to one command
 
-- [ ] Not started — designed in [`docs/bootstrap.md`](bootstrap.md)
+- [x] Done
 
-`docs/runbook.md`'s first-time checklist is fourteen steps, two of which it
-documents as irreducibly manual. Only three are genuinely irreducible (one
-secret paste, one interactive Claude login per sandbox, and a machine that
-exists); the rest is unsequenced, and one is blocked by a live bug rather
-than a real constraint.
+All four phases from [`docs/bootstrap.md`](bootstrap.md) landed, plus the
+`grain sandbox login` command that document's own "Deferred" section named
+as still worth having:
 
-- **The bug, and why step 5 reads as irreducible.** `LibvirtAdapter.create()`
-  injects one public key from one path into *every* VM. At controller-create
-  time that path is empty — the controller generates its keypair itself, at
-  first boot — so the controller comes up with no authorized key, and step 5
-  then tells the operator to SSH into it. The documented sequence only works
-  if the operator pre-places their own key at the path step 5 subsequently
-  overwrites: one path, two keys, two purposes, swapped mid-setup. cloud-init
-  takes a *list* of `public-keys`, so splitting admin (every VM) from
-  controller (sandboxes only) both fixes the bug and makes the key read-back
-  scriptable. Worth landing on its own.
-- **Step 7 needs no deploy credential.** Its premise was `git clone` from
-  GitHub. The host is already running this code — the deployment is a 664 KB
-  file copy over the SSH path that has to exist anyway.
-- **Step 10 is already unnecessary.** `SandboxTokenStore.ensure_token()`
-  mints and records a token per sandbox, idempotently, on first dispatch.
-  The runbook is stale.
-- **No state file.** Every stage converges from observed reality, the same
-  call `state()`/`list_vms()` already make. A second record of what exists
-  is a second thing that can disagree with the inventory.
+- **Phase 1, the key-roles fix.** `render_meta_data` takes a *sequence* of
+  keys; `LibvirtAdapter` now takes `admin_public_key_path` (embedded into
+  the controller *and* every sandbox) and `controller_public_key_path`
+  (sandboxes only), selected by `spec.role` in `create()`. This closes the
+  actual bug: previously one key path fed every VM, and since that path was
+  empty at controller-create time (the controller generates its own keypair
+  at first boot), the controller came up with **no authorized key at all**
+  — the documented step 5 only ever worked because an operator pre-placed
+  their own key at the path step 5 then silently overwrote. With the admin
+  key present from the start, the controller trusts it immediately, which
+  is what makes reading the controller's own key back a scripted stage
+  instead of a two-terminal human operation.
+- **Phase 2, the cluster is a file.** `Cluster.load(path)` reads a TOML file
+  (`tomllib`, stdlib on 3.11+) for sandbox count, subnet, bridge, image, and
+  per-role sizing, falling back to the dataclass defaults for whatever's
+  absent — including the file itself. `--cluster-file` and `--image` are
+  new global CLI flags; `--sandboxes` now defaults to `None` and only
+  overrides when passed, so a cluster file's `sandbox_count` isn't silently
+  clobbered by the flag's old hardcoded default.
+- **Phase 3, the three missing verbs.** `grain host wait <name>`
+  (`grain/adapter/wait.py`, lifted from `tests/loadtest.py`'s already-live-
+  proven `_wait_for_ssh`/`_wait_for_provisioning`); `grain host deploy
+  [controller]` (`grain/adapter/deploy.py` — a `tar | ssh tar` pipeline run
+  as one `bash -c` command, not composed from `SshRunner`'s stdin parameter,
+  since that's text-mode and tar's payload is binary); `grain controller
+  configure --repo owner/name [--github-token-file] [--claude-credentials-file]`
+  (`grain/automation/configure.py` — writes `automation.json`,
+  `repo-allowlist.json`, the GitHub token/credential mapping, and the Claude
+  credential file, all over the same stdin-not-argv SSH shape
+  `dispatch.configure_git_credentials` already established for the
+  git-proxy token).
+- **Phase 4, the sequencer.** `grain host bootstrap --repo owner/name
+  [--github-token-file] [--claude-credentials-file]` (`grain/bootstrap.py`)
+  — eleven stages, no state file, every stage converging from observed
+  reality (`adapter.state()`, key-file presence, a live SSH read-back) the
+  same way `state()`/`list_vms()` already do. Unit-tested against
+  `FakeRunner` for the property that matters most (`tests/test_bootstrap.py`):
+  the controller's key is read back *before* any sandbox is created, every
+  stage is a genuine no-op when its target already converged, and a failure
+  injected mid-chain (deploy) leaves a re-run able to resume rather than
+  redo completed work.
+- **`grain sandbox login <name>`**, docs/bootstrap.md's own "Deferred" item,
+  built anyway rather than left open: direct interactive SSH to a sandbox or
+  the controller using the admin key, `os.execvp`'d rather than run through
+  `Runner` (this needs a real interactive terminal, not a captured result)
+  — the one command in the CLI not built on `Runner.run`.
 
-Target: `grain host bootstrap --repo owner/name --github-token-file -`,
-then one `grain sandbox login` per sandbox. Four landable phases (key roles,
-cluster-as-a-file, three new verbs, the sequencer), then a live run on the
-dev host — the unit suite cannot verify the boot/SSH/cloud-init chain, which
-is where `docs/design.md`'s five dispatch bugs all came from.
+**Verified live, not just against `FakeRunner`**, on this dev host (which
+has `/dev/kvm` and an already-applied `br-grain`): a dedicated two-key
+sandbox proved a sandbox really does accept *both* the admin and the
+controller key simultaneously (`tests/test_bootstrap_integration.py`) —
+the one property no other live suite in this repo exercises at once, since
+`test_vm_integration.py`'s and `test_controller_integration.py`'s own
+fixtures each inject only one role's key. `wait_for_ssh`/
+`wait_for_provisioning`, `deploy_tree`, and `configure_repo`/
+`configure_claude_credentials` were each run against that same real VM —
+real `sudo`, a real tar pipe over a real SSH hop, real file modes (`644`
+for config, `600` root-owned and root-only-readable for credentials).
+
+**A full `grain host bootstrap` run against a bare host, end to end**, run
+manually once (not kept as a permanent suite entry — a second VM named
+`controller` would collide with `test_controller_integration.py`'s own
+session-scoped fixture on every future full-suite run): network up,
+controller created and provisioned, admin key generated on first use,
+controller's key read back, this tree deployed to `/opt/grain` (real files
+landed, `.git`/`docs`/`__pycache__` excluded), `/data/config/automation.json`
+and `repo-allowlist.json` written with the given repo, a sandbox created
+trusting both keys, `grain-git-proxy.service`/`grain-automation.timer`
+enabled — `grain automation status`, `github audit`, and inspecting
+`/opt/grain` over SSH all confirmed the end state. Also confirmed live: the
+controller's own dispatch key reaches a sandbox (the automation path is
+intact) but is refused by the controller itself (`Permission denied` —
+the controller trusts only the admin key, never its own dispatch key, so
+splitting the roles adds a debugging path without widening the automation
+credential's own reach).
+
+**Not verified live**: the concurrent-Claude-credential-refresh open
+question (`docs/bootstrap.md`, "The open question: concurrent refresh") —
+unrelated to this item's own scope, still tracked as its own open question
+in `docs/design.md`. Also not exercised: `--claude-credentials-file` actually
+landing on a sandbox and surviving a real `claude` refresh cycle (needs a
+real login credential this environment doesn't have), and the "controller
+recreate → key repair on an *existing* sandbox" path in `bootstrap()`'s
+stage 9 (unit-tested via `FakeRunner`'s stage-order/skip-if-present cases,
+not yet run against a real controller recreate).

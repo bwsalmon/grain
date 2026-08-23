@@ -31,8 +31,8 @@ flowchart TB
         admin["Operator (SSH)"]
     end
 
-    subgraph host["HOST — Debian + KVM/QEMU. Hypervisor and firewall only. No secrets."]
-        adapter["grain host …<br/>libvirt adapter · nftables · br-grain<br/>/var/lib/grain/{images,controller-ssh.pub}"]
+    subgraph host["HOST — Debian + KVM/QEMU. Hypervisor and firewall only. No system credentials — the admin private key is the one thing it does hold."]
+        adapter["grain host …<br/>libvirt adapter · nftables · br-grain<br/>/var/lib/grain/{images,admin-ssh,controller-ssh.pub}"]
 
         subgraph ctl["controller VM — 10.100.0.2 — 1 vCPU · 4 GB · 40 GB"]
             auto["grain-automation.timer → run-once<br/>poll · dispatch · sweep · capture<br/>the only GitHub API caller"]
@@ -49,7 +49,8 @@ flowchart TB
     end
 
     admin -->|"ssh :22"| host
-    admin -.->|"then ssh 10.100.0.2"| ctl
+    admin -.->|"admin key, direct"| ctl
+    admin -.->|"admin key, direct — grain sandbox login"| sbs
 
     auto -->|"ssh :22, controller key<br/>systemd-run, prompt on stdin"| sb0
     auto -->|"ssh :22"| sb1

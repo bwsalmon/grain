@@ -577,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     runner = RealRunner()
     network = LinuxNetwork(cluster, runner)
     adapter = LibvirtAdapter(
-        cluster, runner, network, config_dir=config_dir, ssh_public_key_path=public_key,
+        cluster, runner, network, config_dir=config_dir, admin_public_key_path=public_key,
     )
 
     specs: list[tuple[str, str | None]] = []

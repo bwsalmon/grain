@@ -112,9 +112,19 @@ flowchart TB
 
 Properties:
 
-- **The host holds no secrets.** Every credential lives in the controller
-  VM. A host compromise is still fatal — it owns the hypervisor — but the
-  credentials are not sitting in a home directory next to a browser.
+- **The host holds no *system* credentials** — no GitHub token, no GCP key,
+  no sandbox token at rest. Every one of those lives in the controller VM. A
+  host compromise is still fatal — it owns the hypervisor — but they are not
+  sitting in a home directory next to a browser. Narrowed from the earlier,
+  simpler "holds no secrets" by `docs/bootstrap.md`'s `grain host bootstrap`:
+  the auto-generated admin private key does live on the host (it is what
+  grants direct SSH to the controller and every sandbox — see "Admin entry"
+  below), and a GitHub token transits the host *process* on its way to the
+  controller when passed via `--github-token-file`, though never host disk.
+  Neither grants the host a capability it lacked already — it owns the
+  hypervisor and writes every VM's cloud-init regardless — but the plain
+  "no secrets" phrasing stopped being literally true once bootstrap could
+  place one there.
 - Sandboxes never hold GitHub or GCP credentials, only two narrow endpoints
   on the controller, allowlist-checked and audit-logged.
 - Concurrent agents cannot reach each other: separate kernels, separate
@@ -168,8 +178,10 @@ through the adapter.
   tap; macOS cannot. Handled by making tokens the single mechanism and
   treating source pinning as an extra layer where available — see
   [sandbox identity](#sandbox-identity).
-- **Admin entry**: SSH to the host, then the controller. On a laptop this
-  is a local console instead.
+- **Admin entry**: SSH to the host, then (with an admin key — see
+  `docs/bootstrap.md`, "key roles") directly to the controller or any
+  sandbox, via `grain sandbox login <name>`, rather than hopping through the
+  controller first. On a laptop the first hop is a local console instead.
 
 Nothing else. The controller and sandbox images, the proxy, the metadata
 servers, and every credential decision are the same on both.
@@ -208,7 +220,8 @@ secrets, the controller is reproducible from an image rather than
 accumulated host state, and the port to macOS no longer has to reimplement
 service management under `launchd`.
 
-Admin access is SSH to the host, then to the controller — one externally
+Admin access is SSH to the host, then — via the admin key — directly to the
+controller or any sandbox (`grain sandbox login`), still just one externally
 reachable port, which is the property the microvm.nix design had and
 revision 4 lost.
 
@@ -1076,8 +1089,12 @@ only in `grain/automation/`, which is exactly where the choice now lives.
 - It cannot reach a concurrently running agent: separate VMs, kernels,
   Docker daemons.
 - Its access is revocable in minutes and fully audit-logged.
-- **The host holds no secrets**, so credential exposure requires
-  compromising the controller VM specifically, not just the machine.
+- **The host holds no *system* credentials** (see the narrowed claim
+  earlier in this doc), so *system* credential exposure — GitHub, GCP,
+  sandbox tokens — requires compromising the controller VM specifically,
+  not just the machine. The admin private key is the one credential that
+  now does live on the host by design; it grants SSH, not GitHub/GCP/
+  sandbox-token access.
 
 **Not defended:**
 

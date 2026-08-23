@@ -13,15 +13,23 @@ what will happen, before it happens, is worth the small amount of code.
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import os
+import shlex
 import sys
 from pathlib import Path
 
 from .adapter.base import EgressMode, VmState
+from .adapter.deploy import DEFAULT_DEST, deploy_tree
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.net_linux import LinuxNetwork, render_host_input_rules, render_ruleset
+from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
+from .automation.configure import (
+    configure_claude_credentials, configure_github_credential, configure_repo,
+)
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
@@ -30,6 +38,7 @@ from .automation.history import FileSessionHistory
 from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
 from .automation import tui as sessions_tui
+from .bootstrap import BootstrapConfig, bootstrap
 from .inventory import Cluster
 from .metadata.audit import FileAuditLog as MetadataFileAuditLog
 from .metadata.audit import sync as metadata_sync
@@ -39,6 +48,8 @@ from .proxy.credentials import CredentialSet
 from .proxy.tokens import SandboxTokenStore
 from .run import DryRunRunner, RealRunner, Runner
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 # The same defaults `AutomationConfig`'s dataclass fields carry — read from
 # there rather than repeated as literals, so `grain host health`/`cleanup`
 # (which need SSH access but nothing else automation.json holds: no owner,
@@ -46,10 +57,25 @@ from .run import DryRunRunner, RealRunner, Runner
 # actually uses.
 _DEFAULT_SSH_USER = AutomationConfig.__dataclass_fields__["ssh_user"].default
 _DEFAULT_SSH_KEY_PATH = AutomationConfig.__dataclass_fields__["ssh_key_path"].default
+# The admin *private* key's default path -- the counterpart of
+# LibvirtAdapter's `admin_public_key_path` default one directory up
+# (`.pub`). Used by commands that reach a VM directly from the host/operator
+# side (`host wait`, `host deploy`, `sandbox login`, `host bootstrap`)
+# rather than from the controller's own automation dispatch path, which is
+# what `_DEFAULT_SSH_KEY_PATH` above is for.
+_DEFAULT_ADMIN_SSH_KEY_PATH = Path("/var/lib/grain/admin-ssh")
 
 
 def build_cluster(args: argparse.Namespace) -> Cluster:
-    return Cluster(sandbox_count=args.sandboxes)
+    cluster = Cluster.load(Path(args.cluster_file))
+    overrides = {}
+    if args.sandboxes is not None:
+        overrides["sandbox_count"] = args.sandboxes
+    if args.image is not None:
+        overrides["image"] = args.image
+    if overrides:
+        cluster = dataclasses.replace(cluster, **overrides)
+    return cluster
 
 
 def build_adapter(cluster: Cluster, runner: Runner, args: argparse.Namespace):
@@ -60,7 +86,8 @@ def build_adapter(cluster: Cluster, runner: Runner, args: argparse.Namespace):
     network = LinuxNetwork(cluster, runner)
     return LibvirtAdapter(
         cluster, runner, network, config_dir=Path(args.config_dir),
-        ssh_public_key_path=Path(args.ssh_public_key),
+        admin_public_key_path=Path(args.admin_ssh_public_key),
+        controller_public_key_path=Path(args.controller_ssh_public_key),
     )
 
 
@@ -319,6 +346,166 @@ def cmd_host_health(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_host_wait(args: argparse.Namespace) -> int:
+    """`grain host wait <name>` -- docs/bootstrap.md Phase 3's first missing
+    verb: block until a VM answers SSH and has finished cloud-init. Lifted
+    from `tests/loadtest.py`'s own `_wait_for_ssh`/`_wait_for_provisioning`
+    into `grain/adapter/wait.py` so both this command and `host bootstrap`'s
+    sequencer share one implementation.
+    """
+    cluster = build_cluster(args)
+    base_runner = _runner(args)
+    for name in _targets(cluster, args.name):
+        ssh = build_ssh_runner(cluster, base_runner, name, args)
+        print(f"{name:<12} waiting for SSH ...")
+        wait_for_ssh(ssh, timeout=args.timeout)
+        print(f"{name:<12} waiting for cloud-init ...")
+        wait_for_provisioning(ssh)
+        print(f"{name:<12} ready")
+    return 0
+
+
+def cmd_host_deploy(args: argparse.Namespace) -> int:
+    """`grain host deploy [name]` -- docs/bootstrap.md Phase 3's second
+    missing verb: push this working tree to `/opt/grain` on the controller.
+    No credential; see `grain/adapter/deploy.py`.
+    """
+    cluster = build_cluster(args)
+    base_runner = _runner(args)
+    if args.name != cluster.controller_name:
+        raise SystemExit(
+            f"deploy target must be '{cluster.controller_name}' -- this repo's "
+            "code only ever runs there, not on a sandbox"
+        )
+    deploy_tree(
+        base_runner, Path(args.source), user=args.ssh_user,
+        address=cluster.address_of(cluster.controller_name),
+        key_path=Path(args.ssh_key), dest=args.dest,
+    )
+    return 0
+
+
+def cmd_controller_configure(args: argparse.Namespace) -> int:
+    """`grain controller configure` -- docs/bootstrap.md Phase 3's third
+    missing verb: writes `/data/config/automation.json`,
+    `repo-allowlist.json`, and, if supplied, the GitHub token/credential
+    mapping and the Claude Code credential file. See
+    `grain/automation/configure.py`.
+    """
+    cluster = build_cluster(args)
+    base_runner = _runner(args)
+    ssh = build_ssh_runner(cluster, base_runner, cluster.controller_name, args)
+    owner, _, repo = args.repo.partition("/")
+    if not owner or not repo:
+        raise SystemExit(f"--repo must be 'owner/name', got {args.repo!r}")
+    configure_repo(ssh, owner, repo)
+    if args.github_token_file:
+        token = (
+            sys.stdin.read() if args.github_token_file == "-"
+            else Path(args.github_token_file).read_text()
+        )
+        configure_github_credential(
+            ssh, owner, repo, token, credential_name=args.credential_name,
+        )
+    if args.claude_credentials_file:
+        configure_claude_credentials(ssh, Path(args.claude_credentials_file).read_text())
+    return 0
+
+
+def cmd_host_bootstrap(args: argparse.Namespace) -> int:
+    """`grain host bootstrap` -- docs/bootstrap.md Phase 4: the sequencer
+    that replaces docs/runbook.md's fourteen-step checklist. See
+    `grain/bootstrap.py` for the stage-by-stage reasoning.
+    """
+    cluster = build_cluster(args)
+    base_runner = _runner(args)
+    adapter = build_adapter(cluster, base_runner, args)
+    github_token = None
+    if args.github_token_file:
+        github_token = (
+            sys.stdin.read() if args.github_token_file == "-"
+            else Path(args.github_token_file).read_text()
+        )
+    claude_credentials = (
+        Path(args.claude_credentials_file).read_text()
+        if args.claude_credentials_file else None
+    )
+    owner, _, repo = args.repo.partition("/")
+    if not owner or not repo:
+        raise SystemExit(f"--repo must be 'owner/name', got {args.repo!r}")
+    config = BootstrapConfig(
+        owner=owner, repo=repo, github_token=github_token,
+        credential_name=args.credential_name, claude_credentials=claude_credentials,
+        ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
+        controller_provision_script=(
+            Path(args.controller_provision).read_text() if args.controller_provision else None
+        ),
+        sandbox_provision_script=(
+            Path(args.sandbox_provision).read_text() if args.sandbox_provision else None
+        ),
+        ssh_timeout=args.ssh_timeout,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=base_runner, config=config)
+
+    # Stage 11: verify -- the sequencer itself stops at "converged"; this is
+    # the CLI command's own tail, using the admin key it already has rather
+    # than re-deriving `grain automation status`/`github audit`/`host
+    # health`'s own separate SSH-key flags (which name a different default,
+    # the controller's dispatch key -- see `_DEFAULT_SSH_KEY_PATH`).
+    print("[bootstrap] verify:")
+    data_dir = Path(args.data_dir)
+    state = AutomationState.load(data_dir / "state" / "automation" / "state.json")
+    for name in cluster.sandbox_names:
+        assignment = state.assignments.get(name)
+        print(f"  automation: {name:<12} {'free' if assignment is None else assignment.kind.value}")
+    for r in audit_secrets_dir(RealTransport(), data_dir / "secrets" / "github"):
+        print(f"  github:     {r.name:<12} {r.verdict.value}")
+    for name in cluster.sandbox_names:
+        ssh = SshRunner(
+            inner=base_runner, user=args.ssh_user,
+            address=cluster.address_of(name), key_path=Path(args.admin_ssh_private_key),
+        )
+        report = check_health(ssh)
+        print(f"  health:     {name:<12} {report.status.value}")
+    return 0
+
+
+def cmd_sandbox_login(args: argparse.Namespace) -> int:
+    """`grain sandbox login <name>` -- direct, interactive admin SSH access
+    to one sandbox or the controller, using the admin key rather than
+    hopping through the controller first. For debugging: a stuck `kind`
+    cluster, a wedged docker daemon, anything `grain host health`/`cleanup`/
+    `sessions browse` doesn't give enough visibility into.
+
+    This is deliberately possible only because of docs/bootstrap.md's Phase
+    1 fix -- the admin key is now embedded as an authorized key on every VM
+    at create time, not just informally reachable by whoever happens to hold
+    the controller's own dispatch key. Holding the admin *private* key is
+    what gates this, the same way holding any other SSH key gates any other
+    login; this command adds no new capability the key itself doesn't
+    already grant, it just removes the "hop through the controller" tax.
+
+    Execs `ssh` directly rather than going through `Runner` -- this needs a
+    real interactive terminal (raw stdio, a pty, signal passthrough), not a
+    captured command result, so it is the one command in this CLI that isn't
+    built on `Runner.run`.
+    """
+    cluster = build_cluster(args)
+    if args.name not in cluster.names:
+        raise SystemExit(f"unknown VM: {args.name} (known: {', '.join(cluster.names)})")
+    address = cluster.address_of(args.name)
+    argv = [
+        "ssh", "-i", args.ssh_key,
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=/dev/null",
+        f"{args.ssh_user}@{address}",
+    ]
+    if args.dry_run:
+        print("+ " + shlex.join(argv))
+        return 0
+    os.execvp("ssh", argv)  # noqa: S606 -- replaces this process with an interactive ssh session
+
+
 # --- helpers --------------------------------------------------------------
 
 def _runner(args: argparse.Namespace) -> Runner:
@@ -359,14 +546,30 @@ def _lifecycle(args: argparse.Namespace, action: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="grain", description=__doc__)
-    parser.add_argument("--sandboxes", type=int, default=2,
-                        help="number of sandbox VMs (default: 2)")
+    parser.add_argument(
+        "--cluster-file", default="/var/lib/grain/cluster.toml",
+        help="TOML file overriding Cluster's dataclass defaults -- sandbox "
+             "count, subnet, bridge, image, per-role sizing (docs/bootstrap.md "
+             "Phase 2); falls back to the built-in defaults if absent",
+    )
+    parser.add_argument("--sandboxes", type=int, default=None,
+                        help="number of sandbox VMs (default: 2, or --cluster-file's "
+                             "sandbox_count)")
+    parser.add_argument("--image", default=None,
+                        help="base image path, overriding --cluster-file's image")
     parser.add_argument("--config-dir", default="/var/lib/grain/instances")
     parser.add_argument(
-        "--ssh-public-key", default="/var/lib/grain/controller-ssh.pub",
-        help="host-local copy of the controller's SSH public key, embedded "
-             "as each created VM's authorized key (see docs/runbook.md, "
-             "'Generate the controller SSH keypair')",
+        "--admin-ssh-public-key", default="/var/lib/grain/admin-ssh.pub",
+        help="host-local admin SSH public key, embedded as an authorized "
+             "key on the controller and every sandbox -- setup, repair, "
+             "and admin debugging access (see docs/bootstrap.md, 'key "
+             "roles'; 'grain host bootstrap' generates one if absent)",
+    )
+    parser.add_argument(
+        "--controller-ssh-public-key", default="/var/lib/grain/controller-ssh.pub",
+        help="host-local copy of the controller's own SSH public key, "
+             "embedded as an authorized key on every sandbox only -- the "
+             "automation dispatch path (see docs/runbook.md)",
     )
     parser.add_argument("--data-dir", default="/data",
                         help="where automation config/secrets/state live")
@@ -427,6 +630,49 @@ def build_parser() -> argparse.ArgumentParser:
                             help=f"percent-used threshold to flag "
                                  f"(default: {DEFAULT_DISK_WATERMARK_PERCENT})")
         p.set_defaults(func=fn)
+
+    p = host.add_parser(
+        "wait", help="block until VM(s) answer SSH and finish cloud-init"
+    )
+    p.add_argument("name", nargs="?", default="all", help="VM name, or 'all' / 'sandboxes'")
+    p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
+    p.add_argument("--ssh-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
+                    help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")
+    p.add_argument("--timeout", type=float, default=180.0,
+                    help="seconds to wait for SSH per VM (default: 180)")
+    p.set_defaults(func=cmd_host_wait)
+
+    p = host.add_parser(
+        "deploy", help="push this working tree to /opt/grain on the controller"
+    )
+    p.add_argument("name", nargs="?", default="controller", help="must be 'controller'")
+    p.add_argument("--source", default=str(_REPO_ROOT), help="tree to deploy (default: this checkout)")
+    p.add_argument("--dest", default=DEFAULT_DEST, help=f"default: {DEFAULT_DEST}")
+    p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
+    p.add_argument("--ssh-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
+                    help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")
+    p.set_defaults(func=cmd_host_deploy)
+
+    p = host.add_parser(
+        "bootstrap",
+        help="one command: network, controller, deploy, configure, sandboxes, enable (docs/bootstrap.md)",
+    )
+    p.add_argument("--repo", required=True, help="owner/name -- written to automation.json")
+    p.add_argument("--github-token-file",
+                    help="path to a file holding the GitHub token, or '-' for stdin")
+    p.add_argument("--credential-name", default="bot",
+                    help="credentials.json entry name for --github-token-file (default: bot)")
+    p.add_argument("--claude-credentials-file",
+                    help="path to a Claude Code ~/.claude/.credentials.json to place on the "
+                         "controller and inject into every sandbox")
+    p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
+    p.add_argument("--admin-ssh-private-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
+                    help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")
+    p.add_argument("--controller-provision", default=str(_REPO_ROOT / "provision" / "controller.sh"))
+    p.add_argument("--sandbox-provision", default=str(_REPO_ROOT / "provision" / "sandbox.sh"))
+    p.add_argument("--ssh-timeout", type=float, default=180.0,
+                    help="seconds to wait for SSH per VM (default: 180)")
+    p.set_defaults(func=cmd_host_bootstrap)
 
     automation = sub.add_parser(
         "automation", help="issue intake and dispatch"
@@ -489,6 +735,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="check every credential under secrets/github for withheld scopes",
     )
     p.set_defaults(func=cmd_github_audit)
+
+    controller = sub.add_parser(
+        "controller", help="one-time per-deployment /data configuration"
+    ).add_subparsers(dest="command", required=True)
+
+    p = controller.add_parser(
+        "configure",
+        help="write automation.json, repo-allowlist.json, and (optionally) "
+             "GitHub/Claude credentials to /data on the controller, over SSH",
+    )
+    p.add_argument("--repo", required=True, help="owner/name")
+    p.add_argument("--github-token-file",
+                    help="path to a file holding the GitHub token, or '-' for stdin")
+    p.add_argument("--credential-name", default="bot",
+                    help="credentials.json entry name for --github-token-file (default: bot)")
+    p.add_argument("--claude-credentials-file",
+                    help="path to a Claude Code ~/.claude/.credentials.json to place on the "
+                         "controller")
+    p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
+    p.add_argument("--ssh-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
+                    help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")
+    p.set_defaults(func=cmd_controller_configure)
+
+    sandbox = sub.add_parser(
+        "sandbox", help="direct admin access to one sandbox or the controller"
+    ).add_subparsers(dest="command", required=True)
+
+    p = sandbox.add_parser(
+        "login",
+        help="interactive SSH, using the admin key, for debugging "
+             "(docs/bootstrap.md, 'grain sandbox login <name>')",
+    )
+    p.add_argument("name", help="VM name, e.g. 'sandbox-0' or 'controller'")
+    p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
+    p.add_argument("--ssh-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
+                    help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")
+    p.set_defaults(func=cmd_sandbox_login)
 
     return parser
 

@@ -16,8 +16,10 @@ driver's JSON shape.
 from __future__ import annotations
 
 import ipaddress
+import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 # Controller service ports, on the controller's private address.
 GIT_PROXY_PORT = 8080
@@ -71,6 +73,28 @@ class Cluster:
     sandbox_cpus: int = 2
     sandbox_mem_mb: int = 8192
     sandbox_disk_gb: int = 80
+
+    @classmethod
+    def load(cls, path: Path) -> "Cluster":
+        """Reads overrides from a small TOML file (docs/bootstrap.md Phase
+        2), falling back to every dataclass default for whatever key is
+        absent -- including the file itself being absent, which is the
+        common case before a deployment has named a real base image.
+        `tomllib` is stdlib on 3.11+ (pyproject.toml's floor), so this costs
+        no dependency.
+
+        This only changes *where* the handful of raw numbers come from --
+        the inventory stays the single source of truth for everything
+        derived from them (this module's own docstring), and every other
+        `Cluster` field keeps working exactly as before when the file is
+        absent or omits it.
+        """
+        if not path.exists():
+            return cls()
+        raw = dict(tomllib.loads(path.read_text()))
+        if "subnet" in raw:
+            raw["subnet"] = ipaddress.IPv4Network(raw["subnet"])
+        return cls(**raw)
 
     def __post_init__(self) -> None:
         if self.sandbox_count < 1:
