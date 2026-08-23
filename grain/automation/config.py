@@ -23,6 +23,13 @@ class AutomationConfig:
     # no separate label.
     trigger_label: str = "grain-agent"
     in_progress_label: str = "grain-agent-in-progress"
+    # Applied instead of in_progress_label once an `ask_question` call is
+    # relayed (docs/roadmap.md item 13) -- visible on GitHub itself, the
+    # same way trigger_label/in_progress_label already are, so an operator
+    # can see at a glance which issues are idle waiting for a human versus
+    # genuinely untouched. Removed the moment a trusted reply promotes the
+    # issue back to trigger_label.
+    awaiting_reply_label: str = "grain-agent-awaiting-reply"
     # The PR base branch — the target repo's own default, almost always,
     # but not assumed: `git`'s "default branch" concept lives in the repo,
     # not here, and `core.py` has no other source for it since it never

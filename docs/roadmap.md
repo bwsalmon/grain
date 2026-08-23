@@ -865,7 +865,7 @@ not yet run against a real controller recreate).
 
 ## 12. Let a dispatched agent ask the human a question
 
-- [x] Done (unit-tested; not yet verified live)
+- [x] Done, verified live end to end against a real deployment
 
 Until now, an agent that hit something it genuinely couldn't resolve on its
 own had no way to surface that — it just ran to completion (or timed out)
@@ -927,11 +927,127 @@ unrelated one; the read side doesn't need to clean up after itself for
 correctness; only writing needs to be careful about *when*, not reading
 about staleness.
 
-**Not verified live**: everything above is covered by unit tests
-(`test_mcp_server.py`, `test_automation_dispatch.py`,
-`test_automation_github.py`, `test_automation_core.py`) against
-`FakeRunner`/`FakeTransport`, but no real `claude -p` session has actually
-called `ask_question` — whether the tool's description reliably gets a real
-model to call it (rather than guessing past a genuine ambiguity, or calling
-it too readily for routine questions) is a real-model behavior question a
-fake transcript can't answer.
+**Verified live**, end to end, against a real `bwsalmon/test1` deployment
+(one controller, one sandbox, real GitHub PAT and Claude OAuth token, timer
+stopped and driven by hand via `automation run-once`): a real issue (#3),
+worded to require a human decision before proceeding, was labelled and
+dispatched. The real `claude -p` session called `ask_question` on its own
+judgment (no forcing beyond the issue's own wording) with a sensible
+question, took no other action, and ended its turn in 2 turns at $0.06. The
+sweep read the question back, posted it verbatim as a real comment on
+issue #3, and removed the in-progress label without re-adding the trigger
+label — confirmed the issue sat with no labels at all afterward, exactly as
+designed. A human reply ("Use 3 retries.") plus re-applying the trigger
+label triggered a real redispatch; its prompt (read directly off the
+controller) carried both the agent's question and the human's reply in the
+new "conversation so far" section. That second run read the reply, wrote a
+correct README example using the answered value (3), pushed to
+`grain/issue-3`, and the sweep opened a real PR (#4) whose diff matches the
+answer exactly.
+
+One unrelated hiccup the agent hit and self-corrected without help: its
+first push attempt (`git push origin HEAD:grain/issue-3` from the detached
+HEAD `ensure_workspace` leaves a fresh default-branch checkout in) failed
+with git's "not a full refname" error; the agent diagnosed it, ran
+`git switch -c` to attach HEAD to a local branch, and retried the identical
+push successfully. Not a bug in this item — `_prompt`'s push instruction and
+`ensure_workspace`'s detached-checkout behavior predate `ask_question`
+entirely, and this would reproduce on any fresh issue dispatch, asked
+question or not — but worth a follow-up item since it cost the run an extra
+turn.
+
+(Dry-run against this same real deployment separately surfaced its own
+finding, unrelated to this item: `DryRunRunner` echoes a mutating command's
+full stdin when printing instead of running it, which defeats the
+stdin-not-argv protection for exactly the steps that carry real secrets --
+`configure_github_credential`/`configure_claude_token`. `--dry-run` is safe
+for read-only inspection but not for previewing a real credential-bearing
+bootstrap. Worth a guardrail: redact stdin for any command dry-run prints,
+or omit it entirely for the credential-writing steps.)
+
+## 13. Auto-redispatch once a trusted human replies to a question
+
+- [x] Done
+
+Item 12 required an operator to notice the question comment and manually
+re-apply the trigger label to get a redispatch. This closes that gap: a
+reply from someone with write-level repo access now redispatches on its
+own, no relabeling needed.
+
+**Visible lifecycle, not just internal bookkeeping.** `_finish_question`
+now applies a new `awaiting_reply_label`
+(`AutomationConfig.awaiting_reply_label`, default
+`"grain-agent-awaiting-reply"`) in place of just removing the in-progress
+label — the same reasoning that gave `trigger_label`/`in_progress_label`
+their own visible labels in the first place: an operator scanning the
+repo's issues should be able to tell "genuinely idle, waiting on a human"
+apart from "untouched" without reading `automation status`.
+
+**The trust boundary, not just the mechanism.** The obvious naive version —
+"any new comment redispatches" — would reopen the exact prompt-injection
+gate the trigger label exists to close (docs/design.md's split surface): on
+a public repo, anyone who can comment (not just anyone with push access)
+could reply to a question thread and redispatch the agent with content of
+their choosing. `Comment` gains `author_association` (GitHub's own field:
+`"OWNER"`/`"MEMBER"`/`"COLLABORATOR"`/`"CONTRIBUTOR"`/`"NONE"`/...) and
+`core.py`'s new `_promote_answered_questions` only promotes a reply from
+`{"OWNER", "MEMBER", "COLLABORATOR"}` — the same trust tier "can apply a
+label" already implies. A random public reply is simply ignored; the issue
+stays `awaiting_reply_label`'d.
+
+**The mechanism itself needs no new hydration path.** `_finish_question`
+now records a `PendingQuestion` (`state.py`: `issue`, the question
+comment's own id, `kind`, `branch`) via `state.record_pending_question`.
+`_promote_answered_questions` (new, run between `_sweep` and `_dispatch` in
+`run_once`) checks each pending question's `list_comments` for anything
+with a *higher* id than the recorded one (not a count or timestamp — both
+of which a deleted or backdated comment could make lie) from a trusted
+author. If found, it just re-adds `trigger_label` and clears the pending
+entry — `_dispatch`'s own polling, unchanged, picks the now-labelled item
+up in the very same `run_once` call, because it already fetches full
+`Issue`/`PullRequestDetail` objects for anything carrying the trigger label.
+No separate "fetch this bare issue number back" method needed.
+
+`GitHubClient.create_comment` now returns the new comment's id (was `None`)
+— the baseline `PendingQuestion` needs. A comment id, not a timestamp,
+because it can't be spoofed by editing an older comment's body and stays
+valid even if other comments in between get deleted.
+
+A 404 while checking for a reply (the same "stale assignment, repo
+reconfigured out from under it" story `_requeue`/`_finish_question` already
+handle) clears the pending question and logs, rather than crashing the
+sweep.
+
+**Verified against the FakeTransport-based unit suite only** — the live,
+end-to-end run described in item 12 predates this item, so the actual
+redispatch-on-reply path (as opposed to the original ask-then-manually-
+relabel path) has not yet been exercised against a real repo.
+
+## 14. A visible signature on everything grain-agent posts
+
+- [x] Done
+
+Nothing previously marked a PR or comment `core.py` posts as automation
+output — the only signal was reading the text itself ("Opened
+automatically...", "grain-agent has a question..."), easy to miss when
+skimming a list of PRs or a busy issue thread, and identical in every way
+GitHub's UI actually renders (title, list view, notification email) to a
+human-authored one unless the deployment happens to use a dedicated bot
+account (docs/design.md's own recommendation, but an operator choice, not
+something the code can enforce).
+
+`core.py` gains one constant, `_AUTOMATION_SIGNATURE`
+(`"🤖 Posted automatically by grain-agent — not a human."`), applied
+consistently:
+
+- Every PR `_finish_succeeded_issue` opens gets a `🤖` prefix on its title
+  and the signature as a footer on its body.
+- Every comment `_finish_question` posts (the `ask_question` relay, item
+  12) leads with the signature before the question itself.
+
+Purely textual — no new GitHub API surface, no behavior change, just makes
+"did a human write this or did the automation" answerable at a glance
+without reading the body. The dedicated-bot-account recommendation in
+docs/design.md is still the stronger signal where it's available (GitHub's
+own avatar/username in every view); this is what's true regardless of
+which credential a given deployment actually uses.

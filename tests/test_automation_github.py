@@ -280,9 +280,10 @@ def test_list_comments_raises_on_a_non_200():
         GitHubClient(transport, token="t").list_comments("o", "r", 5)
 
 
-def test_create_comment_posts_the_body():
-    transport = FakeTransport(responses=[ApiResponse(201, {}, b"{}")])
-    GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question for you")
+def test_create_comment_posts_the_body_and_returns_the_new_id():
+    transport = FakeTransport(responses=[ApiResponse(201, {}, json.dumps({"id": 999}).encode())])
+    comment_id = GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question for you")
+    assert comment_id == 999
     call = transport.calls[0]
     assert call["method"] == "POST"
     assert call["path"] == "/repos/o/r/issues/5/comments"

@@ -116,6 +116,64 @@ def test_save_and_load_round_trips_pr_kind_and_branch(tmp_path: Path):
     assert assignment.branch == "feature-x"
 
 
+# --- pending questions (docs/roadmap.md item 13) ---------------------------
+
+def test_record_pending_question_defaults_to_issue_kind_with_no_branch():
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    pending = state.pending_questions["5"]
+    assert pending.issue == 5
+    assert pending.question_comment_id == 100
+    assert pending.kind is TriggerKind.ISSUE
+    assert pending.branch is None
+
+
+def test_record_pending_question_records_pr_kind_and_branch():
+    state = AutomationState()
+    state.record_pending_question(9, question_comment_id=200,
+                                   kind=TriggerKind.PR, branch="feature-x")
+    pending = state.pending_questions["9"]
+    assert pending.kind is TriggerKind.PR
+    assert pending.branch == "feature-x"
+
+
+def test_clear_pending_question_removes_it():
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    state.clear_pending_question(5)
+    assert state.pending_questions == {}
+
+
+def test_clear_pending_question_on_an_absent_issue_is_a_no_op():
+    state = AutomationState()
+    state.clear_pending_question(5)  # must not raise
+    assert state.pending_questions == {}
+
+
+def test_save_and_load_round_trips_pending_questions(tmp_path: Path):
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100,
+                                   kind=TriggerKind.PR, branch="feature-x")
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    pending = loaded.pending_questions["5"]
+    assert pending.issue == 5
+    assert pending.question_comment_id == 100
+    assert pending.kind is TriggerKind.PR
+    assert pending.branch == "feature-x"
+
+
+def test_load_of_a_pre_item_13_state_file_has_no_pending_questions(tmp_path: Path):
+    # A state file written before item 13 existed has no "pending_questions"
+    # key at all -- loading it must default to empty rather than KeyError.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.pending_questions == {}
+
+
 def test_load_of_a_pre_item_9_state_file_defaults_to_issue_kind(tmp_path: Path):
     # A state file written before item 9 existed has neither "kind" nor
     # "branch" keys at all — every assignment it could hold was necessarily

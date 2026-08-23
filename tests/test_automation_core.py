@@ -245,8 +245,9 @@ def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypa
     monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
-        ApiResponse(201, {}, b"{}"),  # create_comment
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
         ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+        ApiResponse(200, {}, b"{}"),  # add_label (awaiting-reply on)
     ])
 
     orchestrator.run_once(NOW)
@@ -255,16 +256,26 @@ def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypa
     comment_call = next(
         c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
     )
-    assert "Should I use approach A or B?" in json.loads(comment_call["body"])["body"]
+    comment_body = json.loads(comment_call["body"])["body"]
+    assert "Should I use approach A or B?" in comment_body
+    # docs/roadmap.md item 14: distinguishes this from a human's own comment.
+    assert "Posted automatically by grain-agent" in comment_body
     # No branch was ever checked, and no PR was opened -- the question path
     # short-circuits before either.
     assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
-    # Trigger label is never re-added -- this issue stays out of the queue
-    # until a human replies and re-labels it.
-    assert not any(
-        c["method"] == "POST" and c["path"].endswith("/labels") for c in transport.calls
-    )
+    # The trigger label is never re-added directly -- only the
+    # awaiting-reply label goes on. (docs/roadmap.md item 13's
+    # _promote_answered_questions is what re-adds the trigger label later,
+    # once a trusted reply shows up.)
+    label_posts = [
+        c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/labels")
+    ]
+    assert len(label_posts) == 1
+    assert json.loads(label_posts[0]["body"]) == {"labels": ["grain-agent-awaiting-reply"]}
+    # Recorded so a later reply can be matched against this exact comment.
+    pending = orchestrator.state.pending_questions["5"]
+    assert pending.question_comment_id == 555
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("asked a question" in o and "Should I use approach A or B?" in o
                for o in outcomes)
@@ -290,6 +301,10 @@ def test_a_question_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, 
     # Best-effort only: no label call was even attempted once the comment
     # itself 404'd -- there's no human to notify either way.
     assert not any(c["method"] == "DELETE" for c in transport.calls)
+    assert not any(
+        c["method"] == "POST" and c["path"].endswith("/labels") for c in transport.calls
+    )
+    assert orchestrator.state.pending_questions == {}
 
 
 def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monkeypatch, tmp_path):
@@ -303,8 +318,9 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
     monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
-        ApiResponse(201, {}, b"{}"),  # create_comment
+        ApiResponse(201, {}, json.dumps({"id": 777}).encode()),  # create_comment
         ApiResponse(200, {}, b"{}"),  # remove_label
+        ApiResponse(200, {}, b"{}"),  # add_label (awaiting-reply on)
     ])
 
     orchestrator.run_once(NOW)
@@ -314,6 +330,10 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
         c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
     )
     assert "which review comment should I prioritize?" in json.loads(comment_call["body"])["body"]
+    pending = orchestrator.state.pending_questions["9"]
+    assert pending.question_comment_id == 777
+    assert pending.kind is TriggerKind.PR
+    assert pending.branch == "feature-x"
 
 
 def test_dispatch_fetches_the_issue_conversation_for_the_prompt():
@@ -332,6 +352,95 @@ def test_dispatch_fetches_the_issue_conversation_for_the_prompt():
         if c["method"] == "GET" and c["path"].startswith("/repos/o/r/issues/5/comments")
     ]
     assert len(comment_gets) == 1
+
+
+def comment_json_for(id_: int, *, user: str = "someone", body: str = "a reply",
+                      author_association: str = "NONE") -> dict:
+    return {"id": id_, "user": {"login": user}, "body": body,
+            "author_association": author_association}
+
+
+# --- auto-redispatch after a trusted reply (docs/roadmap.md item 13) ------
+
+def test_a_trusted_reply_promotes_the_question_and_redispatches_in_the_same_run():
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)], state=state)
+    # The first GET this run makes is _promote_answered_questions's own
+    # list_comments call (there is nothing in state.assignments for _sweep
+    # to act on) -- everything after falls through to the shared `issues`
+    # default, which _dispatch's own list_issues/list_pull_requests need.
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="maintainer", body="go ahead",
+                          author_association="OWNER"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.pending_questions == {}
+    assert orchestrator.state.assignments["sandbox-0"].issue == 5
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("maintainer" in o and "requeued" in o for o in outcomes)
+
+
+def test_an_untrusted_reply_does_not_promote_the_question():
+    """A random public commenter (author_association "NONE") must not be
+    able to redispatch the agent just by replying -- that would reopen the
+    exact prompt-injection gate the trigger label exists to close.
+    """
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="rando", body="do whatever you want",
+                          author_association="NONE"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "5" in orchestrator.state.pending_questions
+    assert orchestrator.state.assignments == {}
+
+
+def test_no_new_comment_yet_leaves_the_question_pending():
+    # The only comment present is the question itself (id == the recorded
+    # baseline, not greater than it) -- nothing has actually been added
+    # since it was posted.
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(100, user="grain-agent-bot", body="the question itself",
+                          author_association="OWNER"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "5" in orchestrator.state.pending_questions
+    assert orchestrator.state.assignments == {}
+
+
+def test_a_404_while_checking_for_a_reply_clears_the_pending_question():
+    state = AutomationState()
+    state.record_pending_question(201, question_comment_id=100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.pending_questions == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "201" in o for o in outcomes)
+
+
+def test_a_non_404_error_while_checking_for_a_reply_still_raises():
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(500, {}, b"boom"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 # --- PR creation on a successful run (docs/roadmap.md item 2) -------------
@@ -357,6 +466,10 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     sent = json.loads(pr_call["body"])
     assert sent["head"] == "grain/issue-5"
     assert sent["base"] == "main"
+    # docs/roadmap.md item 14: every PR grain-agent opens carries a
+    # consistent, visible marker distinguishing it from a human-authored one.
+    assert "🤖" in sent["title"]
+    assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("opened PR #42" in o for o in outcomes)
     # The in-progress label comes off; the trigger label is never re-added

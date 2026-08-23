@@ -144,10 +144,20 @@ class Comment:
     those are inline, diff-attached; this is the ordinary conversation
     thread — where a human's reply to an agent's `ask_question` call
     (docs/roadmap.md item 12) actually lands.
+
+    `author_association` (GitHub's own field: "OWNER", "MEMBER",
+    "COLLABORATOR", "CONTRIBUTOR", "NONE", ...) is what lets `core.py` tell
+    a trusted reply from an arbitrary public comment when deciding whether
+    to auto-redispatch after a question (docs/roadmap.md item 13) — the
+    same trust tier as "can apply a label," since a random commenter on a
+    public repo must not be able to redispatch the agent with content of
+    their choosing. That would reopen the exact prompt-injection gate the
+    trigger label exists to close (docs/design.md's split surface).
     """
     id: int
     user: str
     body: str
+    author_association: str = "NONE"
 
 
 @dataclass(frozen=True)
@@ -382,16 +392,22 @@ class GitHubClient:
                 comments.append(Comment(
                     id=item["id"], user=item.get("user", {}).get("login", ""),
                     body=item.get("body") or "",
+                    author_association=item.get("author_association", "NONE"),
                 ))
             path = _next_page_path(resp.headers.get("Link"))
         return comments
 
-    def create_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+    def create_comment(self, owner: str, repo: str, number: int, body: str) -> int:
         """Posts a top-level comment — the operation docs/design.md's split
         surface originally noted as absent. Still not something the agent
         can reach directly (that boundary is unchanged): `core.py` is the
         only caller, and only to relay an `ask_question` call
         (docs/roadmap.md item 12) to a human.
+
+        Returns the new comment's id (docs/roadmap.md item 13) — `core.py`
+        records it as the baseline for "has a trusted reply arrived after
+        this," since a comment's own id is the one thing that can't be
+        spoofed by editing an earlier comment's body.
         """
         resp = self.transport.request(
             method="POST", path=f"/repos/{owner}/{repo}/issues/{number}/comments",
@@ -400,6 +416,7 @@ class GitHubClient:
         )
         if resp.status != 201:
             raise GitHubError(resp.status, resp.body)
+        return json.loads(resp.body)["id"]
 
 
 @dataclass
@@ -440,5 +457,6 @@ class DryRunGitHubClient:
     def list_comments(self, owner: str, repo: str, number: int) -> list[Comment]:
         return self.inner.list_comments(owner, repo, number)
 
-    def create_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+    def create_comment(self, owner: str, repo: str, number: int, body: str) -> int:
         print(f"+ comment on {owner}/{repo}#{number}: {body!r}")
+        return 0

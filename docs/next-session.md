@@ -143,6 +143,22 @@ on a 4-vCPU host means revisiting the sandbox count too.
 
 ## Will bite in the first week
 
+- **`--dry-run` prints a credential-writing command's real stdin in full.**
+  `DryRunRunner` (`grain/run.py`) echoes the exact stdin it would have piped
+  in, which is exactly the stdin-not-argv channel
+  `configure_github_credential`/`configure_claude_token` use to keep
+  secrets out of argv/`ps` — so `grain --dry-run ... host bootstrap
+  --github-token-file ... --claude-token-file ...` (or `controller
+  configure` with either flag) prints the real GitHub token and Claude
+  OAuth token in plaintext to whatever captured that output. Found live,
+  this session, previewing a real bootstrap command before running it for
+  real — both tokens ended up exposed in a place neither should have been.
+  `--dry-run` is safe for read-only inspection (`host rules`, `host
+  status`) but not for anything that carries a real secret over stdin.
+  Fix: redact stdin in `DryRunRunner`'s echo (print a placeholder like
+  `<stdin: N bytes>` instead of the literal content), or have the
+  credential-writing call sites pass a marker `DryRunRunner` recognizes and
+  suppresses.
 - **No revocation path for a sandbox token.** `SandboxTokenStore.rotate`
   (`grain/proxy/tokens.py`) is called by nothing — not `recreate`, not any
   CLI verb — and the proxy loads `sandbox-tokens.json` once at startup.

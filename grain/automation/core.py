@@ -84,6 +84,22 @@ from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.tokens import SandboxTokenStore
 from ..run import Runner
 
+# The same trust tier "can apply a label" implies -- write access to the
+# repo, in one of GitHub's own shapes for it (docs/roadmap.md item 13). A
+# random public commenter (author_association "NONE"/"CONTRIBUTOR"/
+# "FIRST_TIME_CONTRIBUTOR"/...) must not be able to redispatch the agent
+# with content of their choosing just by replying to a question thread --
+# that would reopen the exact prompt-injection gate the trigger label
+# exists to close (docs/design.md's split surface).
+_TRUSTED_REPLY_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+# A consistent, visible marker on everything grain-agent itself posts to
+# GitHub (docs/roadmap.md item 14) -- so a comment or PR is immediately
+# recognizable as automation output at a glance, regardless of which
+# credential actually posted it (a personal PAT and a dedicated machine
+# account otherwise look identical in a thread).
+_AUTOMATION_SIGNATURE = "🤖 _Posted automatically by grain-agent — not a human._"
+
 
 def _pending_question(sandbox: str) -> str | None:
     """Reads back an `ask_question` call, if the agent made one this run
@@ -152,6 +168,7 @@ class Orchestrator:
 
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
+        self._promote_answered_questions(now)
         self._dispatch(now)
 
     # --- sweep --------------------------------------------------------
@@ -201,9 +218,10 @@ class Orchestrator:
         pr = self.github.create_pull_request(
             self.config.owner, self.config.repo,
             head=branch, base=self.config.base_branch,
-            title=f"grain: fix #{outcome.issue}",
+            title=f"🤖 grain: fix #{outcome.issue}",
             body=f"Closes #{outcome.issue}.\n\nOpened automatically after "
-                 f"issue #{outcome.issue} finished on {outcome.sandbox}.",
+                 f"issue #{outcome.issue} finished on {outcome.sandbox}."
+                 f"\n\n---\n{_AUTOMATION_SIGNATURE}",
         )
         self.github.remove_label(
             self.config.owner, self.config.repo,
@@ -255,26 +273,32 @@ class Orchestrator:
         with no new information is still a reasonable default) but wrong
         here: it would redispatch on the very next `run_once` and most
         likely ask the identical question again, looping at real cost with
-        nothing to act on in between. Removing only the in-progress label
-        (never re-adding the trigger) leaves the issue idle until a human
-        replies and re-labels it themselves — the same manual gate a fresh
-        issue already goes through, and how the next dispatch ends up
-        seeing the reply at all (`_dispatch` always fetches the current
-        comment thread — see its own comments).
+        nothing to act on in between.
+
+        `awaiting_reply_label` replaces the in-progress label rather than
+        just removing it (docs/roadmap.md item 13) — visible on GitHub, the
+        same way the other two labels already are, so an operator can see
+        which issues are genuinely idle waiting on a human versus untouched.
+        The comment's own id is recorded (`state.record_pending_question`)
+        as the baseline `_promote_answered_questions` checks future replies
+        against; that pass is what re-adds the trigger label once a trusted
+        reply shows up, not this method.
 
         A 404 from `create_comment` here means the same thing it means in
         `_requeue`: a stale assignment against a repo that's since changed
         out from under it, not a reason to crash the sweep. Best-effort
         only for the comment in that case — there's no human to post to
-        either way, so removing the in-progress label is skipped too; the
-        assignment simply lapses.
+        either way, so the label swap and pending-question bookkeeping are
+        skipped too; the assignment simply lapses.
         """
         try:
-            self.github.create_comment(
+            comment_id = self.github.create_comment(
                 self.config.owner, self.config.repo, outcome.issue,
-                "grain-agent has a question before it can continue:\n\n"
-                f"{question}\n\n"
-                "Reply here, then re-apply the trigger label to try again.",
+                f"{_AUTOMATION_SIGNATURE}\n\n"
+                f"I have a question before I can continue:\n\n{question}\n\n"
+                "Reply here to continue -- a reply from a maintainer picks "
+                f"this back up automatically. If that doesn't happen, "
+                f"re-applying the {self.config.trigger_label!r} label works too.",
             )
         except GitHubError as exc:
             if exc.status != 404:
@@ -290,8 +314,71 @@ class Orchestrator:
             self.config.owner, self.config.repo,
             outcome.issue, self.config.in_progress_label,
         )
+        self.github.add_label(
+            self.config.owner, self.config.repo,
+            outcome.issue, self.config.awaiting_reply_label,
+        )
+        self.state.record_pending_question(
+            outcome.issue, comment_id, kind=outcome.kind, branch=outcome.branch,
+        )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"asked a question, awaiting reply: {question[:200]!r}")
+
+    # --- pending questions (docs/roadmap.md item 13) ---------------------
+
+    def _promote_answered_questions(self, now: datetime) -> None:
+        """For every issue/PR still waiting on a question, checks whether a
+        trusted reply has landed since the question was posted and, if so,
+        re-adds the trigger label so `_dispatch`'s own polling picks it up
+        in this same `run_once` call -- no new hydration path needed, since
+        `_dispatch` already fetches full `Issue`/`PullRequestDetail` objects
+        for anything carrying the trigger label.
+
+        A reply "since the question" means a comment with a higher id than
+        the question comment's own (`state.pending_questions`'s recorded
+        baseline) -- not a count or a timestamp, both of which a deleted or
+        backdated comment could make lie.
+        """
+        for pending in list(self.state.pending_questions.values()):
+            try:
+                comments = self.github.list_comments(
+                    self.config.owner, self.config.repo, pending.issue
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                # Same "stale assignment" story as _requeue/_finish_question
+                # -- the issue is gone from the currently configured repo.
+                self.state.clear_pending_question(pending.issue)
+                self.audit.record(
+                    sandbox=None, issue=pending.issue,
+                    outcome=f"issue #{pending.issue} not found in "
+                            f"{self.config.owner}/{self.config.repo} while "
+                            "checking for a reply -- stale assignment?",
+                )
+                continue
+            reply = next(
+                (c for c in comments
+                 if c.id > pending.question_comment_id
+                 and c.author_association in _TRUSTED_REPLY_ASSOCIATIONS),
+                None,
+            )
+            if reply is None:
+                continue
+            self.github.remove_label(
+                self.config.owner, self.config.repo,
+                pending.issue, self.config.awaiting_reply_label,
+            )
+            self.github.add_label(
+                self.config.owner, self.config.repo,
+                pending.issue, self.config.trigger_label,
+            )
+            self.state.clear_pending_question(pending.issue)
+            self.audit.record(
+                sandbox=None, issue=pending.issue,
+                outcome=f"{reply.user} ({reply.author_association}) replied -- "
+                        "requeued for redispatch",
+            )
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
         # Back to the trigger label, per docs/design.md: "issues need

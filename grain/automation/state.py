@@ -56,10 +56,33 @@ class Assignment:
     branch: str | None = None
 
 
+@dataclass(frozen=True)
+class PendingQuestion:
+    """Tracks one issue/PR sitting idle after an `ask_question` call
+    (docs/roadmap.md item 13), waiting for a trusted reply to auto-redispatch
+    it without an operator re-applying the trigger label by hand.
+
+    `question_comment_id` is the id of the question comment `core.py`'s
+    `_finish_question` itself posted — the baseline a later check compares
+    the issue's current comment thread against: any comment with a *higher*
+    id, from a trusted author, means someone replied after the question was
+    asked. A comment id, not a timestamp or a count, because it can't be
+    spoofed by editing an older comment's body and is stable even if
+    comments in between get deleted.
+    """
+    issue: int
+    question_comment_id: int
+    kind: TriggerKind = TriggerKind.ISSUE
+    branch: str | None = None
+
+
 @dataclass
 class AutomationState:
     assignments: dict[str, Assignment] = field(default_factory=dict)
     run_timestamps: list[datetime] = field(default_factory=list)
+    # Keyed by str(issue number) -- JSON object keys must be strings, same
+    # reason `assignments` is keyed by sandbox name rather than an int.
+    pending_questions: dict[str, PendingQuestion] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "AutomationState":
@@ -82,7 +105,16 @@ class AutomationState:
         run_timestamps = [
             datetime.fromisoformat(t) for t in raw.get("run_timestamps", [])
         ]
-        return cls(assignments=assignments, run_timestamps=run_timestamps)
+        pending_questions = {
+            key: PendingQuestion(
+                issue=q["issue"], question_comment_id=q["question_comment_id"],
+                kind=TriggerKind(q.get("kind", TriggerKind.ISSUE.value)),
+                branch=q.get("branch"),
+            )
+            for key, q in raw.get("pending_questions", {}).items()
+        }
+        return cls(assignments=assignments, run_timestamps=run_timestamps,
+                    pending_questions=pending_questions)
 
     def save(self, path: Path) -> None:
         data = {
@@ -95,6 +127,13 @@ class AutomationState:
                 for name, a in self.assignments.items()
             },
             "run_timestamps": [t.isoformat() for t in self.run_timestamps],
+            "pending_questions": {
+                key: {
+                    "issue": q.issue, "question_comment_id": q.question_comment_id,
+                    "kind": q.kind.value, "branch": q.branch,
+                }
+                for key, q in self.pending_questions.items()
+            },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -119,6 +158,18 @@ class AutomationState:
 
     def in_progress_issues(self) -> set[int]:
         return {a.issue for a in self.assignments.values()}
+
+    # --- pending questions (docs/roadmap.md item 13) ---------------------
+    def record_pending_question(self, issue: int, question_comment_id: int, *,
+                                 kind: TriggerKind = TriggerKind.ISSUE,
+                                 branch: str | None = None) -> None:
+        self.pending_questions[str(issue)] = PendingQuestion(
+            issue=issue, question_comment_id=question_comment_id,
+            kind=kind, branch=branch,
+        )
+
+    def clear_pending_question(self, issue: int) -> None:
+        self.pending_questions.pop(str(issue), None)
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:

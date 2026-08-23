@@ -77,16 +77,26 @@ a human can make — can call the `ask_question` MCP tool instead of guessing
 or grinding to a timeout. That ends its turn: `dispatch.py` resets a fixed
 per-unit file before every dispatch, the tool call writes the question
 there, and once the unit finishes, `core.py`'s sweep reads it back, posts
-it as a comment on the issue/PR, and removes the in-progress label —
-**without** re-adding the trigger label, so the task doesn't immediately
-redispatch and re-ask the same question in a loop. The issue sits idle
-until a human replies and re-applies the trigger label themselves, same as
-a fresh issue; the next dispatch always fetches the current comment thread,
-so it sees the reply.
+it as a `🤖`-signed comment on the issue/PR, and swaps the in-progress label
+for `grain-agent-awaiting-reply` — **without** re-adding the trigger label,
+so the task doesn't immediately redispatch and re-ask the same question in
+a loop.
+
+The issue then sits idle until someone with write access to the repo
+(GitHub's own `author_association`: owner, member, or collaborator) replies
+in the thread — every `run_once` checks each open question's comments for
+exactly that, and re-applies the trigger label on its own the moment one
+shows up, so the very next dispatch picks it back up with the reply already
+in its prompt (`_dispatch` always fetches the current comment thread). A
+reply from anyone *without* write access is ignored: treating any comment
+as a redispatch trigger would let a random public commenter drive the agent
+with content of their choosing, on a public repo, which is exactly the
+prompt-injection gate the trigger label exists to close. Re-applying the
+label by hand still works too, as a fallback.
 
 The agent still never gets GitHub API access of its own — `core.py` is the
 only thing that posts the comment, and only from this one path
-(docs/roadmap.md item 12).
+(docs/roadmap.md items 12–13).
 
 ## Documentation
 
