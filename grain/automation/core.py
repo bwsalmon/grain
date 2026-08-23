@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from . import ratelimit
@@ -72,6 +73,7 @@ from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
 from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
+    question_path, unit_name,
 )
 from .github import GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
@@ -81,6 +83,24 @@ from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.tokens import SandboxTokenStore
 from ..run import Runner
+
+
+def _pending_question(sandbox: str) -> str | None:
+    """Reads back an `ask_question` call, if the agent made one this run
+    (docs/roadmap.md item 12) — a plain local file, same discipline as
+    `capture.py`'s `capture_trajectory`: `claude -p` (and the MCP server
+    child that wrote this) run on the controller now, so this is a direct
+    read, no `Runner`/SSH involved, and absence just means "no question,"
+    never an exception. `unit_name(sandbox)` is recomputed rather than
+    threaded through `Outcome` — it's a pure function of the sandbox, the
+    same shape `branch_name(issue)` already gets recomputed instead of
+    carried around for an issue-kind assignment.
+    """
+    try:
+        text = Path(question_path(unit_name(sandbox))).read_text().strip()
+    except OSError:
+        return None
+    return text or None
 
 
 @dataclass
@@ -160,6 +180,10 @@ class Orchestrator:
             self._finish_succeeded_issue(outcome)
 
     def _finish_succeeded_issue(self, outcome: Outcome) -> None:
+        question = _pending_question(outcome.sandbox)
+        if question is not None:
+            self._finish_question(outcome, question)
+            return
         branch = branch_name(outcome.issue)
         if not self.github.branch_exists(self.config.owner, self.config.repo, branch):
             # The unit exited zero, but that is not the same claim as "a PR
@@ -189,6 +213,10 @@ class Orchestrator:
                            outcome=f"opened PR #{pr.number}: {pr.html_url}")
 
     def _finish_succeeded_pr(self, outcome: Outcome) -> None:
+        question = _pending_question(outcome.sandbox)
+        if question is not None:
+            self._finish_question(outcome, question)
+            return
         # A PR assignment always carries its branch (recorded at dispatch
         # time — see state.py's Assignment docstring for why it can't be
         # recomputed the way an issue's can); sweeper.py always fills it in
@@ -217,6 +245,53 @@ class Orchestrator:
             sandbox=outcome.sandbox, issue=outcome.issue,
             outcome=f"pushed additional commits to PR #{outcome.issue} ({branch!r})",
         )
+
+    def _finish_question(self, outcome: Outcome, question: str) -> None:
+        """The agent called `ask_question` instead of finishing the task
+        (docs/roadmap.md item 12) — post it to a human and take the issue
+        out of the queue, rather than treating this like any other
+        "succeeded but nothing usable" case. `_requeue` re-adds the trigger
+        label immediately, which is right for a failed/branchless run (retry
+        with no new information is still a reasonable default) but wrong
+        here: it would redispatch on the very next `run_once` and most
+        likely ask the identical question again, looping at real cost with
+        nothing to act on in between. Removing only the in-progress label
+        (never re-adding the trigger) leaves the issue idle until a human
+        replies and re-labels it themselves — the same manual gate a fresh
+        issue already goes through, and how the next dispatch ends up
+        seeing the reply at all (`_dispatch` always fetches the current
+        comment thread — see its own comments).
+
+        A 404 from `create_comment` here means the same thing it means in
+        `_requeue`: a stale assignment against a repo that's since changed
+        out from under it, not a reason to crash the sweep. Best-effort
+        only for the comment in that case — there's no human to post to
+        either way, so removing the in-progress label is skipped too; the
+        assignment simply lapses.
+        """
+        try:
+            self.github.create_comment(
+                self.config.owner, self.config.repo, outcome.issue,
+                "grain-agent has a question before it can continue:\n\n"
+                f"{question}\n\n"
+                "Reply here, then re-apply the trigger label to try again.",
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            self.audit.record(
+                sandbox=outcome.sandbox, issue=outcome.issue,
+                outcome=f"asked a question but issue #{outcome.issue} not found in "
+                        f"{self.config.owner}/{self.config.repo} -- stale assignment? "
+                        f"question was: {question[:200]!r}",
+            )
+            return
+        self.github.remove_label(
+            self.config.owner, self.config.repo,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
+                           outcome=f"asked a question, awaiting reply: {question[:200]!r}")
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
         # Back to the trigger label, per docs/design.md: "issues need
@@ -300,17 +375,30 @@ class Orchestrator:
                 ssh_key_path=CONTROLLER_AGENT_SSH_KEY_PATH,
             )
             token = self.token_store.ensure_token(sandbox)
+            # Fetched for every dispatch, issue or PR alike, whether or not
+            # a prior attempt ever asked a question (docs/roadmap.md item
+            # 12) -- `AutomationState` carries no memory of that once an
+            # assignment is released, so this is the only way a redispatch
+            # sees a human's reply. Empty for the (common) case of no
+            # conversation yet; `_prompt`/`_pr_prompt` render that plainly
+            # rather than omitting the section, matching the existing
+            # blank-state convention for review comments.
+            thread_comments = self.github.list_comments(
+                self.config.owner, self.config.repo, number
+            )
             if isinstance(item, PullRequestDetail):
                 comments = self.github.list_review_comments(
                     self.config.owner, self.config.repo, number
                 )
                 unit = dispatch_pr(sandbox_runner, self.base_runner, sandbox, target,
-                                    item, comments, remote_url=self._remote_url(), token=token)
+                                    item, comments, remote_url=self._remote_url(), token=token,
+                                    thread_comments=thread_comments)
                 self.state.assign(sandbox, number, unit, now,
                                    kind=TriggerKind.PR, branch=item.head_ref)
             else:
                 unit = dispatch(sandbox_runner, self.base_runner, sandbox, target, item,
-                                 remote_url=self._remote_url(), token=token)
+                                 remote_url=self._remote_url(), token=token,
+                                 comments=thread_comments)
                 self.state.assign(sandbox, number, unit, now)
             self.state.record_run(now)
             self.github.remove_label(

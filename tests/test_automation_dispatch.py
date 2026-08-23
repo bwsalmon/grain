@@ -5,7 +5,7 @@ from grain.automation.dispatch import (
     branch_name, configure_git_credentials, dispatch, dispatch_pr, ensure_workspace,
     reap, transcript_path, unit_name, unit_status,
 )
-from grain.automation.github import Issue, PullRequestDetail, ReviewComment
+from grain.automation.github import Comment, Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
 
 REMOTE_URL = "http://10.100.0.2:8080/o/r.git"
@@ -14,6 +14,7 @@ UNIT = "grain-task-sandbox-0"
 UNIT_DIR = "/data/state/automation/units/grain-task-sandbox-0"
 PROMPT_PATH = f"{UNIT_DIR}/prompt.md"
 MCP_CONFIG_PATH = f"{UNIT_DIR}/mcp-config.json"
+QUESTION_PATH = f"{UNIT_DIR}/question.txt"
 
 
 def make_issue(number=1) -> Issue:
@@ -31,6 +32,10 @@ def make_pr(number=1, head_ref="feature-x") -> PullRequestDetail:
 def make_comments() -> list[ReviewComment]:
     return [ReviewComment(id=1, user="reviewer", body="please fix this",
                            path="src/thing.py", line=12)]
+
+
+def make_thread_comments() -> list[Comment]:
+    return [Comment(id=1, user="human", body="here's my answer")]
 
 
 def make_target(**overrides) -> SandboxTarget:
@@ -148,6 +153,63 @@ def test_dispatch_writes_an_mcp_config_naming_the_assigned_sandbox():
     assert "grain.automation.mcp_server" in server["args"]
 
 
+def test_dispatch_writes_an_mcp_config_naming_the_question_path():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    mcp_config = json.loads(mcp_stdin)
+    server = mcp_config["mcpServers"]["grain-sandbox"]
+    assert server["args"][server["args"].index("--question-path") + 1] == QUESTION_PATH
+
+
+def test_dispatch_resets_the_question_file_before_every_dispatch():
+    """A fixed path, reused across dispatches to the same sandbox -- a
+    leftover question from an earlier, unrelated task must never survive
+    into this one (docs/roadmap.md item 12).
+    """
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert runner.ran(f"sudo rm -f {QUESTION_PATH}")
+
+
+def test_dispatch_includes_the_issue_conversation_in_the_prompt():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, comments=make_thread_comments())
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "here's my answer" in prompt_stdin
+
+
+def test_dispatch_prompt_handles_no_conversation_yet():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "(no comments yet)" in prompt_stdin
+
+
+def test_dispatch_prompt_points_a_blocked_agent_at_ask_question():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "ask_question" in prompt_stdin
+
+
 def test_dispatch_prepares_credentials_and_workspace_before_the_prompt():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
@@ -185,6 +247,7 @@ def test_dispatch_runs_claude_from_opt_grain_with_only_mcp_and_native_exceptions
     assert "--strict-mcp-config" in unit_call
     assert "mcp__grain-sandbox__run_command" in unit_call
     assert "mcp__grain-sandbox__edit_file" in unit_call
+    assert "mcp__grain-sandbox__ask_question" in unit_call
     assert "--allowedTools" in unit_call and "Task" in unit_call
     assert "--no-session-persistence" in unit_call
     # The permission-mode flag existed only to auto-approve the native
@@ -405,6 +468,32 @@ def test_dispatch_pr_prompt_handles_no_review_comments():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "no inline review comments" in prompt_stdin
+
+
+def test_dispatch_pr_includes_the_top_level_conversation_too():
+    """Distinct from inline review comments -- a human's reply to a prior
+    `ask_question` call (docs/roadmap.md item 12) lands as a plain
+    top-level comment, not an inline one.
+    """
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, thread_comments=make_thread_comments())
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "here's my answer" in prompt_stdin
+
+
+def test_dispatch_pr_prompt_handles_no_conversation_yet():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), [],
+                remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "(no comments yet)" in prompt_stdin
 
 
 def test_dispatch_pr_starts_a_systemd_unit_named_for_the_sandbox():

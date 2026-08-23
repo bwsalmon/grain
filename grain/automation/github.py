@@ -1,10 +1,21 @@
 """The GitHub REST calls the orchestrator needs: list labelled issues, move
-labels, confirm a branch exists, open a PR. Still no comment *creation* and
-still no sandbox-side access — see docs/design.md's split surface
-("Orchestrator: API operations... sandboxes: git transport only"). PR
-creation is what docs/roadmap.md item 2 added; reading a PR's own data and
-its review comments (never writing a comment) is what item 9 adds, to
-support dispatching to an existing PR rather than only a labelled issue.
+labels, confirm a branch exists, open a PR. Still no sandbox-side access —
+see docs/design.md's split surface ("Orchestrator: API operations...
+sandboxes: git transport only"). PR creation is what docs/roadmap.md item 2
+added; reading a PR's own data and its review comments (never writing a
+comment) is what item 9 adds, to support dispatching to an existing PR
+rather than only a labelled issue.
+
+Comment *creation* (`create_comment`) arrives with docs/roadmap.md item 12,
+for exactly one purpose: relaying a dispatched agent's `ask_question` MCP
+call to a human. It is not a general capability the agent can reach
+directly — the split surface above is unchanged, since `core.py` remains
+the only caller and the agent never gets API access of its own; it only
+ever writes a question to a local file `core.py` later reads (docs/roadmap.md
+item 12, `mcp_server.py`'s `ask_question` tool). `list_comments` (the
+top-level conversation thread, distinct from `list_review_comments`'s
+inline diff comments) exists for the other half of that same item: showing
+a redispatched issue/PR the human's reply to a prior question.
 
 Same shape as `grain/proxy/forward.py`: a `Transport` protocol wrapping
 `http.client` so `GitHubClient`'s logic is testable without a real call to
@@ -122,6 +133,21 @@ class PullRequestDetail:
     html_url: str
     head_ref: str
     base_ref: str
+
+
+@dataclass(frozen=True)
+class Comment:
+    """A plain top-level comment on an issue or PR — GitHub's own
+    `/issues/{number}/comments` endpoint serves both, since a PR is a
+    special kind of issue in its data model (same unification
+    `list_pull_requests` already relies on). Distinct from `ReviewComment`:
+    those are inline, diff-attached; this is the ordinary conversation
+    thread — where a human's reply to an agent's `ask_question` call
+    (docs/roadmap.md item 12) actually lands.
+    """
+    id: int
+    user: str
+    body: str
 
 
 @dataclass(frozen=True)
@@ -338,6 +364,43 @@ class GitHubClient:
             path = _next_page_path(resp.headers.get("Link"))
         return comments
 
+    def list_comments(self, owner: str, repo: str, number: int) -> list[Comment]:
+        """The plain top-level conversation on an issue or PR (docs/roadmap.md
+        item 12) — where a human's reply to an agent's `ask_question` call
+        lands. Same shared issues-comments endpoint and pagination shape
+        `list_review_comments` uses for its own (inline) endpoint.
+        """
+        comments: list[Comment] = []
+        path = f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=100"
+        while path:
+            resp = self.transport.request(
+                method="GET", path=path, headers=self._headers(), body=None
+            )
+            if resp.status != 200:
+                raise GitHubError(resp.status, resp.body)
+            for item in json.loads(resp.body):
+                comments.append(Comment(
+                    id=item["id"], user=item.get("user", {}).get("login", ""),
+                    body=item.get("body") or "",
+                ))
+            path = _next_page_path(resp.headers.get("Link"))
+        return comments
+
+    def create_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+        """Posts a top-level comment — the operation docs/design.md's split
+        surface originally noted as absent. Still not something the agent
+        can reach directly (that boundary is unchanged): `core.py` is the
+        only caller, and only to relay an `ask_question` call
+        (docs/roadmap.md item 12) to a human.
+        """
+        resp = self.transport.request(
+            method="POST", path=f"/repos/{owner}/{repo}/issues/{number}/comments",
+            headers=self._headers(json_body=True),
+            body=json.dumps({"body": body}).encode(),
+        )
+        if resp.status != 201:
+            raise GitHubError(resp.status, resp.body)
+
 
 @dataclass
 class DryRunGitHubClient:
@@ -373,3 +436,9 @@ class DryRunGitHubClient:
 
     def list_review_comments(self, owner: str, repo: str, number: int) -> list[ReviewComment]:
         return self.inner.list_review_comments(owner, repo, number)
+
+    def list_comments(self, owner: str, repo: str, number: int) -> list[Comment]:
+        return self.inner.list_comments(owner, repo, number)
+
+    def create_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+        print(f"+ comment on {owner}/{repo}#{number}: {body!r}")

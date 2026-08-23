@@ -829,8 +829,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_mcp_server_round_trips_real_tool_calls_over_real_ssh(
-    booted_sandbox: Sandbox, git_installed: None,
+    booted_sandbox: Sandbox, git_installed: None, tmp_path: Path,
 ):
+    question_path = tmp_path / "question.txt"
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -857,6 +858,10 @@ def test_mcp_server_round_trips_real_tool_calls_over_real_ssh(
             "name": "run_command",
             "arguments": {"command": "sleep 5", "timeout": 1000},
         }},
+        {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
+            "name": "ask_question",
+            "arguments": {"question": "a distinctive question marker"},
+        }},
     ]
     stdin_text = "\n".join(json.dumps(r) for r in requests) + "\n"
 
@@ -871,7 +876,7 @@ def test_mcp_server_round_trips_real_tool_calls_over_real_ssh(
             ["python3", "-m", "grain.automation.mcp_server",
              "--address", str(booted_sandbox.cluster.address_of(booted_sandbox.name)),
              "--user", SSH_USER, "--key-path", str(booted_sandbox.private_key),
-             "--workspace", WORKSPACE_PATH],
+             "--workspace", WORKSPACE_PATH, "--question-path", str(question_path)],
             input=stdin_text, capture_output=True, text=True, timeout=60, cwd=_REPO_ROOT,
         )
         responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
@@ -879,7 +884,9 @@ def test_mcp_server_round_trips_real_tool_calls_over_real_ssh(
 
         assert by_id[1]["result"]["serverInfo"]["name"] == "grain-sandbox"
         tool_names = {t["name"] for t in by_id[2]["result"]["tools"]}
-        assert tool_names == {"run_command", "read_file", "edit_file", "write_file"}
+        assert tool_names == {
+            "run_command", "read_file", "edit_file", "write_file", "ask_question",
+        }
 
         run_text = by_id[3]["result"]["content"][0]["text"]
         assert "hello-from-real-sandbox" in run_text
@@ -903,6 +910,12 @@ def test_mcp_server_round_trips_real_tool_calls_over_real_ssh(
         # the tool's own report of success.
         final = ssh_runner.run(["cat", f"{WORKSPACE_PATH}/mcp_test.txt"]).stdout
         assert final == "line one\nline TWO edited\nline three\n"
+
+        assert by_id[8]["result"]["isError"] is False
+        # ask_question never touches the sandbox at all -- the question
+        # lands on the *local* filesystem this subprocess ran against, not
+        # over ssh_runner.
+        assert question_path.read_text() == "a distinctive question marker"
     finally:
         ssh_runner.run(["rm", "-f", f"{WORKSPACE_PATH}/mcp_test.txt"], check=False)
 

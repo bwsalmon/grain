@@ -617,6 +617,16 @@ The cost is that agents cannot run `gh pr create`; PR and comment creation
 happens through OpenHands. Worth accepting — the alternative reintroduces
 the full REST attack surface into the least trusted component.
 
+**One narrow, deliberate exception (docs/roadmap.md item 12):** an agent
+that's genuinely blocked can call an `ask_question` MCP tool to relay a
+question to a human. This does not reopen the split: the agent still has
+no REST/GraphQL access of its own, here or anywhere else — the tool only
+writes a question to a local file on the controller, and the orchestrator
+(the only thing holding the GitHub credential, unchanged) is what actually
+calls `create_comment`. The boundary the split-surface argument draws is
+preserved; what moved is that the orchestrator now has a `create_comment`
+operation to call at all, where before it had none.
+
 ### Auth model: a broad credential behind a narrow proxy
 
 Installing a GitHub App on every needed repo is often impossible — it

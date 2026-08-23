@@ -3,7 +3,7 @@ import json
 import pytest
 
 from grain.automation.github import (
-    ApiResponse, DryRunGitHubClient, FakeTransport, GitHubClient, GitHubError,
+    ApiResponse, Comment, DryRunGitHubClient, FakeTransport, GitHubClient, GitHubError,
     PullRequest, PullRequestDetail, ReviewComment,
 )
 
@@ -248,6 +248,53 @@ def test_list_review_comments_raises_on_a_non_200():
         GitHubClient(transport, token="t").list_review_comments("o", "r", 5)
 
 
+def comment_json(id_: int, *, user: str = "human", body: str = "here's my answer") -> dict:
+    return {"id": id_, "user": {"login": user}, "body": body}
+
+
+def test_list_comments_reads_the_plain_comment_shape():
+    transport = FakeTransport(
+        responses=[ApiResponse(200, {}, json.dumps([comment_json(9)]).encode())]
+    )
+    comments = GitHubClient(transport, token="t").list_comments("o", "r", 5)
+    assert comments == [Comment(id=9, user="human", body="here's my answer")]
+    assert transport.calls[0]["path"] == "/repos/o/r/issues/5/comments?per_page=100"
+
+
+def test_list_comments_follows_link_header_pagination():
+    transport = FakeTransport(responses=[
+        ApiResponse(
+            200,
+            {"Link": '<https://api.github.com/repos/o/r/issues/5/comments?page=2>; rel="next"'},
+            json.dumps([comment_json(1)]).encode(),
+        ),
+        ApiResponse(200, {}, json.dumps([comment_json(2)]).encode()),
+    ])
+    comments = GitHubClient(transport, token="t").list_comments("o", "r", 5)
+    assert [c.id for c in comments] == [1, 2]
+
+
+def test_list_comments_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").list_comments("o", "r", 5)
+
+
+def test_create_comment_posts_the_body():
+    transport = FakeTransport(responses=[ApiResponse(201, {}, b"{}")])
+    GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question for you")
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/r/issues/5/comments"
+    assert json.loads(call["body"]) == {"body": "a question for you"}
+
+
+def test_create_comment_raises_on_a_non_201():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question")
+
+
 def test_dry_run_client_passes_pr_reads_through(capsys):
     transport = FakeTransport(responses=[
         ApiResponse(200, {}, json.dumps([issue_json(1, is_pr=True)]).encode()),
@@ -290,3 +337,20 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
     # Only the two reads (list_issues, branch_exists) actually reached the
     # transport — every mutation, including PR creation, only printed.
     assert len(transport.calls) == 2
+
+
+def test_dry_run_client_passes_list_comments_through_but_prints_create_comment(capsys):
+    transport = FakeTransport(
+        responses=[ApiResponse(200, {}, json.dumps([comment_json(1)]).encode())]
+    )
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+
+    comments = dry.list_comments("o", "r", 1)
+    assert [c.id for c in comments] == [1]
+
+    dry.create_comment("o", "r", 1, "a question for you")
+    out = capsys.readouterr().out
+    assert "comment on" in out
+    assert "a question for you" in out
+    # The read reached the transport; the mutation only printed.
+    assert len(transport.calls) == 1

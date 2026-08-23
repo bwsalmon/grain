@@ -1,7 +1,7 @@
 import shlex
 
 from grain.automation.mcp_server import (
-    TOOLS, McpServer, edit_file, read_file, run_command, write_file,
+    TOOLS, McpServer, ask_question, edit_file, read_file, run_command, write_file,
 )
 from grain.run import FakeRunner
 
@@ -108,6 +108,24 @@ def test_write_file_creates_the_parent_directory_then_writes():
     assert dd_stdin == "content\n"
 
 
+def test_ask_question_writes_the_question_to_the_fixed_path_not_the_sandbox(tmp_path):
+    """Unlike every other tool here, this never touches a `Runner` at all --
+    the question is for a human, not the sandbox.
+    """
+    path = tmp_path / "question.txt"
+    result = ask_question(str(path), "Should I use approach A or B?")
+    assert path.read_text() == "Should I use approach A or B?"
+    assert not result.is_error
+    assert "recorded" in result.text.lower()
+
+
+def test_ask_question_overwrites_a_prior_question_in_the_same_dispatch(tmp_path):
+    path = tmp_path / "question.txt"
+    ask_question(str(path), "first question")
+    ask_question(str(path), "second question")
+    assert path.read_text() == "second question"
+
+
 # --- McpServer JSON-RPC dispatch -------------------------------------------
 
 def test_initialize_reports_protocol_and_server_info():
@@ -121,11 +139,13 @@ def test_notifications_initialized_produces_no_response():
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
-def test_tools_list_returns_exactly_the_four_tools():
+def test_tools_list_returns_exactly_the_five_tools():
     server = McpServer(FakeRunner(), WORKSPACE)
     response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in response["result"]["tools"]}
-    assert names == {"run_command", "read_file", "edit_file", "write_file"}
+    assert names == {
+        "run_command", "read_file", "edit_file", "write_file", "ask_question",
+    }
     assert response["result"]["tools"] == TOOLS
 
 
@@ -164,3 +184,23 @@ def test_unknown_method_returns_an_error_when_it_has_an_id():
     server = McpServer(FakeRunner(), WORKSPACE)
     response = server.handle({"jsonrpc": "2.0", "id": 6, "method": "not/a/real/method"})
     assert response["error"]["code"] == -32601
+
+
+def test_tools_call_routes_ask_question_to_the_configured_path(tmp_path):
+    path = tmp_path / "question.txt"
+    server = McpServer(FakeRunner(), WORKSPACE, question_path=str(path))
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": "ask_question", "arguments": {"question": "which way?"}},
+    })
+    assert response["result"]["isError"] is False
+    assert path.read_text() == "which way?"
+
+
+def test_tools_call_ask_question_without_a_configured_path_errors_not_crashes():
+    server = McpServer(FakeRunner(), WORKSPACE)  # no question_path
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+        "params": {"name": "ask_question", "arguments": {"question": "which way?"}},
+    })
+    assert response["result"]["isError"] is True

@@ -154,7 +154,7 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
-from .github import Issue, PullRequestDetail, ReviewComment
+from .github import Comment, Issue, PullRequestDetail, ReviewComment
 from ..run import Runner
 
 # Fixed across every dispatch to a sandbox — long-lived sandboxes reuse the
@@ -275,6 +275,21 @@ def _mcp_config_path(unit: str) -> str:
     return f"{_unit_dir(unit)}/mcp-config.json"
 
 
+def question_path(unit: str) -> str:
+    """The fixed path `mcp_server.py`'s `ask_question` tool writes to, and
+    `core.py`'s sweep reads back after a unit finishes (docs/roadmap.md item
+    12) — same "compute once, share" shape `transcript_path` already uses,
+    for the same reason: the writer (`mcp_server.py`, a separate process)
+    and the reader (`core.py`) must never be able to disagree on where the
+    question landed. Reused verbatim across dispatches to this sandbox
+    (`unit_name()` is fixed per sandbox), which is exactly why `_start_task`
+    resets it at the start of every dispatch — otherwise a question from
+    one task could leak into a later, unrelated one that never asked
+    anything.
+    """
+    return f"{_unit_dir(unit)}/question.txt"
+
+
 def branch_name(issue: int) -> str:
     """The exact branch a dispatch for this issue must push to.
 
@@ -286,11 +301,31 @@ def branch_name(issue: int) -> str:
     return f"grain/issue-{issue}"
 
 
-def _prompt(issue: Issue, branch: str, workspace: str) -> str:
+def _format_comment(comment: Comment) -> str:
+    return f"- {comment.user}:\n  {comment.body}"
+
+
+def _conversation_section(comments: list[Comment]) -> str:
+    """The plain top-level comment thread, formatted for a prompt — where a
+    human's reply to a prior `ask_question` call (docs/roadmap.md item 12)
+    would actually show up. Always included, blank state and all, matching
+    `_pr_prompt`'s existing "(no inline review comments)" convention: a
+    fresh issue with nothing to show is the common case, not an error.
+    """
+    return (
+        "\n\n".join(_format_comment(c) for c in comments)
+        if comments else "(no comments yet)"
+    )
+
+
+def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = ()) -> str:
     return (
         f"You are working GitHub issue #{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n\n"
         f"Issue URL: {issue.html_url}\n\n"
+        "Conversation on this issue so far (a prior attempt may have asked "
+        "a question here, and a human may have already answered it):\n\n"
+        f"{_conversation_section(list(comments))}\n\n"
         f"A clone of the target repository is already checked out at "
         f"{workspace} in your assigned sandbox, with its git remote already "
         "configured — do your work there, using the tools available to "
@@ -300,7 +335,9 @@ def _prompt(issue: Issue, branch: str, workspace: str) -> str:
         f"    git push origin HEAD:{branch}\n"
         "The controller opens the pull request itself once it sees that "
         "branch — you have no GitHub API access from here, so do not "
-        "attempt to open a PR or comment directly."
+        "attempt to open a PR or comment directly. If you are genuinely "
+        "blocked and need the human's input, use the ask_question tool "
+        "instead."
     )
 
 
@@ -309,7 +346,8 @@ def _format_review_comment(comment: ReviewComment) -> str:
     return f"- {comment.user} on {location}:\n  {comment.body}"
 
 
-def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str) -> str:
+def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str,
+               thread_comments: list[Comment] = ()) -> str:
     feedback = (
         "\n\n".join(_format_review_comment(c) for c in comments)
         if comments else "(no inline review comments)"
@@ -328,6 +366,9 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         "start over or open a competing branch.\n\n"
         "Review feedback on this pull request so far:\n\n"
         f"{feedback}\n\n"
+        "Conversation on this pull request so far (a prior attempt may have "
+        "asked a question here, and a human may have already answered it):\n\n"
+        f"{_conversation_section(list(thread_comments))}\n\n"
         "When you are done, commit your changes and push them with exactly "
         "this command:\n"
         f"    git push origin HEAD:{pr.head_ref}\n"
@@ -454,13 +495,17 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
     ])
 
 
-def _mcp_config_json(target: SandboxTarget) -> str:
+def _mcp_config_json(target: SandboxTarget, question_path_value: str) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
     `mcp_server.py` is invoked as its own process, per dispatch, with the
     assigned sandbox's connection details baked into its argv here. Nothing
     in a tool call itself can ever change this: the agent only ever sees
     tool names and their declared parameters (`command`, `file_path`, ...),
     never `target` — this JSON is the only place the sandbox gets named.
+    `question_path_value` is the same "only place it's named" treatment
+    for `ask_question` (docs/roadmap.md item 12): the agent supplies only
+    the question text; where it lands is decided here, not by the tool
+    call.
     """
     return json.dumps({
         "mcpServers": {
@@ -472,6 +517,7 @@ def _mcp_config_json(target: SandboxTarget) -> str:
                     "--user", target.ssh_user,
                     "--key-path", target.ssh_key_path,
                     "--workspace", target.workspace,
+                    "--question-path", question_path_value,
                 ],
             },
         },
@@ -499,6 +545,7 @@ _NATIVE_TOOLS = "Task"
 _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
+    "mcp__grain-sandbox__ask_question,"
     f"{_NATIVE_TOOLS}"
 )
 
@@ -534,9 +581,18 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     controller_runner.run(["sudo", "chown", CONTROLLER_AGENT_USER, unit_dir])
     p_path = _prompt_path(unit)
     controller_runner.run(["sudo", "dd", f"of={p_path}", "status=none"], stdin=prompt)
+    q_path = question_path(unit)
+    # A fixed path, reused across every dispatch to this sandbox
+    # (docs/roadmap.md item 12) -- reset unconditionally so a question from
+    # an earlier, unrelated task can never be misread as belonging to this
+    # one. `mcp_server.py`'s `ask_question` tool (running as
+    # CONTROLLER_AGENT_USER, same as the rest of this unit) can create it
+    # fresh on its own; nothing here needs to pre-create or chown it.
+    controller_runner.run(["sudo", "rm", "-f", q_path])
     m_path = _mcp_config_path(unit)
     controller_runner.run(
-        ["sudo", "dd", f"of={m_path}", "status=none"], stdin=_mcp_config_json(target),
+        ["sudo", "dd", f"of={m_path}", "status=none"],
+        stdin=_mcp_config_json(target, q_path),
     )
     out_path = transcript_path(unit)
     start_unit(
@@ -559,7 +615,8 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 
 
 def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
-             target: SandboxTarget, issue: Issue, *, remote_url: str, token: str) -> str:
+             target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
+             comments: list[Comment] = ()) -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
     `claude -p` on the controller, pointed at that same sandbox via
@@ -571,19 +628,24 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     sandbox's own git-proxy bearer token (`grain/proxy/tokens.py`'s
     `SandboxTokenStore.ensure_token` mints it on first use) — both supplied
     by `core.py`, which is the only layer that knows the controller's
-    address and holds the token store.
+    address and holds the token store. `comments` (docs/roadmap.md item 12)
+    is the issue's top-level conversation, from `GitHubClient.list_comments`
+    — how a redispatch after a prior `ask_question` call sees the human's
+    reply, since `AutomationState` itself carries no memory of that round
+    trip once the assignment is released.
     """
     branch = branch_name(issue.number)
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
-        _prompt(issue, branch, target.workspace),
+        _prompt(issue, branch, target.workspace, comments),
         remote_url=remote_url, token=token,
     )
 
 
 def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, pr: PullRequestDetail,
-                 comments: list[ReviewComment], *, remote_url: str, token: str) -> str:
+                 comments: list[ReviewComment], *, remote_url: str, token: str,
+                 thread_comments: list[Comment] = ()) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
     (`pr.head_ref`) instead of the default branch, and the prompt carries the
@@ -595,10 +657,14 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     reads both before calling this, same division of labour as `dispatch()`
     (all GitHub API work stays on the controller; the sandbox only ever
     sees git, and only through the tools `mcp_server.py` exposes).
+    `thread_comments` (docs/roadmap.md item 12) is the PR's top-level
+    conversation, from `GitHubClient.list_comments` — distinct from
+    `comments`'s inline review comments, and where a human's reply to a
+    prior `ask_question` call actually lands.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
-        _pr_prompt(pr, comments, target.workspace),
+        _pr_prompt(pr, comments, target.workspace, thread_comments),
         remote_url=remote_url, token=token, branch=pr.head_ref,
     )
 

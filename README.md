@@ -8,8 +8,10 @@ controller turns into a PR.
 The point of the design is the credential boundary: **the untrusted
 execution environment holds nothing worth taking.** The agent *process* —
 `claude -p` — runs on the **controller**, with its entire native tool
-roster disabled and replaced by four narrow MCP tools that reach the
-assigned sandbox over SSH. The sandbox is where the work actually happens
+roster disabled and replaced by five narrow MCP tools, four of which reach
+the assigned sandbox over SSH; the fifth (`ask_question`) reaches a human
+instead, by posting to the GitHub issue/PR thread. The sandbox is where the
+work actually happens
 — the checkout, the builds, the `kind` clusters — and it holds no GitHub
 token, no GCP key, and no Claude credential. Its only routes out are a git
 proxy and a metadata server, both on the controller, both allowlist-checked
@@ -25,7 +27,7 @@ host (Debian, KVM — admin SSH key only, no system credentials)
 ├── controller VM   automation loop · claude -p (as grain-agent) · git proxy
 │                   · one metadata server per sandbox · /data (every credential)
 │                       │
-│                       │  SSH, four MCP tools, nothing else
+│                       │  SSH, five MCP tools, nothing else
 │                       ▼
 ├── sandbox-0       docker · kind · the workspace checkout — no credentials
 └── sandbox-1       docker · kind · the workspace checkout — no credentials
@@ -51,11 +53,15 @@ dedicated unprivileged `grain-agent` account, with:
   a roster filter); both flags together do, and the advertised tool list in
   the `system/init` event shrinks to exactly what is named.
 - `--mcp-config <per-dispatch file> --strict-mcp-config` — pointing at
-  `grain/automation/mcp_server.py`, which exposes exactly four tools:
-  `run_command`, `read_file`, `edit_file`, `write_file`. Every one resolves
-  against the *assigned* sandbox's workspace, over SSH. The sandbox's
-  address, user, and key are baked into the MCP server's argv at dispatch
-  time; nothing in a tool call's own arguments can redirect it elsewhere.
+  `grain/automation/mcp_server.py`, which exposes exactly five tools:
+  `run_command`, `read_file`, `edit_file`, `write_file` all resolve against
+  the *assigned* sandbox's workspace, over SSH — the sandbox's address,
+  user, and key are baked into the MCP server's argv at dispatch time,
+  never into a tool call's own arguments. `ask_question` is different: it
+  never touches the sandbox at all, and only ever writes to a local file on
+  the controller for the orchestrator to relay as a GitHub comment (see
+  "Asking the human a question" below) — the agent still gets no GitHub API
+  access of its own.
 - `TodoWrite` and `Task` also allowed — a `Task`-spawned subagent inherits
   the same empty roster (confirmed live by an explicit system denial, not
   self-report), so delegation is safe to leave on.
@@ -63,6 +69,24 @@ dedicated unprivileged `grain-agent` account, with:
 A sandbox therefore holds exactly one secret: its own git-proxy bearer
 token, which buys nothing but proxied access to allow-listed repos and is
 revocable per sandbox.
+
+## Asking the human a question
+
+An agent that's genuinely blocked — ambiguous requirements, a decision only
+a human can make — can call the `ask_question` MCP tool instead of guessing
+or grinding to a timeout. That ends its turn: `dispatch.py` resets a fixed
+per-unit file before every dispatch, the tool call writes the question
+there, and once the unit finishes, `core.py`'s sweep reads it back, posts
+it as a comment on the issue/PR, and removes the in-progress label —
+**without** re-adding the trigger label, so the task doesn't immediately
+redispatch and re-ask the same question in a loop. The issue sits idle
+until a human replies and re-applies the trigger label themselves, same as
+a fresh issue; the next dispatch always fetches the current comment thread,
+so it sees the reply.
+
+The agent still never gets GitHub API access of its own — `core.py` is the
+only thing that posts the comment, and only from this one path
+(docs/roadmap.md item 12).
 
 ## Documentation
 

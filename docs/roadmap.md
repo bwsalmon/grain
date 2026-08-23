@@ -862,3 +862,76 @@ real login credential this environment doesn't have), and the "controller
 recreate → key repair on an *existing* sandbox" path in `bootstrap()`'s
 stage 9 (unit-tested via `FakeRunner`'s stage-order/skip-if-present cases,
 not yet run against a real controller recreate).
+
+## 12. Let a dispatched agent ask the human a question
+
+- [x] Done (unit-tested; not yet verified live)
+
+Until now, an agent that hit something it genuinely couldn't resolve on its
+own had no way to surface that — it just ran to completion (or timed out)
+with whatever it could infer, and `docs/design.md`'s split surface meant it
+never had GitHub API access to comment with anyway, even if it had
+something to say.
+
+**The tool.** `mcp_server.py` gains a fifth tool, `ask_question`, unlike the
+other four in one respect: it never touches the sandbox at all. It takes
+only `{question: string}` and writes it to a fixed local file on the
+controller — `dispatch.question_path(unit)`, the same "compute once, share"
+shape `transcript_path`/`branch_name` already use — then returns a result
+telling the agent to end its turn. No `Runner`/SSH involved, since the
+question is for a human, not the sandbox's filesystem.
+
+**Closing the loop without reopening the split surface.** The agent still
+never gets a GitHub credential or API access of its own (`docs/design.md`'s
+"Split the surface" is unchanged, see its own updated note). `core.py` is
+the only thing that can act on a question:
+
+- `_finish_succeeded_issue`/`_finish_succeeded_pr` check for a pending
+  question (`_pending_question`, reading the fixed path back — same
+  never-raises discipline as `capture.py`'s `capture_trajectory`) *before*
+  the existing `branch_exists` check, since a run that asked a question
+  almost never also pushed a branch, and the two need different handling.
+- `GitHubClient` gains `create_comment` (docs/design.md's split surface
+  originally flagged this as the one operation missing) and `list_comments`
+  (the plain top-level conversation, distinct from `list_review_comments`'s
+  inline diff comments — where a human's reply actually lands).
+- `_finish_question` posts the comment and removes the in-progress label,
+  but **deliberately does not re-add the trigger label** the way `_requeue`
+  does for a failed/branchless run. Re-adding it would redispatch on the
+  very next `run_once` and most likely re-ask the identical question,
+  looping at real cost with nothing new to act on — one of the "no
+  per-run cost cap" risks `docs/next-session.md` already flags. Instead the
+  issue sits idle, exactly like a fresh issue, until a human replies and
+  re-applies the trigger label themselves.
+- A 404 from `create_comment` (a stale assignment against a repo that's
+  changed out from under it — the same class of bug `docs/next-session.md`
+  flagged for `_requeue`) is logged and treated as best-effort, not a crash.
+
+**Closing the round trip.** None of this matters if the next dispatch can't
+see the human's answer. `_dispatch` now fetches `list_comments` for *every*
+dispatch, issue or PR alike (previously only PR dispatches fetched
+anything — inline review comments), and `_prompt`/`_pr_prompt` render it as
+a "conversation so far" section, blank-state included (matching the
+existing "(no inline review comments)" convention). `dispatch()`/
+`dispatch_pr()` both gained a `comments`/`thread_comments` parameter to
+carry this through — `AutomationState` itself remembers nothing of the
+round trip once an assignment is released, so the comment thread on GitHub
+is the only durable record of "a question was asked and answered."
+
+**The reused-sandbox hazard, closed at the write end, not the read end.**
+`question_path(unit)` is fixed per sandbox, not per task (same as
+`transcript_path`) — reused verbatim by whatever task this sandbox gets
+next. `_start_task` resets it (`rm -f`) at the start of *every* dispatch,
+so a question from one task can never be misread as belonging to a later,
+unrelated one; the read side doesn't need to clean up after itself for
+correctness; only writing needs to be careful about *when*, not reading
+about staleness.
+
+**Not verified live**: everything above is covered by unit tests
+(`test_mcp_server.py`, `test_automation_dispatch.py`,
+`test_automation_github.py`, `test_automation_core.py`) against
+`FakeRunner`/`FakeTransport`, but no real `claude -p` session has actually
+called `ask_question` — whether the tool's description reliably gets a real
+model to call it (rather than guessing past a genuine ambiguity, or calling
+it too readily for routine questions) is a real-model behavior question a
+fake transcript can't answer.

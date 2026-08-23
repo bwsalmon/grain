@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import grain.automation.capture as capture_module
+import grain.automation.core as core_module
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
@@ -22,7 +23,13 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 def issue_json(number: int) -> dict:
     return {
-        "number": number, "title": f"issue {number}", "body": "do it",
+        # "id" isn't read by list_issues itself, but the same fixture also
+        # serves as FakeTransport's shared default response for whichever
+        # GET call falls through to it -- including _dispatch's new
+        # list_comments call (docs/roadmap.md item 12), which does read
+        # "id". Present so that fallback doesn't KeyError in tests that
+        # never queue a dedicated comments response.
+        "id": number, "number": number, "title": f"issue {number}", "body": "do it",
         "html_url": f"https://github.com/o/r/issues/{number}",
         "labels": [{"name": "grain-agent"}],
     }
@@ -223,6 +230,108 @@ def test_a_requeue_still_raises_a_non_404_github_error():
 
     with pytest.raises(GitHubError):
         orchestrator.run_once(NOW)
+
+
+# --- ask_question (docs/roadmap.md item 12) --------------------------------
+
+def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypatch, tmp_path):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    question_file = tmp_path / "question.txt"
+    question_file.write_text("Should I use approach A or B?")
+    monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(201, {}, b"{}"),  # create_comment
+        ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    comment_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
+    )
+    assert "Should I use approach A or B?" in json.loads(comment_call["body"])["body"]
+    # No branch was ever checked, and no PR was opened -- the question path
+    # short-circuits before either.
+    assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
+    assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
+    # Trigger label is never re-added -- this issue stays out of the queue
+    # until a human replies and re-labels it.
+    assert not any(
+        c["method"] == "POST" and c["path"].endswith("/labels") for c in transport.calls
+    )
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("asked a question" in o and "Should I use approach A or B?" in o
+               for o in outcomes)
+
+
+def test_a_question_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, tmp_path):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    question_file = tmp_path / "question.txt"
+    question_file.write_text("does this issue even exist?")
+    monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale assignment" in o for o in outcomes)
+    # Best-effort only: no label call was even attempted once the comment
+    # itself 404'd -- there's no human to notify either way.
+    assert not any(c["method"] == "DELETE" for c in transport.calls)
+
+
+def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monkeypatch, tmp_path):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    question_file = tmp_path / "question.txt"
+    question_file.write_text("which review comment should I prioritize?")
+    monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(201, {}, b"{}"),  # create_comment
+        ApiResponse(200, {}, b"{}"),  # remove_label
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    comment_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
+    )
+    assert "which review comment should I prioritize?" in json.loads(comment_call["body"])["body"]
+
+
+def test_dispatch_fetches_the_issue_conversation_for_the_prompt():
+    """`_dispatch` must fetch the top-level comment thread for every issue
+    dispatch, not just PRs -- otherwise a redispatch after a human answers
+    a prior `ask_question` call would never see the reply.
+    """
+    state = AutomationState()
+    runner = FakeRunner()
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)], state=state, runner=runner)
+
+    orchestrator.run_once(NOW)
+
+    comment_gets = [
+        c for c in transport.calls
+        if c["method"] == "GET" and c["path"].startswith("/repos/o/r/issues/5/comments")
+    ]
+    assert len(comment_gets) == 1
 
 
 # --- PR creation on a successful run (docs/roadmap.md item 2) -------------

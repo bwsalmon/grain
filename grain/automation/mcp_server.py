@@ -37,6 +37,18 @@ line-numbered output too, not just its parameters) rather than an
 OpenAI-Codex-style `apply_patch`/V4A diff -- the agent here is Claude, which
 was never trained to produce V4A, but has extensive trained behavior around
 its own native tool shapes.
+
+A fifth tool, `ask_question` (docs/roadmap.md item 12), is not like the
+other four: it never touches the sandbox at all, so it takes no `runner`.
+The agent's only way to reach a human is through GitHub issue/PR comments,
+and only `core.py` -- on the controller, holding the real GitHub credential
+-- can post one (docs/design.md's split surface: the agent never gets API
+access of its own, here or anywhere else). So this tool just records the
+question to a plain local file at a fixed path `dispatch.py` computes once
+per unit (the same "compute once, share" shape `transcript_path`/
+`branch_name` already use) and tells the agent to stop; `core.py`'s sweep
+reads that file back before deciding how a finished run resolved, and is
+the one that actually posts the comment.
 """
 
 from __future__ import annotations
@@ -117,6 +129,28 @@ TOOLS = [
                 "content": {"type": "string"},
             },
             "required": ["file_path", "content"],
+        },
+    },
+    {
+        "name": "ask_question",
+        "description": (
+            "Ask the human a clarifying question when you cannot safely or "
+            "correctly proceed without their input. This ends your turn: the "
+            "question is posted as a comment on the GitHub issue or pull "
+            "request, the task is taken out of the queue, and a human must "
+            "reply and re-apply the trigger label before another attempt "
+            "runs. Do not call this for routine progress updates or when you "
+            "can reasonably proceed on your own judgment -- only when you are "
+            "genuinely blocked. After calling this, do not take any further "
+            "actions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "question": {"type": "string"},
+            },
+            "required": ["question"],
         },
     },
 ]
@@ -200,15 +234,37 @@ def write_file(runner: Runner, workspace: str, file_path: str, content: str) -> 
     return _write_remote(runner, file_path, content)
 
 
+def ask_question(question_path: str, question: str) -> ToolResult:
+    """Records `question` for `core.py` to relay to a human as a GitHub
+    comment (docs/roadmap.md item 12) -- a plain local file write, no
+    `Runner`/SSH involved at all, unlike every other tool here: the
+    question is for a human, not the sandbox, so there is nothing to reach
+    over SSH for. Overwrites on a repeat call within the same dispatch --
+    the last question asked is the one that matters; `dispatch.py` resets
+    this file at the start of every dispatch so a leftover question can
+    never leak into a later, unrelated one on the same reused sandbox.
+    """
+    Path(question_path).write_text(question)
+    return ToolResult(
+        text="Your question has been recorded and will be posted as a "
+             "comment on the GitHub issue/PR for a human to answer. Do not "
+             "take any further actions -- end your turn now."
+    )
+
+
 class McpServer:
     """The JSON-RPC method dispatch, kept separate from stdio plumbing
     (`serve()`) so `handle()` can be exercised directly in tests with a
     plain dict in, dict out -- no subprocess, no real stdin/stdout.
     """
 
-    def __init__(self, runner: Runner, workspace: str) -> None:
+    def __init__(self, runner: Runner, workspace: str, *,
+                 question_path: str | None = None) -> None:
         self.runner = runner
         self.workspace = workspace
+        # None only in tests that don't care about ask_question -- `main()`
+        # always supplies a real path in production.
+        self.question_path = question_path
 
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
@@ -263,12 +319,19 @@ class McpServer:
                               replace_all=args.get("replace_all", False))
         if name == "write_file":
             return write_file(self.runner, self.workspace, args["file_path"], args["content"])
+        if name == "ask_question":
+            if self.question_path is None:
+                return ToolResult(
+                    text="ask_question is not configured for this session.",
+                    is_error=True,
+                )
+            return ask_question(self.question_path, args["question"])
         return None
 
 
-def serve(runner: Runner, workspace: str, *, stdin: TextIO = sys.stdin,
-          stdout: TextIO = sys.stdout) -> None:
-    server = McpServer(runner, workspace)
+def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
+          stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
+    server = McpServer(runner, workspace, question_path=question_path)
     for line in stdin:
         line = line.strip()
         if not line:
@@ -289,12 +352,13 @@ def main() -> None:
     parser.add_argument("--user", required=True)
     parser.add_argument("--key-path", required=True)
     parser.add_argument("--workspace", required=True)
+    parser.add_argument("--question-path", required=True)
     args = parser.parse_args()
     runner = SshRunner(
         inner=RealRunner(), user=args.user,
         address=ipaddress.IPv4Address(args.address), key_path=Path(args.key_path),
     )
-    serve(runner, args.workspace)
+    serve(runner, args.workspace, question_path=args.question_path)
 
 
 if __name__ == "__main__":
