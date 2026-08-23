@@ -42,15 +42,6 @@ from .run import Runner
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Where Claude Code's OAuth credential lives on a sandbox -- docs/design.md,
-# "Interim choice: a login credential in the sandbox", and the exact path
-# `provision/sandbox.sh`'s `sandbox.credentials.files` deny-rule already
-# names. Fixed to the `debian` user's home, matching `dispatch.py`'s
-# `WORKSPACE_PATH` convention of hardcoding that account rather than
-# deriving it.
-_CLAUDE_CREDENTIALS_DIR = "/home/debian/.claude"
-_CLAUDE_CREDENTIALS_PATH = f"{_CLAUDE_CREDENTIALS_DIR}/.credentials.json"
-
 
 @dataclass(frozen=True)
 class BootstrapConfig:
@@ -218,13 +209,12 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                 f"grep -qxF {shlex.quote(trimmed)} ~/.ssh/authorized_keys "
                 f"2>/dev/null || echo {shlex.quote(trimmed)} >> ~/.ssh/authorized_keys",
             ])
-        if config.claude_credentials:
-            sandbox_ssh.run(["mkdir", "-p", _CLAUDE_CREDENTIALS_DIR])
-            sandbox_ssh.run(
-                ["dd", f"of={_CLAUDE_CREDENTIALS_PATH}", "status=none"],
-                stdin=config.claude_credentials,
-            )
-            sandbox_ssh.run(["chmod", "600", _CLAUDE_CREDENTIALS_PATH])
+        # No Claude credential is ever placed on a sandbox (docs/roadmap.md
+        # item 8's "Update") -- `claude -p` runs on the controller now, and
+        # stage 8's `configure_claude_credentials` call already places both
+        # the controller's own reference copy and the live copy the
+        # controller-side `grain-agent` account actually reads. A sandbox
+        # holds nothing worth protecting anymore.
 
     # Mint every sandbox's git-proxy token before the proxy itself starts
     # (stage 10) -- see `ensure_sandbox_tokens`'s own docstring for the

@@ -47,77 +47,26 @@ sysctl --system
 # discard it otherwise.
 docker pull "${KIND_NODE_IMAGE}"
 
-# Claude Code runs in-VM with a login credential (see docs/design.md,
-# "Alternative agent runtime: Claude Code" and the credential-isolation
-# notes below). Two things narrow how far that credential reaches if this
-# agent is ever steered into trying to exfiltrate it — both verified live
-# on a throwaway test VM before landing here, not just reasoned about:
-#
-# 1. kernel.yama.ptrace_scope: at the kernel default (0), we read the raw
-#    ELF header straight out of an unrelated same-user process's live
-#    memory via /proc/<pid>/mem — no special privilege needed, just the
-#    same UID. At ptrace_scope=2 the identical attempt fails at open()
-#    with "Permission denied". This closes the "read the credential out of
-#    the Claude Code process's own memory" path that file-level protection
-#    alone does not.
-cat > /etc/sysctl.d/99-grain-security.conf <<'SYSCTL'
-kernel.yama.ptrace_scope = 2
-SYSCTL
-sysctl --system
-
-# 2. Claude Code's own `sandbox.credentials.files` (bubblewrap-backed on
-#    Linux): a command the agent runs through the sandbox gets `mode:
-#    "deny"` on the credential file — verified to come back as a clean
-#    ENOENT, not a permission error that would hint something is being
-#    hidden, while an ordinary work file bound in alongside it stays fully
-#    readable and writable. This is what actually needs `sandbox.enabled`
-#    turned on to take effect; the settings below only matter once Claude
-#    Code itself is installed and logged in, which is a manual first-setup
-#    step, not something this script can do unattended.
-sudo -u debian bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-# dispatch.py runs `claude -p` via `systemd-run --uid=debian`, a
-# non-login, non-interactive shell that never sources ~/.profile -- and
-# ~/.profile is exactly what puts the installer's target directory,
-# ~/.local/bin, on PATH. Without this symlink the unit's PATH is just
-# systemd's own default (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-# :/sbin:/bin), so a real dispatch fails at "claude: command not found".
-# Found live, with a real Claude Code login: every earlier live suite used
-# a fake `claude` binary planted straight at /usr/local/bin (already on
-# that default PATH), which is why this went uncaught until a real login
-# credential existed to test against.
-ln -sf /home/debian/.local/bin/claude /usr/local/bin/claude
-# `network.allowedDomains` grants the agent's own sandboxed Bash tool
-# egress to the git proxy -- without it, `sandbox.enabled: true` (turned on
-# for the credential-file deny rule below) also blocks *all* network
-# access by default, including the `git push origin ...` dispatch.py's own
-# prompt tells the agent to run. Found live, with a real Claude Code login:
-# the agent cloned fine (dispatch.py's own `ensure_workspace` clones over
-# plain SSH before `claude -p` ever starts, unaffected by this sandbox),
-# wrote and committed the requested change, then reported "the sandbox on
-# this device blocks connections to 10.100.0.2:8080" and stopped, needing
-# a human's sandbox approval it has no way to get non-interactively. Every
-# earlier live suite used a fake `claude` binary that never went through
-# Claude Code's own sandboxing at all, so this went uncaught until now.
-# `10.100.0.2` is `Cluster().controller_ip` -- this script is static
-# cloud-init user-data, not templated per-cluster, so it names the same
-# default a custom `--cluster-file` subnet would need to override here too.
-install -d -o debian -g debian /home/debian/.claude
-cat > /home/debian/.claude/settings.json <<'CLAUDESETTINGS'
-{
-  "sandbox": {
-    "enabled": true,
-    "network": {
-      "allowedDomains": ["10.100.0.2"]
-    },
-    "credentials": {
-      "files": [
-        {"path": "~/.claude/.credentials.json", "mode": "deny"}
-      ]
-    }
-  }
-}
-CLAUDESETTINGS
-chown debian:debian /home/debian/.claude/settings.json
+# Claude Code no longer runs on the sandbox at all (docs/roadmap.md item
+# 8's "Update"). It used to, with a real login credential here, and this
+# script used to carry a substantial section hardening that: kernel.yama.
+# ptrace_scope=2 against reading the credential out of the process's own
+# memory, and Claude Code's own `sandbox.credentials.files: deny` against
+# reading it as a file. Both were real, verified-live protections against
+# a real problem -- but neither one could close the actual hole a full
+# live-debugging session found: the credential leaks into any unsandboxed
+# Bash subprocess's environment trivially (confirmed live via a plain
+# `env`), and the agent readily discovers `dangerouslyDisableSandbox: true`
+# on its own to get there. Environment variables aren't files or process
+# memory -- no amount of sandbox tuning here could ever have closed that
+# gap. The actual fix: `claude -p` now runs on the controller instead (see
+# `provision/controller.sh`), with its entire native tool roster disabled
+# and replaced by narrow MCP tools (`grain/automation/mcp_server.py`) that
+# reach this sandbox over SSH for everything it actually needs to do. The
+# sandbox goes back to holding nothing worth protecting -- the host
+# firewall and the git-proxy's per-sandbox token scoping (both unrelated to
+# this change) are its only real boundary now, same as they always were for
+# everything except the one thing that used to live here.
 
 mkdir -p /etc/agent-tools
 cat > /etc/agent-tools/README <<'DOC'

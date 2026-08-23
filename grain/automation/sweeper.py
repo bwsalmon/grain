@@ -9,13 +9,19 @@ report the issue back to `core.py` for requeuing:
   run since there is no long-lived process to notify the orchestrator when
   a job completes between cron invocations.
 - The unit is unreachable (`UnitState.ABSENT` on a sandbox this state
-  believes is assigned — the sandbox never got the job, or died with it) or
-  still running past `max_runtime_minutes` — the actual "stranded" case.
+  believes is assigned — dispatch failed partway before the unit ever
+  started, or the controller-side unit was otherwise lost) or still running
+  past `max_runtime_minutes` — the actual "stranded" case.
 
 This module knows nothing about GitHub; it only reads `unit_status` over an
-injected per-sandbox `Runner` and mutates `AutomationState`. Label moves and
-PR creation are `core.py`'s job, which is the only piece holding a
-`GitHubClient`.
+injected `Runner` and mutates `AutomationState`. Two different runners are
+in play (docs/roadmap.md item 8's "Update": `claude -p` moved from the
+sandbox to the controller) — `unit_status`/`reap` act on `controller_runner`
+(where the unit actually lives now), while `_release`'s `cleanup()`/
+`check_health()` still act on the per-sandbox `Runner` from `ssh_runner_for`
+(the sandbox itself is still what needs cleaning/health-checking between
+tasks). Label moves and PR creation are `core.py`'s job, which is the only
+piece holding a `GitHubClient`.
 
 **Every release also runs the between-task cleanup hook and a health check**
 (docs/roadmap.md item 5, docs/design.md step 8) — the moment a sandbox's
@@ -106,14 +112,14 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
     branch below that frees a sandbox, so the capture/cleanup/health
     behaviour is identical regardless of why the slot is being freed.
 
-    Capture runs first, before cleanup or the state release — a transcript
-    is what `claude -p` already wrote under `/tmp` (docs/roadmap.md item
-    10), and neither `cleanup()` nor freeing the slot touches that path, but
-    reading it before either still keeps "capture happens before a sandbox
-    could possibly be reused" true by construction rather than by the
-    accident of what cleanup happens not to touch today.
+    Capture runs first, before cleanup or the state release — `claude -p`
+    now runs on the controller (docs/roadmap.md item 8's "Update"), so
+    `capture_trajectory` reads a controller-local file with no `runner`
+    involved at all; kept first in this sequence purely to preserve
+    "capture happens before a sandbox could possibly be reused" by
+    construction, not because cleanup or the state release could touch it.
     """
-    transcript_text = capture_trajectory(runner, unit)
+    transcript_text = capture_trajectory(unit)
     history.record(
         issue=assignment.issue, kind=assignment.kind, sandbox=sandbox, unit=unit,
         started_at=assignment.started_at, finished_at=now, outcome=outcome_label,
@@ -128,8 +134,15 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
 
 
 def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
-          config: AutomationConfig, now: datetime,
+          controller_runner: Runner, config: AutomationConfig, now: datetime,
           history: SessionHistory | None = None) -> SweepResult:
+    """`controller_runner` is new (docs/roadmap.md item 8's "Update"):
+    `claude -p` now runs on the controller, not the sandbox, so the unit
+    `unit_status`/`reap` are checking against lives there too — the
+    per-sandbox `runner` from `ssh_runner_for` is still needed for
+    everything that genuinely still happens on the sandbox itself
+    (`cleanup()`/`check_health()` inside `_release`).
+    """
     if history is None:
         history = NullSessionHistory()
     result = SweepResult()
@@ -137,32 +150,32 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
     for sandbox, assignment in list(state.assignments.items()):
         runner = ssh_runner_for(sandbox)
         unit = unit_name(sandbox)
-        status = unit_status(runner, unit)
+        status = unit_status(controller_runner, unit)
         outcome = Outcome(sandbox=sandbox, issue=assignment.issue,
                            kind=assignment.kind, branch=assignment.branch)
 
         if status is UnitState.DONE_SUCCESS:
-            reap(runner, unit)
+            reap(controller_runner, unit)
             warning = _release(state, runner, sandbox, history=history,
                                 assignment=assignment, unit=unit,
                                 outcome_label="succeeded", now=now)
             result.succeeded.append(outcome)
         elif status is UnitState.DONE_FAILED:
-            reap(runner, unit)
+            reap(controller_runner, unit)
             warning = _release(state, runner, sandbox, history=history,
                                 assignment=assignment, unit=unit,
                                 outcome_label="failed", now=now)
             result.failed.append(outcome)
         elif status is UnitState.ABSENT:
             # Assigned in our state but the unit isn't there — never
-            # started (a dispatch that failed partway) or the sandbox was
-            # recreated out from under it. Nothing to reap.
+            # started (a dispatch that failed partway) or the controller
+            # unit was otherwise lost. Nothing to reap.
             warning = _release(state, runner, sandbox, history=history,
                                 assignment=assignment, unit=unit,
                                 outcome_label="stranded", now=now)
             result.stranded.append(outcome)
         elif now - assignment.started_at > max_runtime:
-            reap(runner, unit)
+            reap(controller_runner, unit)
             warning = _release(state, runner, sandbox, history=history,
                                 assignment=assignment, unit=unit,
                                 outcome_label="stranded", now=now)

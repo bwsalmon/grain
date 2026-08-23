@@ -70,7 +70,7 @@ from typing import Callable
 from . import ratelimit
 from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
-from .dispatch import branch_name, dispatch, dispatch_pr
+from .dispatch import SandboxTarget, branch_name, dispatch, dispatch_pr
 from .github import GitHubClient, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
@@ -134,8 +134,8 @@ class Orchestrator:
 
     # --- sweep --------------------------------------------------------
     def _sweep(self, now: datetime) -> None:
-        result = sweep(self.state, self._ssh_runner_for, self.config, now,
-                        history=self.history)
+        result = sweep(self.state, self._ssh_runner_for, self.base_runner,
+                        self.config, now, history=self.history)
         for outcome in result.succeeded:
             self._finish_succeeded(outcome)
         for outcome in (*result.failed, *result.stranded):
@@ -261,18 +261,29 @@ class Orchestrator:
                                    outcome="skipped: rate limit")
                 break
 
-            runner = self._ssh_runner_for(sandbox)
+            sandbox_runner = self._ssh_runner_for(sandbox)
+            # The same address/user/key `_ssh_runner_for` just used to build
+            # `sandbox_runner` above, passed through as data rather than an
+            # object — `mcp_server.py` runs as its own process (a child of
+            # the controller-side `claude -p` unit) and builds its own
+            # independent `SshRunner`, so it needs this to travel inside the
+            # per-dispatch MCP config JSON, not as a live `Runner`.
+            target = SandboxTarget(
+                address=str(self.cluster.address_of(sandbox)),
+                ssh_user=self.config.ssh_user,
+                ssh_key_path=str(self.config.ssh_key_path),
+            )
             token = self.token_store.ensure_token(sandbox)
             if isinstance(item, PullRequestDetail):
                 comments = self.github.list_review_comments(
                     self.config.owner, self.config.repo, number
                 )
-                unit = dispatch_pr(runner, sandbox, item, comments,
-                                    remote_url=self._remote_url(), token=token)
+                unit = dispatch_pr(sandbox_runner, self.base_runner, sandbox, target,
+                                    item, comments, remote_url=self._remote_url(), token=token)
                 self.state.assign(sandbox, number, unit, now,
                                    kind=TriggerKind.PR, branch=item.head_ref)
             else:
-                unit = dispatch(runner, sandbox, item,
+                unit = dispatch(sandbox_runner, self.base_runner, sandbox, target, item,
                                  remote_url=self._remote_url(), token=token)
                 self.state.assign(sandbox, number, unit, now)
             self.state.record_run(now)

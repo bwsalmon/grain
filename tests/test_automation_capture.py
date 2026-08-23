@@ -1,39 +1,35 @@
+from pathlib import Path
+
+import grain.automation.capture as capture_module
 from grain.automation.capture import capture_trajectory
-from grain.automation.dispatch import transcript_path
-from grain.run import FakeRunner
+
+UNIT = "grain-task-sandbox-0"
 
 
-def test_capture_reads_the_exact_path_dispatch_writes_to():
-    runner = FakeRunner()
-    runner.expect(
-        f"cat {transcript_path('grain-task-sandbox-0')}",
-        stdout='{"type": "system"}\n{"type": "result", "result": "done"}\n',
-    )
-    text = capture_trajectory(runner, "grain-task-sandbox-0")
-    assert text == '{"type": "system"}\n{"type": "result", "result": "done"}\n'
+def _point_transcript_at(monkeypatch, tmp_path: Path) -> Path:
+    path = tmp_path / f"{UNIT}.transcript.jsonl"
+    monkeypatch.setattr(capture_module, "transcript_path", lambda unit: str(path))
+    return path
 
 
-def test_capture_returns_none_when_the_file_is_missing():
-    runner = FakeRunner()
-    runner.expect("cat", returncode=1, stderr="cat: No such file or directory")
-    assert capture_trajectory(runner, "grain-task-sandbox-0") is None
+def test_capture_reads_the_exact_path_dispatch_writes_to(monkeypatch, tmp_path):
+    path = _point_transcript_at(monkeypatch, tmp_path)
+    path.write_text('{"type": "system"}\n{"type": "result", "result": "done"}\n')
+    assert capture_trajectory(UNIT) == '{"type": "system"}\n{"type": "result", "result": "done"}\n'
 
 
-def test_capture_returns_none_for_an_empty_file():
-    runner = FakeRunner()
-    runner.expect("cat", stdout="")
-    assert capture_trajectory(runner, "grain-task-sandbox-0") is None
+def test_capture_returns_none_when_the_file_is_missing(monkeypatch, tmp_path):
+    _point_transcript_at(monkeypatch, tmp_path)  # never written
+    assert capture_trajectory(UNIT) is None
 
 
-def test_capture_never_raises_even_on_failure():
-    runner = FakeRunner()
-    runner.expect("cat", returncode=1, stderr="permission denied")
-    # Must not raise -- capture_trajectory always calls with check=False.
-    assert capture_trajectory(runner, "grain-task-sandbox-0") is None
+def test_capture_returns_none_for_an_empty_file(monkeypatch, tmp_path):
+    path = _point_transcript_at(monkeypatch, tmp_path)
+    path.write_text("")
+    assert capture_trajectory(UNIT) is None
 
 
-def test_capture_uses_cat_not_a_new_channel():
-    runner = FakeRunner()
-    runner.expect("cat", stdout="content\n")
-    capture_trajectory(runner, "grain-task-sandbox-0")
-    assert runner.calls[0][0][0] == "cat"
+def test_capture_never_raises_even_when_unreadable(monkeypatch, tmp_path):
+    path = _point_transcript_at(monkeypatch, tmp_path)
+    path.mkdir()  # a directory at this path makes read_text() raise OSError
+    assert capture_trajectory(UNIT) is None

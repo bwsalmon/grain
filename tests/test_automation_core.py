@@ -3,10 +3,11 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import grain.automation.capture as capture_module
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
-from grain.automation.dispatch import transcript_path, unit_name
+from grain.automation.dispatch import unit_name
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
@@ -429,16 +430,18 @@ def test_orchestrator_defaults_to_a_null_session_history():
     assert isinstance(orchestrator.history, NullSessionHistory)
 
 
-def test_a_swept_success_is_recorded_into_the_injected_history():
+def test_a_swept_success_is_recorded_into_the_injected_history(monkeypatch, tmp_path):
     state = AutomationState()
     state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
                  now=NOW - timedelta(hours=1))
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
-    runner.expect(
-        f"cat {transcript_path(unit_name('sandbox-0'))}",
-        stdout='{"type": "result", "result": "done"}\n',
-    )
+    # claude -p now runs on the controller and its transcript is a plain
+    # local file -- point capture_trajectory's transcript_path lookup at a
+    # real tmp_path file rather than scripting a `cat` response.
+    transcript = tmp_path / f"{unit_name('sandbox-0')}.transcript.jsonl"
+    transcript.write_text('{"type": "result", "result": "done"}\n')
+    monkeypatch.setattr(capture_module, "transcript_path", lambda unit: str(transcript))
     history = RecordingSessionHistory()
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner,
                                                  history=history)

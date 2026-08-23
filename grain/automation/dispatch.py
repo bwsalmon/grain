@@ -1,22 +1,52 @@
-"""Runs `claude -p` on a sandbox as a transient systemd unit, and checks on
-it later.
+"""Runs `claude -p` as a transient systemd unit on the **controller**, and
+checks on it later. The dispatched agent still does all its actual work
+(editing files, running commands, git) inside the assigned sandbox — but it
+reaches the sandbox only through the narrow MCP tool surface in
+`mcp_server.py`, over SSH, never by running there itself.
 
-systemd, not tmux: every sandbox already has systemd as PID 1 (Debian, not
-the container image `openhands-agent-server` assumes — see
+**Why the agent doesn't run on the sandbox anymore (docs/roadmap.md item
+8's "Update").** It used to: `claude -p` ran on the sandbox with a real
+Claude Code OAuth credential, and Claude Code's own sandbox/permission
+system (`sandbox.enabled`, `--permission-mode`, `network.allowedDomains`)
+tried to restrict what it could do. A full live-debugging session found
+this fundamentally broken — the credential leaks into any unsandboxed Bash
+subprocess's environment trivially (confirmed live via a plain `env`), the
+agent readily discovers `dangerouslyDisableSandbox: true` on its own to get
+there, and Claude Code's own sandboxing caused a full day of unrelated
+breakage (denied Edit/Write under `dontAsk`, a `.git/config.lock`
+write-block breaking `git commit` outright, "requires approval" prompts a
+headless run can never answer). Landlock — kernel-level, immune to
+`dangerouslyDisableSandbox` — can protect a *file*, but has no concept of
+environment variables at all, so it cannot close the credential-leak gap
+either. The only real fix: never put the credential inside the untrusted
+execution environment in the first place. `claude -p` now runs on the
+controller with its entire native tool roster disabled (`--tools ""`) and
+replaced by `mcp_server.py`'s four tools, which are the *only* way the
+agent can touch the sandbox. Confirmed live: `--tools "" --mcp-config
+<file> --allowedTools <names>` genuinely empties the roster (the advertised
+`tools` list in the `system/init` event shrinks to exactly what's named),
+`--allowedTools` alone does not (it's a permission hint, not a roster
+filter — both flags are required together), and a `Task`-spawned subagent
+inherits the same restriction (an explicit system denial confirmed this,
+not just self-report) so `Task` is safe to leave enabled for delegation.
+
+systemd, not tmux: both the controller and every sandbox already have
+systemd as PID 1 (Debian, not the container image
+`openhands-agent-server` assumes — see `provision/controller.sh`/
 `provision/sandbox.sh`), so tracking a dispatched task needs nothing beyond
-what's already provisioned, and status survives the orchestrator's own SSH
-connection dropping between cron invocations — the run keeps going, and
+what's already provisioned, and status survives the orchestrator's own
+process restarting between cron invocations — the run keeps going, and
 `unit_status` picks it back up next time.
 
 `sudo`, not a bare `systemd-run`: found live — starting or stopping a
 *system* (not `--user`) transient unit is a privileged D-Bus call, and an
-unprivileged SSH session has no polkit authentication agent to satisfy it,
-so a bare call fails with "Interactive authentication required" even
-though `--uid=debian` only asks to run the unit's own command as `debian`.
-Debian's cloud images grant the default user passwordless sudo, which is
-enough to make the *manager* call, while `--uid=debian` still keeps the
-dispatched command itself unprivileged. Read-only queries (`systemctl
-show`) need no such elevation.
+unprivileged session has no polkit authentication agent to satisfy it, so a
+bare call fails with "Interactive authentication required" even though
+`--uid=` only asks to run the unit's own command as that user. Debian's
+cloud images (and the controller's own provisioning) grant the invoking
+user passwordless sudo, which is enough to make the *manager* call, while
+`--uid=` still keeps the dispatched command itself unprivileged. Read-only
+queries (`systemctl show`) need no such elevation.
 
 `--property=RemainAfterExit=yes`, found live the hard way: a plain
 transient unit's *default* behaviour — with no `--collect` in sight — is to
@@ -36,7 +66,7 @@ redirects that file into `claude -p`'s stdin (which reads the prompt from
 stdin when no positional argument is given). Untrusted issue content never
 becomes a shell-interpolated argument anywhere in this path — the only
 thing built as a shell string is the fixed `bash -c` wrapper below, and its
-only variable component is a unit-derived path, never issue content.
+only variable components are unit-derived paths, never issue content.
 
 Two more pieces landed here for docs/roadmap.md item 2, both upstream of
 `start_unit`:
@@ -62,7 +92,10 @@ Two more pieces landed here for docs/roadmap.md item 2, both upstream of
   that URL: a `git-credential-store` line delivered over the same
   stdin-not-argv channel the prompt uses, consumed by git's own credential
   helper machinery, so neither the clone URL nor the agent's own commands
-  ever need to carry it.
+  ever need to carry it. It also sets a fixed git identity (`user.name`/
+  `user.email`) — found live: a fresh sandbox has *no* identity configured
+  anywhere (global, system, or local), which makes `git commit` fail
+  outright the first time anything tries to commit, agent or otherwise.
 
 docs/roadmap.md item 9 adds a second entry point, `dispatch_pr()`, for
 pointing an agent at an *existing* PR rather than a labelled issue — to
@@ -90,16 +123,22 @@ docs/roadmap.md item 10 adds one more piece to the unit's own command line:
 This is the session browser's raw material — see `grain/automation/capture.py`'s
 docstring for what was actually checked (not assumed) about what `claude -p`
 leaves behind on disk, and why this project captures a redirected stream
-rather than depending on Claude Code's own session-persistence file location.
+rather than depending on Claude Code's own session-persistence file location
+(now doubly true: that default path lives under the *controller's* shared
+`grain-agent` account, accumulating across every dispatch forever with no
+per-sandbox VM recreation to bound it — `--no-session-persistence` turns it
+off outright rather than letting it grow unbounded).
 `transcript_path()` is computed the same "once, shared" way `branch_name()`
 already is: `dispatch()` uses it to build the redirect, `capture.py` uses the
-identical function to know what to `cat` back off the sandbox before its slot
-is freed.
+identical function to know what to read back before the sandbox's slot is
+freed.
 """
 
 from __future__ import annotations
 
+import json
 import shlex
+from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
@@ -111,6 +150,20 @@ from ..run import Runner
 # ensure_workspace()'s docstring.
 WORKSPACE_PATH = "/home/debian/workspace"
 _CREDENTIALS_PATH = "/home/debian/.git-credentials"
+_GIT_IDENTITY_NAME = "grain agent"
+_GIT_IDENTITY_EMAIL = "grain-agent@localhost"
+
+# The unprivileged, dedicated controller-side account `claude -p` (and the
+# MCP server it spawns as a child) runs as — never root, never the account
+# `grain-automation.service` itself runs as. See provision/controller.sh.
+CONTROLLER_AGENT_USER = "grain-agent"
+
+# Where a unit's controller-local files (prompt, MCP config, transcript)
+# live — under /data, not /tmp: the controller is now a shared, multi-
+# tenant machine running every concurrent dispatch's agent process, not a
+# disposable per-task VM, so its state belongs in the same durable,
+# already-backed-up location as everything else under /data/state.
+_UNIT_STATE_DIR = "/data/state/automation/units"
 
 
 class UnitState(Enum):
@@ -120,6 +173,23 @@ class UnitState(Enum):
     ABSENT = "absent"
 
 
+@dataclass(frozen=True)
+class SandboxTarget:
+    """What `mcp_server.py` needs to reach the assigned sandbox on its own
+    behalf — it builds its own independent `SshRunner` rather than reusing
+    the caller's, since it runs as a separate process (a child of the
+    controller-side `claude -p` unit), so this has to travel as data (baked
+    into the per-dispatch MCP config JSON), not as an already-constructed
+    `Runner` object. `core.py` builds one from the exact same
+    address/user/key it already uses to build `sandbox_runner`.
+    """
+
+    address: str
+    ssh_user: str
+    ssh_key_path: str
+    workspace: str = WORKSPACE_PATH
+
+
 def unit_name(sandbox: str) -> str:
     # One task per sandbox at a time (the design's max_concurrent_runs=1
     # trade, carried over from the OpenHands path) — a fixed name per
@@ -127,17 +197,29 @@ def unit_name(sandbox: str) -> str:
     return f"grain-task-{sandbox}"
 
 
+def _unit_dir(unit: str) -> str:
+    return f"{_UNIT_STATE_DIR}/{unit}"
+
+
 def transcript_path(unit: str) -> str:
     """The fixed path this dispatch's `claude -p --output-format
     stream-json` output is redirected to (docs/roadmap.md item 10) —
     computed once here so `_start_task`'s own redirect and
-    `capture.py`'s later `cat` of the same path can never disagree,
+    `capture.py`'s later read of the same path can never disagree,
     the same "compute once, share" shape `branch_name()` already uses.
     Reused verbatim by the next dispatch to this sandbox (`unit_name()` is
     fixed per sandbox, not per task), which is exactly why `capture.py`'s
     docstring calls capture-before-slot-reuse load-bearing, not a nicety.
     """
-    return f"/tmp/{unit}.transcript.jsonl"
+    return f"{_unit_dir(unit)}/transcript.jsonl"
+
+
+def _prompt_path(unit: str) -> str:
+    return f"{_unit_dir(unit)}/prompt.md"
+
+
+def _mcp_config_path(unit: str) -> str:
+    return f"{_unit_dir(unit)}/mcp-config.json"
 
 
 def branch_name(issue: int) -> str:
@@ -157,8 +239,9 @@ def _prompt(issue: Issue, branch: str, workspace: str) -> str:
         f"{issue.body}\n\n"
         f"Issue URL: {issue.html_url}\n\n"
         f"A clone of the target repository is already checked out at "
-        f"{workspace}, with its git remote already configured — do your "
-        "work there.\n\n"
+        f"{workspace} in your assigned sandbox, with its git remote already "
+        "configured — do your work there, using the tools available to "
+        "you.\n\n"
         "When you are done, commit your changes and push them with exactly "
         "this command:\n"
         f"    git push origin HEAD:{branch}\n"
@@ -184,11 +267,12 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         f"{pr.body}\n\n"
         f"PR URL: {pr.html_url}\n\n"
         f"A clone of the target repository is already checked out at "
-        f"{workspace}, on the PR's existing branch ({pr.head_ref!r}) with its "
-        "git remote already configured. This is NOT a fresh task: the branch "
-        "already has commits and review history behind it — your job is to "
-        "continue that work (address the feedback below, fix CI, finish what "
-        "was started), not to start over or open a competing branch.\n\n"
+        f"{workspace} in your assigned sandbox, on the PR's existing branch "
+        f"({pr.head_ref!r}) with its git remote already configured. This is "
+        "NOT a fresh task: the branch already has commits and review "
+        "history behind it — your job is to continue that work (address "
+        "the feedback below, fix CI, finish what was started), not to "
+        "start over or open a competing branch.\n\n"
         "Review feedback on this pull request so far:\n\n"
         f"{feedback}\n\n"
         "When you are done, commit your changes and push them with exactly "
@@ -216,12 +300,20 @@ def _credential_line(remote_url: str, token: str) -> str:
 
 def configure_git_credentials(runner: Runner, remote_url: str, token: str) -> None:
     """Points the sandbox's git at its proxy token via a credential helper,
-    so neither the clone URL nor any command the agent runs ever needs to
-    carry it — docs/design.md: "git consumes it via a credential helper, so
+    so neither the clone URL nor any command run there ever needs to carry
+    it — docs/design.md: "git consumes it via a credential helper, so
     agents never handle it." The token reaches the sandbox over the same
-    stdin-not-argv channel `dispatch()` already uses for the prompt, so it
-    is never a literal argv element either (an argv element would land in
-    `ps` output and this runner's own command logging).
+    stdin-not-argv channel the prompt uses, so it is never a literal argv
+    element either (an argv element would land in `ps` output and this
+    runner's own command logging).
+
+    Also sets a fixed git identity (`user.name`/`user.email`), idempotently,
+    every dispatch — found live: a fresh sandbox has none configured
+    anywhere (global, system, or local), which makes `git commit` fail
+    outright ("Author identity unknown") the first time anything tries to
+    commit. Unrelated to the credential-helper concern above, but fixed
+    here since it is exactly this same "make the sandbox ready to commit
+    and push" step, and it would otherwise block every single dispatch.
     """
     runner.run(["git", "config", "--global", "credential.helper", "store"])
     runner.run(
@@ -229,6 +321,8 @@ def configure_git_credentials(runner: Runner, remote_url: str, token: str) -> No
         stdin=_credential_line(remote_url, token),
     )
     runner.run(["chmod", "600", _CREDENTIALS_PATH])
+    runner.run(["git", "config", "--global", "user.name", _GIT_IDENTITY_NAME])
+    runner.run(["git", "config", "--global", "user.email", _GIT_IDENTITY_EMAIL])
 
 
 def ensure_workspace(runner: Runner, remote_url: str, path: str = WORKSPACE_PATH,
@@ -291,51 +385,98 @@ def ensure_workspace(runner: Runner, remote_url: str, path: str = WORKSPACE_PATH
     runner.run(["bash", "-c", script])
 
 
-def start_unit(runner: Runner, unit: str, command: str) -> None:
+def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") -> None:
     """Starts `command` (a shell string, run via `bash -c`) as a transient
-    systemd unit named `unit`. The primitive `dispatch()` specializes for
-    `claude -p` — pulled out on its own because it's what a live test
-    exercises against a real sandbox without needing a real Claude Code
-    login: any inert stand-in command proves the same systemd-run/SSH
-    mechanism `dispatch()` relies on.
+    systemd unit named `unit`, run as `uid`. `dispatch()` specializes this
+    for `claude -p` on the controller, as `CONTROLLER_AGENT_USER` — pulled
+    out on its own because it's what a live test exercises against a real
+    VM without needing a real Claude Code login: any inert stand-in command
+    proves the same systemd-run/SSH mechanism `dispatch()` relies on,
+    against whichever `uid` a given test cares about.
     """
     runner.run([
-        "sudo", "systemd-run", f"--unit={unit}", "--uid=debian",
+        "sudo", "systemd-run", f"--unit={unit}", f"--uid={uid}",
         "--property=RemainAfterExit=yes", "--",
         "bash", "-c", command,
     ])
 
 
-def _start_task(runner: Runner, sandbox: str, prompt: str, *,
-                 remote_url: str, token: str, branch: str | None = None) -> str:
-    """The common tail of both `dispatch()` and `dispatch_pr()`: credentials,
-    workspace, prompt file, unit. `branch` unset gets the fresh-issue
+def _mcp_config_json(target: SandboxTarget) -> str:
+    """The `--mcp-config` file `claude -p` loads on the controller —
+    `mcp_server.py` is invoked as its own process, per dispatch, with the
+    assigned sandbox's connection details baked into its argv here. Nothing
+    in a tool call itself can ever change this: the agent only ever sees
+    tool names and their declared parameters (`command`, `file_path`, ...),
+    never `target` — this JSON is the only place the sandbox gets named.
+    """
+    return json.dumps({
+        "mcpServers": {
+            "grain-sandbox": {
+                "command": "python3",
+                "args": [
+                    "-m", "grain.automation.mcp_server",
+                    "--address", target.address,
+                    "--user", target.ssh_user,
+                    "--key-path", target.ssh_key_path,
+                    "--workspace", target.workspace,
+                ],
+            },
+        },
+    })
+
+
+_ALLOWED_TOOLS = (
+    "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
+    "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
+    "TodoWrite,Task"
+)
+
+
+def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
+                 target: SandboxTarget, prompt: str, *, remote_url: str, token: str,
+                 branch: str | None = None) -> str:
+    """The common tail of both `dispatch()` and `dispatch_pr()`. Two
+    runners now, not one (docs/roadmap.md item 8's "Update"): `sandbox_runner`
+    still prepares the workspace and credentials on the sandbox itself,
+    exactly as before; `controller_runner` is new and does everything that
+    now happens on the controller instead — writing the prompt and MCP
+    config, and starting the unit. `branch` unset gets the fresh-issue
     workspace (default branch); `branch` given gets `ensure_workspace`'s
     PR-continuation path (docs/roadmap.md item 9) — see its docstring.
     """
-    configure_git_credentials(runner, remote_url, token)
-    ensure_workspace(runner, remote_url, branch=branch)
+    configure_git_credentials(sandbox_runner, remote_url, token)
+    ensure_workspace(sandbox_runner, remote_url, target.workspace, branch=branch)
+
     unit = unit_name(sandbox)
-    prompt_path = f"/tmp/{unit}.md"
-    runner.run(
-        ["dd", f"of={prompt_path}", "status=none"],
-        stdin=prompt,
+    controller_runner.run(["mkdir", "-p", _unit_dir(unit)])
+    p_path = _prompt_path(unit)
+    controller_runner.run(["dd", f"of={p_path}", "status=none"], stdin=prompt)
+    m_path = _mcp_config_path(unit)
+    controller_runner.run(
+        ["dd", f"of={m_path}", "status=none"], stdin=_mcp_config_json(target),
     )
     out_path = transcript_path(unit)
     start_unit(
-        runner, unit,
-        f"cd {WORKSPACE_PATH} && claude -p --permission-mode acceptEdits "
+        controller_runner, unit,
+        f"cd /opt/grain && claude -p "
+        f"--tools '' "
+        f"--mcp-config {shlex.quote(m_path)} --strict-mcp-config "
+        f"--allowedTools {shlex.quote(_ALLOWED_TOOLS)} "
+        f"--no-session-persistence "
         f"--output-format stream-json --verbose "
-        f"< {shlex.quote(prompt_path)} > {shlex.quote(out_path)}",
+        f"< {shlex.quote(p_path)} > {shlex.quote(out_path)}",
+        uid=CONTROLLER_AGENT_USER,
     )
     return unit
 
 
-def dispatch(runner: Runner, sandbox: str, issue: Issue, *,
-             remote_url: str, token: str) -> str:
-    """Starts an issue-triggered task on the sandbox `runner` targets.
-    Returns the unit name — the caller records it in `AutomationState` to
-    poll later.
+def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
+             target: SandboxTarget, issue: Issue, *, remote_url: str, token: str) -> str:
+    """Starts an issue-triggered task. `sandbox_runner` prepares the
+    workspace on the sandbox `target` describes; `controller_runner` starts
+    `claude -p` on the controller, pointed at that same sandbox via
+    `target`. Returns the unit name — the caller records it in
+    `AutomationState` to poll later.
 
     `remote_url` is the git-proxy URL for the target repo
     (`http://<controller>:<port>/<owner>/<repo>.git`) and `token` is this
@@ -346,12 +487,14 @@ def dispatch(runner: Runner, sandbox: str, issue: Issue, *,
     """
     branch = branch_name(issue.number)
     return _start_task(
-        runner, sandbox, _prompt(issue, branch, WORKSPACE_PATH),
+        sandbox_runner, controller_runner, sandbox, target,
+        _prompt(issue, branch, target.workspace),
         remote_url=remote_url, token=token,
     )
 
 
-def dispatch_pr(runner: Runner, sandbox: str, pr: PullRequestDetail,
+def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
+                 target: SandboxTarget, pr: PullRequestDetail,
                  comments: list[ReviewComment], *, remote_url: str, token: str) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
@@ -362,11 +505,12 @@ def dispatch_pr(runner: Runner, sandbox: str, pr: PullRequestDetail,
     `pr` and `comments` come from `GitHubClient.get_pull_request`/
     `list_pull_requests` and `list_review_comments` respectively — `core.py`
     reads both before calling this, same division of labour as `dispatch()`
-    (all GitHub API work stays on the controller; this module only ever
-    speaks git and SSH to the sandbox).
+    (all GitHub API work stays on the controller; the sandbox only ever
+    sees git, and only through the tools `mcp_server.py` exposes).
     """
     return _start_task(
-        runner, sandbox, _pr_prompt(pr, comments, WORKSPACE_PATH),
+        sandbox_runner, controller_runner, sandbox, target,
+        _pr_prompt(pr, comments, target.workspace),
         remote_url=remote_url, token=token, branch=pr.head_ref,
     )
 

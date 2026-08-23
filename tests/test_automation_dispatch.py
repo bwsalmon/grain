@@ -1,12 +1,19 @@
+import json
+
 from grain.automation.dispatch import (
-    UnitState, branch_name, configure_git_credentials, dispatch, dispatch_pr,
-    ensure_workspace, reap, transcript_path, unit_name, unit_status,
+    CONTROLLER_AGENT_USER, SandboxTarget, UnitState, branch_name,
+    configure_git_credentials, dispatch, dispatch_pr, ensure_workspace, reap,
+    transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
 
 REMOTE_URL = "http://10.100.0.2:8080/o/r.git"
 TOKEN = "sandbox-token"
+UNIT = "grain-task-sandbox-0"
+UNIT_DIR = "/data/state/automation/units/grain-task-sandbox-0"
+PROMPT_PATH = f"{UNIT_DIR}/prompt.md"
+MCP_CONFIG_PATH = f"{UNIT_DIR}/mcp-config.json"
 
 
 def make_issue(number=1) -> Issue:
@@ -24,6 +31,15 @@ def make_pr(number=1, head_ref="feature-x") -> PullRequestDetail:
 def make_comments() -> list[ReviewComment]:
     return [ReviewComment(id=1, user="reviewer", body="please fix this",
                            path="src/thing.py", line=12)]
+
+
+def make_target(**overrides) -> SandboxTarget:
+    fields = {
+        "address": "10.100.0.10", "ssh_user": "debian",
+        "ssh_key_path": "/data/secrets/controller-ssh",
+    }
+    fields.update(overrides)
+    return SandboxTarget(**fields)
 
 
 def test_unit_name_is_stable_per_sandbox():
@@ -62,6 +78,15 @@ def test_configure_git_credentials_restricts_the_file_mode():
     assert runner.ran("chmod 600 /home/debian/.git-credentials")
 
 
+def test_configure_git_credentials_sets_a_fixed_git_identity():
+    # Found live: a fresh sandbox has no user.name/user.email configured
+    # anywhere, which makes `git commit` fail outright.
+    runner = FakeRunner()
+    configure_git_credentials(runner, REMOTE_URL, TOKEN)
+    assert runner.ran("git config --global user.name")
+    assert runner.ran("git config --global user.email")
+
+
 def test_ensure_workspace_runs_one_bash_script():
     runner = FakeRunner()
     ensure_workspace(runner, REMOTE_URL, path="/home/debian/workspace")
@@ -83,12 +108,13 @@ def test_ensure_workspace_script_clones_when_absent_and_resets_when_present():
     assert "origin/main" not in script
 
 
-def test_dispatch_writes_the_prompt_over_stdin_not_argv():
+def test_dispatch_writes_the_prompt_to_a_controller_local_file_over_stdin_not_argv():
     runner = FakeRunner()
-    dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
     dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
     prompt_argv, prompt_stdin = next(
-        c for c in dd_calls if c[0][1] == "of=/tmp/grain-task-sandbox-0.md"
+        c for c in dd_calls if c[0][1] == f"of={PROMPT_PATH}"
     )
     assert "fix the thing" in prompt_stdin
     assert "details here" in prompt_stdin
@@ -99,67 +125,103 @@ def test_dispatch_writes_the_prompt_over_stdin_not_argv():
 
 def test_dispatch_tells_the_agent_the_exact_branch_to_push():
     runner = FakeRunner()
-    dispatch(runner, "sandbox-0", make_issue(7), remote_url=REMOTE_URL, token=TOKEN)
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(7),
+             remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
     )
     assert "grain/issue-7" in prompt_stdin
 
 
+def test_dispatch_writes_an_mcp_config_naming_the_assigned_sandbox():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(address="10.100.0.42"),
+              make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "dd" and argv[1] == f"of={MCP_CONFIG_PATH}"
+    )
+    mcp_config = json.loads(mcp_stdin)
+    server = mcp_config["mcpServers"]["grain-sandbox"]
+    assert server["args"][server["args"].index("--address") + 1] == "10.100.0.42"
+    assert "grain.automation.mcp_server" in server["args"]
+
+
 def test_dispatch_prepares_credentials_and_workspace_before_the_prompt():
     runner = FakeRunner()
-    dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
     commands = runner.commands
     credential_index = next(i for i, c in enumerate(commands) if c.startswith("git config"))
     clone_index = next(i for i, c in enumerate(commands) if c.startswith("bash -c"))
     prompt_index = next(
         i for i, (argv, _) in enumerate(runner.calls)
-        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
     )
     assert credential_index < clone_index < prompt_index
 
 
-def test_dispatch_starts_a_systemd_unit_named_for_the_sandbox():
+def test_dispatch_starts_a_systemd_unit_named_for_the_sandbox_as_the_agent_user():
     runner = FakeRunner()
-    unit = dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    unit = dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+                     remote_url=REMOTE_URL, token=TOKEN)
     assert unit == "grain-task-sandbox-0"
-    assert runner.ran(f"sudo systemd-run --unit={unit}")
+    assert runner.ran(f"sudo systemd-run --unit={unit} --uid={CONTROLLER_AGENT_USER}")
 
 
-def test_dispatch_runs_claude_from_inside_the_workspace():
+def test_dispatch_runs_claude_from_opt_grain_with_no_native_tools():
     runner = FakeRunner()
-    dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
-    unit_call = next(c for c in runner.commands if "systemd-run" in c)
-    assert "cd /home/debian/workspace &&" in unit_call
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    # The raw command string (argv[-1] of the systemd-run call), not
+    # runner.commands' shlex-joined rendering -- that re-escapes the
+    # embedded `--tools ''` quotes, which would break a plain substring
+    # check.
+    unit_call = next(argv[-1] for argv, _ in runner.calls if "systemd-run" in argv)
+    assert "cd /opt/grain &&" in unit_call
+    assert "--tools ''" in unit_call
+    assert f"--mcp-config {MCP_CONFIG_PATH}" in unit_call
+    assert "--strict-mcp-config" in unit_call
+    assert "mcp__grain-sandbox__run_command" in unit_call
+    assert "mcp__grain-sandbox__edit_file" in unit_call
+    assert "TodoWrite" in unit_call
+    assert "Task" in unit_call
+    assert "--no-session-persistence" in unit_call
+    # The permission-mode flag existed only to auto-approve the native
+    # Edit/Write tools' prompts -- meaningless once --tools '' empties the
+    # roster, and must not be carried over.
+    assert "--permission-mode" not in unit_call
 
 
 # --- captured trajectory (docs/roadmap.md item 10) -------------------------
 
-def test_transcript_path_is_a_pure_function_of_the_unit():
-    assert transcript_path("grain-task-sandbox-0") == "/tmp/grain-task-sandbox-0.transcript.jsonl"
-    assert transcript_path("grain-task-sandbox-0") == transcript_path("grain-task-sandbox-0")
-    assert transcript_path("grain-task-sandbox-0") != transcript_path("grain-task-sandbox-1")
+def test_transcript_path_is_a_controller_local_pure_function_of_the_unit():
+    assert transcript_path(UNIT) == f"{UNIT_DIR}/transcript.jsonl"
+    assert transcript_path(UNIT) == transcript_path(UNIT)
+    assert transcript_path("grain-task-sandbox-1") != transcript_path(UNIT)
 
 
 def test_dispatch_asks_claude_for_stream_json_output():
     runner = FakeRunner()
-    dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
     unit_call = next(c for c in runner.commands if "systemd-run" in c)
     assert "--output-format stream-json --verbose" in unit_call
 
 
 def test_dispatch_redirects_claude_output_to_the_transcript_path():
     runner = FakeRunner()
-    unit = dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    unit = dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+                     remote_url=REMOTE_URL, token=TOKEN)
     unit_call = next(c for c in runner.commands if "systemd-run" in c)
     assert f"> {transcript_path(unit)}" in unit_call
 
 
 def test_dispatch_pr_also_redirects_to_the_transcript_path():
     runner = FakeRunner()
-    unit = dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
-                        remote_url=REMOTE_URL, token=TOKEN)
+    unit = dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(),
+                        make_comments(), remote_url=REMOTE_URL, token=TOKEN)
     unit_call = next(c for c in runner.commands if "systemd-run" in c)
     assert f"> {transcript_path(unit)}" in unit_call
     assert "--output-format stream-json --verbose" in unit_call
@@ -170,7 +232,8 @@ def test_dispatch_sets_remain_after_exit():
     # live against a real sandbox — and unit_status can no longer tell
     # "succeeded" from "never dispatched" once it's gone.
     runner = FakeRunner()
-    dispatch(runner, "sandbox-0", make_issue(), remote_url=REMOTE_URL, token=TOKEN)
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
     assert any("--property=RemainAfterExit=yes" in argv for argv, _ in runner.calls)
 
 
@@ -273,8 +336,8 @@ def test_ensure_workspace_checks_out_the_branch_on_first_clone_too():
 
 def test_dispatch_pr_checks_out_the_prs_own_branch():
     runner = FakeRunner()
-    dispatch_pr(runner, "sandbox-0", make_pr(head_ref="feature-x"), make_comments(),
-                remote_url=REMOTE_URL, token=TOKEN)
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(head_ref="feature-x"),
+                make_comments(), remote_url=REMOTE_URL, token=TOKEN)
     clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
     assert clone_calls
     assert "checkout -f -B feature-x origin/feature-x" in clone_calls[0][2]
@@ -282,11 +345,11 @@ def test_dispatch_pr_checks_out_the_prs_own_branch():
 
 def test_dispatch_pr_writes_a_prompt_carrying_title_body_and_comments():
     runner = FakeRunner()
-    dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
                 remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
     )
     assert "a distinctive PR title" in prompt_stdin
     assert "a distinctive PR body" in prompt_stdin
@@ -300,47 +363,48 @@ def test_dispatch_pr_writes_a_prompt_carrying_title_body_and_comments():
 
 def test_dispatch_pr_prompt_tells_the_agent_this_is_not_a_fresh_task():
     runner = FakeRunner()
-    dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
                 remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
     )
     assert "not a fresh task" in prompt_stdin.lower() or "not a fresh" in prompt_stdin.lower()
 
 
 def test_dispatch_pr_prompt_tells_the_agent_the_exact_branch_to_push():
     runner = FakeRunner()
-    dispatch_pr(runner, "sandbox-0", make_pr(head_ref="feature-x"), make_comments(),
-                remote_url=REMOTE_URL, token=TOKEN)
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(head_ref="feature-x"),
+                make_comments(), remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
     )
     assert "git push origin HEAD:feature-x" in prompt_stdin
 
 
 def test_dispatch_pr_prompt_handles_no_review_comments():
     runner = FakeRunner()
-    dispatch_pr(runner, "sandbox-0", make_pr(), [], remote_url=REMOTE_URL, token=TOKEN)
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), [],
+                remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == "of=/tmp/grain-task-sandbox-0.md"
+        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
     )
     assert "no inline review comments" in prompt_stdin
 
 
 def test_dispatch_pr_starts_a_systemd_unit_named_for_the_sandbox():
     runner = FakeRunner()
-    unit = dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
-                        remote_url=REMOTE_URL, token=TOKEN)
+    unit = dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(),
+                        make_comments(), remote_url=REMOTE_URL, token=TOKEN)
     assert unit == "grain-task-sandbox-0"
     assert runner.ran(f"sudo systemd-run --unit={unit}")
 
 
 def test_dispatch_pr_configures_credentials_before_the_workspace():
     runner = FakeRunner()
-    dispatch_pr(runner, "sandbox-0", make_pr(), make_comments(),
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
                 remote_url=REMOTE_URL, token=TOKEN)
     commands = runner.commands
     credential_index = next(i for i, c in enumerate(commands) if c.startswith("git config"))
