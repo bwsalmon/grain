@@ -70,7 +70,9 @@ from typing import Callable
 from . import ratelimit
 from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
-from .dispatch import SandboxTarget, branch_name, dispatch, dispatch_pr
+from .dispatch import (
+    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
+)
 from .github import GitHubClient, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
@@ -262,16 +264,20 @@ class Orchestrator:
                 break
 
             sandbox_runner = self._ssh_runner_for(sandbox)
-            # The same address/user/key `_ssh_runner_for` just used to build
+            # The same address/user `_ssh_runner_for` just used to build
             # `sandbox_runner` above, passed through as data rather than an
             # object — `mcp_server.py` runs as its own process (a child of
             # the controller-side `claude -p` unit) and builds its own
             # independent `SshRunner`, so it needs this to travel inside the
-            # per-dispatch MCP config JSON, not as a live `Runner`.
+            # per-dispatch MCP config JSON, not as a live `Runner`. The key
+            # path is deliberately CONTROLLER_AGENT_SSH_KEY_PATH, not
+            # `self.config.ssh_key_path` (this process's own key) — see
+            # that constant's docstring for why they have to be two
+            # separate files.
             target = SandboxTarget(
                 address=str(self.cluster.address_of(sandbox)),
                 ssh_user=self.config.ssh_user,
-                ssh_key_path=str(self.config.ssh_key_path),
+                ssh_key_path=CONTROLLER_AGENT_SSH_KEY_PATH,
             )
             token = self.token_store.ensure_token(sandbox)
             if isinstance(item, PullRequestDetail):
