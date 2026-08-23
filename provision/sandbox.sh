@@ -75,11 +75,40 @@ sysctl --system
 #    Code itself is installed and logged in, which is a manual first-setup
 #    step, not something this script can do unattended.
 sudo -u debian bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+# dispatch.py runs `claude -p` via `systemd-run --uid=debian`, a
+# non-login, non-interactive shell that never sources ~/.profile -- and
+# ~/.profile is exactly what puts the installer's target directory,
+# ~/.local/bin, on PATH. Without this symlink the unit's PATH is just
+# systemd's own default (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+# :/sbin:/bin), so a real dispatch fails at "claude: command not found".
+# Found live, with a real Claude Code login: every earlier live suite used
+# a fake `claude` binary planted straight at /usr/local/bin (already on
+# that default PATH), which is why this went uncaught until a real login
+# credential existed to test against.
+ln -sf /home/debian/.local/bin/claude /usr/local/bin/claude
+# `network.allowedDomains` grants the agent's own sandboxed Bash tool
+# egress to the git proxy -- without it, `sandbox.enabled: true` (turned on
+# for the credential-file deny rule below) also blocks *all* network
+# access by default, including the `git push origin ...` dispatch.py's own
+# prompt tells the agent to run. Found live, with a real Claude Code login:
+# the agent cloned fine (dispatch.py's own `ensure_workspace` clones over
+# plain SSH before `claude -p` ever starts, unaffected by this sandbox),
+# wrote and committed the requested change, then reported "the sandbox on
+# this device blocks connections to 10.100.0.2:8080" and stopped, needing
+# a human's sandbox approval it has no way to get non-interactively. Every
+# earlier live suite used a fake `claude` binary that never went through
+# Claude Code's own sandboxing at all, so this went uncaught until now.
+# `10.100.0.2` is `Cluster().controller_ip` -- this script is static
+# cloud-init user-data, not templated per-cluster, so it names the same
+# default a custom `--cluster-file` subnet would need to override here too.
 install -d -o debian -g debian /home/debian/.claude
 cat > /home/debian/.claude/settings.json <<'CLAUDESETTINGS'
 {
   "sandbox": {
     "enabled": true,
+    "network": {
+      "allowedDomains": ["10.100.0.2"]
+    },
     "credentials": {
       "files": [
         {"path": "~/.claude/.credentials.json", "mode": "deny"}

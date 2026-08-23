@@ -39,14 +39,23 @@ class Transport(Protocol):
 
 
 class RealTransport:
-    """Talks to the real GitHub API over HTTPS."""
+    """Talks to the GitHub API over HTTPS by default. `use_tls=False` exists
+    for `AutomationConfig.github_host` pointed at a local mock server for a
+    live end-to-end test (docs/roadmap.md item 8's mocked-GitHub run) — a
+    mock has no clean answer for a self-signed cert, and this project
+    already treats "point it at a mock" as a first-class test seam
+    (`Transport` itself, `FakeTransport`) rather than something to fake with
+    disabled certificate verification.
+    """
 
-    def __init__(self, host: str = "api.github.com") -> None:
+    def __init__(self, host: str = "api.github.com", *, use_tls: bool = True) -> None:
         self.host = host
+        self.use_tls = use_tls
 
     def request(self, *, method: str, path: str, headers: dict[str, str],
                 body: bytes | None) -> ApiResponse:
-        conn = http.client.HTTPSConnection(self.host, timeout=30)
+        conn_cls = http.client.HTTPSConnection if self.use_tls else http.client.HTTPConnection
+        conn = conn_cls(self.host, timeout=30)
         try:
             conn.request(method, path, body=body, headers=headers)
             resp = conn.getresponse()

@@ -32,6 +32,19 @@ class AutomationConfig:
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 10
     max_runtime_minutes: int = 120
+    # Overrides RealTransport's/RealForwarder's host+scheme -- unset in
+    # every real deployment, set only to point a live test at a mock GitHub
+    # server instead of the real thing (docs/roadmap.md item 8).
+    # `github_host` is the REST API (real default "api.github.com"),
+    # `git_forward_host` is the git-proxy's smart-HTTP forward target (real
+    # default "github.com") -- genuinely different hosts in production, so
+    # kept as separate fields even though a mock run typically points both
+    # at the same address. `github_use_tls` applies to both connections --
+    # a single shared toggle, since nothing about this project ever mixes
+    # "mock one, real the other."
+    github_host: str = "api.github.com"
+    git_forward_host: str = "github.com"
+    github_use_tls: bool = True
 
     @classmethod
     def load(cls, path: Path) -> "AutomationConfig":

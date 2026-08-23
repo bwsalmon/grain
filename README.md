@@ -35,6 +35,9 @@ host (Debian, KVM, no system credentials)
 - **[`docs/host-adapter.md`](docs/host-adapter.md)** — the one
   platform-specific module, and what a macOS port would have to replace.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
+- **[`docs/next-session.md`](docs/next-session.md)** — the one thing
+  standing between a mocked-GitHub live run and a real agent PR, and where
+  to pick it up.
 
 Read the ["Status and limits"](#status-and-limits) section before pointing
 this at a repo you care about.

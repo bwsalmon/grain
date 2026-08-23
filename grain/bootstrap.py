@@ -34,6 +34,7 @@ from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_claude_credentials, configure_github_credential, configure_repo,
+    ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -58,6 +59,9 @@ class BootstrapConfig:
     github_token: str | None = None
     credential_name: str = "bot"
     claude_credentials: str | None = None
+    github_host: str = "api.github.com"
+    git_forward_host: str = "github.com"
+    github_use_tls: bool = True
     ssh_user: str = "debian"
     admin_private_key_path: Path = Path("/var/lib/grain/admin-ssh")
     controller_provision_script: str | None = None
@@ -179,7 +183,9 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
     # Stage 8: configure. Token/Claude-credential only if one was supplied
     # -- a bare re-run with neither should not clobber what's already there.
     log("stage 8/11: configure /data")
-    configure_repo(admin_ssh, config.owner, config.repo)
+    configure_repo(admin_ssh, config.owner, config.repo,
+                    github_host=config.github_host, git_forward_host=config.git_forward_host,
+                    github_use_tls=config.github_use_tls)
     if config.github_token:
         configure_github_credential(
             admin_ssh, config.owner, config.repo, config.github_token,
@@ -219,6 +225,15 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                 stdin=config.claude_credentials,
             )
             sandbox_ssh.run(["chmod", "600", _CLAUDE_CREDENTIALS_PATH])
+
+    # Mint every sandbox's git-proxy token before the proxy itself starts
+    # (stage 10) -- see `ensure_sandbox_tokens`'s own docstring for the
+    # live-found bug this closes: the proxy loads sandbox-tokens.json once
+    # at startup, so a token minted only lazily on first dispatch (the
+    # normal `dispatch.py` path) would otherwise make that very first
+    # dispatch fail authentication against a proxy that started before the
+    # token existed.
+    ensure_sandbox_tokens(admin_ssh, list(cluster.sandbox_names))
 
     # Stage 10: enable.
     log("stage 10/11: enable the git proxy and the automation timer")

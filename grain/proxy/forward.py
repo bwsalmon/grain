@@ -27,10 +27,17 @@ class Forwarder(Protocol):
 
 
 class RealForwarder:
-    """Talks to the real GitHub over HTTPS."""
+    """Talks to GitHub's smart-HTTP endpoint over HTTPS by default.
+    `use_tls=False` is the git-transport half of the same mock-GitHub test
+    seam as `RealTransport` (`grain/automation/github.py`) — see
+    `grain/proxy/server.py`'s `build_proxy`, which wires both from the same
+    `automation.json` override so a live test can point clone/push and the
+    REST API at one mock server together.
+    """
 
-    def __init__(self, host: str = "github.com") -> None:
+    def __init__(self, host: str = "github.com", *, use_tls: bool = True) -> None:
         self.host = host
+        self.use_tls = use_tls
 
     def forward(self, *, method: str, path: str, query: str,
                 headers: dict[str, str], body: bytes | None,
@@ -48,7 +55,8 @@ class RealForwarder:
             )
         out_headers = {k: v for k, v in out_headers.items() if v}
 
-        conn = http.client.HTTPSConnection(self.host, timeout=30)
+        conn_cls = http.client.HTTPSConnection if self.use_tls else http.client.HTTPConnection
+        conn = conn_cls(self.host, timeout=30)
         try:
             full_path = f"{path}?{query}" if query else path
             conn.request(method, full_path, body=body, headers=out_headers)

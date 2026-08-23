@@ -98,7 +98,8 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     credentials = CredentialSet(data_dir / "secrets" / "github")
     credential = credentials.select(config.owner, config.repo)
     github: GitHubClient | DryRunGitHubClient = GitHubClient(
-        RealTransport(), credential.token if credential else None
+        RealTransport(config.github_host, use_tls=config.github_use_tls),
+        credential.token if credential else None,
     )
     if args.dry_run:
         github = DryRunGitHubClient(github)
@@ -398,7 +399,9 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     owner, _, repo = args.repo.partition("/")
     if not owner or not repo:
         raise SystemExit(f"--repo must be 'owner/name', got {args.repo!r}")
-    configure_repo(ssh, owner, repo)
+    configure_repo(ssh, owner, repo, github_host=args.github_host,
+                    git_forward_host=args.git_forward_host,
+                    github_use_tls=not args.github_insecure_http)
     if args.github_token_file:
         token = (
             sys.stdin.read() if args.github_token_file == "-"
@@ -436,6 +439,8 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
     config = BootstrapConfig(
         owner=owner, repo=repo, github_token=github_token,
         credential_name=args.credential_name, claude_credentials=claude_credentials,
+        github_host=args.github_host, git_forward_host=args.git_forward_host,
+        github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
         controller_provision_script=(
             Path(args.controller_provision).read_text() if args.controller_provision else None
@@ -665,6 +670,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-credentials-file",
                     help="path to a Claude Code ~/.claude/.credentials.json to place on the "
                          "controller and inject into every sandbox")
+    p.add_argument("--github-host", default="api.github.com",
+                    help="REST API host override for a live test against a mock GitHub "
+                         "server (default: api.github.com)")
+    p.add_argument("--git-forward-host", default="github.com",
+                    help="git-proxy's smart-HTTP forward-target override, same purpose as "
+                         "--github-host (default: github.com)")
+    p.add_argument("--github-insecure-http", action="store_true",
+                    help="talk plain HTTP to --github-host/--git-forward-host instead of "
+                         "HTTPS -- only for a mock server; never for the real API")
     p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
     p.add_argument("--admin-ssh-private-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
                     help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")
@@ -753,6 +767,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-credentials-file",
                     help="path to a Claude Code ~/.claude/.credentials.json to place on the "
                          "controller")
+    p.add_argument("--github-host", default="api.github.com",
+                    help="REST API host override for a live test against a mock GitHub "
+                         "server (default: api.github.com)")
+    p.add_argument("--git-forward-host", default="github.com",
+                    help="git-proxy's smart-HTTP forward-target override, same purpose as "
+                         "--github-host (default: github.com)")
+    p.add_argument("--github-insecure-http", action="store_true",
+                    help="talk plain HTTP to --github-host/--git-forward-host instead of "
+                         "HTTPS -- only for a mock server; never for the real API")
     p.add_argument("--ssh-user", default=_DEFAULT_SSH_USER, help=f"default: {_DEFAULT_SSH_USER}")
     p.add_argument("--ssh-key", default=str(_DEFAULT_ADMIN_SSH_KEY_PATH),
                     help=f"default: {_DEFAULT_ADMIN_SSH_KEY_PATH}")

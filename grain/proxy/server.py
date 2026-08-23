@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..automation.config import AutomationConfig
 from .allowlist import Allowlist
 from .audit import FileAuditLog
 from .core import GitProxy
@@ -64,12 +65,25 @@ def run(proxy: GitProxy, host: str = "0.0.0.0", port: int = 8080) -> None:
 def build_proxy(data_dir: Path) -> GitProxy:
     """Wires the real files under a /data-shaped directory — see
     docs/design.md, "Secrets on /data".
+
+    The forward target defaults to real GitHub; it's overridden only when
+    `automation.json` carries a non-default `git_forward_host` — the
+    git-transport half of the mock-GitHub live-test seam
+    (docs/roadmap.md item 8), the other half being `RealTransport` in
+    `grain/cli.py`'s `build_orchestrator`. Missing/unconfigured
+    `automation.json` (the proxy can be enabled before `controller
+    configure` runs) falls back to the real default rather than failing.
     """
+    forwarder = RealForwarder()
+    automation_path = data_dir / "config" / "automation.json"
+    if automation_path.exists():
+        config = AutomationConfig.load(automation_path)
+        forwarder = RealForwarder(config.git_forward_host, use_tls=config.github_use_tls)
     return GitProxy(
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         credentials=CredentialSet(data_dir / "secrets" / "github"),
         tokens=SandboxTokens(data_dir / "secrets" / "sandbox-tokens.json"),
-        forwarder=RealForwarder(),
+        forwarder=forwarder,
         audit=FileAuditLog(data_dir / "state" / "git-proxy" / "audit.log"),
     )
 

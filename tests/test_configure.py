@@ -1,12 +1,19 @@
 import ipaddress
 import json
+import shlex
 from pathlib import Path
 
 from grain.automation.configure import (
     configure_claude_credentials, configure_github_credential, configure_repo,
+    ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
 from grain.run import FakeRunner
+
+SSH_PREFIX = (
+    "ssh -i /var/lib/grain/admin-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "
+    "-o UserKnownHostsFile=/dev/null -o IdentityAgent=none -o ConnectTimeout=10 debian@10.100.0.2"
+)
 
 
 def make_ssh():
@@ -17,6 +24,10 @@ def make_ssh():
         key_path=Path("/var/lib/grain/admin-ssh"),
     )
     return runner, inner
+
+
+def expect_remote(inner: FakeRunner, remote_command: str, **kwargs) -> None:
+    inner.expect(f"{SSH_PREFIX} -- {shlex.quote(remote_command)}", **kwargs)
 
 
 def stdin_for(inner: FakeRunner, path: str) -> str:
@@ -33,9 +44,31 @@ def test_configure_repo_writes_automation_json_and_allowlist():
     ssh, inner = make_ssh()
     configure_repo(ssh, "acme", "widgets")
     automation = json.loads(stdin_for(inner, "/data/config/automation.json"))
-    assert automation == {"owner": "acme", "repo": "widgets"}
+    assert automation == {
+        "owner": "acme", "repo": "widgets",
+        "github_host": "api.github.com", "git_forward_host": "github.com",
+        "github_use_tls": True,
+    }
     allowlist = json.loads(stdin_for(inner, "/data/config/repo-allowlist.json"))
     assert allowlist == ["acme/widgets"]
+
+
+def test_configure_repo_honours_a_github_host_override():
+    """A live test pointed at a mock GitHub server (docs/roadmap.md item 8)
+    -- unset in every real deployment, so this must be an explicit opt-in
+    that lands in automation.json, not a default that could silently point
+    production at the wrong host.
+    """
+    ssh, inner = make_ssh()
+    configure_repo(
+        ssh, "acme", "widgets",
+        github_host="10.100.0.1:8443", git_forward_host="10.100.0.1:8443",
+        github_use_tls=False,
+    )
+    automation = json.loads(stdin_for(inner, "/data/config/automation.json"))
+    assert automation["github_host"] == "10.100.0.1:8443"
+    assert automation["git_forward_host"] == "10.100.0.1:8443"
+    assert automation["github_use_tls"] is False
 
 
 def test_configure_repo_uses_sudo_and_chmod_644_for_config():
@@ -82,6 +115,50 @@ def test_configure_github_credential_sets_mode_600_on_the_token():
     assert any(
         "sudo chmod 600 /data/secrets/github/bot.token" in c for c in inner.commands
     )
+
+
+def test_ensure_sandbox_tokens_mints_one_per_sandbox_when_the_file_is_absent():
+    """The live bug this closes: the proxy loads sandbox-tokens.json once at
+    startup (grain/proxy/server.py's build_proxy), so a token minted only
+    lazily on first dispatch would make that dispatch fail auth against a
+    proxy that already started with none. Bootstrap must mint every
+    sandbox's token before stage 10 enables the proxy.
+    """
+    ssh, inner = make_ssh()
+    expect_remote(inner, "sudo cat /data/secrets/sandbox-tokens.json", returncode=1)
+    ensure_sandbox_tokens(ssh, ["sandbox-0", "sandbox-1"])
+    tokens = json.loads(stdin_for(inner, "/data/secrets/sandbox-tokens.json"))
+    assert set(tokens) == {"sandbox-0", "sandbox-1"}
+    assert tokens["sandbox-0"] != tokens["sandbox-1"]
+    assert any(
+        "sudo chmod 644 /data/secrets/sandbox-tokens.json" in c for c in inner.commands
+    )
+
+
+def test_ensure_sandbox_tokens_preserves_an_existing_token():
+    """A bootstrap re-run (or a sandbox already dispatched to) must not
+    replace a token in use -- that would strand the credential the
+    sandbox's own git credential helper still presents.
+    """
+    ssh, inner = make_ssh()
+    expect_remote(
+        inner, "sudo cat /data/secrets/sandbox-tokens.json",
+        stdout=json.dumps({"sandbox-0": "existing-token"}),
+    )
+    ensure_sandbox_tokens(ssh, ["sandbox-0", "sandbox-1"])
+    tokens = json.loads(stdin_for(inner, "/data/secrets/sandbox-tokens.json"))
+    assert tokens["sandbox-0"] == "existing-token"
+    assert "sandbox-1" in tokens
+
+
+def test_ensure_sandbox_tokens_is_a_no_op_when_every_sandbox_already_has_one():
+    ssh, inner = make_ssh()
+    expect_remote(
+        inner, "sudo cat /data/secrets/sandbox-tokens.json",
+        stdout=json.dumps({"sandbox-0": "existing-token"}),
+    )
+    ensure_sandbox_tokens(ssh, ["sandbox-0"])
+    assert not any("dd of=/data/secrets/sandbox-tokens.json" in c for c in inner.commands)
 
 
 def test_configure_claude_credentials_writes_to_the_fixed_path_mode_600():
