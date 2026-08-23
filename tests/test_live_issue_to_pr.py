@@ -69,7 +69,9 @@ from grain.adapter.net_linux import LinuxNetwork
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
-from grain.automation.dispatch import UnitState, branch_name, unit_name, unit_status
+from grain.automation.dispatch import (
+    WORKSPACE_PATH, UnitState, branch_name, unit_name, unit_status,
+)
 from grain.automation.github import ApiResponse, GitHubClient
 from grain.automation.ssh import SshRunner
 from grain.automation.state import AutomationState
@@ -158,6 +160,44 @@ def live_ssh_runner(live_sandbox: Sandbox) -> SshRunner:
         address=live_sandbox.cluster.address_of(live_sandbox.name),
         key_path=live_sandbox.private_key,
     )
+
+
+@pytest.fixture(scope="module")
+def live_controller_stand_in(live_sandbox: Sandbox) -> None:
+    """`claude -p` runs on the controller now, not the sandbox
+    (docs/roadmap.md item 8's "Update") — but this suite, like
+    `test_vm_integration.py`, only ever boots one VM. `live_sandbox` stands
+    in for both roles at once here, same reasoning as
+    `test_vm_integration.py`'s `controller_stand_in` (see its own
+    docstring): this is testing the real dispatch/sweep/PR *mechanism*, not
+    credential isolation between two machines, so one VM playing both parts
+    is a legitimate simplification, not a gap in what this suite proves.
+
+    `grain-agent` gets passwordless sudo here (a real deployment's
+    `grain-agent` never has or needs sudo) purely so the fake `claude`
+    script below can fix up workspace permissions itself — see that
+    script's own comment for why that's needed only because this stand-in
+    collapses two accounts (`debian`, who owns the cloned workspace, and
+    `grain-agent`, who runs the agent process) onto one VM.
+    """
+    runner = SshRunner(
+        inner=RealRunner(), user=SSH_USER,
+        address=live_sandbox.cluster.address_of(live_sandbox.name),
+        key_path=live_sandbox.private_key,
+    )
+    # --create-home, matching provision/controller.sh's real grain-agent
+    # user: it needs one for ~/.claude and (found live, building this fake
+    # script) for `git config --global` to have somewhere to write.
+    runner.run(["sudo", "useradd", "--system", "--create-home",
+                "--shell", "/usr/sbin/nologin", "grain-agent"], check=False)
+    runner.run([
+        "bash", "-c",
+        "echo 'grain-agent ALL=(ALL) NOPASSWD:ALL' | "
+        "sudo tee /etc/sudoers.d/99-grain-agent-test-only >/dev/null",
+    ])
+    runner.run(["sudo", "mkdir", "-p", "/data/state/automation/units"])
+    runner.run(["sudo", "chmod", "-R", "0777", "/data"])
+    runner.run(["sudo", "mkdir", "-p", "/opt/grain"])
 
 
 @pytest.fixture(scope="module")
@@ -296,8 +336,24 @@ class RealGitHubMock:
 # would read its own instructions, and either makes a real commit and
 # pushes it, or deliberately doesn't (the two failure shapes the roadmap
 # item also asks to be exercised).
+#
+# `claude -p` runs on the controller now (docs/roadmap.md item 8's
+# "Update"), started from `/opt/grain`, not from inside the workspace — a
+# real agent reaches the workspace only through `mcp_server.py`'s tools
+# over SSH, never a local cwd. This fake binary is intentionally *not*
+# MCP-aware (that mechanism is already proven for real in
+# `test_vm_integration.py`'s `test_mcp_server_round_trips_real_tool_calls_
+# over_real_ssh` — re-proving it here would just be redundant); it `cd`s
+# straight into the known workspace path instead, since `live_controller_
+# stand_in` collapses the sandbox and controller onto one VM, so that path
+# is already reachable on the local filesystem. The one thing that
+# collapse actually breaks: the workspace was cloned as `debian` (over
+# `sandbox_runner`, real production code, unchanged) but this script runs
+# as `grain-agent` (a different, real account, matching production) — so it
+# needs one `sudo` fixup line no real agent would ever need, since a real
+# agent never touches the workspace as a local user at all.
 
-_FAKE_CLAUDE_SUCCESS = """#!/bin/bash
+_FAKE_CLAUDE_SUCCESS = f"""#!/bin/bash
 set -eu
 prompt="$(cat)"
 branch=$(printf '%s\\n' "$prompt" | sed -n 's/.*git push origin HEAD:\\([^ ]*\\).*/\\1/p' | head -n1)
@@ -305,6 +361,24 @@ if [ -z "$branch" ]; then
   echo "fake-claude: could not find a branch to push to in the prompt" >&2
   exit 1
 fi
+sudo chmod -R a+rwX {WORKSPACE_PATH}
+# git's own "dubious ownership" protection (checks the repo's UID, not
+# permission bits -- the chmod above doesn't satisfy it) fires here for the
+# same reason the chmod above is needed at all: this script runs as
+# grain-agent, touching a workspace `debian` owns directly, unlike a real
+# agent, which only ever reaches it via SSH-as-debian through
+# mcp_server.py's tools and never hits this.
+git config --global --add safe.directory {WORKSPACE_PATH}
+# Same story as safe.directory above: configure_git_credentials (real
+# production code, unchanged) only ever configured debian's own credential
+# helper -- correct, since a real agent authenticates as debian over SSH
+# through mcp_server.py, never touching git credentials as any other user.
+# This script running as grain-agent instead (this test's own
+# simplification) needs its own copy.
+sudo cat /home/debian/.git-credentials > ~/.git-credentials
+chmod 600 ~/.git-credentials
+git config --global credential.helper store
+cd {WORKSPACE_PATH}
 git config user.email "fake-agent@grain.local"
 git config user.name "grain-fake-agent"
 echo "fake agent was here: $(date -u +%FT%TZ)" >> AGENT_NOTE.md
@@ -405,7 +479,7 @@ class LiveTarget:
 
 
 @pytest.fixture
-def live_target(tmp_path: Path, live_sandbox: Sandbox):
+def live_target(tmp_path: Path, live_sandbox: Sandbox, live_controller_stand_in: None):
     """The real bare repo + real `GitProxy` (adapted from
     `test_vm_integration.py`'s `git_proxy_target` — same rig, seeded for a
     single default branch rather than also a PR branch, and bound to
@@ -486,12 +560,25 @@ def live_target(tmp_path: Path, live_sandbox: Sandbox):
         ssh_key_path=live_sandbox.private_key,
     )
     audit = RecordingAuditLog()
+    # `sandbox_runner` plays both the sandbox role and the stand-in
+    # controller role (see `live_controller_stand_in`'s docstring) — passed
+    # as both `base_runner` (used unwrapped as `controller_runner`,
+    # docs/roadmap.md item 8's "Update") and via `ssh_runner_factory` (which
+    # bypasses `_ssh_runner_for`'s own SshRunner wrapping — without it,
+    # `base_runner` being an SshRunner already would get wrapped in a
+    # second one, hopping through the same VM twice for no reason).
+    sandbox_runner = SshRunner(
+        inner=RealRunner(), user=SSH_USER,
+        address=live_sandbox.cluster.address_of(live_sandbox.name),
+        key_path=live_sandbox.private_key,
+    )
     orchestrator = Orchestrator(
         cluster=_SingleSandboxCluster(
             inner=live_sandbox.cluster, sandbox_names=[live_sandbox.name]
         ),
         github=github_client, config=config,
-        state=AutomationState(), base_runner=RealRunner(),
+        state=AutomationState(), base_runner=sandbox_runner,
+        ssh_runner_factory=lambda _sandbox: sandbox_runner,
         token_store=token_store, audit=audit,
     )
 

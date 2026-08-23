@@ -112,9 +112,9 @@ def test_dispatch_writes_the_prompt_to_a_controller_local_file_over_stdin_not_ar
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
              remote_url=REMOTE_URL, token=TOKEN)
-    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[:2] == ["sudo", "dd"]]
     prompt_argv, prompt_stdin = next(
-        c for c in dd_calls if c[0][1] == f"of={PROMPT_PATH}"
+        c for c in dd_calls if c[0][2] == f"of={PROMPT_PATH}"
     )
     assert "fix the thing" in prompt_stdin
     assert "details here" in prompt_stdin
@@ -129,7 +129,7 @@ def test_dispatch_tells_the_agent_the_exact_branch_to_push():
              remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "grain/issue-7" in prompt_stdin
 
@@ -140,7 +140,7 @@ def test_dispatch_writes_an_mcp_config_naming_the_assigned_sandbox():
               make_issue(), remote_url=REMOTE_URL, token=TOKEN)
     mcp_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == f"of={MCP_CONFIG_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
     )
     mcp_config = json.loads(mcp_stdin)
     server = mcp_config["mcpServers"]["grain-sandbox"]
@@ -157,7 +157,7 @@ def test_dispatch_prepares_credentials_and_workspace_before_the_prompt():
     clone_index = next(i for i, c in enumerate(commands) if c.startswith("bash -c"))
     prompt_index = next(
         i for i, (argv, _) in enumerate(runner.calls)
-        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert credential_index < clone_index < prompt_index
 
@@ -349,7 +349,7 @@ def test_dispatch_pr_writes_a_prompt_carrying_title_body_and_comments():
                 remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "a distinctive PR title" in prompt_stdin
     assert "a distinctive PR body" in prompt_stdin
@@ -367,7 +367,7 @@ def test_dispatch_pr_prompt_tells_the_agent_this_is_not_a_fresh_task():
                 remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "not a fresh task" in prompt_stdin.lower() or "not a fresh" in prompt_stdin.lower()
 
@@ -378,7 +378,7 @@ def test_dispatch_pr_prompt_tells_the_agent_the_exact_branch_to_push():
                 make_comments(), remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "git push origin HEAD:feature-x" in prompt_stdin
 
@@ -389,7 +389,7 @@ def test_dispatch_pr_prompt_handles_no_review_comments():
                 remote_url=REMOTE_URL, token=TOKEN)
     prompt_stdin = next(
         stdin for argv, stdin in runner.calls
-        if argv[0] == "dd" and argv[1] == f"of={PROMPT_PATH}"
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "no inline review comments" in prompt_stdin
 

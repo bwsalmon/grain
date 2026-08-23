@@ -448,12 +448,24 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     ensure_workspace(sandbox_runner, remote_url, target.workspace, branch=branch)
 
     unit = unit_name(sandbox)
-    controller_runner.run(["mkdir", "-p", _unit_dir(unit)])
+    unit_dir = _unit_dir(unit)
+    # `sudo`, matching start_unit's/reap's own existing pattern below —
+    # controller_runner isn't guaranteed to already be root (found live:
+    # even in production, relying on that is fragile), and the directory
+    # has to end up owned by CONTROLLER_AGENT_USER specifically, not
+    # whoever controller_runner happens to be: `claude -p`'s own
+    # `--output-format stream-json` redirect creates transcript_path(unit)
+    # as that unprivileged user, and a root-owned 0755 directory (mkdir's
+    # own default) would deny it write access to create that file at all
+    # — found live, the unit's own systemd-run wrapper failing outright
+    # with "Permission denied" on the redirect before claude -p ever ran.
+    controller_runner.run(["sudo", "mkdir", "-p", unit_dir])
+    controller_runner.run(["sudo", "chown", CONTROLLER_AGENT_USER, unit_dir])
     p_path = _prompt_path(unit)
-    controller_runner.run(["dd", f"of={p_path}", "status=none"], stdin=prompt)
+    controller_runner.run(["sudo", "dd", f"of={p_path}", "status=none"], stdin=prompt)
     m_path = _mcp_config_path(unit)
     controller_runner.run(
-        ["dd", f"of={m_path}", "status=none"], stdin=_mcp_config_json(target),
+        ["sudo", "dd", f"of={m_path}", "status=none"], stdin=_mcp_config_json(target),
     )
     out_path = transcript_path(unit)
     start_unit(

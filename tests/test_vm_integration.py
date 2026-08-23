@@ -54,12 +54,13 @@ from pathlib import Path
 
 import pytest
 
+import grain.automation.capture as capture_module
 from grain.adapter.base import VmState
 from grain.adapter.libvirt import LIBVIRT_URI, LibvirtAdapter
 from grain.adapter.net_linux import LinuxNetwork
 from grain.automation.config import AutomationConfig
 from grain.automation.dispatch import (
-    WORKSPACE_PATH, UnitState, configure_git_credentials, dispatch,
+    WORKSPACE_PATH, SandboxTarget, UnitState, configure_git_credentials, dispatch,
     ensure_workspace, reap, start_unit, transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Issue, PullRequestDetail, ReviewComment
@@ -236,6 +237,51 @@ def git_installed(booted_sandbox: Sandbox) -> None:
     )
     runner.run(["sudo", "apt-get", "update", "-qq"])
     runner.run(["sudo", "apt-get", "install", "-y", "-qq", "git"])
+
+
+@pytest.fixture(scope="session")
+def controller_stand_in(booted_sandbox: Sandbox, ssh_runner_for_controller_setup) -> None:
+    """`claude -p` now runs on the controller, not the sandbox
+    (docs/roadmap.md item 8's "Update") — but this suite only ever boots one
+    VM (see the module docstring). Rather than stand up a second real VM
+    just to host `dispatch()`'s controller-side half, the tests below reuse
+    the same sandbox as a stand-in "controller" too — legitimate for what
+    they're actually proving (that the real systemd-run/SSH/mkdir/dd
+    mechanism works), the same way `start_unit`'s own docstring already
+    treats it as location-agnostic: "any inert stand-in command proves the
+    same systemd-run/SSH mechanism `dispatch()` relies on." What it does
+    *not* prove is anything about credential isolation between the
+    controller and the sandbox — this VM plays both roles at once here, so
+    that property is meaningless to check against it; it's covered instead
+    by the design itself (no Claude credential ever reaches a sandbox,
+    verified by what `provision/sandbox.sh` no longer installs) and by a
+    real two-VM live run (docs/roadmap.md item 8's own verification order).
+
+    Session-scoped: idempotent (`useradd`/`mkdir -p` both tolerate already
+    existing), so paying this setup cost once for every test that needs it
+    is fine.
+    """
+    runner = ssh_runner_for_controller_setup
+    # --create-home, matching provision/controller.sh's real grain-agent
+    # user: it needs one for ~/.claude and for git's own per-user config.
+    runner.run(["sudo", "useradd", "--system", "--create-home",
+                "--shell", "/usr/sbin/nologin", "grain-agent"], check=False)
+    runner.run(["sudo", "mkdir", "-p", "/data/state/automation/units"])
+    runner.run(["sudo", "chmod", "-R", "0777", "/data"])  # test-only; real
+    # deployments get real ownership from provision/controller.sh -- this
+    # stand-in just needs the plain, unprivileged `mkdir`/`dd` calls
+    # `_start_task` issues via controller_runner (no `sudo` in front of
+    # them, by design -- see dispatch.py) to succeed against a directory a
+    # real controller would already own correctly.
+
+
+@pytest.fixture(scope="session")
+def ssh_runner_for_controller_setup(booted_sandbox: Sandbox) -> SshRunner:
+    return SshRunner(
+        inner=RealRunner(), user=SSH_USER,
+        address=booted_sandbox.cluster.address_of(booted_sandbox.name),
+        key_path=booted_sandbox.private_key,
+    )
 
 
 # --- a real bare repo, served over real smart-HTTP, behind a real GitProxy
@@ -571,25 +617,37 @@ def test_cleanup_against_a_sandbox_with_no_kind_or_docker_installed(ssh_runner: 
 
 def test_dispatch_writes_the_real_prompt_and_clones_the_real_workspace(
     ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
+    controller_stand_in: None, booted_sandbox: Sandbox,
 ):
     issue = Issue(
         number=7, title="a distinctive title marker",
         body="a distinctive body marker",
         html_url="https://github.com/o/r/issues/7", labels=frozenset(),
     )
+    target = SandboxTarget(
+        address=str(booted_sandbox.cluster.address_of("sandbox-0")),
+        ssh_user=SSH_USER, ssh_key_path=str(booted_sandbox.private_key),
+    )
+    # ssh_runner plays both roles (sandbox and stand-in controller) — see
+    # controller_stand_in's own docstring for why that's legitimate here.
     unit = dispatch(
-        ssh_runner, "sandbox-0", issue,
+        ssh_runner, ssh_runner, "sandbox-0", target, issue,
         remote_url=git_proxy_target.remote_url, token=git_proxy_target.token,
     )
     try:
-        prompt = ssh_runner.run(["cat", f"/tmp/{unit}.md"]).stdout
+        prompt = ssh_runner.run(["cat", f"/data/state/automation/units/{unit}/prompt.md"]).stdout
         assert "a distinctive title marker" in prompt
         assert "a distinctive body marker" in prompt
         assert "grain/issue-7" in prompt
+        mcp_config = json.loads(
+            ssh_runner.run(["cat", f"/data/state/automation/units/{unit}/mcp-config.json"]).stdout
+        )
+        server_args = mcp_config["mcpServers"]["grain-sandbox"]["args"]
+        assert server_args[server_args.index("--address") + 1] == target.address
         # The workspace clone this test actually cares about really
         # happened — over the network, through the real GitProxy, before
-        # the unit (expected to fail: no `claude` binary on the stock
-        # image) was even started.
+        # the unit (expected to fail: no real Claude credential exists in
+        # this environment) was even started.
         readme = ssh_runner.run(["cat", f"{WORKSPACE_PATH}/README.md"]).stdout
         assert readme == "hello from the live test upstream\n"
     finally:
@@ -717,6 +775,7 @@ def test_ensure_workspace_with_a_branch_resets_an_existing_default_branch_checko
 
 def test_dispatch_pr_writes_the_real_prompt_and_checks_out_the_prs_branch(
     ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
+    controller_stand_in: None, booted_sandbox: Sandbox,
 ):
     from grain.automation.dispatch import dispatch_pr
 
@@ -728,19 +787,24 @@ def test_dispatch_pr_writes_the_real_prompt_and_checks_out_the_prs_branch(
     )
     comments = [ReviewComment(id=1, user="reviewer", body="a distinctive comment marker",
                                path="README.md", line=1)]
+    target = SandboxTarget(
+        address=str(booted_sandbox.cluster.address_of("sandbox-0")),
+        ssh_user=SSH_USER, ssh_key_path=str(booted_sandbox.private_key),
+    )
     unit = dispatch_pr(
-        ssh_runner, "sandbox-0", pr, comments,
+        ssh_runner, ssh_runner, "sandbox-0", target, pr, comments,
         remote_url=git_proxy_target.remote_url, token=git_proxy_target.token,
     )
     try:
-        prompt = ssh_runner.run(["cat", f"/tmp/{unit}.md"]).stdout
+        prompt = ssh_runner.run(["cat", f"/data/state/automation/units/{unit}/prompt.md"]).stdout
         assert "a distinctive PR title marker" in prompt
         assert "a distinctive PR body marker" in prompt
         assert "a distinctive comment marker" in prompt
         assert f"git push origin HEAD:{git_proxy_target.pr_branch}" in prompt
         # The workspace really landed on the PR's own branch, over the
         # network, through the real GitProxy — before the unit (expected to
-        # fail: no `claude` binary on the stock image) was even started.
+        # fail: no real Claude credential exists in this environment) was
+        # even started.
         readme = ssh_runner.run(["cat", f"{WORKSPACE_PATH}/README.md"]).stdout
         assert readme == "hello from the PR's own branch\n"
         branch = ssh_runner.run(
@@ -750,6 +814,97 @@ def test_dispatch_pr_writes_the_real_prompt_and_checks_out_the_prs_branch(
     finally:
         reap(ssh_runner, unit)
         ssh_runner.run(["rm", "-rf", WORKSPACE_PATH], check=False)
+
+
+# --- mcp_server.py's real SSH-to-sandbox tool round-trip (docs/roadmap.md
+# --- item 8's "Update") -- proves the actual mechanism the controller-side
+# --- claude -p session depends on for everything it does, independent of
+# --- claude -p itself (no real Claude credential exists in this
+# --- environment): a real `run_command`/`read_file`/`edit_file`/
+# --- `write_file` round-trip against the real sandbox, invoked exactly the
+# --- way `--mcp-config` will spawn it -- JSON-RPC over stdin/stdout, no
+# --- Claude Code involved at all.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_mcp_server_round_trips_real_tool_calls_over_real_ssh(
+    booted_sandbox: Sandbox, git_installed: None,
+):
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "run_command",
+            "arguments": {"command": "echo hello-from-real-sandbox && whoami"},
+        }},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "write_file",
+            "arguments": {"file_path": f"{WORKSPACE_PATH}/mcp_test.txt",
+                           "content": "line one\nline two\nline three\n"},
+        }},
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+            "name": "read_file",
+            "arguments": {"file_path": f"{WORKSPACE_PATH}/mcp_test.txt"},
+        }},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+            "name": "edit_file",
+            "arguments": {"file_path": f"{WORKSPACE_PATH}/mcp_test.txt",
+                           "old_string": "line two", "new_string": "line TWO edited"},
+        }},
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+            "name": "run_command",
+            "arguments": {"command": "sleep 5", "timeout": 1000},
+        }},
+    ]
+    stdin_text = "\n".join(json.dumps(r) for r in requests) + "\n"
+
+    ssh_runner = SshRunner(
+        inner=RealRunner(), user=SSH_USER,
+        address=booted_sandbox.cluster.address_of(booted_sandbox.name),
+        key_path=booted_sandbox.private_key,
+    )
+    ssh_runner.run(["mkdir", "-p", WORKSPACE_PATH])
+    try:
+        proc = subprocess.run(
+            ["python3", "-m", "grain.automation.mcp_server",
+             "--address", str(booted_sandbox.cluster.address_of(booted_sandbox.name)),
+             "--user", SSH_USER, "--key-path", str(booted_sandbox.private_key),
+             "--workspace", WORKSPACE_PATH],
+            input=stdin_text, capture_output=True, text=True, timeout=60, cwd=_REPO_ROOT,
+        )
+        responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+        by_id = {r["id"]: r for r in responses if "id" in r}
+
+        assert by_id[1]["result"]["serverInfo"]["name"] == "grain-sandbox"
+        tool_names = {t["name"] for t in by_id[2]["result"]["tools"]}
+        assert tool_names == {"run_command", "read_file", "edit_file", "write_file"}
+
+        run_text = by_id[3]["result"]["content"][0]["text"]
+        assert "hello-from-real-sandbox" in run_text
+        assert f"\n{SSH_USER}\n" in run_text or run_text.strip().endswith(SSH_USER)
+        assert by_id[3]["result"]["isError"] is False
+
+        assert by_id[4]["result"]["isError"] is False
+
+        read_text = by_id[5]["result"]["content"][0]["text"]
+        assert read_text == "     1\tline one\n     2\tline two\n     3\tline three"
+
+        assert by_id[6]["result"]["isError"] is False
+
+        # Real network-level timeout enforcement, not a mocked clock: the
+        # `timeout` coreutil really killed a real `sleep 5` after 1s.
+        timeout_result = by_id[7]["result"]
+        assert timeout_result["isError"] is True
+        assert "exit=124" in timeout_result["content"][0]["text"]
+
+        # And the edit really landed on the real sandbox, independent of
+        # the tool's own report of success.
+        final = ssh_runner.run(["cat", f"{WORKSPACE_PATH}/mcp_test.txt"]).stdout
+        assert final == "line one\nline TWO edited\nline three\n"
+    finally:
+        ssh_runner.run(["rm", "-f", f"{WORKSPACE_PATH}/mcp_test.txt"], check=False)
 
 
 # --- trajectory capture against a real sandbox (docs/roadmap.md item 10) ---
@@ -815,28 +970,34 @@ _SIMULATED_TRAJECTORY = "\n".join([
 
 
 def test_sweep_captures_a_real_trajectory_file_before_freeing_the_slot(
-    ssh_runner: SshRunner, booted_sandbox: Sandbox, tmp_path: Path,
+    ssh_runner: SshRunner, booted_sandbox: Sandbox, tmp_path: Path, monkeypatch,
 ):
     from grain.automation.transcript import parse_transcript
 
     sandbox = booted_sandbox.name  # "sandbox-0"
     unit = unit_name(sandbox)
-    out_path = transcript_path(unit)
+    # claude -p's transcript is a controller-local file now (docs/roadmap.md
+    # item 8's "Update") -- capture_trajectory reads it directly, no SSH
+    # involved, so this test's "already-written transcript" is a plain local
+    # file too, not something `dd`'d onto the sandbox.
+    out_path = tmp_path / f"{unit}.transcript.jsonl"
+    monkeypatch.setattr(capture_module, "transcript_path", lambda u: str(out_path))
     reap(ssh_runner, unit)  # in case a previous test left it behind
-    ssh_runner.run(["rm", "-f", out_path], check=False)
 
     try:
         # Stand in for "claude -p --output-format stream-json --verbose
         # > out_path" having already run and written its transcript — the
-        # exact redirect dispatch.py's start_unit now builds.
-        ssh_runner.run(["dd", f"of={out_path}", "status=none"], stdin=_SIMULATED_TRAJECTORY)
-        written = ssh_runner.run(["cat", out_path]).stdout
-        assert written == _SIMULATED_TRAJECTORY, "the file didn't land byte-for-byte before the sweep"
+        # exact redirect dispatch.py's start_unit now builds, on whichever
+        # machine claude -p runs on.
+        out_path.write_text(_SIMULATED_TRAJECTORY)
 
         # A trivial real unit standing in for the dispatched claude -p
         # process itself (same substitution test_a_real_systemd_unit_goes_
         # active_then_done_success uses) -- what sweep() actually reads to
-        # decide this task is DONE_SUCCESS.
+        # decide this task is DONE_SUCCESS. Run via ssh_runner playing the
+        # controller's role too (see controller_stand_in's docstring) --
+        # `unit_status`/`reap` are runner-agnostic, so this genuinely proves
+        # the mechanism regardless of which machine hosts the unit.
         start_unit(ssh_runner, unit, "true")
         time.sleep(2)
         assert unit_status(ssh_runner, unit) is UnitState.DONE_SUCCESS
@@ -848,8 +1009,8 @@ def test_sweep_captures_a_real_trajectory_file_before_freeing_the_slot(
         config = AutomationConfig(owner="o", repo="r")
 
         result = sweep(
-            state, lambda name: ssh_runner, config, datetime.now(timezone.utc),
-            history=history,
+            state, lambda name: ssh_runner, ssh_runner, config,
+            datetime.now(timezone.utc), history=history,
         )
 
         # The slot is freed -- capture ran as part of releasing it, not on
@@ -877,4 +1038,3 @@ def test_sweep_captures_a_real_trajectory_file_before_freeing_the_slot(
         assert "Fixed the off-by-one error" in events[-1].summary
     finally:
         reap(ssh_runner, unit)
-        ssh_runner.run(["rm", "-f", out_path], check=False)
