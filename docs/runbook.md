@@ -52,7 +52,7 @@ run-once --data-dir /data`.
 sudo python3 -m grain.cli host bootstrap \
   --repo your-org/your-repo \
   --github-token-file /path/to/token   # or '-' to pipe it in on stdin
-  # --claude-credentials-file ~/.claude/.credentials.json   # optional, see below
+  # --claude-token-file /path/to/token   # optional, see below
 ```
 
 This is `docs/bootstrap.md`'s sequencer (`grain/bootstrap.py`) — it replaces
@@ -110,18 +110,19 @@ holding any other SSH key gates any other login.
 
 ### Claude Code credential
 
-One login, not one per sandbox (`docs/bootstrap.md`, "The Claude
-credential"): on Linux the credential is a file,
-`~/.claude/.credentials.json`, and nothing in it is bound to a machine. Log
-in once anywhere — your laptop, the host, a throwaway VM — and pass the
-result to `host bootstrap --claude-credentials-file <path>` (or `grain
-controller configure --claude-credentials-file <path>` on its own). It is
-placed at `/data/secrets/claude-credentials.json` on the controller and
-injected into every sandbox over the same stdin-not-argv SSH path the
-git-proxy token already uses. **Unverified and load-bearing**: whether
-concurrent refreshes from several sandboxes sharing one credential
-invalidate each other — see `docs/design.md`, open question 8, before
-relying on this for more than a couple of sandboxes.
+`claude -p` runs on the controller now, as a dedicated `grain-agent`
+account — never on a sandbox, and never using an operator's own personal
+login (`docs/design.md`, "Final choice: no credential in the sandbox at
+all"). One token for the whole pool, not one per sandbox: generate a
+dedicated one with `claude setup-token` (deliberately not your own `claude
+login` session, so this deployment's dispatch traffic never rides on a
+personal credential), then pass it to `host bootstrap --claude-token-file
+<path>` (or `grain controller configure --claude-token-file <path>` on its
+own). It is placed at `/data/secrets/claude-oauth-token` on the controller
+(a root-owned reference copy) and again at `grain-agent`'s own
+`~/.claude-oauth-token` (the live copy `dispatch.py`'s own unit script
+reads into `CLAUDE_CODE_OAUTH_TOKEN` at runtime) — nothing is ever placed
+on a sandbox.
 
 ## First-time setup checklist (manual, step by step)
 
@@ -257,10 +258,10 @@ short of giving the host a GitHub/Claude credential — see
     sudo systemctl enable --now grain-git-proxy.service
     sudo systemctl enable --now grain-automation.timer
     ```
-13. **Claude Code login.** See "Claude Code credential" above — one login
-    placed once via `grain controller configure
-    --claude-credentials-file`/`host bootstrap`, not a per-sandbox ritual
-    anymore. The refresh-token caveat there still applies.
+13. **Claude Code token.** See "Claude Code credential" above — one
+    dedicated `claude setup-token` value, placed once via `grain controller
+    configure --claude-token-file`/`host bootstrap`, never a sandbox-side
+    ritual.
 14. **Verify before trusting it**: `grain --data-dir /data automation
     status` should list every configured sandbox as `free`, and `grain
     --data-dir /data github audit` should print one line per credential
@@ -331,11 +332,13 @@ plain non-interactive shell.
 
 **Where the data comes from**: `sweeper.py`'s release path — the same place
 `grain/automation/cleanup.py` and `health.py` already hook into (see
-"Stranded sandboxes" below) — pulls the finished session's trajectory off
-the sandbox over SSH *before* the slot is freed for reuse, and records it
-into `/data/state/automation/sessions/`. This is capture-on-completion, not
-fetch-on-demand: a sandbox is long-lived and its next task's `claude -p`
-run overwrites the same fixed transcript path, so a later "fetch it when
+"Stranded sandboxes" below) — reads the finished session's trajectory
+*before* the sandbox's slot is freed for reuse, and records it into
+`/data/state/automation/sessions/`. `claude -p` runs on the controller now
+(`docs/design.md`, "Final choice"), so this is a plain local file read, not
+an SSH pull, though the load-bearing timing is identical either way: a
+sandbox is long-lived and its next task's `claude -p` run overwrites the
+same fixed transcript path, so a later "fetch it when
 someone wants to browse" would find nothing or the wrong task's content.
 `claude -p` is run with `--output-format stream-json --verbose`, redirected
 to that fixed path (`grain/automation/dispatch.py`'s `transcript_path()`) —
@@ -495,12 +498,13 @@ What is **not automatic**:
 
 - **A wedged sandbox that still reports `ACTIVE`** — e.g. `claude -p` is
   hung but hasn't exceeded `max_runtime_minutes` yet. The sweeper leaves it
-  alone by design (it can't distinguish "slow" from "stuck"). If you
-  suspect this, check with `grain automation status` plus `ssh -i
-  /data/secrets/controller-ssh debian@<address> systemctl status
-  grain-task-<sandbox>`, and either wait it out or manually stop the unit
-  (`sudo systemctl stop grain-task-<sandbox>` on the sandbox) and re-run
-  `automation run-once` to let the sweep pick it up as stranded.
+  alone by design (it can't distinguish "slow" from "stuck"). `claude -p`
+  runs on the **controller** now (`docs/design.md`, "Final choice"), so the
+  unit to check is there too, not on the sandbox: `grain automation status`
+  plus, on the controller itself, `systemctl status
+  grain-task-<sandbox>`. Either wait it out or manually stop the unit
+  (`sudo systemctl stop grain-task-<sandbox>`, on the controller) and
+  re-run `automation run-once` to let the sweep pick it up as stranded.
 - **Acting on an unhealthy reading.** `grain host health` and the sweeper's
   own post-cleanup check both *report* a problem; neither one recreates,
   quarantines, or stops dispatching to a degraded sandbox. If

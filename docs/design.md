@@ -952,12 +952,22 @@ listed. `--dangerously-skip-permissions` looked like the documented fix for
 under it, `sandbox.enabled`'s own auto-allow stopped applying and `git add`/
 `commit` started needing approval too, which `acceptEdits` never blocked.
 Reverted to `acceptEdits`, the empirically-better-performing mode, with the
-network-approval gate still open. Whatever the actual fix turns out to be
-(a different `allowedDomains` spelling, `--permission-prompt-tool`, a
-`dontAsk` + explicit `permissions.allow` for `Bash(git *)`, or something
-else in the sandbox/permission interaction not yet understood), this is the
-one item standing between "verified against a mocked GitHub" and "verified
-with a real agent actually pushing."
+network-approval gate still open.
+
+**Superseded, not fixed on its own terms.** A later session tried both
+remaining candidates from the list above live and found the real problem
+wasn't the network-approval gate at all: `dontAsk` + an explicit
+`permissions.allow` denied the native `Edit`/`Write` tools outright and
+matched `Bash` rules by literal command prefix (a real agent's own
+`git -c user.name=... commit` never matches a `Bash(git commit:*)` rule),
+and once the agent *did* reach a real `git push`, a plain `env` from any
+unsandboxed Bash call showed `CLAUDE_CODE_OAUTH_TOKEN` sitting in plaintext
+in the environment — confirmed live, not theorized. No `sandbox.*` setting
+closes that: it's an execution-surface problem, not a permission-mode
+tuning problem. `docs/roadmap.md` item 8's second "Update" has the full
+account; the resolution is architectural, not a flag change — see "Final
+choice: no credential in the sandbox at all" below, which replaces the
+"Interim choice" section this paragraph used to point to.
 
 **It would run on metered API billing, not a subscription.** The two
 constraints above compound: `--bare` is what stops cloned-repo hooks from
@@ -970,79 +980,99 @@ not merely a configuration detail — and it is a further argument for the
 controller-side LLM proxy, which is the only place that spend can be
 metered and capped.
 
-### Interim choice: a login credential in the sandbox, hardened rather than avoided
+### Abandoned: a login credential in the sandbox, hardened rather than avoided
 
-The controller-side LLM proxy above is the right answer eventually, but for
-now the working plan is simpler and accepts the trade-off directly: Claude
-Code runs *in* the sandbox VM with a login credential, breaking the
-"sandboxes never hold GitHub or GCP credentials" property for the first
-time — this is a new category of secret-on-sandbox, not an extension of the
-existing git-proxy/metadata-server model, and the design's threat model
-should be read with that in mind. Given that, "make it hard to get to"
-rather than "impossible" is the goal, layered rather than relying on one
-mechanism:
+The original plan here accepted a trade-off directly: Claude Code would run
+*in* the sandbox VM with a login credential, breaking the "sandboxes never
+hold GitHub or GCP credentials" property for the first time, hardened in
+layers rather than relying on one mechanism —
+`sandbox.credentials.files: [{path: "~/.claude/.credentials.json", mode:
+"deny"}]` (Claude Code's own bubblewrap setting, verified live to turn a
+denied-path read into a clean `ENOENT` without breaking an adjacent
+readable work file), `kernel.yama.ptrace_scope = 2` (verified live to turn
+"read another same-UID process's live memory via `/proc/<pid>/mem`" from a
+working attack into a clean `Permission denied`, closing what file-masking
+alone doesn't), and a considered-but-unapplied Landlock option, all
+verified not to break `docker`/`kind` on the same sandbox.
 
-- **`sandbox.credentials.files: [{path: "~/.claude/.credentials.json", mode:
-  "deny"}]`**, Claude Code's own bubblewrap-backed sandbox setting. Verified
-  live on a throwaway VM (not just read about): a command run through the
-  sandbox with the credential path denied gets a clean `ENOENT`, while an
-  ordinary work file bound in alongside it stays fully readable and
-  writable — the mechanism doesn't collaterally break normal agent work.
-  This protects the credential from commands the agent's Bash tool spawns;
-  it does not touch the harness process's own (legitimate) access.
-- **`kernel.yama.ptrace_scope = 2`**, closing a gap file-masking alone
-  doesn't: verified that at the kernel default (0) an unrelated same-UID
-  process can read another process's live memory via `/proc/<pid>/mem` —
-  we pulled the ELF magic bytes straight out of a victim process with no
-  special privilege, just a shared UID — and that `ptrace_scope=2` turns
-  the identical attempt into a clean `Permission denied` at `open()`. Now
-  in `provision/sandbox.sh` alongside the existing inotify tuning.
-- **Both verified not to break `docker`/`kind`**, which was the obvious risk
-  given ["why a VM per agent"](#why-a-vm-per-agent) exists specifically
-  because container-in-container isolation causes exactly this class of
-  opaque failure. `kind create cluster` succeeds cleanly on a sandbox
-  provisioned with bubblewrap present and `ptrace_scope=2` active — the
-  reasoning (docker/kind are thin clients to `dockerd`, which runs
-  unsandboxed; the sandbox jails only the agent-invoked command, not the
-  daemon) held up live, not just on paper.
-- **Landlock (kernel LSM, `CONFIG_SECURITY_LANDLOCK`), a further,
-  unverified-in-this-project option**, worth recording because it is
-  structurally stronger than the above where it applies: an unprivileged
-  process can call `landlock_restrict_self()` to *irrevocably* deny itself
-  (and every future child) access to a specific path — including the
-  harness process's own future opens, not just what it spawns. Confirmed
-  present and active in the sandbox kernel's LSM stack (`6.1.0-52-cloud`,
-  well past the 5.13 filesystem-scope minimum). Not something Claude Code
-  uses natively (its own sandbox is bubblewrap+seccomp); applying it here
-  would mean a small wrapper that reads the credential once, calls
-  `landlock_restrict_self()` on that path, then execs into `claude` — and
-  it would need confirming that Claude Code never needs to re-read the
-  credential file after startup, since the restriction can't be lifted.
-- **Rotate on recreate**: re-authenticate fresh each time a sandbox is
-  recreated rather than letting one login persist for the sandbox's whole
-  life, matching the rotation discipline already applied to per-sandbox
-  bearer tokens.
+**Every one of those layers turned out to be defending the wrong surface.**
+A full live-debugging session (`docs/roadmap.md` item 8's second "Update")
+found the credential leaks into any *unsandboxed* Bash subprocess's
+environment trivially — a plain `env`, confirmed live — and the agent
+readily discovers `dangerouslyDisableSandbox: true` on its own to get
+there. File-path denial and ptrace hardening protect against reading the
+credential as a *file* or out of process *memory*; neither one is a file or
+memory read, so neither one is even in scope. Landlock specifically was
+recorded above as "structurally stronger... an unprivileged process can
+call `landlock_restrict_self()` to irrevocably deny itself access to a
+specific path" — true, and still beside the point, because Landlock has no
+concept of environment variables at all. No amount of sandbox-setting
+tuning could ever have closed this gap; the credential simply should not
+have been reachable by the agent's own execution surface, and every layer
+here left that surface fully intact.
 
-**One login, not one per sandbox** (`docs/bootstrap.md`): on Linux the
-credential is a file, `~/.claude/.credentials.json`, and nothing in it is
-bound to a machine — so a single login can be placed on the controller at
-`/data/secrets/claude-credentials.json` and injected into each sandbox over
-the SSH path that already carries the git-proxy token. That narrows "rotate
-on recreate" above to *re-inject* on recreate, and makes one credential span
-the pool. Acceptable on the same grounds the rest of this section rests on —
-sandboxes here are not mutually distrusting — and it is interim either way,
-since the LLM proxy removes the credential from sandboxes entirely.
-**Unverified and load-bearing**: whether concurrent refreshes from several
-sandboxes sharing one credential invalidate each other. Rotating refresh
-tokens are common, and the failure mode is sporadic auth failures hours
-later that look like agent flakiness. Test before relying on it; see open
-question 8.
+### Final choice: no credential in the sandbox at all
 
-What's still open: a full Claude-Code-mediated end-to-end test (a real
-agentic turn, with `sandbox.enabled` on, actually attempting and failing to
-exfiltrate the credential) needs a real login credential in a test sandbox,
-which wasn't done here — everything above verifies the underlying
-mechanisms independently, which is strong evidence but not the same claim.
+`claude -p` now runs on the **controller**, not the sandbox, as a
+dedicated, unprivileged `grain-agent` account (`provision/controller.sh`)
+— never root, never the account `grain-automation.service` itself runs as.
+Its entire native tool roster is disabled except `Task`
+(`--tools Task`, confirmed live to be the only way `--allowedTools` alone
+does not achieve — see `grain/automation/dispatch.py`'s module docstring
+for the exact mechanics found live) and replaced with four narrow MCP
+tools (`grain/automation/mcp_server.py`: `run_command`/`read_file`/
+`edit_file`/`write_file`, schemas mirroring Claude's own native `Bash`/
+`Read`/`Edit`/`Write` rather than an OpenAI-Codex-style `apply_patch`,
+since the agent here was never trained on that format) that reach the
+assigned sandbox over SSH for every actual git/file operation. The sandbox
+itself goes back to holding nothing worth protecting at all — this whole
+credential-isolation problem was never really about the sandbox; it was
+about protecting whatever process holds the Claude credential, and moving
+that process off the untrusted machine entirely is a stronger answer than
+hardening it in place ever could be.
+
+**The credential itself: a dedicated `claude setup-token`, not a login
+file, delivered as an environment variable — deliberately, not by
+default.** `configure_claude_token` (`grain/automation/configure.py`)
+places a bare token (kept separate from any operator's own `claude login`
+session, so this deployment's dispatch traffic never rides on a personal
+credential) at two mode-600 locations: a root-owned reference copy under
+`/data/secrets`, and a live copy owned by `grain-agent`.
+`dispatch.py`'s own unit script reads the live copy into
+`CLAUDE_CODE_OAUTH_TOKEN` at runtime (`export ...="$(cat ...)"`, never a
+`systemd-run --setenv=` argument, which would put the raw token in `ps`
+output). Putting a credential back in an environment variable, after the
+entire section above documents exactly that failing catastrophically,
+needs its own justification: it's safe *here* specifically because
+`--tools Task` removes the native `Bash` tool that made the leak
+exploitable in the first place — the agent's only execution surface
+(`run_command`) runs exclusively on the sandbox over SSH, never in this
+process's own environment, and there is no tool call that reads or
+forwards this process's env vars (confirmed live: a `Task`-spawned
+subagent inherits the identical restricted roster, not a wider one, via an
+explicit system denial, not just self-report). That is a structural
+guarantee resting on `--tools Task` staying complete, not on the secret
+being unreachable regardless of tool restrictions the way a credentials-
+file-only design would be — a real, accepted trade-off, made because
+keeping the deployment's own token separate from an operator's personal
+login mattered more than closing that last gap. A file-based credential
+(a real `claude login` session, which does produce the fuller
+`{"claudeAiOauth": {"accessToken", "refreshToken", ...}}` shape a
+`--claude-token-file` could equally accept) remains available and is the
+strictly stronger option if that trade-off ever needs revisiting.
+
+**Verified live, end to end, not just reasoned through**: a real
+`grain host bootstrap` with a real Claude credential, a real dispatch, a
+real `claude -p` session on the controller with exactly the intended tool
+roster (confirmed via the transcript's own advertised `tools` list) and
+zero permission denials, a real edit, a real commit, a real push, a real
+PR. Two more bugs surfaced only by actually running it, both fixed:
+`grain-agent`'s SSH key access, first tried as a group-readable copy of
+the controller's own key, which OpenSSH's client refused outright
+("private key file... too open") — fixed with two independent, owner-only
+copies instead of one shared file; and `TodoWrite`, tried alongside
+`Task`, confirmed live to never be admittable in `-p`/headless mode by any
+`--tools` syntax, dropped rather than left as a dead reference.
 
 ### Dispatch mechanism: what only showed up by actually running it
 

@@ -1,87 +1,58 @@
 # Next session: what stands between here and using grain for real
 
-The previous version of this file named a single blocker: a real dispatched
+The previous version of this file named two blockers: a real dispatched
 `claude -p` could clone and commit inside its sandbox but could not `git
-push`, because the push needed a sandbox network-domain approval a headless
-run has no way to answer. **That blocker is gone** — not solved on its own
-terms, but removed by the redesign that followed it. `claude -p` no longer
-runs in the sandbox at all. It runs on the controller as `grain-agent`,
-with its native tool roster emptied (`--tools ""`) and replaced by the four
-MCP tools in `grain/automation/mcp_server.py`, which reach the assigned
-sandbox over SSH. See `grain/automation/dispatch.py`'s module docstring for
-the live findings that forced the move, and the README's "Where the agent
-runs, and why it moved."
+push`, and the controller-side Claude credential path (a
+`.claude/.credentials.json` file, `configure_claude_credentials`) had never
+been exercised against a real login. **Both are resolved, verified live,
+not just reasoned through:**
+
+- `claude -p` no longer runs in the sandbox at all. It runs on the
+  controller as `grain-agent`, with its native tool roster reduced to just
+  `Task` (`--tools Task`) and replaced by the four MCP tools in
+  `grain/automation/mcp_server.py`, which reach the assigned sandbox over
+  SSH. See `grain/automation/dispatch.py`'s module docstring for the live
+  findings that forced the move, and `docs/design.md`'s "Final choice: no
+  credential in the sandbox at all."
+- The credential path changed shape: `configure_claude_token`
+  (`grain/automation/configure.py`) places a bare `claude setup-token`
+  value — deliberately kept separate from any operator's own `claude
+  login` session — at a mode-600 path `grain-agent` owns, read into
+  `CLAUDE_CODE_OAUTH_TOKEN` at runtime by `dispatch.py`'s own unit script.
+  `--claude-token-file` replaces `--claude-credentials-file` throughout.
+  A real `grain host bootstrap`, with a real token from a real `claude
+  setup-token`, produced a real dispatch: a real edit, a real commit, a
+  real push, a real PR, zero permission denials in the transcript. Two
+  more bugs surfaced only by running it for real and are already fixed —
+  see `docs/roadmap.md` item 8's second "Update" for both.
+
+`docs/design.md` and `docs/roadmap.md` (item 8) are reconciled with this —
+both describe the current architecture, not the sandbox-side one.
+`docs/system-diagram.md` is **not** reconciled yet: its diagram still shows
+`claude -p` running on the sandbox nodes, and its "credential ladder"
+narrative is built around a sandbox-side login. That's a dedicated diagram
+pass, not a quick text fix, and is listed under "Will bite in the first
+week" below rather than done as part of this update.
 
 This file is the current handoff: what's left, in the order worth doing it.
 
-> **Note on the rest of `docs/`.** `design.md`, `system-diagram.md`,
-> `roadmap.md` (item 8 especially), and `runbook.md` all still describe
-> `claude -p` running on the sandbox with a login credential there. They are
-> accurate on everything else. Reconciling them is worth its own pass and is
-> listed under "Will bite in the first week" below, not as a blocker.
-
 ## Blocks a first real run
 
-### 1. No real agent has ever completed a run through the four MCP tools
+### 1. Real GitHub: a repo, a credential, and an audit against it
 
-Every live verification to date substitutes a *scripted* stand-in for
-`claude` (`tests/test_live_issue_to_pr.py`'s `_install_fake_claude`, three
-variants). What that proves is the mechanism: dispatch, the real clone
-through the real proxy, real git state at sweep time, PR creation, and both
-requeue paths. What it structurally cannot prove is how a real session
-behaves when its entire native roster is gone and `run_command`/`read_file`/
-`edit_file`/`write_file` against a remote workspace are all it has.
-
-Open questions a first real run answers: does the agent work comfortably
-through a tool surface with no `Glob`/`Grep` (it has `run_command`, so
-`rg`/`find` are reachable, but it was never trained to reach for them that
-way); is `read_file`'s `cat -n` mirror close enough that `edit_file`'s
-exact-string matching lands; does it respect the "push with exactly this
-command" instruction in `dispatch.py`'s `_prompt`.
-
-**Verify:** one real dispatch against the mock-GitHub rig (see "Reproduce"
-below), then read the transcript at
-`/data/state/automation/units/grain-task-<sandbox>/transcript.jsonl` — or
-`grain sessions browse` — rather than only checking whether a PR appeared.
-
-### 2. The controller-side Claude credential path is unverified
-
-Worth separating from item 1 because it is concrete and checkable.
-`configure_claude_credentials` (`grain/automation/configure.py`) writes
-`/home/grain-agent/.claude/.credentials.json`, and `_start_task`
-(`dispatch.py`) starts the unit with no environment at all — so that file is
-the *only* way the dispatched agent authenticates. Nothing anywhere in
-`grain/` sets `CLAUDE_CODE_OAUTH_TOKEN`.
-
-The one live run that ever had a real login did **not** use that path: a
-`claude setup-token` value is not the `.credentials.json` shape, so it was
-injected as an env var via `systemctl set-environment` on each *sandbox*.
-That path no longer exists. So the credential mechanism the code actually
-ships has never been exercised against a real login.
-
-Two things to establish:
-
-- What a real login writes, and whether `--claude-credentials-file` accepts
-  it as-is. If the practical credential is a `setup-token`-shaped value,
-  `dispatch.py` needs a `--setenv=` on the `systemd-run` call and
-  `configure.py` needs somewhere to put it — neither exists today.
-- **Concurrent refresh.** With `sandbox_count=2`, two `claude -p` processes
-  run as the same `grain-agent` user against the same credentials file, and
-  OAuth refresh writes that file back. This was explicitly sidestepped last
-  time (the env var avoided it) and is now on the main path. Whether
-  Claude Code locks that write is unknown here.
-
-### 3. Real GitHub: a repo, a credential, and an audit against it
-
-Everything to date runs against `RealGitHubMock`. Needed: a target repo, a
+Every live verification to date, including the real-agent run above, runs
+against a mock GitHub server, never the real API. Needed: a target repo, a
 machine account or fine-grained PAT invited as a collaborator, its token in
 `/data/secrets/github/`, the `credentials.json` mapping, the repo on
 `repo-allowlist.json`, and `grain github audit` run against the real token —
 its withheld-scope check has only ever seen scripted response shapes
 (`docs/roadmap.md` item 7 has the detail on what the audit can and cannot
-verify for fine-grained PATs).
+verify for fine-grained PATs). This is genuinely the next open question a
+real run answers: nothing about real GitHub's actual API behavior or
+quirks — rate limits, exact error-response shapes, auth edge cases — has
+been exercised yet, mocked or otherwise.
 
-### 4. Branch protection on the target repo
+### 2. Branch protection on the target repo
 
 Manual, needs admin on that repo, and load-bearing rather than optional: no
 direct pushes to the default branch from the agent credential, no
@@ -90,7 +61,7 @@ reconfiguring a target repo," step 3 has the procedure. The design
 deliberately enforces write safety at GitHub rather than by inspecting pack
 files, so this is the control, not a backstop to one.
 
-### 5. `/data` lives on the controller's root disk, and `recreate` deletes it
+### 3. `/data` lives on the controller's root disk, and `recreate` deletes it
 
 `provision/controller.sh` says plainly that `/data` is *expected* to be a
 separate persistent disk, and that the libvirt adapter has no notion of one,
@@ -114,7 +85,7 @@ Two ways to close it, either acceptable:
   flag, and say why. Cheap, and it removes the sharp edge even before the
   disk work lands.
 
-### 6. The resource budget predates the move
+### 4. The resource budget predates the move, and concurrency is unverified
 
 The controller is 1 vCPU / 4 GB (`Cluster.controller_cpus`/`controller_mem_mb`,
 `grain/inventory.py`). It now hosts every concurrent `claude -p` *and* its
@@ -122,12 +93,16 @@ MCP server child, on top of the git proxy and one metadata server per
 sandbox. `tests/loadtest.py`'s numbers — and `docs/design.md`'s resource
 budget that quotes them — were measured with the agent work happening on
 the sandboxes and the controller nearly idle. That budget no longer
-describes this system.
+describes this system. The one real dispatch done so far only ever
+exercised one `claude -p`/MCP-server pair at a time; with `sandbox_count=2`,
+two can now run concurrently on the controller as the same `grain-agent`
+account, and nothing in `mcp_server.py` was written with that concurrency
+in mind, because nothing forced the question yet.
 
 **Verify:** re-run `python3 -m tests.loadtest` with real dispatches in
-flight, and watch the controller specifically. Expect to raise
-`controller_cpus`/`controller_mem_mb`, which on a 4-vCPU host means
-revisiting the sandbox count too.
+flight — ideally two concurrent ones — and watch the controller
+specifically. Expect to raise `controller_cpus`/`controller_mem_mb`, which
+on a 4-vCPU host means revisiting the sandbox count too.
 
 ## Will bite in the first week
 
@@ -150,10 +125,11 @@ revisiting the sandbox count too.
   cap; a looping run burns until `max_runtime_minutes`. The `result` event
   at the end of each transcript carries `total_cost_usd`/`num_turns` — a
   cheap first version is to read it in `capture.py` and audit-log it.
-- **`docs/` still describes the pre-move architecture.** See the note at the
-  top of this file. `roadmap.md` item 8's "Update" section is the worst of
-  it: the code's own docstrings cite it as the authority for the *new*
-  design while it describes the *old* one.
+- **`docs/system-diagram.md` still describes the pre-move architecture** —
+  see the note at the top of this file. `design.md` and `roadmap.md` are
+  already reconciled; this is the one diagram/table-heavy doc still
+  showing `claude -p` on the sandbox nodes and a sandbox-side credential
+  ladder.
 - **The proxy's audit attribution is a bearer-token claim, not a network
   fact.** `GitProxy.handle` (`grain/proxy/core.py`) authenticates on the
   token alone; the sandbox name it yields is used only for the audit line.
@@ -177,15 +153,11 @@ revisiting the sandbox count too.
 
 ## Suggested order
 
-1. **Item 5**, first and cheaply (the guardrail form, if the disk work is
+1. **Item 3**, first and cheaply (the guardrail form, if the disk work is
    not happening this session) — it is the only irrecoverable failure here.
-2. **Items 2 and 1 together**, on the mock-GitHub rig: place a real login,
-   dispatch one real issue, read the transcript. No real repo or GitHub
-   credential needed, so this is the cheapest way to answer the biggest
-   unknown.
-3. **Item 6**, once real dispatches are running — the measurement needs
-   them.
-4. **Items 3 and 4**, which need a real repo and admin on it.
+2. **Item 4**, once a real target repo exists to dispatch against for real —
+   the measurement needs real dispatches in flight, ideally concurrent ones.
+3. **Items 1 and 2**, which need a real repo and admin on it.
 
 ## Reproduce / verify
 
@@ -200,7 +172,7 @@ sudo python3 -m grain.cli --image /var/lib/grain/images/debian-12.qcow2 \
   host bootstrap --repo <owner>/<repo> --github-token-file - \
   --github-host <mock-host>:<port> --git-forward-host <mock-host>:<port> \
   --github-insecure-http \
-  --claude-credentials-file <path>  <<< "mock-token"
+  --claude-token-file <path>  <<< "mock-token"
 
 ssh -i /var/lib/grain/admin-ssh debian@10.100.0.2 \
   'cd /opt/grain && sudo python3 -m grain.cli automation run-once'

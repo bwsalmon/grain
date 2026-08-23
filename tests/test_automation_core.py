@@ -7,7 +7,7 @@ import grain.automation.capture as capture_module
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
-from grain.automation.dispatch import unit_name
+from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, unit_name
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
@@ -260,6 +260,30 @@ def test_dispatch_mints_a_sandbox_token_and_configures_the_credential_helper(tmp
         if argv[0] == "dd" and argv[1] == "of=/home/debian/.git-credentials"
     )
     assert token in credential_dd
+
+
+def test_dispatch_points_the_mcp_server_at_grain_agents_own_ssh_key_copy():
+    # Found live (docs/roadmap.md item 8's "Update"): OpenSSH refuses to
+    # use a private key file it considers group-readable at all, so
+    # grain-agent's MCP server can't share AutomationConfig.ssh_key_path
+    # (root-owned, used by this same process for its own SSH calls) --
+    # it needs CONTROLLER_AGENT_SSH_KEY_PATH, a separate, independently
+    # owner-only copy. Locks down the split that bug was in, so it can't
+    # silently regress back to the broken shared-file shape.
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)])
+    orchestrator.run_once(NOW)
+    runner = orchestrator.base_runner
+    mcp_config_dd = next(
+        stdin for argv, stdin in runner.calls
+        if argv[:2] == ["sudo", "dd"] and "mcp-config.json" in argv[2]
+    )
+    mcp_config = json.loads(mcp_config_dd)
+    server_args = mcp_config["mcpServers"]["grain-sandbox"]["args"]
+    key_path = server_args[server_args.index("--key-path") + 1]
+    assert key_path == CONTROLLER_AGENT_SSH_KEY_PATH
+    # Not this process's own key (AutomationConfig's default) -- that one's
+    # root-owned and group-unreadable, exactly the file OpenSSH rejected.
+    assert key_path != "/data/secrets/controller-ssh"
 
 
 # --- health visibility from the sweep pass (docs/roadmap.md item 5) -------

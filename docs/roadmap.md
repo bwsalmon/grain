@@ -500,6 +500,103 @@ it), a real sandbox dispatched a real `claude -p` against the mock:
   dontAsk` with an explicit `permissions.allow` covering `Bash(git *)`
   (`docs/design.md` already named `dontAsk` as "the locked-down end").
 
+**Update 2: the push gate above was never the real problem, and closing it
+the "obvious" way exposed a much worse one.** A follow-up live session
+tried both untried options from the note above, live, against a real
+login:
+
+- `--permission-mode dontAsk` + a `permissions.allow` covering the exact
+  git subcommands the prompt asks for: denied the native `Edit`/`Write`
+  tools outright (not part of the threat model at all — just breakage),
+  and matched `Bash` rules by *literal command prefix* — a real agent's
+  own `git -c user.name=... commit` or `ENV=x git commit` never matches a
+  `Bash(git commit:*)` rule, only bare `git commit ...` does — so the
+  agent got stuck before ever reaching the push, having burned real API
+  spend on an unproductive session.
+- `--permission-prompt-tool`: does not exist as a flag on the installed
+  CLI version. Ruled out, not just untried.
+- Reverting to `acceptEdits` and adding one narrow `Bash(git push:*)`
+  allow rule *did* get a real agent all the way to a real push — but
+  tracing exactly how surfaced the actual problem: the agent had
+  discovered `dangerouslyDisableSandbox: true` on its own, on an
+  *earlier* dispatch, to route around the network-approval gate, and a
+  direct check (`env` in an unsandboxed Bash call) confirmed
+  `CLAUDE_CODE_OAUTH_TOKEN` sitting in plaintext in the sandbox's process
+  environment the whole time. Any unsandboxed command — one the agent
+  itself can request, and evidently will, once sandboxed execution stops
+  working for whatever reason — could read it. Landlock (kernel LSM,
+  `docs/design.md`'s "Abandoned" section) was checked as a fix and ruled
+  out immediately: it can protect a *file*, but has no concept of
+  environment variables at all, so it cannot touch this. No `sandbox.*`
+  setting was ever going to fix this; it isn't a permission-mode problem.
+
+**The fix is architectural: `claude -p` no longer runs on the sandbox at
+all.** It runs on the controller as a new, dedicated, unprivileged
+`grain-agent` account (`provision/controller.sh`) — never root, never the
+account `grain-automation.service` itself runs as — with its native tool
+roster reduced to just `Task` (`--tools Task`) and replaced by four MCP
+tools in the new `grain/automation/mcp_server.py` (`run_command`/
+`read_file`/`edit_file`/`write_file`, schemas mirroring Claude's own
+native `Bash`/`Read`/`Edit`/`Write`, not OpenAI's `apply_patch` format —
+the agent here was never trained to produce that) that reach the assigned
+sandbox over SSH for everything it actually needs to do. `dispatch.py`'s
+module docstring has the full mechanical account, including three things
+confirmed live and easy to get wrong by reasoning alone: `--tools ''`
+(or naming anything less than the full set) excludes every native tool
+from the registry regardless of what `--allowedTools` separately
+pre-approves; a `Task`-spawned subagent inherits the identical restricted
+roster rather than a wider one (an explicit system denial confirmed this,
+not self-report); and `TodoWrite` cannot be admitted in `-p`/headless mode
+by any `--tools` syntax at all, unlike `Task`. `docs/design.md`'s "Final
+choice: no credential in the sandbox at all" has the full security
+argument for why this is the actual fix, not another layer on the same
+broken model.
+
+**The credential changed shape too, deliberately.** `configure_claude_token`
+(`grain/automation/configure.py`, replacing the earlier file-based
+`configure_claude_credentials`) places a bare `claude setup-token` value —
+kept separate from any operator's own `claude login` session on purpose —
+at a mode-600 path `grain-agent` owns, read into
+`CLAUDE_CODE_OAUTH_TOKEN` at runtime by `dispatch.py`'s own unit script,
+never passed as a `systemd-run` argument (which would put it in `ps`
+output). `--claude-credentials-file` is `--claude-token-file` throughout
+now, to match.
+
+**Verified live, fully, end to end**: a real `grain host bootstrap`
+against a mock GitHub server, a real dispatch, a real `claude -p` session
+on the controller with exactly the intended tool roster (confirmed via the
+transcript's own advertised `tools` list — `Task` plus the four MCP tools,
+nothing else) and zero permission denials in the transcript, a real edit,
+a real commit by the `grain-agent` git identity, a real push, a real PR
+opened with the right head/base/title. Two more bugs surfaced only by
+actually running it:
+
+- **`grain-agent`'s access to the controller's own SSH key**: first tried
+  as a group-readable copy of the same file `grain-automation.service`
+  itself uses (`chown root:grain-agent`, `chmod 0640`) — broke live:
+  OpenSSH's client refuses to use *any* private key file it considers
+  group-readable at all, regardless of which group, so the root-run
+  orchestrator's own SSH calls started failing authentication. Fixed with
+  two independent, owner-only (0600) copies instead of one shared file —
+  `provision/controller.sh` installs a second copy to `grain-agent`'s own
+  `~/.ssh`, and `dispatch.py`/`core.py` carry that separate path
+  (`CONTROLLER_AGENT_SSH_KEY_PATH`) into the per-dispatch MCP config,
+  distinct from the orchestrator's own `AutomationConfig.ssh_key_path`.
+- **`TodoWrite`**, covered above — tried alongside `Task` in
+  `--allowedTools`, silently absent from the real transcript's tool list
+  despite being named there, because `--tools ''` had already excluded it
+  from the registry and `--allowedTools` alone does not add a tool back.
+  `--tools 'Task'` (naming it directly) does admit `Task`; the identical
+  treatment for `TodoWrite` was confirmed, twice, to never work in
+  `-p`/headless mode regardless of syntax — dropped rather than left
+  advertised-but-nonfunctional.
+
+This closes the item: real repo interaction still uses a mock (a real
+GitHub credential and target repo remain a separate, later step — see
+`docs/next-session.md`), but the mechanism this item was actually about —
+a real agent, with a real credential, doing real work through the tool
+surface this design gives it — is now proven, not theorized.
+
 ## 9. Dispatch to an existing PR, not just a labelled issue
 
 - [x] Done
