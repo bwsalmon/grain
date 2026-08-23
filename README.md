@@ -2,23 +2,69 @@
 
 **A single-node agent cluster.** One machine runs a controller VM and a
 small pool of sandbox VMs; label a GitHub issue or pull request, and an
-agent picks it up in a sandbox, does the work, and pushes a branch that
-the controller turns into a PR.
+agent picks it up, does the work in a sandbox, and pushes a branch that the
+controller turns into a PR.
 
-The point of the design is the credential boundary: **agents hold no
-GitHub or GCP credentials.** A sandbox's only routes out are a git proxy
-and a metadata server, both on the controller, both allowlist-checked and
-audit-logged. The host itself holds no *system* credential — no GitHub
-token, no GCP key, no sandbox token — every one of those lives on the
-controller's `/data`. It does hold one thing: an admin SSH key, for direct
-setup/repair/debugging access to the controller and every sandbox.
+The point of the design is the credential boundary: **the untrusted
+execution environment holds nothing worth taking.** The agent *process* —
+`claude -p` — runs on the **controller**, with its entire native tool
+roster disabled and replaced by four narrow MCP tools that reach the
+assigned sandbox over SSH. The sandbox is where the work actually happens
+— the checkout, the builds, the `kind` clusters — and it holds no GitHub
+token, no GCP key, and no Claude credential. Its only routes out are a git
+proxy and a metadata server, both on the controller, both allowlist-checked
+and audit-logged.
+
+The host holds no *system* credential — no GitHub token, no GCP key, no
+Claude login; every one of those lives on the controller's `/data`. It
+holds one thing: an admin SSH key, for direct setup/repair/debugging access
+to the controller and every sandbox.
 
 ```
-host (Debian, KVM, no system credentials)
-├── controller VM        automation loop · git proxy · one metadata server per sandbox · /data
-├── sandbox-0            claude · docker · kind
-└── sandbox-1            claude · docker · kind
+host (Debian, KVM — admin SSH key only, no system credentials)
+├── controller VM   automation loop · claude -p (as grain-agent) · git proxy
+│                   · one metadata server per sandbox · /data (every credential)
+│                       │
+│                       │  SSH, four MCP tools, nothing else
+│                       ▼
+├── sandbox-0       docker · kind · the workspace checkout — no credentials
+└── sandbox-1       docker · kind · the workspace checkout — no credentials
 ```
+
+## Where the agent runs, and why it moved
+
+`claude -p` used to run *in* the sandbox, with a real Claude Code login
+sitting there, and Claude Code's own sandbox/permission settings tried to
+contain it. A full live-debugging session found that fundamentally broken:
+the credential leaks into any unsandboxed Bash subprocess's environment
+trivially (confirmed live with a plain `env`), the agent readily discovers
+`dangerouslyDisableSandbox: true` on its own to get there, and Landlock —
+kernel-level, immune to that flag — can protect a *file* but has no concept
+of environment variables at all. No amount of tuning closes that gap.
+
+So the credential left the untrusted environment entirely. Today
+`grain/automation/dispatch.py` starts `claude -p` on the controller, as a
+dedicated unprivileged `grain-agent` account, with:
+
+- `--tools ""` — the entire native tool roster emptied. Confirmed live:
+  `--allowedTools` alone does **not** do this (it is a permission hint, not
+  a roster filter); both flags together do, and the advertised tool list in
+  the `system/init` event shrinks to exactly what is named.
+- `--mcp-config <per-dispatch file> --strict-mcp-config` — pointing at
+  `grain/automation/mcp_server.py`, which exposes exactly four tools:
+  `run_command`, `read_file`, `edit_file`, `write_file`. Every one resolves
+  against the *assigned* sandbox's workspace, over SSH. The sandbox's
+  address, user, and key are baked into the MCP server's argv at dispatch
+  time; nothing in a tool call's own arguments can redirect it elsewhere.
+- `TodoWrite` and `Task` also allowed — a `Task`-spawned subagent inherits
+  the same empty roster (confirmed live by an explicit system denial, not
+  self-report), so delegation is safe to leave on.
+
+A sandbox therefore holds exactly one secret: its own git-proxy bearer
+token, which buys nothing but proxied access to allow-listed repos and is
+revocable per sandbox.
+
+## Documentation
 
 - **[`docs/system-diagram.md`](docs/system-diagram.md)** — the picture:
   every component, VM, port, and secret, and which trust boundary each
@@ -35,9 +81,16 @@ host (Debian, KVM, no system credentials)
 - **[`docs/host-adapter.md`](docs/host-adapter.md)** — the one
   platform-specific module, and what a macOS port would have to replace.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
-- **[`docs/next-session.md`](docs/next-session.md)** — the one thing
-  standing between a mocked-GitHub live run and a real agent PR, and where
-  to pick it up.
+- **[`docs/next-session.md`](docs/next-session.md)** — where to pick up.
+
+> **The `docs/` tree predates the move described above.** It still
+> describes `claude -p` running on the sandbox with a login credential
+> there, and `docs/next-session.md` still names the sandbox permission
+> prompt as the blocker — the redesign is what removed that blocker. The
+> code, `provision/`, and this file are current; treat those docs as
+> accurate on everything *except* where the agent process runs, and read
+> `grain/automation/dispatch.py`'s and `mcp_server.py`'s module docstrings
+> for the live findings behind the change.
 
 Read the ["Status and limits"](#status-and-limits) section before pointing
 this at a repo you care about.
@@ -74,14 +127,20 @@ curl -fsSL -o /var/lib/grain/images/debian-12.qcow2 \
   https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
 ```
 
-> **Known gap.** `Cluster.image` (`grain/inventory.py`) defaults to the bare
-> string `"debian-12"` and there is no `--image` flag yet, so today you
-> either edit that default to the path above or drive `LibvirtAdapter`
-> directly from a script the way the integration tests do.
+`Cluster.image` (`grain/inventory.py`) still defaults to the bare string
+`"debian-12"`, so name the real path — either per-invocation with the
+global `--image` flag, or once in `/var/lib/grain/cluster.toml`:
+
+```toml
+sandbox_count = 2
+image = "/var/lib/grain/images/debian-12.qcow2"
+# subnet, bridge, and the per-role sizes keep their defaults unless set
+```
 
 **Off-host** you need a GitHub credential for the target repo (details
-under [Configure](#3-configure-the-controller)) and, optionally, a GCP
-service account if agents need cloud access.
+under [Configure](#configure)) and a Claude Code login for the pool — one,
+not one per sandbox. A GCP service account is optional, for agents that
+need cloud access.
 
 ## Install
 
@@ -103,12 +162,15 @@ credentials.
 | Command group | Runs on |
 |---|---|
 | `grain host up/create/start/stop/destroy/recreate/status/rules/egress` | host |
-| `grain host cleanup/health` | controller (they reach sandboxes over SSH) |
+| `grain host bootstrap/wait/deploy`, `grain controller configure`, `grain sandbox login` | host (they use the admin SSH key) |
+| `grain host cleanup/health` | controller (they reach sandboxes over the controller's own key) |
 | `grain automation …`, `grain sessions …`, `grain metadata …`, `grain github audit` | controller |
 | `python3 -m grain.proxy.server` | controller |
 
-Two global flags matter and both go **before** the subcommand group:
-`--data-dir` (default `/data`), `--sandboxes` (default `2`). So
+Global flags go **before** the subcommand group: `--data-dir` (default
+`/data`), `--sandboxes`, `--image`, `--cluster-file` (default
+`/var/lib/grain/cluster.toml`), `--config-dir`, `--admin-ssh-public-key`,
+`--controller-ssh-public-key`, `--dry-run`. So
 `grain --data-dir /data automation run-once`, never
 `grain automation run-once --data-dir /data`.
 
@@ -127,22 +189,35 @@ grain --dry-run host up           # print every command, run none
 ### The one-command path
 
 ```sh
-sudo python3 -m grain.cli host bootstrap \
-  --repo your-org/your-repo \
-  --github-token-file /path/to/token          # or '-' to pipe it in
-  # --claude-credentials-file ~/.claude/.credentials.json   # optional
+sudo python3 -m grain.cli \
+  --image /var/lib/grain/images/debian-12.qcow2 \
+  host bootstrap \
+    --repo your-org/your-repo \
+    --github-token-file /path/to/token \
+    --claude-credentials-file ~/.claude/.credentials.json
 ```
 
-`docs/bootstrap.md`'s sequencer (`grain/bootstrap.py`): network up,
-controller created and booted, an admin SSH keypair generated if none
-exists yet (`/var/lib/grain/admin-ssh{,.pub}` by default — trusted by the
-controller *and* every sandbox, see "Admin access" below), the
+`--github-token-file -` reads the token from stdin instead. Both
+credential flags are optional on a re-run: a bare re-run does not clobber
+what is already in place.
+
+`grain/bootstrap.py` sequences eleven stages: preflight, an admin SSH
+keypair generated if none exists yet (`/var/lib/grain/admin-ssh{,.pub}` by
+default — trusted by the controller *and* every sandbox), network up,
+controller created and booted, wait for SSH and cloud-init, the
 controller's own key read back automatically, this tree deployed to
-`/opt/grain`, `/data` configured, every sandbox created, the git proxy and
-automation timer enabled. `--dry-run` previews every command with nothing
-touched; every stage checks what's already converged, so a re-run after a
-failure resumes rather than redoing completed work. The sections below walk
-through what each stage does, for debugging it or doing a step by hand.
+`/opt/grain`, `/data` configured (repo config, GitHub token, Claude
+credential), every sandbox created and given a git-proxy token, the git
+proxy and automation timer enabled, and a verify pass.
+
+**No state file** — every stage converges from observed reality, so a
+re-run after a failure resumes rather than redoing completed work.
+`--dry-run` previews every command with nothing touched. Stage order is not
+reorderable: the controller's key has to be read back *before* any sandbox
+is created, since sandbox creation is what embeds it as an authorized key.
+
+The sections below walk through what each stage does, for debugging it or
+doing a step by hand.
 
 ### 1. Network
 
@@ -169,6 +244,7 @@ nothing applies it automatically.
 
 ```sh
 sudo python3 -m grain.cli host create controller --provision provision/controller.sh
+sudo python3 -m grain.cli host wait controller
 sudo python3 -m grain.cli host status
 ```
 
@@ -177,10 +253,14 @@ Use the `controller` target specifically — `create`/`recreate` refuse
 different scripts.
 
 `provision/controller.sh` installs Python, `gce_metadata_server`, the
-`grain-metadata` system user, the `/data/{secrets,config,state}` layout,
-and the `grain-automation.timer` / `grain-git-proxy.service` units
-(**installed but left disabled**). It also generates the controller's own
-SSH keypair at `/data/secrets/controller-ssh{,.pub}`, idempotently.
+Claude Code CLI, two system users (`grain-metadata` for the metadata
+servers, `grain-agent` for `claude -p` and the MCP server it spawns), the
+`/data/{secrets,config,state}` layout, and the `grain-automation.timer` /
+`grain-git-proxy.service` units (**installed but left disabled**). It also
+generates the controller's own SSH keypair at
+`/data/secrets/controller-ssh{,.pub}`, idempotently — group-readable by
+`grain-agent`, which needs it to reach the sandbox it was dispatched
+against.
 
 It deliberately does **not** deploy this repo's code and does **not**
 enable any service. No secret is ever baked into a provisioning script,
@@ -193,13 +273,7 @@ creating sandboxes; a sandbox created first gets no controller-role
 authorized key at all and is unreachable from the automation dispatch path
 (though still reachable by the admin key below).
 
-This is scripted now — `grain host wait` blocks until the controller
-answers SSH and finishes cloud-init, and reading the key back only needs a
-non-interactive SSH hop if the host already holds an **admin** key the
-controller trusts (see "Admin access" below):
-
 ```sh
-sudo python3 -m grain.cli host wait controller
 ssh -i /var/lib/grain/admin-ssh debian@10.100.0.2 \
   cat /data/secrets/controller-ssh.pub \
   | sudo tee /var/lib/grain/controller-ssh.pub > /dev/null
@@ -207,15 +281,17 @@ ssh -i /var/lib/grain/admin-ssh debian@10.100.0.2 \
 
 `/var/lib/grain/controller-ssh.pub` is the default
 `--controller-ssh-public-key` path; override the flag to keep it elsewhere.
-(`host bootstrap` above does all of this automatically.)
+(`host bootstrap` does all of this automatically, including detecting a
+*changed* controller key and repairing existing sandboxes.)
 
 ### Admin access
 
 Two keys, two purposes (`grain/adapter/libvirt.py`, `LibvirtAdapter.create`):
 an **admin** key, trusted by the controller *and* every sandbox, for setup,
 repair, and debugging; the **controller**'s own key, trusted by sandboxes
-only, for the automation dispatch path. `host bootstrap` generates the
-admin key itself if `--admin-ssh-public-key` doesn't exist yet.
+only, for the automation dispatch path and the MCP server's tool calls.
+`host bootstrap` generates the admin key itself if
+`--admin-ssh-public-key` doesn't exist yet.
 
 ```sh
 sudo python3 -m grain.cli sandbox login sandbox-0     # or 'controller'
@@ -233,10 +309,11 @@ sudo python3 -m grain.cli host create sandboxes --provision provision/sandbox.sh
 sudo python3 -m grain.cli host status
 ```
 
-`provision/sandbox.sh` installs Docker from the official repo, `kind`,
-the usual agent toolchain, raises the inotify limits `kind` needs (its
-absence fails as opaque `too many open files` errors), pre-pulls the kind
-node image, and sets `kernel.yama.ptrace_scope = 2`.
+`provision/sandbox.sh` installs Docker from the official repo, `kind`, and
+the usual agent toolchain, raises the inotify limits `kind` needs (their
+absence fails as opaque `too many open files` errors), and pre-pulls the
+kind node image. It installs **no** Claude Code and places **no**
+credential — there is nothing on a sandbox to harden anymore.
 
 ### 4. Deploy the code to the controller
 
@@ -247,40 +324,53 @@ sudo python3 -m grain.cli host deploy
 No credential needed — `grain/adapter/deploy.py` pipes a `tar` of this
 working tree over the admin SSH path and extracts it as root; `/opt/grain`
 is created empty by the provisioning script. Since `grain` has no
-third-party dependencies, the source tree is the whole deployment. (The
-manual equivalent, `ssh debian@10.100.0.2 sudo git clone <remote>
-/opt/grain`, still works if you'd rather deploy from a remote directly.)
+third-party dependencies, the source tree is the whole deployment.
 
 ## Configure
 
-Everything below lives on the controller, under `/data`. Nothing here is
-generated for you — this is the per-deployment data that a provisioning
-script has no business holding.
+Everything below lives on the controller, under `/data`. This is the
+per-deployment data that a provisioning script has no business holding.
 
-`grain controller configure --repo owner/name --github-token-file PATH`
-writes `automation.json`, `repo-allowlist.json`, the token file, and the
-`credentials.json` entry pointing at it, over the admin SSH path (stdin,
-never argv). `host bootstrap` calls this for you; running it on its own is
-for adding a repo, rotating a token, or placing a Claude credential later
-without a full bootstrap re-run.
+```sh
+grain controller configure --repo owner/name \
+  --github-token-file PATH \
+  --claude-credentials-file PATH
+```
+
+writes `automation.json`, `repo-allowlist.json`, the token file, the
+`credentials.json` entry pointing at it, and both copies of the Claude
+credential — over the admin SSH path, stdin, never argv. `host bootstrap`
+calls this for you; running it on its own is for adding a repo, rotating a
+token, or placing a Claude credential later without a full bootstrap
+re-run.
 
 ```
 /data/
   secrets/
     controller-ssh, controller-ssh.pub   # generated by provision/controller.sh
-    sandbox-tokens.json                  # sandbox name -> bearer token
+    claude-credentials.json              # the pool's one Claude Code login
+    sandbox-tokens.json                  # sandbox name -> git-proxy bearer token
     gcp-service-account.json             # optional; 0640, grain-metadata:grain-metadata
     github/
       credentials.json                   # repo pattern -> credential name
       <name>.token                       # one 0600 file per name above
   config/
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
-    automation.json                       # AutomationConfig
+    automation.json                      # AutomationConfig
   state/
     automation/state.json, audit.log, sessions/
+    automation/units/grain-task-<sandbox>/
+      prompt.md, mcp-config.json, transcript.jsonl   # one dir per dispatch
     git-proxy/audit.log
     metadata-server/audit.log
 ```
+
+**The Claude credential.** One login for the whole pool, on the controller
+only. `configure_claude_credentials` writes two copies: a root-owned
+reference copy at `/data/secrets/claude-credentials.json`, and the live
+copy `claude -p` actually reads at
+`/home/grain-agent/.claude/.credentials.json`, owned by `grain-agent`.
+Nothing places a Claude credential on a sandbox, and nothing should.
 
 **GitHub credentials.** `credentials.json` maps a repo pattern to a
 credential name, narrowest match wins, and the proxy records which one
@@ -316,13 +406,16 @@ before the proxy forwards anything for it.
 sandbox's git credential helper presents to the proxy as its HTTP Basic
 password:
 
-```sh
-python3 -c 'import secrets; print(secrets.token_hex(32))'   # once per sandbox
-```
-
 ```json
 {"sandbox-0": "…", "sandbox-1": "…"}
 ```
+
+`host bootstrap` mints one per sandbox before the proxy first starts, which
+matters: the proxy loads this file once at startup, so a token minted only
+lazily on first dispatch would make that very first dispatch fail
+authentication (a live-found bug, fixed by `ensure_sandbox_tokens`). To add
+one by hand, `python3 -c 'import secrets; print(secrets.token_hex(32))'`
+and restart `grain-git-proxy.service`.
 
 **Automation**, `/data/config/automation.json` — `owner` and `repo` are
 the only fields with no default:
@@ -334,8 +427,11 @@ the only fields with no default:
 The defaults worth knowing: `trigger_label: "grain-agent"`,
 `in_progress_label: "grain-agent-in-progress"`, `base_branch: "main"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
-`runs_per_hour: 10`, `max_runtime_minutes: 120`. Override any of them by
-including the key.
+`runs_per_hour: 10`, `max_runtime_minutes: 120`. Also
+`github_host: "api.github.com"`, `git_forward_host: "github.com"`, and
+`github_use_tls: true` — right for every real deployment, and set
+otherwise only to point a live test at a mock GitHub
+(`--github-host`/`--git-forward-host`/`--github-insecure-http`).
 
 **Branch protection on the target repo.** Not scriptable from here — it
 needs admin on that repo — and it is load-bearing rather than optional:
@@ -355,13 +451,6 @@ sudo systemctl enable --now grain-automation.timer     # two-minute cadence
 `systemctl cat grain-automation.timer` shows the exact unit; edit
 `/etc/systemd/system/*` and `daemon-reload` for a different cadence.
 
-**Log the agent in, per sandbox.** Claude Code runs *in* the sandbox with
-a login credential — this is the one place the "sandboxes hold no
-secrets" property is knowingly broken, hardened rather than avoided (see
-`docs/design.md`, "Interim choice"). SSH in as `debian` and run the
-current `claude` login flow. There is no automation for this, and none is
-planned until the controller-side LLM proxy lands.
-
 **GCP (optional).** Place the key at
 `/data/secrets/gcp-service-account.json`, `chown` it to
 `grain-metadata`, `chmod 0640`, and start the per-sandbox instances:
@@ -369,6 +458,7 @@ planned until the controller-side LLM proxy lands.
 ```sh
 grain metadata start          # one gce_metadata_server per sandbox
 grain metadata status
+grain metadata sync-audit     # pull each instance's audit log into /data
 ```
 
 Each instance is bound to one sandbox's address and impersonates a
@@ -381,16 +471,29 @@ instance, and every Google SDK just works.
 ```sh
 grain --data-dir /data automation status     # every sandbox should read `free`
 grain --data-dir /data github audit          # no `flagged` verdicts
+grain host health                            # every sandbox healthy
 ```
 
 ## Use it
 
 **Label an issue `grain-agent`.** The next `run-once` pass picks it up,
-moves the label to `grain-agent-in-progress`, and dispatches to a free
-sandbox as a transient systemd unit running `claude -p`. The agent works
-in `/home/debian/workspace`, cloned through the git proxy, and pushes to
-`grain/issue-<N>`. When the unit finishes, the sweeper verifies that
-branch exists on GitHub and opens the PR.
+moves the label to `grain-agent-in-progress`, and claims a free sandbox.
+Dispatch is two-sided:
+
+- On the **sandbox**: the workspace at `/home/debian/workspace` is cloned
+  (first task) or fetched-and-reset (every task after) through the git
+  proxy, and a git credential helper is pointed at that sandbox's proxy
+  token — delivered over stdin, never argv, so the token never lands in a
+  clone URL, in `ps`, or in command logs.
+- On the **controller**: `claude -p` starts as the transient unit
+  `grain-task-<sandbox>`, running as `grain-agent`, with the prompt on
+  stdin and the four MCP tools pointed at that sandbox. Untrusted issue
+  content never becomes a shell-interpolated argument anywhere in this
+  path.
+
+The agent works in the sandbox through those tools and pushes to
+`grain/issue-<N>`. When the unit finishes, the sweeper verifies that branch
+exists on GitHub and opens the PR.
 
 The branch name is computed by the controller, never taken from the
 agent's own report — the prompt it received came from untrusted issue
@@ -399,8 +502,9 @@ input to a GitHub write.
 
 **Label an existing PR `grain-agent`** to have an agent address review
 feedback, fix CI, or continue work in flight. Same pool, same rate limit;
-it pushes more commits to that PR's own branch rather than opening a new
-one.
+the workspace lands on the PR's own branch with its existing history, the
+prompt carries the PR's review comments, and it pushes more commits to
+that branch rather than opening a new one.
 
 **Requiring a human to apply the label is the prompt-injection gate.**
 Anyone who can file an issue can put text in front of the agent; the
@@ -425,10 +529,13 @@ grain sessions list --kind pr --outcome failed
 grain sessions browse                        # curses UI; needs a real terminal
 ```
 
-Trajectories are captured **on completion**, before a sandbox's slot is
-freed — a sandbox is long-lived and the next task's `claude -p` overwrites
-the same transcript path, so fetch-on-demand would find the wrong task's
-content or none at all.
+`claude -p` is run with `--output-format stream-json --verbose`, redirected
+to that dispatch's `transcript.jsonl`, and `--no-session-persistence` so
+Claude Code's own session store doesn't accumulate forever under the shared
+`grain-agent` account. Trajectories are captured **on completion**, before
+a sandbox's slot is freed — the unit name (and therefore the transcript
+path) is fixed per sandbox, so the next task overwrites it and
+fetch-on-demand would find the wrong task's content or none at all.
 
 Every dispatch and sweep decision is one JSON object per line in
 `/data/state/automation/audit.log`, with the outcome (`dispatched`,
@@ -449,18 +556,20 @@ grain github audit                   # withheld-scope check             (control
 straight into a cron job.
 
 **The sweeper handles most of it already.** Each `run-once` pass, before
-dispatching: a finished unit gets its label moved and its PR opened, a
-failed or stranded one gets the issue re-labelled and requeued, and
-either way the session's trajectory is captured, between-task cleanup
-runs (`kind delete clusters --all`, `docker system prune -af --volumes`),
-and a health check follows. A sandbox is clean the moment its slot frees.
+dispatching: it reads each tracked unit's state on the controller, a
+finished unit gets its label moved and its PR opened, a failed or stranded
+one gets the issue re-labelled and requeued, and either way the session's
+trajectory is captured, between-task cleanup runs on the sandbox (`kind
+delete clusters --all`, `docker system prune -af --volumes`), and a health
+check follows. A sandbox is clean the moment its slot frees.
 
 What is **not** automatic:
 
-- **A wedged-but-`ACTIVE` sandbox.** The sweeper can't tell "slow" from
+- **A wedged-but-`ACTIVE` unit.** The sweeper can't tell "slow" from
   "stuck", so it waits for `max_runtime_minutes`. Stop the unit by hand
-  (`sudo systemctl stop grain-task-<sandbox>` on the sandbox) and re-run
-  `automation run-once` to let the sweep collect it.
+  (`sudo systemctl stop grain-task-<sandbox>` — on the **controller** now,
+  not the sandbox) and re-run `automation run-once` to let the sweep
+  collect it.
 - **Acting on a health warning.** Both `grain host health` and the
   sweeper's own check *report*; neither quarantines a degraded sandbox or
   stops dispatching to it. `grain host recreate <name>` is the usual fix.
@@ -498,27 +607,36 @@ supported and cuts the bill roughly threefold.**
 python3 -m pytest              # unit tests: no hypervisor, no network, no root
 ```
 
-The live suites skip themselves cleanly on a machine that can't run them,
-so the command above is safe anywhere. They come in when the machine can:
+492 unit tests pass on a bare machine; the live suites skip themselves
+cleanly there, so the command above is safe anywhere. They come in when the
+machine can run them:
 
 | Suite | Needs |
 |---|---|
 | `test_net_integration.py` | root and a reachable netfilter |
-| `test_vm_integration.py` | `/dev/kvm`, `qemu:///system`, `br-grain` up (it fetches the base image itself if missing) |
+| `test_vm_integration.py` | `/dev/kvm`, `qemu:///system`, `br-grain` up (it fetches the base image itself if missing) — includes an MCP-server-over-real-SSH round trip |
 | `test_controller_integration.py` | the same, but the base image must already be cached |
+| `test_bootstrap_integration.py` | the same — the two-key sandbox and the deploy/configure verbs |
 | `test_live_issue_to_pr.py` | the same — a full issue→PR run against a mocked GitHub |
 
 ```sh
 python3 -m tests.loadtest      # boot the real pool and measure it under kind + build load
 ```
 
-This project holds itself to **verify live, not just unit tests**, and
-the reason is written down in `docs/design.md`'s dispatch-mechanism
-section: five separate things — the libvirt connection URI, SSH host-key
-churn across recreates, `systemd-run` needing `sudo`, successful
-transient units self-unloading, and SSH word-splitting an argv it never
-really had — looked obviously fine on paper and only surfaced by booting
-a guest and running a command on it.
+> The live suites default to the same VM names a real deployment uses
+> (`controller`, `sandbox-0`), so an unscoped `pytest` on a host with a
+> live cluster up will destroy it. Scope it to specific files, or stop the
+> cluster first.
+
+This project holds itself to **verify live, not just unit tests**, and the
+record is worth the cost: the credential leak that moved `claude -p` to the
+controller, `--allowedTools` not actually emptying the tool roster, a
+root-owned unit directory blocking the agent's own transcript redirect,
+`claude` missing from a non-login shell's `PATH`, `git http-backend`
+denying push even with `GIT_HTTP_EXPORT_ALL=1`, a sandbox's first dispatch
+always failing proxy auth, transient units self-unloading on success — none
+of these were visible on paper. All surfaced by booting a guest and running
+the real thing on it.
 
 Layout:
 
@@ -527,8 +645,11 @@ grain/
   inventory.py        names, addresses, ports, specs — one source of truth
   run.py              command execution behind an interface (Real/DryRun/Fake)
   cli.py              the whole operator surface
+  bootstrap.py        the eleven-stage `host bootstrap` sequencer
   adapter/            the only platform-specific code: libvirt, lima, nftables
   automation/         poll, dispatch, sweep, capture, session history
+    dispatch.py       starts claude -p on the controller, per sandbox
+    mcp_server.py     the four tools that are the agent's only reach
   proxy/              the git proxy: allowlist, tokens, credentials, audit
   metadata/           per-sandbox gce_metadata_server instances
 provision/            controller.sh, sandbox.sh — cloud-init user-data
@@ -544,31 +665,38 @@ exactly what the anti-spoofing rules exist to prevent.
 
 ## Status and limits
 
-Implementation steps 1–10 of `docs/design.md`'s plan are done or mostly
-done, most of them verified against real VMs. What is genuinely not
-finished:
+The whole mechanical pipeline works, and most of it has been verified
+against real VMs — including a real `grain host bootstrap` run driving a
+real deployed `grain-automation.timer`, and a real `claude -p` dispatch,
+both against a mock GitHub server. What is genuinely not finished:
 
 - **Nothing here has run against a real GitHub repo or a real
-  credential.** The full issue→PR pipeline is verified end to end against
-  a mocked GitHub; `grain github audit` is verified against scripted
-  response shapes, not a live token. Both need a real target repo with
-  admin access.
+  credential.** Issue→PR is verified end to end against a mocked GitHub;
+  `grain github audit` is verified against scripted response shapes, not a
+  live token. Both need a real target repo with admin access.
+- **The controller-side agent has not completed a real issue→PR run.** The
+  mechanism is live-verified — the MCP tools over real SSH against a real
+  sandbox (including timeout enforcement), and all three sweep scenarios
+  (happy path, nonzero exit, exit-zero-no-push) end to end against real
+  infrastructure with a scripted stand-in for `claude`. What hasn't
+  happened since the move is a real logged-in agent working a real issue
+  through those four tools and pushing.
 - **No token mint has been verified** against a real GCP project.
-- **`git push` through the proxy is implemented but not exercised live** —
-  that needs a real writable allow-listed repo. Fetch is verified against
-  real `git` and real GitHub.
-- **`--image` doesn't exist**, so pointing at a real base image means
-  editing `Cluster.image` or driving the adapter from a script.
-- Two setup steps are irreducibly manual: copying the controller's public
-  key to the host (they are different machines), and deploying this repo
-  to `/opt/grain` (it would need a deploy credential in a provisioning
-  script).
+- **`git push` through the proxy is exercised live**, by the fake agent in
+  `test_live_issue_to_pr.py` against a real `git http-backend` behind a
+  real `GitProxy` — but never against real GitHub.
+- **Hardening (`docs/roadmap.md` item 7) is half done**: the tooling is
+  built and unit-tested; moving a real repo down the credential ladder and
+  applying branch protection need a real repo.
 
 And what the threat model does **not** defend, stated plainly: sequential
 tasks on one long-lived sandbox (task B inherits task A's filesystem);
-abuse of legitimate access while a sandbox is compromised; exfiltration
-under the default open-egress policy; malicious code in agent output —
-human PR review is the control, which is why the no-push-to-`main` rules
-are load-bearing; a compromised host, which owns the hypervisor and
-therefore every VM; and prompt injection via issue content, where
-requiring a human label is a mitigation rather than a guarantee.
+abuse of legitimate access while a sandbox is compromised — including the
+sandbox's own git-proxy token, which is scoped to allow-listed repos but is
+real; exfiltration under the default open-egress policy; malicious code in
+agent output — human PR review is the control, which is why the
+no-push-to-`main` rules are load-bearing; a compromised controller, which
+now runs the agent process *and* holds every credential; a compromised
+host, which owns the hypervisor and therefore every VM; and prompt
+injection via issue content, where requiring a human label is a mitigation
+rather than a guarantee.
