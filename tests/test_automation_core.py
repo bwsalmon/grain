@@ -3,12 +3,14 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 import grain.automation.capture as capture_module
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
 from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, unit_name
-from grain.automation.github import ApiResponse, FakeTransport, GitHubClient
+from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.inventory import Cluster
@@ -176,6 +178,51 @@ def test_a_failed_run_is_requeued_via_labels_not_state():
     assert "failed" in outcomes
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     assert len(mutating) == 2  # remove in-progress, add trigger back
+
+
+def test_a_requeue_tolerates_a_404_from_add_label_for_a_stale_assignment():
+    """A leftover `AutomationState` assignment can point at an issue number
+    that doesn't exist in the *currently configured* repo -- e.g. after
+    `controller configure` points a live deployment at a different repo
+    while an old assignment is still on file (docs/next-session.md, found
+    live). That must not crash the whole sweep before `_dispatch` ever runs.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=failed\nResult=exit-code\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # remove_label: fine either way
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # add_label: no such issue here
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale assignment" in o for o in outcomes)
+
+
+def test_a_requeue_still_raises_a_non_404_github_error():
+    """Only a 404 is treated as "stale assignment, move on" -- a genuine
+    API failure (5xx, auth) must still surface, not be silently swallowed
+    alongside it.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=failed\nResult=exit-code\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),
+        ApiResponse(500, {}, b"internal error"),
+    ])
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 # --- PR creation on a successful run (docs/roadmap.md item 2) -------------

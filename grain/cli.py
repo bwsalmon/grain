@@ -287,11 +287,32 @@ def cmd_destroy(args: argparse.Namespace) -> int:
 def cmd_recreate(args: argparse.Namespace) -> int:
     cluster = build_cluster(args)
     _check_provision_target(cluster, args)
+    targets = _targets(cluster, args.name)
+    _check_controller_recreate(cluster, targets, args)
     adapter = build_adapter(cluster, _runner(args), args)
     script = Path(args.provision).read_text() if args.provision else None
-    for name in _targets(cluster, args.name):
+    for name in targets:
         adapter.recreate(name, script)
     return 0
+
+
+def _check_controller_recreate(cluster: Cluster, targets: list[str], args: argparse.Namespace) -> None:
+    """`/data` (credentials, automation state) lives on the controller's own
+    disk today -- there is no separate persistent disk for it yet (see
+    `provision/controller.sh`) -- and `recreate` is destroy-then-create, so
+    recreating the controller silently deletes it. `recreate` is described
+    as routine maintenance elsewhere (README, runbook), so an operator can
+    reach for it without expecting that. This is a guardrail, not a fix:
+    once `/data` lives on its own disk that survives destroy, this check
+    should come out.
+    """
+    if cluster.controller_name in targets and not args.i_know_this_deletes_data:
+        raise SystemExit(
+            f"recreating {cluster.controller_name!r} destroys /data -- every "
+            "credential and all automation state -- because /data has no "
+            "disk of its own yet and lives on the controller's own qcow2. "
+            "Pass --i-know-this-deletes-data to proceed anyway."
+        )
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -392,6 +413,15 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     `repo-allowlist.json`, and, if supplied, the GitHub token/credential
     mapping and the Claude Code OAuth token. See
     `grain/automation/configure.py`.
+
+    Restarts `grain-git-proxy.service` afterward: `build_proxy`
+    (`grain/proxy/server.py`) reads `automation.json` once, at process
+    startup, so a live proxy keeps forwarding to whatever `git_forward_host`
+    it started with until restarted -- found live, pointing a deployment at
+    a new repo/host otherwise fails with a proxied 500 while the proxy still
+    targets the old one. Harmless if the service isn't running yet (a fresh
+    controller that hasn't reached `host bootstrap`'s stage 10): `systemctl
+    restart` on a stopped-but-installed unit just starts it.
     """
     cluster = build_cluster(args)
     base_runner = _runner(args)
@@ -402,6 +432,7 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     configure_repo(ssh, owner, repo, github_host=args.github_host,
                     git_forward_host=args.git_forward_host,
                     github_use_tls=not args.github_insecure_http)
+    ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     if args.github_token_file:
         token = (
             sys.stdin.read() if args.github_token_file == "-"
@@ -611,6 +642,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("name", help="VM name, or 'all' / 'sandboxes'")
         if name in ("create", "recreate"):
             p.add_argument("--provision", help="path to a provisioning script")
+        if name == "recreate":
+            p.add_argument(
+                "--i-know-this-deletes-data", action="store_true",
+                help="required to recreate the controller (or 'all') -- "
+                     "/data has no disk of its own yet, so this destroys "
+                     "every credential and all automation state",
+            )
         p.set_defaults(func=fn)
 
     p = host.add_parser("status", help="show VM states and addresses")

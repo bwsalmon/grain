@@ -73,7 +73,7 @@ from .config import AutomationConfig
 from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
 )
-from .github import GitHubClient, Issue, PullRequestDetail
+from .github import GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
 from .state import AutomationState, TriggerKind
@@ -221,14 +221,34 @@ class Orchestrator:
     def _requeue(self, outcome: Outcome, reason: str) -> None:
         # Back to the trigger label, per docs/design.md: "issues need
         # returning to the queue rather than stalling silently."
-        self.github.remove_label(
-            self.config.owner, self.config.repo,
-            outcome.issue, self.config.in_progress_label,
-        )
-        self.github.add_label(
-            self.config.owner, self.config.repo,
-            outcome.issue, self.config.trigger_label,
-        )
+        #
+        # A 404 here means the issue this assignment names doesn't exist in
+        # the *currently configured* repo — not "GitHub rejected the
+        # request," but "this assignment is stale," e.g. left over from a
+        # repo `controller configure` has since pointed elsewhere (found
+        # live: docs/next-session.md). Letting that propagate crashes
+        # `run_once` before `_dispatch` ever runs, taking down the whole
+        # sweep over one leftover assignment. Log and move on instead; any
+        # other status (a real 5xx, an auth failure) still isn't something
+        # a stale assignment explains, so it still propagates.
+        try:
+            self.github.remove_label(
+                self.config.owner, self.config.repo,
+                outcome.issue, self.config.in_progress_label,
+            )
+            self.github.add_label(
+                self.config.owner, self.config.repo,
+                outcome.issue, self.config.trigger_label,
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            self.audit.record(
+                sandbox=outcome.sandbox, issue=outcome.issue,
+                outcome=f"{reason} (requeue skipped: issue #{outcome.issue} not found in "
+                        f"{self.config.owner}/{self.config.repo} -- stale assignment?)",
+            )
+            return
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue, outcome=reason)
 
     # --- dispatch -------------------------------------------------------

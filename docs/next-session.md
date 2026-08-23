@@ -26,6 +26,51 @@ not just reasoned through:**
   more bugs surfaced only by running it for real and are already fixed —
   see `docs/roadmap.md` item 8's second "Update" for both.
 
+A third blocker — everything above had only ever run against a mock GitHub
+server — is now resolved too. A real fine-grained PAT (`bwsalmon/test1`,
+scoped to Contents/Issues/Pull requests read+write) drove a real end-to-end
+run: real issue #1, a controller-side `claude -p` whose advertised tool
+roster was confirmed to be exactly `Task` plus the four
+`mcp__grain-sandbox__*` tools (no native `Bash`/`Edit`/`Write`), a real
+edit/commit/`git push` through the proxy to real GitHub, and a real PR
+(bwsalmon/test1#2) opened by the sweep's own `branch_exists`/
+`create_pull_request` path — not the agent's claim about what it pushed.
+`grain github audit` against that same PAT correctly reported it
+"unverifiable" (fine-grained PATs expose no scopes header via GitHub's API —
+documented limitation, not a bug).
+
+That run surfaced two real gaps, neither of which blocked it but both worth
+fixing before reconfiguring a live deployment becomes routine. **Both are
+now fixed:**
+
+- **`controller configure` doesn't restart the git proxy, and the proxy
+  caches `git_forward_host` at process startup** (`build_proxy` in
+  `grain/proxy/server.py` reads `automation.json` once, at boot). Pointing a
+  live deployment at a new repo/host with `controller configure` silently
+  leaves the proxy forwarding to whatever host it started with — the first
+  real dispatch here failed with a proxied 500 because the proxy was still
+  targeting a mock server torn down earlier in the same session. **Fixed**:
+  `cmd_controller_configure` (`grain/cli.py`) now restarts
+  `grain-git-proxy.service` right after writing `automation.json` —
+  harmless if the service isn't running yet, since `systemctl restart` on a
+  stopped-but-installed unit just starts it. Covered by
+  `tests/test_cli.py::test_controller_configure_restarts_the_git_proxy_so_it_picks_up_the_new_config`.
+- **A stale `AutomationState` assignment crashes `run_once` with an
+  uncaught 404 when the target repo changes out from under it.**
+  `core.py`'s `_sweep()` → `_requeue()` calls `self.github.add_label(...)`
+  unconditionally on a leftover assignment; if that assignment's issue
+  number doesn't exist in the newly-configured repo, `GitHubError` propagates
+  uncaught and `run_once` exits nonzero having done nothing else either. Hit
+  here after reconfiguring from a mock repo to `bwsalmon/test1` while a
+  `sandbox-0 → issue #201` assignment from the earlier mock test was still in
+  `/data/state/automation/state.json`. Worked around by hand-clearing the
+  state file at the time. **Fixed**: `_requeue` now catches `GitHubError`
+  from `remove_label`/`add_label`, logs and moves on for a 404 specifically
+  (a stale assignment, not a real failure), and still re-raises anything
+  else (a genuine 5xx or auth error). Covered by
+  `tests/test_automation_core.py::test_a_requeue_tolerates_a_404_from_add_label_for_a_stale_assignment`
+  and `::test_a_requeue_still_raises_a_non_404_github_error`.
+
 `docs/design.md` and `docs/roadmap.md` (item 8) are reconciled with this —
 both describe the current architecture, not the sandbox-side one.
 `docs/system-diagram.md` is **not** reconciled yet: its diagram still shows
@@ -38,21 +83,7 @@ This file is the current handoff: what's left, in the order worth doing it.
 
 ## Blocks a first real run
 
-### 1. Real GitHub: a repo, a credential, and an audit against it
-
-Every live verification to date, including the real-agent run above, runs
-against a mock GitHub server, never the real API. Needed: a target repo, a
-machine account or fine-grained PAT invited as a collaborator, its token in
-`/data/secrets/github/`, the `credentials.json` mapping, the repo on
-`repo-allowlist.json`, and `grain github audit` run against the real token —
-its withheld-scope check has only ever seen scripted response shapes
-(`docs/roadmap.md` item 7 has the detail on what the audit can and cannot
-verify for fine-grained PATs). This is genuinely the next open question a
-real run answers: nothing about real GitHub's actual API behavior or
-quirks — rate limits, exact error-response shapes, auth edge cases — has
-been exercised yet, mocked or otherwise.
-
-### 2. Branch protection on the target repo
+### 1. Branch protection on the target repo
 
 Manual, needs admin on that repo, and load-bearing rather than optional: no
 direct pushes to the default branch from the agent credential, no
@@ -61,7 +92,7 @@ reconfiguring a target repo," step 3 has the procedure. The design
 deliberately enforces write safety at GitHub rather than by inspecting pack
 files, so this is the control, not a backstop to one.
 
-### 3. `/data` lives on the controller's root disk, and `recreate` deletes it
+### 2. `/data` lives on the controller's root disk, and `recreate` deletes it
 
 `provision/controller.sh` says plainly that `/data` is *expected* to be a
 separate persistent disk, and that the libvirt adapter has no notion of one,
@@ -81,11 +112,17 @@ Two ways to close it, either acceptable:
 
 - **Adapter work**: a second attached disk per VM, mounted at `/data`,
   surviving destroy. This is what `provision/controller.sh` says to fix.
+  **Not done** — this is still the real fix and still open.
 - **A guardrail**: make `recreate` refuse the controller without an explicit
   flag, and say why. Cheap, and it removes the sharp edge even before the
-  disk work lands.
+  disk work lands. **Done**: `grain host recreate controller` (or `all`)
+  now refuses with a clear message unless `--i-know-this-deletes-data` is
+  passed (`_check_controller_recreate` in `grain/cli.py`, checked before the
+  adapter is even built). `docs/runbook.md`'s controller-SSH-rotation
+  example is updated to pass the flag; `tests/test_cli.py` covers refuse/
+  allow for both `controller` and `all`, and that `sandboxes` needs no flag.
 
-### 4. The resource budget predates the move, and concurrency is unverified
+### 3. The resource budget predates the move, and concurrency is unverified
 
 The controller is 1 vCPU / 4 GB (`Cluster.controller_cpus`/`controller_mem_mb`,
 `grain/inventory.py`). It now hosts every concurrent `claude -p` *and* its
@@ -153,11 +190,14 @@ on a 4-vCPU host means revisiting the sandbox count too.
 
 ## Suggested order
 
-1. **Item 3**, first and cheaply (the guardrail form, if the disk work is
-   not happening this session) — it is the only irrecoverable failure here.
-2. **Item 4**, once a real target repo exists to dispatch against for real —
-   the measurement needs real dispatches in flight, ideally concurrent ones.
-3. **Items 1 and 2**, which need a real repo and admin on it.
+1. ~~**Item 2**, first and cheaply (the guardrail form, if the disk work is
+   not happening this session) — it is the only irrecoverable failure
+   here.~~ **Done** — see item 2 above. The real fix (a second disk for
+   `/data`) is still open.
+2. **Item 3**, now that a real target repo exists to dispatch against for
+   real — the measurement needs real dispatches in flight, ideally
+   concurrent ones.
+3. **Item 1**, which needs admin on the target repo.
 
 ## Reproduce / verify
 

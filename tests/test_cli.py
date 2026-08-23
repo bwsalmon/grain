@@ -280,6 +280,17 @@ def test_dry_run_controller_configure_writes_automation_json_over_ssh(capsys, tm
     assert "credentials.json" not in out  # no --github-token-file given
 
 
+def test_controller_configure_restarts_the_git_proxy_so_it_picks_up_the_new_config(capsys):
+    """`build_proxy` reads automation.json once, at startup -- a live proxy
+    would otherwise keep forwarding to whatever host it started with after
+    reconfiguring to a new repo/host.
+    """
+    out = run(["--dry-run", "controller", "configure", "--repo", "acme/widgets"], capsys)
+    assert "systemctl restart grain-git-proxy.service" in out
+    # ...and after the config is written, not before.
+    assert out.index("dd of=/data/config/automation.json") < out.index("systemctl restart")
+
+
 def test_dry_run_controller_configure_with_a_github_token_file(capsys, tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("ghp_dryruntoken\n")
@@ -344,3 +355,35 @@ def test_missing_tool_raises_a_legible_error_when_check_is_on():
         assert exc.returncode == 127
     else:
         raise AssertionError("expected CommandError")
+
+
+def test_recreate_controller_is_refused_without_the_data_loss_flag():
+    """/data has no disk of its own yet, so recreating the controller
+    silently destroys every credential and all automation state. This
+    should be blocked before the adapter is even built.
+    """
+    with pytest.raises(SystemExit, match="destroys /data"):
+        main(["--dry-run", "host", "recreate", "controller"])
+
+
+def test_recreate_all_is_refused_too_since_it_includes_the_controller():
+    with pytest.raises(SystemExit, match="destroys /data"):
+        main(["--dry-run", "host", "recreate", "all"])
+
+
+def test_recreate_sandboxes_needs_no_flag(tmp_path, capsys):
+    out = run(
+        ["--dry-run", "--config-dir", str(tmp_path / "instances"),
+         "host", "recreate", "sandboxes"],
+        capsys,
+    )
+    assert "sandbox-0" in out and "sandbox-1" in out
+
+
+def test_recreate_controller_proceeds_with_the_flag(tmp_path, capsys):
+    out = run(
+        ["--dry-run", "--config-dir", str(tmp_path / "instances"),
+         "host", "recreate", "controller", "--i-know-this-deletes-data"],
+        capsys,
+    )
+    assert "controller" in out

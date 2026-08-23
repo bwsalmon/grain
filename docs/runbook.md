@@ -394,8 +394,11 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   sandbox does *not* rotate its token; do that as a separate, manual step.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing
-  `/data/secrets/controller-ssh`). `grain host recreate controller` followed
-  by `grain host bootstrap --repo owner/name` (no need to repeat the
+  `/data/secrets/controller-ssh`). `grain host recreate controller
+  --i-know-this-deletes-data` — the flag is required because `/data` has no
+  disk of its own yet and lives on the controller's own qcow2, so this also
+  destroys every credential and all automation state, not just the SSH key
+  — followed by `grain host bootstrap --repo owner/name` (no need to repeat the
   GitHub/Claude credential flags — see below) now handles rotation without a
   full sandbox recreation cycle: stage 6 reads the *new* key back over the
   admin SSH path (only possible because of the "key roles" split — see
