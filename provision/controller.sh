@@ -124,17 +124,26 @@ install -d -m0755 /data/state/metadata-server
 if [ ! -f /data/secrets/controller-ssh ]; then
   ssh-keygen -t ed25519 -f /data/secrets/controller-ssh -N "" -q
 fi
-# Group-readable, not just root-owned: `grain-agent`'s MCP server
-# (grain/automation/mcp_server.py) is a separate process from
-# grain-automation.service (still root, unchanged) and needs to read this
-# key itself, to build its own SshRunner reaching the sandbox it was told
-# to target. This grants no controller-side privilege — the key only ever
-# authenticates to a disposable, unprivileged (debian-uid) sandbox account
-# behind the existing host firewall, the same reach `grain-agent`'s tools
-# already have by design.
-chown root:grain-agent /data/secrets/controller-ssh
-chmod 0640 /data/secrets/controller-ssh
+chmod 0600 /data/secrets/controller-ssh
 chmod 0644 /data/secrets/controller-ssh.pub
+
+# `grain-agent`'s MCP server (grain/automation/mcp_server.py) is a separate
+# process from grain-automation.service (still root, unchanged) and needs
+# to read this key itself, to build its own SshRunner reaching the sandbox
+# it was told to target. Found live: group-readable (chmod 0640, group
+# grain-agent) does NOT work for this -- OpenSSH's own client refuses to
+# use *any* private key file it considers "too open", which for it means
+# anything beyond owner-only 0600/0400, regardless of which group holds
+# the read bit or how narrowly that group is scoped. The only thing that
+# actually satisfies both processes at once is a second, independent copy,
+# each owner-only in its own right. Granting the read grants no
+# controller-side privilege either way — the key only ever authenticates
+# to a disposable, unprivileged (debian-uid) sandbox account behind the
+# existing host firewall, the same reach `grain-agent`'s tools already
+# have by design.
+install -d -m0700 -o grain-agent -g grain-agent /home/grain-agent/.ssh
+install -m0600 -o grain-agent -g grain-agent \
+  /data/secrets/controller-ssh /home/grain-agent/.ssh/controller-ssh
 
 # --- Where this repo's code is expected to live once deployed by hand (see
 # the top of this script). Owned by root; a `git clone` run as root (e.g.
@@ -200,14 +209,16 @@ Set up by provision/controller.sh:
   it runs each per-sandbox instance as
 - claude (Claude Code CLI), at /usr/local/bin, and the grain-agent system
   user it runs as — `claude -p` runs HERE now, not on the sandboxes
-  (docs/roadmap.md item 8's "Update"); grain-agent can read
-  /data/secrets/controller-ssh (group grain-agent, mode 0640) so its MCP
-  server (grain/automation/mcp_server.py) can reach the sandbox it was
-  dispatched against, and nothing else under /data/secrets
+  (docs/roadmap.md item 8's "Update"); grain-agent has its own 0600 copy of
+  the controller SSH key at ~/.ssh/controller-ssh (OpenSSH refuses a
+  group-readable one, found live) so its MCP server
+  (grain/automation/mcp_server.py) can reach the sandbox it was dispatched
+  against, and nothing else under /data/secrets
 - the /data/{secrets,config,state} layout grain/automation, grain/proxy and
   grain/metadata already expect, including /data/state/automation/units
   where each dispatch's prompt/MCP-config/transcript now live
-- the controller SSH keypair, /data/secrets/controller-ssh{,.pub}
+- the controller SSH keypair, /data/secrets/controller-ssh{,.pub}, plus
+  grain-agent's own copy at /home/grain-agent/.ssh/controller-ssh
 - /opt/grain, empty, where this repo's code is deployed by hand
 - grain-automation.{service,timer} and grain-git-proxy.service, installed
   but not enabled

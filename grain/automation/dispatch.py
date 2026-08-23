@@ -20,15 +20,27 @@ headless run can never answer). Landlock — kernel-level, immune to
 environment variables at all, so it cannot close the credential-leak gap
 either. The only real fix: never put the credential inside the untrusted
 execution environment in the first place. `claude -p` now runs on the
-controller with its entire native tool roster disabled (`--tools ""`) and
-replaced by `mcp_server.py`'s four tools, which are the *only* way the
-agent can touch the sandbox. Confirmed live: `--tools "" --mcp-config
-<file> --allowedTools <names>` genuinely empties the roster (the advertised
-`tools` list in the `system/init` event shrinks to exactly what's named),
-`--allowedTools` alone does not (it's a permission hint, not a roster
-filter — both flags are required together), and a `Task`-spawned subagent
-inherits the same restriction (an explicit system denial confirmed this,
-not just self-report) so `Task` is safe to leave enabled for delegation.
+controller with almost its entire native tool roster disabled (`--tools`
+naming only `_NATIVE_TOOLS`) and replaced by `mcp_server.py`'s four tools,
+which are the *only* way the agent can touch the sandbox. Confirmed live:
+`--tools '' --mcp-config <file> --allowedTools <names>` genuinely empties
+the roster down to exactly the MCP tools (the advertised `tools` list in
+the `system/init` event shrinks to exactly what's named), `--allowedTools`
+alone does not (it's a permission hint, not a roster filter — both flags
+are required together), and naming a native tool in `--allowedTools` alone
+does not add it back once `--tools` excludes it either — found live, the
+same real dispatch that finally proved this whole redesign end to end also
+showed `Task` silently absent from the roster despite being listed in
+`--allowedTools`, because `--tools ''` had excluded it from the registry
+outright. `--tools 'Task'` (naming it directly) is what actually admits
+it — confirmed safe to include, since a `Task`-spawned subagent was
+separately confirmed live to inherit this same restricted roster, not
+bypass it (an explicit system denial confirmed this, not just
+self-report). `TodoWrite` was tried the same way and dropped: confirmed
+live, twice, that no `--tools` syntax admits it in `-p`/headless mode at
+all — most likely excluded there as a product decision, since a todo list
+is a visible, ongoing tracker meant for an interactive session, which a
+one-shot headless dispatch never has.
 
 systemd, not tmux: both the controller and every sandbox already have
 systemd as PID 1 (Debian, not the container image
@@ -157,6 +169,20 @@ _GIT_IDENTITY_EMAIL = "grain-agent@localhost"
 # MCP server it spawns as a child) runs as — never root, never the account
 # `grain-automation.service` itself runs as. See provision/controller.sh.
 CONTROLLER_AGENT_USER = "grain-agent"
+
+# CONTROLLER_AGENT_USER's own copy of the controller's SSH key
+# (provision/controller.sh), used by `mcp_server.py` (a child of the
+# controller-side `claude -p` unit, so it runs as this same account) to
+# reach the assigned sandbox. Deliberately a *separate* file from the
+# orchestrator's own `AutomationConfig.ssh_key_path` (normally
+# `/data/secrets/controller-ssh`, root-owned) rather than a shared,
+# group-readable copy of it — found live: OpenSSH's client refuses to use
+# *any* private key file it considers group-readable at all, regardless of
+# how narrowly the group is scoped, so sharing one file across the two
+# accounts (root, for grain-automation.service; grain-agent, for this)
+# breaks the root side's own use of it. Two independently owner-only
+# (0600) copies is the only shape that satisfies both.
+CONTROLLER_AGENT_SSH_KEY_PATH = "/home/grain-agent/.ssh/controller-ssh"
 
 # Where CONTROLLER_AGENT_USER's own Claude Code OAuth token lives (a bare
 # `claude setup-token` value, placed by `grain/automation/configure.py`'s
@@ -452,10 +478,28 @@ def _mcp_config_json(target: SandboxTarget) -> str:
     })
 
 
+# The only native (non-MCP) tool kept enabled -- confirmed safe live
+# (docs/roadmap.md item 8's "Update"): a Task-spawned subagent inherits
+# this same restricted roster, not a bypass to it (an explicit system
+# denial confirmed this, not just self-report). Named on `--tools` itself,
+# not just `--allowedTools` -- found live: `--tools ''` excludes every
+# native tool from the registry outright, and naming one in
+# `--allowedTools` alone does not add it back (that flag only pre-approves
+# tools already in the registry). `--tools 'Task'` is what actually admits
+# it alongside whatever `--mcp-config` supplies.
+#
+# `TodoWrite` was tried alongside it and dropped: confirmed live (twice --
+# a real dispatch and an isolated local check) that `--tools` cannot admit
+# it in `-p`/headless mode at all, regardless of syntax. Most likely
+# excluded from `-p` mode as a product decision -- a todo list is a visible,
+# ongoing tracker meant for an interactive session, which a one-shot
+# headless dispatch never has.
+_NATIVE_TOOLS = "Task"
+
 _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
-    "TodoWrite,Task"
+    f"{_NATIVE_TOOLS}"
 )
 
 
@@ -503,7 +547,7 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
         # land in `ps` output).
         f"export CLAUDE_CODE_OAUTH_TOKEN=\"$(cat {shlex.quote(CONTROLLER_AGENT_TOKEN_PATH)})\" && "
         f"cd /opt/grain && claude -p "
-        f"--tools '' "
+        f"--tools {shlex.quote(_NATIVE_TOOLS)} "
         f"--mcp-config {shlex.quote(m_path)} --strict-mcp-config "
         f"--allowedTools {shlex.quote(_ALLOWED_TOOLS)} "
         f"--no-session-persistence "

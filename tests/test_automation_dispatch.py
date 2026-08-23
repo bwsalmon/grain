@@ -170,27 +170,26 @@ def test_dispatch_starts_a_systemd_unit_named_for_the_sandbox_as_the_agent_user(
     assert runner.ran(f"sudo systemd-run --unit={unit} --uid={CONTROLLER_AGENT_USER}")
 
 
-def test_dispatch_runs_claude_from_opt_grain_with_no_native_tools():
+def test_dispatch_runs_claude_from_opt_grain_with_only_mcp_and_native_exceptions():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
              remote_url=REMOTE_URL, token=TOKEN)
-    # The raw command string (argv[-1] of the systemd-run call), not
-    # runner.commands' shlex-joined rendering -- that re-escapes the
-    # embedded `--tools ''` quotes, which would break a plain substring
-    # check.
     unit_call = next(argv[-1] for argv, _ in runner.calls if "systemd-run" in argv)
     assert "cd /opt/grain &&" in unit_call
-    assert "--tools ''" in unit_call
+    # Named directly on --tools, not just --allowedTools -- found live:
+    # --allowedTools alone does not add a native tool back once --tools
+    # excludes it. TodoWrite tried and dropped -- confirmed live that no
+    # --tools syntax admits it in -p/headless mode at all.
+    assert "--tools Task" in unit_call
     assert f"--mcp-config {MCP_CONFIG_PATH}" in unit_call
     assert "--strict-mcp-config" in unit_call
     assert "mcp__grain-sandbox__run_command" in unit_call
     assert "mcp__grain-sandbox__edit_file" in unit_call
-    assert "TodoWrite" in unit_call
-    assert "Task" in unit_call
+    assert "--allowedTools" in unit_call and "Task" in unit_call
     assert "--no-session-persistence" in unit_call
     # The permission-mode flag existed only to auto-approve the native
-    # Edit/Write tools' prompts -- meaningless once --tools '' empties the
-    # roster, and must not be carried over.
+    # Edit/Write tools' prompts -- meaningless once --tools excludes them,
+    # and must not be carried over.
     assert "--permission-mode" not in unit_call
 
 
