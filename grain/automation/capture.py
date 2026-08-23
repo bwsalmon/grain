@@ -1,13 +1,16 @@
-"""Pulls a finished session's Claude Code trajectory off the sandbox before
-its slot is freed for reuse (docs/roadmap.md item 10) — capture-on-
-completion, not fetch-on-demand. Sandboxes are long-lived and a unit's name
-is fixed per sandbox, reused verbatim by the next dispatch
-(`dispatch.py`'s `unit_name`) — so is the transcript path
-(`dispatch.transcript_path`) that name derives. A later "fetch it when
-someone wants to browse" would therefore find either nothing (the sandbox
-already ran another task and the file was overwritten) or the wrong task's
-content. The file has to come off *before* `sweeper.py` frees the slot for
-reuse — this module is called from exactly that release path.
+"""Pulls a finished session's Claude Code trajectory off disk before its
+sandbox's slot is freed for reuse (docs/roadmap.md item 10) — capture-on-
+completion, not fetch-on-demand. A unit's name is fixed per sandbox, reused
+verbatim by the next dispatch (`dispatch.py`'s `unit_name`) — so is the
+transcript path (`dispatch.transcript_path`) that name derives. A later
+"fetch it when someone wants to browse" would therefore find either nothing
+(the sandbox already ran another task and the file was overwritten) or the
+wrong task's content. The file has to come off *before* `sweeper.py` frees
+the slot for reuse — this module is called from exactly that release path.
+
+`claude -p` now runs on the controller, not the sandbox (docs/roadmap.md
+item 8's "Update"), so the transcript is already a plain local file by the
+time this runs — no `Runner`/SSH involved, just a read.
 
 **What `claude -p` actually leaves behind, checked rather than assumed.**
 Claude Code persists a session's transcript to disk by default — an
@@ -44,26 +47,27 @@ under this project's own control rather than one it would have to guess.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .dispatch import transcript_path
-from ..run import Runner
 
 
-def capture_trajectory(runner: Runner, unit: str) -> str | None:
-    """Reads `unit`'s transcript file over the same `Runner` (typically an
-    `SshRunner`) `dispatch.py`/`sweeper.py` already use for everything else
-    — no new channel, no `scp`/`sftp`, just `cat` over the existing SSH exec
-    path.
+def capture_trajectory(unit: str) -> str | None:
+    """Reads `unit`'s transcript file directly off the controller's own
+    disk — the same file `dispatch.py` redirected `claude -p`'s
+    `--output-format stream-json` output to.
 
     Never raises — the same discipline `cleanup.py`/`health.py` already
     hold to for this exact call site (a step that runs on every sandbox
     release must not be the reason a slot fails to free): a unit that never
-    started, a `claude -p` that crashed before writing anything, or a
-    transient `cat` failure all come back as `None`, not an exception.
-    `None` specifically (never `""`) is what lets `SessionHistory.record`
-    tell "nothing to capture" apart from "captured an empty file" without a
+    started, a `claude -p` that crashed before writing anything, or the file
+    being unreadable all come back as `None`, not an exception. `None`
+    specifically (never `""`) is what lets `SessionHistory.record` tell
+    "nothing to capture" apart from "captured an empty file" without a
     second sentinel.
     """
-    result = runner.run(["cat", transcript_path(unit)], check=False)
-    if result.returncode != 0 or not result.stdout:
+    try:
+        text = Path(transcript_path(unit)).read_text()
+    except OSError:
         return None
-    return result.stdout
+    return text or None

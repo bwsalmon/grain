@@ -45,6 +45,25 @@ chmod +x /usr/local/bin/gce_metadata_server
 id -u grain-metadata >/dev/null 2>&1 || \
   useradd --system --no-create-home --shell /usr/sbin/nologin grain-metadata
 
+# The dedicated, unprivileged account `claude -p` (and the MCP server it
+# spawns as a child — grain/automation/mcp_server.py) runs as, per dispatch
+# (docs/roadmap.md item 8's "Update"). Unlike grain-metadata this one needs
+# a real home directory: `claude`'s own installer targets ~/.local/bin, and
+# its OAuth credential lives at ~/.claude/.credentials.json (placed by
+# `configure_claude_credentials`, grain/automation/configure.py). Never
+# root, and never the account grain-automation.service itself runs as —
+# this is specifically the account that runs untrusted-issue-driven agent
+# sessions, and the whole point of moving `claude -p` here from the sandbox
+# was to stop giving that session anything worth taking.
+id -u grain-agent >/dev/null 2>&1 || \
+  useradd --system --create-home --shell /usr/sbin/nologin grain-agent
+sudo -u grain-agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+# Same PATH fix `provision/sandbox.sh` already needed for the identical
+# reason: `systemd-run --uid=grain-agent` is a non-login, non-interactive
+# shell that never sources ~/.profile, which is what would otherwise put
+# the installer's target directory, ~/.local/bin, on PATH.
+ln -sf /home/grain-agent/.local/bin/claude /usr/local/bin/claude
+
 # --- /data: the disk that outlives a controller rebuild (docs/design.md,
 # "Secrets on /data"). On GCP this is expected to be a separate persistent
 # disk, attached before this script runs; nothing here formats or mounts
@@ -58,6 +77,13 @@ install -d -m0700 /data/secrets/github
 install -d -m0755 /data/config
 install -d -m0755 /data/state
 install -d -m0755 /data/state/automation
+# One subdirectory per dispatched unit — the controller-local prompt, MCP
+# config, and transcript `dispatch.py` now writes for each `claude -p`
+# session it starts here (docs/roadmap.md item 8's "Update"). Nothing under
+# it is secret (untrusted-but-not-secret prompt content, a path to the SSH
+# key rather than the key itself, and the transcript already flowing
+# through the audit trail), so 0755 root-owned is fine — same as the parent.
+install -d -m0755 /data/state/automation/units
 install -d -m0755 /data/state/git-proxy
 install -d -m0755 /data/state/metadata-server
 # /data/secrets is 0711 (traverse, not list) rather than 0700 so that
@@ -93,7 +119,16 @@ install -d -m0755 /data/state/metadata-server
 if [ ! -f /data/secrets/controller-ssh ]; then
   ssh-keygen -t ed25519 -f /data/secrets/controller-ssh -N "" -q
 fi
-chmod 0600 /data/secrets/controller-ssh
+# Group-readable, not just root-owned: `grain-agent`'s MCP server
+# (grain/automation/mcp_server.py) is a separate process from
+# grain-automation.service (still root, unchanged) and needs to read this
+# key itself, to build its own SshRunner reaching the sandbox it was told
+# to target. This grants no controller-side privilege — the key only ever
+# authenticates to a disposable, unprivileged (debian-uid) sandbox account
+# behind the existing host firewall, the same reach `grain-agent`'s tools
+# already have by design.
+chown root:grain-agent /data/secrets/controller-ssh
+chmod 0640 /data/secrets/controller-ssh
 chmod 0644 /data/secrets/controller-ssh.pub
 
 # --- Where this repo's code is expected to live once deployed by hand (see
@@ -158,8 +193,15 @@ Set up by provision/controller.sh:
 - python3, git, openssh-client, ca-certificates
 - gce_metadata_server, at /usr/local/bin, and the grain-metadata system user
   it runs each per-sandbox instance as
+- claude (Claude Code CLI), at /usr/local/bin, and the grain-agent system
+  user it runs as — `claude -p` runs HERE now, not on the sandboxes
+  (docs/roadmap.md item 8's "Update"); grain-agent can read
+  /data/secrets/controller-ssh (group grain-agent, mode 0640) so its MCP
+  server (grain/automation/mcp_server.py) can reach the sandbox it was
+  dispatched against, and nothing else under /data/secrets
 - the /data/{secrets,config,state} layout grain/automation, grain/proxy and
-  grain/metadata already expect
+  grain/metadata already expect, including /data/state/automation/units
+  where each dispatch's prompt/MCP-config/transcript now live
 - the controller SSH keypair, /data/secrets/controller-ssh{,.pub}
 - /opt/grain, empty, where this repo's code is deployed by hand
 - grain-automation.{service,timer} and grain-git-proxy.service, installed
@@ -172,5 +214,8 @@ Still manual, per docs/runbook.md's first-time setup checklist:
 - copying /data/secrets/controller-ssh.pub to the host, for
   LibvirtAdapter.ssh_public_key_path to embed into sandboxes it creates
 - enabling grain-git-proxy.service and grain-automation.timer
-- Claude Code login in each sandbox
+- a Claude Code login for grain-agent, placed via
+  `configure_claude_credentials` (grain/automation/configure.py) — one
+  login for the whole pool, never one per sandbox, and never touching a
+  sandbox at all now
 DOC

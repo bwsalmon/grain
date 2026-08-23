@@ -265,3 +265,15 @@ def test_configure_claude_credentials_writes_mode_600(two_key_sandbox, admin_ssh
         ["sudo", "stat", "-c", "%a", "/data/secrets/claude-credentials.json"]
     ).stdout.strip()
     assert mode == "600"
+
+    # docs/roadmap.md item 8's "Update": the live copy claude -p actually
+    # reads now, owned by the dedicated grain-agent account it runs as
+    # (provision/controller.sh) -- not any sandbox.
+    live_mode = admin_ssh.run(
+        ["sudo", "stat", "-c", "%a %U:%G", "/home/grain-agent/.claude/.credentials.json"]
+    ).stdout.strip()
+    assert live_mode == "600 grain-agent:grain-agent"
+    live_content = admin_ssh.run(
+        ["sudo", "cat", "/home/grain-agent/.claude/.credentials.json"]
+    ).stdout
+    assert live_content == '{"accessToken": "tok"}'

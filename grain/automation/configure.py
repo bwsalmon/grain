@@ -25,13 +25,26 @@ DATA_CONFIG = "/data/config"
 DATA_SECRETS_GITHUB = "/data/secrets/github"
 CLAUDE_CREDENTIALS_PATH = "/data/secrets/claude-credentials.json"
 SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
+# Where the live copy `claude -p` actually reads goes now that it runs on
+# the controller as the dedicated `grain-agent` account (docs/roadmap.md
+# item 8's "Update", provision/controller.sh) instead of on a sandbox.
+_AGENT_CREDENTIALS_DIR = "/home/grain-agent/.claude"
+_AGENT_CREDENTIALS_PATH = f"{_AGENT_CREDENTIALS_DIR}/.credentials.json"
 
 
-def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str) -> None:
+def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
+                        owner: str | None = None) -> None:
     parent = str(PurePosixPath(path).parent)
     runner.run(["sudo", "mkdir", "-p", parent])
     runner.run(["sudo", "dd", f"of={path}", "status=none"], stdin=content)
     runner.run(["sudo", "chmod", mode, path])
+    if owner is not None:
+        runner.run(["sudo", "chown", f"{owner}:{owner}", path])
+        # `mkdir -p` above runs as root, so a freshly-created parent (e.g.
+        # ~/.claude, the first time a credential is placed) would otherwise
+        # stay root-owned under an account that needs to write other things
+        # there itself later (Claude Code's own settings/session state).
+        runner.run(["sudo", "chown", f"{owner}:{owner}", parent])
 
 
 def configure_repo(runner: Runner, owner: str, repo: str, *,
@@ -77,11 +90,23 @@ def configure_github_credential(runner: Runner, owner: str, repo: str, token: st
 
 
 def configure_claude_credentials(runner: Runner, credentials_json: str) -> None:
-    """Places a Claude Code OAuth credential file on the controller, ready
-    for injection into sandboxes (docs/bootstrap.md, "The Claude
-    credential") -- one login placed once, not one per sandbox.
+    """Places a Claude Code OAuth credential on the controller -- one login
+    placed once, not one per sandbox (docs/bootstrap.md, "The Claude
+    credential"). Two copies, both written here now (docs/roadmap.md item
+    8's "Update" folded the old per-sandbox injection loop, formerly in
+    `grain/bootstrap.py` stage 9, into this single controller-side step,
+    since `claude -p` runs on the controller now and no sandbox needs any
+    Claude credential at all):
+
+    - `CLAUDE_CREDENTIALS_PATH`, a root-owned reference copy under
+      `/data/secrets`, matching every other credential this module places;
+    - `_AGENT_CREDENTIALS_PATH`, the live copy `claude -p` actually reads,
+      owned by the dedicated `grain-agent` account it runs as
+      (`provision/controller.sh`) rather than root.
     """
     _write_remote_file(runner, CLAUDE_CREDENTIALS_PATH, credentials_json, mode="600")
+    _write_remote_file(runner, _AGENT_CREDENTIALS_PATH, credentials_json, mode="600",
+                        owner="grain-agent")
 
 
 def ensure_sandbox_tokens(runner: Runner, sandbox_names: list[str]) -> None:

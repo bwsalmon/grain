@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
+import grain.automation.capture as capture_module
 from grain.automation.config import AutomationConfig
-from grain.automation.dispatch import transcript_path, unit_name
+from grain.automation.dispatch import unit_name
 from grain.automation.history import RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.automation.sweeper import Outcome, sweep
@@ -18,6 +19,17 @@ def state_with(sandbox: str, issue: int, started_at: datetime) -> AutomationStat
     state = AutomationState()
     state.assign(sandbox, issue, unit=f"grain-task-{sandbox}", now=started_at)
     return state
+
+
+def _point_transcript_at(monkeypatch, tmp_path, unit: str):
+    """`claude -p` now runs on the controller (docs/roadmap.md item 8's
+    "Update"), so `capture_trajectory` reads a plain local file, not
+    something over a `Runner` -- these tests point that read at a real
+    tmp_path file instead of scripting a `cat` response on a FakeRunner.
+    """
+    path = tmp_path / f"{unit}.transcript.jsonl"
+    monkeypatch.setattr(capture_module, "transcript_path", lambda u: str(path))
+    return path
 
 
 # A fully-healthy sandbox, so tests that don't care about health/cleanup
@@ -52,7 +64,7 @@ def runner_reporting(active_state: str, result: str = "success", *,
 def test_a_still_active_run_within_budget_is_left_alone():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("active")
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.succeeded == result.failed == result.stranded == []
     assert "sandbox-0" in state.assignments
 
@@ -60,7 +72,7 @@ def test_a_still_active_run_within_budget_is_left_alone():
 def test_a_successful_unit_frees_the_slot_and_is_reported_succeeded():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("inactive", "success")
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.succeeded == [Outcome("sandbox-0", 1)]
     assert "sandbox-0" not in state.assignments
     assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
@@ -69,7 +81,7 @@ def test_a_successful_unit_frees_the_slot_and_is_reported_succeeded():
 def test_a_failed_unit_frees_the_slot_and_is_reported_failed():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("failed", "exit-code")
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.failed == [Outcome("sandbox-0", 1)]
     assert "sandbox-0" not in state.assignments
 
@@ -78,7 +90,7 @@ def test_an_absent_unit_is_stranded_without_reaping():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = FakeRunner()
     runner.expect("systemctl show", returncode=1)
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.stranded == [Outcome("sandbox-0", 1)]
     assert "sandbox-0" not in state.assignments
     assert not runner.ran("sudo systemctl stop")
@@ -88,7 +100,7 @@ def test_a_run_past_max_runtime_is_stranded_even_if_still_active():
     started = NOW - timedelta(minutes=200)
     state = state_with("sandbox-0", issue=1, started_at=started)
     runner = runner_reporting("active")
-    result = sweep(state, lambda name: runner, config(max_runtime_minutes=120), NOW)
+    result = sweep(state, lambda name: runner, runner, config(max_runtime_minutes=120), NOW)
     assert result.stranded == [Outcome("sandbox-0", 1)]
     assert "sandbox-0" not in state.assignments
     assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
@@ -98,7 +110,7 @@ def test_a_run_within_a_custom_max_runtime_stays_active():
     started = NOW - timedelta(minutes=30)
     state = state_with("sandbox-0", issue=1, started_at=started)
     runner = runner_reporting("active")
-    result = sweep(state, lambda name: runner, config(max_runtime_minutes=120), NOW)
+    result = sweep(state, lambda name: runner, runner, config(max_runtime_minutes=120), NOW)
     assert result.stranded == []
     assert "sandbox-0" in state.assignments
 
@@ -112,7 +124,19 @@ def test_sweep_uses_the_per_sandbox_runner_factory():
         "sandbox-0": runner_reporting("inactive", "success"),
         "sandbox-1": runner_reporting("active"),
     }
-    result = sweep(state, lambda name: runners[name], config(), now)
+    # unit_status/reap now go through one shared controller_runner (the
+    # unit lives on the controller regardless of which sandbox it targets)
+    # -- scripted to answer for both units at once.
+    controller_runner = FakeRunner()
+    controller_runner.expect(
+        "systemctl show grain-task-sandbox-0",
+        stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n",
+    )
+    controller_runner.expect(
+        "systemctl show grain-task-sandbox-1",
+        stdout="LoadState=loaded\nActiveState=active\nResult=success\n",
+    )
+    result = sweep(state, lambda name: runners[name], controller_runner, config(), now)
     assert [o.sandbox for o in result.succeeded] == ["sandbox-0"]
     assert "sandbox-1" in state.assignments
 
@@ -123,7 +147,7 @@ def test_sweep_uses_the_per_sandbox_runner_factory():
 def test_a_freed_sandbox_gets_the_cleanup_hook_run_on_it():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("inactive", "success")
-    sweep(state, lambda name: runner, config(), NOW)
+    sweep(state, lambda name: runner, runner, config(), NOW)
     assert runner.ran("kind delete clusters --all")
     assert runner.ran("docker system prune -af --volumes")
 
@@ -131,7 +155,7 @@ def test_a_freed_sandbox_gets_the_cleanup_hook_run_on_it():
 def test_cleanup_runs_for_a_failed_run_too():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("failed", "exit-code")
-    sweep(state, lambda name: runner, config(), NOW)
+    sweep(state, lambda name: runner, runner, config(), NOW)
     assert runner.ran("kind delete clusters --all")
 
 
@@ -141,7 +165,7 @@ def test_cleanup_runs_for_a_stranded_absent_unit_too():
     runner.expect("systemctl show", returncode=1)
     for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
         runner.expect(prefix, stdout=stdout, returncode=returncode)
-    sweep(state, lambda name: runner, config(), NOW)
+    sweep(state, lambda name: runner, runner, config(), NOW)
     assert runner.ran("kind delete clusters --all")
     assert runner.ran("docker system prune -af --volumes")
 
@@ -149,7 +173,7 @@ def test_cleanup_runs_for_a_stranded_absent_unit_too():
 def test_a_still_active_run_gets_no_cleanup_or_health_probe():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("active")
-    sweep(state, lambda name: runner, config(), NOW)
+    sweep(state, lambda name: runner, runner, config(), NOW)
     assert not runner.ran("kind")
     assert not runner.ran("docker")
     assert not runner.ran("true")
@@ -158,7 +182,7 @@ def test_a_still_active_run_gets_no_cleanup_or_health_probe():
 def test_a_healthy_freed_sandbox_reports_no_health_warning():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("inactive", "success", healthy=True)
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.health_warnings == []
 
 
@@ -167,7 +191,7 @@ def test_an_unhealthy_freed_sandbox_is_reported_but_still_freed():
     runner = runner_reporting("inactive", "success", healthy=False)
     # No health extras scripted: systemd/docker/disk probes fall through to
     # FakeRunner's empty-output default, which fails to parse -> degraded.
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert len(result.health_warnings) == 1
     assert result.health_warnings[0].sandbox == "sandbox-0"
     # The slot is freed regardless — a health problem doesn't gate reuse,
@@ -184,7 +208,7 @@ def test_an_unreachable_sandbox_is_reported_unreachable_not_crashed():
         stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n",
     )
     runner.expect("true", returncode=255, stderr="ssh: connect timed out")
-    result = sweep(state, lambda name: runner, config(), NOW)  # must not raise
+    result = sweep(state, lambda name: runner, runner, config(), NOW)  # must not raise
     assert len(result.health_warnings) == 1
     assert "unreachable" in result.health_warnings[0].detail
 
@@ -197,14 +221,14 @@ def test_a_swept_pr_assignment_carries_its_kind_and_branch_into_the_outcome():
     state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0", now=NOW,
                  kind=TriggerKind.PR, branch="feature-x")
     runner = runner_reporting("inactive", "success")
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.succeeded == [Outcome("sandbox-0", 9, kind=TriggerKind.PR, branch="feature-x")]
 
 
 def test_an_issue_assignment_still_defaults_to_issue_kind_with_no_branch():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("inactive", "success")
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.succeeded[0].kind is TriggerKind.ISSUE
     assert result.succeeded[0].branch is None
 
@@ -216,19 +240,17 @@ def test_sweep_with_no_history_argument_still_works_unchanged():
     # pass history= at all -- must keep working exactly as before.
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("inactive", "success")
-    result = sweep(state, lambda name: runner, config(), NOW)
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.succeeded == [Outcome("sandbox-0", 1)]
 
 
-def test_a_successful_release_captures_the_transcript_and_records_it():
+def test_a_successful_release_captures_the_transcript_and_records_it(monkeypatch, tmp_path):
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("inactive", "success")
-    runner.expect(
-        f"cat {transcript_path(unit_name('sandbox-0'))}",
-        stdout='{"type": "result", "result": "done"}\n',
-    )
+    transcript = _point_transcript_at(monkeypatch, tmp_path, unit_name("sandbox-0"))
+    transcript.write_text('{"type": "result", "result": "done"}\n')
     history = RecordingSessionHistory()
-    sweep(state, lambda name: runner, config(), NOW, history=history)
+    sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert len(history.calls) == 1
     call = history.calls[0]
     assert call["issue"] == 1
@@ -240,44 +262,43 @@ def test_a_successful_release_captures_the_transcript_and_records_it():
     assert call["transcript_text"] == '{"type": "result", "result": "done"}\n'
 
 
-def test_a_failed_release_is_recorded_with_outcome_failed():
+def test_a_failed_release_is_recorded_with_outcome_failed(monkeypatch, tmp_path):
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("failed", "exit-code")
+    _point_transcript_at(monkeypatch, tmp_path, unit_name("sandbox-0"))
     history = RecordingSessionHistory()
-    sweep(state, lambda name: runner, config(), NOW, history=history)
+    sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert history.calls[0]["outcome"] == "failed"
 
 
-def test_a_stranded_absent_release_is_recorded_with_no_transcript():
+def test_a_stranded_absent_release_is_recorded_with_no_transcript(monkeypatch, tmp_path):
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = FakeRunner()
     runner.expect("systemctl show", returncode=1)
     for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
         runner.expect(prefix, stdout=stdout, returncode=returncode)
-    # No `cat` scripted -- a never-started unit never wrote a transcript;
-    # FakeRunner's empty default response is what a real `cat` of a missing
-    # file's failure collapses to here too (capture_trajectory -> None).
+    # transcript_path pointed at a file that's never written -- a
+    # never-started unit never wrote one; capture_trajectory -> None.
+    _point_transcript_at(monkeypatch, tmp_path, unit_name("sandbox-0"))
     history = RecordingSessionHistory()
-    sweep(state, lambda name: runner, config(), NOW, history=history)
+    sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert history.calls[0]["outcome"] == "stranded"
     assert history.calls[0]["transcript_text"] is None
 
 
-def test_a_run_past_max_runtime_is_captured_before_release_too():
+def test_a_run_past_max_runtime_is_captured_before_release_too(monkeypatch, tmp_path):
     started = NOW - timedelta(minutes=200)
     state = state_with("sandbox-0", issue=1, started_at=started)
     runner = runner_reporting("active")
-    runner.expect(
-        f"cat {transcript_path(unit_name('sandbox-0'))}",
-        stdout='{"type": "system"}\n',
-    )
+    transcript = _point_transcript_at(monkeypatch, tmp_path, unit_name("sandbox-0"))
+    transcript.write_text('{"type": "system"}\n')
     history = RecordingSessionHistory()
-    sweep(state, lambda name: runner, config(max_runtime_minutes=120), NOW, history=history)
+    sweep(state, lambda name: runner, runner, config(max_runtime_minutes=120), NOW, history=history)
     assert history.calls[0]["outcome"] == "stranded"
     assert history.calls[0]["transcript_text"] == '{"type": "system"}\n'
 
 
-def test_capture_happens_before_the_slot_is_freed_in_state():
+def test_capture_happens_before_the_slot_is_freed_in_state(monkeypatch, tmp_path):
     # A capture step that reads history.record()'s own record of the
     # assignment must see the pre-release Assignment (kind/branch included)
     # -- checked indirectly here via a PR-kind assignment carrying its
@@ -286,8 +307,9 @@ def test_capture_happens_before_the_slot_is_freed_in_state():
     state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0", now=NOW,
                  kind=TriggerKind.PR, branch="feature-x")
     runner = runner_reporting("inactive", "success")
+    _point_transcript_at(monkeypatch, tmp_path, unit_name("sandbox-0"))
     history = RecordingSessionHistory()
-    sweep(state, lambda name: runner, config(), NOW, history=history)
+    sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert history.calls[0]["kind"] is TriggerKind.PR
 
 
@@ -295,5 +317,5 @@ def test_a_still_active_run_within_budget_captures_nothing():
     state = state_with("sandbox-0", issue=1, started_at=NOW)
     runner = runner_reporting("active")
     history = RecordingSessionHistory()
-    sweep(state, lambda name: runner, config(), NOW, history=history)
+    sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert history.calls == []

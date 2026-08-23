@@ -245,7 +245,10 @@ def test_resume_after_a_mid_chain_failure_skips_already_converged_stages(env):
     assert not runner.ran("ssh-keygen")
 
 
-def test_claude_credentials_are_injected_into_every_sandbox(env):
+def test_claude_credentials_reach_the_controllers_grain_agent_account_not_any_sandbox(env):
+    # docs/roadmap.md item 8's "Update": claude -p runs on the controller
+    # now, as the dedicated grain-agent account -- no sandbox gets any
+    # Claude credential at all anymore.
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
         runner, cluster, admin_private,
@@ -257,11 +260,19 @@ def test_claude_credentials_are_injected_into_every_sandbox(env):
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
-    sandbox_prefix = ssh_prefix("debian", str(cluster.address_of("sandbox-0")), admin_private)
-    dd_calls = [
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    controller_dd_calls = [
         stdin for argv, stdin in runner.calls
-        if argv and argv[0] == "ssh"
-        and argv[-1] == "dd of=/home/debian/.claude/.credentials.json status=none"
+        if argv and argv[0] == "ssh" and "dd" in argv[-1]
+        and "/home/grain-agent/.claude/.credentials.json" in argv[-1]
+        and shlex.join(argv).startswith(controller_prefix)
+    ]
+    assert controller_dd_calls == ['{"accessToken": "x"}']
+
+    sandbox_prefix = ssh_prefix("debian", str(cluster.address_of("sandbox-0")), admin_private)
+    sandbox_claude_calls = [
+        argv for argv, _ in runner.calls
+        if argv and argv[0] == "ssh" and ".claude" in argv[-1]
         and shlex.join(argv).startswith(sandbox_prefix)
     ]
-    assert dd_calls == ['{"accessToken": "x"}']
+    assert sandbox_claude_calls == []
