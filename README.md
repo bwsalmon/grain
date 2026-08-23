@@ -81,16 +81,16 @@ revocable per sandbox.
 - **[`docs/host-adapter.md`](docs/host-adapter.md)** — the one
   platform-specific module, and what a macOS port would have to replace.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
-- **[`docs/next-session.md`](docs/next-session.md)** — where to pick up.
+- **[`docs/next-session.md`](docs/next-session.md)** — what is left before
+  a first real run, in the order worth doing it. Start here.
 
-> **The `docs/` tree predates the move described above.** It still
-> describes `claude -p` running on the sandbox with a login credential
-> there, and `docs/next-session.md` still names the sandbox permission
-> prompt as the blocker — the redesign is what removed that blocker. The
-> code, `provision/`, and this file are current; treat those docs as
-> accurate on everything *except* where the agent process runs, and read
-> `grain/automation/dispatch.py`'s and `mcp_server.py`'s module docstrings
-> for the live findings behind the change.
+> **`design.md`, `system-diagram.md`, `roadmap.md`, and `runbook.md`
+> predate the move described above** — they still describe `claude -p`
+> running on the sandbox with a login credential there. They are accurate
+> on everything else. The code, `provision/`, `next-session.md`, and this
+> file are current; for the live findings behind the change, read
+> `grain/automation/dispatch.py`'s and `mcp_server.py`'s module
+> docstrings.
 
 Read the ["Status and limits"](#status-and-limits) section before pointing
 this at a repo you care about.
