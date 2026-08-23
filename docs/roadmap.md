@@ -431,6 +431,75 @@ way nobody scripted for. That gap is real, and closing it needs the three
 things listed at the top of this item — a real repo, a real credential, a
 real login — none of which exist in this environment.
 
+**Update: two of the three now exist, and closing that gap surfaced three
+more, real, bugs.** A `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`)
+became available, and this dev host already has `/dev/kvm`. Rather than a
+real GitHub repo, `--github-host`/`--git-forward-host`/`--github-insecure-
+http` (new flags on `grain controller configure`/`host bootstrap`, threading
+into `AutomationConfig.github_host`/`git_forward_host`/`github_use_tls` and
+`RealTransport`/`RealForwarder`'s existing `host`/`use_tls` constructor
+args) point the *real, deployed* `grain-automation.timer` — not this item's
+own in-process `Orchestrator` harness — at a small standalone mock server
+combining `RealGitHubMock`-shaped REST endpoints with a `git http-backend`
+CGI, run on the host's own bridge address. `CLAUDE_CODE_OAUTH_TOKEN` was
+injected via `sudo systemctl set-environment` on each sandbox rather than
+`--claude-credentials-file`'s `~/.claude/.credentials.json` shape, since a
+`setup-token` value is exactly the env-var form and sidesteps the
+concurrent-refresh open question entirely. Two real `grain host bootstrap`
+runs later (the first collided with and lost its VMs to an unrelated
+concurrent live-suite run on this shared host — a fresh bootstrap avoided
+it), a real sandbox dispatched a real `claude -p` against the mock:
+
+- **Fixed: `claude` wasn't on `PATH` for a dispatched task.** The installer
+  places it at `~/.local/bin/claude`; `dispatch.py`'s `systemd-run
+  --uid=debian` is a non-login shell that never sources `~/.profile`, the
+  only thing that adds that directory to `PATH`. Every prior live suite used
+  a fake `claude` already sitting on `/usr/local/bin` (on `systemd`'s
+  default `PATH`), so this never surfaced before a real login existed to
+  test with. Fixed in `provision/sandbox.sh`: `ln -sf ~/.local/bin/claude
+  /usr/local/bin/claude`.
+- **Fixed: a sandbox's first-ever dispatch always failed git-proxy auth.**
+  `grain-git-proxy.service` loads `sandbox-tokens.json` once at start
+  (`SandboxTokens`, never re-read); a token is normally minted lazily, on
+  first dispatch (`SandboxTokenStore.ensure_token`, called from
+  `dispatch.py`). Bootstrap's stage 10 enables the proxy before any
+  dispatch has ever happened, so on a fresh deployment the proxy always
+  starts with an empty token file, and the very first real dispatch to any
+  sandbox 401s against it — `git clone` came back `fatal: Authentication
+  failed`, cryptic against the actual cause. Fixed: a new
+  `ensure_sandbox_tokens` (`grain/automation/configure.py`) mints every
+  sandbox's token before stage 10, so the proxy's first-ever load already
+  has the complete set. (`tests/test_live_issue_to_pr.py`'s own fixture
+  independently works around the identical ordering hazard by pre-minting
+  before constructing its in-process `GitProxy` — this generalizes that
+  into the real bootstrap sequencer.)
+- **Open, not fixed: a real agent still cannot push.** `git commit` succeeds
+  (the sandbox's own `sandbox.autoAllowBashIfSandboxed`, default on, covers
+  it), but `git push origin HEAD:<branch>` — the exact instruction
+  `dispatch.py`'s prompt gives the agent — needs a sandbox network-domain
+  approval no `-p` run with no `--permission-prompt-tool` can ever answer.
+  `sandbox.network.allowedDomains` is upstream's documented way to pre-
+  allow a host with no prompt; `["10.100.0.2"]` (the git proxy's address),
+  `["10.100.0.2", "10.100.0.2:8080"]`, and even `["*"]` were each tried
+  live in `~/.claude/settings.json` and every one still hit "needs your
+  explicit approval ... network access to `10.100.0.2:8080`." Switching
+  `dispatch.py` from `--permission-mode acceptEdits` to
+  `--dangerously-skip-permissions` — upstream's documented answer for
+  "fully unattended inside a container, VM, or the sandbox runtime," which
+  a grain sandbox already is — made things *worse* live: under it,
+  `autoAllowBashIfSandboxed` stopped applying and `git add`/`commit`
+  started needing approval too, which plain `acceptEdits` never blocked.
+  Reverted to `acceptEdits` (the empirically-furthest-getting mode) with
+  the push gate still open; `docs/design.md`'s "Interim choice" section
+  records the same finding. Every unit exits zero without pushing, so the
+  sweeper's own "succeeded but branch does not exist" requeue path
+  (exercised by this item's mock-harness scenario 3) is what actually
+  fires — correct behavior, just not the outcome this run was after. Next
+  things worth trying, not yet attempted: a `--permission-prompt-tool`
+  script that auto-answers exactly this prompt, or `--permission-mode
+  dontAsk` with an explicit `permissions.allow` covering `Bash(git *)`
+  (`docs/design.md` already named `dontAsk` as "the locked-down end").
+
 ## 9. Dispatch to an existing PR, not just a labelled issue
 
 - [x] Done

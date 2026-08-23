@@ -937,6 +937,28 @@ Also note `-p` starts in Manual permission mode on every plan, so an
 autonomous run needs an explicit `--permission-mode`; `acceptEdits` fits a
 disposable VM, `dontAsk` is the locked-down end.
 
+**Open, found live against a real Claude Code login (docs/roadmap.md item
+8):** `acceptEdits` auto-approves file edits and a fixed list of
+filesystem-only Bash commands (`mkdir`, `touch`, `mv`, `cp`, `sed`, ...),
+never git -- but in practice the sandbox's own `autoAllowBashIfSandboxed`
+(default on, independent of `--permission-mode`) covers `git clone`/`add`/
+`commit` anyway, so the only command that actually blocks on approval is
+`git push origin HEAD:<branch>`, and specifically only its *network* leg:
+the sandbox's `network.allowedDomains` is supposed to pre-allow a listed
+host with no prompt, but a real run still hit "needs your explicit approval
+... network access to `10.100.0.2:8080`" with the git proxy's address
+listed. `--dangerously-skip-permissions` looked like the documented fix for
+"fully unattended inside a container/VM," but made things worse live --
+under it, `sandbox.enabled`'s own auto-allow stopped applying and `git add`/
+`commit` started needing approval too, which `acceptEdits` never blocked.
+Reverted to `acceptEdits`, the empirically-better-performing mode, with the
+network-approval gate still open. Whatever the actual fix turns out to be
+(a different `allowedDomains` spelling, `--permission-prompt-tool`, a
+`dontAsk` + explicit `permissions.allow` for `Bash(git *)`, or something
+else in the sandbox/permission interaction not yet understood), this is the
+one item standing between "verified against a mocked GitHub" and "verified
+with a real agent actually pushing."
+
 **It would run on metered API billing, not a subscription.** The two
 constraints above compound: `--bare` is what stops cloned-repo hooks from
 executing, and `--bare` does not read `CLAUDE_CODE_OAUTH_TOKEN` — it
