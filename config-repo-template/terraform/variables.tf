@@ -275,3 +275,9 @@ variable "deploy_timeout_minutes" {
   description = "How long the on-VM deploy may run before config-sync gives up and reports failure."
   default     = 45
 }
+
+variable "bootstrap_ssh_timeout_seconds" {
+  type        = number
+  description = "How long grain host bootstrap waits for a freshly created VM (the controller, then each sandbox) to answer SSH at all, before giving up on it -- grain's own --ssh-timeout, default 180s. Nested virtualization on a real cloud VM can take longer than that to boot cold, well within deploy_timeout_minutes's much larger budget."
+  default     = 600
+}

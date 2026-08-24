@@ -52,7 +52,8 @@ def sh(name, value):
 
 out = ""
 for key in ("grain_repo_url", "grain_ref", "debian_image_url",
-            "task_repo", "default_target_repo", "credential_name"):
+            "task_repo", "default_target_repo", "credential_name",
+            "bootstrap_ssh_timeout_seconds"):
     out += sh(key.upper(), cfg.get(key, "") or "")
 targets = cfg.get("target_repos") or []
 out += "TARGET_REPOS=(" + " ".join(shlex.quote(t) for t in targets) + ")\n"
@@ -181,6 +182,10 @@ run_bootstrap() {
   local claude_file="$RUNDIR/claude.token"
   local args=(--cluster-file "$CLUSTER_FILE" host bootstrap --task-repo "$TASK_REPO")
   local repo
+
+  if [ -n "$BOOTSTRAP_SSH_TIMEOUT_SECONDS" ]; then
+    args+=(--ssh-timeout "$BOOTSTRAP_SSH_TIMEOUT_SECONDS")
+  fi
 
   fetch_secret_to_file "$GITHUB_TOKEN_ATTR" "$gh_file" "$SECRET_WAIT_REQUIRED" \
     || die "no '$GITHUB_TOKEN_ATTR' in instance metadata; set GRAIN_GITHUB_TOKEN in the repo's Actions secrets"

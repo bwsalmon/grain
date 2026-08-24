@@ -10,16 +10,17 @@ locals {
   # separately, pushed straight into instance metadata by the deploy
   # workflow after `terraform apply` returns, never through Terraform.
   grain_config = {
-    grain_repo_url      = var.grain_repo_url
-    grain_ref           = var.grain_ref
-    debian_image_url    = var.debian_image_url
-    sandbox_count       = var.sandbox_count
-    cluster_overrides   = var.cluster_overrides
-    task_repo           = local.task_repo
-    target_repos        = var.target_repos
-    default_target_repo = var.default_target_repo
-    credential_name     = var.credential_name
-    deploy_timeout_secs = var.deploy_timeout_minutes * 60
+    grain_repo_url                = var.grain_repo_url
+    grain_ref                     = var.grain_ref
+    debian_image_url              = var.debian_image_url
+    sandbox_count                 = var.sandbox_count
+    cluster_overrides             = var.cluster_overrides
+    task_repo                     = local.task_repo
+    target_repos                  = var.target_repos
+    default_target_repo           = var.default_target_repo
+    credential_name               = var.credential_name
+    deploy_timeout_secs           = var.deploy_timeout_minutes * 60
+    bootstrap_ssh_timeout_seconds = var.bootstrap_ssh_timeout_seconds
   }
 }
 
