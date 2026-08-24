@@ -69,7 +69,7 @@ class AutomationConfig:
     awaiting_reply_label: str = "grain-agent-awaiting-reply"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
-    runs_per_hour: int = 10
+    runs_per_hour: int = 60
     max_runtime_minutes: int = 120
     # Overrides RealTransport's/RealForwarder's host+scheme -- unset in
     # every real deployment, set only to point a live test at a mock GitHub

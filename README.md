@@ -509,7 +509,7 @@ The defaults worth knowing: `trigger_label: "grain-agent"`,
 `in_progress_label: "grain-agent-in-progress"`,
 `awaiting_reply_label: "grain-agent-awaiting-reply"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
-`runs_per_hour: 10`, `max_runtime_minutes: 120`. Also
+`runs_per_hour: 60`, `max_runtime_minutes: 120`. Also
 `github_host: "api.github.com"`, `git_forward_host: "github.com"`, and
 `github_use_tls: true` — right for every real deployment, and set
 otherwise only to point a live test at a mock GitHub
