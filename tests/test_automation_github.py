@@ -99,6 +99,21 @@ def test_remove_label_raises_on_other_errors():
         GitHubClient(transport, token="t").remove_label("o", "r", 1, "grain-agent")
 
 
+def test_close_issue_patches_the_issue_closed():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b"{}")])
+    GitHubClient(transport, token="t").close_issue("o", "r", 1)
+    call = transport.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["path"] == "/repos/o/r/issues/1"
+    assert json.loads(call["body"]) == {"state": "closed"}
+
+
+def test_close_issue_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").close_issue("o", "r", 1)
+
+
 def test_anonymous_client_sends_no_authorization_header():
     transport = FakeTransport(responses=[ApiResponse(200, {}, b"[]")])
     GitHubClient(transport, token=None).list_issues("o", "r", "grain-agent")
@@ -354,15 +369,17 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
 
     dry.add_label("o", "r", 1, "grain-agent-in-progress")
     dry.remove_label("o", "r", 1, "grain-agent")
+    dry.close_issue("o", "r", 1)
     pr = dry.create_pull_request("o", "r", head="grain/issue-1", base="main", title="x")
     out = capsys.readouterr().out
     assert "add label" in out
     assert "remove label" in out
+    assert "close issue" in out
     assert "open PR" in out
     assert isinstance(pr, PullRequest)
     # Only the three reads (list_issues, get_issue, branch_exists) actually
-    # reached the transport — every mutation, including PR creation, only
-    # printed.
+    # reached the transport — every mutation, including PR creation and
+    # closing the issue, only printed.
     assert len(transport.calls) == 3
 
 

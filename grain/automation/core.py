@@ -298,11 +298,11 @@ class Orchestrator:
         # fails partway (a 422 from a stale PR, a transient 5xx), the issue
         # stays visibly in-progress rather than looking finished with
         # nothing to show for it.
-        # `Closes <task repo>#<n>`, fully qualified: the task lives in a
-        # different repo from the PR in the general case, and GitHub only
-        # links (and auto-closes) a cross-repo reference when it names the
-        # repo. Falls back to reading identically for a deployment whose
-        # task repo *is* its target repo.
+        # `Closes <task repo>#<n>`, fully qualified: still worth the
+        # cross-repo link/mention on the issue even though (bwsalmon/agents#23)
+        # a qualified `Closes` reference never auto-closes across repos —
+        # GitHub only auto-closes within the same repo the PR is opened in.
+        # The task issue is closed explicitly below instead.
         task = self._task
         # The issue's title isn't on hand here — `Outcome` only carries the
         # number (see sweeper.py's `Outcome` docstring on what does and
@@ -319,6 +319,10 @@ class Orchestrator:
                  f"task {task}#{outcome.issue} finished on {outcome.sandbox}."
                  f"\n\n---\n{_AUTOMATION_SIGNATURE}",
         )
+        # The `Closes` text above never auto-closes across repos
+        # (bwsalmon/agents#23), so the task issue is closed explicitly here
+        # rather than left to rely on it.
+        self.github.close_issue(task.owner, task.name, outcome.issue)
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,

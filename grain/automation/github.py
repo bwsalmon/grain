@@ -325,6 +325,23 @@ class GitHubClient:
         if resp.status not in (200, 404):
             raise GitHubError(resp.status, resp.body)
 
+    def close_issue(self, owner: str, repo: str, number: int) -> None:
+        """Closes a task issue directly. bwsalmon/agents#23: a fully
+        qualified `Closes owner/repo#N` in a PR body only auto-closes
+        within the *same* repo it's opened in — across repos (the task/
+        target split's normal case) it just links, never closes — so
+        `core.py` closes the task issue itself rather than relying on
+        the PR body text to do it.
+        """
+        resp = self.transport.request(
+            method="PATCH",
+            path=f"/repos/{owner}/{repo}/issues/{number}",
+            headers=self._headers(owner, repo, json_body=True),
+            body=json.dumps({"state": "closed"}).encode(),
+        )
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+
     def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
         """Whether `branch` is really on the remote.
 
@@ -488,6 +505,9 @@ class DryRunGitHubClient:
 
     def remove_label(self, owner: str, repo: str, number: int, label: str) -> None:
         print(f"+ remove label {label!r} from {owner}/{repo}#{number}")
+
+    def close_issue(self, owner: str, repo: str, number: int) -> None:
+        print(f"+ close issue {owner}/{repo}#{number}")
 
     def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
         return self.inner.branch_exists(owner, repo, branch)
