@@ -464,14 +464,19 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     mapping and the Claude Code OAuth token. See
     `grain/automation/configure.py`.
 
-    Restarts `grain-git-proxy.service` afterward: `build_proxy`
-    (`grain/proxy/server.py`) reads `automation.json` once, at process
-    startup, so a live proxy keeps forwarding to whatever `git_forward_host`
-    it started with until restarted -- found live, pointing a deployment at
-    a new repo/host otherwise fails with a proxied 500 while the proxy still
-    targets the old one. Harmless if the service isn't running yet (a fresh
-    controller that hasn't reached `host bootstrap`'s stage 10): `systemctl
-    restart` on a stopped-but-installed unit just starts it.
+    Restarts `grain-git-proxy.service` afterward -- once, after every write
+    below rather than right after `configure_repo`: `build_proxy`
+    (`grain/proxy/server.py`) reads both `automation.json` (for
+    `git_forward_host`) and `credentials.json` once, at process startup, so
+    a live proxy keeps using whatever it started with until restarted.
+    Restarting between the two writes (an earlier version of this function
+    did) fixes the first but not the second -- found live, adding a new
+    target repo's credential and immediately dispatching against it failed
+    with a proxied 500 ("no credential configured") because the restart had
+    already happened before `configure_github_credential` wrote the new
+    mapping. Harmless if the service isn't running yet (a fresh controller
+    that hasn't reached `host bootstrap`'s stage 10): `systemctl restart` on
+    a stopped-but-installed unit just starts it.
     """
     cluster = build_cluster(args)
     base_runner = _runner(args)
@@ -481,7 +486,6 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
                     github_host=args.github_host,
                     git_forward_host=args.git_forward_host,
                     github_use_tls=not args.github_insecure_http)
-    ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     if args.github_token_file:
         token = (
             sys.stdin.read() if args.github_token_file == "-"
@@ -493,6 +497,7 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
         )
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
+    ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
 
 
