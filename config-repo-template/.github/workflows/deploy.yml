@@ -1,0 +1,185 @@
+# Push to main -> the deployment converges. Nothing in this workflow
+# touches the host directly: Terraform reconciles the GCP side, the two
+# secrets go into Secret Manager, and the new commit SHA lands in instance
+# metadata, which is what the on-VM config-sync service is watching.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "config/**"
+      - "terraform/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+  # Uncomment to also redeploy on a schedule, which is how you track a
+  # moving grain_ref (e.g. "main") without pushing to this repo.
+  # schedule:
+  #   - cron: "17 6 * * *"
+
+# One rollout at a time. Never cancel one in flight: it is mid-apply.
+concurrency:
+  group: grain-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # for keyless auth to GCP
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # The token the host watches for. A commit SHA for a push; SHA + run
+      # id for a manual or scheduled run, so "redeploy now" always takes.
+      DEPLOY_GENERATION: ${{ github.event_name == 'push' && github.sha || format('{0}-{1}', github.sha, github.run_id) }}
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Preferred: Workload Identity Federation, so this repo holds no GCP
+      # key at all. scripts/bootstrap-gcp.sh sets it up and prints both values.
+      - name: Authenticate to GCP (workload identity)
+        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      # Fallback for projects that cannot use WIF. A long-lived key in a
+      # GitHub secret is strictly worse; prefer the step above.
+      - name: Authenticate to GCP (service account key)
+        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER == '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform init
+        working-directory: terraform
+        run: terraform init -input=false -backend-config=../config/backend.hcl
+
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: |
+          terraform apply -input=false -auto-approve -no-color \
+            -var-file=../config/grain.tfvars \
+            -var="deploy_generation=${DEPLOY_GENERATION}"
+
+      - name: Read outputs
+        id: tf
+        working-directory: terraform
+        run: |
+          {
+            echo "project_id=$(terraform output -raw project_id)"
+            echo "instance=$(terraform output -raw instance_name)"
+            echo "zone=$(terraform output -raw zone)"
+            echo "github_token_secret=$(terraform output -raw github_token_secret)"
+            echo "claude_token_secret=$(terraform output -raw claude_token_secret)"
+          } >> "$GITHUB_OUTPUT"
+
+      # The only place a secret value is ever decrypted. It goes straight
+      # into Secret Manager; the host reads it back with its own instance
+      # identity. Terraform never sees it, so it is not in the state file.
+      - name: Push secrets into Secret Manager
+        env:
+          PROJECT: ${{ steps.tf.outputs.project_id }}
+          GH_TOKEN_SECRET_ID: ${{ steps.tf.outputs.github_token_secret }}
+          CLAUDE_TOKEN_SECRET_ID: ${{ steps.tf.outputs.claude_token_secret }}
+          GRAIN_GITHUB_TOKEN: ${{ secrets.GRAIN_GITHUB_TOKEN }}
+          GRAIN_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.GRAIN_CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          push_secret() {
+            local name="$1" value="$2" current
+            if [ -z "$value" ]; then
+              echo "::warning::$name is empty; leaving Secret Manager untouched"
+              return 0
+            fi
+            # Only add a version when the value actually changed, so
+            # rotation is visible in the version list and a no-op push is
+            # a no-op here too.
+            current="$(gcloud secrets versions access latest \
+              --secret="$name" --project="$PROJECT" 2>/dev/null || true)"
+            if [ "$current" = "$value" ]; then
+              echo "$name: unchanged"
+              return 0
+            fi
+            printf '%s' "$value" | gcloud secrets versions add "$name" \
+              --project="$PROJECT" --data-file=- >/dev/null
+            echo "$name: new version added"
+          }
+
+          push_secret "$GH_TOKEN_SECRET_ID" "$GRAIN_GITHUB_TOKEN"
+          push_secret "$CLAUDE_TOKEN_SECRET_ID" "$GRAIN_CLAUDE_CODE_OAUTH_TOKEN"
+
+      # The host reports progress through guest attributes, so CI fails
+      # when the rollout fails rather than when `terraform apply` returns.
+      - name: Wait for the host to converge
+        env:
+          PROJECT: ${{ steps.tf.outputs.project_id }}
+          INSTANCE: ${{ steps.tf.outputs.instance }}
+          ZONE: ${{ steps.tf.outputs.zone }}
+          TIMEOUT_MINUTES: ${{ vars.ROLLOUT_TIMEOUT_MINUTES || '45' }}
+        run: |
+          set -euo pipefail
+
+          attr() {
+            gcloud compute instances get-guest-attributes "$INSTANCE" \
+              --project="$PROJECT" --zone="$ZONE" --query-path="grain/$1" \
+              --format='value(value)' 2>/dev/null || true
+          }
+
+          deadline=$(( SECONDS + TIMEOUT_MINUTES * 60 ))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status="$(attr deploy-status)"
+            generation="$(attr deploy-generation)"
+            if [ "$generation" = "$DEPLOY_GENERATION" ]; then
+              case "$status" in
+                ok)
+                  echo "host converged on $DEPLOY_GENERATION"
+                  exit 0
+                  ;;
+                failed)
+                  echo "::error::deploy failed on the host: $(attr deploy-detail)"
+                  echo "Inspect it with:"
+                  echo "  gcloud compute ssh $INSTANCE --zone $ZONE --project $PROJECT --tunnel-through-iap \\"
+                  echo "    --command 'sudo journalctl -u grain-config-sync -n 200 --no-pager'"
+                  exit 1
+                  ;;
+              esac
+            fi
+            echo "waiting: generation=${generation:-none} status=${status:-none}"
+            sleep 20
+          done
+
+          echo "::error::host did not report success within ${TIMEOUT_MINUTES}m"
+          echo "A first deploy downloads a base image and boots several VMs;"
+          echo "raise the ROLLOUT_TIMEOUT_MINUTES repository variable if it is just slow."
+          exit 1
+
+      - name: Summary
+        if: always()
+        working-directory: terraform
+        run: |
+          {
+            echo "### grain rollout"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| generation | \`${DEPLOY_GENERATION}\` |"
+            echo "| instance | \`$(terraform output -raw instance_name 2>/dev/null || echo unknown)\` |"
+            echo "| host service account | \`$(terraform output -raw host_service_account 2>/dev/null || echo unknown)\` |"
+            echo "| ssh | \`$(terraform output -raw ssh_command 2>/dev/null || echo unknown)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

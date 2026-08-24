@@ -260,6 +260,24 @@ is created, since sandbox creation is what embeds it as an authorized key.
 The sections below walk through what each stage does, for debugging it or
 doing a step by hand.
 
+### On GCP, from a config repo
+
+[`config-repo-template/`](config-repo-template/) is a repository template
+that does everything above on GCP with nobody SSHing anywhere. Terraform
+creates the host — nested virtualization on, a persistent disk for
+`/var/lib/grain`, and a service account whose roles are one committed list
+— GitHub Actions applies it on every push to `main`, and a small service on
+the host watches instance metadata and re-runs `host bootstrap` whenever
+the config changes.
+
+The GitHub token and the Claude Code token live in that repo's Actions
+secrets, which hand them to Secret Manager once; the host reads them back
+with its own instance identity, so no workflow and no runner ever holds a
+running credential — the arrangement
+[`docs/design.md`](docs/design.md#where-credentials-should-live) prefers.
+Everything else — machine type, sandbox count, task and target repos, IAM
+roles — is a diff you review before it ships.
+
 ### 1. Network
 
 ```sh
