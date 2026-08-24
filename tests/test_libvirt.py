@@ -220,6 +220,34 @@ def _tee_stdin(runner: FakeRunner, prefix: str) -> str:
     raise AssertionError(f"no call starting with {prefix!r}; calls were {runner.commands}")
 
 
+def test_start_also_allowlists_apparmor_for_a_vm_that_skipped_create(cluster, tmp_path):
+    """Found live: create()'s own allowlisting wasn't enough on its own --
+    bootstrap.py's _ensure_started() calls start() directly, with no
+    create() at all, for a VM already defined from an earlier attempt
+    (predating this fix, or from a previous deploy generation). The exact
+    failure this reproduces: 'Cannot access storage file ... Permission
+    denied' on a real redeploy, because the domain existed already and
+    start() alone never ran the allowlist check.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    rules = tmp_path / "apparmor" / "local" / "abstractions" / "libvirt-qemu"
+    rules.parent.mkdir(parents=True)
+    a = LibvirtAdapter(sized_cluster, runner, network,
+                        config_dir=tmp_path / "instances",
+                        apparmor_rules_path=rules)
+
+    a.start("sandbox-0")  # no create() call at all
+
+    written = _tee_stdin(runner, f"tee -a {rules}")
+    assert f"{tmp_path}/instances/*.qcow2 rwk," in written
+    assert f"{tmp_path}/images/*.qcow2 rwk," in written
+    assert runner.ran("systemctl reload apparmor")
+    assert runner.ran("virsh -c qemu:///system start sandbox-0")
+
+
 def test_create_allowlists_config_dir_and_image_dir_in_apparmor(cluster, tmp_path):
     """Found live: qemu failed to start a VM whose disk lived at
     config_dir's own default (a custom path, not the

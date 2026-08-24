@@ -255,20 +255,22 @@ class LibvirtAdapter(HostAdapter):
                          stdin=addition, check=True)
         self.runner.run(["systemctl", "reload", "apparmor"], check=False)
 
-    # --- lifecycle --------------------------------------------------------
-    def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
-        if self.state(spec.name) is not VmState.ABSENT:
-            raise RuntimeError(
-                f"{spec.name} already exists; use recreate() to replace it"
-            )
+    def _apparmor_dirs_for(self, spec: VmSpec) -> tuple[Path, ...]:
         # spec.image is normally a real absolute path (the README: "name
         # the real path... via --image or cluster.toml"), but Cluster's own
         # bare-string default ("debian-12") resolves to a meaningless "."
         # -- not worth allowlisting, and AppArmor rules are absolute paths
         # anyway.
         image_dir = Path(spec.image).parent
-        dirs = (self.config_dir, image_dir) if image_dir.is_absolute() else (self.config_dir,)
-        self._ensure_apparmor_allows(*dirs)
+        return (self.config_dir, image_dir) if image_dir.is_absolute() else (self.config_dir,)
+
+    # --- lifecycle --------------------------------------------------------
+    def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
+        if self.state(spec.name) is not VmState.ABSENT:
+            raise RuntimeError(
+                f"{spec.name} already exists; use recreate() to replace it"
+            )
+        self._ensure_apparmor_allows(*self._apparmor_dirs_for(spec))
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
         disk_path = self.config_dir / f"{spec.name}.qcow2"
@@ -308,6 +310,13 @@ class LibvirtAdapter(HostAdapter):
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "define", str(xml_path)])
 
     def start(self, name: str) -> None:
+        # Found live: create()'s own allowlisting isn't enough on its own --
+        # a VM already defined from an earlier attempt (predating this
+        # fix, or from a previous deploy generation) skips create()
+        # entirely and comes straight here, so the same check has to run
+        # wherever a VM can actually be started, not just where it can be
+        # created. Cheap and idempotent either way.
+        self._ensure_apparmor_allows(*self._apparmor_dirs_for(self.cluster.spec_of(name)))
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "start", name])
 
     def stop(self, name: str) -> None:
