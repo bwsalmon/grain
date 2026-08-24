@@ -93,6 +93,16 @@ def test_config_sync_reads_the_deploy_timeout():
     assert "deploy_timeout_secs" in (TERRAFORM / "files" / "config-sync.sh").read_text()
 
 
+def test_deploy_sh_passes_the_ssh_timeout_to_grain_host_bootstrap():
+    """Found live: grain's own --ssh-timeout default (180s) wasn't enough
+    for a cold nested-virt boot on a real cloud VM, and deploy.sh had no
+    way to override it -- bootstrap_ssh_timeout_seconds closes that."""
+    deploy_sh = DEPLOY_SH.read_text()
+    assert "bootstrap_ssh_timeout_seconds" in deploy_sh
+    assert "--ssh-timeout" in deploy_sh
+    assert "BOOTSTRAP_SSH_TIMEOUT_SECONDS" in deploy_sh
+
+
 def test_shell_scripts_are_syntactically_valid_and_fail_fast():
     for script in SHELL_SCRIPTS:
         assert script.exists(), script
@@ -156,7 +166,8 @@ def test_the_config_repo_is_the_task_repo_by_default():
     instance = (TERRAFORM / "instance.tf").read_text()
     assert re.search(r"task_repo\s*=\s*var\.task_repo\s*!=\s*\"\"\s*\?", instance), \
         "instance.tf no longer falls back from task_repo to config_repo"
-    assert "task_repo           = local.task_repo" in instance
+    assert re.search(r"task_repo\s*=\s*local\.task_repo", instance), \
+        "grain_config no longer publishes local.task_repo as task_repo"
 
     # plan.yml deliberately excluded: it never authenticates to GCP or runs
     # `terraform plan`/`apply` at all (only `fmt`/`validate`, neither of
