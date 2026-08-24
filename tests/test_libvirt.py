@@ -316,3 +316,63 @@ def test_create_skips_an_already_allowlisted_directory(cluster, tmp_path):
     # present, so no write happens at all.
     assert not runner.ran("tee")
     assert not runner.ran("systemctl reload apparmor")
+
+
+def test_create_labels_config_dir_and_image_dir_for_selinux(cluster, tmp_path):
+    """Found live: AppArmor wasn't the actual confining layer on a real
+    deployment -- SELinux was (confirmed by _SELINUX_CONTEXT: "libvirtd
+    (enforce)" in the journal, and separately by the per-VM AppArmor
+    profile itself being reported as profile="unconfined", i.e. genuinely
+    inactive). sVirt only auto-relabels a file's dynamic MCS category at
+    start time, not its base type -- that has to already be virt_image_t,
+    which the packaged policy only pre-labels for the default
+    /var/lib/libvirt/images.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    a = LibvirtAdapter(sized_cluster, runner, network,
+                        config_dir=tmp_path / "instances",
+                        selinux_marker_path=tmp_path / "selinux")
+    (tmp_path / "selinux").mkdir()
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+
+    a.create(sized_cluster.spec_of("sandbox-0"))
+
+    assert runner.ran(f"chcon -R -t virt_image_t {tmp_path}/instances")
+    assert runner.ran(f"chcon -R -t virt_image_t {tmp_path}/images")
+
+
+def test_create_is_a_noop_for_selinux_when_not_active(cluster, tmp_path):
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    a = LibvirtAdapter(cluster, runner, network, config_dir=tmp_path / "instances",
+                        selinux_marker_path=tmp_path / "no-selinux")
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    assert not a.selinux_marker_path.is_dir()
+
+    a.create(cluster.spec_of("sandbox-0"))  # must not raise
+
+    assert not runner.ran("chcon")
+
+
+def test_start_also_labels_selinux_for_a_vm_that_skipped_create(cluster, tmp_path):
+    """The exact failure this reproduces: start() called with no
+    preceding create() at all, for a VM already defined from an earlier
+    attempt -- create()'s own labelling never ran for it either.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    a = LibvirtAdapter(sized_cluster, runner, network,
+                        config_dir=tmp_path / "instances",
+                        selinux_marker_path=tmp_path / "selinux")
+    (tmp_path / "selinux").mkdir()
+
+    a.start("sandbox-0")  # no create() call at all
+
+    assert runner.ran(f"chcon -R -t virt_image_t {tmp_path}/instances")
+    assert runner.ran(f"chcon -R -t virt_image_t {tmp_path}/images")
+    assert runner.ran("virsh -c qemu:///system start sandbox-0")
