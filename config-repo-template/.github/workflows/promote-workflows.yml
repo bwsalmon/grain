@@ -1,0 +1,80 @@
+# Closes the loop this repo's bot credential can't: GitHub refuses to let
+# any token without the `workflow` scope/permission touch
+# `.github/workflows/**`, including the default GITHUB_TOKEN inside a
+# workflow run -- so a task that needs to change a workflow file can't
+# just push one directly, and giving the deployment's everyday dispatch
+# credential that scope would undo the whole point of withholding it (see
+# plan.yml's own comment on why that scope matters).
+#
+# The escape hatch: a task writes its proposed file to
+# .github/workflows-staged/<name>.yml instead of .github/workflows/ --
+# an ordinary path the bot credential can push to like any other. That
+# staged file goes through the exact same PR review as everything else
+# this deployment's agents propose. Only once a human has already merged
+# it to main does *this* job run, using a single dedicated secret
+# (WORKFLOW_PROMOTION_TOKEN -- a PAT scoped to just this repo, Contents +
+# Workflows + Pull requests) that exists nowhere else in the system. It
+# moves the file into .github/workflows/, opens a PR, and merges it
+# immediately -- this repo's branch rule requires a pull request to exist
+# but needs zero approvals, so there's nothing left for a human to click:
+# the real review already happened on the staging change.
+#
+# Triggered on push to main only, never pull_request -- the same reason
+# plan.yml never authenticates to GCP on a PR. This secret must never be
+# reachable by unreviewed, agent-authored code.
+name: promote-workflows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows-staged/**"
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WORKFLOW_PROMOTION_TOKEN }}
+
+      - name: Promote staged workflow files
+        id: promote
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PROMOTION_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          staged=(.github/workflows-staged/*.yml .github/workflows-staged/*.yaml)
+          if [ ${#staged[@]} -eq 0 ]; then
+            echo "no staged workflow files -- nothing to promote"
+            exit 0
+          fi
+
+          # A noreply address in this exact form is what GitHub itself
+          # attributes a commit to an account by -- anything else risks
+          # tripping this repo's own "unattributed changes" rule.
+          login="$(gh api user --jq .login)"
+          git config user.name "$login"
+          git config user.email "${login}@users.noreply.github.com"
+
+          branch="promote-workflows-${GITHUB_SHA:0:12}"
+          git checkout -b "$branch"
+          mkdir -p .github/workflows
+          names=()
+          for f in "${staged[@]}"; do
+            name="$(basename "$f")"
+            mv "$f" ".github/workflows/$name"
+            names+=("$name")
+          done
+          git add .github/workflows .github/workflows-staged
+          git commit -m "Promote staged workflow file(s): ${names[*]}"
+          git push origin "$branch"
+
+          pr_url="$(gh pr create --base main --head "$branch" \
+            --title "Promote staged workflow file(s): ${names[*]}" \
+            --body "Auto-promoted from \`.github/workflows-staged/\` by \`promote-workflows.yml\` -- the content already went through review on the change that staged it (this commit's parent on \`main\`). This PR only relocates already-approved content into \`.github/workflows/\`.")"
+          gh pr merge "$pr_url" --merge --delete-branch

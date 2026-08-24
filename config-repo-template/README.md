@@ -67,6 +67,12 @@ and the state bucket. You do not have to name a task repo — this one is it.
 service account key in `GCP_CREDENTIALS_JSON` instead. It is strictly
 worse; the workflows support it so that "no WIF" is not a blocker.)
 
+A fifth, optional secret — `WORKFLOW_PROMOTION_TOKEN` — only matters if you
+want a task to ever change one of *this* repo's own workflow files; see
+["Changing a workflow file"](#changing-a-workflow-file) below. Skip it and
+that one specific thing needs a manual step; everything else works without
+it.
+
 **4. Push to `main`.** The `deploy` workflow runs, and its last step waits
 for the host to report that it converged — so a green check means the
 system is actually up, not just that Terraform returned.
@@ -121,7 +127,37 @@ else is parked with a comment rather than dispatched. Set
 
 A directive can sit anywhere in the body, and a maintainer can add or
 correct one by replying, so a mis-filed task is repaired with a comment
-rather than an edit. grain's own README has
+rather than an edit.
+
+### Changing a workflow file
+
+GitHub refuses to let any token without the `workflow` scope touch
+`.github/workflows/**` — including a workflow's own default `GITHUB_TOKEN`,
+so there's no way to make this fully automatic without *some* dedicated
+credential existing somewhere. Handing that scope to `GRAIN_GITHUB_TOKEN`
+would defeat the reason it's withheld in the first place: an agent that can
+edit workflow files can get CI to run whatever it wants with whatever
+secrets that CI holds, and — since this repo's own PR rule needs no
+approvals — potentially before anyone has looked at the diff at all.
+
+So a task that needs to change `plan.yml`/`deploy.yml` (or add a new
+workflow) writes it to `.github/workflows-staged/<name>.yml` instead of
+`.github/workflows/` directly — an ordinary path `GRAIN_GITHUB_TOKEN` can
+push to like any other, so the change goes through the exact same PR review
+as everything else an agent proposes. Once that PR is merged,
+`promote-workflows.yml` — itself already in `.github/workflows/`, so it
+needs no promotion — notices the staged file, moves it into
+`.github/workflows/` for real, and merges that move itself, using
+`WORKFLOW_PROMOTION_TOKEN`: a PAT scoped to just this repo (Contents +
+Workflows + Pull requests), the only place in the whole system that scope
+exists. It only ever runs on a push to `main`, never on a pull request, so
+that credential is never reachable by unreviewed, agent-authored code — the
+review already happened on the staging change.
+
+Without `WORKFLOW_PROMOTION_TOKEN` set, a staged file just sits in
+`.github/workflows-staged/` until you move it by hand.
+
+grain's own README has
 [the rest of the workflow](https://github.com/bwsalmon/grain#use-it) —
 what happens on the sandbox, how questions come back, how the PR is
 opened.

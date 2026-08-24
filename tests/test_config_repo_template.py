@@ -168,6 +168,26 @@ def test_the_config_repo_is_the_task_repo_by_default():
         "deploy.yml does not tell Terraform which repo it is running in"
 
 
+def test_promote_workflows_never_triggers_on_a_pull_request():
+    """The whole reason this job's dedicated token is safe to keep as a
+    secret at all: it must only ever run on a push to main, after a human
+    has already merged the staging change. Triggering on pull_request
+    would hand a workflow-scoped credential to unreviewed, agent-authored
+    code -- exactly the thing plan.yml's own airtight redesign exists to
+    avoid for the GCP deployer credential.
+    """
+    text = (WORKFLOWS / "promote-workflows.yml").read_text()
+    assert not re.search(r"^\s*pull_request\s*:", text, re.MULTILINE), \
+        "promote-workflows.yml must never trigger on pull_request"
+    assert re.search(r"on:\s*\n\s*push:\s*\n\s*branches:\s*\[main\]", text), \
+        "promote-workflows.yml no longer triggers on push to main"
+
+
+def test_promote_workflows_watches_the_staged_directory_not_the_real_one():
+    text = (WORKFLOWS / "promote-workflows.yml").read_text()
+    assert ".github/workflows-staged/**" in text
+
+
 def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
     """Every label grain's automation applies has to exist in the queue
     repo, and this repo *is* the queue repo -- so the workflow creates
