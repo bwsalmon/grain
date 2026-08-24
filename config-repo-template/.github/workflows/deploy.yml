@@ -35,6 +35,12 @@ jobs:
       # id for a manual or scheduled run, so "redeploy now" always takes.
       DEPLOY_GENERATION: ${{ github.event_name == 'push' && github.sha || format('{0}-{1}', github.sha, github.run_id) }}
       TF_IN_AUTOMATION: "true"
+      # A step's `if:` can't see the secrets context at all (GitHub
+      # rejects it at parse time: "Unrecognized named-value: 'secrets'") --
+      # only env, vars and a handful of others. jobs.<job_id>.env can see
+      # secrets, so the WIF-vs-key branch has to happen here and get
+      # checked via env below instead of inline.
+      HAS_WIF: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +66,7 @@ jobs:
       # Preferred: Workload Identity Federation, so this repo holds no GCP
       # key at all. scripts/bootstrap-gcp.sh sets it up and prints both values.
       - name: Authenticate to GCP (workload identity)
-        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        if: ${{ env.HAS_WIF == 'true' }}
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -69,7 +75,7 @@ jobs:
       # Fallback for projects that cannot use WIF. A long-lived key in a
       # GitHub secret is strictly worse; prefer the step above.
       - name: Authenticate to GCP (service account key)
-        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER == '' }}
+        if: ${{ env.HAS_WIF != 'true' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
