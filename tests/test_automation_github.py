@@ -64,6 +64,21 @@ def test_list_issues_raises_on_a_non_200():
         client.list_issues("o", "r", "grain-agent")
 
 
+def test_get_issue_returns_the_issue():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(issue_json(7)).encode())])
+    issue = GitHubClient(transport, token="t").get_issue("o", "r", 7)
+    assert issue.number == 7
+    assert issue.title == "issue 7"
+    assert issue.labels == frozenset({"grain-agent"})
+    assert transport.calls[0]["path"] == "/repos/o/r/issues/7"
+
+
+def test_get_issue_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").get_issue("o", "r", 7)
+
+
 def test_add_label_posts_the_label_body():
     transport = FakeTransport(responses=[ApiResponse(200, {}, b"[]")])
     GitHubClient(transport, token="t").add_label("o", "r", 1, "grain-agent-in-progress")
@@ -326,6 +341,7 @@ def test_dry_run_client_passes_pr_reads_through(capsys):
 def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
     transport = FakeTransport(responses=[
         ApiResponse(200, {}, json.dumps([issue_json(1)]).encode()),
+        ApiResponse(200, {}, json.dumps(issue_json(1)).encode()),
         ApiResponse(200, {}, b"{}"),
     ])
     real = GitHubClient(transport, token="t")
@@ -333,6 +349,7 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
 
     issues = dry.list_issues("o", "r", "grain-agent")
     assert [i.number for i in issues] == [1]
+    assert dry.get_issue("o", "r", 1).title == "issue 1"
     assert dry.branch_exists("o", "r", "grain/issue-1") is True
 
     dry.add_label("o", "r", 1, "grain-agent-in-progress")
@@ -343,9 +360,10 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
     assert "remove label" in out
     assert "open PR" in out
     assert isinstance(pr, PullRequest)
-    # Only the two reads (list_issues, branch_exists) actually reached the
-    # transport — every mutation, including PR creation, only printed.
-    assert len(transport.calls) == 2
+    # Only the three reads (list_issues, get_issue, branch_exists) actually
+    # reached the transport — every mutation, including PR creation, only
+    # printed.
+    assert len(transport.calls) == 3
 
 
 def test_dry_run_client_passes_list_comments_through_but_prints_create_comment(capsys):

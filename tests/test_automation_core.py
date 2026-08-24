@@ -62,17 +62,19 @@ def pr_detail_json(number: int, head_ref: str = "feature-x", base_ref: str = "ma
 
 
 def pr_flow_response(pr_number: int) -> list[ApiResponse]:
-    """The three responses one `_finish_succeeded` call consumes, in exact
+    """The four responses one `_finish_succeeded` call consumes, in exact
     call order: `branch_exists` (200 -> the branch is really there),
+    `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
     then `remove_label` (in-progress comes off). `FakeTransport.responses`
     is a strict FIFO queue regardless of which call consumes each entry, so
-    a test with more than one succeeded outcome needs this whole triple per
-    outcome, in order, or a later call silently eats an earlier outcome's
-    response.
+    a test with more than one succeeded outcome needs this whole quadruple
+    per outcome, in order, or a later call silently eats an earlier
+    outcome's response.
     """
     return [
         ApiResponse(200, {}, b"{}"),
+        ApiResponse(200, {}, json.dumps(issue_json(pr_number)).encode()),
         ApiResponse(201, {}, json.dumps(
             {"number": pr_number, "html_url": f"https://github.com/o/r/pull/{pr_number}"}
         ).encode()),
@@ -553,6 +555,9 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     # docs/roadmap.md item 14: every PR grain-agent opens carries a
     # consistent, visible marker distinguishing it from a human-authored one.
     assert "🤖" in sent["title"]
+    # bwsalmon/agents#4: the issue's own title rides along, not just its
+    # number, so a PR is identifiable from the list view alone.
+    assert sent["title"] == "🤖 grain: o/r#5: issue 42"
     assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("opened PR o/r#42" in o for o in outcomes)

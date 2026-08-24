@@ -293,11 +293,17 @@ class Orchestrator:
         # repo. Falls back to reading identically for a deployment whose
         # task repo *is* its target repo.
         task = self._task
+        # The issue's title isn't on hand here — `Outcome` only carries the
+        # number (see sweeper.py's `Outcome` docstring on what does and
+        # doesn't survive to finish time) — so it's read fresh rather than
+        # threaded through, the same "one more call, no stale copy to keep
+        # in sync" trade-off `get_pull_request` already makes elsewhere.
+        issue = self.github.get_issue(task.owner, task.name, outcome.issue)
         base = outcome.base or self.github.default_branch(target.owner, target.name)
         pr = self.github.create_pull_request(
             target.owner, target.name,
             head=branch, base=base,
-            title=f"🤖 grain: {task}#{outcome.issue}",
+            title=f"🤖 grain: {task}#{outcome.issue}: {issue.title}",
             body=f"Closes {task}#{outcome.issue}.\n\nOpened automatically after "
                  f"task {task}#{outcome.issue} finished on {outcome.sandbox}."
                  f"\n\n---\n{_AUTOMATION_SIGNATURE}",
