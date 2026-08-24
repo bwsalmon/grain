@@ -8,12 +8,13 @@ docs/design.md" convention:
     for one more `run-once` interval — a *successful* sweep also verifies
     the pushed branch and opens the PR, since that is the other half of
     "this run is really done", not a separate pass,
-    list open trigger-labelled issues in the *task repo* not already
-    tracked as in-progress, oldest first, so a backlog drains in the order
-    it was filed, resolving each one's target repo from its own text,
-    while a free sandbox exists and the rate limit allows it, mint the
-    sandbox's git-proxy token if it doesn't have one yet, dispatch, move the
-    label, and record the assignment,
+    list open issues in the *task repo* not already tracked as in-progress
+    and not held back by a blocking label (`AutomationConfig.triage_label`,
+    `in_progress_label`, `awaiting_reply_label`), oldest first, so a backlog
+    drains in the order it was filed, resolving each one's target repo from
+    its own text, while a free sandbox exists and the rate limit allows it,
+    mint the sandbox's git-proxy token if it doesn't have one yet, dispatch,
+    apply the in-progress label, and record the assignment,
     stop — cron will call again.
 
 Cron, not a loop: docs/design.md's issue-intake section is explicit that
@@ -50,12 +51,12 @@ parser and the full rationale. What follows from that split:
 - **An unusable directive parks the task instead of failing it.** No
   `/repo` and no configured `default_target_repo`, a malformed one, a
   non-allow-listed or nonexistent target: `_park` posts a comment saying
-  exactly what was wrong and swaps the trigger label for
-  `awaiting_reply_label`, which is precisely the state item 13 already
-  knows how to promote out of — a maintainer replies `/repo owner/name` and
-  the next cycle picks it up. Leaving the trigger label on instead would
-  redispatch the identical failure every two minutes with nothing new to
-  act on, the same argument `_finish_question` makes for a question.
+  exactly what was wrong and applies `awaiting_reply_label`, which is
+  precisely the state item 13 already knows how to promote out of — a
+  maintainer replies `/repo owner/name` and the next cycle picks it up.
+  Leaving the issue undispatched but unlabelled instead would redispatch
+  the identical failure every two minutes with nothing new to act on, the
+  same argument `_finish_question` makes for a question.
 - **The target is recorded on the assignment, not re-derived at sweep
   time** (`state.py`'s `Assignment`): an issue body can be edited mid-run,
   and an edit must not be able to redirect where the finished work's PR is
@@ -127,8 +128,9 @@ from ..run import CommandError, Runner
 # random public commenter (author_association "NONE"/"CONTRIBUTOR"/
 # "FIRST_TIME_CONTRIBUTOR"/...) must not be able to redispatch the agent
 # with content of their choosing just by replying to a question thread --
-# that would reopen the exact prompt-injection gate the trigger label
-# exists to close (docs/design.md's split surface).
+# that would let untrusted content pick the moment an agent runs on it,
+# the same thing `awaiting_reply_label` otherwise holds back
+# (docs/design.md's split surface).
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 # A consistent, visible marker on everything grain-agent itself posts to
@@ -365,21 +367,23 @@ class Orchestrator:
         """The agent called `ask_question` instead of finishing the task
         (docs/roadmap.md item 12) — post it to a human and take the issue
         out of the queue, rather than treating this like any other
-        "succeeded but nothing usable" case. `_requeue` re-adds the trigger
-        label immediately, which is right for a failed/branchless run (retry
-        with no new information is still a reasonable default) but wrong
-        here: it would redispatch on the very next `run_once` and most
-        likely ask the identical question again, looping at real cost with
-        nothing to act on in between.
+        "succeeded but nothing usable" case. `_requeue` makes the issue an
+        immediate dispatch candidate again, which is right for a
+        failed/branchless run (retry with no new information is still a
+        reasonable default) but wrong here: it would redispatch on the very
+        next `run_once` and most likely ask the identical question again,
+        looping at real cost with nothing to act on in between.
 
         `awaiting_reply_label` replaces the in-progress label rather than
         just removing it (docs/roadmap.md item 13) — visible on GitHub, the
-        same way the other two labels already are, so an operator can see
-        which issues are genuinely idle waiting on a human versus untouched.
-        The comment's own id is recorded (`state.record_pending_question`)
-        as the baseline `_promote_answered_questions` checks future replies
-        against; that pass is what re-adds the trigger label once a trusted
-        reply shows up, not this method.
+        same way the other labels already are, so an operator can see which
+        issues are genuinely idle waiting on a human versus untouched, and
+        it is what keeps `_dispatch` from picking the issue back up on its
+        own. The comment's own id is recorded
+        (`state.record_pending_question`) as the baseline
+        `_promote_answered_questions` checks future replies against; that
+        pass is what removes `awaiting_reply_label` once a trusted reply
+        shows up, not this method.
 
         A 404 from `create_comment` here means the same thing it means in
         `_requeue`: a stale assignment against a repo that's since changed
@@ -395,7 +399,7 @@ class Orchestrator:
                 f"I have a question before I can continue:\n\n{question}\n\n"
                 "Reply here to continue -- a reply from a maintainer picks "
                 f"this back up automatically. If that doesn't happen, "
-                f"re-applying the {self.config.trigger_label!r} label works too.",
+                f"removing the {self.config.awaiting_reply_label!r} label works too.",
             )
         except GitHubError as exc:
             if exc.status != 404:
@@ -426,10 +430,10 @@ class Orchestrator:
     def _promote_answered_questions(self, now: datetime) -> None:
         """For every issue/PR still waiting on a question, checks whether a
         trusted reply has landed since the question was posted and, if so,
-        re-adds the trigger label so `_dispatch`'s own polling picks it up
-        in this same `run_once` call -- no new hydration path needed, since
-        `_dispatch` already fetches full `Issue`/`PullRequestDetail` objects
-        for anything carrying the trigger label.
+        removes `awaiting_reply_label` so `_dispatch`'s own polling picks it
+        up in this same `run_once` call -- no new hydration path needed,
+        since `_dispatch` already fetches full `Issue`/`PullRequestDetail`
+        objects for every open issue not held back by a blocking label.
 
         A reply "since the question" means a comment with a higher id than
         the question comment's own (`state.pending_questions`'s recorded
@@ -466,10 +470,6 @@ class Orchestrator:
                 self.config.task_owner, self.config.task_repo,
                 pending.issue, self.config.awaiting_reply_label,
             )
-            self.github.add_label(
-                self.config.task_owner, self.config.task_repo,
-                pending.issue, self.config.trigger_label,
-            )
             self.state.clear_pending_question(pending.issue)
             self.audit.record(
                 sandbox=None, issue=pending.issue,
@@ -478,36 +478,20 @@ class Orchestrator:
             )
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
-        # Back to the trigger label, per docs/design.md: "issues need
-        # returning to the queue rather than stalling silently."
-        #
-        # A 404 here means the issue this assignment names doesn't exist in
-        # the *currently configured* repo — not "GitHub rejected the
-        # request," but "this assignment is stale," e.g. left over from a
-        # repo `controller configure` has since pointed elsewhere (found
-        # live: docs/next-session.md). Letting that propagate crashes
-        # `run_once` before `_dispatch` ever runs, taking down the whole
-        # sweep over one leftover assignment. Log and move on instead; any
-        # other status (a real 5xx, an auth failure) still isn't something
-        # a stale assignment explains, so it still propagates.
-        try:
-            self.github.remove_label(
-                self.config.task_owner, self.config.task_repo,
-                outcome.issue, self.config.in_progress_label,
-            )
-            self.github.add_label(
-                self.config.task_owner, self.config.task_repo,
-                outcome.issue, self.config.trigger_label,
-            )
-        except GitHubError as exc:
-            if exc.status != 404:
-                raise
-            self.audit.record(
-                sandbox=outcome.sandbox, issue=outcome.issue,
-                outcome=f"{reason} (requeue skipped: issue #{outcome.issue} not found in "
-                        f"{self.config.task_owner}/{self.config.task_repo} -- stale assignment?)",
-            )
-            return
+        # Back to the queue, per docs/design.md: "issues need returning to
+        # the queue rather than stalling silently." With intake opt-out
+        # rather than opt-in (AutomationConfig.triage_label), that just
+        # means taking the in-progress label back off -- an issue with no
+        # blocking label left is a dispatch candidate again on its own,
+        # nothing needs adding. No 404 handling needed here the way
+        # `_finish_question`/`_park` need it for `create_comment`:
+        # `github.py`'s `remove_label` already treats a 404 (label, or even
+        # the whole issue, already gone) as the caller's intent being
+        # satisfied rather than an error.
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.in_progress_label,
+        )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue, outcome=reason)
 
     # --- target resolution ----------------------------------------------
@@ -573,13 +557,15 @@ class Orchestrator:
         retrying an unusable directive every cycle forever.
 
         Deliberately the same landing state as an unanswered question
-        (docs/roadmap.md items 12-13): comment, swap the trigger label for
-        `awaiting_reply_label`, record the comment id as the reply baseline.
-        `_promote_answered_questions` then does the rest — a maintainer's
-        reply (which may itself carry the corrected `/repo` line) puts the
-        trigger label back on the next cycle. No sandbox was ever assigned
-        here, so there is no in-progress label to remove and nothing to
-        release.
+        (docs/roadmap.md items 12-13): comment, apply `awaiting_reply_label`
+        (the issue carries no blocking label yet -- it only got this far
+        because `_dispatch`'s own candidate filter let it through), record
+        the comment id as the reply baseline. `_promote_answered_questions`
+        then does the rest — a maintainer's reply (which may itself carry
+        the corrected `/repo` line) takes the label back off on the next
+        cycle, making the issue a dispatch candidate again. No sandbox was
+        ever assigned here, so there is no in-progress label to remove and
+        nothing to release.
 
         Same 404 tolerance as `_finish_question`: an issue that vanished
         between the listing and this call isn't a reason to crash the
@@ -604,10 +590,6 @@ class Orchestrator:
                         "-- deleted mid-cycle?",
             )
             return
-        self.github.remove_label(
-            self.config.task_owner, self.config.task_repo,
-            number, self.config.trigger_label,
-        )
         self.github.add_label(
             self.config.task_owner, self.config.task_repo,
             number, self.config.awaiting_reply_label,
@@ -618,17 +600,34 @@ class Orchestrator:
 
     # --- dispatch -------------------------------------------------------
     def _dispatch(self, now: datetime) -> None:
-        candidates = self.github.list_issues(
-            self.config.task_owner, self.config.task_repo, self.config.trigger_label
-        )
+        # Every open issue is a candidate now (AutomationConfig.triage_label
+        # docstring) -- there is no positive label left to filter the
+        # GitHub-side query on, so this lists all of them and narrows to
+        # dispatchable ones below, client-side, the same place the
+        # pull-request filter already lives inside `list_issues` itself.
+        candidates = self.github.list_issues(self.config.task_owner, self.config.task_repo)
         in_progress = self.state.in_progress_issues()
+        # An issue carrying `triage_label` is held back deliberately (an
+        # operator, or an automated filer, isn't ready for an agent to see
+        # it yet); `in_progress_label`/`awaiting_reply_label` are this same
+        # orchestrator's own markers for work already dispatched or parked
+        # -- `in_progress` (local state) is normally what catches the first
+        # of those, but checking the label too means a dispatch this
+        # process has no local record of (state lost, or a second
+        # deployment sharing the repo) still isn't redispatched on top of
+        # itself.
+        blocking_labels = {
+            self.config.triage_label, self.config.in_progress_label,
+            self.config.awaiting_reply_label,
+        }
         # Oldest number first: one repo's issue numbers are handed out in
         # filing order, so this drains a backlog in the order it arrived.
         # Only issues are polled -- a PR-continuation task is an issue
         # carrying a `/pr` directive, so there is no second listing to merge
         # in and no interleaving policy to decide.
         queue = sorted(
-            (i for i in candidates if i.number not in in_progress),
+            (i for i in candidates
+             if i.number not in in_progress and not (i.labels & blocking_labels)),
             key=lambda i: i.number,
         )
 
@@ -709,8 +708,8 @@ class Orchestrator:
             # sandbox crashed `run_once` before it ever reached the next
             # candidate. Neither the sandbox nor the issue's labels are
             # touched below on failure -- the sandbox stays free and the
-            # issue keeps its trigger label, so both are simply retried on
-            # a later cycle, same "log and move on" discipline
+            # issue carries no blocking label, so both are simply retried
+            # on a later cycle, same "log and move on" discipline
             # `_requeue`/`_finish_question` already apply to a GitHub-side
             # 404. Only `CommandError` specifically: anything else is a
             # real bug, not an expected failure mode, and should still
@@ -750,10 +749,6 @@ class Orchestrator:
                                    target_owner=task.repo.owner,
                                    target_repo=task.repo.name, base=task.base)
             self.state.record_run(now)
-            self.github.remove_label(
-                self.config.task_owner, self.config.task_repo,
-                number, self.config.trigger_label,
-            )
             self.github.add_label(
                 self.config.task_owner, self.config.task_repo,
                 number, self.config.in_progress_label,
