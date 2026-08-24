@@ -311,6 +311,26 @@ def test_dry_run_controller_configure_with_a_github_token_file(capsys, tmp_path)
             assert "ghp_dryruntoken" not in line
 
 
+def test_controller_configure_restarts_the_proxy_after_the_credential_write_too(capsys, tmp_path):
+    """Found live: an earlier version restarted the proxy right after
+    automation.json, before configure_github_credential got to write
+    credentials.json -- so a newly added target repo's credential never
+    reached the running proxy, and the very first dispatch against it
+    failed with a proxied 500 ("no credential configured"). The restart
+    has to come after *both* writes, not just the first.
+    """
+    token_file = tmp_path / "token"
+    token_file.write_text("ghp_dryruntoken\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--github-token-file", str(token_file)],
+        capsys,
+    )
+    assert out.index("dd of=/data/secrets/github/credentials.json") < out.index(
+        "systemctl restart"
+    )
+
+
 def test_repo_without_a_slash_is_rejected():
     with pytest.raises(SystemExit, match="owner/name"):
         main(["--dry-run", "controller", "configure", "--repo", "not-a-repo-slug"])
