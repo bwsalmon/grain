@@ -60,6 +60,17 @@ parser and the full rationale. What follows from that split:
   time** (`state.py`'s `Assignment`): an issue body can be edited mid-run,
   and an edit must not be able to redirect where the finished work's PR is
   opened.
+- **`/base` shapes the workspace itself, not just where the PR opens.**
+  `_resolve_target` resolves `base` once (a `/base` directive, or else the
+  target repo's own default branch) and `_dispatch` passes it straight into
+  `dispatch()`'s own `base` parameter, which threads it through to
+  `ensure_workspace`'s `branch` — the fresh sandbox checkout (and the
+  agent's new branch) is built on top of the resolved base, the same way a
+  PR-continuation dispatch already builds on `pr.head_ref`. Without this, a
+  `/base` that differs from the real default branch only redirected
+  `create_pull_request` at finish time while the agent still worked from
+  the default branch the whole run, producing a PR diff polluted with
+  every commit the default branch had that `base` didn't.
 
 docs/roadmap.md item 9's second intake path — continue an *existing* PR
 rather than start a fresh branch — survives the split as a `/pr N`
@@ -721,8 +732,8 @@ class Orchestrator:
                         sandbox_runner, self.base_runner, sandbox, sandbox_target,
                         prompt_issue,
                         remote_url=self._remote_url(task.repo), token=token,
-                        comments=prompt_comments, task_repo=str(self._task),
-                        target_repo=str(task.repo),
+                        base=task.base, comments=prompt_comments,
+                        task_repo=str(self._task), target_repo=str(task.repo),
                     )
             except CommandError as exc:
                 self.audit.record(sandbox=sandbox, issue=number,

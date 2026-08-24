@@ -1035,6 +1035,30 @@ def test_a_base_directive_overrides_the_target_repos_default_branch():
     assert orchestrator.state.assignments["sandbox-0"].base == "release-2"
 
 
+def test_a_base_directive_also_builds_the_workspace_from_that_base():
+    # bwsalmon/agents#6: a /base directive that differs from the target
+    # repo's real default branch (OrchestratorTransport always answers
+    # "main") must change what the sandbox workspace -- and therefore the
+    # agent's new branch -- is actually built on top of, not just where
+    # create_pull_request later opens the PR. Before the fix, the workspace
+    # always reset to origin/HEAD (the real default branch) regardless of
+    # `/base`, so the agent's branch (and the eventual PR diff) carried
+    # every commit "main" had that "release-2" didn't.
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="/repo o/r\n/base release-2")],
+    )
+
+    orchestrator.run_once(NOW)
+
+    runner = orchestrator.base_runner
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert clone_calls
+    script = clone_calls[0][2]
+    assert "checkout -f -B release-2 origin/release-2" in script
+    # Not the repo's real default branch -- the whole point of the bug.
+    assert "checkout -f --detach origin/HEAD" not in script
+
+
 def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkeypatch):
     state = AutomationState()
     state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
