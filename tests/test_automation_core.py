@@ -65,13 +65,15 @@ def pr_detail_json(number: int, head_ref: str = "feature-x", base_ref: str = "ma
 
 
 def pr_flow_response(pr_number: int) -> list[ApiResponse]:
-    """The four responses one `_finish_succeeded` call consumes, in exact
+    """The five responses one `_finish_succeeded` call consumes, in exact
     call order: `branch_exists` (200 -> the branch is really there),
     `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
-    then `remove_label` (in-progress comes off). `FakeTransport.responses`
+    `close_issue` (bwsalmon/agents#23 -- the task issue closed explicitly,
+    since a cross-repo `Closes` reference never auto-closes), then
+    `remove_label` (in-progress comes off). `FakeTransport.responses`
     is a strict FIFO queue regardless of which call consumes each entry, so
-    a test with more than one succeeded outcome needs this whole quadruple
+    a test with more than one succeeded outcome needs this whole handful
     per outcome, in order, or a later call silently eats an earlier
     outcome's response.
     """
@@ -81,6 +83,7 @@ def pr_flow_response(pr_number: int) -> list[ApiResponse]:
         ApiResponse(201, {}, json.dumps(
             {"number": pr_number, "html_url": f"https://github.com/o/r/pull/{pr_number}"}
         ).encode()),
+        ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
     ]
 
@@ -617,6 +620,11 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("opened PR o/r#42" in o for o in outcomes)
+    # bwsalmon/agents#23: the task issue is closed explicitly, since a
+    # cross-repo `Closes` reference in the PR body never auto-closes it.
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert close_call["path"] == "/repos/o/r/issues/5"
+    assert json.loads(close_call["body"]) == {"state": "closed"}
     # The in-progress label comes off; nothing is added back for a
     # genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
@@ -824,6 +832,10 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     assert len(mutating) == 1  # only the in-progress label comes off
+    # bwsalmon/agents#23's close_issue is issue-triggered only -- a
+    # PR-triggered task is continuing an existing PR, which has its own
+    # lifecycle, so this path must never close anything.
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
 
 
 def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
@@ -959,8 +971,14 @@ def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
     # The base recorded at dispatch, not re-read and not a global default.
     assert sent["base"] == "trunk"
     # A cross-repo closing reference: `Closes #5` would name an issue in the
-    # target repo, which is a different issue entirely (or nobody's).
+    # target repo, which is a different issue entirely (or nobody's). It's
+    # kept for the link/mention even though (bwsalmon/agents#23) it never
+    # auto-closes across repos.
     assert "Closes o/r#5" in sent["body"]
+    # The task issue is closed explicitly, in the *task* repo -- not the
+    # target repo the PR itself was opened in.
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert close_call["path"] == "/repos/o/r/issues/5"
     # The in-progress label comes off the *task* repo.
     delete_calls = [c for c in transport.calls if c["method"] == "DELETE"]
     assert delete_calls[0]["path"].startswith("/repos/o/r/issues/5/labels")
