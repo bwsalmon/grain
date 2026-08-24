@@ -168,6 +168,23 @@ def test_the_config_repo_is_the_task_repo_by_default():
         "deploy.yml does not tell Terraform which repo it is running in"
 
 
+def test_no_step_if_condition_references_the_secrets_context():
+    """Found live: GitHub rejects this at parse time -- 'Unrecognized
+    named-value: secrets' -- for every workflow in the repo, not just the
+    one that shipped with it. The secrets context is available in env,
+    with, and run, but never in a step's own if:; a value that needs to
+    gate a step has to go through a job-level env: var instead (env *is*
+    available in steps.if), the way deploy.yml's HAS_WIF does.
+    """
+    for path in WORKFLOWS.glob("*.yml"):
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            if re.match(r"\s*if\s*:", line):
+                assert "secrets." not in line, (
+                    f"{path.name}:{lineno} references secrets directly in a "
+                    "step if: condition -- GitHub will reject this file"
+                )
+
+
 def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
     """Every label grain's automation applies has to exist in the queue
     repo, and this repo *is* the queue repo -- so the workflow creates
