@@ -285,6 +285,24 @@ class GitHubClient:
             path = _next_page_path(resp.headers.get("Link"))
         return issues
 
+    def get_issue(self, owner: str, repo: str, number: int) -> Issue:
+        """A single issue, fetched fresh — used to read an issue's current
+        title when it isn't otherwise on hand (e.g. PR creation, which only
+        carries the issue number through `Outcome`, not its title).
+        """
+        resp = self.transport.request(
+            method="GET", path=f"/repos/{owner}/{repo}/issues/{number}",
+            headers=self._headers(owner, repo), body=None,
+        )
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+        data = json.loads(resp.body)
+        return Issue(
+            number=data["number"], title=data["title"], body=data.get("body") or "",
+            html_url=data["html_url"],
+            labels=frozenset(l["name"] for l in data["labels"]),
+        )
+
     def add_label(self, owner: str, repo: str, number: int, label: str) -> None:
         resp = self.transport.request(
             method="POST",
@@ -461,6 +479,9 @@ class DryRunGitHubClient:
 
     def list_issues(self, owner: str, repo: str, label: str) -> list[Issue]:
         return self.inner.list_issues(owner, repo, label)
+
+    def get_issue(self, owner: str, repo: str, number: int) -> Issue:
+        return self.inner.get_issue(owner, repo, number)
 
     def add_label(self, owner: str, repo: str, number: int, label: str) -> None:
         print(f"+ add label {label!r} to {owner}/{repo}#{number}")

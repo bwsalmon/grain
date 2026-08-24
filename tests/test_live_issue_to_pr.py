@@ -240,6 +240,11 @@ _REPO_RE = re.compile(r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)$")
 _ISSUE_COMMENTS_RE = re.compile(
     r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)/comments$"
 )
+# A single issue: `core.py` reads this at PR-creation time (bwsalmon/agents#4)
+# to fold the issue's own title into the PR title, not just its number.
+_ISSUE_RE = re.compile(
+    r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)$"
+)
 
 
 def _parse_qs(query: str) -> dict[str, str]:
@@ -262,7 +267,7 @@ class FakeIssue:
 @dataclass
 class RealGitHubMock:
     """Implements the specific endpoints `GitHubClient` calls
-    (`list_issues` via the `/issues` listing, `list_comments`,
+    (`list_issues` via the `/issues` listing, `get_issue`, `list_comments`,
     `default_branch`,
     `add_label`, `remove_label`, `branch_exists`, `create_pull_request`),
     seeded with one fake issue carrying the trigger label. Wired in as a
@@ -299,6 +304,16 @@ class RealGitHubMock:
             # No conversation on the seeded issue; the orchestrator renders
             # the blank state plainly, so an empty list is a real answer.
             return ApiResponse(200, {}, b"[]")
+
+        m = _ISSUE_RE.match(p)
+        if method == "GET" and m:
+            number = int(m["number"])
+            issue = self.issues[number]
+            return ApiResponse(200, {}, json.dumps({
+                "number": number, "title": issue.title, "body": issue.body,
+                "html_url": f"https://github.example/{self.owner}/{self.repo}/issues/{number}",
+                "labels": [{"name": l} for l in sorted(issue.labels)],
+            }).encode())
 
         m = _REPO_RE.match(p)
         if method == "GET" and m:
@@ -690,7 +705,7 @@ def test_live_issue_to_pr_pipeline(
     pr = github.pull_requests[0]
     assert pr["head"] == branch
     assert pr["base"] == "main"
-    assert pr["title"] == "grain: fix #101"
+    assert pr["title"] == f"🤖 grain: {OWNER}/{REPO}#101: a distinctive live-test issue title"
 
     # The real proof: a real commit, made by the fake agent inside the real
     # sandbox, really landed on the real branch in the real bare repo —
