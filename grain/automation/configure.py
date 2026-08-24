@@ -43,12 +43,25 @@ def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
         runner.run(["sudo", "chown", f"{owner}:{owner}", parent])
 
 
-def configure_repo(runner: Runner, owner: str, repo: str, *,
+def configure_repo(runner: Runner, task_repo: str, targets: list[str], *,
+                    default_target_repo: str | None = None,
                     github_host: str = "api.github.com", git_forward_host: str = "github.com",
                     github_use_tls: bool = True) -> None:
     """Writes `/data/config/automation.json` and `repo-allowlist.json`
-    (docs/runbook.md steps 9 and 11) -- both derivable from the same
-    `owner/repo` this command already takes (docs/bootstrap.md).
+    (docs/runbook.md steps 9 and 11).
+
+    Two roles, two arguments. `task_repo` (`"owner/name"`) is the queue the
+    orchestrator polls for labelled issues; `targets` are the repos those
+    issues may actually dispatch into, named per-task by a `/repo` directive
+    (`grain/automation/directives.py`). Only the targets go in the
+    allowlist: the allowlist gates *git transport*, and no sandbox ever
+    clones the task repo -- the orchestrator reads it over the API, which
+    `credentials.json` covers instead (`configure_github_credential`).
+
+    `default_target_repo` is what a task with no `/repo` line gets. A
+    single-repo deployment (task repo == the code) passes its own repo for
+    all three and never writes a directive at all, which is exactly how
+    every deployment behaved before the split.
 
     `github_host`/`git_forward_host`/`github_use_tls` default to the real
     GitHub and only ever differ for a live test pointed at a mock server
@@ -56,29 +69,49 @@ def configure_repo(runner: Runner, owner: str, repo: str, *,
     `RealForwarder`. Always written explicitly, matching the rest of this
     file's config, rather than omitted when they equal the default.
     """
+    task_owner, _, task_name = task_repo.partition("/")
     automation_json = json.dumps({
-        "owner": owner, "repo": repo,
+        "task_owner": task_owner, "task_repo": task_name,
+        "default_target_repo": default_target_repo,
         "github_host": github_host, "git_forward_host": git_forward_host,
         "github_use_tls": github_use_tls,
     }, indent=2) + "\n"
     _write_remote_file(runner, f"{DATA_CONFIG}/automation.json", automation_json, mode="644")
-    allowlist_json = json.dumps([f"{owner}/{repo}"], indent=2) + "\n"
+    allowlist_json = json.dumps(list(targets), indent=2) + "\n"
     _write_remote_file(runner, f"{DATA_CONFIG}/repo-allowlist.json", allowlist_json, mode="644")
 
 
-def configure_github_credential(runner: Runner, owner: str, repo: str, token: str,
+def credential_repos(task_repo: str, targets: list[str]) -> list[str]:
+    """Every repo the orchestrator's own credential has to cover: the task
+    repo (read issues, move labels, comment) plus each target repo (check a
+    branch, open a PR). Deduplicated, order preserved -- a single-repo
+    deployment names the same repo in both roles and must not produce a
+    duplicated entry. Lives here rather than at either call site (`grain
+    host bootstrap` and `grain controller configure` both need it) so the
+    two can't drift.
+    """
+    return list(dict.fromkeys([task_repo, *targets]))
+
+
+def configure_github_credential(runner: Runner, repos: list[str], token: str,
                                  *, credential_name: str = "bot") -> None:
-    """Writes the token file and the `credentials.json` pattern pointing
-    `owner/repo` at it (docs/runbook.md step 8). Only ever writes the single
-    exact-repo pattern this deployment was given; a broader `owner/*` or `*`
-    pattern is a deliberate operator edit made by hand afterward, same as
-    today -- this command does not guess at widening its own grant.
+    """Writes the token file and the `credentials.json` patterns pointing
+    each repo in `repos` at it (docs/runbook.md step 8). Only ever writes
+    exact-repo patterns for the repos this deployment was given; a broader
+    `owner/*` or `*` pattern is a deliberate operator edit made by hand
+    afterward, same as today -- this command does not guess at widening its
+    own grant.
+
+    `repos` is the task repo plus every target repo: the orchestrator now
+    resolves a credential per repo (`CredentialSet.token_for`, wired into
+    `GitHubClient`), so a repo absent from this mapping is one it will talk
+    to anonymously and, for anything private, fail on.
     """
     _write_remote_file(
         runner, f"{DATA_SECRETS_GITHUB}/{credential_name}.token",
         token.strip() + "\n", mode="600",
     )
-    mapping = {f"{owner}/{repo}": credential_name}
+    mapping = {repo: credential_name for repo in repos}
     _write_remote_file(
         runner, f"{DATA_SECRETS_GITHUB}/credentials.json",
         json.dumps(mapping, indent=2) + "\n", mode="644",

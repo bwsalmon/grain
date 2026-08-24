@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from grain.cli import build_parser, main
@@ -312,6 +314,79 @@ def test_dry_run_controller_configure_with_a_github_token_file(capsys, tmp_path)
 def test_repo_without_a_slash_is_rejected():
     with pytest.raises(SystemExit, match="owner/name"):
         main(["--dry-run", "controller", "configure", "--repo", "not-a-repo-slug"])
+
+
+def test_configure_allowlists_the_target_repos_not_the_task_repo(capsys):
+    """The allowlist gates git transport, and no sandbox ever clones the
+    task repo -- it is read over the API, which credentials.json covers.
+    """
+    written = _configure_with(
+        ["--task-repo", "acme/tasks",
+         "--target-repo", "acme/widgets", "--target-repo", "acme/gadgets"],
+        capsys,
+    )
+    assert json.loads(written["/data/config/repo-allowlist.json"]) == [
+        "acme/widgets", "acme/gadgets",
+    ]
+    automation = json.loads(written["/data/config/automation.json"])
+    assert (automation["task_owner"], automation["task_repo"]) == ("acme", "tasks")
+    # No default: with several targets named, a task that names none is
+    # parked rather than guessed at.
+    assert automation["default_target_repo"] is None
+
+
+def test_configure_with_no_target_repo_keeps_the_single_repo_shape(capsys):
+    """The migration path: a deployment whose task repo *is* its code gets
+    that repo as its only target and as the default, so no issue needs a
+    `/repo` line.
+    """
+    written = _configure_with(["--task-repo", "acme/widgets"], capsys)
+    assert json.loads(written["/data/config/repo-allowlist.json"]) == ["acme/widgets"]
+    automation = json.loads(written["/data/config/automation.json"])
+    assert automation["default_target_repo"] == "acme/widgets"
+
+
+def test_a_default_target_outside_the_target_list_is_rejected():
+    with pytest.raises(SystemExit, match="not one of"):
+        main(["--dry-run", "controller", "configure", "--task-repo", "acme/tasks",
+              "--target-repo", "acme/widgets",
+              "--default-target-repo", "acme/elsewhere"])
+
+
+def test_the_credential_mapping_covers_the_task_repo_and_every_target(tmp_path, capsys):
+    token_file = tmp_path / "token"
+    token_file.write_text("ghp_x\n")
+    written = _configure_with(
+        ["--task-repo", "acme/tasks", "--target-repo", "acme/widgets",
+         "--github-token-file", str(token_file)],
+        capsys,
+    )
+    assert json.loads(written["/data/secrets/github/credentials.json"]) == {
+        "acme/tasks": "bot", "acme/widgets": "bot",
+    }
+
+
+def _configure_with(extra_args: list[str], capsys) -> dict[str, str]:
+    """Runs `controller configure --dry-run` and returns `{remote path:
+    content}` for every file it would write -- `DryRunRunner` echoes each
+    command plus its stdin heredoc, and every remote file this command
+    writes goes through `dd of=<path>` fed over stdin.
+    """
+    out = run(["--dry-run", "controller", "configure", *extra_args], capsys)
+    written: dict[str, str] = {}
+    path: str | None = None
+    lines = out.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("+ ") and "dd of=" in line and line.endswith("<<'EOF'"):
+            path = line.split("dd of=", 1)[1].split()[0]
+            body: list[str] = []
+            for content in lines[index + 1:]:
+                if content == "EOF":
+                    break
+                body.append(content)
+            written[path] = "\n".join(body)
+    return written
+
 
 
 def test_dry_run_bootstrap_runs_every_stage_without_touching_a_real_vm(tmp_path, capsys):

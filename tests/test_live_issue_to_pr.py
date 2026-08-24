@@ -111,6 +111,10 @@ pytestmark = pytest.mark.skipif(
 BRIDGE = "br-grain"
 OWNER = "live-org"
 REPO = "live-repo"
+# The bare repo's own default branch (created below) — served by the mock's
+# `GET /repos/{owner}/{repo}` route, which is where a PR's base now comes
+# from.
+DEFAULT_BRANCH = "main"
 
 
 # --- a dedicated sandbox VM, at a different index from test_vm_integration's
@@ -227,6 +231,15 @@ _BRANCH_RE = re.compile(
     r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/branches/(?P<branch>[^/]+)$"
 )
 _PULLS_RE = re.compile(r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pulls$")
+# `GET /repos/{owner}/{repo}`: the target repo's default branch, read once
+# per dispatch now that the PR base comes from the repo itself rather than
+# a single configured `base_branch` (`GitHubClient.default_branch`).
+_REPO_RE = re.compile(r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)$")
+# The task issue's top-level conversation -- read on every dispatch (a
+# human's reply to a prior question, and any `/repo` correction).
+_ISSUE_COMMENTS_RE = re.compile(
+    r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/(?P<number>\d+)/comments$"
+)
 
 
 def _parse_qs(query: str) -> dict[str, str]:
@@ -249,7 +262,8 @@ class FakeIssue:
 @dataclass
 class RealGitHubMock:
     """Implements the specific endpoints `GitHubClient` calls
-    (`list_issues`/`list_pull_requests` via the shared `/issues` listing,
+    (`list_issues` via the `/issues` listing, `list_comments`,
+    `default_branch`,
     `add_label`, `remove_label`, `branch_exists`, `create_pull_request`),
     seeded with one fake issue carrying the trigger label. Wired in as a
     `Transport`, so `GitHubClient`'s own logic runs unmodified.
@@ -279,6 +293,17 @@ class RealGitHubMock:
         split = urlsplit(path)
         p = split.path
         qs = _parse_qs(split.query)
+
+        m = _ISSUE_COMMENTS_RE.match(p)
+        if method == "GET" and m:
+            # No conversation on the seeded issue; the orchestrator renders
+            # the blank state plainly, so an empty list is a real answer.
+            return ApiResponse(200, {}, b"[]")
+
+        m = _REPO_RE.match(p)
+        if method == "GET" and m:
+            return ApiResponse(200, {}, json.dumps(
+                {"default_branch": DEFAULT_BRANCH}).encode())
 
         m = _ISSUES_RE.match(p)
         if method == "GET" and m:
@@ -555,9 +580,12 @@ def live_target(tmp_path: Path, live_sandbox: Sandbox, live_controller_stand_in:
     github_mock = RealGitHubMock(owner=OWNER, repo=REPO, bare_repo=bare)
     github_client = GitHubClient(github_mock, token=None)
 
+    # Task repo and target repo are the same repo here: the single-repo
+    # shape, expressed the way a real single-repo deployment now expresses
+    # it (`default_target_repo`), so no seeded issue needs a `/repo` line.
     config = AutomationConfig(
-        owner=OWNER, repo=REPO, ssh_user=SSH_USER,
-        ssh_key_path=live_sandbox.private_key,
+        task_owner=OWNER, task_repo=REPO, default_target_repo=f"{OWNER}/{REPO}",
+        ssh_user=SSH_USER, ssh_key_path=live_sandbox.private_key,
     )
     audit = RecordingAuditLog()
     # `sandbox_runner` plays both the sandbox role and the stand-in
@@ -579,7 +607,8 @@ def live_target(tmp_path: Path, live_sandbox: Sandbox, live_controller_stand_in:
         github=github_client, config=config,
         state=AutomationState(), base_runner=sandbox_runner,
         ssh_runner_factory=lambda _sandbox: sandbox_runner,
-        token_store=token_store, audit=audit,
+        token_store=token_store, allowlist=Allowlist(allowlist_path),
+        audit=audit,
     )
 
     try:
@@ -676,7 +705,7 @@ def test_live_issue_to_pr_pipeline(
 
     outcomes = [e["outcome"] for e in live_target.audit.entries]
     assert "dispatched" in outcomes
-    assert any(o.startswith("opened PR #9000") for o in outcomes)
+    assert any(o.startswith(f"opened PR {OWNER}/{REPO}#9000") for o in outcomes)
 
     # --- 2. failure path: the fake agent exits nonzero, never touches the
     #        repo -> requeued, not treated as done -----------------------

@@ -758,6 +758,47 @@ refused client just prints *"the remote end hung up unexpectedly"*.
 
 ### Issue intake
 
+**One repo is the queue; each task names the repo it is for.** The
+orchestrator polls exactly one repo — the *task repo*, the agent set's task
+list — and that is the only repo it ever labels or comments on. The code a
+task is about is a *target* repo, named by the task itself with a `/repo
+owner/name` line in its body (`grain/automation/directives.py`; `/pr N` and
+`/base branch` are the other two directives). A body line rather than a
+label: a `repo:owner/name` label would have to be created in the task repo
+before it could be applied, once per target, and could carry neither a PR
+number nor a base branch.
+
+Three consequences worth stating plainly, because they are where this
+design could otherwise go wrong:
+
+- **The target repo is checked against the same allowlist the git proxy
+  enforces** (`/data/config/repo-allowlist.json`). An issue body is
+  untrusted input — the trigger label gates *whether* an agent runs on it,
+  not what it may then reach — so which repos this deployment can write to
+  stays an operator's file, checked on the API side at dispatch and on the
+  git side at every fetch and push. The task repo is deliberately *not* on
+  that list: no sandbox ever clones it.
+- **An unusable directive parks the task, it does not fail it.** No
+  `/repo` (and no configured `default_target_repo`), a malformed one, or a
+  repo the deployment can't reach: the orchestrator comments saying which,
+  swaps the trigger label for the awaiting-reply label, and waits — the
+  same state, and the same trusted-reply promotion, an unanswered
+  `ask_question` already uses. Leaving the trigger label on instead would
+  redispatch an identical failure every polling interval.
+- **Directives are read from trusted comments too**, at the same
+  `author_association` tier that can promote a question (owner, member,
+  collaborator). Repairing a parked task is then a reply, not an edit plus
+  a reply. A public commenter cannot name the repo an agent writes to, for
+  the same reason they cannot redispatch one.
+
+The `/repo` directive is recorded on the assignment at dispatch, not
+re-read when the run finishes: an issue body is editable, and an edit
+landing mid-run must not be able to redirect where the finished work's PR
+is opened. The PR's base branch comes from the target repo's own
+`default_branch` (or a `/base` override), read once at the same moment —
+one global `base_branch` setting stopped being a defensible guess once one
+deployment dispatches into many repos.
+
 Polling, not `OpenHands/automation` — see
 [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
 `grain/automation/core.py` is the loop; `grain automation run-once`,

@@ -164,43 +164,53 @@ def test_get_pull_request_raises_on_a_non_200():
         GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
 
 
-def test_list_pull_requests_keeps_only_items_carrying_a_pull_request_key():
-    # The opposite filter from list_issues: the issues endpoint returns both
-    # issues and PRs, distinguished by a "pull_request" key on each item.
+def test_default_branch_reads_the_repos_own_default():
+    """What a PR opened in a target repo bases off, when the task's own
+    `/base` directive doesn't say -- read from the repo rather than
+    configured, since a task repo dispatches into many target repos and
+    each one knows its own answer.
+    """
     transport = FakeTransport(responses=[
-        ApiResponse(200, {}, json.dumps(
-            [issue_json(1), issue_json(2, is_pr=True)]
-        ).encode()),
-        # The one PR hit gets hydrated with a get_pull_request call.
-        ApiResponse(200, {}, json.dumps(pr_json(2)).encode()),
+        ApiResponse(200, {}, json.dumps({"default_branch": "trunk"}).encode()),
     ])
-    prs = GitHubClient(transport, token="t").list_pull_requests("o", "r", "grain-agent")
-    assert [p.number for p in prs] == [2]
-    assert prs[0].head_ref == "feature-branch"
-    # First call is the issues-style listing; second is the per-PR hydration.
-    assert transport.calls[0]["path"] == "/repos/o/r/issues?labels=grain-agent&state=open&per_page=100"
-    assert transport.calls[1]["path"] == "/repos/o/r/pulls/2"
+    assert GitHubClient(transport, token="t").default_branch("o", "r") == "trunk"
+    assert transport.calls[0]["path"] == "/repos/o/r"
 
 
-def test_list_pull_requests_follows_link_header_pagination():
-    transport = FakeTransport(responses=[
-        ApiResponse(
-            200,
-            {"Link": '<https://api.github.com/repos/o/r/issues?page=2>; rel="next"'},
-            json.dumps([issue_json(1, is_pr=True)]).encode(),
-        ),
-        ApiResponse(200, {}, json.dumps([issue_json(2, is_pr=True)]).encode()),
-        ApiResponse(200, {}, json.dumps(pr_json(1)).encode()),
-        ApiResponse(200, {}, json.dumps(pr_json(2)).encode()),
-    ])
-    prs = GitHubClient(transport, token="t").list_pull_requests("o", "r", "grain-agent")
-    assert [p.number for p in prs] == [1, 2]
-
-
-def test_list_pull_requests_raises_on_a_non_200():
-    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+def test_default_branch_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
     with pytest.raises(GitHubError):
-        GitHubClient(transport, token="t").list_pull_requests("o", "r", "grain-agent")
+        GitHubClient(transport, token="t").default_branch("o", "r")
+
+
+def test_a_token_source_resolves_a_credential_per_repo():
+    """One client, many repos: the task repo and each target repo may need
+    different credentials, so the token is resolved per call rather than
+    fixed at construction.
+    """
+    class PerRepo:
+        def token_for(self, owner: str, repo: str) -> str | None:
+            return {"o/tasks": "task-token", "o/code": "code-token"}.get(f"{owner}/{repo}")
+
+    transport = FakeTransport()
+    client = GitHubClient(transport, PerRepo())
+    client.list_issues("o", "tasks", "grain-agent")
+    client.list_issues("o", "code", "grain-agent")
+    client.list_issues("o", "unmapped", "grain-agent")
+    assert transport.calls[0]["headers"]["Authorization"] == "token task-token"
+    assert transport.calls[1]["headers"]["Authorization"] == "token code-token"
+    # No credential covers the third -- an anonymous request, not a crash:
+    # that is a real shape (a public repo), and fail-closed for a *private*
+    # one is GitHub's own 404, not something to guess at here.
+    assert "Authorization" not in transport.calls[2]["headers"]
+
+
+def test_a_bare_token_still_applies_to_every_repo():
+    transport = FakeTransport()
+    client = GitHubClient(transport, token="t")
+    client.list_issues("o", "one", "grain-agent")
+    client.list_issues("other", "two", "grain-agent")
+    assert all(c["headers"]["Authorization"] == "token t" for c in transport.calls)
 
 
 def review_comment_json(id_: int, *, line: int | None = 12) -> dict:
@@ -298,21 +308,19 @@ def test_create_comment_raises_on_a_non_201():
 
 def test_dry_run_client_passes_pr_reads_through(capsys):
     transport = FakeTransport(responses=[
-        ApiResponse(200, {}, json.dumps([issue_json(1, is_pr=True)]).encode()),
-        ApiResponse(200, {}, json.dumps(pr_json(1)).encode()),
         ApiResponse(200, {}, json.dumps(pr_json(1)).encode()),
         ApiResponse(200, {}, json.dumps([review_comment_json(1)]).encode()),
+        ApiResponse(200, {}, json.dumps({"default_branch": "main"}).encode()),
     ])
     dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
-    prs = dry.list_pull_requests("o", "r", "grain-agent")
-    assert [p.number for p in prs] == [1]
     pr = dry.get_pull_request("o", "r", 1)
     assert isinstance(pr, PullRequestDetail)
     comments = dry.list_review_comments("o", "r", 1)
     assert [c.id for c in comments] == [1]
-    # All four calls were reads, so all four actually reached the transport
+    assert dry.default_branch("o", "r") == "main"
+    # All three calls were reads, so all three actually reached the transport
     # — nothing here is a mutation DryRunGitHubClient would intercept.
-    assert len(transport.calls) == 4
+    assert len(transport.calls) == 3
 
 
 def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):

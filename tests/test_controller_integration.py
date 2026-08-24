@@ -183,7 +183,7 @@ def test_python_3_11_or_newer_is_present(booted_controller: Controller):
 
 
 def test_the_controller_ssh_keypair_was_generated_on_the_guest(booted_controller: Controller):
-    key_path = AutomationConfig(owner="x", repo="y").ssh_key_path
+    key_path = AutomationConfig(task_owner="x", task_repo="y").ssh_key_path
     result = _sh(booted_controller, "sudo", "test", "-f", str(key_path))
     assert result.returncode == 0
     result = _sh(booted_controller, "sudo", "test", "-f", f"{key_path}.pub")

@@ -34,9 +34,9 @@ unsequenced.
 | 6. Create sandboxes | already one command |
 | 7. **Deploy code to `/opt/grain`** | documented as needing a deploy credential. **It does not** — the host already has the tree |
 | 8. GitHub credential files | irreducible: a human pastes a secret, once |
-| 9. `repo-allowlist.json` | derivable from the same `owner/repo` as step 11 |
+| 9. `repo-allowlist.json` | the target repos, from `--target-repo` (docs/roadmap.md item 15) |
 | 10. `sandbox-tokens.json` | **already unnecessary.** `SandboxTokenStore.ensure_token()` mints and records one per sandbox, idempotently, on first dispatch. The runbook is stale |
-| 11. `automation.json` | two fields with no default, `owner` and `repo` |
+| 11. `automation.json` | two fields with no default, `task_owner` and `task_repo` — the polled queue, distinct from the target repos in step 9 |
 | 12. Enable proxy + timer | scriptable once its preconditions hold, which is the only reason provisioning leaves it undone |
 | 13. Claude login per sandbox | **superseded, not just reduced to one** — see [The Claude credential](#the-claude-credential). No sandbox ever holds this credential now; `claude -p` runs on the controller as a dedicated `grain-agent` account instead |
 | 14. Verify | should be the tail of whatever did the work |
@@ -201,7 +201,8 @@ credential, no network egress, no `git` on the far side.
 
 | Input | Written to |
 |---|---|
-| `--repo owner/name` | `/data/config/automation.json`, `/data/config/repo-allowlist.json` |
+| `--task-repo owner/name` | `/data/config/automation.json` (the polled queue; `--repo` is still accepted as its former name) |
+| `--target-repo owner/name`, repeatable | `/data/config/repo-allowlist.json` (the repos tasks may dispatch into; defaults to the task repo, which also becomes `default_target_repo`) |
 | `--github-token-file PATH \| -` | `/data/secrets/github/<name>.token`, `0600` |
 | `--credential-name` (default `bot`) | `/data/secrets/github/credentials.json` |
 | `--claude-token-file PATH` | `/data/secrets/claude-oauth-token`, `0600`, plus a live copy at `grain-agent`'s own `~/.claude-oauth-token` |
@@ -219,7 +220,8 @@ sits on host disk at rest.
 ### Phase 4 — the sequencer
 
 ```sh
-grain host bootstrap --repo owner/name \
+grain host bootstrap --task-repo owner/agent-tasks \
+    --target-repo owner/service-a \
     --github-token-file - \
     --claude-token-file ~/.claude-setup-token
 ```

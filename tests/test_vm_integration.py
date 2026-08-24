@@ -1019,7 +1019,7 @@ def test_sweep_captures_a_real_trajectory_file_before_freeing_the_slot(
         started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         state.assign(sandbox, issue=123, unit=unit, now=started_at)
         history = FileSessionHistory(tmp_path / "sessions")
-        config = AutomationConfig(owner="o", repo="r")
+        config = AutomationConfig(task_owner="o", task_repo="r")
 
         result = sweep(
             state, lambda name: ssh_runner, ssh_runner, config,

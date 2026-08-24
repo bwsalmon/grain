@@ -42,10 +42,11 @@ def stdin_for(inner: FakeRunner, path: str) -> str:
 
 def test_configure_repo_writes_automation_json_and_allowlist():
     ssh, inner = make_ssh()
-    configure_repo(ssh, "acme", "widgets")
+    configure_repo(ssh, "acme/widgets", ["acme/widgets"])
     automation = json.loads(stdin_for(inner, "/data/config/automation.json"))
     assert automation == {
-        "owner": "acme", "repo": "widgets",
+        "task_owner": "acme", "task_repo": "widgets",
+        "default_target_repo": None,
         "github_host": "api.github.com", "git_forward_host": "github.com",
         "github_use_tls": True,
     }
@@ -61,7 +62,7 @@ def test_configure_repo_honours_a_github_host_override():
     """
     ssh, inner = make_ssh()
     configure_repo(
-        ssh, "acme", "widgets",
+        ssh, "acme/widgets", ["acme/widgets"],
         github_host="10.100.0.1:8443", git_forward_host="10.100.0.1:8443",
         github_use_tls=False,
     )
@@ -73,7 +74,7 @@ def test_configure_repo_honours_a_github_host_override():
 
 def test_configure_repo_uses_sudo_and_chmod_644_for_config():
     ssh, inner = make_ssh()
-    configure_repo(ssh, "acme", "widgets")
+    configure_repo(ssh, "acme/widgets", ["acme/widgets"])
     assert any(
         c.startswith("ssh") and "sudo chmod 644 /data/config/automation.json" in c
         for c in inner.commands
@@ -82,7 +83,7 @@ def test_configure_repo_uses_sudo_and_chmod_644_for_config():
 
 def test_configure_github_credential_writes_token_and_credentials_json():
     ssh, inner = make_ssh()
-    configure_github_credential(ssh, "acme", "widgets", "  ghp_secrettoken  \n")
+    configure_github_credential(ssh, ["acme/widgets"], "  ghp_secrettoken  \n")
     token = stdin_for(inner, "/data/secrets/github/bot.token")
     assert token == "ghp_secrettoken\n"  # stripped, then a single trailing newline
     mapping = json.loads(stdin_for(inner, "/data/secrets/github/credentials.json"))
@@ -91,7 +92,7 @@ def test_configure_github_credential_writes_token_and_credentials_json():
 
 def test_configure_github_credential_honours_a_custom_credential_name():
     ssh, inner = make_ssh()
-    configure_github_credential(ssh, "acme", "widgets", "tok", credential_name="personal")
+    configure_github_credential(ssh, ["acme/widgets"], "tok", credential_name="personal")
     stdin_for(inner, "/data/secrets/github/personal.token")  # does not raise
     mapping = json.loads(stdin_for(inner, "/data/secrets/github/credentials.json"))
     assert mapping == {"acme/widgets": "personal"}
@@ -104,14 +105,14 @@ def test_github_token_file_is_never_in_argv():
     """
     ssh, inner = make_ssh()
     secret = "ghp_supersecretvalue"
-    configure_github_credential(ssh, "acme", "widgets", secret)
+    configure_github_credential(ssh, ["acme/widgets"], secret)
     for argv, _ in inner.calls:
         assert all(secret not in arg for arg in argv)
 
 
 def test_configure_github_credential_sets_mode_600_on_the_token():
     ssh, inner = make_ssh()
-    configure_github_credential(ssh, "acme", "widgets", "tok")
+    configure_github_credential(ssh, ["acme/widgets"], "tok")
     assert any(
         "sudo chmod 600 /data/secrets/github/bot.token" in c for c in inner.commands
     )

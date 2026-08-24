@@ -19,14 +19,14 @@ host — the controller is where `/data` and every credential live.
 
 | Command | What it does | Runs on |
 |---|---|---|
-| `grain host bootstrap --repo owner/name [...]` | One command: network, controller, deploy, configure, sandboxes, enable (docs/bootstrap.md) — replaces steps 1–12 below | host |
+| `grain host bootstrap --task-repo owner/name [--target-repo owner/name ...]` | One command: network, controller, deploy, configure, sandboxes, enable (docs/bootstrap.md) — replaces steps 1–12 below | host |
 | `grain host up` | Creates the private bridge/network and applies the firewall policy | host |
 | `grain host create/start/stop/destroy/recreate <name>` | VM lifecycle | host |
 | `grain host wait <name>` | Blocks until VM(s) answer SSH and finish cloud-init | host |
 | `grain host deploy [controller]` | Pushes this working tree to `/opt/grain` on the controller, no credential needed | host |
 | `grain host status` | Lists VM state + assigned address | host |
 | `grain host rules [--dry-run]` | Prints the firewall ruleset without applying it | host |
-| `grain controller configure --repo owner/name [...]` | Writes `automation.json`/`repo-allowlist.json` and, optionally, GitHub/Claude credentials to `/data` | host (over SSH) |
+| `grain controller configure --task-repo owner/name [--target-repo owner/name ...]` | Writes `automation.json` (the task repo) / `repo-allowlist.json` (the target repos) and, optionally, GitHub/Claude credentials to `/data` | host (over SSH) |
 | `grain sandbox login <name>` | Direct interactive admin SSH to one sandbox or the controller — for debugging | host |
 | `grain automation run-once` | Sweep stranded work, then poll GitHub and dispatch | controller |
 | `grain automation status` | Show current sandbox↔issue assignments | controller |
@@ -50,7 +50,8 @@ run-once --data-dir /data`.
 
 ```sh
 sudo python3 -m grain.cli host bootstrap \
-  --repo your-org/your-repo \
+  --task-repo your-org/agent-tasks \
+  --target-repo your-org/your-repo \
   --github-token-file /path/to/token   # or '-' to pipe it in on stdin
   # --claude-token-file /path/to/token   # optional, see below
 ```
@@ -60,7 +61,8 @@ every step below with one idempotent command: brings the network up,
 generates an admin keypair if none exists, creates and boots the controller,
 reads its own SSH key back (only possible because the admin key it just
 generated is trusted by the controller too — see "Key roles"), deploys this
-tree to `/opt/grain`, writes `automation.json`/`repo-allowlist.json` and, if
+tree to `/opt/grain`, writes `automation.json` (the task repo) and
+`repo-allowlist.json` (the target repos) and, if
 given, the GitHub token and Claude credential, creates and boots every
 sandbox, and enables the git proxy and automation timer. `--dry-run` prints
 every command it would run without touching anything. Safe to re-run: every
@@ -219,8 +221,11 @@ short of giving the host a GitHub/Claude credential — see
      bot.token             # e.g. the machine-account PAT
      personal.token         # last resort
    ```
-   `grain controller configure --repo owner/name --github-token-file PATH`
-   writes both, over the admin SSH path (stdin, never argv — see
+   `grain controller configure --task-repo owner/name [--target-repo
+   owner/name ...] --github-token-file PATH` writes both, with one
+   exact-repo pattern per repo it was given (the task repo, so the
+   orchestrator can read issues and move labels, plus every target repo, so
+   it can check a branch and open a PR), over the admin SSH path (stdin, never argv — see
    `grain/automation/configure.py`). Doing it by hand: every value in
    `credentials.json` other than the literal string `"anonymous"` must have
    a matching `<name>.token` file next to it (`grain/proxy/credentials.py`)
@@ -228,25 +233,41 @@ short of giving the host a GitHub/Claude credential — see
    **Do not grant `workflow`, `delete_repo`, `write:org`, or any `admin:*`
    scope to any of these** — see [Credential audit](#credential-audit)
    below.
-9. **The repo allowlist**, `/data/config/repo-allowlist.json` — a plain
-   JSON array of `"owner/repo"` strings, default-deny, hot-reloaded
+9. **The repo allowlist**, `/data/config/repo-allowlist.json` — the
+   *target* repos this deployment may work in: a plain JSON array of
+   `"owner/repo"` strings, default-deny, hot-reloaded
    (`grain/proxy/allowlist.py` re-reads it on every request, no restart
-   needed). Written by `grain controller configure` alongside
-   `automation.json` (step 11) — both derive from the same `--repo`. A repo
-   must be on this list *and* covered by a `credentials.json` pattern
-   before the proxy will forward anything for it.
+   needed). Written by `grain controller configure` from its
+   `--target-repo` values, alongside `automation.json` (step 11). Enforced
+   in two places against this one file: the git proxy on every fetch and
+   push, and the orchestrator when it resolves a task's `/repo` directive
+   (a task naming an off-list repo is parked with a comment rather than
+   dispatched). The **task** repo does not belong here — no sandbox ever
+   clones it; the orchestrator reads it over the API, which
+   `credentials.json` covers. A repo must be on this list *and* covered by
+   a `credentials.json` pattern before the proxy will forward anything for
+   it.
 10. **Sandbox tokens**, `/data/secrets/sandbox-tokens.json` — already
     unnecessary: `SandboxTokenStore.ensure_token()`
     (`grain/proxy/tokens.py`) mints and records one per sandbox,
     idempotently, on first dispatch. Nothing to do here.
-11. **`automation.json`**, `/data/config/automation.json` — the only two
-    fields with no default (`AutomationConfig`, `grain/automation/config.py`):
+11. **`automation.json`**, `/data/config/automation.json` — names the
+    *task* repo, the one queue polled for labelled issues
+    (`AutomationConfig`, `grain/automation/config.py`); `task_owner` and
+    `task_repo` are its only fields with no default:
     ```json
-    {"owner": "your-org", "repo": "your-repo"}
+    {"task_owner": "your-org", "task_repo": "agent-tasks",
+     "default_target_repo": null}
     ```
-    Written by `grain controller configure --repo owner/name` (step 8).
+    Written by `grain controller configure --task-repo owner/name` (step
+    8). `default_target_repo` is the target for a task carrying no `/repo`
+    directive; `null` makes the directive mandatory, and a task without one
+    is parked with a comment. Passing no `--target-repo` at all produces
+    the single-repo shape instead: the task repo as the sole allow-listed
+    target *and* the default, so no task needs a directive.
     Everything else has a default worth knowing: `trigger_label:
     "grain-agent"`, `in_progress_label: "grain-agent-in-progress"`,
+    `awaiting_reply_label: "grain-agent-awaiting-reply"`,
     `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
     `runs_per_hour: 10`, `max_runtime_minutes: 120`. Override any of them by
     editing the file directly.
@@ -270,14 +291,17 @@ short of giving the host a GitHub/Claude credential — see
 ## Running automation
 
 `grain automation run-once` does one pass: sweep stranded/finished work,
-poll `owner/repo` for open issues *and open pull requests* carrying
-`trigger_label`, and dispatch to any free sandbox within the rate limit —
-both share the same pool and the same budget, since it's the same finite set
-of sandboxes either way. An issue-triggered dispatch opens a new PR once its
-branch shows up; a PR-triggered dispatch (docs/roadmap.md item 9 — label an
-*existing* PR to have an agent address review feedback, fix CI, or continue
-work already in flight) just pushes more commits to that PR's own branch,
-already checked out — no new PR to open. It is meant to be **invoked
+poll the **task repo** for open issues carrying `trigger_label`, resolve
+each one's target repo from its own `/repo` directive, and dispatch to any
+free sandbox within the rate limit. A fresh task opens a new PR in its
+target repo once its branch shows up; a task carrying `/pr N`
+(docs/roadmap.md items 9 and 15 — continue an *existing* PR to address
+review feedback, fix CI, or finish work in flight) just pushes more commits
+to that PR's own branch, already checked out — no new PR to open. Both
+share the same pool and the same budget, since it's the same finite set of
+sandboxes either way; labels and comments stay on the task issue in both
+cases, and a task whose directive can't be honoured is parked with a
+comment rather than retried blindly. It is meant to be **invoked
 periodically by something else, not run as a daemon** — `docs/design.md`
 says "invoked by a systemd timer."
 
@@ -398,7 +422,7 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   --i-know-this-deletes-data` — the flag is required because `/data` has no
   disk of its own yet and lives on the controller's own qcow2, so this also
   destroys every credential and all automation state, not just the SSH key
-  — followed by `grain host bootstrap --repo owner/name` (no need to repeat the
+  — followed by `grain host bootstrap --task-repo owner/name` (no need to repeat the
   GitHub/Claude credential flags — see below) now handles rotation without a
   full sandbox recreation cycle: stage 6 reads the *new* key back over the
   admin SSH path (only possible because of the "key roles" split — see
@@ -520,8 +544,15 @@ What is **not automatic**:
 
 ## Adding or reconfiguring a target repo
 
+A *target* repo is one that tasks may dispatch into. The **task** repo (the
+polled queue) is set once, in `automation.json`; pointing a deployment at a
+different one is a `grain controller configure --task-repo ...` run, not
+this procedure.
+
 1. Add `"owner/repo"` to `/data/config/repo-allowlist.json` (hot-reloaded —
-   no restart).
+   no restart). Until it is on that list, a task naming it with `/repo
+   owner/repo` is parked with a comment saying exactly that, rather than
+   dispatched.
 2. Add a `credentials.json` entry (exact repo, `owner/*`, or leave it
    covered by the existing `*` fallback) pointing at a credential name with
    a matching `<name>.token` file.

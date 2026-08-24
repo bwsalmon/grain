@@ -238,16 +238,19 @@ def test_configure_repo_writes_real_files_as_root_over_ssh(two_key_sandbox, admi
     creating it, not just writing into a directory that already exists.
     """
     admin_ssh.run(["sudo", "rm", "-rf", "/data/config"])
-    configure_repo(admin_ssh, "acme", "widgets")
+    configure_repo(admin_ssh, "acme/tasks", ["acme/widgets"])
     # 644, world-readable, so a plain `cat` as the unprivileged admin SSH
     # user (not `sudo cat`) is itself part of what this asserts.
     result = admin_ssh.run(["cat", "/data/config/automation.json"])
-    assert '"owner": "acme"' in result.stdout
-    assert '"repo": "widgets"' in result.stdout
+    assert '"task_owner": "acme"' in result.stdout
+    assert '"task_repo": "tasks"' in result.stdout
     mode = admin_ssh.run(["stat", "-c", "%a", "/data/config/automation.json"]).stdout.strip()
     assert mode == "644"
     allowlist = admin_ssh.run(["cat", "/data/config/repo-allowlist.json"]).stdout
+    # The *target* repo, not the task repo: the allowlist gates git
+    # transport, and no sandbox ever clones the task repo.
     assert "acme/widgets" in allowlist
+    assert "acme/tasks" not in allowlist
 
 
 def test_configure_claude_token_writes_mode_600(two_key_sandbox, admin_ssh):

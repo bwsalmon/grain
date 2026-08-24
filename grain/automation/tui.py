@@ -114,9 +114,13 @@ def format_row(record: SessionRecord, *, width: int = 0) -> str:
     trigger = f"{record.kind.value}#{record.issue}"
     when = record.started_at.strftime("%Y-%m-%d %H:%M")
     captured = "yes" if record.transcript_path else "no"
+    # `target` is None only for a session recorded before the task/target
+    # split (history.py's own field docstring) -- rendered as a dash rather
+    # than blank so the column still lines up in a mixed listing.
+    target = record.target or "-"
     row = (
         f"{when}  {trigger:<10} {record.outcome:<10} {record.sandbox:<12} "
-        f"transcript={captured:<3} {record.unit}"
+        f"{target:<24} transcript={captured:<3} {record.unit}"
     )
     return row[:width] if width else row
 
@@ -154,8 +158,9 @@ class DetailState:
 
 def format_detail_title(record: SessionRecord) -> str:
     return (
-        f"{record.kind.value}#{record.issue}  sandbox={record.sandbox}  "
-        f"outcome={record.outcome}  started={record.started_at.isoformat()}"
+        f"{record.kind.value}#{record.issue}  target={record.target or '-'}  "
+        f"sandbox={record.sandbox}  outcome={record.outcome}  "
+        f"started={record.started_at.isoformat()}"
     )
 
 

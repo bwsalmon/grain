@@ -34,6 +34,7 @@ from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_claude_token, configure_github_credential, configure_repo,
+    credential_repos,
     ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
@@ -45,8 +46,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class BootstrapConfig:
-    owner: str
-    repo: str
+    # `"owner/name"` for the task repo -- the one queue polled for labelled
+    # issues -- and for each target repo those tasks may dispatch into (see
+    # `grain/automation/configure.py`'s `configure_repo`). `targets` empty
+    # means "the task repo is also the code," the single-repo shape every
+    # deployment had before the task/target split: it becomes the sole
+    # allow-listed target *and* the default for a task with no `/repo`
+    # directive, so such a deployment keeps working with none written.
+    task_repo: str
+    targets: tuple[str, ...] = ()
+    default_target_repo: str | None = None
     github_token: str | None = None
     credential_name: str = "bot"
     claude_token: str | None = None
@@ -174,12 +183,17 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
     # Stage 8: configure. Token/Claude-credential only if one was supplied
     # -- a bare re-run with neither should not clobber what's already there.
     log("stage 8/11: configure /data")
-    configure_repo(admin_ssh, config.owner, config.repo,
+    targets = list(config.targets) or [config.task_repo]
+    default_target = config.default_target_repo or (
+        config.task_repo if not config.targets else None
+    )
+    configure_repo(admin_ssh, config.task_repo, targets,
+                    default_target_repo=default_target,
                     github_host=config.github_host, git_forward_host=config.git_forward_host,
                     github_use_tls=config.github_use_tls)
     if config.github_token:
         configure_github_credential(
-            admin_ssh, config.owner, config.repo, config.github_token,
+            admin_ssh, credential_repos(config.task_repo, targets), config.github_token,
             credential_name=config.credential_name,
         )
     if config.claude_token:

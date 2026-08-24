@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,13 +16,14 @@ from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, Gi
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.inventory import Cluster
+from grain.proxy.allowlist import Allowlist
 from grain.proxy.tokens import SandboxTokenStore
 from grain.run import FakeRunner
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def issue_json(number: int) -> dict:
+def issue_json(number: int, body: str = "do it") -> dict:
     return {
         # "id" isn't read by list_issues itself, but the same fixture also
         # serves as FakeTransport's shared default response for whichever
@@ -29,7 +31,7 @@ def issue_json(number: int) -> dict:
         # list_comments call (docs/roadmap.md item 12), which does read
         # "id". Present so that fallback doesn't KeyError in tests that
         # never queue a dedicated comments response.
-        "id": number, "number": number, "title": f"issue {number}", "body": "do it",
+        "id": number, "number": number, "title": f"issue {number}", "body": body,
         "html_url": f"https://github.com/o/r/issues/{number}",
         "labels": [{"name": "grain-agent"}],
     }
@@ -78,7 +80,44 @@ def pr_flow_response(pr_number: int) -> list[ApiResponse]:
     ]
 
 
-def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None, history=None):
+class OrchestratorTransport(FakeTransport):
+    """`FakeTransport` plus one always-served route: `GET /repos/{owner}/{repo}`,
+    the target repo's default branch, which every dispatch now reads
+    (`core.py`'s `_resolve_target`) and every PR creation falls back to.
+
+    Answered directly, *without* consuming the `responses` queue: that queue
+    is a strict FIFO regardless of which call takes each entry, so a test
+    scripting a sweep's exact response sequence (`pr_flow_response`) would
+    otherwise have a dispatch-time repo read silently eat the first of them.
+    The call is still recorded in `calls`, so a test can assert on it.
+    """
+
+    # Overridable so one test can make that route 404 (a target repo the
+    # credential can't see) without scripting the whole queue around it.
+    repo_status: int = 200
+
+    def request(self, *, method: str, path: str, headers: dict, body):
+        if method == "GET" and re.fullmatch(r"/repos/[^/]+/[^/]+", path):
+            self.calls.append(
+                {"method": method, "path": path, "headers": dict(headers), "body": body}
+            )
+            if self.repo_status != 200:
+                return ApiResponse(self.repo_status, {}, b"not found")
+            return ApiResponse(200, {}, b'{"default_branch": "main"}')
+        return super().request(method=method, path=path, headers=headers, body=body)
+
+
+def allowlist_of(repos) -> Allowlist:
+    """A real `Allowlist` over a real file — it re-reads on every check, so
+    a test that needs to widen or narrow it can just rewrite the file.
+    """
+    path = Path(tempfile.mkdtemp()) / "repo-allowlist.json"
+    path.write_text(json.dumps(list(repos)))
+    return Allowlist(path)
+
+
+def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
+                       history=None, allowed=("o/r",)):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -87,11 +126,16 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None, h
     # fall through to an unrelated default. Serving the same body to every
     # call sidesteps that ordering coupling entirely, since only the GET
     # calls' response body is ever actually inspected.
-    transport = FakeTransport(
+    transport = OrchestratorTransport(
         default=ApiResponse(200, {}, json.dumps(list(issues)).encode())
     )
     github = GitHubClient(transport, token="t")
-    config = AutomationConfig(owner="o", repo="r")
+    # `default_target_repo`, so a plain `issue_json(...)` with no `/repo`
+    # line still dispatches to "o/r" -- the single-repo shape these tests
+    # were written against, and a real deployment's own migration path.
+    # Tests about the task/target split write the directive explicitly.
+    config = AutomationConfig(task_owner="o", task_repo="r",
+                               default_target_repo="o/r")
     fake_runner = runner if runner is not None else FakeRunner()
     if token_store is None:
         token_store = SandboxTokenStore(Path(tempfile.mkdtemp()) / "sandbox-tokens.json")
@@ -99,6 +143,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None, h
         cluster=cluster, github=github, config=config,
         state=state if state is not None else AutomationState(),
         base_runner=fake_runner, token_store=token_store,
+        allowlist=allowlist_of(allowed),
         audit=RecordingAuditLog(), history=history,
         # Bypass SshRunner's argv wrapping here — that integration is
         # covered by test_automation_ssh.py; these tests target
@@ -187,7 +232,8 @@ def test_an_issue_already_tracked_as_in_progress_is_not_redispatched():
 
 def test_rate_limit_stops_further_dispatch_this_run():
     orchestrator, _ = make_orchestrator(issues=[issue_json(1), issue_json(2)])
-    orchestrator.config = AutomationConfig(owner="o", repo="r", runs_per_hour=1)
+    orchestrator.config = AutomationConfig(task_owner="o", task_repo="r",
+                                            default_target_repo="o/r", runs_per_hour=1)
     orchestrator.run_once(NOW)
     assert len(orchestrator.state.assignments) == 1
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
@@ -348,7 +394,8 @@ def test_a_question_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, 
 def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monkeypatch, tmp_path):
     state = AutomationState()
     state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
-                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x",
+                 target_owner="o", target_repo="r")
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     question_file = tmp_path / "question.txt"
@@ -498,8 +545,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     branch_call = transport.calls[0]
     assert branch_call["method"] == "GET"
     assert branch_call["path"] == "/repos/o/r/branches/grain%2Fissue-5"
-    pr_call = transport.calls[1]
-    assert pr_call["method"] == "POST"
+    pr_call = next(c for c in transport.calls if c["method"] == "POST")
     assert pr_call["path"] == "/repos/o/r/pulls"
     sent = json.loads(pr_call["body"])
     assert sent["head"] == "grain/issue-5"
@@ -509,7 +555,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     assert "🤖" in sent["title"]
     assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
-    assert any("opened PR #42" in o for o in outcomes)
+    assert any("opened PR o/r#42" in o for o in outcomes)
     # The in-progress label comes off; the trigger label is never re-added
     # for a genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
@@ -619,7 +665,7 @@ def test_an_unhealthy_freed_sandbox_is_logged_but_still_reused():
     # Still freed and still gets its PR — health doesn't block the sweep's
     # own success handling.
     assert "sandbox-0" not in orchestrator.state.assignments
-    assert any("opened PR #42" in o for o in outcomes)
+    assert any("opened PR o/r#42" in o for o in outcomes)
 
 
 def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_path):
@@ -636,55 +682,45 @@ def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_pat
     assert first_token == second_token
 
 
-# --- PR-triggered dispatch (docs/roadmap.md item 9) ------------------------
+# --- PR-continuation dispatch (docs/roadmap.md item 9, via a `/pr` task) ---
 
-def test_a_labelled_pr_is_dispatched_to_its_own_existing_branch():
-    orchestrator, transport = make_orchestrator(issues=[])
+def test_a_pr_directive_dispatches_to_the_prs_own_existing_branch():
+    """A task issue carrying `/pr N` continues that PR in the target repo,
+    instead of starting a fresh `grain/issue-<n>` branch -- the shape item
+    9's labelled-PR trigger became once PRs stopped living in the polled
+    repo.
+    """
+    orchestrator, transport = make_orchestrator(
+        issues=[issue_json(3, body="fix the review comments\n/repo o/r\n/pr 7")]
+    )
     transport.responses.extend([
-        ApiResponse(200, {}, json.dumps([]).encode()),                       # list_issues
-        ApiResponse(200, {}, json.dumps([pr_trigger_json(7)]).encode()),     # list_pull_requests: candidate
-        ApiResponse(200, {}, json.dumps(pr_detail_json(7, head_ref="feature-x")).encode()),  # hydration
-        ApiResponse(200, {}, b"[]"),                                          # list_review_comments
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(3, body="fix the review comments\n/repo o/r\n/pr 7")]
+        ).encode()),                                                  # list_issues
+        ApiResponse(200, {}, b"[]"),                                  # list_comments
+        ApiResponse(200, {}, json.dumps(
+            pr_detail_json(7, head_ref="feature-x")).encode()),       # get_pull_request
+        ApiResponse(200, {}, b"[]"),                                  # list_review_comments
     ])
 
     orchestrator.run_once(NOW)
 
     assignment = orchestrator.state.assignments["sandbox-0"]
-    assert assignment.issue == 7
+    # The trigger's number is the *task issue's*, not the PR's: that is what
+    # carries the labels and what a requeue or a question is filed against.
+    assert assignment.issue == 3
     assert assignment.kind is TriggerKind.PR
     assert assignment.branch == "feature-x"
     runner = orchestrator.base_runner
     clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
     assert any("checkout -f -B feature-x origin/feature-x" in c[2] for c in clone_calls)
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
-    assert "dispatched" in outcomes
+    assert any("dispatched to o/r (PR #7)" in o for o in outcomes)
 
 
-def test_issues_and_prs_are_merged_and_sorted_by_number_together():
-    # Two candidates for two sandboxes: PR #2 and issue #5. Since GitHub
-    # gives issues and PRs one shared number sequence per repo, sorting the
-    # merged candidate list by number alone is already "oldest trigger
-    # first" across both kinds -- #2 gets dispatched (and thus a sandbox)
-    # before #5.
-    orchestrator, transport = make_orchestrator(issues=[])
-    transport.responses.extend([
-        ApiResponse(200, {}, json.dumps([issue_json(5)]).encode()),          # list_issues
-        ApiResponse(200, {}, json.dumps([pr_trigger_json(2)]).encode()),     # list_pull_requests: candidate
-        ApiResponse(200, {}, json.dumps(pr_detail_json(2)).encode()),        # hydration
-        ApiResponse(200, {}, b"[]"),                                          # list_review_comments
-    ])
-
-    orchestrator.run_once(NOW)
-
-    assert orchestrator.state.assignments["sandbox-0"].issue == 2
-    assert orchestrator.state.assignments["sandbox-0"].kind is TriggerKind.PR
-    assert orchestrator.state.assignments["sandbox-1"].issue == 5
-    assert orchestrator.state.assignments["sandbox-1"].kind is TriggerKind.ISSUE
-
-
-def test_a_pr_candidate_is_skipped_when_the_pool_is_full_same_as_an_issue():
-    # The shared-budget decision: a PR-triggered candidate competes for the
-    # same free-sandbox pool as an issue-triggered one, no separate budget.
+def test_a_pr_task_is_skipped_when_the_pool_is_full_same_as_any_other():
+    # The shared-budget decision: a PR-continuation task competes for the
+    # same free-sandbox pool as a fresh one, no separate budget.
     state = AutomationState()
     state.assign("sandbox-0", issue=1, unit="grain-task-sandbox-0", now=NOW)
     state.assign("sandbox-1", issue=2, unit="grain-task-sandbox-1", now=NOW)
@@ -693,15 +729,9 @@ def test_a_pr_candidate_is_skipped_when_the_pool_is_full_same_as_an_issue():
         "systemctl show",
         stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
     )
-    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend([
-        ApiResponse(200, {}, json.dumps([]).encode()),                       # list_issues
-        ApiResponse(200, {}, json.dumps([pr_trigger_json(9)]).encode()),     # list_pull_requests: candidate
-        ApiResponse(200, {}, json.dumps(pr_detail_json(9)).encode()),        # hydration (candidates are
-                                                                               # always hydrated up front,
-                                                                               # same as list_issues already
-                                                                               # fully reads every issue)
-    ])
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(9, body="/repo o/r\n/pr 4")], state=state, runner=runner,
+    )
 
     orchestrator.run_once(NOW)
 
@@ -714,7 +744,8 @@ def test_a_pr_candidate_is_skipped_when_the_pool_is_full_same_as_an_issue():
 def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     state = AutomationState()
     state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0",
-                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x",
+                 target_owner="o", target_repo="r")
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
@@ -727,7 +758,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
 
     assert "sandbox-0" not in orchestrator.state.assignments
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
-    assert any("pushed additional commits to PR #7" in o for o in outcomes)
+    assert any("pushed additional commits to o/r" in o for o in outcomes)
     # No PR-creation call at all -- the PR this dispatch worked already existed.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
@@ -737,7 +768,8 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
 def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
     state = AutomationState()
     state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0",
-                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x",
+                 target_owner="o", target_repo="r")
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
@@ -784,3 +816,237 @@ def test_a_swept_success_is_recorded_into_the_injected_history(monkeypatch, tmp_
     assert history.calls[0]["issue"] == 5
     assert history.calls[0]["outcome"] == "succeeded"
     assert history.calls[0]["transcript_text"] == '{"type": "result", "result": "done"}\n'
+
+
+# --- task repo vs. target repo -------------------------------------------
+
+def test_a_repo_directive_sends_the_work_to_that_repo_not_the_task_repo():
+    """The whole point of the split: the issue is filed in the task repo,
+    but the clone, the push and the PR all belong to the repo the task's
+    own `/repo` line names.
+    """
+    orchestrator, transport = make_orchestrator(
+        issues=[issue_json(4, body="ship it\n/repo other/service")],
+        allowed=("o/r", "other/service"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == ("other", "service")
+    # The sandbox clones through the proxy, on the *target* repo's path.
+    clone_calls = [argv for argv, _ in orchestrator.base_runner.calls
+                   if argv[:2] == ["bash", "-c"]]
+    assert any("/other/service.git" in c[2] for c in clone_calls)
+    # Labels still move on the task repo, which is the only repo this
+    # deployment ever writes to besides opening a PR.
+    label_calls = [c for c in transport.calls
+                   if "labels" in c["path"] and c["method"] in ("POST", "DELETE")]
+    assert label_calls
+    assert all(c["path"].startswith("/repos/o/r/issues/4/labels") for c in label_calls)
+
+
+def test_the_prompt_names_both_repos_and_carries_no_directive_lines():
+    orchestrator, transport = make_orchestrator(
+        issues=[], allowed=("o/r", "other/service"),
+    )
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="ship it\n/repo other/service")]).encode()),  # list_issues
+        ApiResponse(200, {}, json.dumps([
+            {"id": 1, "user": {"login": "maintainer"},
+             "body": "confirming:\n/repo other/service", "author_association": "MEMBER"},
+        ]).encode()),                                                          # list_comments
+    ])
+
+    orchestrator.run_once(NOW)
+
+    prompt = next(
+        stdin for argv, stdin in orchestrator.base_runner.calls
+        if argv[:1] == ["sudo"] and any("prompt.md" in a for a in argv)
+    )
+    assert "o/r#4" in prompt          # where the task lives
+    assert "other/service" in prompt  # where the code lives
+    # Stripped from the body *and* from the conversation section -- a
+    # maintainer's correction is a reply, so it reaches the prompt that way
+    # if nothing strips it there too.
+    assert "/repo other/service" not in prompt
+    assert "ship it" in prompt
+    assert "confirming:" in prompt
+
+
+def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1),
+                 target_owner="other", target_repo="service", base="trunk")
+    runner = FakeRunner()
+    runner.expect("systemctl show",
+                   stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state, runner=runner, allowed=("o/r", "other/service"),
+    )
+    transport.responses.extend(pr_flow_response(42))
+
+    orchestrator.run_once(NOW)
+
+    branch_call = transport.calls[0]
+    assert branch_call["path"] == "/repos/other/service/branches/grain%2Fissue-5"
+    pr_call = next(c for c in transport.calls if c["method"] == "POST")
+    assert pr_call["path"] == "/repos/other/service/pulls"
+    sent = json.loads(pr_call["body"])
+    # The base recorded at dispatch, not re-read and not a global default.
+    assert sent["base"] == "trunk"
+    # A cross-repo closing reference: `Closes #5` would name an issue in the
+    # target repo, which is a different issue entirely (or nobody's).
+    assert "Closes o/r#5" in sent["body"]
+    # The in-progress label comes off the *task* repo.
+    delete_calls = [c for c in transport.calls if c["method"] == "DELETE"]
+    assert delete_calls[0]["path"].startswith("/repos/o/r/issues/5/labels")
+
+
+def test_a_task_naming_a_non_allow_listed_repo_is_parked_not_dispatched():
+    """Fail closed, and say why: the allowlist is the operator's control
+    over which repos this agent set can touch, and an issue body is not.
+    """
+    orchestrator, transport = make_orchestrator(
+        issues=[issue_json(4, body="/repo somewhere/else")],
+        allowed=("o/r",),
+    )
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/repo somewhere/else")]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                   # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),        # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "somewhere/else" in json.loads(comment["body"])["body"]
+    assert "allowlist" in json.loads(comment["body"])["body"]
+    # Parked exactly like an unanswered question: trigger label off,
+    # awaiting-reply on, and the comment id recorded as the reply baseline.
+    assert orchestrator.state.pending_questions["4"].question_comment_id == 555
+    added = [json.loads(c["body"])["labels"] for c in transport.calls
+             if c["method"] == "POST" and c["path"].endswith("/labels")]
+    assert added == [["grain-agent-awaiting-reply"]]
+
+
+def test_a_task_with_no_repo_directive_and_no_default_is_parked():
+    orchestrator, transport = make_orchestrator(issues=[])
+    orchestrator.config = AutomationConfig(task_owner="o", task_repo="r")
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(4)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                  # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 7}).encode()),         # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "/repo owner/name" in json.loads(comment["body"])["body"]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+
+
+def test_parking_one_task_does_not_stop_the_next_one_dispatching():
+    """A parked task consumes no sandbox and no rate-limit slot, so the
+    rest of the cycle's queue is unaffected.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([
+            issue_json(1, body="/repo nope/nope"),
+            issue_json(2, body="/repo o/r"),
+        ]).encode()),                                            # list_issues
+        ApiResponse(200, {}, b"[]"),                             # #1 list_comments
+        ApiResponse(201, {}, json.dumps({"id": 11}).encode()),   # #1 park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 2
+    assert "1" in orchestrator.state.pending_questions
+
+
+def test_a_trusted_reply_can_carry_the_corrected_repo_directive():
+    """The repair loop in one action: reply with the right `/repo` line and
+    the next cycle dispatches it, no issue-body edit needed. Untrusted
+    comments are excluded from directive reading for the same reason they
+    can't promote a question -- that would be an unlabelled stranger
+    choosing which repo the agent writes to.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r", "fix/ed"))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(4, body="no directive here")]).encode()),
+        ApiResponse(200, {}, json.dumps([
+            {"id": 1, "user": {"login": "stranger"}, "body": "/repo evil/repo",
+             "author_association": "NONE"},
+            {"id": 2, "user": {"login": "maintainer"},
+             "body": "sorry, wrong repo:\n/repo fix/ed",
+             "author_association": "MEMBER"},
+        ]).encode()),                                            # list_comments
+    ])
+    orchestrator.config = AutomationConfig(task_owner="o", task_repo="r")
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == ("fix", "ed")
+
+
+def test_a_nonexistent_target_repo_is_parked_rather_than_crashing_the_cycle():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r", "gone/away"))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/repo gone/away")]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 3}).encode()),     # the park comment
+    ])
+    # The routing transport answers `GET /repos/{owner}/{repo}` itself, so
+    # 404 that one route specifically for this test.
+    transport.repo_status = 404
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "404" in json.loads(comment["body"])["body"]
+
+
+def test_a_base_directive_overrides_the_target_repos_default_branch():
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="/repo o/r\n/base release-2")],
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].base == "release-2"
+
+
+def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkeypatch):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1),
+                 target_owner="other", target_repo="service", base="main")
+    runner = FakeRunner()
+    runner.expect("systemctl show",
+                   stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    monkeypatch.setattr(capture_module, "transcript_path",
+                         lambda unit: str(tmp_path / "missing.jsonl"))
+    history = RecordingSessionHistory()
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state, runner=runner, history=history,
+        allowed=("o/r", "other/service"),
+    )
+    transport.responses.extend(pr_flow_response(42))
+
+    orchestrator.run_once(NOW)
+
+    assert history.calls[0]["target"] == "other/service"

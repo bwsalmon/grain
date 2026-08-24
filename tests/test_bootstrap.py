@@ -60,7 +60,7 @@ def env(cluster: Cluster, tmp_path: Path):
     )
     admin_private = tmp_path / "admin-ssh"
     config = BootstrapConfig(
-        owner="acme", repo="widgets",
+        task_repo="acme/widgets",
         admin_private_key_path=admin_private,
     )
     return adapter, runner, cluster, config, admin_private
@@ -196,7 +196,7 @@ def test_github_token_is_only_configured_when_supplied(env):
         sandbox_states=[("sandbox-0", "running")],
     )
     config2 = BootstrapConfig(
-        owner="acme", repo="widgets", github_token="ghp_tok",
+        task_repo="acme/widgets", github_token="ghp_tok",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter2, base_runner=runner2, config=config2)
@@ -271,7 +271,7 @@ def test_claude_credentials_reach_the_controllers_grain_agent_account_not_any_sa
         sandbox_states=[("sandbox-0", "running")],
     )
     config = BootstrapConfig(
-        owner="acme", repo="widgets", claude_token="sk-ant-oat01-fake",
+        task_repo="acme/widgets", claude_token="sk-ant-oat01-fake",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)

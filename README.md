@@ -77,17 +77,23 @@ a human can make — can call the `ask_question` MCP tool instead of guessing
 or grinding to a timeout. That ends its turn: `dispatch.py` resets a fixed
 per-unit file before every dispatch, the tool call writes the question
 there, and once the unit finishes, `core.py`'s sweep reads it back, posts
-it as a `🤖`-signed comment on the issue/PR, and swaps the in-progress label
+it as a `🤖`-signed comment on the task issue, and swaps the in-progress label
 for `grain-agent-awaiting-reply` — **without** re-adding the trigger label,
 so the task doesn't immediately redispatch and re-ask the same question in
 a loop.
 
-The issue then sits idle until someone with write access to the repo
+The same machinery covers a task whose `/repo` directive is missing,
+malformed, or names a repo that isn't allow-listed: the comment says which
+of those it is, and the task waits in exactly the same state.
+
+The issue then sits idle until someone with write access to the task repo
 (GitHub's own `author_association`: owner, member, or collaborator) replies
 in the thread — every `run_once` checks each open question's comments for
 exactly that, and re-applies the trigger label on its own the moment one
 shows up, so the very next dispatch picks it back up with the reply already
 in its prompt (`_dispatch` always fetches the current comment thread). A
+trusted reply can also carry a `/repo`, `/pr` or `/base` directive, which
+is how a parked task gets repaired without editing the original body. A
 reply from anyone *without* write access is ignored: treating any comment
 as a redispatch trigger would let a random public commenter drive the agent
 with content of their choosing, on a public repo, which is exactly the
@@ -226,7 +232,8 @@ grain --dry-run host up           # print every command, run none
 sudo python3 -m grain.cli \
   --image /var/lib/grain/images/debian-12.qcow2 \
   host bootstrap \
-    --repo your-org/your-repo \
+    --task-repo your-org/agent-tasks \
+    --target-repo your-org/your-repo \
     --github-token-file /path/to/token \
     --claude-credentials-file ~/.claude/.credentials.json
 ```
@@ -366,13 +373,15 @@ Everything below lives on the controller, under `/data`. This is the
 per-deployment data that a provisioning script has no business holding.
 
 ```sh
-grain controller configure --repo owner/name \
+grain controller configure --task-repo owner/agent-tasks \
+  --target-repo owner/service-a --target-repo owner/service-b \
   --github-token-file PATH \
   --claude-credentials-file PATH
 ```
 
-writes `automation.json`, `repo-allowlist.json`, the token file, the
-`credentials.json` entry pointing at it, and both copies of the Claude
+writes `automation.json` (the task repo), `repo-allowlist.json` (the
+target repos), the token file, the `credentials.json` entries pointing
+every one of those repos at it, and both copies of the Claude
 credential — over the admin SSH path, stdin, never argv. `host bootstrap`
 calls this for you; running it on its own is for adding a repo, rotating a
 token, or placing a Claude credential later without a full bootstrap
@@ -426,7 +435,12 @@ choosing with whatever secrets that workflow holds. Withholding the scope
 makes *GitHub* reject the push, which is a control your bugs cannot
 bypass. `grain github audit` checks this — see [Operate](#operate).
 
-**Repo allowlist**, `/data/config/repo-allowlist.json` — a plain JSON
+**Repo allowlist**, `/data/config/repo-allowlist.json` — the *target*
+repos this deployment may work in. Enforced twice against one file: by the
+git proxy on every fetch and push, and by the orchestrator when it resolves
+a task's `/repo` directive, so a task naming an off-list repo is parked
+with an explanation instead of failing later as an opaque clone error. The
+task repo does not belong here — no sandbox ever clones it. A plain JSON
 array, default-deny, hot-reloaded on every request with no restart:
 
 ```json
@@ -451,15 +465,26 @@ authentication (a live-found bug, fixed by `ensure_sandbox_tokens`). To add
 one by hand, `python3 -c 'import secrets; print(secrets.token_hex(32))'`
 and restart `grain-git-proxy.service`.
 
-**Automation**, `/data/config/automation.json` — `owner` and `repo` are
-the only fields with no default:
+**Automation**, `/data/config/automation.json` — `task_owner` and
+`task_repo` name the *task* repo (the polled queue) and are the only fields
+with no default. Which repos tasks may dispatch *into* is not configured
+here: that is `repo-allowlist.json`, the same list the git proxy enforces.
 
 ```json
-{"owner": "your-org", "repo": "your-repo"}
+{"task_owner": "your-org", "task_repo": "agent-tasks",
+ "default_target_repo": null}
 ```
 
+`default_target_repo` is the target for a task carrying no `/repo`
+directive. `null` (the default) makes the directive mandatory: a task
+without one is parked with a comment rather than dispatched at a guess.
+A single-repo deployment sets it to its own repo and writes no directives
+at all — which is what `grain controller configure --task-repo X` with no
+`--target-repo` produces.
+
 The defaults worth knowing: `trigger_label: "grain-agent"`,
-`in_progress_label: "grain-agent-in-progress"`, `base_branch: "main"`,
+`in_progress_label: "grain-agent-in-progress"`,
+`awaiting_reply_label: "grain-agent-awaiting-reply"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
 `runs_per_hour: 10`, `max_runtime_minutes: 120`. Also
 `github_host: "api.github.com"`, `git_forward_host: "github.com"`, and
@@ -510,9 +535,35 @@ grain host health                            # every sandbox healthy
 
 ## Use it
 
-**Label an issue `grain-agent`.** The next `run-once` pass picks it up,
-moves the label to `grain-agent-in-progress`, and claims a free sandbox.
-Dispatch is two-sided:
+**File the task in the task repo, and label it `grain-agent`.** One repo
+is the agent set's queue: it is the only repo polled, labelled, or
+commented on. The code being changed is a *target* repo, named by the task
+itself:
+
+```
+Something is broken in the widget service.
+
+/repo acme/widget-service
+/pr 42            (optional: continue that PR instead of a fresh branch)
+/base develop     (optional: PR base; default is the target repo's own)
+```
+
+A directive can sit anywhere in the body, and a maintainer can add or
+correct one by replying to the issue — replies count as directives, from
+the same people who could have applied the label. `default_target_repo` in
+`automation.json` covers a deployment whose task repo *is* its code: set
+it and no task needs a `/repo` line at all.
+
+A target repo has to be on `/data/config/repo-allowlist.json`, the same
+list the git proxy enforces. A task naming anything else — or naming
+nothing, with no default configured — is **parked**: the orchestrator
+comments saying exactly what is wrong, swaps the trigger label for
+`grain-agent-awaiting-reply`, and picks the task back up once a maintainer
+replies. Nothing dispatches on a guess about which repo was meant.
+
+The next `run-once` pass picks a labelled task up, moves the label to
+`grain-agent-in-progress`, and claims a free sandbox. Dispatch is
+two-sided:
 
 - On the **sandbox**: the workspace at `/home/debian/workspace` is cloned
   (first task) or fetched-and-reset (every task after) through the git
@@ -526,19 +577,23 @@ Dispatch is two-sided:
   path.
 
 The agent works in the sandbox through those tools and pushes to
-`grain/issue-<N>`. When the unit finishes, the sweeper verifies that branch
-exists on GitHub and opens the PR.
+`grain/issue-<N>` — `<N>` being the *task* issue's number. When the unit
+finishes, the sweeper verifies that branch exists in the target repo and
+opens the PR there, closing the task issue by a fully qualified
+`Closes owner/tasks#N` reference.
 
 The branch name is computed by the controller, never taken from the
 agent's own report — the prompt it received came from untrusted issue
 content, so nothing the agent says about what it pushed is trusted as an
 input to a GitHub write.
 
-**Label an existing PR `grain-agent`** to have an agent address review
-feedback, fix CI, or continue work in flight. Same pool, same rate limit;
-the workspace lands on the PR's own branch with its existing history, the
-prompt carries the PR's review comments, and it pushes more commits to
-that branch rather than opening a new one.
+**Add `/pr 42` to a task** to have an agent address review feedback, fix
+CI, or continue work in flight on an existing pull request in the target
+repo. Same pool, same rate limit; the workspace lands on the PR's own
+branch with its existing history, the prompt carries the PR's review
+comments, and it pushes more commits to that branch rather than opening a
+new one. The labels and the conversation still live on the task issue — no
+label of ours is ever applied in a target repo.
 
 **Requiring a human to apply the label is the prompt-injection gate.**
 Anyone who can file an issue can put text in front of the agent; the
@@ -625,9 +680,15 @@ the system is stateful. And since the design has no inbound dependency
 (cron polling, no webhooks), **stopping the instance when idle is
 supported and cuts the bill roughly threefold.**
 
-### Adding a repo
+### Adding a target repo
 
-1. Add `"owner/repo"` to `repo-allowlist.json` (hot-reloaded).
+Adding a repo tasks may dispatch into — the task repo itself is configured
+once, in `automation.json`, and adding another one means a second
+deployment.
+
+1. Add `"owner/repo"` to `repo-allowlist.json` (hot-reloaded). Tasks can
+   then name it with `/repo owner/repo`; until it is on the list, one that
+   does is parked with a comment saying so.
 2. Add a `credentials.json` entry pointing at a credential with a
    matching token file.
 3. Apply branch protection on that repo — GitHub-side, manual, needed.
@@ -641,7 +702,7 @@ supported and cuts the bill roughly threefold.**
 python3 -m pytest              # unit tests: no hypervisor, no network, no root
 ```
 
-492 unit tests pass on a bare machine; the live suites skip themselves
+536 unit tests pass on a bare machine; the live suites skip themselves
 cleanly there, so the command above is safe anywhere. They come in when the
 machine can run them:
 

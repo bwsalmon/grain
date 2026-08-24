@@ -318,15 +318,28 @@ def _conversation_section(comments: list[Comment]) -> str:
     )
 
 
-def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = ()) -> str:
+def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = (),
+            *, task_repo: str = "", target_repo: str = "") -> str:
+    """`task_repo` is where the issue itself lives (the agent set's queue);
+    `target_repo` is where the code is. Two different repos in the general
+    case — the prompt says which is which, because "the repository" would
+    otherwise be ambiguous to an agent that can see a task numbered against
+    one repo and a checkout of another.
+
+    `issue.body` arrives with its directive lines already stripped
+    (`core.py` calls `directives.strip_directives`) — a `/repo` line is
+    addressed to the orchestrator, not to the agent.
+    """
     return (
-        f"You are working GitHub issue #{issue.number}: {issue.title}\n\n"
+        f"You are working {task_repo}#{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n\n"
         f"Issue URL: {issue.html_url}\n\n"
         "Conversation on this issue so far (a prior attempt may have asked "
         "a question here, and a human may have already answered it):\n\n"
         f"{_conversation_section(list(comments))}\n\n"
-        f"A clone of the target repository is already checked out at "
+        f"The task above is filed in {task_repo}, which is only the queue "
+        f"this work was assigned from. The code you are changing is "
+        f"{target_repo}: a clone of it is already checked out at "
         f"{workspace} in your assigned sandbox, with its git remote already "
         "configured — do your work there, using the tools available to "
         "you.\n\n"
@@ -347,17 +360,31 @@ def _format_review_comment(comment: ReviewComment) -> str:
 
 
 def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str,
-               thread_comments: list[Comment] = ()) -> str:
+               thread_comments: list[Comment] = (), *, task_repo: str = "",
+               target_repo: str = "", task_issue: int | None = None) -> str:
+    """A PR-continuation dispatch. The PR lives in `target_repo`; the task
+    that asked for the work — and the conversation a human is having about
+    it — lives in `task_repo`, as issue `task_issue` (a `/pr` directive on
+    that issue is what makes this a PR dispatch at all, see
+    `directives.py`).
+    """
     feedback = (
         "\n\n".join(_format_review_comment(c) for c in comments)
         if comments else "(no inline review comments)"
     )
+    task_line = (
+        f"This work was assigned by {task_repo}#{task_issue}, the task queue "
+        f"entry for it — a different repository from the one you are "
+        f"changing, and where any conversation with a human happens.\n\n"
+        if task_issue is not None else ""
+    )
     return (
-        f"You are continuing existing work on GitHub pull request "
-        f"#{pr.number}: {pr.title}\n\n"
+        f"You are continuing existing work on pull request "
+        f"{target_repo}#{pr.number}: {pr.title}\n\n"
         f"{pr.body}\n\n"
         f"PR URL: {pr.html_url}\n\n"
-        f"A clone of the target repository is already checked out at "
+        f"{task_line}"
+        f"A clone of {target_repo} is already checked out at "
         f"{workspace} in your assigned sandbox, on the PR's existing branch "
         f"({pr.head_ref!r}) with its git remote already configured. This is "
         "NOT a fresh task: the branch already has commits and review "
@@ -616,15 +643,17 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 
 def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
              target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
-             comments: list[Comment] = ()) -> str:
+             comments: list[Comment] = (), task_repo: str = "",
+             target_repo: str = "") -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
     `claude -p` on the controller, pointed at that same sandbox via
     `target`. Returns the unit name — the caller records it in
     `AutomationState` to poll later.
 
-    `remote_url` is the git-proxy URL for the target repo
-    (`http://<controller>:<port>/<owner>/<repo>.git`) and `token` is this
+    `remote_url` is the git-proxy URL for the *target* repo — the one the
+    task's `/repo` directive named (`directives.py`), not the task repo the
+    issue itself lives in (`http://<controller>:<port>/<owner>/<repo>.git`) and `token` is this
     sandbox's own git-proxy bearer token (`grain/proxy/tokens.py`'s
     `SandboxTokenStore.ensure_token` mints it on first use) — both supplied
     by `core.py`, which is the only layer that knows the controller's
@@ -637,7 +666,8 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     branch = branch_name(issue.number)
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
-        _prompt(issue, branch, target.workspace, comments),
+        _prompt(issue, branch, target.workspace, comments,
+                task_repo=task_repo, target_repo=target_repo),
         remote_url=remote_url, token=token,
     )
 
@@ -645,26 +675,30 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, pr: PullRequestDetail,
                  comments: list[ReviewComment], *, remote_url: str, token: str,
-                 thread_comments: list[Comment] = ()) -> str:
+                 thread_comments: list[Comment] = (), task_repo: str = "",
+                 target_repo: str = "", task_issue: int | None = None) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
     (`pr.head_ref`) instead of the default branch, and the prompt carries the
     PR's title/body/review-comments instead of an issue's title/body — see
     `_pr_prompt` and `ensure_workspace`'s `branch` parameter.
 
-    `pr` and `comments` come from `GitHubClient.get_pull_request`/
-    `list_pull_requests` and `list_review_comments` respectively — `core.py`
-    reads both before calling this, same division of labour as `dispatch()`
+    `pr` and `comments` come from `GitHubClient.get_pull_request` and
+    `list_review_comments` respectively, both read against the *target*
+    repo — `core.py` reads both before calling this, same division of labour as `dispatch()`
     (all GitHub API work stays on the controller; the sandbox only ever
     sees git, and only through the tools `mcp_server.py` exposes).
-    `thread_comments` (docs/roadmap.md item 12) is the PR's top-level
-    conversation, from `GitHubClient.list_comments` — distinct from
-    `comments`'s inline review comments, and where a human's reply to a
-    prior `ask_question` call actually lands.
+    `thread_comments` (docs/roadmap.md item 12) is the *task issue's*
+    top-level conversation, from `GitHubClient.list_comments` — distinct
+    from `comments`'s inline review comments on the PR itself, and where a
+    human's reply to a prior `ask_question` call actually lands, since the
+    task repo is the only repo this deployment ever comments on.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
-        _pr_prompt(pr, comments, target.workspace, thread_comments),
+        _pr_prompt(pr, comments, target.workspace, thread_comments,
+                   task_repo=task_repo, target_repo=target_repo,
+                   task_issue=task_issue),
         remote_url=remote_url, token=token, branch=pr.head_ref,
     )
 
