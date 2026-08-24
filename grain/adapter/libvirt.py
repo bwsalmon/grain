@@ -188,10 +188,26 @@ class LibvirtAdapter(HostAdapter):
     def __init__(self, cluster: Cluster, runner: Runner, network: Network,
                  config_dir: Path | None = None,
                  admin_public_key_path: Path | None = None,
-                 controller_public_key_path: Path | None = None) -> None:
+                 controller_public_key_path: Path | None = None,
+                 apparmor_rules_path: Path | None = None) -> None:
         super().__init__(cluster, network)
         self.runner = runner
         self.config_dir = config_dir or Path("/var/lib/grain/instances")
+        # Debian's libvirt-daemon-system ships an AppArmor profile for qemu
+        # that only allows the default /var/lib/libvirt/images/ path (plus
+        # a couple of others) -- found live: a VM whose disk lived at
+        # config_dir's own default, a custom path, failed to start with
+        # "Cannot access storage file ... Permission denied", not an
+        # ownership problem (dynamic_ownership had already corrected that)
+        # but AppArmor denying the open() before permissions are even
+        # checked. This is the extension point Debian/Ubuntu ship
+        # specifically so a package upgrade doesn't clobber admin-added
+        # rules. Injectable for the same reason config_dir/the key paths
+        # are: a test points it at a tmp_path instead of a real system file.
+        self.apparmor_rules_path = (
+            apparmor_rules_path
+            or Path("/etc/apparmor.d/local/abstractions/libvirt-qemu")
+        )
         # Both host-local, deliberately not /data/secrets/... — /data lives
         # on the *controller* VM, and this adapter runs on the *host*, a
         # different machine (docs/design.md, "One host machine runs
@@ -219,12 +235,40 @@ class LibvirtAdapter(HostAdapter):
             controller_public_key_path or Path("/var/lib/grain/controller-ssh.pub")
         )
 
+    def _ensure_apparmor_allows(self, *dirs: Path) -> None:
+        """No-op if AppArmor's local-abstractions directory doesn't exist at
+        all -- not every host runs AppArmor. Idempotent otherwise: skips
+        whichever of `dirs` is already allowlisted, so a normal three-VM
+        bootstrap (controller, two sandboxes) does at most one real write.
+        """
+        if not self.apparmor_rules_path.parent.is_dir():
+            return
+        existing = (
+            self.apparmor_rules_path.read_text()
+            if self.apparmor_rules_path.exists() else ""
+        )
+        missing = [d for d in dirs if str(d) not in existing]
+        if not missing:
+            return
+        addition = "".join(f"  {d}/*.qcow2 rwk,\n  {d}/*.iso rk,\n" for d in missing)
+        self.runner.run(["tee", "-a", str(self.apparmor_rules_path)],
+                         stdin=addition, check=True)
+        self.runner.run(["systemctl", "reload", "apparmor"], check=False)
+
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
         if self.state(spec.name) is not VmState.ABSENT:
             raise RuntimeError(
                 f"{spec.name} already exists; use recreate() to replace it"
             )
+        # spec.image is normally a real absolute path (the README: "name
+        # the real path... via --image or cluster.toml"), but Cluster's own
+        # bare-string default ("debian-12") resolves to a meaningless "."
+        # -- not worth allowlisting, and AppArmor rules are absolute paths
+        # anyway.
+        image_dir = Path(spec.image).parent
+        dirs = (self.config_dir, image_dir) if image_dir.is_absolute() else (self.config_dir,)
+        self._ensure_apparmor_allows(*dirs)
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
         disk_path = self.config_dir / f"{spec.name}.qcow2"
