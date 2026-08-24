@@ -295,7 +295,7 @@ class LibvirtAdapter(HostAdapter):
         if not self.selinux_marker_path.is_dir():
             return
         for d in dirs:
-            self.runner.run(["chcon", "-R", "-t", "virt_image_t", str(d)], check=False)
+            self.runner.run(["chcon", "-R", "-t", "virt_image_t", str(d)], check=True)
 
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
