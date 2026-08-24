@@ -72,6 +72,40 @@ UNIT
   log "grain-config-sync.service enabled"
 }
 
+# Found live: a real deploy failure was undiagnosable from CI's own guest-
+# attribute summary (a bare "exit=N"), and journalctl -u grain-config-sync
+# needs an SSH/IAP path neither the deploy identity nor an operator may
+# actually have. Cloud Logging sidesteps both -- readable from the Cloud
+# Console in a browser, using nothing but whatever IAM the viewer's own
+# account already has there. vm_service_account_roles already grants
+# logging.logWriter by default; this is what actually uses it.
+install_ops_agent() {
+  if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+    log "installing google-cloud-ops-agent"
+    curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+    bash add-google-cloud-ops-agent-repo.sh --also-install
+    rm -f add-google-cloud-ops-agent-repo.sh
+  fi
+
+  # No unit-name filter at the receiver level (upstream doesn't offer one)
+  # -- ships the whole systemd journal, filtered at query time instead:
+  # jsonPayload._SYSTEMD_UNIT="grain-config-sync.service" in Cloud Logging.
+  cat > /etc/google-cloud-ops-agent/config.yaml <<'YAML'
+logging:
+  receivers:
+    journald:
+      type: systemd_journald
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [journald]
+YAML
+
+  systemctl restart google-cloud-ops-agent
+  log "google-cloud-ops-agent installed and forwarding the journal to Cloud Logging"
+}
+
 mount_data_disk
+install_ops_agent
 install_config_sync
 log "done; watch the rollout with: journalctl -u grain-config-sync -f"

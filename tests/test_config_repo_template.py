@@ -118,6 +118,20 @@ def test_sync_source_retries_its_git_commands():
     assert "retry git -C" in body and "fetch" in body
 
 
+def test_startup_installs_ops_agent_and_ships_the_full_journal():
+    """Found live: a real deploy failure was undiagnosable from CI's own
+    guest-attribute summary (a bare "exit=N"), and journalctl -u
+    grain-config-sync needs an SSH/IAP path neither the deploy identity
+    nor an operator may actually have. Cloud Logging sidesteps both.
+    """
+    startup = (TERRAFORM / "files" / "startup.sh").read_text()
+    assert "google-cloud-ops-agent" in startup
+    assert "systemd_journald" in startup
+    assert "systemctl restart google-cloud-ops-agent" in startup
+    assert re.search(r"^install_ops_agent\n", startup, re.M), \
+        "install_ops_agent is never actually called"
+
+
 def test_shell_scripts_are_syntactically_valid_and_fail_fast():
     for script in SHELL_SCRIPTS:
         assert script.exists(), script

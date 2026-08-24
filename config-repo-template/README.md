@@ -79,6 +79,18 @@ gcloud compute ssh grain-host --zone us-central1-a --tunnel-through-iap \
   --command 'sudo journalctl -u grain-config-sync -f'
 ```
 
+No IAP/SSH access, or none of your accounts have it? The host also ships its
+entire systemd journal to Cloud Logging (`google-cloud-ops-agent`, installed
+by `startup.sh` -- it's what `vm_service_account_roles`'s default
+`logging.logWriter` role is actually for). Filter to just this service in
+the [Logs Explorer](https://console.cloud.google.com/logs), or:
+
+```sh
+gcloud logging read \
+  'resource.type="gce_instance" jsonPayload._SYSTEMD_UNIT="grain-config-sync.service"' \
+  --project YOUR_PROJECT --freshness=1d
+```
+
 **5. File a task.** Open an issue here, label it `grain-agent`, and name
 the repo it is about. That is the whole interface.
 
