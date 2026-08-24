@@ -67,6 +67,12 @@ class AutomationConfig:
     # genuinely untouched. Removed the moment a trusted reply promotes the
     # issue back to trigger_label.
     awaiting_reply_label: str = "grain-agent-awaiting-reply"
+    # Applied instead of trigger_label to a task `core.py`'s `_triage_feedback`
+    # files from PR feedback (bwsalmon/agents#24) — a candidate, not
+    # something to dispatch unattended, since it was generated from content
+    # a human wrote on a PR rather than filed as a task directly. A human
+    # swaps this for trigger_label (or closes the issue) to decide.
+    triage_label: str = "triage needed"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

@@ -96,6 +96,43 @@ class PendingQuestion:
     branch: str | None = None
 
 
+def pr_key(owner: str, repo: str, number: int) -> str:
+    """The stable identity of one tracked PR (bwsalmon/agents#24) --
+    `AutomationState.tracked_prs`'s dict key. An owner/repo/number triple
+    has no single field that can key it alone, since two different target
+    repos can each have their own PR #1. Computed here, not inlined at each
+    call site, so `core.py` and `AutomationState` can never disagree on it.
+    """
+    return f"{owner}/{repo}#{number}"
+
+
+@dataclass(frozen=True)
+class TrackedPullRequest:
+    """One PR grain itself opened, watched for new feedback to turn into
+    candidate tasks (bwsalmon/agents#24). Only a fresh-branch dispatch's own
+    PR is tracked (`core.py`'s `_finish_succeeded_issue`, right after
+    `create_pull_request` succeeds) -- a `/pr`-continuation task can point
+    at a PR grain never opened, whose pre-existing comment history isn't
+    feedback grain caused, and would flood the task repo with backlog on
+    the very first triage pass if it were tracked from zero.
+
+    `last_review_comment_id`/`last_comment_id` are the highest id already
+    considered on each of a PR's two comment surfaces (inline review
+    comments, top-level conversation) -- the same "an id, not a count or a
+    timestamp" baseline `PendingQuestion.question_comment_id` already
+    relies on, for the same reason: unspoofable by editing an older
+    comment, and stable even if something in between gets deleted. Both
+    start at zero for a freshly tracked PR, which by construction has no
+    comments yet.
+    """
+    owner: str
+    repo: str
+    number: int
+    origin_task_issue: int
+    last_review_comment_id: int = 0
+    last_comment_id: int = 0
+
+
 @dataclass
 class AutomationState:
     assignments: dict[str, Assignment] = field(default_factory=dict)
@@ -103,6 +140,8 @@ class AutomationState:
     # Keyed by str(issue number) -- JSON object keys must be strings, same
     # reason `assignments` is keyed by sandbox name rather than an int.
     pending_questions: dict[str, PendingQuestion] = field(default_factory=dict)
+    # Keyed by `pr_key(owner, repo, number)` -- see `TrackedPullRequest`.
+    tracked_prs: dict[str, TrackedPullRequest] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "AutomationState":
@@ -136,8 +175,17 @@ class AutomationState:
             )
             for key, q in raw.get("pending_questions", {}).items()
         }
+        tracked_prs = {
+            key: TrackedPullRequest(
+                owner=t["owner"], repo=t["repo"], number=t["number"],
+                origin_task_issue=t["origin_task_issue"],
+                last_review_comment_id=t.get("last_review_comment_id", 0),
+                last_comment_id=t.get("last_comment_id", 0),
+            )
+            for key, t in raw.get("tracked_prs", {}).items()
+        }
         return cls(assignments=assignments, run_timestamps=run_timestamps,
-                    pending_questions=pending_questions)
+                    pending_questions=pending_questions, tracked_prs=tracked_prs)
 
     def save(self, path: Path) -> None:
         data = {
@@ -158,6 +206,15 @@ class AutomationState:
                     "kind": q.kind.value, "branch": q.branch,
                 }
                 for key, q in self.pending_questions.items()
+            },
+            "tracked_prs": {
+                key: {
+                    "owner": t.owner, "repo": t.repo, "number": t.number,
+                    "origin_task_issue": t.origin_task_issue,
+                    "last_review_comment_id": t.last_review_comment_id,
+                    "last_comment_id": t.last_comment_id,
+                }
+                for key, t in self.tracked_prs.items()
             },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +255,37 @@ class AutomationState:
 
     def clear_pending_question(self, issue: int) -> None:
         self.pending_questions.pop(str(issue), None)
+
+    # --- feedback triage (bwsalmon/agents#24) ----------------------------
+    def track_pull_request(self, owner: str, repo: str, number: int, *,
+                            origin_task_issue: int) -> None:
+        """Starts watching a freshly opened PR for feedback. A no-op if
+        already tracked (idempotent against a redispatch that somehow saw
+        this PR before -- not expected in practice, since each fresh-branch
+        PR is opened exactly once, but re-tracking would reset the baseline
+        back to zero and replay the PR's whole comment history as "new").
+        """
+        key = pr_key(owner, repo, number)
+        if key in self.tracked_prs:
+            return
+        self.tracked_prs[key] = TrackedPullRequest(
+            owner=owner, repo=repo, number=number, origin_task_issue=origin_task_issue,
+        )
+
+    def update_tracked_pull_request(self, key: str, *, last_review_comment_id: int,
+                                     last_comment_id: int) -> None:
+        tracked = self.tracked_prs.get(key)
+        if tracked is None:
+            return
+        self.tracked_prs[key] = TrackedPullRequest(
+            owner=tracked.owner, repo=tracked.repo, number=tracked.number,
+            origin_task_issue=tracked.origin_task_issue,
+            last_review_comment_id=last_review_comment_id,
+            last_comment_id=last_comment_id,
+        )
+
+    def untrack_pull_request(self, key: str) -> None:
+        self.tracked_prs.pop(key, None)
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:

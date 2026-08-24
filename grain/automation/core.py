@@ -3,7 +3,16 @@
 Order, mirroring `grain/proxy/core.py`'s own "order matters and mirrors
 docs/design.md" convention:
 
-    sweep first, so a sandbox a finished or stranded run just freed is
+    triage feedback first, on every PR this deployment has itself already
+    opened as of the *previous* cycle — each new review comment or
+    top-level comment on one becomes its own candidate task, filed with
+    `triage_label` rather than `trigger_label` so a human decides whether
+    it dispatches (bwsalmon/agents#24). Deliberately before sweep, not
+    after: a sweep below may itself open a brand-new PR and start tracking
+    it, and polling that PR in this same cycle would be pure overhead (a
+    PR that did not exist a moment ago has no feedback yet) for every
+    caller that exercises a successful PR-opening sweep,
+    sweep next, so a sandbox a finished or stranded run just freed is
     available to the same cycle's dispatch pass rather than sitting idle
     for one more `run-once` interval — a *successful* sweep also verifies
     the pushed branch and opens the PR, since that is the other half of
@@ -94,6 +103,39 @@ regardless of what triggered it. What that leaves:
   the same `_requeue` on failure/no-branch, unchanged — a requeue only ever
   needs the trigger's own number, which is `outcome.issue` regardless of
   kind.
+
+**bwsalmon/agents#24: feedback on a grain PR becomes a candidate task, not
+an automatic redispatch.** A human (or another engineer) reviewing a PR
+grain opened leaves an inline review comment or a plain top-level one —
+`_triage_feedback` turns each new one into its own issue in the task repo,
+carrying `/repo`/`/pr` directives so it targets the exact same PR when it
+eventually dispatches, and `triage_label` instead of `trigger_label` so
+`_dispatch`'s own `list_issues(..., trigger_label)` query never sees it
+until a human swaps the label. Filing a *task* rather than just relaying
+the comment (the way `_finish_question` relays an `ask_question` call)
+matters because the direction of trust is reversed here: a question is the
+agent asking a human it already has a live, approved run with, while a PR
+comment is unreviewed content arriving on its own — the same prompt-
+injection gate `docs/design.md`'s split surface already draws around issue
+intake applies to PR feedback just as much, so it goes through the
+identical human-approval choke point, not around it.
+
+**Only grain-opened PRs are watched, and only for comments newer than
+tracking started.** `_finish_succeeded_issue` calls
+`AutomationState.track_pull_request` right after `create_pull_request`
+succeeds; a `/pr`-continuation task's PR is never tracked, since grain
+didn't open it and its pre-existing review history isn't feedback grain
+caused. Tracking a PR from a zero baseline is exactly right for a
+brand-new PR (it has no comments yet) but would be wrong for an
+already-existing one, which is the other reason continuation PRs are left
+alone rather than tracked retroactively.
+
+**Only a trusted author's comment becomes a task.** `_TRUSTED_REPLY_ASSOCIATIONS`
+gates this the same way it already gates a directive reply and a question
+answer — an arbitrary public commenter on a public PR must not be able to
+fill the task queue with content of their choosing. A comment from anyone
+else is simply never turned into a task, but its id still advances the
+tracked baseline so it isn't reconsidered every cycle.
 """
 
 from __future__ import annotations
@@ -112,10 +154,12 @@ from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
     question_path, unit_name,
 )
-from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
+from .github import (
+    Comment, GitHubClient, GitHubError, Issue, PullRequestDetail, ReviewComment,
+)
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
-from .state import AutomationState, TriggerKind
+from .state import AutomationState, TrackedPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.allowlist import Allowlist
@@ -155,6 +199,15 @@ def _pending_question(sandbox: str) -> str | None:
     except OSError:
         return None
     return text or None
+
+
+def _first_line(text: str, limit: int = 72) -> str:
+    """A short, single-line summary of a feedback comment's body, for a
+    filed task's title -- GitHub issue titles render on one line, and a
+    multi-paragraph review comment shouldn't spill an unreadable title.
+    """
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "(empty)")
+    return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
 
 
 @dataclass(frozen=True)
@@ -249,6 +302,7 @@ class Orchestrator:
         return self._task
 
     def run_once(self, now: datetime) -> None:
+        self._triage_feedback(now)
         self._sweep(now)
         self._promote_answered_questions(now)
         self._dispatch(now)
@@ -322,6 +376,13 @@ class Orchestrator:
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
+        )
+        # Watch this PR for feedback (bwsalmon/agents#24) -- from a zero
+        # baseline, correct only because the PR is brand new and has no
+        # comments yet; see this module's own docstring for why a
+        # `/pr`-continuation PR is never tracked this way.
+        self.state.track_pull_request(
+            target.owner, target.name, pr.number, origin_task_issue=outcome.issue,
         )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"opened PR {target}#{pr.number}: {pr.html_url}")
@@ -476,6 +537,118 @@ class Orchestrator:
                 outcome=f"{reply.user} ({reply.author_association}) replied -- "
                         "requeued for redispatch",
             )
+
+    # --- feedback triage (bwsalmon/agents#24) -----------------------------
+
+    def _triage_feedback(self, now: datetime) -> None:
+        """Turns new feedback on every grain-opened PR into its own
+        triage-labelled candidate task. See this module's own docstring for
+        why only grain-opened PRs are watched and why only a trusted
+        author's comment is filed.
+        """
+        for key, tracked in list(self.state.tracked_prs.items()):
+            try:
+                pr = self.github.get_pull_request(tracked.owner, tracked.repo, tracked.number)
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                # Same "stale reference, not a real failure" story as
+                # _requeue/_finish_question -- the PR (or the repo itself)
+                # is gone from under this assignment.
+                self.state.untrack_pull_request(key)
+                self.audit.record(
+                    sandbox=None, issue=tracked.origin_task_issue,
+                    outcome=f"stopped triaging feedback on {tracked.owner}/"
+                            f"{tracked.repo}#{tracked.number}: not found",
+                )
+                continue
+            if pr.state != "open":
+                # Merged or closed either way -- no more feedback worth
+                # triaging, and nothing left to dispatch a continuation
+                # against.
+                self.state.untrack_pull_request(key)
+                self.audit.record(
+                    sandbox=None, issue=tracked.origin_task_issue,
+                    outcome=f"stopped triaging feedback on {tracked.owner}/"
+                            f"{tracked.repo}#{tracked.number}: no longer open",
+                )
+                continue
+
+            review_comments = self.github.list_review_comments(
+                tracked.owner, tracked.repo, tracked.number
+            )
+            comments = self.github.list_comments(
+                tracked.owner, tracked.repo, tracked.number
+            )
+            for comment in sorted(review_comments, key=lambda c: c.id):
+                if (comment.id > tracked.last_review_comment_id
+                        and comment.author_association in _TRUSTED_REPLY_ASSOCIATIONS):
+                    self._file_feedback_task(tracked, pr, review_comment=comment)
+            for comment in sorted(comments, key=lambda c: c.id):
+                if (comment.id > tracked.last_comment_id
+                        and comment.author_association in _TRUSTED_REPLY_ASSOCIATIONS):
+                    self._file_feedback_task(tracked, pr, comment=comment)
+
+            # Advances past every comment seen this cycle, trusted or not --
+            # an untrusted one is deliberately never filed as a task, and
+            # there's no reason to keep re-evaluating the same one forever.
+            self.state.update_tracked_pull_request(
+                key,
+                last_review_comment_id=max(
+                    (c.id for c in review_comments), default=tracked.last_review_comment_id
+                ),
+                last_comment_id=max(
+                    (c.id for c in comments), default=tracked.last_comment_id
+                ),
+            )
+
+    def _file_feedback_task(self, tracked: TrackedPullRequest, pr: PullRequestDetail, *,
+                             review_comment: ReviewComment | None = None,
+                             comment: Comment | None = None) -> None:
+        """Files one feedback item (an inline review comment or a top-level
+        one -- exactly one of the two keyword arguments is given) as a new
+        triage-labelled task in the task repo, carrying the `/repo`/`/pr`
+        directives that will point a later, human-approved dispatch at this
+        exact PR's existing branch (`directives.py`; `dispatch_pr` is what
+        actually consumes them once triaged).
+        """
+        target = RepoRef(tracked.owner, tracked.repo)
+        if review_comment is not None:
+            author, body, url = review_comment.user, review_comment.body, review_comment.html_url
+            where = (
+                f"On `{review_comment.path}`"
+                + (f", line {review_comment.line}" if review_comment.line is not None else "")
+                + ":\n\n"
+            )
+        else:
+            assert comment is not None
+            author, body, url = comment.user, comment.body, comment.html_url
+            where = ""
+        task = self.github.create_issue(
+            self.config.task_owner, self.config.task_repo,
+            title=f"Feedback on {target}#{pr.number}: {_first_line(body)}",
+            body=(
+                f"/repo {target}\n"
+                f"/pr {pr.number}\n\n"
+                f"{author} left feedback on {target}#{pr.number} ({pr.title}):\n\n"
+                f"{where}> {body}\n\n"
+                f"Comment: {url}\n\n"
+                "This task was filed automatically from PR feedback and needs a "
+                f"human to approve it before it runs: swap the "
+                f"{self.config.triage_label!r} label for "
+                f"{self.config.trigger_label!r} to dispatch it, or close it if "
+                "no action is needed. Once dispatched, the agent continues "
+                "this PR's own branch and pushes more commits to it, rather "
+                "than opening a new one.\n\n"
+                f"---\n{_AUTOMATION_SIGNATURE}"
+            ),
+            labels=[self.config.triage_label],
+        )
+        self.audit.record(
+            sandbox=None, issue=task.number,
+            outcome=f"filed triage task for feedback from {author} on "
+                    f"{target}#{pr.number}: {task.html_url}",
+        )
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
         # Back to the trigger label, per docs/design.md: "issues need

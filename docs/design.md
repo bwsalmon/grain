@@ -839,6 +839,22 @@ remote, so this shouldn't recur, but it hasn't been checked against a
 sandbox with a real git remote configured — worth confirming before the
 first live issue-to-PR run (`docs/roadmap.md`).
 
+### Feedback intake: a PR comment becomes a candidate, not a redispatch
+
+PR review comments are the other direction untrusted content can arrive
+from — a human reviewing a PR grain opened, not a task filed directly.
+`core.py`'s `_triage_feedback` (`docs/roadmap.md` item 16) turns each new
+one into its own task issue in the task repo, carrying `/repo`/`/pr`
+directives back to the exact PR, but labelled for triage rather than the
+trigger label — the same choke point issue intake above already draws,
+applied here because the direction of trust is the same: unreviewed
+content arriving on its own, not a reply inside a run a human already
+approved. Only PRs grain itself opened are watched (a `/pr`-continuation
+task's PR is left alone — its pre-existing history isn't feedback grain
+caused), and only a trusted commenter's feedback is ever filed as a task,
+the same `author_association` tier the rest of this section already
+relies on.
+
 ## GCP credentials
 
 **Don't build a token service — emulate GCE's metadata server.**

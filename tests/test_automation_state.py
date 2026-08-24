@@ -174,6 +174,79 @@ def test_load_of_a_pre_item_13_state_file_has_no_pending_questions(tmp_path: Pat
     assert loaded.pending_questions == {}
 
 
+# --- feedback triage (bwsalmon/agents#24) -----------------------------------
+
+def test_track_pull_request_starts_at_a_zero_baseline():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=7)
+    tracked = state.tracked_prs["o/r#42"]
+    assert tracked.owner == "o"
+    assert tracked.repo == "r"
+    assert tracked.number == 42
+    assert tracked.origin_task_issue == 7
+    assert tracked.last_review_comment_id == 0
+    assert tracked.last_comment_id == 0
+
+
+def test_track_pull_request_is_a_no_op_if_already_tracked():
+    # Re-tracking must not reset an advanced baseline back to zero -- that
+    # would replay the PR's whole comment history as "new" on the next
+    # triage pass.
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=7)
+    state.update_tracked_pull_request("o/r#42", last_review_comment_id=5, last_comment_id=9)
+    state.track_pull_request("o", "r", 42, origin_task_issue=999)
+    tracked = state.tracked_prs["o/r#42"]
+    assert tracked.origin_task_issue == 7
+    assert tracked.last_review_comment_id == 5
+    assert tracked.last_comment_id == 9
+
+
+def test_update_tracked_pull_request_on_an_absent_key_is_a_no_op():
+    state = AutomationState()
+    state.update_tracked_pull_request("o/r#42", last_review_comment_id=1, last_comment_id=1)
+    assert state.tracked_prs == {}
+
+
+def test_untrack_pull_request_removes_it():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=7)
+    state.untrack_pull_request("o/r#42")
+    assert state.tracked_prs == {}
+
+
+def test_untrack_pull_request_on_an_absent_key_is_a_no_op():
+    state = AutomationState()
+    state.untrack_pull_request("o/r#42")  # must not raise
+    assert state.tracked_prs == {}
+
+
+def test_save_and_load_round_trips_tracked_prs(tmp_path: Path):
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=7)
+    state.update_tracked_pull_request("o/r#42", last_review_comment_id=5, last_comment_id=9)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    tracked = loaded.tracked_prs["o/r#42"]
+    assert tracked.owner == "o"
+    assert tracked.repo == "r"
+    assert tracked.number == 42
+    assert tracked.origin_task_issue == 7
+    assert tracked.last_review_comment_id == 5
+    assert tracked.last_comment_id == 9
+
+
+def test_load_of_a_pre_item_24_state_file_has_no_tracked_prs(tmp_path: Path):
+    # A state file written before this item existed has no "tracked_prs"
+    # key at all -- loading it must default to empty rather than KeyError.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.tracked_prs == {}
+
+
 def test_load_of_a_pre_item_9_state_file_defaults_to_issue_kind(tmp_path: Path):
     # A state file written before item 9 existed has neither "kind" nor
     # "branch" keys at all — every assignment it could hold was necessarily

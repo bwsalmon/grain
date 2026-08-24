@@ -1079,3 +1079,188 @@ def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkey
     orchestrator.run_once(NOW)
 
     assert history.calls[0]["target"] == "other/service"
+
+
+# --- feedback triage (bwsalmon/agents#24) -----------------------------------
+
+def review_feedback_json(id_: int, *, author_association: str = "COLLABORATOR") -> dict:
+    return {
+        "id": id_, "user": {"login": "alice"}, "body": "please rename this",
+        "path": "src/thing.py", "line": 10, "author_association": author_association,
+        "html_url": "https://github.com/o/r/pull/42#discussion_r9",
+    }
+
+
+def created_task_json(number: int = 100) -> dict:
+    return {
+        "number": number, "title": "Feedback on o/r#42: please rename this",
+        "body": "/repo o/r\n/pr 42\n\n...", "html_url": f"https://github.com/o/r/issues/{number}",
+        "labels": [{"name": "triage needed"}],
+    }
+
+
+def test_a_fresh_pr_success_starts_tracking_it_for_feedback():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(pr_flow_response(42))
+
+    orchestrator.run_once(NOW)
+
+    tracked = orchestrator.state.tracked_prs["o/r#42"]
+    assert tracked.owner == "o"
+    assert tracked.repo == "r"
+    assert tracked.number == 42
+    assert tracked.origin_task_issue == 5
+    assert tracked.last_review_comment_id == 0
+    assert tracked.last_comment_id == 0
+
+
+def test_a_pr_continuation_success_does_not_track_the_pr_for_feedback():
+    # `/pr`-continuation dispatches point at a PR grain never opened -- its
+    # pre-existing review history isn't feedback grain caused, so it must
+    # not be swept into tracking the way a fresh-branch PR is.
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.PR, branch="feature-x")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(200, {}, b"{}"))  # branch_exists
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.tracked_prs == {}
+
+
+def test_triage_feedback_files_a_task_for_a_new_trusted_review_comment():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=5)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(pr_detail_json(42)).encode()),  # get_pull_request
+        ApiResponse(200, {}, json.dumps([review_feedback_json(9)]).encode()),  # review comments
+        ApiResponse(200, {}, b"[]"),  # plain comments
+        ApiResponse(201, {}, json.dumps(created_task_json()).encode()),  # create_issue
+    ])
+
+    orchestrator.run_once(NOW)
+
+    create_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/o/r/issues"
+    )
+    sent = json.loads(create_call["body"])
+    assert sent["labels"] == ["triage needed"]
+    assert "Feedback on o/r#42" in sent["title"]
+    assert "please rename this" in sent["title"]
+    assert "/repo o/r" in sent["body"]
+    assert "/pr 42" in sent["body"]
+    assert "alice" in sent["body"]
+    assert "> please rename this" in sent["body"]
+    assert "src/thing.py" in sent["body"]
+    assert "Posted automatically by grain-agent" in sent["body"]
+
+    tracked = orchestrator.state.tracked_prs["o/r#42"]
+    assert tracked.last_review_comment_id == 9
+    assert tracked.last_comment_id == 0
+
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("filed triage task for feedback from alice on o/r#42" in o for o in outcomes)
+
+
+def test_triage_feedback_files_a_task_for_a_new_top_level_comment():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=5)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(pr_detail_json(42)).encode()),
+        ApiResponse(200, {}, b"[]"),
+        ApiResponse(200, {}, json.dumps([{
+            "id": 3, "user": {"login": "bob"}, "body": "also please add a test",
+            "author_association": "OWNER",
+            "html_url": "https://github.com/o/r/pull/42#issuecomment-3",
+        }]).encode()),
+        ApiResponse(201, {}, json.dumps(created_task_json()).encode()),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    create_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/o/r/issues"
+    )
+    sent = json.loads(create_call["body"])
+    assert "also please add a test" in sent["body"]
+    assert "bob" in sent["body"]
+
+    tracked = orchestrator.state.tracked_prs["o/r#42"]
+    assert tracked.last_review_comment_id == 0
+    assert tracked.last_comment_id == 3
+
+
+def test_triage_feedback_ignores_an_untrusted_commenter_but_advances_the_baseline():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=5)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(pr_detail_json(42)).encode()),
+        ApiResponse(200, {}, json.dumps(
+            [review_feedback_json(9, author_association="NONE")]
+        ).encode()),
+        ApiResponse(200, {}, b"[]"),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(
+        c["method"] == "POST" and c["path"] == "/repos/o/r/issues" for c in transport.calls
+    )
+    assert orchestrator.state.tracked_prs["o/r#42"].last_review_comment_id == 9
+
+
+def test_triage_feedback_ignores_a_comment_already_covered_by_the_baseline():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=5)
+    state.update_tracked_pull_request("o/r#42", last_review_comment_id=9, last_comment_id=0)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(pr_detail_json(42)).encode()),
+        ApiResponse(200, {}, json.dumps([review_feedback_json(9)]).encode()),
+        ApiResponse(200, {}, b"[]"),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(
+        c["method"] == "POST" and c["path"] == "/repos/o/r/issues" for c in transport.calls
+    )
+
+
+def test_triage_feedback_stops_tracking_a_pr_that_is_no_longer_open():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=5)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    closed = pr_detail_json(42)
+    closed["state"] = "closed"
+    transport.responses.append(ApiResponse(200, {}, json.dumps(closed).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.tracked_prs == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("no longer open" in o for o in outcomes)
+
+
+def test_triage_feedback_stops_tracking_a_pr_that_404s():
+    state = AutomationState()
+    state.track_pull_request("o", "r", 42, origin_task_issue=5)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(404, {}, b"not found"))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.tracked_prs == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o for o in outcomes)

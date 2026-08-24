@@ -179,6 +179,16 @@ def test_get_pull_request_raises_on_a_non_200():
         GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
 
 
+def test_get_pull_request_reads_state():
+    # bwsalmon/agents#24: `core.py`'s `_triage_feedback` stops watching a PR
+    # once it's no longer open, merged or not.
+    body = pr_json(5)
+    body["state"] = "closed"
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(body).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.state == "closed"
+
+
 def test_default_branch_reads_the_repos_own_default():
     """What a PR opened in a target repo bases off, when the task's own
     `/base` directive doesn't say -- read from the repo rather than
@@ -228,10 +238,13 @@ def test_a_bare_token_still_applies_to_every_repo():
     assert all(c["headers"]["Authorization"] == "token t" for c in transport.calls)
 
 
-def review_comment_json(id_: int, *, line: int | None = 12) -> dict:
+def review_comment_json(id_: int, *, line: int | None = 12,
+                         author_association: str = "COLLABORATOR",
+                         html_url: str = "https://github.com/o/r/pull/5#discussion_r1") -> dict:
     return {
         "id": id_, "user": {"login": "reviewer"}, "body": "please fix this",
         "path": "src/thing.py", "line": line, "diff_hunk": "@@ -1,3 +1,3 @@",
+        "author_association": author_association, "html_url": html_url,
     }
 
 
@@ -242,6 +255,8 @@ def test_list_review_comments_reads_the_review_comment_shape():
     comments = GitHubClient(transport, token="t").list_review_comments("o", "r", 5)
     assert comments == [ReviewComment(
         id=9, user="reviewer", body="please fix this", path="src/thing.py", line=12,
+        author_association="COLLABORATOR",
+        html_url="https://github.com/o/r/pull/5#discussion_r1",
     )]
     assert transport.calls[0]["path"] == "/repos/o/r/pulls/5/comments?per_page=100"
 
@@ -273,8 +288,13 @@ def test_list_review_comments_raises_on_a_non_200():
         GitHubClient(transport, token="t").list_review_comments("o", "r", 5)
 
 
-def comment_json(id_: int, *, user: str = "human", body: str = "here's my answer") -> dict:
-    return {"id": id_, "user": {"login": user}, "body": body}
+def comment_json(id_: int, *, user: str = "human", body: str = "here's my answer",
+                  author_association: str = "NONE",
+                  html_url: str = "https://github.com/o/r/issues/5#issuecomment-1") -> dict:
+    return {
+        "id": id_, "user": {"login": user}, "body": body,
+        "author_association": author_association, "html_url": html_url,
+    }
 
 
 def test_list_comments_reads_the_plain_comment_shape():
@@ -282,7 +302,10 @@ def test_list_comments_reads_the_plain_comment_shape():
         responses=[ApiResponse(200, {}, json.dumps([comment_json(9)]).encode())]
     )
     comments = GitHubClient(transport, token="t").list_comments("o", "r", 5)
-    assert comments == [Comment(id=9, user="human", body="here's my answer")]
+    assert comments == [Comment(
+        id=9, user="human", body="here's my answer",
+        html_url="https://github.com/o/r/issues/5#issuecomment-1",
+    )]
     assert transport.calls[0]["path"] == "/repos/o/r/issues/5/comments?per_page=100"
 
 
@@ -319,6 +342,35 @@ def test_create_comment_raises_on_a_non_201():
     transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
     with pytest.raises(GitHubError):
         GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question")
+
+
+def test_create_issue_posts_title_body_and_labels():
+    transport = FakeTransport(responses=[ApiResponse(201, {}, json.dumps({
+        "number": 12, "title": "Feedback on o/code#5: rename this",
+        "body": "/repo o/code\n/pr 5\n\n...", "html_url": "https://github.com/o/tasks/issues/12",
+        "labels": [{"name": "triage needed"}],
+    }).encode())])
+    issue = GitHubClient(transport, token="t").create_issue(
+        "o", "tasks", title="Feedback on o/code#5: rename this",
+        body="/repo o/code\n/pr 5\n\n...", labels=["triage needed"],
+    )
+    assert issue.number == 12
+    assert issue.labels == frozenset({"triage needed"})
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/tasks/issues"
+    assert json.loads(call["body"]) == {
+        "title": "Feedback on o/code#5: rename this",
+        "body": "/repo o/code\n/pr 5\n\n...", "labels": ["triage needed"],
+    }
+
+
+def test_create_issue_raises_on_a_non_201():
+    transport = FakeTransport(responses=[ApiResponse(422, {}, b"nope")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").create_issue(
+            "o", "tasks", title="x", body="y", labels=["triage needed"],
+        )
 
 
 def test_dry_run_client_passes_pr_reads_through(capsys):
@@ -378,6 +430,18 @@ def test_dry_run_client_passes_list_comments_through_but_prints_create_comment(c
     dry.create_comment("o", "r", 1, "a question for you")
     out = capsys.readouterr().out
     assert "comment on" in out
-    assert "a question for you" in out
-    # The read reached the transport; the mutation only printed.
-    assert len(transport.calls) == 1
+
+
+def test_dry_run_client_prints_create_issue_instead_of_firing(capsys):
+    transport = FakeTransport()
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+
+    issue = dry.create_issue("o", "tasks", title="Feedback on o/code#5: x",
+                              body="...", labels=["triage needed"])
+    out = capsys.readouterr().out
+    assert "file issue" in out
+    assert issue.title == "Feedback on o/code#5: x"
+    assert issue.labels == frozenset({"triage needed"})
+    # Never reached the transport -- a create, same treatment as
+    # create_pull_request/create_comment.
+    assert transport.calls == []

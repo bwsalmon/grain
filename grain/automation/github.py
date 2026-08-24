@@ -20,6 +20,15 @@ top-level conversation thread, distinct from `list_review_comments`'s
 inline diff comments) exists for the other half of that same item: showing
 a redispatched issue/PR the human's reply to a prior question.
 
+Issue *creation* (`create_issue`) arrives with bwsalmon/agents#24: turning
+feedback on a grain-opened pull request into a candidate task, filed in the
+*task repo* with `triage_label` rather than `trigger_label` so a human has
+to promote it before it dispatches. `list_review_comments`/`list_comments`
+now also carry `author_association` (the same trust tier `core.py`'s
+`_TRUSTED_REPLY_ASSOCIATIONS` already gates directive replies and question
+answers on) and `html_url` (so a filed task can link straight back to the
+comment it came from).
+
 **One client, many repos.** Every method already took `owner, repo` as
 its first two arguments, but the token was fixed at construction — fine
 while a deployment had exactly one repo, wrong now that the task repo (API:
@@ -46,7 +55,7 @@ from __future__ import annotations
 import http.client
 import json
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, Sequence
 from urllib.parse import quote, urlsplit
 
 
@@ -169,6 +178,12 @@ class PullRequestDetail:
     html_url: str
     head_ref: str
     base_ref: str
+    # GitHub's own "open"/"closed" (a merge is still "closed" -- `merged_at`
+    # is what distinguishes the two, and nothing here needs that distinction:
+    # either way there's no more feedback to triage). Defaulted to "open"
+    # only so existing call sites/tests that build one by hand don't need
+    # updating; every real response carries it.
+    state: str = "open"
 
 
 @dataclass(frozen=True)
@@ -194,6 +209,9 @@ class Comment:
     user: str
     body: str
     author_association: str = "NONE"
+    # The comment's own permalink -- carried through so a task filed from
+    # PR feedback (bwsalmon/agents#24) can point straight back at it.
+    html_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -211,6 +229,12 @@ class ReviewComment:
     body: str
     path: str
     line: int | None
+    # Same trust-tier and permalink fields `Comment` carries, and for the
+    # same reason (bwsalmon/agents#24: `core.py`'s `_triage_feedback` only
+    # turns a *trusted* commenter's feedback into a task, and links the
+    # filed task back to the comment that prompted it).
+    author_association: str = "NONE"
+    html_url: str = ""
 
 
 def _next_page_path(link_header: str | None) -> str | None:
@@ -376,6 +400,7 @@ class GitHubClient:
             number=data["number"], title=data["title"], body=data.get("body") or "",
             html_url=data["html_url"],
             head_ref=data["head"]["ref"], base_ref=data["base"]["ref"],
+            state=data.get("state", "open"),
         )
 
     def default_branch(self, owner: str, repo: str) -> str:
@@ -419,6 +444,8 @@ class GitHubClient:
                     id=item["id"], user=item.get("user", {}).get("login", ""),
                     body=item.get("body") or "", path=item.get("path", ""),
                     line=item.get("line"),
+                    author_association=item.get("author_association", "NONE"),
+                    html_url=item.get("html_url", ""),
                 ))
             path = _next_page_path(resp.headers.get("Link"))
         return comments
@@ -442,6 +469,7 @@ class GitHubClient:
                     id=item["id"], user=item.get("user", {}).get("login", ""),
                     body=item.get("body") or "",
                     author_association=item.get("author_association", "NONE"),
+                    html_url=item.get("html_url", ""),
                 ))
             path = _next_page_path(resp.headers.get("Link"))
         return comments
@@ -466,6 +494,31 @@ class GitHubClient:
         if resp.status != 201:
             raise GitHubError(resp.status, resp.body)
         return json.loads(resp.body)["id"]
+
+    def create_issue(self, owner: str, repo: str, *, title: str, body: str,
+                      labels: Sequence[str] = ()) -> Issue:
+        """Files a new issue in the *task repo* -- the one write this
+        module makes that isn't a reply to something the agent set already
+        did. Its only caller (bwsalmon/agents#24) is `core.py`'s
+        `_triage_feedback`, always with `labels=[triage_label]` rather than
+        `trigger_label`, so the new task sits out of `_dispatch`'s own
+        `list_issues(..., trigger_label)` query until a human promotes it.
+        """
+        resp = self.transport.request(
+            method="POST", path=f"/repos/{owner}/{repo}/issues",
+            headers=self._headers(owner, repo, json_body=True),
+            body=json.dumps(
+                {"title": title, "body": body, "labels": list(labels)}
+            ).encode(),
+        )
+        if resp.status != 201:
+            raise GitHubError(resp.status, resp.body)
+        data = json.loads(resp.body)
+        return Issue(
+            number=data["number"], title=data["title"], body=data.get("body") or "",
+            html_url=data["html_url"],
+            labels=frozenset(l["name"] for l in data["labels"]),
+        )
 
 
 @dataclass
@@ -512,3 +565,10 @@ class DryRunGitHubClient:
     def create_comment(self, owner: str, repo: str, number: int, body: str) -> int:
         print(f"+ comment on {owner}/{repo}#{number}: {body!r}")
         return 0
+
+    def create_issue(self, owner: str, repo: str, *, title: str, body: str,
+                      labels: Sequence[str] = ()) -> Issue:
+        print(f"+ file issue on {owner}/{repo}: {title!r} (labels={list(labels)!r})")
+        return Issue(number=0, title=title, body=body,
+                     html_url=f"(dry run) {owner}/{repo}: {title}",
+                     labels=frozenset(labels))

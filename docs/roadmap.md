@@ -1145,3 +1145,65 @@ repeatable `--target-repo`; with no `--target-repo` at all, the task repo
 becomes the sole allow-listed target *and* `default_target_repo`, which is
 precisely the single-repo deployment every deployment was before this item
 — it keeps working with no directive written anywhere.
+
+## 16. Turn PR feedback into a candidate, triage-labelled task
+
+- [x] Done
+
+bwsalmon/agents#24: once a PR is open, a human reviewing it leaves feedback
+— an inline review comment, or a plain top-level one — and that feedback
+used to go nowhere the orchestrator could see: nothing turned it into more
+work, and re-running the agent against it meant a maintainer manually
+filing a new task and copying the comment in by hand.
+
+**Only PRs grain itself opened are watched, and only from the moment it
+opened them.** `core.py`'s `_finish_succeeded_issue` calls the new
+`AutomationState.track_pull_request` right after `create_pull_request`
+succeeds — a `/pr`-continuation task's PR is deliberately left untracked,
+since grain never opened it and its pre-existing review history isn't
+feedback grain caused (tracking it from a zero baseline would flood the
+task repo with its entire backlog on the very first pass). `TrackedPullRequest`
+records the owner/repo/number, the task issue that started it (for the
+audit trail), and the highest comment id already considered on each of a
+PR's two comment surfaces (inline review comments, top-level conversation)
+— an id, not a count or a timestamp, the same unspoofable baseline shape
+`PendingQuestion.question_comment_id` (item 13) already uses.
+
+**A new orchestrator pass, `_triage_feedback`, runs first in `run_once` —
+before sweep, not after.** A sweep in the same cycle can itself open a
+brand-new PR and start tracking it; polling that PR in the same cycle
+would be pure overhead — a PR that didn't exist a moment ago has no
+feedback yet either way. For every already-tracked PR it reads the PR
+itself (to notice it's closed or merged, at which point tracking stops —
+no more feedback worth triaging, and nothing left to dispatch a
+continuation against), then both comment surfaces, and files one new task
+per comment newer than the recorded baseline.
+
+**Filed as a real issue in the task repo, not a comment or an automatic
+redispatch.** `GitHubClient.create_issue` is the one new write this item
+adds; every task it creates carries `/repo owner/name` and `/pr N`
+directives (`directives.py`) so a later, human-approved dispatch lands on
+the exact same PR's existing branch via `dispatch_pr`, plus the feedback
+text, its author, and a permalink back to the comment. It carries
+`triage_label` ("triage needed") rather than `trigger_label`, so
+`_dispatch`'s own `list_issues(..., trigger_label)` query never sees it —
+a human has to swap the label (or close the issue) before it can ever run.
+This is the same prompt-injection gate `docs/design.md`'s split surface
+already draws around issue intake, applied to PR feedback for the same
+reason: unreviewed content arriving on its own, not a reply within an
+already-approved run.
+
+**Only a trusted author's comment becomes a task.** `_TRUSTED_REPLY_ASSOCIATIONS`
+(the same "could have applied the label" tier item 13's reply-promotion
+and item 15's directive-reply parsing already gate on) decides whether a
+comment is filed at all — an arbitrary public commenter on a public PR
+must not be able to fill the task queue with content of their choosing.
+An untrusted comment's id still advances the tracked baseline, so it is
+never reconsidered on a later cycle; it is simply never turned into a
+task.
+
+**A stale tracked PR is dropped, not retried forever.** A 404 (the repo or
+PR is gone, e.g. the allowlist or credentials changed out from under it)
+untracks it, the same "stale reference, not a real failure" tolerance
+`_requeue`/`_finish_question`/`_promote_answered_questions` already apply
+to a 404 elsewhere in this module.
