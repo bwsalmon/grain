@@ -80,7 +80,7 @@ class Assignment:
 class PendingQuestion:
     """Tracks one issue/PR sitting idle after an `ask_question` call
     (docs/roadmap.md item 13), waiting for a trusted reply to auto-redispatch
-    it without an operator re-applying the trigger label by hand.
+    it without an operator removing `awaiting_reply_label` by hand.
 
     `question_comment_id` is the id of the question comment `core.py`'s
     `_finish_question` itself posted — the baseline a later check compares

@@ -252,7 +252,7 @@ short of giving the host a GitHub/Claude credential — see
     (`grain/proxy/tokens.py`) mints and records one per sandbox,
     idempotently, on first dispatch. Nothing to do here.
 11. **`automation.json`**, `/data/config/automation.json` — names the
-    *task* repo, the one queue polled for labelled issues
+    *task* repo, the one queue polled for open issues
     (`AutomationConfig`, `grain/automation/config.py`); `task_owner` and
     `task_repo` are its only fields with no default:
     ```json
@@ -265,8 +265,10 @@ short of giving the host a GitHub/Claude credential — see
     is parked with a comment. Passing no `--target-repo` at all produces
     the single-repo shape instead: the task repo as the sole allow-listed
     target *and* the default, so no task needs a directive.
-    Everything else has a default worth knowing: `trigger_label:
-    "grain-agent"`, `in_progress_label: "grain-agent-in-progress"`,
+    Everything else has a default worth knowing: `triage_label:
+    "triage-needed"` (an issue carrying it is held out of the queue --
+    intake is opt-out, not opt-in; see docs/design.md's "Issue intake"),
+    `in_progress_label: "grain-agent-in-progress"`,
     `awaiting_reply_label: "grain-agent-awaiting-reply"`,
     `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
     `runs_per_hour: 60`, `max_runtime_minutes: 120`. Override any of them by
@@ -291,9 +293,10 @@ short of giving the host a GitHub/Claude credential — see
 ## Running automation
 
 `grain automation run-once` does one pass: sweep stranded/finished work,
-poll the **task repo** for open issues carrying `trigger_label`, resolve
-each one's target repo from its own `/repo` directive, and dispatch to any
-free sandbox within the rate limit. A fresh task opens a new PR in its
+poll the **task repo** for open issues not held back by `triage_label`,
+`in_progress_label`, or `awaiting_reply_label`, resolve each one's target
+repo from its own `/repo` directive, and dispatch to any free sandbox
+within the rate limit. A fresh task opens a new PR in its
 target repo once its branch shows up; a task carrying `/pr N`
 (docs/roadmap.md items 9 and 15 — continue an *existing* PR to address
 review feedback, fix CI, or finish work in flight) just pushes more commits
@@ -488,11 +491,12 @@ with no operator action:
 - The dispatched unit finished successfully → label moved back off
   in-progress, sandbox freed, PR opened once the pushed branch is verified
   to exist.
-- The unit finished with a failure → issue re-labelled with the trigger
-  label (put back in the queue), sandbox freed.
+- The unit finished with a failure → in-progress label removed (back in the
+  queue, since intake is opt-out -- see docs/design.md's "Issue intake"),
+  sandbox freed.
 - The unit is missing entirely (never started, or the sandbox was recreated
   out from under it) or has run past `max_runtime_minutes` → treated as
-  stranded, issue re-labelled, sandbox freed.
+  stranded, in-progress label removed, sandbox freed.
 - **Every one of the three releases above also captures the session's
   trajectory** (`docs/roadmap.md` item 10, `grain/automation/capture.py` —
   see ["Browsing past sessions"](#browsing-past-sessions-docsroadmapmd-item-10)

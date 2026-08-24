@@ -33,11 +33,12 @@ from pathlib import Path
 # `task_repo` mean now; `base_branch` was the single global PR base, which
 # no longer has a coherent meaning across many target repos (each one's own
 # default branch is read from GitHub instead — see `core.py`'s
-# `_resolve_target`). Accepted on load rather than rejected, so pointing an
-# already-deployed controller at a new version doesn't need `/data` edited
-# first.
+# `_resolve_target`); `trigger_label` was the opt-in label the intake model
+# required before `triage_label` inverted it to an opt-out one (below).
+# Accepted on load rather than rejected, so pointing an already-deployed
+# controller at a new version doesn't need `/data` edited first.
 _LEGACY_ALIASES = {"owner": "task_owner", "repo": "task_repo"}
-_LEGACY_DROPPED = ("base_branch",)
+_LEGACY_DROPPED = ("base_branch", "trigger_label")
 
 
 @dataclass(frozen=True)
@@ -52,20 +53,27 @@ class AutomationConfig:
     # a comment rather than guessed at. A single-repo deployment sets this
     # to its own repo and never writes a directive at all.
     default_target_repo: str | None = None
-    # The prompt-injection gate from docs/design.md: only issues a human
-    # has already labelled are ever picked up. One label, and only on the
-    # task repo — a PR-continuation task (docs/roadmap.md item 9) is a task
-    # issue carrying a `/pr` directive, not a labelled PR in some other
-    # repo, so there is still exactly one trigger surface to watch.
-    trigger_label: str = "grain-agent"
+    # The prompt-injection gate from docs/design.md, inverted from an
+    # opt-in to an opt-out: every open issue in the task repo is a dispatch
+    # candidate by default, and `triage_label` is what holds one back. This
+    # makes bulk/automated filing workable -- an issue-filer sets the label
+    # itself at creation time instead of a human having to apply a trigger
+    # label to every issue by hand -- at the cost of the gate's original
+    # guarantee: an issue is now processed unless someone acts on it, not
+    # only once someone has. One label, and only on the task repo — a
+    # PR-continuation task (docs/roadmap.md item 9) is a task issue carrying
+    # a `/pr` directive, not a labelled PR in some other repo, so there is
+    # still exactly one gating surface to watch.
+    triage_label: str = "triage-needed"
     in_progress_label: str = "grain-agent-in-progress"
     # Applied instead of in_progress_label once an `ask_question` call is
     # relayed (docs/roadmap.md item 13), and equally when a task is parked
     # for an unusable `/repo` directive -- visible on GitHub itself, the
-    # same way trigger_label/in_progress_label already are, so an operator
+    # same way triage_label/in_progress_label already are, so an operator
     # can see at a glance which issues are idle waiting for a human versus
     # genuinely untouched. Removed the moment a trusted reply promotes the
-    # issue back to trigger_label.
+    # issue, which (with no other blocking label left) makes it a dispatch
+    # candidate again.
     awaiting_reply_label: str = "grain-agent-awaiting-reply"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")

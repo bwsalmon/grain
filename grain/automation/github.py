@@ -187,8 +187,7 @@ class Comment:
     to auto-redispatch after a question (docs/roadmap.md item 13) — the
     same trust tier as "can apply a label," since a random commenter on a
     public repo must not be able to redispatch the agent with content of
-    their choosing. That would reopen the exact prompt-injection gate the
-    trigger label exists to close (docs/design.md's split surface).
+    their choosing (docs/design.md's split surface).
     """
     id: int
     user: str
@@ -256,16 +255,23 @@ class GitHubClient:
             headers["Content-Type"] = "application/json"
         return headers
 
-    def list_issues(self, owner: str, repo: str, label: str) -> list[Issue]:
-        """Open issues carrying `label`. Filters out pull requests — the
-        issues endpoint returns both, distinguished only by the presence of
-        a `pull_request` key on the item.
+    def list_issues(self, owner: str, repo: str, label: str | None = None) -> list[Issue]:
+        """Open issues, optionally filtered to those carrying `label`.
+        Filters out pull requests either way — the issues endpoint returns
+        both, distinguished only by the presence of a `pull_request` key on
+        the item.
+
+        `label=None` (`core.py`'s `_dispatch` call) lists every open issue
+        in the task repo: the intake model is opt-out, not opt-in
+        (`AutomationConfig.triage_label`), so there is no positive label left
+        to filter the GitHub-side query on — candidates are narrowed to
+        dispatchable ones client-side instead, the same place the
+        pull-request filter below already happens.
         """
         issues: list[Issue] = []
-        path = (
-            f"/repos/{owner}/{repo}/issues"
-            f"?labels={quote(label)}&state=open&per_page=100"
-        )
+        path = f"/repos/{owner}/{repo}/issues?state=open&per_page=100"
+        if label is not None:
+            path += f"&labels={quote(label)}"
         while path:
             resp = self.transport.request(
                 method="GET", path=path, headers=self._headers(owner, repo), body=None
@@ -477,7 +483,7 @@ class DryRunGitHubClient:
 
     inner: GitHubClient
 
-    def list_issues(self, owner: str, repo: str, label: str) -> list[Issue]:
+    def list_issues(self, owner: str, repo: str, label: str | None = None) -> list[Issue]:
         return self.inner.list_issues(owner, repo, label)
 
     def get_issue(self, owner: str, repo: str, number: int) -> Issue:
