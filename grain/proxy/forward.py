@@ -46,6 +46,17 @@ class RealForwarder:
             "Content-Type": headers.get("Content-Type", ""),
             "Accept": headers.get("Accept", "*/*"),
             "User-Agent": headers.get("User-Agent", "git/grain-proxy"),
+            # git gzip-compresses a git-upload-pack request body once its
+            # "have"/"want" negotiation gets large enough (http.postBuffer) --
+            # found live: a sandbox's workspace, reused across a repo switch,
+            # still held its previous target's full ref history, and the
+            # resulting oversized negotiation against the new target was the
+            # first request ever big enough to actually get compressed.
+            # Forwarding the compressed body without this header meant
+            # GitHub tried to parse gzip bytes as plain pkt-line data and
+            # replied 400 -- small requests never hit this because they
+            # never get compressed in the first place.
+            "Content-Encoding": headers.get("Content-Encoding", ""),
         }
         if token:
             # GitHub's HTTPS PAT convention: the token as the Basic auth
