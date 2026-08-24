@@ -158,10 +158,14 @@ def test_the_config_repo_is_the_task_repo_by_default():
         "instance.tf no longer falls back from task_repo to config_repo"
     assert "task_repo           = local.task_repo" in instance
 
-    for workflow in ("deploy.yml", "plan.yml"):
-        text = (WORKFLOWS / workflow).read_text()
-        assert "config_repo=${{ github.repository }}" in text, \
-            f"{workflow} does not tell Terraform which repo it is running in"
+    # plan.yml deliberately excluded: it never authenticates to GCP or runs
+    # `terraform plan`/`apply` at all (only `fmt`/`validate`, neither of
+    # which touches variables), specifically so a PR never gets a live
+    # deployer credential before a human reviews it -- see plan.yml's own
+    # module comment. Nothing there consumes config_repo.
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    assert "config_repo=${{ github.repository }}" in deploy, \
+        "deploy.yml does not tell Terraform which repo it is running in"
 
 
 def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
