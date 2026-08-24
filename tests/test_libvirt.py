@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 
 import pytest
@@ -210,3 +211,80 @@ def test_recreate_destroys_then_creates_then_starts(adapter, cluster):
     a.recreate("sandbox-0")
     assert runner.ran("virsh -c qemu:///system define")
     assert runner.ran("virsh -c qemu:///system start sandbox-0")
+
+
+def _tee_stdin(runner: FakeRunner, prefix: str) -> str:
+    for argv, stdin in runner.calls:
+        if shlex.join(argv).startswith(prefix):
+            return stdin or ""
+    raise AssertionError(f"no call starting with {prefix!r}; calls were {runner.commands}")
+
+
+def test_create_allowlists_config_dir_and_image_dir_in_apparmor(cluster, tmp_path):
+    """Found live: qemu failed to start a VM whose disk lived at
+    config_dir's own default (a custom path, not the
+    /var/lib/libvirt/images/ Debian's libvirt AppArmor profile allows by
+    default) with "Cannot access storage file ... Permission denied" --
+    not an ownership problem, AppArmor denies the open() before file
+    permissions are ever checked. FakeRunner only records the `tee` call
+    rather than really executing it, so the write is checked via its
+    recorded stdin, not by reading the (never actually written) file back.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    rules = tmp_path / "apparmor" / "local" / "abstractions" / "libvirt-qemu"
+    rules.parent.mkdir(parents=True)
+    a = LibvirtAdapter(sized_cluster, runner, network,
+                        config_dir=tmp_path / "instances",
+                        apparmor_rules_path=rules)
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+
+    a.create(sized_cluster.spec_of("sandbox-0"))
+
+    written = _tee_stdin(runner, f"tee -a {rules}")
+    assert f"{tmp_path}/instances/*.qcow2 rwk," in written
+    assert f"{tmp_path}/images/*.qcow2 rwk," in written
+    assert runner.ran("systemctl reload apparmor")
+
+
+def test_create_is_a_noop_when_apparmor_isnt_installed(cluster, tmp_path):
+    """Not every host runs AppArmor at all -- a tmp_path-based
+    apparmor_rules_path whose parent was never created stands in for that,
+    regardless of whether *this* machine happens to have AppArmor
+    installed (the shared `adapter` fixture uses the real system path, so
+    it can't be relied on to test the absent case portably).
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    a = LibvirtAdapter(cluster, runner, network, config_dir=tmp_path / "instances",
+                        apparmor_rules_path=tmp_path / "no-apparmor" / "libvirt-qemu")
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    assert not a.apparmor_rules_path.parent.exists()
+
+    a.create(cluster.spec_of("sandbox-0"))  # must not raise
+
+    assert not runner.ran("tee")
+    assert not runner.ran("systemctl reload apparmor")
+
+
+def test_create_skips_an_already_allowlisted_directory(cluster, tmp_path):
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    rules = tmp_path / "apparmor" / "libvirt-qemu"
+    rules.parent.mkdir(parents=True)
+    config_dir = tmp_path / "instances"
+    rules.write_text(f"  {config_dir}/*.qcow2 rwk,\n  {config_dir}/*.iso rk,\n")
+    a = LibvirtAdapter(cluster, runner, network, config_dir=config_dir,
+                        apparmor_rules_path=rules)
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+
+    a.create(cluster.spec_of("sandbox-0"))
+
+    # debian-12 (the default bare image string) resolves to a relative
+    # ".", which is deliberately never allowlisted (not a real path) --
+    # config_dir is the only real candidate here, and it's already
+    # present, so no write happens at all.
+    assert not runner.ran("tee")
+    assert not runner.ran("systemctl reload apparmor")
