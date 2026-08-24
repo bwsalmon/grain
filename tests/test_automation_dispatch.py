@@ -408,6 +408,50 @@ def test_ensure_workspace_checks_out_the_branch_on_first_clone_too():
     assert "checkout -f -B feature-x origin/feature-x" in else_clause
 
 
+# --- dispatch's `base` parameter (bwsalmon/agents#6) -----------------------
+
+def test_dispatch_without_a_base_keeps_the_prior_default_branch_workspace():
+    # Regression guard: production always resolves and passes a real base
+    # now (core.py's _resolve_target), but a caller that doesn't must not
+    # change behaviour -- unmodified fallback to ensure_workspace's plain
+    # origin/HEAD reset.
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert clone_calls
+    assert "checkout -f --detach origin/HEAD" in clone_calls[0][2]
+
+
+def test_dispatch_with_a_base_builds_the_workspace_from_that_base():
+    # bwsalmon/agents#6: a /base directive must change what the agent's
+    # branch is actually built on top of, not just where the PR later
+    # opens -- the same mechanism dispatch_pr already uses for pr.head_ref.
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(7),
+             remote_url=REMOTE_URL, token=TOKEN, base="develop")
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert clone_calls
+    script = clone_calls[0][2]
+    assert "checkout -f -B develop origin/develop" in script
+    assert "checkout -f --detach" not in script
+
+
+def test_dispatch_with_a_base_still_tells_the_agent_to_push_the_issue_branch():
+    # The workspace builds on `base`, but the agent still pushes to the
+    # deterministic per-issue branch (branch_name), not to `base` itself --
+    # ensure_workspace's local branch name is just a starting point, never
+    # what create_pull_request's head ends up being.
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(7),
+             remote_url=REMOTE_URL, token=TOKEN, base="develop")
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "git push origin HEAD:grain/issue-7" in prompt_stdin
+
+
 # --- dispatch_pr (docs/roadmap.md item 9) ----------------------------------
 
 def test_dispatch_pr_checks_out_the_prs_own_branch():

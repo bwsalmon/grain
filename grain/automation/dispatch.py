@@ -587,7 +587,9 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     now happens on the controller instead — writing the prompt and MCP
     config, and starting the unit. `branch` unset gets the fresh-issue
     workspace (default branch); `branch` given gets `ensure_workspace`'s
-    PR-continuation path (docs/roadmap.md item 9) — see its docstring.
+    branch-reset path (docs/roadmap.md item 9) instead — either
+    `dispatch_pr`'s PR-continuation branch, or `dispatch`'s own resolved
+    `/base` — see its docstring.
     """
     configure_git_credentials(sandbox_runner, remote_url, token)
     ensure_workspace(sandbox_runner, remote_url, target.workspace, branch=branch)
@@ -643,7 +645,7 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 
 def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
              target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
-             comments: list[Comment] = (), task_repo: str = "",
+             base: str | None = None, comments: list[Comment] = (), task_repo: str = "",
              target_repo: str = "") -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
@@ -662,13 +664,27 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     — how a redispatch after a prior `ask_question` call sees the human's
     reply, since `AutomationState` itself carries no memory of that round
     trip once the assignment is released.
+
+    `base` is the resolved PR base `core.py`'s `_resolve_target` already
+    pinned onto this task (a `/base` directive, or the target repo's own
+    default branch) — passed straight through to `ensure_workspace`'s own
+    `branch` parameter so the agent's new branch is actually *built on top
+    of* that base, not just opened against it later. Without this, a `/base`
+    that differs from the target repo's real default branch only affected
+    where `create_pull_request` (`core.py`'s `_finish_succeeded_issue`)
+    opened the PR — the workspace itself always reset to `origin/HEAD`, so
+    the agent's branch carried every commit the real default branch had
+    that `base` didn't, polluting the PR's diff. `None` (a test-only shape;
+    production always resolves and passes a real value) falls back to
+    `ensure_workspace`'s plain `origin/HEAD` default-branch reset, exactly
+    as before this parameter existed.
     """
-    branch = branch_name(issue.number)
+    push_branch = branch_name(issue.number)
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
-        _prompt(issue, branch, target.workspace, comments,
+        _prompt(issue, push_branch, target.workspace, comments,
                 task_repo=task_repo, target_repo=target_repo),
-        remote_url=remote_url, token=token,
+        remote_url=remote_url, token=token, branch=base,
     )
 
 
