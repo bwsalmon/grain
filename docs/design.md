@@ -291,9 +291,20 @@ so the key file returns and the adapter reports that. **Verify** that
 `gce_metadata_server` accepts ADC as its impersonation source.
 
 That leaves only the GitHub credentials to store. If they should be
-centralised rather than on `/data`, **GCP Secret Manager read via instance
-identity** beats GitHub secrets on every axis here: no third party holding
-them, no runner, no coupling to repo write access, same recovery property.
+centralised rather than on `/data`, push them **straight into the
+instance's own metadata**, over the Compute API, rather than through
+Secret Manager: no third party holding them, no runner, no coupling to
+repo write access, same recovery property as the instance-identity read
+above — and one thing better. Secret Manager access has to be granted
+either project-wide (to whatever CI identity creates and rotates the
+secret) or per-secret (to the host, narrower but still a standing GCP IAM
+grant that anyone who inherits or escalates into that identity can use to
+read it back out). Instance metadata needs neither: the deploy workflow
+already holds `roles/compute.admin` to manage the VM at all, so attaching
+the credential costs no new grant, and the host reads its own metadata
+over the local, unauthenticated metadata server — there is no IAM
+binding for a compromised or over-scoped identity elsewhere in the
+project to exploit.
 
 ## The sandbox VMs
 

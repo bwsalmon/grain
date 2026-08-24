@@ -106,7 +106,6 @@ def test_the_rendered_cluster_file_is_one_grain_can_load():
     with tempfile.TemporaryDirectory() as tmp:
         renderer = _config_renderer().replace("/run/grain-deploy", tmp)
         config = {
-            "project_id": "a-project",
             "grain_repo_url": "https://github.com/bwsalmon/grain",
             "grain_ref": "main",
             "debian_image_url": "https://example.invalid/debian-12.qcow2",
@@ -116,8 +115,6 @@ def test_the_rendered_cluster_file_is_one_grain_can_load():
             "target_repos": ["an-org/service-a", "an-org/service b"],
             "default_target_repo": "",
             "credential_name": "bot",
-            "github_token_secret": "grain-github-token",
-            "claude_token_secret": "grain-claude-code-oauth-token",
             "deploy_timeout_secs": 2700,
         }
         (Path(tmp) / "config.json").write_text(json.dumps(config))
@@ -139,10 +136,13 @@ def test_the_rendered_cluster_file_is_one_grain_can_load():
 
 
 def test_no_secret_value_is_committed_or_passed_through_terraform():
-    """The template's central claim. Terraform creates secret containers
-    and never a version, and nothing in the repo holds a credential."""
+    """The template's central claim. Terraform never touches Secret
+    Manager or a secret value -- the two runtime credentials go straight
+    into instance metadata over the Compute API instead -- and nothing in
+    the repo holds a credential."""
     source = _tf_source()
-    assert "google_secret_manager_secret_version" not in source
+    assert "secret_manager" not in source.lower()
+    assert "secretmanager" not in source.lower()
     for path in TEMPLATE.rglob("*"):
         if path.is_file():
             text = path.read_text(errors="ignore")

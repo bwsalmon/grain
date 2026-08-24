@@ -3,7 +3,8 @@
 # request, read the plan CI posts on it, merge -- and the host converges.
 #
 # Nothing secret belongs here. The two credentials grain needs live in this
-# repo's Actions secrets and go to Secret Manager; see the README.
+# repo's Actions secrets and go straight into the host's own instance
+# metadata; see the README.
 # ---------------------------------------------------------------------------
 
 # -- Where it runs ----------------------------------------------------------
@@ -70,10 +71,10 @@ credential_name = "bot"
 
 # -- What the VM is allowed to do -------------------------------------------
 
-# Roles on the host's own service account. Read access to its two secrets
-# is granted separately, on the secrets themselves, so it is not project-
-# wide. Add to this list to widen what the host may do -- it is a
-# reviewable diff, which is the point of keeping it here.
+# Roles on the host's own service account. It needs no Secret Manager
+# grant -- its two runtime credentials arrive as instance metadata. Add
+# to this list to widen what the host may do -- it is a reviewable diff,
+# which is the point of keeping it here.
 vm_service_account_roles = [
   "roles/logging.logWriter",
   "roles/monitoring.metricWriter",

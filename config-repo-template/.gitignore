@@ -7,7 +7,8 @@
 crash.log
 
 # Nor does anything holding a credential. Secrets go in this repo's
-# Actions secrets and, from there, into Secret Manager.
+# Actions secrets and, from there, straight into the host's own instance
+# metadata.
 *.tfvars.json
 *.auto.tfvars
 *.json.key

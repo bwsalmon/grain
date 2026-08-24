@@ -17,20 +17,21 @@ issue filed here and labelled `grain-agent` is what the agents pick up.
         │
         ▼
   GitHub Actions ──▶ terraform apply       (the VM, its disks, its identity)
-        │        └─▶ Secret Manager        (the two runtime credentials)
-        │        └─▶ instance metadata     (the new commit SHA)
+        │        └─▶ instance metadata     (the two runtime credentials,
+        │                                   the new commit SHA)
         │                    │
         │                    ▼
         │        grain-config-sync on the host notices the SHA changed
         │                    │
         └───── waits ────────┴──▶ deploy.sh: fetch grain, read the secrets
-                                  with the VM's own identity, run
+                                  from its own metadata, run
                                   `grain host bootstrap`
 ```
 
 CI never logs into the host. There is no SSH key in this repo, no runner on
-the VM, and no path from a workflow to a running credential — the host pulls
-what it needs, authenticated by being itself.
+the VM, and no GCP service in between — the deploy workflow attaches the two
+credentials directly to the VM resource, and the host reads them back
+locally, needing no credential of its own to do it.
 
 ## Use it
 
@@ -148,21 +149,25 @@ from and go to, the network and who may SSH, and the IAM roles the VM
 holds. All of it reviewable in a pull request, all of it reverted by
 reverting a commit.
 
-**In Actions secrets, never in the repo:** two values that CI hands to
-Secret Manager and never uses again, plus the two identifiers that let CI
-authenticate to GCP at all.
+**In Actions secrets, never in the repo:** two values that CI attaches
+directly to the VM and never uses again, plus the two identifiers that let
+CI authenticate to GCP at all.
 
 **On the host:** nothing durable that CI put there. `deploy.sh` reads the
-two secrets from Secret Manager with the instance's own service account,
+two secrets from its own instance metadata — no GCP credential needed,
+just the local metadata server every GCE instance exposes to itself —
 writes them to `/run` (tmpfs, `0600`), lets `grain host bootstrap` place
 them on the controller's `/data`, and deletes them. Terraform never sees a
-secret value, so the state file does not contain one.
+secret value, so the state file does not contain one either.
 
 grain's own [`docs/design.md`](https://github.com/bwsalmon/grain/blob/main/docs/design.md)
 argues against keeping the *system's* credentials in Actions secrets, and
 this template agrees with it: they do not live there. They pass through
-once, on their way to Secret Manager, which is the alternative that
-document recommends.
+once, on their way straight into the instance's own metadata, which is the
+alternative that document recommends — it needs no Secret Manager grant at
+all, so nothing with broader access to this GCP project (a stray IAM
+binding, a misconfigured agent identity) has a role it could use to read
+these two credentials back out.
 
 ## What the VM is allowed to do
 
@@ -176,8 +181,9 @@ vm_service_account_roles = [
 ]
 ```
 
-Read access to its two secrets is granted on the secrets themselves, not
-project-wide, so widening that list does not accidentally widen this.
+It holds no Secret Manager grant for its two credentials — they arrive as
+instance metadata, which needs no IAM role to read locally — so widening
+this list does not accidentally widen access to them.
 
 There is a second, deliberately separate account for **agents**:
 
@@ -208,9 +214,9 @@ role — by editing `config/grain.tfvars` in a pull request. CI plans it;
 merging applies it and redeploys.
 
 **Rotate a credential** by updating the Actions secret and running the
-`deploy` workflow manually (`workflow_dispatch`). The workflow adds a new
-Secret Manager version only when the value actually changed, and the
-manual run bumps the deploy generation so the host picks it up.
+`deploy` workflow manually (`workflow_dispatch`). The workflow pushes the
+new value to the host's instance metadata every run, and the manual run
+bumps the deploy generation so the host picks it up.
 
 **Deploy a new grain** by moving `grain_ref`. Pin it to a tag or SHA if you
 want deployments to be reproducible; leave it on `main` and uncomment the

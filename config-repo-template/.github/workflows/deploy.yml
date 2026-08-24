@@ -1,7 +1,7 @@
-# Push to main -> the deployment converges. Nothing in this workflow
-# touches the host directly: Terraform reconciles the GCP side, the two
-# secrets go into Secret Manager, and the new commit SHA lands in instance
-# metadata, which is what the on-VM config-sync service is watching.
+# Push to main -> the deployment converges. Nothing in this workflow logs
+# into the host: Terraform reconciles the GCP side, the two secrets go
+# straight into the instance's own metadata, and the new commit SHA lands
+# there too -- which is what the on-VM config-sync service is watching.
 name: deploy
 
 on:
@@ -104,45 +104,42 @@ jobs:
             echo "project_id=$(terraform output -raw project_id)"
             echo "instance=$(terraform output -raw instance_name)"
             echo "zone=$(terraform output -raw zone)"
-            echo "github_token_secret=$(terraform output -raw github_token_secret)"
-            echo "claude_token_secret=$(terraform output -raw claude_token_secret)"
           } >> "$GITHUB_OUTPUT"
 
       # The only place a secret value is ever decrypted. It goes straight
-      # into Secret Manager; the host reads it back with its own instance
-      # identity. Terraform never sees it, so it is not in the state file.
-      - name: Push secrets into Secret Manager
+      # into the instance's own metadata over the Compute API -- never
+      # through Secret Manager, so the deployer needs no project-wide
+      # secret access, and never through Terraform, so it is not in the
+      # state file. The host reads it back locally, with no GCP
+      # credential at all: metadata is local to the instance that owns it.
+      - name: Push secrets to the host
         env:
           PROJECT: ${{ steps.tf.outputs.project_id }}
-          GH_TOKEN_SECRET_ID: ${{ steps.tf.outputs.github_token_secret }}
-          CLAUDE_TOKEN_SECRET_ID: ${{ steps.tf.outputs.claude_token_secret }}
+          INSTANCE: ${{ steps.tf.outputs.instance }}
+          ZONE: ${{ steps.tf.outputs.zone }}
           GRAIN_GITHUB_TOKEN: ${{ secrets.GRAIN_GITHUB_TOKEN }}
           GRAIN_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.GRAIN_CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
 
           push_secret() {
-            local name="$1" value="$2" current
+            local key="$1" value="$2" tmp
             if [ -z "$value" ]; then
-              echo "::warning::$name is empty; leaving Secret Manager untouched"
+              echo "::warning::$key is empty; leaving the host's copy untouched"
               return 0
             fi
-            # Only add a version when the value actually changed, so
-            # rotation is visible in the version list and a no-op push is
-            # a no-op here too.
-            current="$(gcloud secrets versions access latest \
-              --secret="$name" --project="$PROJECT" 2>/dev/null || true)"
-            if [ "$current" = "$value" ]; then
-              echo "$name: unchanged"
-              return 0
-            fi
-            printf '%s' "$value" | gcloud secrets versions add "$name" \
-              --project="$PROJECT" --data-file=- >/dev/null
-            echo "$name: new version added"
+            tmp="$(mktemp)"
+            umask 077
+            printf '%s' "$value" > "$tmp"
+            gcloud compute instances add-metadata "$INSTANCE" \
+              --project="$PROJECT" --zone="$ZONE" \
+              --metadata-from-file="$key=$tmp" >/dev/null
+            rm -f "$tmp"
+            echo "$key: pushed"
           }
 
-          push_secret "$GH_TOKEN_SECRET_ID" "$GRAIN_GITHUB_TOKEN"
-          push_secret "$CLAUDE_TOKEN_SECRET_ID" "$GRAIN_CLAUDE_CODE_OAUTH_TOKEN"
+          push_secret "grain-github-token" "$GRAIN_GITHUB_TOKEN"
+          push_secret "grain-claude-token" "$GRAIN_CLAUDE_CODE_OAUTH_TOKEN"
 
       # The host reports progress through guest attributes, so CI fails
       # when the rollout fails rather than when `terraform apply` returns.

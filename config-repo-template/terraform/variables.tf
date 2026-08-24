@@ -1,7 +1,9 @@
 # Every value here is *configuration*, not a secret: it is set in
 # config/grain.tfvars, committed, and reviewed in a pull request. The two
 # secrets this deployment needs (a GitHub token and a Claude Code OAuth
-# token) never appear in Terraform -- see secrets.tf.
+# token) never appear in Terraform -- the deploy workflow pushes them
+# straight into instance metadata after `terraform apply` returns, so
+# they are never in the plan, the apply, or the state file.
 
 # ---------------------------------------------------------------- project --
 
@@ -12,7 +14,7 @@ variable "project_id" {
 
 variable "region" {
   type        = string
-  description = "Region for the subnet, the router, and the Secret Manager replicas."
+  description = "Region for the subnet and the router."
   default     = "us-central1"
 }
 
