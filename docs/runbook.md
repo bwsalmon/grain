@@ -269,7 +269,7 @@ short of giving the host a GitHub/Claude credential — see
     "grain-agent"`, `in_progress_label: "grain-agent-in-progress"`,
     `awaiting_reply_label: "grain-agent-awaiting-reply"`,
     `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
-    `runs_per_hour: 10`, `max_runtime_minutes: 120`. Override any of them by
+    `runs_per_hour: 60`, `max_runtime_minutes: 120`. Override any of them by
     editing the file directly.
 12. **Enable the git proxy and the automation timer**, now that `/opt/grain`
     holds real code and `/data` holds real credentials (SSH to the

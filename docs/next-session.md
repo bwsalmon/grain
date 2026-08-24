@@ -229,7 +229,7 @@ and `::test_a_non_command_error_from_dispatch_still_raises`.
   `grain host health` and the sweeper's own check only report; a degraded
   sandbox keeps receiving dispatches. Recreate is the fix for a filling disk
   and the deploy path for image updates, and nothing runs it on a cadence.
-- **The only spend control is `runs_per_hour: 10`.** No per-run turn or cost
+- **The only spend control is `runs_per_hour: 60`.** No per-run turn or cost
   cap; a looping run burns until `max_runtime_minutes`. The `result` event
   at the end of each transcript carries `total_cost_usd`/`num_turns` — a
   cheap first version is to read it in `capture.py` and audit-log it.
