@@ -31,6 +31,16 @@ def test_list_issues_returns_open_issues():
     assert issues[0].labels == frozenset({"grain-agent"})
 
 
+def test_list_issues_with_no_label_omits_the_labels_query_param():
+    transport = FakeTransport(
+        responses=[ApiResponse(200, {}, json.dumps([issue_json(1, labels=())]).encode())]
+    )
+    client = GitHubClient(transport, token="t")
+    issues = client.list_issues("o", "r")
+    assert [i.number for i in issues] == [1]
+    assert transport.calls[0]["path"] == "/repos/o/r/issues?state=open&per_page=100"
+
+
 def test_list_issues_filters_out_pull_requests():
     transport = FakeTransport(
         responses=[ApiResponse(

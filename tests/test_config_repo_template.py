@@ -170,6 +170,6 @@ def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
     them. A renamed default here would otherwise strand the queue."""
     deploy = (WORKFLOWS / "deploy.yml").read_text()
     config = AutomationConfig(task_owner="an-org", task_repo="a-repo")
-    for label in (config.trigger_label, config.in_progress_label,
+    for label in (config.triage_label, config.in_progress_label,
                   config.awaiting_reply_label):
         assert f"label {label} " in deploy, f"deploy.yml never creates {label!r}"
