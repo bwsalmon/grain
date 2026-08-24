@@ -270,9 +270,7 @@ class RealGitHubMock:
     (`list_issues` via the `/issues` listing, `get_issue`, `list_comments`,
     `default_branch`,
     `add_label`, `remove_label`, `branch_exists`, `create_pull_request`),
-    seeded with one fake issue -- no label needed for it to be a dispatch
-    candidate, since intake is opt-out (`AutomationConfig.triage_label`),
-    not opt-in. Wired in as a
+    seeded with one fake issue carrying the trigger label. Wired in as a
     `Transport`, so `GitHubClient`'s own logic runs unmodified.
 
     `branch_exists` is the one endpoint that would be dishonest as a canned
@@ -670,19 +668,19 @@ def test_live_issue_to_pr_pipeline(
     # separated where the test needs to inspect state between them. Calling
     # `run_once()` a second time here would be equally "real" but would
     # also immediately re-dispatch: the sweep phase frees the sandbox and
-    # (on a failure/no-push outcome) takes the in-progress label straight
-    # back off with nothing blocking left behind, and that same call's own
-    # dispatch phase would then pick the freed issue right back up before
-    # this test ever gets to look at the freed, requeued state — which is
-    # itself correct production behaviour, just not what these particular
-    # assertions want to isolate.
+    # (on a failure/no-push outcome) puts the trigger label straight back
+    # on, and that same call's own dispatch phase would then pick the
+    # freshly-relabelled issue right back up before this test ever gets to
+    # look at the freed, requeued state — which is itself correct
+    # production behaviour, just not what these particular assertions want
+    # to isolate.
 
     # --- 1. happy path: dispatch -> real clone -> real commit and push ----
     _install_fake_claude(live_ssh_runner, _FAKE_CLAUDE_SUCCESS)
     github.issues[101] = FakeIssue(
         title="a distinctive live-test issue title",
         body="a distinctive live-test issue body",
-        labels=set(),
+        labels={orchestrator.config.trigger_label},
     )
 
     orchestrator.run_once(datetime.now(timezone.utc))  # sweep (no-op) + dispatch
@@ -690,7 +688,7 @@ def test_live_issue_to_pr_pipeline(
     assert sandbox in orchestrator.state.assignments, "dispatch should have claimed the sandbox"
     assert orchestrator.state.assignments[sandbox].issue == 101
     assert github.issues[101].labels == {orchestrator.config.in_progress_label}, (
-        "dispatch should have applied the in-progress label"
+        "dispatch should have moved the trigger label to in-progress"
     )
 
     state = _wait_for_unit(live_ssh_runner, sandbox, timeout=45)
@@ -701,7 +699,7 @@ def test_live_issue_to_pr_pipeline(
 
     assert sandbox not in orchestrator.state.assignments, "sandbox should be freed"
     assert github.issues[101].labels == set(), (
-        "success should remove in-progress with nothing added back"
+        "success should remove in-progress with no trigger re-add"
     )
     assert len(github.pull_requests) == 1
     pr = github.pull_requests[0]
@@ -729,7 +727,7 @@ def test_live_issue_to_pr_pipeline(
     _install_fake_claude(live_ssh_runner, _FAKE_CLAUDE_FAIL_NONZERO)
     github.issues[102] = FakeIssue(
         title="a second live-test issue", body="body",
-        labels=set(),
+        labels={orchestrator.config.trigger_label},
     )
 
     orchestrator.run_once(datetime.now(timezone.utc))
@@ -740,24 +738,24 @@ def test_live_issue_to_pr_pipeline(
     orchestrator._sweep(datetime.now(timezone.utc))  # sweep: requeue
 
     assert sandbox not in orchestrator.state.assignments
-    assert github.issues[102].labels == set(), (
-        "a failed run should just lose the in-progress label, not gain a new one"
+    assert github.issues[102].labels == {orchestrator.config.trigger_label}, (
+        "a failed run should go back to the trigger label, not stay in-progress"
     )
     assert len(github.pull_requests) == 1, "no new PR should have been opened"
     assert not _branch_exists_on_disk(live_target.bare_repo, branch_name(102))
     reasons_102 = [e["outcome"] for e in live_target.audit.entries if e["issue"] == 102]
     assert "failed" in reasons_102
 
-    # Issue 102 is genuinely still queued at this point — it carries no
-    # blocking label, exactly like a real requeued issue, and the *next*
-    # dispatch pass really would pick it back up first (lower number).
-    # That's correct production behaviour, already covered by the
+    # Issue 102 is genuinely still queued at this point — it went back on
+    # the trigger label exactly like a real requeued issue would, and the
+    # *next* dispatch pass really would pick it back up first (lower
+    # number). That's correct production behaviour, already covered by the
     # `run_once()` vs `_sweep()` split explained above; here it would just
     # steal the one sandbox this suite has before scenario 3 gets to run.
-    # Standing in for an operator not yet ready for another attempt, apply
-    # `triage_label` directly on the mock rather than through the
+    # Standing in for an operator moving on (or simply not relabelling it
+    # again), clear its label directly on the mock rather than through the
     # orchestrator, so scenario 3 below is isolated.
-    github.issues[102].labels.add(orchestrator.config.triage_label)
+    github.issues[102].labels.clear()
 
     # --- 3. edge case: the fake agent exits zero but never pushes ->
     #        "succeeded" is not trusted; requeued with the branch-missing
@@ -766,7 +764,7 @@ def test_live_issue_to_pr_pipeline(
     _install_fake_claude(live_ssh_runner, _FAKE_CLAUDE_SUCCEED_NO_PUSH)
     github.issues[103] = FakeIssue(
         title="a third live-test issue", body="body",
-        labels=set(),
+        labels={orchestrator.config.trigger_label},
     )
 
     orchestrator.run_once(datetime.now(timezone.utc))
@@ -777,7 +775,7 @@ def test_live_issue_to_pr_pipeline(
     orchestrator._sweep(datetime.now(timezone.utc))  # sweep: branch missing -> requeue
 
     assert sandbox not in orchestrator.state.assignments
-    assert github.issues[103].labels == set()
+    assert github.issues[103].labels == {orchestrator.config.trigger_label}
     assert len(github.pull_requests) == 1, "still no new PR — the unit exiting zero is not proof"
     assert not _branch_exists_on_disk(live_target.bare_repo, branch_name(103))
     reasons_103 = [e["outcome"] for e in live_target.audit.entries if e["issue"] == 103]

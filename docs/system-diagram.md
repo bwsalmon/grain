@@ -310,7 +310,7 @@ protection, not by parsing pack files — a control our bugs cannot bypass.
 | controller → sandbox | SSH as `debian` with the controller key | no host-key pinning by design (a sandbox gets a new key each recreate); identity comes from the fixed address on a firewalled bridge |
 | controller → GitHub | REST, and the proxy's forwarded git | credential ladder + GitHub-side scoping |
 | controller → GCP | impersonation | narrow second service account; every mint audit-logged |
-| issue text → agent prompt | the automation loop | **the absence of `triage_label` is the gate** (opt-out, not opt-in — docs/design.md's "Issue intake"); nothing the agent then says is trusted as input to a GitHub write |
+| issue text → agent prompt | the automation loop | **a human applying the label is the gate**; nothing the agent then says is trusted as input to a GitHub write |
 | issue text → which repo the work lands in | the automation loop + `repo-allowlist.json` | a task's `/repo` directive only selects from the operator's allowlist — the same file the git proxy enforces; anything else is parked with a comment, never dispatched |
 
 That last row is the one worth restating: the branch a PR is opened from is
@@ -329,12 +329,12 @@ sequenceDiagram
     participant S as sandbox-i
     participant P as Git proxy (controller)
 
-    H->>GH: file issue (no `triage-needed` label)
+    H->>GH: label issue `grain-agent`
     Note over A: systemd timer, every 1 min
     A->>A: sweep first — finished / failed / stranded units
-    A->>GH: list open task-repo issues, drop any with a blocking label
+    A->>GH: list task-repo issues with the trigger label
     A->>A: rate limit (runs_per_hour), free-sandbox check
-    A->>GH: apply label `grain-agent-in-progress`
+    A->>GH: move label → `grain-agent-in-progress`
     A->>S: ssh · inject proxy token · clone/reset workspace
     A->>S: systemd-run grain-task-sandbox-i (prompt on stdin)
     S->>P: git clone/fetch (bearer token)
@@ -346,13 +346,13 @@ sequenceDiagram
     A->>S: next pass: read unit state, cat transcript
     A->>A: capture trajectory → /data/state/automation/sessions/
     A->>GH: branch_exists(grain/issue-N)?
-    A->>GH: create PR, remove `grain-agent-in-progress` label
+    A->>GH: create PR, move label off
     A->>S: kind delete clusters --all · docker system prune · health check
     Note over A: slot freed only after capture + cleanup
 ```
 
 Failure paths land in the same place: a failed or stranded run gets the
-in-progress label removed and is requeued, the trajectory captured either way, and one
+issue re-labelled and requeued, the trajectory captured either way, and one
 JSON line per decision appended to `/data/state/automation/audit.log` with
 an outcome of `dispatched`, `succeeded`, `failed`, `stranded`, or
 `skipped: <reason>`.

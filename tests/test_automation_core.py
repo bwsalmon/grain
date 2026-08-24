@@ -23,7 +23,7 @@ from grain.run import FakeRunner
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def issue_json(number: int, body: str = "do it", labels: tuple[str, ...] = ()) -> dict:
+def issue_json(number: int, body: str = "do it") -> dict:
     return {
         # "id" isn't read by list_issues itself, but the same fixture also
         # serves as FakeTransport's shared default response for whichever
@@ -33,10 +33,7 @@ def issue_json(number: int, body: str = "do it", labels: tuple[str, ...] = ()) -
         # never queue a dedicated comments response.
         "id": number, "number": number, "title": f"issue {number}", "body": body,
         "html_url": f"https://github.com/o/r/issues/{number}",
-        # No label by default -- intake is opt-out now
-        # (AutomationConfig.triage_label), so a fresh issue is already a
-        # dispatch candidate. Tests that need a blocking label pass one.
-        "labels": [{"name": l} for l in labels],
+        "labels": [{"name": "grain-agent"}],
     }
 
 
@@ -167,20 +164,6 @@ def test_dispatches_the_lowest_numbered_candidate_first():
     assert orchestrator.state.assignments["sandbox-0"].issue == 1
 
 
-def test_dispatch_lists_every_open_issue_with_no_label_filter():
-    """Intake is opt-out (AutomationConfig.triage_label), so `_dispatch`
-    has no positive label left to filter the GitHub-side query on -- it
-    lists every open issue and narrows to dispatchable ones itself.
-    """
-    orchestrator, transport = make_orchestrator(issues=[issue_json(1)])
-    orchestrator.run_once(NOW)
-    listing = next(
-        c for c in transport.calls
-        if c["method"] == "GET" and c["path"].startswith("/repos/o/r/issues?")
-    )
-    assert "labels=" not in listing["path"]
-
-
 def test_dispatch_uses_only_one_sandbox_for_one_issue():
     orchestrator, _ = make_orchestrator(issues=[issue_json(1)])
     orchestrator.run_once(NOW)
@@ -252,42 +235,6 @@ def test_an_issue_already_tracked_as_in_progress_is_not_redispatched():
     assert not runner.ran("systemd-run")
 
 
-def test_an_issue_with_no_label_is_dispatched_by_default():
-    """Intake is opt-out now (AutomationConfig.triage_label), not opt-in --
-    a fresh issue carrying no label at all is still a dispatch candidate.
-    """
-    orchestrator, _ = make_orchestrator(issues=[issue_json(1, labels=())])
-    orchestrator.run_once(NOW)
-    assert orchestrator.state.assignments["sandbox-0"].issue == 1
-
-
-def test_an_issue_carrying_the_triage_label_is_not_dispatched():
-    orchestrator, _ = make_orchestrator(issues=[issue_json(1, labels=("triage-needed",))])
-    orchestrator.run_once(NOW)
-    assert orchestrator.state.assignments == {}
-
-
-def test_an_issue_carrying_the_awaiting_reply_label_is_not_dispatched():
-    """Defense in depth alongside `state.in_progress_issues()`: even if a
-    parked issue somehow isn't tracked in local state (state lost, or a
-    second deployment sharing the repo), the label itself still holds it
-    back from `_dispatch`'s own candidate listing.
-    """
-    orchestrator, _ = make_orchestrator(
-        issues=[issue_json(1, labels=("grain-agent-awaiting-reply",))]
-    )
-    orchestrator.run_once(NOW)
-    assert orchestrator.state.assignments == {}
-
-
-def test_an_issue_carrying_the_in_progress_label_but_untracked_locally_is_not_redispatched():
-    orchestrator, _ = make_orchestrator(
-        issues=[issue_json(1, labels=("grain-agent-in-progress",))]
-    )
-    orchestrator.run_once(NOW)
-    assert orchestrator.state.assignments == {}
-
-
 def test_rate_limit_stops_further_dispatch_this_run():
     orchestrator, _ = make_orchestrator(issues=[issue_json(1), issue_json(2)])
     orchestrator.config = AutomationConfig(task_owner="o", task_repo="r",
@@ -326,22 +273,15 @@ def test_a_failed_run_is_requeued_via_labels_not_state():
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert "failed" in outcomes
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    # Intake is opt-out now (AutomationConfig.triage_label): requeueing just
-    # takes the in-progress label back off, nothing gets added back.
-    assert len(mutating) == 1
+    assert len(mutating) == 2  # remove in-progress, add trigger back
 
 
-def test_a_requeue_tolerates_a_404_for_a_stale_assignment():
+def test_a_requeue_tolerates_a_404_from_add_label_for_a_stale_assignment():
     """A leftover `AutomationState` assignment can point at an issue number
     that doesn't exist in the *currently configured* repo -- e.g. after
     `controller configure` points a live deployment at a different repo
     while an old assignment is still on file (docs/next-session.md, found
     live). That must not crash the whole sweep before `_dispatch` ever runs.
-
-    `_requeue`'s only GitHub call is `remove_label`, which already treats a
-    404 (label -- or even the whole issue -- gone) as satisfied rather than
-    an error (`github.py`), so this exercises that tolerance rather than any
-    404 handling of `_requeue`'s own.
     """
     state = AutomationState()
     state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
@@ -349,20 +289,22 @@ def test_a_requeue_tolerates_a_404_for_a_stale_assignment():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=failed\nResult=exit-code\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.append(
-        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # remove_label: no such issue here
-    )
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # remove_label: fine either way
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # add_label: no such issue here
+    ])
 
     orchestrator.run_once(NOW)  # must not raise
 
     assert "sandbox-0" not in orchestrator.state.assignments
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
-    assert "failed" in outcomes
+    assert any("not found" in o and "stale assignment" in o for o in outcomes)
 
 
 def test_a_requeue_still_raises_a_non_404_github_error():
-    """`remove_label` only swallows a 404 -- a genuine API failure (5xx,
-    auth) must still surface, not be silently swallowed alongside it.
+    """Only a 404 is treated as "stale assignment, move on" -- a genuine
+    API failure (5xx, auth) must still surface, not be silently swallowed
+    alongside it.
     """
     state = AutomationState()
     state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
@@ -370,7 +312,10 @@ def test_a_requeue_still_raises_a_non_404_github_error():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=failed\nResult=exit-code\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),
+        ApiResponse(500, {}, b"internal error"),
+    ])
 
     with pytest.raises(GitHubError):
         orchestrator.run_once(NOW)
@@ -408,10 +353,10 @@ def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypa
     # short-circuits before either.
     assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
-    # Only the awaiting-reply label goes on -- nothing else is added.
-    # (docs/roadmap.md item 13's _promote_answered_questions is what takes
-    # awaiting-reply back off later, once a trusted reply shows up, making
-    # the issue a dispatch candidate again.)
+    # The trigger label is never re-added directly -- only the
+    # awaiting-reply label goes on. (docs/roadmap.md item 13's
+    # _promote_answered_questions is what re-adds the trigger label later,
+    # once a trusted reply shows up.)
     label_posts = [
         c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/labels")
     ]
@@ -530,9 +475,8 @@ def test_a_trusted_reply_promotes_the_question_and_redispatches_in_the_same_run(
 
 def test_an_untrusted_reply_does_not_promote_the_question():
     """A random public commenter (author_association "NONE") must not be
-    able to redispatch the agent just by replying -- that would let
-    untrusted content pick the moment an agent runs on it, the same thing
-    `awaiting_reply_label` otherwise holds back.
+    able to redispatch the agent just by replying -- that would reopen the
+    exact prompt-injection gate the trigger label exists to close.
     """
     state = AutomationState()
     state.record_pending_question(5, question_comment_id=100)
@@ -625,8 +569,8 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     close_call = next(c for c in transport.calls if c["method"] == "PATCH")
     assert close_call["path"] == "/repos/o/r/issues/5"
     assert json.loads(close_call["body"]) == {"state": "closed"}
-    # The in-progress label comes off; nothing is added back for a
-    # genuinely finished run.
+    # The in-progress label comes off; the trigger label is never re-added
+    # for a genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     label_mutations = [c for c in mutating if "labels" in c["path"]]
     assert len(label_mutations) == 1
@@ -652,7 +596,7 @@ def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
     # No PR call was ever made — no POST to the pulls endpoint.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 1  # remove in-progress, nothing added back
+    assert len(mutating) == 2  # remove in-progress, add trigger back
 
 
 # --- workspace/token wiring into dispatch() (docs/roadmap.md item 2) ------
@@ -855,7 +799,7 @@ def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
     assert any("does not exist" in o for o in outcomes)
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 1  # remove in-progress, nothing added back — same
+    assert len(mutating) == 2  # remove in-progress, add trigger back — same
                                # requeue path a failed/stranded run takes
 
 
@@ -1006,8 +950,8 @@ def test_a_task_naming_a_non_allow_listed_repo_is_parked_not_dispatched():
                     and c["path"].endswith("/comments"))
     assert "somewhere/else" in json.loads(comment["body"])["body"]
     assert "allowlist" in json.loads(comment["body"])["body"]
-    # Parked exactly like an unanswered question: awaiting-reply on, and
-    # the comment id recorded as the reply baseline.
+    # Parked exactly like an unanswered question: trigger label off,
+    # awaiting-reply on, and the comment id recorded as the reply baseline.
     assert orchestrator.state.pending_questions["4"].question_comment_id == 555
     added = [json.loads(c["body"])["labels"] for c in transport.calls
              if c["method"] == "POST" and c["path"].endswith("/labels")]

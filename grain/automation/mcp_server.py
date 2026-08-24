@@ -138,10 +138,11 @@ TOOLS = [
             "correctly proceed without their input. This ends your turn: the "
             "question is posted as a comment on the GitHub issue or pull "
             "request, the task is taken out of the queue, and a human must "
-            "reply before another attempt runs. Do not call this for "
-            "routine progress updates or when you can reasonably proceed on "
-            "your own judgment -- only when you are genuinely blocked. "
-            "After calling this, do not take any further actions."
+            "reply and re-apply the trigger label before another attempt "
+            "runs. Do not call this for routine progress updates or when you "
+            "can reasonably proceed on your own judgment -- only when you are "
+            "genuinely blocked. After calling this, do not take any further "
+            "actions."
         ),
         "inputSchema": {
             "type": "object",
