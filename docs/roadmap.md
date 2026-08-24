@@ -1051,3 +1051,97 @@ without reading the body. The dedicated-bot-account recommendation in
 docs/design.md is still the stronger signal where it's available (GitHub's
 own avatar/username in every view); this is what's true regardless of
 which credential a given deployment actually uses.
+
+## 15. One task repo, many target repos
+
+- [x] Done
+
+Everything before this item assumed one repo per deployment: the repo whose
+issues were polled was also the repo that got cloned, pushed to, and opened
+a PR against. That is the wrong shape for a set of agents working across
+several services — it means one controller, one `/data`, one credential
+ladder, and one pool per repo.
+
+**The split.** `AutomationConfig`'s `owner`/`repo` become
+`task_owner`/`task_repo`: the *task repo*, a queue of issues for the agent
+set. It is the only repo polled, and the only repo labelled or commented
+on. Each task names its own *target* repo in its text, with a slash
+directive parsed by the new `grain/automation/directives.py`:
+
+    /repo acme/widget-service
+    /pr 42            optional: continue that PR rather than a fresh branch
+    /base develop     optional: PR base, default the target repo's own
+
+Directives are read from the issue body *and* from comments by trusted
+authors (`_TRUSTED_REPLY_ASSOCIATIONS` — the same "could have applied the
+label" tier the trigger gate relies on), later texts overriding earlier, so
+repairing a task is a reply rather than an edit plus a reply. They are
+stripped from the prompt: they address the orchestrator, and the agent has
+no GitHub API access to act on one anyway.
+
+**Why a directive and not a label.** A `repo:owner/name` label has to exist
+in the task repo before it can be applied, is awkward to create once per
+target, and can carry neither a PR number nor a base branch. One mechanism
+covers all three.
+
+**Fail closed on the target repo.** `Orchestrator` now takes an
+`Allowlist` — the same `/data/config/repo-allowlist.json` the git proxy
+already enforces, not a second list that could disagree with it. A task
+naming an off-list repo never dispatches. Without this the dispatch still
+fails (the proxy denies the clone), but as a `CommandError` from inside a
+sandbox rather than a sentence a human can act on.
+
+**Parking, not failing.** An unusable directive (missing with no
+`default_target_repo` configured, malformed, off-list, or a repo GitHub
+404s) routes into the state docs/roadmap.md item 13 already built: comment,
+swap the trigger label for `awaiting_reply_label`, record the comment id as
+the reply baseline. A maintainer's reply — which may itself carry the
+corrected `/repo` line — puts the trigger label back on the next cycle.
+Leaving the trigger label on instead would redispatch the identical failure
+every two minutes with nothing new to act on, which is the same argument
+`_finish_question` already makes for a question.
+
+**Item 9's PR trigger changed shape.** Polling a second listing for
+labelled *pull requests* stopped making sense once PRs live in target
+repos, where no label of this deployment's ever gets applied — so
+`list_pull_requests` is gone and a PR-continuation task is a task issue
+carrying `/pr N`. Everything downstream is unchanged: same pool, same rate
+limit, `TriggerKind.PR`, the PR's own branch in the workspace, review
+comments in the prompt, and no new PR opened on success. What differs is
+that the trigger's number is now the *task issue's*, so labels, questions
+and requeues all still land in the one repo this deployment writes to.
+
+**What had to carry the target.** `Assignment` (and `sweeper.Outcome`) gain
+`target_owner`/`target_repo`/`base`, recorded at dispatch rather than
+re-parsed at sweep time: an issue body is editable, and an edit landing
+mid-run must not be able to redirect where the finished work's PR is
+opened — the same "decide once, verify don't trust" discipline
+`branch_name()` already applies to the branch. Both are `None` for an
+assignment written before this item, which `core.py` reads as the task
+repo, exactly what it meant then. `SessionRecord` gains `target` so the
+session browser can answer "which repo did this touch" from the list view.
+
+**Credentials became per-repo.** A cycle now talks to the task repo *and*
+to each target repo, which may need different credentials.
+`GitHubClient`'s fixed token becomes a `TokenSource` resolved per call —
+every method already took `owner, repo` as its first two arguments — and
+`CredentialSet` (narrowest pattern first: `owner/repo`, `owner/*`, `*`)
+satisfies it directly. That ladder was built for exactly this and had never
+been wired to more than one repo. A bare `str | None` still works.
+
+**The PR base comes from the target repo.** `AutomationConfig.base_branch`
+was a fair guess for one repo and an unmaintainable per-repo table for
+many, so it is gone: `GitHubClient.default_branch` reads the target repo's
+own `default_branch`, `/base` overrides it, and the answer is pinned onto
+the assignment at dispatch. The PR body's closing reference is fully
+qualified (`Closes owner/tasks#N`) — a bare `#N` would name an issue in the
+target repo, which is a different issue entirely.
+
+**Migration.** `AutomationConfig.load` accepts the legacy `owner`/`repo`
+keys and ignores a legacy `base_branch`, so an already-deployed `/data`
+needs no edit. `grain controller configure`/`host bootstrap` take
+`--task-repo` (with `--repo` still accepted as its former name) and a
+repeatable `--target-repo`; with no `--target-repo` at all, the task repo
+becomes the sole allow-listed target *and* `default_target_repo`, which is
+precisely the single-repo deployment every deployment was before this item
+— it keeps working with no directive written anywhere.

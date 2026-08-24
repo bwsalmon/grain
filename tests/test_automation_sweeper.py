@@ -12,7 +12,7 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def config(**overrides) -> AutomationConfig:
-    return AutomationConfig(owner="o", repo="r", **overrides)
+    return AutomationConfig(task_owner="o", task_repo="r", **overrides)
 
 
 def state_with(sandbox: str, issue: int, started_at: datetime) -> AutomationState:

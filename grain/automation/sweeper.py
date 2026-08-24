@@ -88,6 +88,15 @@ class Outcome:
     # instant `_release` below calls `state.release`.
     kind: TriggerKind = TriggerKind.ISSUE
     branch: str | None = None
+    # Which repo the work was actually happening in, and what base a PR
+    # from it targets — carried through from the Assignment for the same
+    # reason `kind`/`branch` are: `core.py`'s finish handling needs them
+    # and the assignment is gone the instant `_release` frees the slot.
+    # `None` on an assignment written before the task/target split, which
+    # `core.py` reads as the task repo.
+    target_owner: str | None = None
+    target_repo: str | None = None
+    base: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,17 @@ class SweepResult:
     failed: list[Outcome] = field(default_factory=list)
     stranded: list[Outcome] = field(default_factory=list)
     health_warnings: list[HealthWarning] = field(default_factory=list)
+
+
+def _target_label(assignment: Assignment) -> str | None:
+    """`"owner/repo"` for the target repo this session worked in, or None
+    for a pre-split assignment that never recorded one — what the session
+    browser shows, so "which repo did this task touch" is answerable
+    without opening the transcript.
+    """
+    if assignment.target_owner and assignment.target_repo:
+        return f"{assignment.target_owner}/{assignment.target_repo}"
+    return None
 
 
 def _release(state: AutomationState, runner: Runner, sandbox: str, *,
@@ -123,7 +143,7 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
     history.record(
         issue=assignment.issue, kind=assignment.kind, sandbox=sandbox, unit=unit,
         started_at=assignment.started_at, finished_at=now, outcome=outcome_label,
-        transcript_text=transcript_text,
+        transcript_text=transcript_text, target=_target_label(assignment),
     )
     cleanup(runner)
     report = check_health(runner)
@@ -152,7 +172,10 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
         unit = unit_name(sandbox)
         status = unit_status(controller_runner, unit)
         outcome = Outcome(sandbox=sandbox, issue=assignment.issue,
-                           kind=assignment.kind, branch=assignment.branch)
+                           kind=assignment.kind, branch=assignment.branch,
+                           target_owner=assignment.target_owner,
+                           target_repo=assignment.target_repo,
+                           base=assignment.base)
 
         if status is UnitState.DONE_SUCCESS:
             reap(controller_runner, unit)

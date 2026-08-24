@@ -4,7 +4,10 @@ see docs/design.md's split surface ("Orchestrator: API operations...
 sandboxes: git transport only"). PR creation is what docs/roadmap.md item 2
 added; reading a PR's own data and its review comments (never writing a
 comment) is what item 9 adds, to support dispatching to an existing PR
-rather than only a labelled issue.
+rather than only a labelled issue. That PR path is now reached through a
+`/pr` directive on a task issue (`directives.py`) rather than by polling a
+second repo for labelled PRs, so `get_pull_request` stayed and the
+label-listing counterpart it once had is gone.
 
 Comment *creation* (`create_comment`) arrives with docs/roadmap.md item 12,
 for exactly one purpose: relaying a dispatched agent's `ask_question` MCP
@@ -16,6 +19,16 @@ item 12, `mcp_server.py`'s `ask_question` tool). `list_comments` (the
 top-level conversation thread, distinct from `list_review_comments`'s
 inline diff comments) exists for the other half of that same item: showing
 a redispatched issue/PR the human's reply to a prior question.
+
+**One client, many repos.** Every method already took `owner, repo` as
+its first two arguments, but the token was fixed at construction — fine
+while a deployment had exactly one repo, wrong now that the task repo (API:
+issues, labels, comments) and each target repo (API: branches, PRs) are
+different repos that may well need different credentials. `GitHubClient`
+now resolves its token *per call* through a `TokenSource`, which is what
+`grain/proxy/credentials.py`'s `CredentialSet` — narrowest-pattern-first,
+`owner/repo` then `owner/*` then `*` — was always shaped for and never
+wired to. A plain `str | None` still works and simply applies everywhere.
 
 Same shape as `grain/proxy/forward.py`: a `Transport` protocol wrapping
 `http.client` so `GitHubClient`'s logic is testable without a real call to
@@ -94,6 +107,29 @@ class FakeTransport:
             {"method": method, "path": path, "headers": dict(headers), "body": body}
         )
         return self.responses.pop(0) if self.responses else self.default
+
+
+class TokenSource(Protocol):
+    """Resolves the API token to use for one repo. `CredentialSet`
+    (`grain/proxy/credentials.py`) satisfies this structurally — it is the
+    real implementation in production; `StaticToken` covers "one token for
+    everything," which is what a test and a single-credential deployment
+    both want.
+    """
+
+    def token_for(self, owner: str, repo: str) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class StaticToken:
+    """One token regardless of repo — what `GitHubClient` wraps a bare
+    `str | None` in, so the per-repo path below is the only path.
+    """
+
+    token: str | None
+
+    def token_for(self, owner: str, repo: str) -> str | None:
+        return self.token
 
 
 class GitHubError(RuntimeError):
@@ -197,18 +233,25 @@ def _next_page_path(link_header: str | None) -> str | None:
 
 
 class GitHubClient:
-    def __init__(self, transport: Transport, token: str | None) -> None:
+    def __init__(self, transport: Transport, token: str | None | TokenSource) -> None:
         self.transport = transport
-        self.token = token
+        # A bare token is the degenerate `TokenSource`, wrapped here rather
+        # than special-cased at every call site — so `_headers` has exactly
+        # one way to find a token, and a caller that only has one keeps
+        # passing it unchanged.
+        self.tokens: TokenSource = (
+            token if hasattr(token, "token_for") else StaticToken(token)
+        )
 
-    def _headers(self, *, json_body: bool = False) -> dict[str, str]:
+    def _headers(self, owner: str, repo: str, *, json_body: bool = False) -> dict[str, str]:
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "grain-automation",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if self.token:
-            headers["Authorization"] = f"token {self.token}"
+        token = self.tokens.token_for(owner, repo)
+        if token:
+            headers["Authorization"] = f"token {token}"
         if json_body:
             headers["Content-Type"] = "application/json"
         return headers
@@ -225,7 +268,7 @@ class GitHubClient:
         )
         while path:
             resp = self.transport.request(
-                method="GET", path=path, headers=self._headers(), body=None
+                method="GET", path=path, headers=self._headers(owner, repo), body=None
             )
             if resp.status != 200:
                 raise GitHubError(resp.status, resp.body)
@@ -246,7 +289,7 @@ class GitHubClient:
         resp = self.transport.request(
             method="POST",
             path=f"/repos/{owner}/{repo}/issues/{number}/labels",
-            headers=self._headers(json_body=True),
+            headers=self._headers(owner, repo, json_body=True),
             body=json.dumps({"labels": [label]}).encode(),
         )
         if resp.status not in (200, 201):
@@ -256,7 +299,7 @@ class GitHubClient:
         resp = self.transport.request(
             method="DELETE",
             path=f"/repos/{owner}/{repo}/issues/{number}/labels/{quote(label)}",
-            headers=self._headers(), body=None,
+            headers=self._headers(owner, repo), body=None,
         )
         # 404 means the label is already off the issue — a fine outcome,
         # not an error, since the caller's intent ("this label should not
@@ -280,7 +323,7 @@ class GitHubClient:
             # name itself percent-encoded (`%2F`), not left as a path
             # separator — quote(..., safe="") is what does that.
             path=f"/repos/{owner}/{repo}/branches/{quote(branch, safe='')}",
-            headers=self._headers(), body=None,
+            headers=self._headers(owner, repo), body=None,
         )
         if resp.status == 200:
             return True
@@ -293,7 +336,7 @@ class GitHubClient:
         resp = self.transport.request(
             method="POST",
             path=f"/repos/{owner}/{repo}/pulls",
-            headers=self._headers(json_body=True),
+            headers=self._headers(owner, repo, json_body=True),
             body=json.dumps(
                 {"title": title, "head": head, "base": base, "body": body}
             ).encode(),
@@ -306,7 +349,7 @@ class GitHubClient:
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
         resp = self.transport.request(
             method="GET", path=f"/repos/{owner}/{repo}/pulls/{number}",
-            headers=self._headers(), body=None,
+            headers=self._headers(owner, repo), body=None,
         )
         if resp.status != 200:
             raise GitHubError(resp.status, resp.body)
@@ -317,38 +360,26 @@ class GitHubClient:
             head_ref=data["head"]["ref"], base_ref=data["base"]["ref"],
         )
 
-    def list_pull_requests(self, owner: str, repo: str, label: str) -> list[PullRequestDetail]:
-        """Open PRs carrying `label` — the PR-trigger equivalent of
-        `list_issues`, for docs/roadmap.md item 9.
+    def default_branch(self, owner: str, repo: str) -> str:
+        """The target repo's own default branch — the base a PR opened
+        there should target when a task's `/base` directive doesn't say
+        otherwise.
 
-        The pulls-list endpoint (`GET .../pulls`) takes no `labels` filter of
-        its own — `state`, `head`, `base`, `sort`, `direction` only, per
-        GitHub's own reference. Labels are exposed through the *issues* API,
-        and a PR is a special kind of issue in GitHub's data model (same
-        number sequence, same labels endpoint), so this walks the identical
-        `/issues?labels=...` listing `list_issues` already uses, keeps only
-        the items carrying a `pull_request` key (the opposite filter from
-        `list_issues`), and hydrates each surviving number into a full
-        `PullRequestDetail` with one `get_pull_request` call — the issues
-        listing has title/body/html_url but never `head`/`base`, so a real PR
-        read is still needed to learn the branch to dispatch against.
+        Read from GitHub rather than configured: with one repo per
+        deployment a single `base_branch` setting was a fair guess, but a
+        task repo dispatching into many target repos would need an operator
+        to keep a per-repo table of "main" vs "master" vs "trunk" correct,
+        and GitHub already knows. `core.py` reads this once at dispatch and
+        records it on the assignment, so the base can't change out from
+        under a run between dispatch and PR creation.
         """
-        numbers: list[int] = []
-        path = (
-            f"/repos/{owner}/{repo}/issues"
-            f"?labels={quote(label)}&state=open&per_page=100"
+        resp = self.transport.request(
+            method="GET", path=f"/repos/{owner}/{repo}",
+            headers=self._headers(owner, repo), body=None,
         )
-        while path:
-            resp = self.transport.request(
-                method="GET", path=path, headers=self._headers(), body=None
-            )
-            if resp.status != 200:
-                raise GitHubError(resp.status, resp.body)
-            for item in json.loads(resp.body):
-                if "pull_request" in item:
-                    numbers.append(item["number"])
-            path = _next_page_path(resp.headers.get("Link"))
-        return [self.get_pull_request(owner, repo, n) for n in numbers]
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+        return json.loads(resp.body)["default_branch"]
 
     def list_review_comments(self, owner: str, repo: str, number: int) -> list[ReviewComment]:
         """Inline review comments on a PR — the context a dispatch needs to
@@ -361,7 +392,7 @@ class GitHubClient:
         path = f"/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100"
         while path:
             resp = self.transport.request(
-                method="GET", path=path, headers=self._headers(), body=None
+                method="GET", path=path, headers=self._headers(owner, repo), body=None
             )
             if resp.status != 200:
                 raise GitHubError(resp.status, resp.body)
@@ -384,7 +415,7 @@ class GitHubClient:
         path = f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=100"
         while path:
             resp = self.transport.request(
-                method="GET", path=path, headers=self._headers(), body=None
+                method="GET", path=path, headers=self._headers(owner, repo), body=None
             )
             if resp.status != 200:
                 raise GitHubError(resp.status, resp.body)
@@ -411,7 +442,7 @@ class GitHubClient:
         """
         resp = self.transport.request(
             method="POST", path=f"/repos/{owner}/{repo}/issues/{number}/comments",
-            headers=self._headers(json_body=True),
+            headers=self._headers(owner, repo, json_body=True),
             body=json.dumps({"body": body}).encode(),
         )
         if resp.status != 201:
@@ -448,8 +479,8 @@ class DryRunGitHubClient:
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
         return self.inner.get_pull_request(owner, repo, number)
 
-    def list_pull_requests(self, owner: str, repo: str, label: str) -> list[PullRequestDetail]:
-        return self.inner.list_pull_requests(owner, repo, label)
+    def default_branch(self, owner: str, repo: str) -> str:
+        return self.inner.default_branch(owner, repo)
 
     def list_review_comments(self, owner: str, repo: str, number: int) -> list[ReviewComment]:
         return self.inner.list_review_comments(owner, repo, number)

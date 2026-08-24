@@ -29,6 +29,7 @@ from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
     configure_claude_token, configure_github_credential, configure_repo,
+    credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
@@ -44,6 +45,7 @@ from .metadata.audit import FileAuditLog as MetadataFileAuditLog
 from .metadata.audit import sync as metadata_sync
 from .metadata.config import instance_paths
 from .metadata.launcher import MetadataLauncher, build_launcher
+from .proxy.allowlist import Allowlist
 from .proxy.credentials import CredentialSet
 from .proxy.tokens import SandboxTokenStore
 from .run import DryRunRunner, RealRunner, Runner
@@ -95,11 +97,14 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
                         args: argparse.Namespace) -> tuple[Orchestrator, Path]:
     data_dir = Path(args.data_dir)
     config = AutomationConfig.load(data_dir / "config" / "automation.json")
+    # The whole `CredentialSet`, not one repo's token resolved up front:
+    # a cycle talks to the task repo *and* to whichever target repos its
+    # tasks name, and the narrowest-pattern ladder is what picks the right
+    # credential for each (`CredentialSet.token_for`).
     credentials = CredentialSet(data_dir / "secrets" / "github")
-    credential = credentials.select(config.owner, config.repo)
     github: GitHubClient | DryRunGitHubClient = GitHubClient(
         RealTransport(config.github_host, use_tls=config.github_use_tls),
-        credential.token if credential else None,
+        credentials,
     )
     if args.dry_run:
         github = DryRunGitHubClient(github)
@@ -110,7 +115,11 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
-        token_store=token_store, audit=audit, history=history,
+        token_store=token_store,
+        # The same file the git proxy enforces (`build_proxy`), read from
+        # the same place -- see `Orchestrator.allowlist`.
+        allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
+        audit=audit, history=history,
     )
     return orchestrator, state_path
 
@@ -133,8 +142,16 @@ def cmd_automation_status(args: argparse.Namespace) -> int:
         if assignment is None:
             print(f"{name:<12} free")
         else:
+            # The target repo, where the work is actually happening -- the
+            # issue number alone names a task in the task repo, which says
+            # nothing about which service is being changed. A dash for an
+            # assignment written before the task/target split.
+            target = (
+                f"{assignment.target_owner}/{assignment.target_repo}"
+                if assignment.target_owner and assignment.target_repo else "-"
+            )
             print(f"{name:<12} {assignment.kind.value} #{assignment.issue:<6} "
-                  f"since {assignment.started_at.isoformat()}")
+                  f"{target:<24} since {assignment.started_at.isoformat()}")
     return 0
 
 
@@ -326,6 +343,39 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _repo_args(args: argparse.Namespace) -> tuple[str, list[str], str | None]:
+    """`--task-repo`/`--target-repo`/`--default-target-repo`, validated into
+    the shape `configure_repo` and `BootstrapConfig` both take.
+
+    The no-`--target-repo` case is the single-repo deployment every
+    deployment was before the task/target split: the task repo becomes the
+    sole allow-listed target *and* the default for a task with no `/repo`
+    directive, so nothing about such a deployment has to change. Given
+    explicit targets, there is no default unless one is named -- guessing
+    which of several repos an ambiguous task meant is exactly what
+    `core.py`'s `_park` exists to refuse.
+    """
+    for flag, value in (("--task-repo", args.task_repo),
+                        ("--default-target-repo", args.default_target_repo),
+                        *(("--target-repo", t) for t in args.target_repos)):
+        if value is None:
+            continue
+        parts = value.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise SystemExit(f"{flag} must be 'owner/name', got {value!r}")
+    targets = list(dict.fromkeys(args.target_repos)) or [args.task_repo]
+    default_target = args.default_target_repo or (
+        args.task_repo if not args.target_repos else None
+    )
+    if default_target is not None and default_target not in targets:
+        raise SystemExit(
+            f"--default-target-repo {default_target!r} is not one of the "
+            f"--target-repo values {targets!r} -- a task falling back to it "
+            "would be parked as not allow-listed"
+        )
+    return args.task_repo, targets, default_target
+
+
 def build_ssh_runner(cluster: Cluster, base_runner: Runner, name: str,
                       args: argparse.Namespace) -> Runner:
     """The same shape as `Orchestrator._ssh_runner_for`, but standalone: a
@@ -426,10 +476,9 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     cluster = build_cluster(args)
     base_runner = _runner(args)
     ssh = build_ssh_runner(cluster, base_runner, cluster.controller_name, args)
-    owner, _, repo = args.repo.partition("/")
-    if not owner or not repo:
-        raise SystemExit(f"--repo must be 'owner/name', got {args.repo!r}")
-    configure_repo(ssh, owner, repo, github_host=args.github_host,
+    task_repo, targets, default_target = _repo_args(args)
+    configure_repo(ssh, task_repo, targets, default_target_repo=default_target,
+                    github_host=args.github_host,
                     git_forward_host=args.git_forward_host,
                     github_use_tls=not args.github_insecure_http)
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
@@ -439,7 +488,8 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             else Path(args.github_token_file).read_text()
         )
         configure_github_credential(
-            ssh, owner, repo, token, credential_name=args.credential_name,
+            ssh, credential_repos(task_repo, targets), token,
+            credential_name=args.credential_name,
         )
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
@@ -464,11 +514,10 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         Path(args.claude_token_file).read_text()
         if args.claude_token_file else None
     )
-    owner, _, repo = args.repo.partition("/")
-    if not owner or not repo:
-        raise SystemExit(f"--repo must be 'owner/name', got {args.repo!r}")
+    task_repo, targets, default_target = _repo_args(args)
     config = BootstrapConfig(
-        owner=owner, repo=repo, github_token=github_token,
+        task_repo=task_repo, targets=tuple(targets),
+        default_target_repo=default_target, github_token=github_token,
         credential_name=args.credential_name, claude_token=claude_token,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
@@ -700,7 +749,20 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap",
         help="one command: network, controller, deploy, configure, sandboxes, enable (docs/bootstrap.md)",
     )
-    p.add_argument("--repo", required=True, help="owner/name -- written to automation.json")
+    p.add_argument("--task-repo", "--repo", dest="task_repo", required=True,
+                    metavar="OWNER/NAME",
+                    help="the task repo: the one repo polled for labelled issues "
+                         "(--repo is accepted as its former name)")
+    p.add_argument("--target-repo", dest="target_repos", action="append", default=[],
+                    metavar="OWNER/NAME",
+                    help="a repo tasks may dispatch into, named by a /repo directive on "
+                         "an issue; repeatable. Omit entirely for a single-repo "
+                         "deployment: the task repo becomes the only target and the "
+                         "default for tasks with no /repo line")
+    p.add_argument("--default-target-repo", metavar="OWNER/NAME",
+                    help="target repo for a task with no /repo directive (default: none, "
+                         "so a task without one is parked with a comment -- unless no "
+                         "--target-repo was given at all, in which case the task repo)")
     p.add_argument("--github-token-file",
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
@@ -798,7 +860,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="write automation.json, repo-allowlist.json, and (optionally) "
              "GitHub/Claude credentials to /data on the controller, over SSH",
     )
-    p.add_argument("--repo", required=True, help="owner/name")
+    p.add_argument("--task-repo", "--repo", dest="task_repo", required=True,
+                    metavar="OWNER/NAME",
+                    help="the task repo: the one repo polled for labelled issues "
+                         "(--repo is accepted as its former name)")
+    p.add_argument("--target-repo", dest="target_repos", action="append", default=[],
+                    metavar="OWNER/NAME",
+                    help="a repo tasks may dispatch into, named by a /repo directive on "
+                         "an issue; repeatable. Omit entirely for a single-repo "
+                         "deployment: the task repo becomes the only target and the "
+                         "default for tasks with no /repo line")
+    p.add_argument("--default-target-repo", metavar="OWNER/NAME",
+                    help="target repo for a task with no /repo directive (default: none, "
+                         "so a task without one is parked with a comment -- unless no "
+                         "--target-repo was given at all, in which case the task repo)")
     p.add_argument("--github-token-file",
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",

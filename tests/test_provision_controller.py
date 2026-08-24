@@ -41,7 +41,7 @@ def test_installs_python_and_ssh_and_git():
 
 def test_generates_the_controller_ssh_key_idempotently_at_the_configured_path():
     text = read()
-    key_path = AutomationConfig(owner="x", repo="y").ssh_key_path
+    key_path = AutomationConfig(task_owner="x", task_repo="y").ssh_key_path
     assert str(key_path) in text
     assert f"{key_path}.pub" in text or f"{key_path}" in text
     # Idempotent: must not clobber an existing identity on a re-run.

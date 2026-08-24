@@ -53,6 +53,23 @@ class CredentialSet:
                 return self._load(name)
         return None
 
+    def token_for(self, owner: str, repo: str) -> str | None:
+        """`select`'s token alone — `grain/automation/github.py`'s
+        `TokenSource` shape, so the orchestrator's `GitHubClient` can
+        resolve a credential per repo instead of holding one fixed at
+        construction. Necessary once a deployment talks to more than one
+        repo (a task repo plus each target repo it dispatches into), and
+        exactly what this class's pattern ladder was already for.
+
+        `None` covers both "nothing covers this repo" and "the covering
+        credential is anonymous" — the caller (an unauthenticated request)
+        does the same thing either way, and the distinction that matters
+        for the *proxy* (fail closed vs. deliberately anonymous) is made by
+        `select` itself, which is still what the proxy calls.
+        """
+        credential = self.select(owner, repo)
+        return credential.token if credential else None
+
     def _load(self, name: str) -> Credential:
         if name not in self._cache:
             if name == "anonymous":

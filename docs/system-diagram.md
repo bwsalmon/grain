@@ -311,6 +311,7 @@ protection, not by parsing pack files — a control our bugs cannot bypass.
 | controller → GitHub | REST, and the proxy's forwarded git | credential ladder + GitHub-side scoping |
 | controller → GCP | impersonation | narrow second service account; every mint audit-logged |
 | issue text → agent prompt | the automation loop | **a human applying the label is the gate**; nothing the agent then says is trusted as input to a GitHub write |
+| issue text → which repo the work lands in | the automation loop + `repo-allowlist.json` | a task's `/repo` directive only selects from the operator's allowlist — the same file the git proxy enforces; anything else is parked with a comment, never dispatched |
 
 That last row is the one worth restating: the branch a PR is opened from is
 computed by the controller (`branch_name(issue) = grain/issue-<N>`) and
@@ -331,7 +332,7 @@ sequenceDiagram
     H->>GH: label issue `grain-agent`
     Note over A: systemd timer, every 2 min
     A->>A: sweep first — finished / failed / stranded units
-    A->>GH: list issues + PRs with the trigger label
+    A->>GH: list task-repo issues with the trigger label
     A->>A: rate limit (runs_per_hour), free-sandbox check
     A->>GH: move label → `grain-agent-in-progress`
     A->>S: ssh · inject proxy token · clone/reset workspace
@@ -367,7 +368,7 @@ instead of the controller opening anything.
   secrets/                          # see the inventory above
   config/
     repo-allowlist.json             # hot-reloaded, default-deny
-    automation.json                 # owner, repo, labels, base_branch, limits
+    automation.json                 # task repo, default target, labels, limits
   state/
     automation/
       state.json                    # sandbox ⇢ issue/PR assignment

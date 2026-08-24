@@ -64,12 +64,21 @@ class SessionRecord:
     # the capture step itself came back empty (see capture.py, which never
     # raises).
     transcript_path: str | None
+    # `"owner/repo"` for the *target* repo this session worked in -- the one
+    # cloned and pushed to, named by the task's own `/repo` directive
+    # (`directives.py`), as opposed to the task repo `issue` above numbers.
+    # None for a session recorded before the task/target split, when a
+    # deployment had exactly one repo. Kept here rather than left to the
+    # transcript because "which repo did this touch" is a list-view
+    # question, not a read-the-whole-session one.
+    target: str | None = None
 
 
 class SessionHistory(Protocol):
     def record(self, *, issue: int, kind: TriggerKind, sandbox: str, unit: str,
                started_at: datetime, finished_at: datetime, outcome: str,
-               transcript_text: str | None) -> SessionRecord | None: ...
+               transcript_text: str | None,
+               target: str | None = None) -> SessionRecord | None: ...
 
 
 def _session_key(started_at: datetime, kind: TriggerKind, issue: int, sandbox: str) -> str:
@@ -91,6 +100,7 @@ def _to_json(record: SessionRecord) -> dict:
         "finished_at": record.finished_at.isoformat(),
         "outcome": record.outcome,
         "transcript_path": record.transcript_path,
+        "target": record.target,
     }
 
 
@@ -104,6 +114,7 @@ def _from_json(raw: dict) -> SessionRecord:
         finished_at=datetime.fromisoformat(raw["finished_at"]),
         outcome=raw["outcome"],
         transcript_path=raw.get("transcript_path"),
+        target=raw.get("target"),
     )
 
 
@@ -119,7 +130,7 @@ class FileSessionHistory:
 
     def record(self, *, issue: int, kind: TriggerKind, sandbox: str, unit: str,
                started_at: datetime, finished_at: datetime, outcome: str,
-               transcript_text: str | None) -> SessionRecord:
+               transcript_text: str | None, target: str | None = None) -> SessionRecord:
         key = _session_key(started_at, kind, issue, sandbox)
         transcript_path: str | None = None
         if transcript_text:
@@ -129,7 +140,7 @@ class FileSessionHistory:
         record = SessionRecord(
             issue=issue, kind=kind, sandbox=sandbox, unit=unit,
             started_at=started_at, finished_at=finished_at, outcome=outcome,
-            transcript_path=transcript_path,
+            transcript_path=transcript_path, target=target,
         )
         # Same temp-file-plus-rename discipline as AutomationState.save --
         # this write can be interrupted (a killed cron job) just as easily,
@@ -188,14 +199,15 @@ class RecordingSessionHistory:
 
     def record(self, *, issue: int, kind: TriggerKind, sandbox: str, unit: str,
                started_at: datetime, finished_at: datetime, outcome: str,
-               transcript_text: str | None) -> SessionRecord:
+               transcript_text: str | None, target: str | None = None) -> SessionRecord:
         self.calls.append({
             "issue": issue, "kind": kind, "sandbox": sandbox, "unit": unit,
             "started_at": started_at, "finished_at": finished_at,
             "outcome": outcome, "transcript_text": transcript_text,
+            "target": target,
         })
         return SessionRecord(
             issue=issue, kind=kind, sandbox=sandbox, unit=unit,
             started_at=started_at, finished_at=finished_at, outcome=outcome,
-            transcript_path=None,
+            transcript_path=None, target=target,
         )

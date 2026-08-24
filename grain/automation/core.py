@@ -8,8 +8,9 @@ docs/design.md" convention:
     for one more `run-once` interval — a *successful* sweep also verifies
     the pushed branch and opens the PR, since that is the other half of
     "this run is really done", not a separate pass,
-    list open trigger-labelled issues not already tracked as in-progress,
-    oldest first, so a backlog drains in the order it was filed,
+    list open trigger-labelled issues in the *task repo* not already
+    tracked as in-progress, oldest first, so a backlog drains in the order
+    it was filed, resolving each one's target repo from its own text,
     while a free sandbox exists and the rate limit allows it, mint the
     sandbox's git-proxy token if it doesn't have one yet, dispatch, move the
     label, and record the assignment,
@@ -31,38 +32,62 @@ through the same `_requeue` path as a failed or stranded run: `sweeper.py`
 still knows nothing about GitHub, and a run that produced nothing usable is
 not meaningfully different from one that failed outright.
 
-docs/roadmap.md item 9 adds a second intake path: dispatching to an
-*existing* PR instead of a labelled issue, to address review feedback, fix
-CI, or continue work. It reuses this same pool and rate limit rather than
-adding a second budget — a PR-triggered run occupies a sandbox exactly like
-an issue-triggered one, and the whole point of `runs_per_hour` is capping
-total dispatch volume regardless of what triggered it. What's new:
+**One task repo, many target repos.** The repo polled above is the *task
+repo* — a queue of issues for the agent set, not the code being changed.
+Each task names its own target repo (and optionally a PR to continue, and a
+PR base) with a `/repo`-style directive in its text; `directives.py` is the
+parser and the full rationale. What follows from that split:
 
-- **`_dispatch` polls both `list_issues` and `list_pull_requests`** (same
-  `trigger_label`, since the human-gate reasoning is identical either way —
-  a label a person applied), merges the two candidate lists, and sorts the
-  merge by number alone. That sort is sound with no separate interleaving
-  policy because issues and PRs share one number sequence per GitHub repo (a
-  PR is a special kind of issue in GitHub's own data model) — a PR and an
-  issue can never tie, so "process the oldest-numbered trigger first"
-  already means "process whichever was filed/opened first," across both
-  kinds at once.
+- **Only the task repo is ever polled, labelled, or commented on.** Labels
+  and the whole question/reply cycle (docs/roadmap.md items 12–13) live on
+  the task issue; target repos see git pushes, a `branch_exists` check and a
+  `create_pull_request` call, and nothing else.
+- **A target repo must be on the same allowlist the git proxy enforces**
+  (`/data/config/repo-allowlist.json`, `grain/proxy/allowlist.py`). One
+  operator-owned list, checked here at dispatch and again at every git
+  operation, rather than two that can disagree. A task naming anything else
+  never dispatches.
+- **An unusable directive parks the task instead of failing it.** No
+  `/repo` and no configured `default_target_repo`, a malformed one, a
+  non-allow-listed or nonexistent target: `_park` posts a comment saying
+  exactly what was wrong and swaps the trigger label for
+  `awaiting_reply_label`, which is precisely the state item 13 already
+  knows how to promote out of — a maintainer replies `/repo owner/name` and
+  the next cycle picks it up. Leaving the trigger label on instead would
+  redispatch the identical failure every two minutes with nothing new to
+  act on, the same argument `_finish_question` makes for a question.
+- **The target is recorded on the assignment, not re-derived at sweep
+  time** (`state.py`'s `Assignment`): an issue body can be edited mid-run,
+  and an edit must not be able to redirect where the finished work's PR is
+  opened.
+
+docs/roadmap.md item 9's second intake path — continue an *existing* PR
+rather than start a fresh branch — survives the split as a `/pr N`
+directive on a task issue, rather than a labelled PR in a second polled
+repo (with a task repo, the PRs are in target repos, where no label of ours
+lives). It reuses this same pool and rate limit rather than adding a second
+budget — a PR-continuation run occupies a sandbox exactly like a fresh one,
+and the whole point of `runs_per_hour` is capping total dispatch volume
+regardless of what triggered it. What that leaves:
+
 - **`AutomationState.Assignment` carries a `kind`.** An issue assignment's
   branch is always recomputable from `branch_name(issue)`; a PR assignment's
   branch is whatever the PR's author already called it, so it's recorded at
   dispatch time instead — see `state.py`'s `Assignment` docstring.
-- **`_finish_succeeded` branches on `outcome.kind`.** An issue success still
-  means "open a new PR"; a PR success means the PR already exists and the
-  agent just pushed more commits to it — verified the same way (does the
-  branch it was told to push to still exist?), but with no PR to create and
-  no new label story: only the in-progress label comes off. Both branches
-  route through the same `_requeue` on failure/no-branch, unchanged — a
-  requeue only ever needs the trigger's own number, which is `outcome.issue`
-  regardless of kind.
+- **`_finish_succeeded` branches on `outcome.kind`.** A fresh-branch success
+  means "open a new PR" in the target repo; a PR-continuation success means
+  the PR already exists and the agent just pushed more commits to it —
+  verified the same way (does the branch it was told to push to still
+  exist?), but with no PR to create and no new label story: only the
+  in-progress label comes off the task issue. Both branches route through
+  the same `_requeue` on failure/no-branch, unchanged — a requeue only ever
+  needs the trigger's own number, which is `outcome.issue` regardless of
+  kind.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -71,16 +96,18 @@ from typing import Callable
 from . import ratelimit
 from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
+from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
     question_path, unit_name,
 )
-from .github import GitHubClient, GitHubError, Issue, PullRequestDetail
+from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
 from .state import AutomationState, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
+from ..proxy.allowlist import Allowlist
 from ..proxy.tokens import SandboxTokenStore
 from ..run import CommandError, Runner
 
@@ -119,6 +146,21 @@ def _pending_question(sandbox: str) -> str | None:
     return text or None
 
 
+@dataclass(frozen=True)
+class ResolvedTask:
+    """What one task issue resolved to: the target repo, the PR being
+    continued (None for a fresh branch), and the base a new PR should
+    target. Produced by `_resolve_target` from the task's own directives
+    and consumed once, at dispatch — everything here is then pinned onto
+    the `Assignment`, so the sweep that finishes this run never re-reads
+    the issue body to find out where the work went.
+    """
+
+    repo: RepoRef
+    pr: PullRequestDetail | None
+    base: str
+
+
 @dataclass
 class Orchestrator:
     cluster: Cluster
@@ -130,6 +172,15 @@ class Orchestrator:
     # `grain/proxy/tokens.py`'s `SandboxTokens` reads on the proxy side. See
     # `_dispatch`'s use of `ensure_token`.
     token_store: SandboxTokenStore
+    # Which target repos this deployment may dispatch into: the same
+    # `/data/config/repo-allowlist.json` the git proxy enforces on every
+    # fetch and push (`grain/proxy/allowlist.py`), read here so a task
+    # naming an off-list repo is refused with an explanation instead of
+    # dispatching and failing later as an opaque clone error. Required, not
+    # optional with a permissive default -- a gate whose absence means
+    # "allow everything" is the wrong shape for the one control standing
+    # between an issue body and which repos this agent set can write to.
+    allowlist: Allowlist
     audit: AuditLog | None = None
     # docs/roadmap.md item 10: where a finished sandbox's captured
     # trajectory gets recorded, keyed by trigger. None (production's
@@ -158,13 +209,33 @@ class Orchestrator:
             key_path=self.config.ssh_key_path,
         )
 
-    def _remote_url(self) -> str:
+    def _remote_url(self, target: RepoRef) -> str:
         # Always through the git proxy, on the controller's own address —
-        # never GitHub directly (docs/design.md, "GitHub access").
+        # never GitHub directly (docs/design.md, "GitHub access"). The proxy
+        # routes on the path, so pointing a sandbox at a different target
+        # repo needs nothing but a different URL here; what it may actually
+        # reach is decided by the allowlist, on both sides.
         return (
             f"http://{self.cluster.controller_ip}:{GIT_PROXY_PORT}/"
-            f"{self.config.owner}/{self.config.repo}.git"
+            f"{target.owner}/{target.name}.git"
         )
+
+    @property
+    def _task(self) -> RepoRef:
+        """The task repo — every label, comment and issue read in this
+        module is against this one repo, and nothing else ever is.
+        """
+        return RepoRef(self.config.task_owner, self.config.task_repo)
+
+    def _target_of(self, outcome: Outcome) -> RepoRef:
+        """The target repo a finished run was working in. Falls back to the
+        task repo for an assignment written before the task/target split,
+        when a deployment had exactly one repo and that is precisely what
+        this meant (see `state.py`'s `Assignment.target_owner`).
+        """
+        if outcome.target_owner and outcome.target_repo:
+            return RepoRef(outcome.target_owner, outcome.target_repo)
+        return self._task
 
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
@@ -201,8 +272,9 @@ class Orchestrator:
         if question is not None:
             self._finish_question(outcome, question)
             return
+        target = self._target_of(outcome)
         branch = branch_name(outcome.issue)
-        if not self.github.branch_exists(self.config.owner, self.config.repo, branch):
+        if not self.github.branch_exists(target.owner, target.name, branch):
             # The unit exited zero, but that is not the same claim as "a PR
             # can be opened" — the agent may never have pushed, or pushed
             # somewhere other than the branch dispatch() told it to. Verify,
@@ -215,20 +287,27 @@ class Orchestrator:
         # fails partway (a 422 from a stale PR, a transient 5xx), the issue
         # stays visibly in-progress rather than looking finished with
         # nothing to show for it.
+        # `Closes <task repo>#<n>`, fully qualified: the task lives in a
+        # different repo from the PR in the general case, and GitHub only
+        # links (and auto-closes) a cross-repo reference when it names the
+        # repo. Falls back to reading identically for a deployment whose
+        # task repo *is* its target repo.
+        task = self._task
+        base = outcome.base or self.github.default_branch(target.owner, target.name)
         pr = self.github.create_pull_request(
-            self.config.owner, self.config.repo,
-            head=branch, base=self.config.base_branch,
-            title=f"🤖 grain: fix #{outcome.issue}",
-            body=f"Closes #{outcome.issue}.\n\nOpened automatically after "
-                 f"issue #{outcome.issue} finished on {outcome.sandbox}."
+            target.owner, target.name,
+            head=branch, base=base,
+            title=f"🤖 grain: {task}#{outcome.issue}",
+            body=f"Closes {task}#{outcome.issue}.\n\nOpened automatically after "
+                 f"task {task}#{outcome.issue} finished on {outcome.sandbox}."
                  f"\n\n---\n{_AUTOMATION_SIGNATURE}",
         )
         self.github.remove_label(
-            self.config.owner, self.config.repo,
+            task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
         )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
-                           outcome=f"opened PR #{pr.number}: {pr.html_url}")
+                           outcome=f"opened PR {target}#{pr.number}: {pr.html_url}")
 
     def _finish_succeeded_pr(self, outcome: Outcome) -> None:
         question = _pending_question(outcome.sandbox)
@@ -242,7 +321,8 @@ class Orchestrator:
         # in practice.
         branch = outcome.branch
         assert branch is not None, "a PR outcome must carry the branch it was assigned"
-        if not self.github.branch_exists(self.config.owner, self.config.repo, branch):
+        target = self._target_of(outcome)
+        if not self.github.branch_exists(target.owner, target.name, branch):
             # Same "verify, don't trust" bar as the issue path (docs/roadmap.md
             # item 2): the unit exiting zero isn't proof the agent pushed
             # anything, or pushed to the branch it was told to.
@@ -250,18 +330,18 @@ class Orchestrator:
             return
 
         # No PR to open — it already exists, which is the whole premise of
-        # this trigger — so a successful finish is just "stop marking it
-        # in-progress." Unlike the issue path there is no trigger label to
-        # withhold either: the PR is simply no longer being worked, and a
-        # human can label it again for another round if more feedback comes
-        # in, the same way they would for a fresh issue.
+        # a `/pr` task — so a successful finish is just "stop marking the
+        # task in-progress." Unlike the fresh-branch path there is no PR to
+        # announce either: the task issue is simply no longer being worked,
+        # and a human can label it again for another round if more feedback
+        # comes in, the same way they would for a fresh task.
         self.github.remove_label(
-            self.config.owner, self.config.repo,
+            self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
         )
         self.audit.record(
             sandbox=outcome.sandbox, issue=outcome.issue,
-            outcome=f"pushed additional commits to PR #{outcome.issue} ({branch!r})",
+            outcome=f"pushed additional commits to {target} ({branch!r})",
         )
 
     def _finish_question(self, outcome: Outcome, question: str) -> None:
@@ -293,7 +373,7 @@ class Orchestrator:
         """
         try:
             comment_id = self.github.create_comment(
-                self.config.owner, self.config.repo, outcome.issue,
+                self.config.task_owner, self.config.task_repo, outcome.issue,
                 f"{_AUTOMATION_SIGNATURE}\n\n"
                 f"I have a question before I can continue:\n\n{question}\n\n"
                 "Reply here to continue -- a reply from a maintainer picks "
@@ -306,16 +386,16 @@ class Orchestrator:
             self.audit.record(
                 sandbox=outcome.sandbox, issue=outcome.issue,
                 outcome=f"asked a question but issue #{outcome.issue} not found in "
-                        f"{self.config.owner}/{self.config.repo} -- stale assignment? "
+                        f"{self.config.task_owner}/{self.config.task_repo} -- stale assignment? "
                         f"question was: {question[:200]!r}",
             )
             return
         self.github.remove_label(
-            self.config.owner, self.config.repo,
+            self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
         )
         self.github.add_label(
-            self.config.owner, self.config.repo,
+            self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.awaiting_reply_label,
         )
         self.state.record_pending_question(
@@ -342,7 +422,7 @@ class Orchestrator:
         for pending in list(self.state.pending_questions.values()):
             try:
                 comments = self.github.list_comments(
-                    self.config.owner, self.config.repo, pending.issue
+                    self.config.task_owner, self.config.task_repo, pending.issue
                 )
             except GitHubError as exc:
                 if exc.status != 404:
@@ -353,7 +433,7 @@ class Orchestrator:
                 self.audit.record(
                     sandbox=None, issue=pending.issue,
                     outcome=f"issue #{pending.issue} not found in "
-                            f"{self.config.owner}/{self.config.repo} while "
+                            f"{self.config.task_owner}/{self.config.task_repo} while "
                             "checking for a reply -- stale assignment?",
                 )
                 continue
@@ -366,11 +446,11 @@ class Orchestrator:
             if reply is None:
                 continue
             self.github.remove_label(
-                self.config.owner, self.config.repo,
+                self.config.task_owner, self.config.task_repo,
                 pending.issue, self.config.awaiting_reply_label,
             )
             self.github.add_label(
-                self.config.owner, self.config.repo,
+                self.config.task_owner, self.config.task_repo,
                 pending.issue, self.config.trigger_label,
             )
             self.state.clear_pending_question(pending.issue)
@@ -395,11 +475,11 @@ class Orchestrator:
         # a stale assignment explains, so it still propagates.
         try:
             self.github.remove_label(
-                self.config.owner, self.config.repo,
+                self.config.task_owner, self.config.task_repo,
                 outcome.issue, self.config.in_progress_label,
             )
             self.github.add_label(
-                self.config.owner, self.config.repo,
+                self.config.task_owner, self.config.task_repo,
                 outcome.issue, self.config.trigger_label,
             )
         except GitHubError as exc:
@@ -408,32 +488,135 @@ class Orchestrator:
             self.audit.record(
                 sandbox=outcome.sandbox, issue=outcome.issue,
                 outcome=f"{reason} (requeue skipped: issue #{outcome.issue} not found in "
-                        f"{self.config.owner}/{self.config.repo} -- stale assignment?)",
+                        f"{self.config.task_owner}/{self.config.task_repo} -- stale assignment?)",
             )
             return
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue, outcome=reason)
 
+    # --- target resolution ----------------------------------------------
+
+    def _resolve_target(self, issue: Issue, comments: list[Comment]) -> "ResolvedTask":
+        """What a task's own text says to work on: which repo, optionally
+        which PR to continue, and what base a new PR should target.
+
+        Reads directives from the issue body plus every *trusted* comment
+        on it (`_TRUSTED_REPLY_ASSOCIATIONS`, the same "could have applied
+        the label" tier the trigger gate itself relies on), later texts
+        overriding earlier — so repairing a task is a reply, not an edit
+        plus a reply. Raises `DirectiveError` for anything unusable; every
+        message is written to be posted verbatim by `_park`.
+        """
+        texts = [issue.body] + [
+            c.body for c in comments
+            if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
+        ]
+        directives = parse_directives(texts)
+        target = directives.target
+        if target is None:
+            if not self.config.default_target_repo:
+                raise DirectiveError(
+                    "this task doesn't say which repository to work in. Add a "
+                    "line `/repo owner/name` to the issue body, or reply to "
+                    "this issue with one."
+                )
+            target = RepoRef.parse(
+                self.config.default_target_repo, what="`default_target_repo`"
+            )
+        if not self.allowlist.allows(target.owner, target.name):
+            raise DirectiveError(
+                f"`{target}` is not on this deployment's repo allowlist, so "
+                "nothing here can clone, push to, or open a pull request "
+                "against it. An operator adds it to "
+                "`/data/config/repo-allowlist.json` on the controller."
+            )
+        pr: PullRequestDetail | None = None
+        try:
+            if directives.pr is not None:
+                pr = self.github.get_pull_request(
+                    target.owner, target.name, directives.pr
+                )
+            # Read even when `/base` was given, so a nonexistent target repo
+            # is caught here (a clear comment) rather than at clone time (a
+            # `CommandError` from inside the sandbox). One extra GET against
+            # a repo this deployment is about to clone anyway.
+            default_branch = self.github.default_branch(target.owner, target.name)
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            raise DirectiveError(
+                f"couldn't read `{target}`"
+                + (f" pull request #{directives.pr}" if pr is None and directives.pr else "")
+                + " -- GitHub returned 404. Either it doesn't exist, or this "
+                  "deployment's credential can't see it."
+            ) from exc
+        return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch)
+
+    def _park(self, number: int, reason: str) -> None:
+        """Takes a task out of the queue with an explanation, instead of
+        retrying an unusable directive every cycle forever.
+
+        Deliberately the same landing state as an unanswered question
+        (docs/roadmap.md items 12-13): comment, swap the trigger label for
+        `awaiting_reply_label`, record the comment id as the reply baseline.
+        `_promote_answered_questions` then does the rest — a maintainer's
+        reply (which may itself carry the corrected `/repo` line) puts the
+        trigger label back on the next cycle. No sandbox was ever assigned
+        here, so there is no in-progress label to remove and nothing to
+        release.
+
+        Same 404 tolerance as `_finish_question`: an issue that vanished
+        between the listing and this call isn't a reason to crash the
+        cycle.
+        """
+        try:
+            comment_id = self.github.create_comment(
+                self.config.task_owner, self.config.task_repo, number,
+                f"{_AUTOMATION_SIGNATURE}\n\n"
+                f"I can't start this task yet: {reason}\n\n"
+                "Reply here once it's fixed -- a reply from a maintainer "
+                "picks this back up automatically, and a `/repo owner/name` "
+                "line in that reply counts.",
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            self.audit.record(
+                sandbox=None, issue=number,
+                outcome=f"could not park issue #{number}: not found in "
+                        f"{self.config.task_owner}/{self.config.task_repo} "
+                        "-- deleted mid-cycle?",
+            )
+            return
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            number, self.config.trigger_label,
+        )
+        self.github.add_label(
+            self.config.task_owner, self.config.task_repo,
+            number, self.config.awaiting_reply_label,
+        )
+        self.state.record_pending_question(number, comment_id)
+        self.audit.record(sandbox=None, issue=number,
+                           outcome=f"parked, awaiting reply: {reason}")
+
     # --- dispatch -------------------------------------------------------
     def _dispatch(self, now: datetime) -> None:
-        issue_candidates = self.github.list_issues(
-            self.config.owner, self.config.repo, self.config.trigger_label
-        )
-        pr_candidates = self.github.list_pull_requests(
-            self.config.owner, self.config.repo, self.config.trigger_label
+        candidates = self.github.list_issues(
+            self.config.task_owner, self.config.task_repo, self.config.trigger_label
         )
         in_progress = self.state.in_progress_issues()
-        # Issues and PRs share one number sequence per GitHub repo (a PR is
-        # a special kind of issue in GitHub's own data model), so merging
-        # both lists and sorting by number alone already processes the
-        # combined backlog oldest-first — no separate interleaving policy
-        # needed between the two trigger kinds.
-        queue: list[tuple[int, Issue | PullRequestDetail]] = sorted(
-            [(i.number, i) for i in issue_candidates if i.number not in in_progress]
-            + [(p.number, p) for p in pr_candidates if p.number not in in_progress],
-            key=lambda t: t[0],
+        # Oldest number first: one repo's issue numbers are handed out in
+        # filing order, so this drains a backlog in the order it arrived.
+        # Only issues are polled -- a PR-continuation task is an issue
+        # carrying a `/pr` directive, so there is no second listing to merge
+        # in and no interleaving policy to decide.
+        queue = sorted(
+            (i for i in candidates if i.number not in in_progress),
+            key=lambda i: i.number,
         )
 
-        for number, item in queue:
+        for issue in queue:
+            number = issue.number
             sandbox = self.state.free_sandbox(self.cluster.sandbox_names)
             if sandbox is None:
                 self.audit.record(sandbox=None, issue=number,
@@ -444,6 +627,27 @@ class Orchestrator:
                 self.audit.record(sandbox=None, issue=number,
                                    outcome="skipped: rate limit")
                 break
+
+            # Fetched for every dispatch, whether or not a prior attempt
+            # ever asked a question (docs/roadmap.md item 12) --
+            # `AutomationState` carries no memory of that once an assignment
+            # is released, so this is the only way a redispatch sees a
+            # human's reply. Empty for the (common) case of no conversation
+            # yet; `_prompt`/`_pr_prompt` render that plainly rather than
+            # omitting the section, matching the existing blank-state
+            # convention for review comments. It is also where a trusted
+            # `/repo` correction lives, which is why it is read before the
+            # task's target is resolved rather than after.
+            thread_comments = self.github.list_comments(
+                self.config.task_owner, self.config.task_repo, number
+            )
+            try:
+                task = self._resolve_target(issue, thread_comments)
+            except DirectiveError as exc:
+                # No sandbox consumed and no rate-limit slot spent: parking
+                # is bookkeeping on the task repo, not a run.
+                self._park(number, str(exc))
+                continue
 
             sandbox_runner = self._ssh_runner_for(sandbox)
             # The same address/user `_ssh_runner_for` just used to build
@@ -456,23 +660,30 @@ class Orchestrator:
             # `self.config.ssh_key_path` (this process's own key) — see
             # that constant's docstring for why they have to be two
             # separate files.
-            target = SandboxTarget(
+            sandbox_target = SandboxTarget(
                 address=str(self.cluster.address_of(sandbox)),
                 ssh_user=self.config.ssh_user,
                 ssh_key_path=CONTROLLER_AGENT_SSH_KEY_PATH,
             )
             token = self.token_store.ensure_token(sandbox)
-            # Fetched for every dispatch, issue or PR alike, whether or not
-            # a prior attempt ever asked a question (docs/roadmap.md item
-            # 12) -- `AutomationState` carries no memory of that once an
-            # assignment is released, so this is the only way a redispatch
-            # sees a human's reply. Empty for the (common) case of no
-            # conversation yet; `_prompt`/`_pr_prompt` render that plainly
-            # rather than omitting the section, matching the existing
-            # blank-state convention for review comments.
-            thread_comments = self.github.list_comments(
-                self.config.owner, self.config.repo, number
+            # The prompt never carries the directive lines themselves --
+            # they are addressed to this orchestrator, and an agent has no
+            # way to act on one anyway (docs/design.md's split surface).
+            # Comments get the same treatment as the body: a maintainer's
+            # `/repo` correction is a reply, so it would otherwise reach the
+            # prompt through the conversation section instead. A comment
+            # left empty by that (one that was *only* a directive) is
+            # dropped rather than rendered as an author with no message.
+            prompt_issue = dataclasses.replace(
+                issue, body=strip_directives(issue.body)
             )
+            prompt_comments = [
+                stripped for stripped in (
+                    dataclasses.replace(c, body=strip_directives(c.body))
+                    for c in thread_comments
+                )
+                if stripped.body
+            ]
             # A `CommandError` here (an SSH/command failure anywhere in
             # dispatch()/dispatch_pr()'s path -- ensure_workspace,
             # configure_git_credentials, starting the unit) must not take
@@ -488,35 +699,50 @@ class Orchestrator:
             # real bug, not an expected failure mode, and should still
             # surface immediately.
             try:
-                if isinstance(item, PullRequestDetail):
-                    comments = self.github.list_review_comments(
-                        self.config.owner, self.config.repo, number
+                if task.pr is not None:
+                    review_comments = self.github.list_review_comments(
+                        task.repo.owner, task.repo.name, task.pr.number
                     )
-                    unit = dispatch_pr(sandbox_runner, self.base_runner, sandbox, target,
-                                        item, comments, remote_url=self._remote_url(), token=token,
-                                        thread_comments=thread_comments)
+                    unit = dispatch_pr(
+                        sandbox_runner, self.base_runner, sandbox, sandbox_target,
+                        task.pr, review_comments,
+                        remote_url=self._remote_url(task.repo), token=token,
+                        thread_comments=prompt_comments, task_repo=str(self._task),
+                        target_repo=str(task.repo), task_issue=number,
+                    )
                 else:
-                    unit = dispatch(sandbox_runner, self.base_runner, sandbox, target, item,
-                                     remote_url=self._remote_url(), token=token,
-                                     comments=thread_comments)
+                    unit = dispatch(
+                        sandbox_runner, self.base_runner, sandbox, sandbox_target,
+                        prompt_issue,
+                        remote_url=self._remote_url(task.repo), token=token,
+                        comments=prompt_comments, task_repo=str(self._task),
+                        target_repo=str(task.repo),
+                    )
             except CommandError as exc:
                 self.audit.record(sandbox=sandbox, issue=number,
                                    outcome=f"dispatch failed: {exc}")
                 continue
 
-            if isinstance(item, PullRequestDetail):
+            if task.pr is not None:
                 self.state.assign(sandbox, number, unit, now,
-                                   kind=TriggerKind.PR, branch=item.head_ref)
+                                   kind=TriggerKind.PR, branch=task.pr.head_ref,
+                                   target_owner=task.repo.owner,
+                                   target_repo=task.repo.name, base=task.base)
             else:
-                self.state.assign(sandbox, number, unit, now)
+                self.state.assign(sandbox, number, unit, now,
+                                   target_owner=task.repo.owner,
+                                   target_repo=task.repo.name, base=task.base)
             self.state.record_run(now)
             self.github.remove_label(
-                self.config.owner, self.config.repo,
+                self.config.task_owner, self.config.task_repo,
                 number, self.config.trigger_label,
             )
             self.github.add_label(
-                self.config.owner, self.config.repo,
+                self.config.task_owner, self.config.task_repo,
                 number, self.config.in_progress_label,
             )
-            self.audit.record(sandbox=sandbox, issue=number,
-                               outcome="dispatched")
+            self.audit.record(
+                sandbox=sandbox, issue=number,
+                outcome=(f"dispatched to {task.repo}"
+                          + (f" (PR #{task.pr.number})" if task.pr else "")),
+            )

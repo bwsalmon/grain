@@ -79,6 +79,24 @@ narrative is built around a sandbox-side login. That's a dedicated diagram
 pass, not a quick text fix, and is listed under "Will bite in the first
 week" below rather than done as part of this update.
 
+**Since then, the intake shape changed** (docs/roadmap.md item 15): a
+deployment now polls one **task repo** — a queue of issues for the agent
+set — and each task names the **target repo** it is for with a `/repo
+owner/name` line in its text (`grain/automation/directives.py`; `/pr N`
+continues an existing PR, `/base` overrides the PR base). Labels, questions
+and replies stay on the task issue; the clone, the push and the PR happen
+in the target repo, which must be on the same `repo-allowlist.json` the git
+proxy enforces. A task whose directive is missing, malformed or off-list is
+*parked* (comment + awaiting-reply label) rather than retried blindly, and
+a maintainer's reply can carry the correction. Config renamed accordingly
+(`task_owner`/`task_repo`, plus an optional `default_target_repo`), with
+the legacy `owner`/`repo` keys still accepted on load — an existing `/data`
+needs no edit, and a single-repo deployment (`--task-repo X` with no
+`--target-repo`) behaves exactly as before with no directive written
+anywhere. **This has not been exercised live yet**: everything below about
+running against a real repo still applies, and the first real multi-repo
+run is the obvious thing to do next.
+
 This file is the current handoff: what's left, in the order worth doing it.
 
 ## Blocks a first real run
@@ -264,7 +282,8 @@ bridge address.
 
 ```sh
 sudo python3 -m grain.cli --image /var/lib/grain/images/debian-12.qcow2 \
-  host bootstrap --repo <owner>/<repo> --github-token-file - \
+  host bootstrap --task-repo <owner>/<tasks> --target-repo <owner>/<repo> \
+  --github-token-file - \
   --github-host <mock-host>:<port> --git-forward-host <mock-host>:<port> \
   --github-insecure-http \
   --claude-token-file <path>  <<< "mock-token"

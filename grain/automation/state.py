@@ -51,9 +51,29 @@ class Assignment:
     # 2's "deterministic, not self-reported" precedent. A PR assignment has
     # no such deterministic name to recompute (the branch is whatever the PR
     # author already called it), so it's recorded once here, at dispatch
-    # time, when `GitHubClient.get_pull_request`/`list_pull_requests` already
-    # had to read it anyway.
+    # time, when `GitHubClient.get_pull_request` already had to read it
+    # anyway.
     branch: str | None = None
+    # The *target* repo this assignment's work is happening in — the one
+    # cloned, pushed to, and opened a PR against — as opposed to the task
+    # repo the trigger issue itself lives in (`AutomationConfig`'s
+    # `task_owner`/`task_repo`, which is what `issue` above is a number in).
+    # Recorded at dispatch from the task's `/repo` directive rather than
+    # re-parsed at sweep time: an issue body is editable, and an edit landing
+    # mid-run must not be able to redirect where the finished work's PR gets
+    # opened. Same "decide once, verify don't trust" discipline
+    # `branch_name()` already applies to the branch.
+    #
+    # `None` means an assignment written before the task/target split, when
+    # a deployment had exactly one repo; `core.py` reads that as the task
+    # repo, which is precisely what it meant then.
+    target_owner: str | None = None
+    target_repo: str | None = None
+    # The base branch a PR from this assignment targets — the task's `/base`
+    # directive, else the target repo's own default branch, read once at
+    # dispatch (`GitHubClient.default_branch`) and pinned here for the same
+    # reason `target_owner`/`target_repo` are.
+    base: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +119,9 @@ class AutomationState:
                 # necessarily an issue dispatch with no recorded branch.
                 kind=TriggerKind(a.get("kind", TriggerKind.ISSUE.value)),
                 branch=a.get("branch"),
+                target_owner=a.get("target_owner"),
+                target_repo=a.get("target_repo"),
+                base=a.get("base"),
             )
             for name, a in raw.get("assignments", {}).items()
         }
@@ -123,6 +146,8 @@ class AutomationState:
                     "issue": a.issue, "unit": a.unit,
                     "started_at": a.started_at.isoformat(),
                     "kind": a.kind.value, "branch": a.branch,
+                    "target_owner": a.target_owner, "target_repo": a.target_repo,
+                    "base": a.base,
                 }
                 for name, a in self.assignments.items()
             },
@@ -148,9 +173,12 @@ class AutomationState:
         return None
 
     def assign(self, sandbox: str, issue: int, unit: str, now: datetime, *,
-               kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None) -> None:
+               kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None,
+               target_owner: str | None = None, target_repo: str | None = None,
+               base: str | None = None) -> None:
         self.assignments[sandbox] = Assignment(
-            issue=issue, unit=unit, started_at=now, kind=kind, branch=branch
+            issue=issue, unit=unit, started_at=now, kind=kind, branch=branch,
+            target_owner=target_owner, target_repo=target_repo, base=base,
         )
 
     def release(self, sandbox: str) -> None:
