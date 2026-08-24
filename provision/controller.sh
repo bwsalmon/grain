@@ -170,11 +170,11 @@ UNIT
 
 cat > /etc/systemd/system/grain-automation.timer <<'UNIT'
 [Unit]
-Description=Run grain automation every 2 minutes
+Description=Run grain automation every 1 minute
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=2min
+OnUnitActiveSec=1min
 
 [Install]
 WantedBy=timers.target
