@@ -1,4 +1,10 @@
 locals {
+  # The config repo is the task repo unless you say otherwise: issues filed
+  # here and labelled `grain-agent` are the queue. CI supplies config_repo
+  # from github.repository, so the common case needs no configuration at
+  # all.
+  task_repo = var.task_repo != "" ? var.task_repo : var.config_repo
+
   # Everything the on-VM deploy script needs, and nothing it does not: no
   # secret values, only the names of the secrets to read with the
   # instance's own identity.
@@ -9,7 +15,7 @@ locals {
     debian_image_url    = var.debian_image_url
     sandbox_count       = var.sandbox_count
     cluster_overrides   = var.cluster_overrides
-    task_repo           = var.task_repo
+    task_repo           = local.task_repo
     target_repos        = var.target_repos
     default_target_repo = var.default_target_repo
     credential_name     = var.credential_name
@@ -118,6 +124,38 @@ resource "google_compute_instance" "host" {
     # Changing this is what triggers a rollout. CI sets it to the commit
     # SHA; config-sync notices within seconds and redeploys.
     grain-deploy-generation = var.deploy_generation
+  }
+
+  # Catch the repo-wiring mistakes in the plan, where they cost a comment
+  # on a pull request, rather than on the host, where they cost a failed
+  # deploy and a journalctl session.
+  lifecycle {
+    precondition {
+      condition     = local.task_repo != ""
+      error_message = "Neither task_repo nor config_repo is set. CI passes config_repo from github.repository; running Terraform by hand needs one of the two in config/grain.tfvars."
+    }
+
+    precondition {
+      condition     = can(regex("^[^/[:space:]]+/[^/[:space:]]+$", local.task_repo))
+      error_message = "task_repo must be owner/name, got '${local.task_repo}'."
+    }
+
+    precondition {
+      condition     = alltrue([for r in var.target_repos : can(regex("^[^/[:space:]]+/[^/[:space:]]+$", r))])
+      error_message = "every entry in target_repos must be owner/name."
+    }
+
+    precondition {
+      # grain refuses to dispatch a task whose default target is not an
+      # allow-listed one. With target_repos empty the task repo is the
+      # sole target, and so the only legal default.
+      condition = var.default_target_repo == "" || (
+        length(var.target_repos) == 0
+        ? var.default_target_repo == local.task_repo
+        : contains(var.target_repos, var.default_target_repo)
+      )
+      error_message = "default_target_repo must be one of target_repos (or, with target_repos empty, the task repo itself)."
+    }
   }
 
   depends_on = [

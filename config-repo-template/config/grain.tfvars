@@ -43,16 +43,26 @@ cluster_overrides = {
 
 # -- Which repos the agents work on -----------------------------------------
 
-# The one repo polled for labelled issues.
-task_repo = "CHANGE-ME/agent-tasks"
+# The queue is *this repository*: file an issue here, label it
+# `grain-agent`, and the next polling pass picks it up. CI passes the repo
+# name automatically, so there is nothing to set. Uncomment only to point
+# the deployment at a separate task repo instead.
+#
+# task_repo = "CHANGE-ME/agent-tasks"
 
-# Repos a task may dispatch into, named by a /repo directive on an issue.
-# Leave empty for a single-repo deployment: the task repo becomes the only
-# target and the default.
+# Repos a task may dispatch into, named by a /repo directive in the issue:
+#
+#     Something is broken in the widget service.
+#     /repo my-org/widget-service
+#
+# Leave this empty and there is no such thing as a target elsewhere: tasks
+# act on this repository itself, which is the self-managing mode -- read
+# the README's note about it before choosing it deliberately.
 target_repos = []
 
-# Where a task with no /repo directive goes. Empty parks such tasks with a
-# comment instead of guessing.
+# Where a task with no /repo directive goes. It must be one of the
+# target_repos above. Empty parks such tasks with a comment rather than
+# guessing which repo was meant.
 default_target_repo = ""
 
 # credentials.json entry name for the GitHub token.

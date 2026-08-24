@@ -15,12 +15,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+from grain.automation.config import AutomationConfig
 from grain.inventory import Cluster
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "config-repo-template"
 TERRAFORM = TEMPLATE / "terraform"
 DEPLOY_SH = TERRAFORM / "files" / "deploy.sh"
 TFVARS = TEMPLATE / "config" / "grain.tfvars"
+WORKFLOWS = TEMPLATE / ".github" / "workflows"
 
 SHELL_SCRIPTS = [
     TERRAFORM / "files" / "startup.sh",
@@ -146,3 +148,28 @@ def test_no_secret_value_is_committed_or_passed_through_terraform():
             text = path.read_text(errors="ignore")
             assert "-----BEGIN" not in text, f"{path} looks like it holds a key"
             assert not re.search(r"\bghp_[A-Za-z0-9]{20,}", text), f"{path} holds a GitHub token"
+
+
+def test_the_config_repo_is_the_task_repo_by_default():
+    """The queue is this repository unless the tfvars says otherwise, and
+    CI is what supplies its name -- so neither can be dropped."""
+    instance = (TERRAFORM / "instance.tf").read_text()
+    assert re.search(r"task_repo\s*=\s*var\.task_repo\s*!=\s*\"\"\s*\?", instance), \
+        "instance.tf no longer falls back from task_repo to config_repo"
+    assert "task_repo           = local.task_repo" in instance
+
+    for workflow in ("deploy.yml", "plan.yml"):
+        text = (WORKFLOWS / workflow).read_text()
+        assert "config_repo=${{ github.repository }}" in text, \
+            f"{workflow} does not tell Terraform which repo it is running in"
+
+
+def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
+    """Every label grain's automation applies has to exist in the queue
+    repo, and this repo *is* the queue repo -- so the workflow creates
+    them. A renamed default here would otherwise strand the queue."""
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    config = AutomationConfig(task_owner="an-org", task_repo="a-repo")
+    for label in (config.trigger_label, config.in_progress_label,
+                  config.awaiting_reply_label):
+        assert f"label {label} " in deploy, f"deploy.yml never creates {label!r}"

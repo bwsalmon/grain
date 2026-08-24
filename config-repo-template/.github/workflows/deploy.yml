@@ -25,6 +25,7 @@ concurrency:
 permissions:
   contents: read
   id-token: write # for keyless auth to GCP
+  issues: write # to create the three labels the task queue runs on
 
 jobs:
   deploy:
@@ -37,6 +38,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # This repo is also the task queue: an issue here, labelled
+      # `grain-agent`, is what the automation service picks up. Create the
+      # three labels it moves an issue between, so they are in the picker
+      # before anyone files the first task.
+      - name: Ensure the task labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          label() {
+            gh label create "$1" --repo "${{ github.repository }}" \
+              --color "$2" --description "$3" 2>/dev/null \
+              && echo "created $1" || echo "$1 already exists"
+          }
+          label grain-agent 0e8a16 "Hand this task to the agent set"
+          label grain-agent-in-progress fbca04 "An agent is working on this"
+          label grain-agent-awaiting-reply d93f0b "Parked: the agent needs a human reply"
 
       # Preferred: Workload Identity Federation, so this repo holds no GCP
       # key at all. scripts/bootstrap-gcp.sh sets it up and prints both values.
@@ -74,6 +93,7 @@ jobs:
         run: |
           terraform apply -input=false -auto-approve -no-color \
             -var-file=../config/grain.tfvars \
+            -var="config_repo=${{ github.repository }}" \
             -var="deploy_generation=${DEPLOY_GENERATION}"
 
       - name: Read outputs

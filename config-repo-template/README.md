@@ -3,11 +3,12 @@
 A deployment of [grain](https://github.com/bwsalmon/grain) on GCP,
 described entirely by this repository.
 
-Everything about the deployment except two credentials is a file you can
-read, diff, and review: which machine, which repos the agents work on, how
-many sandboxes, and — the part worth being careful about — exactly what the
-VM is allowed to do in your cloud project. Push to `main` and the running
-system converges on it.
+This repository does two jobs. It **describes the deployment** — which
+machine, how many sandboxes, which repos the agents work on, and the part
+worth being careful about, exactly what the VM is allowed to do in your
+cloud project — as files you can read, diff, and review; push to `main` and
+the running system converges on them. And it **is the task queue**: an
+issue filed here and labelled `grain-agent` is what the agents pick up.
 
 ```
   pull request ──▶ CI plans, you read the diff
@@ -49,8 +50,8 @@ authenticates to GCP with no key anywhere. It prints exactly what to do
 next.
 
 **2. Fill in the config.** `config/grain.tfvars` and `config/backend.hcl`
-have `CHANGE-ME` in every field that needs you. At minimum: `project_id`,
-`task_repo`, and the state bucket.
+have `CHANGE-ME` in every field that needs you. At minimum: `project_id`
+and the state bucket. You do not have to name a task repo — this one is it.
 
 **3. Set four repository secrets.**
 
@@ -58,7 +59,7 @@ have `CHANGE-ME` in every field that needs you. At minimum: `project_id`,
 |---|---|
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | printed by the bootstrap script |
 | `GCP_DEPLOYER_SERVICE_ACCOUNT` | printed by the bootstrap script |
-| `GRAIN_GITHUB_TOKEN` | the token grain uses for the repos it works on |
+| `GRAIN_GITHUB_TOKEN` | the token grain uses for **this** repo (read issues, move labels, comment) and for every repo in `target_repos` (push a branch, open a PR) |
 | `GRAIN_CLAUDE_CODE_OAUTH_TOKEN` | output of `claude setup-token` |
 
 (If you cannot use workload identity, leave the first two unset and put a
@@ -76,6 +77,66 @@ the controller and every sandbox. Watch it live with
 gcloud compute ssh grain-host --zone us-central1-a --tunnel-through-iap \
   --command 'sudo journalctl -u grain-config-sync -f'
 ```
+
+**5. File a task.** Open an issue here, label it `grain-agent`, and name
+the repo it is about. That is the whole interface.
+
+## Issues here are the task queue
+
+```
+  issue filed here, labelled `grain-agent`
+        │
+        ▼
+  the host polls on its own timer ──▶ claims a free sandbox
+        │                                    │
+        │                            an agent works in it
+        │                                    │
+        └──── PR opened in the target repo ◀──┘
+              the issue named; this issue closed by reference
+```
+
+Once the host is up, file an issue in this repository and label it
+`grain-agent`. The next polling pass claims a free sandbox, swaps the
+label for `grain-agent-in-progress`, and runs an agent against it. The
+deploy workflow creates all three labels the first time it runs, so they
+are in the picker before you need them. Nothing about filing a task
+involves a deploy: the host polls this repo on its own.
+
+The code being changed is usually somewhere else, named by a directive in
+the issue body:
+
+```
+The widget service 500s when the cache is cold.
+
+/repo my-org/widget-service
+/pr 42            optional: continue that PR instead of a fresh branch
+/base develop     optional: PR base; default is the target repo's own
+```
+
+Every repo a task may name has to be listed in `target_repos` — that list
+becomes the allowlist the git proxy enforces, so a task naming anything
+else is parked with a comment rather than dispatched. Set
+`default_target_repo` and issues need no `/repo` line at all.
+
+A directive can sit anywhere in the body, and a maintainer can add or
+correct one by replying, so a mis-filed task is repaired with a comment
+rather than an edit. grain's own README has
+[the rest of the workflow](https://github.com/bwsalmon/grain#use-it) —
+what happens on the sandbox, how questions come back, how the PR is
+opened.
+
+> **If you leave `target_repos` empty, tasks act on this repository** —
+> the deployment's own config. That is a real mode, not a mistake: agents
+> that maintain their own deployment. Understand what it means before
+> choosing it. An agent's PR could edit `config/grain.tfvars`, and merging
+> it would widen the VM's IAM roles or point the deployment at a different
+> grain ref. Two things stand between that and a bad day, and you should
+> want both: grain
+> [withholds the `workflow` scope](https://github.com/bwsalmon/grain/blob/main/docs/design.md)
+> from its token, so an agent cannot touch `.github/workflows/**` at all;
+> and nothing here applies until a human merges to `main`. Put branch
+> protection on `main` and a `CODEOWNERS` entry on `config/` and
+> `terraform/` if agents work in this repo.
 
 ## Configuration here, secrets there
 

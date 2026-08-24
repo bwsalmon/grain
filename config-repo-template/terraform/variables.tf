@@ -225,9 +225,25 @@ variable "cluster_overrides" {
   default = {}
 }
 
+variable "config_repo" {
+  type        = string
+  description = <<-EOT
+    owner/name of *this* repository. CI passes it automatically from
+    github.repository; set it in the tfvars only if you run Terraform by
+    hand. It is the default task repo -- see task_repo.
+  EOT
+  default = ""
+}
+
 variable "task_repo" {
   type        = string
-  description = "owner/name of the one repo polled for labelled issues."
+  description = <<-EOT
+    owner/name of the repo polled for labelled issues. Empty -- the
+    default -- means this repository: the config repo is also the queue,
+    so an issue filed here and labelled `grain-agent` becomes a task. Set
+    it only to point the deployment at a separate task repo.
+  EOT
+  default = ""
 }
 
 variable "target_repos" {

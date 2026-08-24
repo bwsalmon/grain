@@ -55,6 +55,7 @@ jobs:
           set -euo pipefail
           terraform plan -input=false -no-color -lock=false \
             -var-file=../config/grain.tfvars \
+            -var="config_repo=${{ github.repository }}" \
             -var="deploy_generation=pr-${{ github.event.pull_request.number }}" \
             | tee /tmp/plan.txt
           {

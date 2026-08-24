@@ -270,13 +270,17 @@ creates the host — nested virtualization on, a persistent disk for
 the host watches instance metadata and re-runs `host bootstrap` whenever
 the config changes.
 
-The GitHub token and the Claude Code token live in that repo's Actions
-secrets, which hand them to Secret Manager once; the host reads them back
-with its own instance identity, so no workflow and no runner ever holds a
-running credential — the arrangement
+That repo is also the task repo: an issue filed there and labelled
+`grain-agent` is what the agents pick up, so the queue and the deployment
+that serves it are one thing to set up, not two.
+
+The GitHub token and the Claude Code token live in its Actions secrets,
+which hand them to Secret Manager once; the host reads them back with its
+own instance identity, so no workflow and no runner ever holds a running
+credential — the arrangement
 [`docs/design.md`](docs/design.md#where-credentials-should-live) prefers.
-Everything else — machine type, sandbox count, task and target repos, IAM
-roles — is a diff you review before it ships.
+Everything else — machine type, sandbox count, target repos, IAM roles —
+is a diff you review before it ships.
 
 ### 1. Network
 
