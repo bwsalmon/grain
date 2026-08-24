@@ -78,9 +78,9 @@ or grinding to a timeout. That ends its turn: `dispatch.py` resets a fixed
 per-unit file before every dispatch, the tool call writes the question
 there, and once the unit finishes, `core.py`'s sweep reads it back, posts
 it as a `🤖`-signed comment on the task issue, and swaps the in-progress label
-for `grain-agent-awaiting-reply` — which, unlike the in-progress label it
-replaced, is left on rather than immediately taken back off, so the task
-doesn't immediately redispatch and re-ask the same question in a loop.
+for `grain-agent-awaiting-reply` — **without** re-adding the trigger label,
+so the task doesn't immediately redispatch and re-ask the same question in
+a loop.
 
 The same machinery covers a task whose `/repo` directive is missing,
 malformed, or names a repo that isn't allow-listed: the comment says which
@@ -89,16 +89,16 @@ of those it is, and the task waits in exactly the same state.
 The issue then sits idle until someone with write access to the task repo
 (GitHub's own `author_association`: owner, member, or collaborator) replies
 in the thread — every `run_once` checks each open question's comments for
-exactly that, and removes `grain-agent-awaiting-reply` on its own the
-moment one shows up, so the very next dispatch picks it back up (now that
-no blocking label is left) with the reply already in its prompt (`_dispatch`
-always fetches the current comment thread). A trusted reply can also carry
-a `/repo`, `/pr` or `/base` directive, which is how a parked task gets
-repaired without editing the original body. A reply from anyone *without*
-write access is ignored: treating any comment as a redispatch trigger
-would let a random public commenter drive the agent with content of their
-choosing, on a public repo. Removing the label by hand still works too, as
-a fallback.
+exactly that, and re-applies the trigger label on its own the moment one
+shows up, so the very next dispatch picks it back up with the reply already
+in its prompt (`_dispatch` always fetches the current comment thread). A
+trusted reply can also carry a `/repo`, `/pr` or `/base` directive, which
+is how a parked task gets repaired without editing the original body. A
+reply from anyone *without* write access is ignored: treating any comment
+as a redispatch trigger would let a random public commenter drive the agent
+with content of their choosing, on a public repo, which is exactly the
+prompt-injection gate the trigger label exists to close. Re-applying the
+label by hand still works too, as a fallback.
 
 The agent still never gets GitHub API access of its own — `core.py` is the
 only thing that posts the comment, and only from this one path
@@ -270,9 +270,9 @@ creates the host — nested virtualization on, a persistent disk for
 the host watches instance metadata and re-runs `host bootstrap` whenever
 the config changes.
 
-That repo is also the task repo: any issue filed there without a
-`triage-needed` label is what the agents pick up, so the queue and the
-deployment that serves it are one thing to set up, not two.
+That repo is also the task repo: an issue filed there and labelled
+`grain-agent` is what the agents pick up, so the queue and the deployment
+that serves it are one thing to set up, not two.
 
 The GitHub token and the Claude Code token live in its Actions secrets,
 which the deploy workflow pushes straight into the host's own instance
@@ -505,8 +505,7 @@ A single-repo deployment sets it to its own repo and writes no directives
 at all — which is what `grain controller configure --task-repo X` with no
 `--target-repo` produces.
 
-The defaults worth knowing: `triage_label: "triage-needed"` (an issue
-carrying it is held out of the queue — intake is opt-out, not opt-in),
+The defaults worth knowing: `trigger_label: "grain-agent"`,
 `in_progress_label: "grain-agent-in-progress"`,
 `awaiting_reply_label: "grain-agent-awaiting-reply"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
@@ -559,12 +558,10 @@ grain host health                            # every sandbox healthy
 
 ## Use it
 
-**File the task in the task repo.** One repo is the agent set's queue: it
-is the only repo polled, labelled, or commented on, and every open issue in
-it is picked up unless it carries the `triage-needed` label (see
-`triage_label` above) — so filing the issue is enough on its own; add
-`triage-needed` instead if it needs a human look first. The code being
-changed is a *target* repo, named by the task itself:
+**File the task in the task repo, and label it `grain-agent`.** One repo
+is the agent set's queue: it is the only repo polled, labelled, or
+commented on. The code being changed is a *target* repo, named by the task
+itself:
 
 ```
 Something is broken in the widget service.
@@ -576,18 +573,18 @@ Something is broken in the widget service.
 
 A directive can sit anywhere in the body, and a maintainer can add or
 correct one by replying to the issue — replies count as directives, from
-the same people who could have applied `triage-needed`.
-`default_target_repo` in `automation.json` covers a deployment whose task
-repo *is* its code: set it and no task needs a `/repo` line at all.
+the same people who could have applied the label. `default_target_repo` in
+`automation.json` covers a deployment whose task repo *is* its code: set
+it and no task needs a `/repo` line at all.
 
 A target repo has to be on `/data/config/repo-allowlist.json`, the same
 list the git proxy enforces. A task naming anything else — or naming
 nothing, with no default configured — is **parked**: the orchestrator
-comments saying exactly what is wrong, applies `grain-agent-awaiting-reply`,
-and picks the task back up once a maintainer replies. Nothing dispatches on
-a guess about which repo was meant.
+comments saying exactly what is wrong, swaps the trigger label for
+`grain-agent-awaiting-reply`, and picks the task back up once a maintainer
+replies. Nothing dispatches on a guess about which repo was meant.
 
-The next `run-once` pass picks an eligible task up, applies
+The next `run-once` pass picks a labelled task up, moves the label to
 `grain-agent-in-progress`, and claims a free sandbox. Dispatch is
 two-sided:
 

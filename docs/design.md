@@ -779,38 +779,23 @@ label: a `repo:owner/name` label would have to be created in the task repo
 before it could be applied, once per target, and could carry neither a PR
 number nor a base branch.
 
-**Every open task-repo issue is a dispatch candidate unless a label says
-otherwise.** `_dispatch` (`grain/automation/core.py`) lists all open issues
-and excludes any carrying `AutomationConfig.triage_label`
-(`"triage-needed"` by default), `in_progress_label`, or
-`awaiting_reply_label`. This replaced an earlier, opt-in design (a
-`trigger_label` a human had to apply before anything was picked up) because
-requiring a label per issue doesn't scale to bulk or automated filing — an
-issue-filer now sets `triage_label` itself at creation time, and a human
-clears it once the issue is ready. The trade: an issue is processed unless
-someone acts on it, not only once someone has, which narrows the "requiring
-a human to label each issue" mitigation described below to whatever labels
-actually get set. A single-issue deployment with no automated filer can
-still get the old behavior by pre-labelling every new issue with
-`triage_label` (e.g. a repo-level default label) and clearing it by hand.
-
 Three consequences worth stating plainly, because they are where this
 design could otherwise go wrong:
 
 - **The target repo is checked against the same allowlist the git proxy
   enforces** (`/data/config/repo-allowlist.json`). An issue body is
-  untrusted input — `AutomationConfig.triage_label` gates *whether* an
-  agent runs on it, not what it may then reach — so which repos this
-  deployment can write to stays an operator's file, checked on the API side
-  at dispatch and on the git side at every fetch and push. The task repo is
-  deliberately *not* on that list: no sandbox ever clones it.
+  untrusted input — the trigger label gates *whether* an agent runs on it,
+  not what it may then reach — so which repos this deployment can write to
+  stays an operator's file, checked on the API side at dispatch and on the
+  git side at every fetch and push. The task repo is deliberately *not* on
+  that list: no sandbox ever clones it.
 - **An unusable directive parks the task, it does not fail it.** No
   `/repo` (and no configured `default_target_repo`), a malformed one, or a
-  repo the deployment can't reach: the orchestrator comments saying which
-  and applies the awaiting-reply label, and waits — the same state, and the
-  same trusted-reply promotion, an unanswered `ask_question` already uses.
-  Leaving the issue undispatched but unlabelled instead would redispatch an
-  identical failure every polling interval.
+  repo the deployment can't reach: the orchestrator comments saying which,
+  swaps the trigger label for the awaiting-reply label, and waits — the
+  same state, and the same trusted-reply promotion, an unanswered
+  `ask_question` already uses. Leaving the trigger label on instead would
+  redispatch an identical failure every polling interval.
 - **Directives are read from trusted comments too**, at the same
   `author_association` tier that can promote a question (owner, member,
   collaborator). Repairing a parked task is then a reply, not an edit plus
@@ -1242,14 +1227,8 @@ only in `grain/automation/`, which is exactly where the choice now lives.
   Moving the controller into a VM does not change that — it changes the
   *reach of a lesser compromise*, which is the common case.
 - **Prompt injection via issue content.** Anyone who can file an issue can
-  put text in front of the agent. Since [issue intake](#issue-intake)
-  became opt-out (`triage_label`) rather than opt-in, filing an issue is
-  enough on its own to get it dispatched unless something applies the
-  label first — weaker than "requiring a human to label each issue," which
-  is what the opt-in design guaranteed. Whoever operates the task repo is
-  responsible for keeping that gap closed where it matters: an automated
-  filer that sets `triage_label` on everything it creates, or branch
-  protection / restricted issue creation on the task repo itself.
+  put text in front of the agent. Requiring a human to label each issue is
+  the mitigation, not a guarantee.
 
 ## Operations
 
