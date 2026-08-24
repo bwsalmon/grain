@@ -189,7 +189,8 @@ class LibvirtAdapter(HostAdapter):
                  config_dir: Path | None = None,
                  admin_public_key_path: Path | None = None,
                  controller_public_key_path: Path | None = None,
-                 apparmor_rules_path: Path | None = None) -> None:
+                 apparmor_rules_path: Path | None = None,
+                 selinux_marker_path: Path | None = None) -> None:
         super().__init__(cluster, network)
         self.runner = runner
         self.config_dir = config_dir or Path("/var/lib/grain/instances")
@@ -208,6 +209,12 @@ class LibvirtAdapter(HostAdapter):
             apparmor_rules_path
             or Path("/etc/apparmor.d/local/abstractions/libvirt-qemu")
         )
+        # Existence, not content, is the whole check -- a real SELinux
+        # enforce/permissive system always has this kernel-exposed
+        # directory; a system with SELinux not built in doesn't. Injectable
+        # for the same reason apparmor_rules_path is: a test shouldn't
+        # depend on whether the machine actually running it has SELinux.
+        self.selinux_marker_path = selinux_marker_path or Path("/sys/fs/selinux")
         # Both host-local, deliberately not /data/secrets/... — /data lives
         # on the *controller* VM, and this adapter runs on the *host*, a
         # different machine (docs/design.md, "One host machine runs
@@ -255,14 +262,40 @@ class LibvirtAdapter(HostAdapter):
                          stdin=addition, check=True)
         self.runner.run(["systemctl", "reload", "apparmor"], check=False)
 
-    def _apparmor_dirs_for(self, spec: VmSpec) -> tuple[Path, ...]:
+    def _confinement_dirs_for(self, spec: VmSpec) -> tuple[Path, ...]:
         # spec.image is normally a real absolute path (the README: "name
         # the real path... via --image or cluster.toml"), but Cluster's own
         # bare-string default ("debian-12") resolves to a meaningless "."
-        # -- not worth allowlisting, and AppArmor rules are absolute paths
-        # anyway.
+        # -- not worth allowlisting, and neither AppArmor rules nor SELinux
+        # file contexts apply to relative paths anyway.
         image_dir = Path(spec.image).parent
         return (self.config_dir, image_dir) if image_dir.is_absolute() else (self.config_dir,)
+
+    def _ensure_selinux_allows(self, *dirs: Path) -> None:
+        """Found live: the actual confining layer on a real deployment
+        turned out to be SELinux, not AppArmor -- confirmed two ways in
+        the same failure: the journal entry carried
+        `_SELINUX_CONTEXT: "libvirtd (enforce)"`, and the per-VM AppArmor
+        profile itself was reported as `profile="unconfined"` (a real,
+        valid AppArmor state meaning no AppArmor restriction applies at
+        all). The AppArmor allowlist above was correctly implemented and
+        genuinely executed -- reloading confirmed in the log -- it was
+        just fixing an inactive layer.
+
+        sVirt (libvirt's SELinux integration) auto-assigns each VM's qemu
+        process a dynamic MCS category at start time, the same way
+        dynamic_ownership auto-chowns -- but only for files already
+        carrying the base `virt_image_t` type, which the packaged policy
+        only pre-labels for the default /var/lib/libvirt/images. A custom
+        path needs that base type set by hand. No-op if SELinux isn't
+        active at all (checked at the kernel level, not by looking for
+        userland tools -- those are already installed if enforce mode is
+        active in the first place, since something had to have set it up).
+        """
+        if not self.selinux_marker_path.is_dir():
+            return
+        for d in dirs:
+            self.runner.run(["chcon", "-R", "-t", "virt_image_t", str(d)], check=False)
 
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
@@ -270,7 +303,8 @@ class LibvirtAdapter(HostAdapter):
             raise RuntimeError(
                 f"{spec.name} already exists; use recreate() to replace it"
             )
-        self._ensure_apparmor_allows(*self._apparmor_dirs_for(spec))
+        dirs = self._confinement_dirs_for(spec)
+        self._ensure_apparmor_allows(*dirs)
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
         disk_path = self.config_dir / f"{spec.name}.qcow2"
@@ -278,6 +312,11 @@ class LibvirtAdapter(HostAdapter):
             ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
              "-b", spec.image, str(disk_path), f"{spec.disk_gb}G"]
         )
+        # After config_dir exists and disk_path is a real file, not before
+        # -- chcon -R on a directory that doesn't exist yet silently does
+        # nothing (start()'s own call still covers it either way, but no
+        # reason to rely on that as the only path).
+        self._ensure_selinux_allows(*dirs)
 
         meta_data_path = self.config_dir / f"{spec.name}-meta-data"
         user_data_path = self.config_dir / f"{spec.name}-user-data"
@@ -313,10 +352,12 @@ class LibvirtAdapter(HostAdapter):
         # Found live: create()'s own allowlisting isn't enough on its own --
         # a VM already defined from an earlier attempt (predating this
         # fix, or from a previous deploy generation) skips create()
-        # entirely and comes straight here, so the same check has to run
+        # entirely and comes straight here, so the same checks have to run
         # wherever a VM can actually be started, not just where it can be
         # created. Cheap and idempotent either way.
-        self._ensure_apparmor_allows(*self._apparmor_dirs_for(self.cluster.spec_of(name)))
+        dirs = self._confinement_dirs_for(self.cluster.spec_of(name))
+        self._ensure_apparmor_allows(*dirs)
+        self._ensure_selinux_allows(*dirs)
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "start", name])
 
     def stop(self, name: str) -> None:
