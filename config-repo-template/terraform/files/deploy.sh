@@ -26,6 +26,24 @@ readonly SECRET_WAIT_OPTIONAL=180
 log() { echo "deploy: $*"; }
 die() { echo "deploy: FATAL: $*" >&2; exit 1; }
 
+# curl's own --retry only covers curl; git has nothing equivalent, so
+# network-touching git commands get the same 3-attempts/5s-apart shape by
+# hand. A transient egress gap right at boot -- Cloud NAT not yet
+# programmed, a DNS blip -- would otherwise fail sync_source permanently
+# on its very first command, with no self-heal until config-sync's own
+# ~5-minute retry cycle came back around.
+retry() {
+  local attempt=1 max=3 delay=5
+  until "$@"; do
+    if [ "$attempt" -ge "$max" ]; then
+      return 1
+    fi
+    log "retrying ($attempt/$max): $*"
+    attempt=$((attempt + 1))
+    sleep "$delay"
+  done
+}
+
 md() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1"; }
 
 cleanup() { rm -rf "$RUNDIR"; }
@@ -122,10 +140,12 @@ sync_source() {
   log "syncing $GRAIN_REPO_URL @ $GRAIN_REF"
   if [ ! -d "$SRC/.git" ]; then
     rm -rf "$SRC"
-    git clone --quiet "$GRAIN_REPO_URL" "$SRC"
+    retry git clone --quiet "$GRAIN_REPO_URL" "$SRC" \
+      || die "could not clone $GRAIN_REPO_URL after 3 attempts"
   fi
   git -C "$SRC" remote set-url origin "$GRAIN_REPO_URL"
-  git -C "$SRC" fetch --quiet --prune --tags origin
+  retry git -C "$SRC" fetch --quiet --prune --tags origin \
+    || die "could not fetch $GRAIN_REPO_URL after 3 attempts"
   # grain_ref may be a branch, a tag, or a commit.
   if git -C "$SRC" rev-parse --verify --quiet "origin/$GRAIN_REF^{commit}" >/dev/null; then
     git -C "$SRC" checkout --quiet --detach "origin/$GRAIN_REF"

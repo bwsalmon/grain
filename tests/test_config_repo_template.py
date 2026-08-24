@@ -103,6 +103,21 @@ def test_deploy_sh_passes_the_ssh_timeout_to_grain_host_bootstrap():
     assert "BOOTSTRAP_SSH_TIMEOUT_SECONDS" in deploy_sh
 
 
+def test_sync_source_retries_its_git_commands():
+    """Found live: a real deploy failed with exit=128 (git's own
+    fatal-error convention) on what was very likely a transient egress
+    gap right at boot -- curl's fetch_base_image already retries 3x, but
+    git has no equivalent built in, so sync_source's clone/fetch had none
+    at all and failed permanently on the first hiccup.
+    """
+    deploy_sh = DEPLOY_SH.read_text()
+    sync_source = re.search(r"^sync_source\(\) \{.*?\n\}", deploy_sh, re.S | re.M)
+    assert sync_source, "sync_source() function not found"
+    body = sync_source.group(0)
+    assert "retry git clone" in body
+    assert "retry git -C" in body and "fetch" in body
+
+
 def test_startup_installs_ops_agent_and_ships_the_full_journal():
     """Found live: a real deploy failure was undiagnosable from CI's own
     guest-attribute summary (a bare "exit=N"), and journalctl -u
