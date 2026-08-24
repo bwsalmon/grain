@@ -1,12 +1,14 @@
 # The host's identity. Everything the VM is allowed to do in GCP is this
-# account's roles plus the two secret-level grants in secrets.tf -- edit
-# vm_service_account_roles in config/grain.tfvars and the change arrives as
-# a reviewable diff.
+# account's roles -- edit vm_service_account_roles in config/grain.tfvars
+# and the change arrives as a reviewable diff. It needs no Secret Manager
+# grant: the two runtime credentials arrive as instance metadata, pushed
+# there directly by the deploy workflow, and the host reads its own
+# metadata with no GCP credential at all.
 
 resource "google_service_account" "host" {
   account_id   = "${var.name_prefix}-host"
   display_name = "grain host VM (${var.name_prefix})"
-  description  = "Attached to the grain host instance. Reads its own deploy secrets; nothing else by default."
+  description  = "Attached to the grain host instance. Holds no secret grant; its two deploy credentials arrive as instance metadata instead."
 }
 
 resource "google_project_iam_member" "host" {

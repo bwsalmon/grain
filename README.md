@@ -275,9 +275,10 @@ That repo is also the task repo: an issue filed there and labelled
 that serves it are one thing to set up, not two.
 
 The GitHub token and the Claude Code token live in its Actions secrets,
-which hand them to Secret Manager once; the host reads them back with its
-own instance identity, so no workflow and no runner ever holds a running
-credential — the arrangement
+which the deploy workflow pushes straight into the host's own instance
+metadata; the host reads them back locally, with no GCP credential of its
+own, so no separate GCP service ever holds them and no runner or SSH
+session ever touches the host — the arrangement
 [`docs/design.md`](docs/design.md#where-credentials-should-live) prefers.
 Everything else — machine type, sandbox count, target repos, IAM roles —
 is a diff you review before it ships.

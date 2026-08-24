@@ -59,8 +59,8 @@ Type=simple
 ExecStart=/opt/grain-deploy/config-sync.sh
 Restart=always
 RestartSec=10
-# The deploy drives libvirt, writes /var/lib/grain, and reads secrets from
-# Secret Manager with the instance's own identity. It needs to be root.
+# The deploy drives libvirt, writes /var/lib/grain, and reads secrets
+# from its own instance metadata. It needs to be root.
 User=root
 
 [Install]

@@ -68,7 +68,6 @@ gcloud services enable --project="$PROJECT_ID" \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   iap.googleapis.com \
-  secretmanager.googleapis.com \
   serviceusage.googleapis.com \
   storage.googleapis.com \
   sts.googleapis.com
@@ -91,14 +90,15 @@ fi
 
 say "Granting the deployer what Terraform needs"
 # Deliberately not owner/editor. Each role here maps to something in
-# terraform/: the instance and network, the host's service account,
-# the IAM bindings that account gets, and its two secrets.
+# terraform/: the instance and network, the host's service account, and
+# the IAM bindings that account gets. No Secret Manager role: the two
+# runtime credentials go straight into instance metadata, which
+# compute.admin already covers.
 for role in \
   roles/compute.admin \
   roles/iam.serviceAccountAdmin \
   roles/iam.serviceAccountUser \
   roles/resourcemanager.projectIamAdmin \
-  roles/secretmanager.admin \
   roles/serviceusage.serviceUsageConsumer
 do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
@@ -171,9 +171,10 @@ cat <<DONE
      gh secret set GRAIN_CLAUDE_CODE_OAUTH_TOKEN --repo ${GITHUB_REPO}
 
    The last two are grain's own runtime credentials -- a GitHub token for
-   the repos it works on, and the output of \`claude setup-token\`. They are
-   read once by the deploy workflow, written to Secret Manager, and from
-   then on the host reads them with its own identity.
+   the repos it works on, and the output of \`claude setup-token\`. The
+   deploy workflow reads them once and pushes them straight into the
+   host's own instance metadata; nothing else in the project ever holds
+   them.
 
 Then push to main.
 DONE

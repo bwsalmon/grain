@@ -4,10 +4,11 @@
 # says, and a re-run after a failure resumes rather than starting over --
 # the same property `grain host bootstrap` has.
 #
-# Nothing here is secret. The two credentials it needs are read from Secret
-# Manager with the instance's *own* service account, never handed to it by
-# CI, and they exist on disk only inside /run (tmpfs), 0600, for the
-# seconds it takes grain to place them on the controller's /data.
+# Nothing here is secret. The two credentials it needs arrive as instance
+# metadata -- pushed straight there by the deploy workflow, read back with
+# no GCP credential at all -- and they exist on disk only inside /run
+# (tmpfs), 0600, for the seconds it takes grain to place them on the
+# controller's /data.
 set -euo pipefail
 
 readonly MD="http://metadata.google.internal/computeMetadata/v1"
@@ -17,6 +18,8 @@ readonly IMAGE_DIR="$DATA_MNT/images"
 readonly IMAGE_PATH="$IMAGE_DIR/debian-12.qcow2"
 readonly RUNDIR="/run/grain-deploy"
 readonly CLUSTER_FILE="$DATA_MNT/cluster.toml"
+readonly GITHUB_TOKEN_ATTR="grain-github-token"
+readonly CLAUDE_TOKEN_ATTR="grain-claude-token"
 readonly SECRET_WAIT_REQUIRED=600
 readonly SECRET_WAIT_OPTIONAL=180
 
@@ -48,9 +51,8 @@ def sh(name, value):
     return f"{name}={shlex.quote(str(value))}\n"
 
 out = ""
-for key in ("project_id", "grain_repo_url", "grain_ref", "debian_image_url",
-            "task_repo", "default_target_repo", "credential_name",
-            "github_token_secret", "claude_token_secret"):
+for key in ("grain_repo_url", "grain_ref", "debian_image_url",
+            "task_repo", "default_target_repo", "credential_name"):
     out += sh(key.upper(), cfg.get(key, "") or "")
 targets = cfg.get("target_repos") or []
 out += "TARGET_REPOS=(" + " ".join(shlex.quote(t) for t in targets) + ")\n"
@@ -151,28 +153,14 @@ write_cluster_file() {
 
 # ---------------------------------------------------------------- secrets ---
 
-# Keep tokens off the process table: curl reads both the header and the URL
-# from a config file on stdin rather than argv.
-access_secret() {
-  local name="$1" token response
-  token="$(md instance/service-accounts/default/token \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')" \
-    || return 1
-  response="$(printf 'silent\nfail\nshow-error\nheader = "Authorization: Bearer %s"\nurl = "%s"\n' \
-    "$token" \
-    "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$name/versions/latest:access" \
-    | curl --config -)" || return 1
-  printf '%s' "$response" \
-    | python3 -c 'import base64,json,sys; sys.stdout.write(base64.b64decode(json.load(sys.stdin)["payload"]["data"]).decode())'
-}
-
-# CI creates the secret container (Terraform) and pushes its value
-# (workflow) in that order, so on a first deploy the version can be a few
-# seconds behind the instance. Wait, rather than fail a race.
+# The deploy workflow adds these to instance metadata with `gcloud compute
+# instances add-metadata` right after the instance exists, so on a first
+# deploy the key can be a few seconds behind config-sync waking up. Wait,
+# rather than fail a race.
 fetch_secret_to_file() {
-  local name="$1" path="$2" budget="$3" waited=0
+  local attr="$1" path="$2" budget="$3" waited=0
   while true; do
-    if access_secret "$name" > "$path" 2>/dev/null && [ -s "$path" ]; then
+    if md "instance/attributes/$attr" > "$path" 2>/dev/null && [ -s "$path" ]; then
       chmod 0600 "$path"
       return 0
     fi
@@ -180,7 +168,7 @@ fetch_secret_to_file() {
     if [ "$waited" -ge "$budget" ]; then
       return 1
     fi
-    log "secret '$name' has no readable version yet; waiting ($waited/${budget}s)"
+    log "metadata key '$attr' not set yet; waiting ($waited/${budget}s)"
     sleep 15
     waited=$((waited + 15))
   done
@@ -194,8 +182,8 @@ run_bootstrap() {
   local args=(--cluster-file "$CLUSTER_FILE" host bootstrap --task-repo "$TASK_REPO")
   local repo
 
-  fetch_secret_to_file "$GITHUB_TOKEN_SECRET" "$gh_file" "$SECRET_WAIT_REQUIRED" \
-    || die "no readable version of secret '$GITHUB_TOKEN_SECRET'; set GRAIN_GITHUB_TOKEN in the repo's Actions secrets"
+  fetch_secret_to_file "$GITHUB_TOKEN_ATTR" "$gh_file" "$SECRET_WAIT_REQUIRED" \
+    || die "no '$GITHUB_TOKEN_ATTR' in instance metadata; set GRAIN_GITHUB_TOKEN in the repo's Actions secrets"
 
   for repo in "${TARGET_REPOS[@]}"; do
     args+=(--target-repo "$repo")
@@ -208,10 +196,10 @@ run_bootstrap() {
   fi
   args+=(--github-token-file "$gh_file")
 
-  if fetch_secret_to_file "$CLAUDE_TOKEN_SECRET" "$claude_file" "$SECRET_WAIT_OPTIONAL"; then
+  if fetch_secret_to_file "$CLAUDE_TOKEN_ATTR" "$claude_file" "$SECRET_WAIT_OPTIONAL"; then
     args+=(--claude-token-file "$claude_file")
   else
-    log "WARNING: no Claude Code OAuth token in Secret Manager; deploying without one."
+    log "WARNING: no Claude Code OAuth token in instance metadata; deploying without one."
     log "         Set GRAIN_CLAUDE_CODE_OAUTH_TOKEN in Actions secrets and push again;"
     log "         until then the automation service cannot dispatch a task."
   fi

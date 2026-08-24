@@ -6,10 +6,10 @@ locals {
   task_repo = var.task_repo != "" ? var.task_repo : var.config_repo
 
   # Everything the on-VM deploy script needs, and nothing it does not: no
-  # secret values, only the names of the secrets to read with the
-  # instance's own identity.
+  # secret values here either -- the two runtime credentials arrive
+  # separately, pushed straight into instance metadata by the deploy
+  # workflow after `terraform apply` returns, never through Terraform.
   grain_config = {
-    project_id          = var.project_id
     grain_repo_url      = var.grain_repo_url
     grain_ref           = var.grain_ref
     debian_image_url    = var.debian_image_url
@@ -19,8 +19,6 @@ locals {
     target_repos        = var.target_repos
     default_target_repo = var.default_target_repo
     credential_name     = var.credential_name
-    github_token_secret = google_secret_manager_secret.github_token.secret_id
-    claude_token_secret = google_secret_manager_secret.claude_token.secret_id
     deploy_timeout_secs = var.deploy_timeout_minutes * 60
   }
 }
@@ -156,10 +154,15 @@ resource "google_compute_instance" "host" {
       )
       error_message = "default_target_repo must be one of target_repos (or, with target_repos empty, the task repo itself)."
     }
-  }
 
-  depends_on = [
-    google_secret_manager_secret_iam_member.host_reads_github_token,
-    google_secret_manager_secret_iam_member.host_reads_claude_token,
-  ]
+    # grain-github-token and grain-claude-token are never declared here --
+    # the deploy workflow adds them directly with `gcloud compute
+    # instances add-metadata` after this resource exists, so the value
+    # never passes through Terraform or lands in the state file. Without
+    # this, the next apply would see them as drift and remove them.
+    ignore_changes = [
+      metadata["grain-github-token"],
+      metadata["grain-claude-token"],
+    ]
+  }
 }

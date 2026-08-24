@@ -23,16 +23,6 @@ output "agent_service_account" {
   description = "The narrow identity sandboxed agents are meant to impersonate, when configured."
 }
 
-output "github_token_secret" {
-  value       = google_secret_manager_secret.github_token.secret_id
-  description = "Secret Manager id CI pushes the GitHub token into."
-}
-
-output "claude_token_secret" {
-  value       = google_secret_manager_secret.claude_token.secret_id
-  description = "Secret Manager id CI pushes the Claude Code OAuth token into."
-}
-
 output "ssh_command" {
   value       = "gcloud compute ssh ${google_compute_instance.host.name} --zone ${var.zone} --project ${var.project_id} --tunnel-through-iap"
   description = "How to get a shell on the host with the default IAP-only firewall."

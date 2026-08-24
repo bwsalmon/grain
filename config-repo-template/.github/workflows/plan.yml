@@ -1,6 +1,6 @@
 # What a pull request against this repo would change in GCP. Read-only:
-# it never applies, never touches Secret Manager, and never bumps the
-# deploy generation.
+# it never applies, never pushes a secret, and never bumps the deploy
+# generation.
 name: plan
 
 on:
