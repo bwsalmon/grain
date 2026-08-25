@@ -4,7 +4,7 @@
 # says, and a re-run after a failure resumes rather than starting over --
 # the same property `grain host bootstrap` has.
 #
-# Nothing here is secret. The two credentials it needs arrive as instance
+# Nothing here is secret. The credentials it needs arrive as instance
 # metadata -- pushed straight there by the deploy workflow, read back with
 # no GCP credential at all -- and they exist on disk only inside /run
 # (tmpfs), 0600, for the seconds it takes grain to place them on the
@@ -20,6 +20,11 @@ readonly RUNDIR="/run/grain-deploy"
 readonly CLUSTER_FILE="$DATA_MNT/cluster.toml"
 readonly GITHUB_TOKEN_ATTR="grain-github-token"
 readonly CLAUDE_TOKEN_ATTR="grain-claude-token"
+# Minted fresh by the deploy workflow on every run that has an agent
+# service account to mint one for -- never a long-lived Actions secret, so
+# there is no wait budget worth calling "required": if
+# agent_service_account_email is unset, one will just never arrive.
+readonly GCP_KEY_ATTR="grain-agent-service-account-key"
 readonly SECRET_WAIT_REQUIRED=600
 readonly SECRET_WAIT_OPTIONAL=180
 
@@ -71,7 +76,7 @@ def sh(name, value):
 out = ""
 for key in ("grain_repo_url", "grain_ref", "debian_image_url",
             "task_repo", "default_target_repo", "credential_name",
-            "bootstrap_ssh_timeout_seconds"):
+            "bootstrap_ssh_timeout_seconds", "agent_service_account_email"):
     out += sh(key.upper(), cfg.get(key, "") or "")
 targets = cfg.get("target_repos") or []
 out += "TARGET_REPOS=(" + " ".join(shlex.quote(t) for t in targets) + ")\n"
@@ -225,6 +230,7 @@ dump_storage_diagnostics() {
 run_bootstrap() {
   local gh_file="$RUNDIR/github.token"
   local claude_file="$RUNDIR/claude.token"
+  local gcp_key_file="$RUNDIR/gcp-service-account.json"
   local args=(--cluster-file "$CLUSTER_FILE" host bootstrap --task-repo "$TASK_REPO")
   local repo
 
@@ -252,6 +258,22 @@ run_bootstrap() {
     log "WARNING: no Claude Code OAuth token in instance metadata; deploying without one."
     log "         Set GRAIN_CLAUDE_CODE_OAUTH_TOKEN in Actions secrets and push again;"
     log "         until then the automation service cannot dispatch a task."
+  fi
+
+  # agent_service_account_email is non-secret config (published in
+  # grain-config, like task_repo); the key itself is the one part of this
+  # that is secret, minted fresh by the deploy workflow and pushed
+  # separately. Empty email means agent_service_account_roles was never
+  # set -- no key will ever arrive, so there is nothing to wait for.
+  if [ -n "$AGENT_SERVICE_ACCOUNT_EMAIL" ]; then
+    if fetch_secret_to_file "$GCP_KEY_ATTR" "$gcp_key_file" "$SECRET_WAIT_OPTIONAL"; then
+      args+=(--gcp-service-account-key-file "$gcp_key_file"
+              --gcp-agent-service-account-email "$AGENT_SERVICE_ACCOUNT_EMAIL"
+              --gcp-project-id "$(md project/project-id)")
+    else
+      log "WARNING: agent_service_account_roles is set but no GCP service account key"
+      log "         was found in instance metadata; sandboxed agents will have no GCP access."
+    fi
   fi
 
   # The token *paths* are fine to log; the files themselves are 0600 on tmpfs.

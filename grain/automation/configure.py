@@ -26,6 +26,14 @@ DATA_CONFIG = "/data/config"
 DATA_SECRETS_GITHUB = "/data/secrets/github"
 CLAUDE_TOKEN_PATH = "/data/secrets/claude-oauth-token"
 SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
+# Must match grain/metadata/config.py's MetadataConfig.key_path default and
+# the "metadata-server.json" name build_launcher's build_launcher() loads --
+# this module and that one are never imported into each other (SSH-remote
+# writes here, local file I/O there), so the paths can only be kept in sync
+# by hand; a rename on one side and not the other is silent until a real
+# `grain metadata start` fails to find its config.
+GCP_SERVICE_ACCOUNT_KEY_PATH = "/data/secrets/gcp-service-account.json"
+METADATA_SERVER_CONFIG_PATH = "/data/config/metadata-server.json"
 
 
 def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
@@ -146,6 +154,41 @@ def configure_claude_token(runner: Runner, token: str) -> None:
     _write_remote_file(runner, CLAUDE_TOKEN_PATH, stripped, mode="600")
     _write_remote_file(runner, CONTROLLER_AGENT_TOKEN_PATH, stripped, mode="600",
                         owner="grain-agent")
+
+
+def configure_gcp_service_account(runner: Runner, key: str, *, service_account_email: str,
+                                   project_id: str, numeric_project_id: int = 0,
+                                   metadata_user: str = "grain-metadata") -> None:
+    """Places the two files `grain metadata start` needs and nothing wrote
+    before this (docs/design.md's "GCP credentials", docs/roadmap.md item
+    4's remaining gap): the impersonation-source key, owned by
+    `metadata_user` so only the metadata service can read it, and
+    `MetadataConfig`'s own JSON file naming the narrow account every
+    instance impersonates.
+
+    `key` is minted fresh per deploy and never lands in this repo or
+    Actions secrets long-lived (config-repo-template's deploy.yml creates
+    it via the deployer's own WIF session and immediately invalidates the
+    previous one) -- the short-lived-credential principle docs/design.md
+    argues for at the *sandbox* layer applied one layer up, to the source
+    key itself.
+
+    Deliberately does not pass `owner=` to `_write_remote_file`: that
+    helper also chowns the file's *parent*, which is correct for
+    `CONTROLLER_AGENT_TOKEN_PATH` (a private grain-agent home directory)
+    but wrong here -- `/data/secrets` is shared with the GitHub and
+    Claude credentials, which must stay root-owned. Only the file itself
+    is handed to `metadata_user`.
+    """
+    _write_remote_file(runner, GCP_SERVICE_ACCOUNT_KEY_PATH, key.strip() + "\n", mode="640")
+    runner.run(["sudo", "chown", f"{metadata_user}:{metadata_user}", GCP_SERVICE_ACCOUNT_KEY_PATH])
+    metadata_config = json.dumps({
+        "service_account_email": service_account_email,
+        "project_id": project_id,
+        "numeric_project_id": numeric_project_id,
+        "metadata_user": metadata_user,
+    }, indent=2) + "\n"
+    _write_remote_file(runner, METADATA_SERVER_CONFIG_PATH, metadata_config, mode="644")
 
 
 def ensure_sandbox_tokens(runner: Runner, sandbox_names: list[str]) -> None:

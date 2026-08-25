@@ -28,7 +28,8 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_claude_token, configure_github_credential, configure_repo,
+    configure_claude_token, configure_gcp_service_account, configure_github_credential,
+    configure_repo,
     credential_repos,
 )
 from .automation.core import Orchestrator
@@ -497,6 +498,20 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
         )
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
+    if args.gcp_service_account_key_file:
+        if not (args.gcp_agent_service_account_email and args.gcp_project_id):
+            raise SystemExit(
+                "--gcp-service-account-key-file requires --gcp-agent-service-account-email "
+                "and --gcp-project-id"
+            )
+        key = (
+            sys.stdin.read() if args.gcp_service_account_key_file == "-"
+            else Path(args.gcp_service_account_key_file).read_text()
+        )
+        configure_gcp_service_account(
+            ssh, key, service_account_email=args.gcp_agent_service_account_email,
+            project_id=args.gcp_project_id, numeric_project_id=args.gcp_numeric_project_id,
+        )
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
 
@@ -519,11 +534,21 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         Path(args.claude_token_file).read_text()
         if args.claude_token_file else None
     )
+    gcp_service_account_key = None
+    if args.gcp_service_account_key_file:
+        gcp_service_account_key = (
+            sys.stdin.read() if args.gcp_service_account_key_file == "-"
+            else Path(args.gcp_service_account_key_file).read_text()
+        )
     task_repo, targets, default_target = _repo_args(args)
     config = BootstrapConfig(
         task_repo=task_repo, targets=tuple(targets),
         default_target_repo=default_target, github_token=github_token,
         credential_name=args.credential_name, claude_token=claude_token,
+        gcp_service_account_key=gcp_service_account_key,
+        gcp_agent_service_account_email=args.gcp_agent_service_account_email,
+        gcp_project_id=args.gcp_project_id,
+        gcp_numeric_project_id=args.gcp_numeric_project_id,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
@@ -776,6 +801,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller and inject into the "
                          "grain-agent account's environment at dispatch time")
+    p.add_argument("--gcp-service-account-key-file",
+                    help="path to a file holding the grain-agent GCP service account's JSON "
+                         "key, or '-' for stdin -- the impersonation source every sandbox's "
+                         "metadata server reads; requires --gcp-agent-service-account-email "
+                         "and --gcp-project-id")
+    p.add_argument("--gcp-agent-service-account-email",
+                    help="email of the narrow GCP service account grain's metadata servers "
+                         "impersonate -- required with --gcp-service-account-key-file")
+    p.add_argument("--gcp-project-id",
+                    help="GCP project id -- required with --gcp-service-account-key-file")
+    p.add_argument("--gcp-numeric-project-id", type=int, default=0,
+                    help="GCP numeric project id (default: 0, i.e. omitted)")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
@@ -886,6 +923,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-token-file",
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller")
+    p.add_argument("--gcp-service-account-key-file",
+                    help="path to a file holding the grain-agent GCP service account's JSON "
+                         "key, or '-' for stdin -- requires --gcp-agent-service-account-email "
+                         "and --gcp-project-id")
+    p.add_argument("--gcp-agent-service-account-email",
+                    help="email of the narrow GCP service account grain's metadata servers "
+                         "impersonate -- required with --gcp-service-account-key-file")
+    p.add_argument("--gcp-project-id",
+                    help="GCP project id -- required with --gcp-service-account-key-file")
+    p.add_argument("--gcp-numeric-project-id", type=int, default=0,
+                    help="GCP numeric project id (default: 0, i.e. omitted)")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")

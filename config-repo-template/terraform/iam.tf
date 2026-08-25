@@ -41,3 +41,18 @@ resource "google_service_account_iam_member" "host_impersonates_agent" {
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${google_service_account.host.email}"
 }
+
+# Lets the deploy workflow mint (and invalidate) the agent account's own
+# key -- the impersonation *source* grain's metadata servers read, never
+# handed out directly (see grain's docs/design.md, "GCP credentials").
+# scripts/bootstrap-gcp.sh grants the deployer project-wide
+# serviceAccountAdmin/serviceAccountUser, but neither of those covers key
+# management (iam.serviceAccountKeys.*) -- that needs its own role, and
+# scoping it to just this one account rather than granting it project-wide
+# is the whole point of doing it here instead of in bootstrap-gcp.sh.
+resource "google_service_account_iam_member" "deployer_manages_agent_keys" {
+  count              = length(var.agent_service_account_roles) > 0 ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = "serviceAccount:${var.name_prefix}-deployer@${var.project_id}.iam.gserviceaccount.com"
+}

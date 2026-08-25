@@ -331,6 +331,31 @@ def test_controller_configure_restarts_the_proxy_after_the_credential_write_too(
     )
 
 
+def test_dry_run_controller_configure_with_a_gcp_service_account_key_file(capsys, tmp_path):
+    key_file = tmp_path / "gcp-key.json"
+    key_file.write_text('{"type": "service_account"}\n')
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--gcp-service-account-key-file", str(key_file),
+         "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com",
+         "--gcp-project-id", "acme"],
+        capsys,
+    )
+    assert "dd of=/data/secrets/gcp-service-account.json" in out
+    assert "dd of=/data/config/metadata-server.json" in out
+    for line in out.splitlines():
+        if line.startswith("+ ssh") and "dd of=" in line:
+            assert "service_account" not in line
+
+
+def test_controller_configure_gcp_key_requires_email_and_project_id(tmp_path):
+    key_file = tmp_path / "gcp-key.json"
+    key_file.write_text("{}")
+    with pytest.raises(SystemExit):
+        main(["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+              "--gcp-service-account-key-file", str(key_file)])
+
+
 def test_repo_without_a_slash_is_rejected():
     with pytest.raises(SystemExit, match="owner/name"):
         main(["--dry-run", "controller", "configure", "--repo", "not-a-repo-slug"])
@@ -422,6 +447,27 @@ def test_dry_run_bootstrap_runs_every_stage_without_touching_a_real_vm(tmp_path,
     assert "+ virsh -c qemu:///system define" in out
     assert "grain-git-proxy.service" in out
     assert "grain-automation.timer" in out
+
+
+def test_dry_run_bootstrap_with_a_gcp_service_account_key_starts_the_metadata_server(
+    tmp_path, capsys,
+):
+    key_file = tmp_path / "gcp-key.json"
+    key_file.write_text('{"type": "service_account"}\n')
+    out = run(
+        ["--dry-run", "--sandboxes", "1", "--config-dir", str(tmp_path / "instances"),
+         "--admin-ssh-public-key", str(tmp_path / "admin-ssh.pub"),
+         "--controller-ssh-public-key", str(tmp_path / "controller-ssh.pub"),
+         "host", "bootstrap", "--repo", "acme/widgets",
+         "--admin-ssh-private-key", str(tmp_path / "admin-ssh"),
+         "--gcp-service-account-key-file", str(key_file),
+         "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com",
+         "--gcp-project-id", "acme"],
+        capsys,
+    )
+    assert "dd of=/data/secrets/gcp-service-account.json" in out
+    assert "dd of=/data/config/metadata-server.json" in out
+    assert "metadata start sandbox-0" in out
 
 
 def test_sandbox_login_dry_run_prints_the_ssh_command_and_does_not_exec(capsys):

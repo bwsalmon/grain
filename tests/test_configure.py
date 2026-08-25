@@ -4,7 +4,8 @@ import shlex
 from pathlib import Path
 
 from grain.automation.configure import (
-    configure_claude_token, configure_github_credential, configure_repo,
+    configure_claude_token, configure_gcp_service_account, configure_github_credential,
+    configure_repo,
     ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
@@ -190,5 +191,78 @@ def test_configure_claude_token_is_never_in_argv():
     ssh, inner = make_ssh()
     secret = "sk-ant-oat01-supersecretvalue"
     configure_claude_token(ssh, secret)
+    for argv, _ in inner.calls:
+        assert all(secret not in arg for arg in argv)
+
+
+def test_configure_gcp_service_account_writes_the_key_mode_640():
+    ssh, inner = make_ssh()
+    configure_gcp_service_account(
+        ssh, '{"type": "service_account"}\n',
+        service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme",
+    )
+    content = stdin_for(inner, "/data/secrets/gcp-service-account.json")
+    assert content == '{"type": "service_account"}\n'  # stripped, single trailing newline
+    assert any(
+        "sudo chmod 640 /data/secrets/gcp-service-account.json" in c for c in inner.commands
+    )
+
+
+def test_configure_gcp_service_account_chowns_only_the_file_not_the_shared_secrets_dir():
+    """Found live while writing this: _write_remote_file's owner= kwarg
+    also chowns the file's *parent*, which is correct for
+    CONTROLLER_AGENT_TOKEN_PATH (a private grain-agent home directory) but
+    would be wrong here -- /data/secrets is shared with the GitHub and
+    Claude credentials, which must stay root-owned.
+    """
+    ssh, inner = make_ssh()
+    configure_gcp_service_account(
+        ssh, "{}", service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme",
+    )
+    chown_commands = [argv[-1] for argv, _ in inner.calls if "chown" in argv[-1]]
+    assert chown_commands == [
+        "sudo chown grain-metadata:grain-metadata /data/secrets/gcp-service-account.json"
+    ]  # exactly one chown, on the file -- never on the shared /data/secrets directory
+
+
+def test_configure_gcp_service_account_honours_a_custom_metadata_user():
+    ssh, inner = make_ssh()
+    configure_gcp_service_account(
+        ssh, "{}", service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme", metadata_user="custom-metadata",
+    )
+    assert any(
+        "sudo chown custom-metadata:custom-metadata /data/secrets/gcp-service-account.json" in c
+        for c in inner.commands
+    )
+
+
+def test_configure_gcp_service_account_writes_the_metadata_config():
+    ssh, inner = make_ssh()
+    configure_gcp_service_account(
+        ssh, "{}", service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme", numeric_project_id=123456,
+    )
+    config = json.loads(stdin_for(inner, "/data/config/metadata-server.json"))
+    assert config == {
+        "service_account_email": "grain-agent@acme.iam.gserviceaccount.com",
+        "project_id": "acme",
+        "numeric_project_id": 123456,
+        "metadata_user": "grain-metadata",
+    }
+    assert any(
+        "sudo chmod 644 /data/config/metadata-server.json" in c for c in inner.commands
+    )
+
+
+def test_configure_gcp_service_account_key_is_never_in_argv():
+    ssh, inner = make_ssh()
+    secret = '{"private_key": "supersecretvalue"}'
+    configure_gcp_service_account(
+        ssh, secret, service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme",
+    )
     for argv, _ in inner.calls:
         assert all(secret not in arg for arg in argv)

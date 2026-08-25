@@ -291,3 +291,93 @@ def test_claude_credentials_reach_the_controllers_grain_agent_account_not_any_sa
         and shlex.join(argv).startswith(sandbox_prefix)
     ]
     assert sandbox_claude_calls == []
+
+
+def test_gcp_service_account_is_only_configured_when_supplied(env):
+    """Mirrors test_github_token_is_only_configured_when_supplied -- a bare
+    re-run with no key must not try to place one or start any metadata
+    server.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not any("gcp-service-account.json" in c for c in runner.commands)
+    assert not any("metadata start" in c for c in runner.commands)
+
+
+def test_gcp_key_reaches_the_controller_and_starts_each_sandboxs_metadata_server(env):
+    """Found live as docs/roadmap.md item 4's remaining gap: nothing in
+    `grain host bootstrap` ever placed the key or started `grain metadata
+    start` for a sandbox, even when Terraform-side wiring supplied one.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets",
+        gcp_service_account_key='{"type": "service_account"}',
+        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        gcp_project_id="acme",
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    assert any(
+        c.startswith(controller_prefix) and "gcp-service-account.json" in c
+        for c in runner.commands
+    )
+    assert any(
+        c.startswith(controller_prefix)
+        and "cd /opt/grain && python3 -m grain.cli --data-dir /data metadata start sandbox-0" in c
+        for c in runner.commands
+    )
+
+
+def test_metadata_server_start_is_skipped_when_already_active(env):
+    """MetadataLauncher.start()'s own docstring: systemd-run refuses to
+    reuse a unit name still active, so a bootstrap re-run has to check
+    first -- the same idempotency contract _ensure_started already
+    guarantees for the VM itself.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    runner.expect(
+        f"{controller_prefix} -- {shlex.quote('sudo systemctl is-active grain-metadata-sandbox-0')}",
+        stdout="active\n",
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets", gcp_service_account_key="{}",
+        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        gcp_project_id="acme",
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not any("metadata start sandbox-0" in c for c in runner.commands)
+
+
+def test_bootstrap_raises_when_gcp_key_given_without_email_or_project_id(env):
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets", gcp_service_account_key="{}",
+        admin_private_key_path=admin_private,
+    )
+    with pytest.raises(ValueError):
+        bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
