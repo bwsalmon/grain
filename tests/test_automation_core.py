@@ -63,9 +63,24 @@ def pr_detail_json(number: int, head_ref: str = "feature-x", base_ref: str = "ma
     }
 
 
-def pr_flow_response(pr_number: int) -> list[ApiResponse]:
+DEFAULT_COMMIT_MESSAGE = (
+    "Fix the frobnicator\n\nRewrites the frobnicator to handle empty input "
+    "instead of raising."
+)
+
+
+def branch_json(message: str = DEFAULT_COMMIT_MESSAGE, sha: str = "deadbeef") -> dict:
+    """The `GET .../branches/{branch}` response shape `get_branch_head`
+    reads -- `commit.sha` and `commit.commit.message`, nested exactly as
+    GitHub's own branches endpoint returns them (bwsalmon/agents#79).
+    """
+    return {"commit": {"sha": sha, "commit": {"message": message}}}
+
+
+def pr_flow_response(pr_number: int, *, commit_message: str = DEFAULT_COMMIT_MESSAGE) -> list[ApiResponse]:
     """The five responses one `_finish_succeeded_issue` call consumes, in
-    exact call order: `branch_exists` (200 -> the branch is really there),
+    exact call order: `get_branch_head` (200 -> the branch is really there,
+    with its head commit's own message, bwsalmon/agents#79),
     `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
     `add_label` (bwsalmon/agents#54 -- `completed_label` goes on the moment
@@ -82,7 +97,7 @@ def pr_flow_response(pr_number: int) -> list[ApiResponse]:
     handful runs in, for every open-PR record a test's outcome(s) produce.
     """
     return [
-        ApiResponse(200, {}, b"{}"),
+        ApiResponse(200, {}, json.dumps(branch_json(commit_message)).encode()),
         ApiResponse(200, {}, json.dumps(issue_json(pr_number)).encode()),
         ApiResponse(201, {}, json.dumps(
             {"number": pr_number, "html_url": f"https://github.com/o/r/pull/{pr_number}"}
@@ -670,6 +685,10 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     # bwsalmon/agents#4: the issue's own title rides along, not just its
     # number, so a PR is identifiable from the list view alone.
     assert sent["title"] == "🤖 grain: o/r#5: issue 42"
+    # bwsalmon/agents#79: the body leads with the pushed branch's own head
+    # commit message -- a real account of the change -- rather than only
+    # generic metadata.
+    assert sent["body"].startswith(DEFAULT_COMMIT_MESSAGE)
     assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("opened PR o/r#42" in o for o in outcomes)

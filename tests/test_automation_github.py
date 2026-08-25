@@ -3,8 +3,8 @@ import json
 import pytest
 
 from grain.automation.github import (
-    ApiResponse, Comment, DryRunGitHubClient, FakeTransport, GitHubClient, GitHubError,
-    PullRequest, PullRequestDetail, ReviewComment,
+    ApiResponse, BranchHead, Comment, DryRunGitHubClient, FakeTransport, GitHubClient,
+    GitHubError, PullRequest, PullRequestDetail, ReviewComment,
 )
 
 
@@ -140,6 +140,37 @@ def test_branch_exists_raises_on_other_errors():
     transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
     with pytest.raises(GitHubError):
         GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1")
+
+
+def test_get_branch_head_returns_the_sha_and_message_on_200():
+    body = json.dumps(
+        {"commit": {"sha": "abc123", "commit": {"message": "Fix the thing\n\nDetails."}}}
+    ).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    head = GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1")
+    assert head == BranchHead(sha="abc123", message="Fix the thing\n\nDetails.")
+
+
+def test_get_branch_head_returns_none_on_404():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    assert GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1") is None
+
+
+def test_get_branch_head_raises_on_other_errors():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1")
+
+
+def test_dry_run_client_passes_get_branch_head_through():
+    body = json.dumps(
+        {"commit": {"sha": "abc123", "commit": {"message": "Fix the thing"}}}
+    ).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+    assert dry.get_branch_head("o", "r", "grain/issue-1") == BranchHead(
+        sha="abc123", message="Fix the thing"
+    )
 
 
 def test_create_pull_request_posts_head_base_and_title():
