@@ -91,6 +91,18 @@ install -d -m0755 /data/state/automation
 install -d -m0755 /data/state/automation/units
 install -d -m0755 /data/state/git-proxy
 install -d -m0755 /data/state/metadata-server
+# Unlike its two siblings above -- git-proxy and automation, both written
+# only by processes that run as root -- this one is written by
+# `gce_metadata_server` itself, which `grain/metadata/launcher.py` starts
+# as the unprivileged `grain-metadata` user. `-logTarget` is a plain file
+# path the binary opens with O_CREAT|O_WRONLY (grain/metadata/config.py's
+# docstring), which needs write on the *directory*, not just the file --
+# root:root 0755 grants grain-metadata no such thing. Left root-owned like
+# its siblings, every instance would fail at startup on its first log
+# write, invisibly: `systemd-run` only confirms the unit was submitted,
+# never that the process it started kept running, so nothing here would
+# surface the failure -- the metadata port would simply never answer.
+chown grain-metadata:grain-metadata /data/state/metadata-server
 # /data/secrets is 0711 (traverse, not list) rather than 0700 so that
 # `grain-metadata` can open /data/secrets/gcp-service-account.json by its
 # exact path once an operator places it there — opening a file by absolute

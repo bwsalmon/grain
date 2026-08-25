@@ -57,6 +57,18 @@ def test_creates_the_data_layout_automation_expects():
         assert path in text, f"{path} not created by provision/controller.sh"
 
 
+def test_metadata_server_state_dir_is_writable_by_the_metadata_user():
+    """Unlike git-proxy and automation next to it, this directory is
+    written by `gce_metadata_server` itself, running as the unprivileged
+    `grain-metadata` user (grain/metadata/launcher.py) -- root:root 0755
+    alone would leave every instance unable to create its own log file.
+    """
+    text = read()
+    config = MetadataConfig(service_account_email="x@y.iam.gserviceaccount.com",
+                             project_id="proj")
+    assert f"chown {config.metadata_user}:{config.metadata_user} /data/state/metadata-server" in text
+
+
 def test_metadata_server_default_key_path_and_user_are_consistent():
     text = read()
     config = MetadataConfig(service_account_email="x@y.iam.gserviceaccount.com",

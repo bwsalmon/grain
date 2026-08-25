@@ -201,6 +201,21 @@ def test_the_data_layout_exists_with_the_paths_automation_expects(booted_control
         assert result.returncode == 0, f"{path} missing on the guest"
 
 
+def test_metadata_server_state_dir_is_owned_by_the_metadata_user(booted_controller: Controller):
+    # Found live: root:root 0755 (matching its git-proxy/automation
+    # siblings, both root-only writers) silently prevents every
+    # `gce_metadata_server` instance -- started as `grain-metadata`,
+    # grain/metadata/launcher.py -- from creating its own `-logTarget`
+    # file, so the process exits immediately and nothing ever answers on
+    # its port. `systemd-run` submitting the unit successfully hides this
+    # entirely; only the owner on disk actually proves an instance could
+    # start.
+    config = MetadataConfig(service_account_email="x@y.iam.gserviceaccount.com",
+                             project_id="proj")
+    result = _sh(booted_controller, "stat", "-c", "%U:%G", "/data/state/metadata-server")
+    assert result.stdout.strip() == f"{config.metadata_user}:{config.metadata_user}", result.stdout
+
+
 def test_gce_metadata_server_binary_runs(booted_controller: Controller):
     result = _sh(booted_controller, "/usr/local/bin/gce_metadata_server", "-h")
     # The binary prints usage and exits non-zero for -h, but must actually
