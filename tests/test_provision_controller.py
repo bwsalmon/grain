@@ -73,6 +73,18 @@ def test_installs_gce_metadata_server_binary():
     assert "chmod +x /usr/local/bin/gce_metadata_server" in text
 
 
+def test_installs_gcloud_for_gemini_key_support():
+    # bwsalmon/agents#47: grain/automation/gemini_keys.py shells out to
+    # gcloud on the controller -- must actually be on the box.
+    text = read()
+    assert "google-cloud-cli" in text
+    assert "gnupg" in text
+    # Installed via apt like the base packages, not a raw pinned binary
+    # download the way gce_metadata_server is -- see this script's own
+    # comment on why those two differ.
+    assert "apt-get install" in text
+
+
 def test_never_writes_a_secret_value_only_paths():
     """The invariant docs/design.md states outright: "no secret is ever
     baked into an image or a provisioning script." A generated *keypair* is

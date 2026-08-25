@@ -356,6 +356,23 @@ def test_controller_configure_gcp_key_requires_email_and_project_id(tmp_path):
               "--gcp-service-account-key-file", str(key_file)])
 
 
+def test_dry_run_controller_configure_with_a_gemini_project_id(capsys):
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--gemini-project-id", "acme"],
+        capsys,
+    )
+    assert "dd of=/data/config/gemini-key.json" in out
+
+
+def test_controller_configure_without_gemini_project_id_writes_no_gemini_config(capsys):
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets"],
+        capsys,
+    )
+    assert "gemini-key.json" not in out
+
+
 def test_repo_without_a_slash_is_rejected():
     with pytest.raises(SystemExit, match="owner/name"):
         main(["--dry-run", "controller", "configure", "--repo", "not-a-repo-slug"])

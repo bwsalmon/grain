@@ -618,6 +618,18 @@ comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
 
+**Add a bare `/gemini-key` line** to have a short-lived Gemini API key
+minted for that task, placed in its sandbox (the prompt tells the agent
+exactly where), and revoked automatically once the task's slot frees —
+success, failure, or stranded, whichever comes first. Off by default: a
+deployment enables it once with `grain controller configure
+--gemini-project-id <project>` (see `docs/runbook.md`, "Enabling
+`/gemini-key`"); a task naming it before that's done is parked with a
+comment, the same as an unlisted `/repo`. The raw key never rides in the
+prompt file, only its path in the sandbox — see
+`grain/automation/gemini_keys.py` for why this is minted on the
+controller's own account rather than the sandbox-facing metadata broker.
+
 **Requiring a human to apply the label is the prompt-injection gate.**
 Anyone who can file an issue can put text in front of the agent; the
 label is what makes a person decide it runs.

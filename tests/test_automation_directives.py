@@ -84,3 +84,35 @@ def test_strip_directives_removes_only_the_directive_lines():
 
 def test_repo_ref_renders_as_owner_slash_name():
     assert str(RepoRef("acme", "widgets")) == "acme/widgets"
+
+
+# --- /gemini-key (bwsalmon/agents#47) ---------------------------------------
+
+def test_gemini_key_directive_defaults_to_false():
+    assert parse_directives(["/repo acme/widgets"]).gemini_key is False
+
+
+def test_gemini_key_directive_is_a_bare_flag():
+    d = parse_directives(["please fix the thing\n\n/gemini-key\n\n/repo acme/widgets\n"])
+    assert d.gemini_key is True
+    assert d.target == RepoRef("acme", "widgets")
+
+
+def test_gemini_key_directive_found_anywhere_in_the_body():
+    body = "## Summary\n\nneed gemini access\n\n/gemini-key\n\nthanks"
+    assert parse_directives([body]).gemini_key is True
+
+
+def test_gemini_key_directive_repeated_is_fine_no_conflict_possible():
+    d = parse_directives(["/gemini-key\nsome text\n/gemini-key\n"])
+    assert d.gemini_key is True
+
+
+def test_gemini_key_directive_once_asked_for_stays_asked_for_across_texts():
+    d = parse_directives(["/gemini-key", "just some unrelated reply"])
+    assert d.gemini_key is True
+
+
+def test_gemini_key_directive_is_stripped_from_the_agent_prompt():
+    body = "fix the bug\n/gemini-key\n\nit happens on startup\n"
+    assert strip_directives(body) == "fix the bug\n\nit happens on startup"

@@ -166,6 +166,12 @@ _CREDENTIALS_PATH = "/home/debian/.git-credentials"
 _GIT_IDENTITY_NAME = "grain agent"
 _GIT_IDENTITY_EMAIL = "grain-agent@localhost"
 
+# Where a minted Gemini API key (bwsalmon/agents#47, `gemini_keys.py`) lands
+# in the sandbox -- outside WORKSPACE_PATH, same as _CREDENTIALS_PATH above,
+# so it is never inside the git working tree a task's own `git add -A`-style
+# command could sweep up and commit.
+GEMINI_KEY_PATH = "/home/debian/.gemini-api-key"
+
 # The unprivileged, dedicated controller-side account `claude -p` (and the
 # MCP server it spawns as a child) runs as — never root, never the account
 # `grain-automation.service` itself runs as. See provision/controller.sh.
@@ -344,8 +350,30 @@ def _agent_id_line(agent_id_value: str) -> str:
     )
 
 
+def _gemini_key_line() -> str:
+    """Told to the agent only when a key was actually minted for this task
+    (`core.py`'s `_dispatch`, gated on the task's `/gemini-key` directive)
+    -- the path, never the key value itself, so the raw secret never lands
+    in the prompt file (which is written to disk under
+    `/data/state/automation/units` and is part of the same transcript
+    surface `dispatch.py`'s own docstring already treats as untrusted-but-
+    not-secret).
+    """
+    return (
+        f"A Gemini API key has been minted for this task and placed in "
+        f"your sandbox at {GEMINI_KEY_PATH} (readable only by you). It "
+        "will be revoked automatically once this task finishes, so it is "
+        "only good for the duration of this session. To use it, read the "
+        "file and export it yourself in whichever command needs it, for "
+        "example:\n"
+        f"    export GEMINI_API_KEY=\"$(cat {GEMINI_KEY_PATH})\"\n"
+        "Do not print its contents, log it, or commit it anywhere."
+    )
+
+
 def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = (),
-            *, task_repo: str = "", target_repo: str = "", agent_id_value: str = "") -> str:
+            *, task_repo: str = "", target_repo: str = "", agent_id_value: str = "",
+            gemini_key: bool = False) -> str:
     """`task_repo` is where the issue itself lives (the agent set's queue);
     `target_repo` is where the code is. Two different repos in the general
     case — the prompt says which is which, because "the repository" would
@@ -359,7 +387,14 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     `agent_id_value` is `agent_id()`'s output, generated once by `dispatch()`
     and passed through here rather than minted inline, so a test can pin it
     to a known value instead of parsing whatever `secrets.token_hex` picked.
+
+    `gemini_key` is `dispatch()`'s own record of whether the task's
+    `/gemini-key` directive actually got a key minted (`core.py`'s
+    `_dispatch`) — true only once a key genuinely landed in the sandbox, so
+    the prompt never claims one exists when `configure_gemini_key` was
+    never called.
     """
+    gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
     return (
         f"You are working {task_repo}#{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n\n"
@@ -374,6 +409,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         "configured — do your work there, using the tools available to "
         "you.\n\n"
         f"{_agent_id_line(agent_id_value)}\n\n"
+        f"{gemini_key_section}"
         "When you are done, commit your changes and push them with exactly "
         "this command:\n"
         f"    git push origin HEAD:{branch}\n"
@@ -393,7 +429,7 @@ def _format_review_comment(comment: ReviewComment) -> str:
 def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str,
                thread_comments: list[Comment] = (), *, task_repo: str = "",
                target_repo: str = "", task_issue: int | None = None,
-               agent_id_value: str = "") -> str:
+               agent_id_value: str = "", gemini_key: bool = False) -> str:
     """A PR-continuation dispatch. The PR lives in `target_repo`; the task
     that asked for the work — and the conversation a human is having about
     it — lives in `task_repo`, as issue `task_issue` (a `/pr` directive on
@@ -401,7 +437,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
     `directives.py`).
 
     `agent_id_value` is `_prompt`'s own parameter of the same name — see its
-    docstring.
+    docstring. `gemini_key` is likewise `_prompt`'s own parameter, unchanged.
     """
     feedback = (
         "\n\n".join(_format_review_comment(c) for c in comments)
@@ -413,6 +449,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         f"changing, and where any conversation with a human happens.\n\n"
         if task_issue is not None else ""
     )
+    gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
     return (
         f"You are continuing existing work on pull request "
         f"{target_repo}#{pr.number}: {pr.title}\n\n"
@@ -427,6 +464,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         "the feedback below, fix CI, finish what was started), not to "
         "start over or open a competing branch.\n\n"
         f"{_agent_id_line(agent_id_value)}\n\n"
+        f"{gemini_key_section}"
         "Review feedback on this pull request so far:\n\n"
         f"{feedback}\n\n"
         "Conversation on this pull request so far (a prior attempt may have "
@@ -480,6 +518,19 @@ def configure_git_credentials(runner: Runner, remote_url: str, token: str) -> No
     runner.run(["chmod", "600", _CREDENTIALS_PATH])
     runner.run(["git", "config", "--global", "user.name", _GIT_IDENTITY_NAME])
     runner.run(["git", "config", "--global", "user.email", _GIT_IDENTITY_EMAIL])
+
+
+def configure_gemini_key(runner: Runner, key: str) -> None:
+    """Writes a freshly minted Gemini API key (`core.py`'s `_dispatch`,
+    via `gemini_keys.create_key`) to the sandbox at `GEMINI_KEY_PATH`, over
+    the same stdin-not-argv channel `configure_git_credentials` already
+    uses for the git-proxy token -- the raw key never becomes a
+    shell-interpolated argument anywhere in this path, and never appears in
+    the prompt file either (`_gemini_key_line` below only ever names the
+    *path*, not the value).
+    """
+    runner.run(["dd", f"of={GEMINI_KEY_PATH}", "status=none"], stdin=key)
+    runner.run(["chmod", "600", GEMINI_KEY_PATH])
 
 
 def ensure_workspace(runner: Runner, remote_url: str, path: str = WORKSPACE_PATH,
@@ -615,7 +666,7 @@ _ALLOWED_TOOLS = (
 
 def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, prompt: str, *, remote_url: str, token: str,
-                 branch: str | None = None) -> str:
+                 branch: str | None = None, gemini_key: str | None = None) -> str:
     """The common tail of both `dispatch()` and `dispatch_pr()`. Two
     runners now, not one (docs/roadmap.md item 8's "Update"): `sandbox_runner`
     still prepares the workspace and credentials on the sandbox itself,
@@ -626,9 +677,16 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     branch-reset path (docs/roadmap.md item 9) instead — either
     `dispatch_pr`'s PR-continuation branch, or `dispatch`'s own resolved
     `/base` — see its docstring.
+
+    `gemini_key` (bwsalmon/agents#47) is the raw key string `core.py`'s
+    `_dispatch` already minted via `gemini_keys.create_key`, or `None` for
+    every task that didn't ask for one — this function never mints or
+    revokes a key itself, only places one that already exists.
     """
     configure_git_credentials(sandbox_runner, remote_url, token)
     ensure_workspace(sandbox_runner, remote_url, target.workspace, branch=branch)
+    if gemini_key is not None:
+        configure_gemini_key(sandbox_runner, gemini_key)
 
     unit = unit_name(sandbox)
     unit_dir = _unit_dir(unit)
@@ -682,7 +740,7 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
              target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
              base: str | None = None, comments: list[Comment] = (), task_repo: str = "",
-             target_repo: str = "") -> str:
+             target_repo: str = "", gemini_key: str | None = None) -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
     `claude -p` on the controller, pointed at that same sandbox via
@@ -714,14 +772,20 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     production always resolves and passes a real value) falls back to
     `ensure_workspace`'s plain `origin/HEAD` default-branch reset, exactly
     as before this parameter existed.
+
+    `gemini_key` (bwsalmon/agents#47) is the raw key string `core.py`'s
+    `_dispatch` minted for this task, or `None` for the common case of no
+    `/gemini-key` directive — threaded through to both `_start_task` (which
+    places it in the sandbox) and the prompt (which tells the agent it's
+    there, only when it actually is).
     """
     push_branch = branch_name(issue.number)
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _prompt(issue, push_branch, target.workspace, comments,
                 task_repo=task_repo, target_repo=target_repo,
-                agent_id_value=agent_id()),
-        remote_url=remote_url, token=token, branch=base,
+                agent_id_value=agent_id(), gemini_key=gemini_key is not None),
+        remote_url=remote_url, token=token, branch=base, gemini_key=gemini_key,
     )
 
 
@@ -729,7 +793,8 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, pr: PullRequestDetail,
                  comments: list[ReviewComment], *, remote_url: str, token: str,
                  thread_comments: list[Comment] = (), task_repo: str = "",
-                 target_repo: str = "", task_issue: int | None = None) -> str:
+                 target_repo: str = "", task_issue: int | None = None,
+                 gemini_key: str | None = None) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
     (`pr.head_ref`) instead of the default branch, and the prompt carries the
@@ -746,13 +811,18 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     from `comments`'s inline review comments on the PR itself, and where a
     human's reply to a prior `ask_question` call actually lands, since the
     task repo is the only repo this deployment ever comments on.
+
+    `gemini_key` (bwsalmon/agents#47) is `dispatch()`'s own parameter of the
+    same name — see its docstring; a `/gemini-key` directive on the task
+    issue works identically for a PR-continuation dispatch.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _pr_prompt(pr, comments, target.workspace, thread_comments,
                    task_repo=task_repo, target_repo=target_repo,
-                   task_issue=task_issue, agent_id_value=agent_id()),
-        remote_url=remote_url, token=token, branch=pr.head_ref,
+                   task_issue=task_issue, agent_id_value=agent_id(),
+                   gemini_key=gemini_key is not None),
+        remote_url=remote_url, token=token, branch=pr.head_ref, gemini_key=gemini_key,
     )
 
 

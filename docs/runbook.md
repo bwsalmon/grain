@@ -390,6 +390,7 @@ session record itself is still kept, just without transcript content.
   config/
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
     automation.json                      # AutomationConfig
+    gemini-key.json                      # GeminiKeyConfig (optional, see below)
   state/
     automation/state.json, audit.log
     automation/sessions/<key>.json, <key>.jsonl   # session history + captured trajectories
@@ -566,6 +567,37 @@ this procedure.
    repo isn't `flagged`.
 5. If using the machine-account pattern, invite `grain-agent-bot` (or
    whatever account the token belongs to) as a collaborator on the repo.
+
+## Enabling `/gemini-key` (optional, bwsalmon/agents#47)
+
+A task whose text carries a bare `/gemini-key` line gets a short-lived
+Gemini API key minted for it, placed in its sandbox, and revoked once the
+task's slot frees (success, failure, or stranded — see
+`grain/automation/sweeper.py`'s docstring). Off by default; nothing above
+requires it.
+
+1. Complete step 8's GCP service account setup first
+   (`--gcp-service-account-key-file`/`--gcp-agent-service-account-email`/
+   `--gcp-project-id`) — `grain/automation/gemini_keys.py` authenticates
+   `gcloud` with that same primary key rather than asking for a second one.
+2. Grant that service account `roles/serviceusage.apiKeysAdmin` (or an
+   equivalent narrower role covering `apikeys.keys.create`/`.delete`/
+   `.get`) on the project, and make sure the Generative Language API
+   (`generativelanguage.googleapis.com`) is enabled there.
+3. Run `grain controller configure --gemini-project-id <project>` (any
+   other `controller configure` flags in the same invocation still apply
+   normally — this one is additive). This writes
+   `/data/config/gemini-key.json`, read fresh on every `automation
+   run-once` invocation, same as `repo-allowlist.json`.
+4. A task now enables it with a bare `/gemini-key` line anywhere in the
+   issue body (or a trusted reply) — see the README's directives section.
+   Until step 3 is done, that directive parks the task with a comment
+   explaining why, the same as an unlisted `/repo`.
+
+To disable it again: delete `/data/config/gemini-key.json`. Any key already
+minted for a task still in flight is unaffected (it still gets revoked
+normally when that task's slot frees) — this only stops new ones from
+being minted.
 
 ## Gaps: what this runbook can't yet tell you to automate
 

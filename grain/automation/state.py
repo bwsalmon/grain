@@ -74,6 +74,14 @@ class Assignment:
     # dispatch (`GitHubClient.default_branch`) and pinned here for the same
     # reason `target_owner`/`target_repo` are.
     base: str | None = None
+    # The full resource name of a Gemini API key minted for this task
+    # (bwsalmon/agents#47, `gemini_keys.create_key`), or `None` for the
+    # common case of no `/gemini-key` directive. Recorded here, not
+    # re-derived at sweep time, for the same reason `target_owner`/
+    # `target_repo` are: `sweeper.py`'s `_release` needs to know which key
+    # to revoke once this assignment is freed, and by then the task's own
+    # directives are long gone.
+    gemini_key_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +130,7 @@ class AutomationState:
                 target_owner=a.get("target_owner"),
                 target_repo=a.get("target_repo"),
                 base=a.get("base"),
+                gemini_key_name=a.get("gemini_key_name"),
             )
             for name, a in raw.get("assignments", {}).items()
         }
@@ -147,7 +156,7 @@ class AutomationState:
                     "started_at": a.started_at.isoformat(),
                     "kind": a.kind.value, "branch": a.branch,
                     "target_owner": a.target_owner, "target_repo": a.target_repo,
-                    "base": a.base,
+                    "base": a.base, "gemini_key_name": a.gemini_key_name,
                 }
                 for name, a in self.assignments.items()
             },
@@ -175,10 +184,11 @@ class AutomationState:
     def assign(self, sandbox: str, issue: int, unit: str, now: datetime, *,
                kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None,
                target_owner: str | None = None, target_repo: str | None = None,
-               base: str | None = None) -> None:
+               base: str | None = None, gemini_key_name: str | None = None) -> None:
         self.assignments[sandbox] = Assignment(
             issue=issue, unit=unit, started_at=now, kind=kind, branch=branch,
             target_owner=target_owner, target_repo=target_repo, base=base,
+            gemini_key_name=gemini_key_name,
         )
 
     def release(self, sandbox: str) -> None:

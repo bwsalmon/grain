@@ -112,6 +112,9 @@ from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
     question_path, unit_name,
 )
+from .gemini_keys import GeminiKeyConfig
+from .gemini_keys import create_key as create_gemini_key
+from .gemini_keys import delete_key as delete_gemini_key
 from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
@@ -170,6 +173,11 @@ class ResolvedTask:
     repo: RepoRef
     pr: PullRequestDetail | None
     base: str
+    # Whether the task's text carried a `/gemini-key` directive
+    # (bwsalmon/agents#47) -- `_resolve_target` already refuses one this
+    # deployment can't honour (no `GeminiKeyConfig` configured), so by the
+    # time this reaches `_dispatch` it is always safe to act on.
+    gemini_key: bool = False
 
 
 @dataclass
@@ -203,6 +211,14 @@ class Orchestrator:
     # real `SshRunner` per sandbox; a test can inject a lookup straight to
     # per-sandbox fakes without needing to match SshRunner's exact argv.
     ssh_runner_factory: Callable[[str], Runner] | None = None
+    # bwsalmon/agents#47: the on/off switch for `/gemini-key`. `None`
+    # (production's default for a deployment that never ran `grain
+    # controller configure --gemini-project-id ...`) makes `_resolve_target`
+    # refuse the directive with an explanation, the same "unusable directive
+    # parks the task" shape an unlisted `/repo` already gets — see
+    # `gemini_keys.py`'s own docstring for why this lives on the controller
+    # account, never a sandbox's.
+    gemini_key_config: GeminiKeyConfig | None = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -256,7 +272,8 @@ class Orchestrator:
     # --- sweep --------------------------------------------------------
     def _sweep(self, now: datetime) -> None:
         result = sweep(self.state, self._ssh_runner_for, self.base_runner,
-                        self.config, now, history=self.history)
+                        self.config, now, history=self.history,
+                        gemini_key_config=self.gemini_key_config)
         for outcome in result.succeeded:
             self._finish_succeeded(outcome)
         for outcome in (*result.failed, *result.stranded):
@@ -271,6 +288,14 @@ class Orchestrator:
             # place already worth reading after an unexpected run.
             self.audit.record(sandbox=warning.sandbox, issue=None,
                                outcome=f"health warning: {warning.detail}")
+        for warning in result.credential_warnings:
+            # Same visibility-only treatment (bwsalmon/agents#47): a failed
+            # Gemini key revocation doesn't gate the sandbox's slot from
+            # freeing (sweeper.py's `_release` already logged it and moved
+            # on) — this just makes sure an operator can see a key that may
+            # still be live and needs revoking by hand.
+            self.audit.record(sandbox=warning.sandbox, issue=None,
+                               outcome=f"credential warning: {warning.detail}")
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
         if outcome.kind is TriggerKind.PR:
@@ -532,6 +557,17 @@ class Orchestrator:
             if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
         ]
         directives = parse_directives(texts)
+        if directives.gemini_key and self.gemini_key_config is None:
+            # Same "unusable directive parks the task" shape as an unlisted
+            # `/repo` below -- checked before the target/allowlist reads,
+            # so a task that can never be honoured is parked without also
+            # spending a GitHub call on a repo it will never reach.
+            raise DirectiveError(
+                "this task has a `/gemini-key` directive, but this "
+                "deployment has no Gemini key support configured. An "
+                "operator enables it with `grain controller configure "
+                "--gemini-project-id ...` (see gemini_keys.py)."
+            )
         target = directives.target
         if target is None:
             if not self.config.default_target_repo:
@@ -570,7 +606,8 @@ class Orchestrator:
                 + " -- GitHub returned 404. Either it doesn't exist, or this "
                   "deployment's credential can't see it."
             ) from exc
-        return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch)
+        return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
+                            gemini_key=directives.gemini_key)
 
     def _park(self, number: int, reason: str) -> None:
         """Takes a task out of the queue with an explanation, instead of
@@ -707,19 +744,31 @@ class Orchestrator:
             ]
             # A `CommandError` here (an SSH/command failure anywhere in
             # dispatch()/dispatch_pr()'s path -- ensure_workspace,
-            # configure_git_credentials, starting the unit) must not take
-            # down every other candidate still queued this cycle. Found
-            # live (docs/next-session.md): a proxy-auth failure on one
-            # sandbox crashed `run_once` before it ever reached the next
-            # candidate. Neither the sandbox nor the issue's labels are
-            # touched below on failure -- the sandbox stays free and the
-            # issue keeps its trigger label, so both are simply retried on
-            # a later cycle, same "log and move on" discipline
-            # `_requeue`/`_finish_question` already apply to a GitHub-side
-            # 404. Only `CommandError` specifically: anything else is a
-            # real bug, not an expected failure mode, and should still
-            # surface immediately.
+            # configure_git_credentials, starting the unit; or, new for
+            # bwsalmon/agents#47, gemini_keys.create_key's own gcloud calls
+            # below) must not take down every other candidate still queued
+            # this cycle. Found live (docs/next-session.md): a proxy-auth
+            # failure on one sandbox crashed `run_once` before it ever
+            # reached the next candidate. Neither the sandbox nor the
+            # issue's labels are touched below on failure -- the sandbox
+            # stays free and the issue keeps its trigger label, so both are
+            # simply retried on a later cycle, same "log and move on"
+            # discipline `_requeue`/`_finish_question` already apply to a
+            # GitHub-side 404. Only `CommandError` specifically: anything
+            # else is a real bug, not an expected failure mode, and should
+            # still surface immediately.
+            gemini_key_string: str | None = None
+            gemini_key_name: str | None = None
             try:
+                if task.gemini_key:
+                    # `_resolve_target` already refused this task outright
+                    # if `self.gemini_key_config` were `None` -- guaranteed
+                    # set here.
+                    minted = create_gemini_key(
+                        self.base_runner, self.gemini_key_config,
+                        display_name=f"grain-{sandbox}-issue-{number}",
+                    )
+                    gemini_key_string, gemini_key_name = minted.key_string, minted.name
                 if task.pr is not None:
                     review_comments = self.github.list_review_comments(
                         task.repo.owner, task.repo.name, task.pr.number
@@ -730,6 +779,7 @@ class Orchestrator:
                         remote_url=self._remote_url(task.repo), token=token,
                         thread_comments=prompt_comments, task_repo=str(self._task),
                         target_repo=str(task.repo), task_issue=number,
+                        gemini_key=gemini_key_string,
                     )
                 else:
                     unit = dispatch(
@@ -738,8 +788,26 @@ class Orchestrator:
                         remote_url=self._remote_url(task.repo), token=token,
                         base=task.base, comments=prompt_comments,
                         task_repo=str(self._task), target_repo=str(task.repo),
+                        gemini_key=gemini_key_string,
                     )
             except CommandError as exc:
+                if gemini_key_name is not None:
+                    # A key was minted but dispatch itself never reached the
+                    # point of recording an Assignment for it to ride on --
+                    # without this, it would never be revoked at all, since
+                    # sweeper.py's `_release` only ever sees keys named on a
+                    # real assignment. Best-effort: this cycle already has
+                    # one failure to report; a second one revoking the
+                    # orphaned key must not mask it.
+                    try:
+                        delete_gemini_key(self.base_runner, self.gemini_key_config, gemini_key_name)
+                    except CommandError as cleanup_exc:
+                        self.audit.record(
+                            sandbox=sandbox, issue=number,
+                            outcome=f"dispatch failed: {exc} (also failed to revoke the "
+                                    f"gemini API key it minted: {cleanup_exc})",
+                        )
+                        continue
                 self.audit.record(sandbox=sandbox, issue=number,
                                    outcome=f"dispatch failed: {exc}")
                 continue
@@ -748,11 +816,13 @@ class Orchestrator:
                 self.state.assign(sandbox, number, unit, now,
                                    kind=TriggerKind.PR, branch=task.pr.head_ref,
                                    target_owner=task.repo.owner,
-                                   target_repo=task.repo.name, base=task.base)
+                                   target_repo=task.repo.name, base=task.base,
+                                   gemini_key_name=gemini_key_name)
             else:
                 self.state.assign(sandbox, number, unit, now,
                                    target_owner=task.repo.owner,
-                                   target_repo=task.repo.name, base=task.base)
+                                   target_repo=task.repo.name, base=task.base,
+                                   gemini_key_name=gemini_key_name)
             self.state.record_run(now)
             self.github.remove_label(
                 self.config.task_owner, self.config.task_repo,

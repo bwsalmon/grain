@@ -879,6 +879,57 @@ one service account and one IAM binding. Optionally add a
 [Credential Access Boundary](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
 to restrict to specific resources.
 
+### A Gemini API key doesn't fit this broker (bwsalmon/agents#47)
+
+A task can ask, with a bare `/gemini-key` line, for a short-lived
+[Gemini API key](https://ai.google.dev/gemini-api/docs/api-key) minted for
+it, placed in its sandbox, and revoked once the task's slot frees. The
+mechanism deliberately sits *outside* the metadata broker above rather than
+reusing it, for two reasons:
+
+- **A literal API key isn't a token the broker can hand out.** ADC-style
+  token-probing (what `gce_metadata_server` serves) works because every
+  Google SDK already knows how to ask the metadata server for a token on
+  demand. The Generative Language API is authenticated by a bearer key
+  string instead — something a caller mints once and holds — so there is
+  no token-shaped thing for a sandbox to probe for; the key itself has to
+  be minted, in full, before anything can use it.
+- **Reusing the broker's impersonation path buys nothing here.** Even
+  routed through impersonation, the *result* is still a raw key string
+  that has to be handed to a sandbox — the broker's whole value
+  ("nothing worth stealing sits in reach of untrusted code") doesn't
+  survive contact with a credential shape that's a bearer secret by
+  definition. So this mints the key from the **controller's own account**
+  (`grain-automation.service`, the same identity that already reads every
+  other file under `/data/secrets`) and only the resulting key *string* —
+  never anything capable of minting or revoking another one — ever reaches
+  a sandbox, over the same stdin-not-argv channel already used for the
+  git-proxy token (`dispatch.py`'s `configure_git_credentials`). It never
+  touches `grain-agent`, the unprivileged account `claude -p` itself runs
+  as (["Agent runtime"](#agent-runtime-claude-code-not-openhands)) — the
+  same "controller mints, sandbox only ever holds the narrow result" split
+  the git-proxy token already uses.
+
+Minting/revoking calls `apikeys.googleapis.com` via the `gcloud` CLI,
+authenticated with the same primary service-account key already placed at
+`/data/secrets/gcp-service-account.json` for the broker above — a second
+controller-only runtime dependency (`provision/controller.sh`), justified
+the same way `gce_metadata_server` already is: the sandbox side of this
+project stays stdlib-only Python, but the controller already isn't one.
+Hand-rolling the OAuth2 JWT-bearer exchange in stdlib Python was considered
+and rejected — no crypto library is available to sign it, and `gcloud`
+already does this correctly. See `grain/automation/gemini_keys.py`'s own
+docstring for the full tradeoff, including against adding the much heavier
+`gcloud` SDK tarball instead of the package-manager install this repo
+already uses for everything else on the controller.
+
+The key's lifetime is bounded by the *task*, not by a fixed TTL: revocation
+runs from the same "sandbox slot just freed" checkpoint
+[between-task hygiene](#between-task-hygiene) already uses for cleanup and
+health, reached uniformly whether the task succeeded, failed, or was found
+stranded — so a key never outlives the sandbox session it was minted for,
+without needing Google-side expiry to enforce that.
+
 ## OpenHands integration
 
 Superseded as the plan of record by

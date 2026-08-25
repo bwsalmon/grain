@@ -12,6 +12,11 @@ request is opened. This module is the parser for how a task says so.
                          instead of starting a fresh branch
     /base develop        optional: PR base override, instead of the target
                          repo's own default branch
+    /gemini-key          optional: mint a short-lived Gemini API key for
+                         this task (bwsalmon/agents#47), placed in the
+                         sandbox and revoked when the task ends. Takes no
+                         value -- unlike the three above, there is nothing
+                         to name, just on or off.
 
 A body line, not a label: a `repo:owner/name` label would have to exist in
 the task repo before it could be applied, is awkward to create once per
@@ -47,11 +52,15 @@ from typing import Sequence
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # A directive line: `/name value`, optionally indented, nothing after the
-# value. Only the three names below are directives — any other `/...` line
-# is left alone (a prose line starting with an absolute path, a Markdown
-# list of shell commands), which is why the name is matched from a fixed
-# set here rather than by shape.
+# value. Only the names below are directives — any other `/...` line is
+# left alone (a prose line starting with an absolute path, a Markdown list
+# of shell commands), which is why the name is matched from a fixed set
+# here rather than by shape.
 _DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base)\s+(\S+)\s*$")
+
+# `/gemini-key` takes no value -- a flag, not a `name value` pair, so it
+# needs its own line shape rather than folding into `_DIRECTIVE_RE`.
+_FLAG_DIRECTIVE_RE = re.compile(r"^\s*/(gemini-key)\s*$")
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,10 @@ class Directives:
     target: RepoRef | None = None
     pr: int | None = None
     base: str | None = None
+    # A flag, not a value: once any trusted text asks for it, it stays
+    # asked-for -- there is no `/no-gemini-key` to retract it, the same way
+    # there is no way to un-apply the trigger label itself.
+    gemini_key: bool = False
 
 
 class DirectiveError(ValueError):
@@ -123,13 +136,20 @@ def strip_directives(text: str) -> str:
     stray `/repo ...` line in a prompt reads as an instruction it might try
     to follow.
     """
-    kept = [line for line in text.splitlines() if not _DIRECTIVE_RE.match(line)]
+    kept = [
+        line for line in text.splitlines()
+        if not _DIRECTIVE_RE.match(line) and not _FLAG_DIRECTIVE_RE.match(line)
+    ]
     return "\n".join(kept).strip()
 
 
 def _parse_one(text: str) -> Directives:
     found: dict[str, str] = {}
+    gemini_key = False
     for line in text.splitlines():
+        if _FLAG_DIRECTIVE_RE.match(line):
+            gemini_key = True
+            continue
         match = _DIRECTIVE_RE.match(line)
         if match is None:
             continue
@@ -145,6 +165,7 @@ def _parse_one(text: str) -> Directives:
         target=RepoRef.parse(found["repo"], what="`/repo`") if "repo" in found else None,
         pr=_parse_pr(found["pr"]) if "pr" in found else None,
         base=found["base"] if "base" in found else None,
+        gemini_key=gemini_key,
     )
 
 
@@ -163,4 +184,5 @@ def _apply(base: Directives, override: Directives) -> Directives:
         target=override.target if override.target is not None else base.target,
         pr=override.pr if override.pr is not None else base.pr,
         base=override.base if override.base is not None else base.base,
+        gemini_key=base.gemini_key or override.gemini_key,
     )

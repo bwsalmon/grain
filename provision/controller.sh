@@ -30,7 +30,7 @@ CONTROLLER_IP="10.100.0.2"
 
 apt-get update
 apt-get install -y --no-install-recommends \
-  python3 git openssh-client curl ca-certificates
+  python3 git openssh-client curl ca-certificates gnupg
 
 # --- gce_metadata_server: one static binary, installed (not built from
 # source) — see docs/design.md, "GCP credentials", and docs/roadmap.md item
@@ -38,6 +38,22 @@ apt-get install -y --no-install-recommends \
 curl -fsSL -o /usr/local/bin/gce_metadata_server \
   "https://github.com/salrashid123/gce_metadata_server/releases/download/v${GCE_METADATA_SERVER_VERSION}/gce_metadata_server_${GCE_METADATA_SERVER_VERSION}_linux_amd64"
 chmod +x /usr/local/bin/gce_metadata_server
+
+# --- gcloud: the controller-only dependency bwsalmon/agents#47 accepted so
+# grain/automation/gemini_keys.py can mint/revoke a task's Gemini API key --
+# see that module's own docstring for why `gcloud` and not a hand-rolled
+# OAuth2 exchange (this repo's sandbox side stays stdlib-only; the
+# controller already isn't, carrying git/openssh-client/gce_metadata_server
+# above). Via apt, like every other package in this script -- not pinned,
+# matching how python3/git/openssh-client/ca-certificates above aren't
+# either; gce_metadata_server is the one pinned download here because it's
+# a raw GitHub release binary outside apt's own update path. ---------------
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+  gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  > /etc/apt/sources.list.d/google-cloud-sdk.list
+apt-get update
+apt-get install -y --no-install-recommends google-cloud-cli
 
 # The system user each gce_metadata_server instance runs as
 # (grain/metadata/config.py's `metadata_user` default) — a narrow account
@@ -204,7 +220,10 @@ This is a grain controller. It holds every credential in the system
 (docs/design.md, "Secrets on /data") — nothing else in the deployment does.
 
 Set up by provision/controller.sh:
-- python3, git, openssh-client, ca-certificates
+- python3, git, openssh-client, ca-certificates, gnupg
+- google-cloud-cli (`gcloud`), via apt -- the one controller-only runtime
+  dependency, for grain/automation/gemini_keys.py to mint/revoke a task's
+  Gemini API key (bwsalmon/agents#47); see that module's own docstring
 - gce_metadata_server, at /usr/local/bin, and the grain-metadata system user
   it runs each per-sandbox instance as
 - claude (Claude Code CLI), at /usr/local/bin, and the grain-agent system
@@ -226,7 +245,10 @@ Set up by provision/controller.sh:
 Still manual, per docs/runbook.md's first-time setup checklist:
 - deploying this repo's code to /opt/grain
 - every file under /data/secrets/github, /data/secrets/sandbox-tokens.json,
-  /data/secrets/gcp-service-account.json (if used), /data/config
+  /data/secrets/gcp-service-account.json (if used), /data/config, including
+  /data/config/gemini-key.json (optional -- `grain controller configure
+  --gemini-project-id ...`, only meaningful once gcp-service-account.json
+  is placed too, since gemini_keys.py authenticates with that same key)
 - copying /data/secrets/controller-ssh.pub to the host, for
   LibvirtAdapter.ssh_public_key_path to embed into sandboxes it creates
 - enabling grain-git-proxy.service and grain-automation.timer
