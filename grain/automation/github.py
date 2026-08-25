@@ -146,6 +146,14 @@ class Issue:
     body: str
     html_url: str
     labels: frozenset[str]
+    # GitHub's own field, "open" or "closed" (bwsalmon/agents#82) -- read by
+    # `core.py`'s cancel-on-close poll to tell a task issue a human closed
+    # early from one still open. Defaulted to "open" for the same
+    # backward-compatible reason `PullRequestDetail.state` is: existing
+    # fixtures and call sites that predate this field never set it, and
+    # `list_issues`'s own query already filters to `state=open` anyway, so
+    # "open" is what every issue it returns actually is.
+    state: str = "open"
 
 
 @dataclass(frozen=True)
@@ -336,6 +344,7 @@ class GitHubClient:
                     body=item.get("body") or "",
                     html_url=item["html_url"],
                     labels=frozenset(l["name"] for l in item["labels"]),
+                    state=item.get("state", "open"),
                 ))
             path = _next_page_path(resp.headers.get("Link"))
         return issues
@@ -356,6 +365,7 @@ class GitHubClient:
             number=data["number"], title=data["title"], body=data.get("body") or "",
             html_url=data["html_url"],
             labels=frozenset(l["name"] for l in data["labels"]),
+            state=data.get("state", "open"),
         )
 
     def add_label(self, owner: str, repo: str, number: int, label: str) -> None:

@@ -358,7 +358,12 @@ def test_an_issue_already_tracked_as_in_progress_is_not_redispatched():
     state.assign("sandbox-0", issue=1, unit="grain-task-sandbox-0", now=NOW)
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
-    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
+    orchestrator, transport = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
+    # bwsalmon/agents#82: still-active-and-in-budget now costs the sweep one
+    # `get_issue` call (cancel-on-close) before `_dispatch`'s own listing —
+    # answered open, so this stays exactly the "left alone" case it always
+    # was.
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(1)).encode()))
     orchestrator.run_once(NOW)
     # Still just the one (untouched) assignment - not a second dispatch.
     assert orchestrator.state.assignments["sandbox-0"].issue == 1
@@ -452,6 +457,93 @@ def test_a_requeue_still_raises_a_non_404_github_error():
 
     with pytest.raises(GitHubError):
         orchestrator.run_once(NOW)
+
+
+# --- cancel-on-close (bwsalmon/agents#82) -----------------------------------
+
+def test_a_still_active_run_whose_issue_closed_is_cancelled_not_requeued():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        # get_issue (cancel-on-close poll): closed
+        ApiResponse(200, {}, json.dumps({**issue_json(5), "state": "closed"}).encode()),
+        ApiResponse(200, {}, b"{}"),  # remove_label: in_progress comes off
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("cancelled" in o and "closed" in o for o in outcomes)
+    assert "failed" not in outcomes and "stranded" not in outcomes
+    # Only the label cleanup -- no re-add of the trigger label, unlike a
+    # requeue: a closed issue must not come back for redispatch.
+    mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
+    assert len(mutating) == 1
+
+
+def test_a_still_active_run_whose_issue_is_still_open_is_left_running():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(5)).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    assert not runner.ran("sudo systemctl stop")
+
+
+def test_a_cancel_on_close_poll_tolerates_a_404_for_a_stale_assignment():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert "sandbox-0" in orchestrator.state.assignments
+
+
+def test_a_cancel_on_close_poll_still_raises_a_non_404_github_error():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
+
+
+def test_a_cancellation_label_cleanup_tolerates_a_404_for_a_stale_assignment():
+    # `GitHubClient.remove_label` already treats a 404 as "label already
+    # off" and never raises for it -- so a stale assignment naming a
+    # since-deleted issue must not crash the cycle here either.
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps({**issue_json(5), "state": "closed"}).encode()),
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # remove_label: no such issue here
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("cancelled" in o for o in outcomes)
 
 
 # --- ask_question (docs/roadmap.md item 12) --------------------------------
@@ -1347,9 +1439,14 @@ def test_a_pr_task_is_skipped_when_the_pool_is_full_same_as_any_other():
         "systemctl show",
         stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
     )
-    orchestrator, _ = make_orchestrator(
+    orchestrator, transport = make_orchestrator(
         issues=[issue_json(9, body="/repo o/r\n/pr 4")], state=state, runner=runner,
     )
+    # bwsalmon/agents#82: one cancel-on-close `get_issue` poll per
+    # still-active assignment the sweep leaves alone -- both answered
+    # open, so neither sandbox is touched.
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(1)).encode()))
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(2)).encode()))
 
     orchestrator.run_once(NOW)
 

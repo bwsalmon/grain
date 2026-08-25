@@ -7,7 +7,10 @@ docs/design.md" convention:
     available to the same cycle's dispatch pass rather than sitting idle
     for one more `run-once` interval — a *successful* sweep also verifies
     the pushed branch and opens the PR, since that is the other half of
-    "this run is really done", not a separate pass,
+    "this run is really done", not a separate pass; the same sweep also
+    stops any in-progress unit whose task issue was closed on GitHub since
+    dispatch (bwsalmon/agents#82), reported back as "cancelled" rather than
+    requeued,
     poll every task issue with a PR still open for it (bwsalmon/agents#54)
     and close the ones whose PR has itself closed since,
     list open trigger-labelled issues in the *task repo* not already
@@ -420,11 +423,38 @@ class Orchestrator:
         self._dispatch(now)
 
     # --- sweep --------------------------------------------------------
+    def _is_issue_closed(self, number: int) -> bool:
+        """`sweeper.py`'s hook for "has this task issue been closed on
+        GitHub" (bwsalmon/agents#82) — called only for a unit `sweep()`
+        would otherwise leave running untouched, so this fires at most
+        once per still-active assignment per cycle, not once per
+        in-progress issue regardless of status. Checked fresh every call
+        rather than cached, the same "poll, don't trust a stale copy" bar
+        `_close_finished_prs`'s own per-cycle PR-state check already holds
+        to — there is no webhook to react to a close with (docs/design.md's
+        cron-not-webhooks stance).
+
+        A 404 means the task issue named by this assignment is gone from
+        the currently configured repo entirely — read as "not closed"
+        (there is nothing this method can act on), the same tolerance
+        `_requeue` already extends to that exact stale-assignment case.
+        """
+        try:
+            issue = self.github.get_issue(
+                self.config.task_owner, self.config.task_repo, number
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            return False
+        return issue.state == "closed"
+
     def _sweep(self, now: datetime) -> None:
         result = sweep(self.state, self._ssh_runner_for, self.base_runner,
                         self.config, now, history=self.history,
                         gemini_key_config=self.gemini_key_config,
-                        credential_store=self.credential_store)
+                        credential_store=self.credential_store,
+                        is_issue_closed=self._is_issue_closed)
         # `sweep()` already called `state.release()` in memory for every
         # outcome above -- persist that now, before any of the GitHub calls
         # below (a PR, a label move) make this run's outcome irreversible.
@@ -437,6 +467,8 @@ class Orchestrator:
         for outcome in (*result.failed, *result.stranded):
             reason = "failed" if outcome in result.failed else "stranded"
             self._requeue(outcome, reason)
+        for outcome in result.cancelled:
+            self._finish_cancelled(outcome)
         for warning in result.health_warnings:
             # Visibility only (docs/roadmap.md item 5) — a health problem
             # doesn't change the sandbox's dispatch eligibility, see
@@ -1017,6 +1049,30 @@ class Orchestrator:
             )
             return
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue, outcome=reason)
+
+    def _finish_cancelled(self, outcome: Outcome) -> None:
+        """bwsalmon/agents#82: the task issue was closed on GitHub while its
+        agent was still running. Unlike `_requeue`'s failed/stranded
+        handling, this must not put the trigger label back on -- a closed
+        issue means the work is no longer wanted, not that it should be
+        attempted again. `in_progress_label` still comes off, so a closed
+        issue doesn't sit looking mid-flight forever; there is no
+        `completed_label` to add, since nothing was actually finished.
+
+        No try/except around `remove_label` here, the same as
+        `_finish_succeeded_issue`'s own use of it: `GitHubClient.remove_label`
+        already treats a 404 as "label already off" internally and never
+        raises for it (see its own docstring), so there is no stale-assignment
+        case left for this call site to catch.
+        """
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.audit.record(
+            sandbox=outcome.sandbox, issue=outcome.issue,
+            outcome="cancelled: issue closed while its agent was still running",
+        )
 
     # --- target resolution ----------------------------------------------
 

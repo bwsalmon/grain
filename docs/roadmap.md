@@ -1308,3 +1308,32 @@ merge attempt) is logged and retried next cycle, not raised. Deliberately
 excluded from ever getting a fix suggested for it in turn — a fix for a
 fix risks an unbounded chain — so a fix whose own PR goes wrong is left
 open, visibly, rather than escalated.
+
+## 20. Closing an issue should cancel the underlying agent
+
+- [x] Done
+
+Nothing stopped a dispatched unit from running to completion (or sitting
+until `max_runtime_minutes`) after a human closed its task issue by
+hand — bwsalmon/agents#82 asked for that work to actually stop.
+
+**No webhook, so a poll, same as item 17.** `sweeper.py`'s own docstring
+still holds ("this module knows nothing about GitHub"), so `sweep()`
+gained an optional `is_issue_closed: Callable[[int], bool] | None` hook
+instead of a `GitHubClient` of its own. It's consulted only for an
+assignment `sweep()` would otherwise leave running untouched — still
+`ACTIVE` and within budget, not one this same pass already found
+`DONE_SUCCESS`/`DONE_FAILED`/`ABSENT`/stranded, which already have a
+terminal outcome to report. That keeps the check to at most one extra
+GitHub call per still-active assignment per cycle, not one per in-progress
+issue regardless of status, and means every pre-existing caller (`None`,
+the default) sees no behaviour change and pays no extra call at all. A
+cancelled unit is reaped the same reap-then-release way a run past its
+runtime budget already is, reported through a new `SweepResult.cancelled`
+list distinct from `stranded` — `core.py`'s `_is_issue_closed` (`get_issue`
+against the task repo, `Issue` now carrying GitHub's own `state` field)
+is the hook `_sweep` wires in, and `_finish_cancelled` handles the result:
+`in_progress_label` comes off so a closed issue doesn't sit looking
+mid-flight forever, but unlike `_requeue`'s failed/stranded handling the
+trigger label never goes back on — a closed issue must not come back for
+redispatch.
