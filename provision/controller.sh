@@ -85,6 +85,17 @@ sudo -u grain-agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
 # the installer's target directory, ~/.local/bin, on PATH.
 ln -sf /home/grain-agent/.local/bin/claude /usr/local/bin/claude
 
+# Read-only access to this VM's own systemd journal (bwsalmon/agents#62),
+# so a dispatched agent's `read_grain_logs` MCP tool
+# (grain/automation/mcp_server.py) can `journalctl -u grain-automation
+# .service`/`grain-git-proxy.service` to triage a bug in grain itself --
+# gated per-task on the `grain-self-debug` label (`dispatch.py` only passes
+# `--self-debug` then), not on this group grant, which is unconditional.
+# `systemd-journal` membership grants read of the journal and nothing
+# else -- no write, no sudo, no capability beyond what any admin can
+# already get with a plain `journalctl -u ...` themselves.
+usermod -aG systemd-journal grain-agent
+
 # --- /data: the disk that outlives a controller rebuild (docs/design.md,
 # "Secrets on /data"). On GCP this is expected to be a separate persistent
 # disk, attached before this script runs; nothing here formats or mounts
@@ -263,6 +274,9 @@ Set up by provision/controller.sh:
   group-readable one, found live) so its MCP server
   (grain/automation/mcp_server.py) can reach the sandbox it was dispatched
   against, and nothing else under /data/secrets
+- grain-agent's read-only membership in the systemd-journal group
+  (bwsalmon/agents#62), so its MCP server can `journalctl` grain's own
+  services when a task carries the grain-self-debug label
 - the /data/{secrets,config,state} layout grain/automation, grain/proxy and
   grain/metadata already expect, including /data/state/automation/units
   where each dispatch's prompt/MCP-config/transcript now live

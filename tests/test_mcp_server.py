@@ -1,8 +1,8 @@
 import shlex
 
 from grain.automation.mcp_server import (
-    TOOLS, McpServer, ask_question, complete_analysis, edit_file, read_file, run_command,
-    write_file,
+    TOOLS, McpServer, ask_question, complete_analysis, edit_file, read_file, read_grain_logs,
+    run_command, write_file,
 )
 from grain.run import FakeRunner
 
@@ -143,6 +143,82 @@ def test_complete_analysis_overwrites_a_prior_summary_in_the_same_dispatch(tmp_p
     complete_analysis(str(path), "first summary")
     complete_analysis(str(path), "second summary")
     assert path.read_text() == "second summary"
+
+
+# --- read_grain_logs (bwsalmon/agents#62) -----------------------------------
+
+def test_read_grain_logs_reads_the_journal_for_an_allowed_unit():
+    runner = FakeRunner()
+    runner.expect("journalctl -u grain-automation.service", stdout="a log line\n")
+    result = read_grain_logs(runner, "grain-automation")
+    assert not result.is_error
+    assert "a log line" in result.text
+    argv, _ = runner.calls[0]
+    assert argv == ["journalctl", "-u", "grain-automation.service", "-n", "200", "--no-pager"]
+
+
+def test_read_grain_logs_honors_a_custom_line_count():
+    runner = FakeRunner()
+    runner.expect("journalctl -u grain-git-proxy.service", stdout="line\n")
+    read_grain_logs(runner, "grain-git-proxy", lines=50)
+    argv, _ = runner.calls[0]
+    assert argv == ["journalctl", "-u", "grain-git-proxy.service", "-n", "50", "--no-pager"]
+
+
+def test_read_grain_logs_rejects_an_unknown_unit_without_running_anything():
+    runner = FakeRunner()
+    result = read_grain_logs(runner, "grain-agent-nope")
+    assert result.is_error
+    assert "Unknown unit" in result.text
+    assert runner.calls == []
+
+
+def test_read_grain_logs_surfaces_a_nonzero_exit_without_raising():
+    runner = FakeRunner()
+    runner.expect("journalctl -u grain-automation.service", returncode=1, stderr="no journal")
+    result = read_grain_logs(runner, "grain-automation")
+    assert result.is_error
+    assert "no journal" in result.text
+
+
+def test_tools_list_excludes_read_grain_logs_by_default():
+    server = McpServer(FakeRunner(), WORKSPACE)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in response["result"]["tools"]}
+    assert "read_grain_logs" not in names
+    assert response["result"]["tools"] == TOOLS
+
+
+def test_tools_list_includes_read_grain_logs_when_self_debug_is_enabled():
+    server = McpServer(FakeRunner(), WORKSPACE, self_debug=True)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in response["result"]["tools"]}
+    assert "read_grain_logs" in names
+
+
+def test_tools_call_read_grain_logs_is_refused_when_self_debug_is_disabled():
+    local_runner = FakeRunner()
+    server = McpServer(FakeRunner(), WORKSPACE, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_grain_logs", "arguments": {"unit": "grain-automation"}},
+    })
+    assert response["result"]["isError"] is True
+    assert local_runner.calls == []
+
+
+def test_tools_call_routes_read_grain_logs_to_the_local_runner_not_the_sandbox_runner():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    local_runner.expect("journalctl -u grain-automation.service", stdout="hi\n")
+    server = McpServer(sandbox_runner, WORKSPACE, self_debug=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_grain_logs", "arguments": {"unit": "grain-automation"}},
+    })
+    assert response["result"]["isError"] is False
+    assert "hi" in response["result"]["content"][0]["text"]
+    assert sandbox_runner.calls == []
 
 
 # --- McpServer JSON-RPC dispatch -------------------------------------------
