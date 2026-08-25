@@ -253,7 +253,22 @@ cat > /etc/systemd/journald.conf.d/forward-to-console.conf <<'UNIT'
 [Journal]
 ForwardToConsole=yes
 UNIT
-systemctl reload systemd-journald
+# `reload` is not a job type journald accepts -- found live, in the very
+# deployment this block was written for: "Failed to reload
+# systemd-journald.service: Job type reload is not applicable for unit
+# systemd-journald.service". journald reads journald.conf at start, so
+# `restart` is what applies the drop-in above (and it is socket-activated,
+# so nothing logged across the restart is lost).
+#
+# And never fatally. Everything in this block is a *diagnostic* convenience,
+# but under `set -eux` that one failing line aborted the whole provisioning
+# script: cloud-init recorded the run as failed, and `grain host bootstrap`
+# stopped at "stage 5/11: wait for the controller" with "cloud-init did not
+# finish cleanly" as its entire account of it -- on a controller that was in
+# fact fully built, keys and units and all, by the lines above. A controller
+# that fails to build because its logging did is not a trade worth making.
+systemctl restart systemd-journald || echo \
+  "WARNING: could not restart systemd-journald; this VM's journal will not reach its serial console"
 
 mkdir -p /etc/grain-tools
 cat > /etc/grain-tools/README <<'DOC'
