@@ -2,8 +2,8 @@ import json
 
 from grain.automation.dispatch import (
     CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, SandboxTarget, UnitState,
-    branch_name, configure_git_credentials, dispatch, dispatch_pr, ensure_workspace,
-    reap, transcript_path, unit_name, unit_status,
+    agent_id, branch_name, configure_git_credentials, dispatch, dispatch_pr,
+    ensure_workspace, reap, transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Comment, Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
@@ -56,6 +56,14 @@ def test_branch_name_is_a_pure_function_of_the_issue_number():
     assert branch_name(7) == "grain/issue-7"
     assert branch_name(7) == branch_name(7)
     assert branch_name(7) != branch_name(8)
+
+
+def test_agent_id_is_short_and_random():
+    a = agent_id()
+    b = agent_id()
+    assert a != b
+    assert len(a) == 8
+    int(a, 16)  # hex
 
 
 def test_configure_git_credentials_sets_the_store_helper():
@@ -137,6 +145,38 @@ def test_dispatch_tells_the_agent_the_exact_branch_to_push():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "grain/issue-7" in prompt_stdin
+
+
+def test_dispatch_prompt_gives_the_agent_a_unique_id_to_label_infrastructure_with():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "Your agent id is " in prompt_stdin
+    assert "collid" in prompt_stdin.lower()
+
+
+def test_dispatch_mints_a_fresh_agent_id_each_call():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    first_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    runner2 = FakeRunner()
+    dispatch(runner2, runner2, "sandbox-0", make_target(), make_issue(),
+              remote_url=REMOTE_URL, token=TOKEN)
+    second_stdin = next(
+        stdin for argv, stdin in runner2.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    first_id = first_stdin.split("Your agent id is ")[1].split(".")[0]
+    second_id = second_stdin.split("Your agent id is ")[1].split(".")[0]
+    assert first_id != second_id
 
 
 def test_dispatch_writes_an_mcp_config_naming_the_assigned_sandbox():
@@ -538,6 +578,17 @@ def test_dispatch_pr_prompt_handles_no_conversation_yet():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "(no comments yet)" in prompt_stdin
+
+
+def test_dispatch_pr_prompt_gives_the_agent_a_unique_id_to_label_infrastructure_with():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "Your agent id is " in prompt_stdin
 
 
 def test_dispatch_pr_starts_a_systemd_unit_named_for_the_sandbox():

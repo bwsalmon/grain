@@ -1145,3 +1145,27 @@ repeatable `--target-repo`; with no `--target-repo` at all, the task repo
 becomes the sole allow-listed target *and* `default_target_repo`, which is
 precisely the single-repo deployment every deployment was before this item
 — it keeps working with no directive written anywhere.
+
+## 16. Give each agent a unique id
+
+- [x] Done
+
+A task can involve the agent creating infrastructure of its own — a
+container, a cloud resource, a scratch database — as part of the work, not
+just editing files in its checkout. Nothing named that infrastructure for
+it, and nothing stopped two concurrently-dispatched agents (this deployment
+already runs more than one sandbox at once, see item 3's live concurrency
+test) from picking the same obvious name and colliding.
+
+`agent_id()` (`grain/automation/dispatch.py`) mints an 8-hex-character
+`secrets.token_hex(4)` value fresh for every dispatch — no need to be a
+pure function of anything the way `branch_name()`/`transcript_path()` are,
+since nothing on the controller side ever has to recompute it to agree.
+`dispatch()`/`dispatch_pr()` generate one and thread it into `_prompt()`/
+`_pr_prompt()` as `agent_id_value`, which render it as a plain sentence
+telling the agent its id and inviting it to fold that id into any
+infrastructure name it picks, so two agents' infrastructure can never
+collide on name alone. Purely a prompt addition — no new MCP tool, no new
+state to persist, nothing for `core.py` to verify, since unlike the branch
+name nothing downstream ever needs to check what the agent actually did
+with it.

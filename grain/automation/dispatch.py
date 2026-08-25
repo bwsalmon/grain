@@ -149,6 +149,7 @@ freed.
 from __future__ import annotations
 
 import json
+import secrets
 import shlex
 from dataclasses import dataclass
 from enum import Enum
@@ -301,6 +302,20 @@ def branch_name(issue: int) -> str:
     return f"grain/issue-{issue}"
 
 
+def agent_id() -> str:
+    """A short random hex id, minted fresh for each dispatch and handed to
+    the agent in its prompt (`_prompt`/`_pr_prompt`) so it has something of
+    its own to fold into any infrastructure it names as part of the task —
+    a container, a cloud resource, a test database — without colliding with
+    another agent's concurrently-running task. Unlike `branch_name()` and
+    `transcript_path()`, nothing on the controller side ever needs to
+    recompute this to agree with it, so it does not need to be a pure
+    function of anything: `secrets.token_hex`, not a seeded/deterministic
+    generator, is exactly right.
+    """
+    return secrets.token_hex(4)
+
+
 def _format_comment(comment: Comment) -> str:
     return f"- {comment.user}:\n  {comment.body}"
 
@@ -318,8 +333,19 @@ def _conversation_section(comments: list[Comment]) -> str:
     )
 
 
+def _agent_id_line(agent_id_value: str) -> str:
+    return (
+        f"Your agent id is {agent_id_value}. If this task involves creating "
+        "any infrastructure of your own — a container, a cloud resource, a "
+        "test database, and the like — fold this id into its name. Other "
+        "agents may be working concurrently, on this same host or others, "
+        "and this id is yours alone to use so your infrastructure never "
+        "collides with theirs."
+    )
+
+
 def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = (),
-            *, task_repo: str = "", target_repo: str = "") -> str:
+            *, task_repo: str = "", target_repo: str = "", agent_id_value: str = "") -> str:
     """`task_repo` is where the issue itself lives (the agent set's queue);
     `target_repo` is where the code is. Two different repos in the general
     case — the prompt says which is which, because "the repository" would
@@ -329,6 +355,10 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     `issue.body` arrives with its directive lines already stripped
     (`core.py` calls `directives.strip_directives`) — a `/repo` line is
     addressed to the orchestrator, not to the agent.
+
+    `agent_id_value` is `agent_id()`'s output, generated once by `dispatch()`
+    and passed through here rather than minted inline, so a test can pin it
+    to a known value instead of parsing whatever `secrets.token_hex` picked.
     """
     return (
         f"You are working {task_repo}#{issue.number}: {issue.title}\n\n"
@@ -343,6 +373,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         f"{workspace} in your assigned sandbox, with its git remote already "
         "configured — do your work there, using the tools available to "
         "you.\n\n"
+        f"{_agent_id_line(agent_id_value)}\n\n"
         "When you are done, commit your changes and push them with exactly "
         "this command:\n"
         f"    git push origin HEAD:{branch}\n"
@@ -361,12 +392,16 @@ def _format_review_comment(comment: ReviewComment) -> str:
 
 def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str,
                thread_comments: list[Comment] = (), *, task_repo: str = "",
-               target_repo: str = "", task_issue: int | None = None) -> str:
+               target_repo: str = "", task_issue: int | None = None,
+               agent_id_value: str = "") -> str:
     """A PR-continuation dispatch. The PR lives in `target_repo`; the task
     that asked for the work — and the conversation a human is having about
     it — lives in `task_repo`, as issue `task_issue` (a `/pr` directive on
     that issue is what makes this a PR dispatch at all, see
     `directives.py`).
+
+    `agent_id_value` is `_prompt`'s own parameter of the same name — see its
+    docstring.
     """
     feedback = (
         "\n\n".join(_format_review_comment(c) for c in comments)
@@ -391,6 +426,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         "history behind it — your job is to continue that work (address "
         "the feedback below, fix CI, finish what was started), not to "
         "start over or open a competing branch.\n\n"
+        f"{_agent_id_line(agent_id_value)}\n\n"
         "Review feedback on this pull request so far:\n\n"
         f"{feedback}\n\n"
         "Conversation on this pull request so far (a prior attempt may have "
@@ -683,7 +719,8 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _prompt(issue, push_branch, target.workspace, comments,
-                task_repo=task_repo, target_repo=target_repo),
+                task_repo=task_repo, target_repo=target_repo,
+                agent_id_value=agent_id()),
         remote_url=remote_url, token=token, branch=base,
     )
 
@@ -714,7 +751,7 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
         sandbox_runner, controller_runner, sandbox, target,
         _pr_prompt(pr, comments, target.workspace, thread_comments,
                    task_repo=task_repo, target_repo=target_repo,
-                   task_issue=task_issue),
+                   task_issue=task_issue, agent_id_value=agent_id()),
         remote_url=remote_url, token=token, branch=pr.head_ref,
     )
 
