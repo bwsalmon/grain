@@ -66,12 +66,21 @@ def mac_for(address: ipaddress.IPv4Address) -> str:
 
 
 def render_domain_xml(cluster: Cluster, spec: VmSpec, disk_path: Path,
-                       seed_path: Path) -> str:
+                       seed_path: Path, console_log_path: Path) -> str:
     """Render the libvirt domain XML for one VM. Pure; no side effects.
 
     Written as an f-string rather than via a library, for the same reason
     `lima.py` rendered YAML by hand: the adapter has no dependencies beyond
     the standard library.
+
+    `console_log_path` gives the guest's serial console a `<log>` sink on
+    the *host* (bwsalmon/agents#58) — without it, the `pty` console is only
+    reachable interactively via `virsh console`, so nothing the guest ever
+    prints to it (in the controller's case, its journal, once
+    provision/controller.sh turns on `ForwardToConsole`) survives past that
+    one session. `append='on'` matches how this repo's own audit logs
+    behave (grain/automation/audit.py's `FileAuditLog`) — content
+    accumulates rather than resetting on every VM start.
     """
     address = cluster.address_of(spec.name)
     iface = cluster.interface_of(spec.name)
@@ -118,6 +127,7 @@ def render_domain_xml(cluster: Cluster, spec: VmSpec, disk_path: Path,
     </interface>
     <console type='pty'>
       <target type='serial' port='0'/>
+      <log file='{console_log_path}' append='on'/>
     </console>
   </devices>
 </domain>
@@ -364,8 +374,11 @@ class LibvirtAdapter(HostAdapter):
              str(seed_path), str(user_data_path), str(meta_data_path)]
         )
 
+        console_log_path = self.config_dir / f"{spec.name}-console.log"
         xml_path = self.config_dir / f"{spec.name}.xml"
-        xml_path.write_text(render_domain_xml(self.cluster, spec, disk_path, seed_path))
+        xml_path.write_text(
+            render_domain_xml(self.cluster, spec, disk_path, seed_path, console_log_path)
+        )
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "define", str(xml_path)])
 
         # After every file this VM needs exists -- unlike the SELinux call
@@ -400,7 +413,7 @@ class LibvirtAdapter(HostAdapter):
         # remove them ourselves (verified: it leaves them behind otherwise).
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "undefine", name, "--nvram"], check=False)
         for suffix in (".qcow2", "-seed.iso", "-meta-data", "-user-data",
-                       "-network-config", ".xml"):
+                       "-network-config", ".xml", "-console.log"):
             (self.config_dir / f"{name}{suffix}").unlink(missing_ok=True)
 
     def state(self, name: str) -> VmState:
