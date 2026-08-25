@@ -348,7 +348,7 @@ variable "task_repo" {
   description = <<-EOT
     owner/name of the repo polled for labelled issues. Empty -- the
     default -- means this repository: the config repo is also the queue,
-    so an issue filed here and labelled `grain-agent` becomes a task. Set
+    so an issue filed here and labelled `grain-todo` becomes a task. Set
     it only to point the deployment at a separate task repo.
   EOT
   default     = ""

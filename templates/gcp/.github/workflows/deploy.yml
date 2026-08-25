@@ -100,7 +100,7 @@ jobs:
           echo "grain-src/ci: every script this workflow runs is present"
 
       # This repo is also the task queue: an issue here, labelled
-      # `grain-agent`, is what the automation service picks up. Creates
+      # `grain-todo`, is what the automation service picks up. Creates
       # every label the queue runs on -- the ones the orchestrator moves an
       # issue between and the opt-in ones a human applies -- and converges
       # their colours. The list is grain's: grain/automation/labels.py.

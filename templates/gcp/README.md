@@ -8,7 +8,7 @@ machine, how many sandboxes, which repos the agents work on, and the part
 worth being careful about, exactly what the VM is allowed to do in your
 cloud project — as files you can read, diff, and review; push to `main` and
 the running system converges on them. And it **is the task queue**: an
-issue filed here and labelled `grain-agent` is what the agents pick up.
+issue filed here and labelled `grain-todo` is what the agents pick up.
 
 ```
   pull request ──▶ CI plans, you read the diff
@@ -93,13 +93,13 @@ gcloud logging read \
   --project YOUR_PROJECT --freshness=1d
 ```
 
-**5. File a task.** Open an issue here, label it `grain-agent`, and name
+**5. File a task.** Open an issue here, label it `grain-todo`, and name
 the repo it is about. That is the whole interface.
 
 ## Issues here are the task queue
 
 ```
-  issue filed here, labelled `grain-agent`
+  issue filed here, labelled `grain-todo`
         │
         ▼
   the host polls on its own timer ──▶ claims a free sandbox
@@ -111,8 +111,8 @@ the repo it is about. That is the whole interface.
 ```
 
 Once the host is up, file an issue in this repository and label it
-`grain-agent`. The next polling pass claims a free sandbox, swaps the
-label for `grain-agent-in-progress`, and runs an agent against it. The
+`grain-todo`. The next polling pass claims a free sandbox, swaps the
+label for `grain-todo-in-progress`, and runs an agent against it. The
 deploy workflow creates every label this deployment uses the first time
 it runs, and brings their colours back in step on every run after, so
 they are in the picker before you need them and stay legible once they
@@ -230,7 +230,7 @@ nothing pushed.
 
 A short-lived Gemini API key for a task (asked for by labelling the task
 issue `grain-gemini-key`, the same "a human decided this" trust tier the
-`grain-agent` trigger label itself carries) reuses this same account and
+`grain-todo` trigger label itself carries) reuses this same account and
 key -- set `enable_gemini_key = true` to also grant it
 `roles/serviceusage.apiKeysAdmin` and enable the Generative Language API,
 both via Terraform. See grain's `docs/runbook.md`, "Enabling

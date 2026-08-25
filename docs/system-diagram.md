@@ -329,12 +329,12 @@ sequenceDiagram
     participant S as sandbox-i
     participant P as Git proxy (controller)
 
-    H->>GH: label issue `grain-agent`
+    H->>GH: label issue `grain-todo`
     Note over A: systemd timer, every 30s
     A->>A: sweep first — finished / failed / stranded units
     A->>GH: list task-repo issues with the trigger label
     A->>A: rate limit (runs_per_hour), free-sandbox check
-    A->>GH: move label → `grain-agent-in-progress`
+    A->>GH: move label → `grain-todo-in-progress`
     A->>S: ssh · inject proxy token · clone/reset workspace
     A->>S: systemd-run grain-task-sandbox-i (prompt on stdin)
     S->>P: git clone/fetch (bearer token)

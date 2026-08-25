@@ -45,7 +45,7 @@ cluster_overrides = {
 # -- Which repos the agents work on -----------------------------------------
 
 # The queue is *this repository*: file an issue here, label it
-# `grain-agent`, and the next polling pass picks it up. CI passes the repo
+# `grain-todo`, and the next polling pass picks it up. CI passes the repo
 # name automatically, so there is nothing to set. Uncomment only to point
 # the deployment at a separate task repo instead.
 #

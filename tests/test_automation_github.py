@@ -8,7 +8,7 @@ from grain.automation.github import (
 )
 
 
-def issue_json(number: int, *, is_pr: bool = False, labels=("grain-agent",)) -> dict:
+def issue_json(number: int, *, is_pr: bool = False, labels=("grain-todo",)) -> dict:
     item = {
         "number": number,
         "title": f"issue {number}",
@@ -26,9 +26,9 @@ def test_list_issues_returns_open_issues():
         responses=[ApiResponse(200, {}, json.dumps([issue_json(1)]).encode())]
     )
     client = GitHubClient(transport, token="t")
-    issues = client.list_issues("o", "r", "grain-agent")
+    issues = client.list_issues("o", "r", "grain-todo")
     assert [i.number for i in issues] == [1]
-    assert issues[0].labels == frozenset({"grain-agent"})
+    assert issues[0].labels == frozenset({"grain-todo"})
 
 
 def test_list_issues_filters_out_pull_requests():
@@ -38,7 +38,7 @@ def test_list_issues_filters_out_pull_requests():
         )]
     )
     client = GitHubClient(transport, token="t")
-    issues = client.list_issues("o", "r", "grain-agent")
+    issues = client.list_issues("o", "r", "grain-todo")
     assert [i.number for i in issues] == [1]
 
 
@@ -52,7 +52,7 @@ def test_list_issues_follows_link_header_pagination():
         ApiResponse(200, {}, json.dumps([issue_json(2)]).encode()),
     ])
     client = GitHubClient(transport, token="t")
-    issues = client.list_issues("o", "r", "grain-agent")
+    issues = client.list_issues("o", "r", "grain-todo")
     assert [i.number for i in issues] == [1, 2]
     assert transport.calls[1]["path"] == "/repos/o/r/issues?page=2"
 
@@ -61,7 +61,7 @@ def test_list_issues_raises_on_a_non_200():
     transport = FakeTransport(responses=[ApiResponse(403, {}, b"nope")])
     client = GitHubClient(transport, token="t")
     with pytest.raises(GitHubError):
-        client.list_issues("o", "r", "grain-agent")
+        client.list_issues("o", "r", "grain-todo")
 
 
 def test_get_issue_returns_the_issue():
@@ -69,7 +69,7 @@ def test_get_issue_returns_the_issue():
     issue = GitHubClient(transport, token="t").get_issue("o", "r", 7)
     assert issue.number == 7
     assert issue.title == "issue 7"
-    assert issue.labels == frozenset({"grain-agent"})
+    assert issue.labels == frozenset({"grain-todo"})
     assert transport.calls[0]["path"] == "/repos/o/r/issues/7"
 
 
@@ -81,22 +81,22 @@ def test_get_issue_raises_on_a_non_200():
 
 def test_add_label_posts_the_label_body():
     transport = FakeTransport(responses=[ApiResponse(200, {}, b"[]")])
-    GitHubClient(transport, token="t").add_label("o", "r", 1, "grain-agent-in-progress")
+    GitHubClient(transport, token="t").add_label("o", "r", 1, "grain-todo-in-progress")
     call = transport.calls[0]
     assert call["method"] == "POST"
-    assert json.loads(call["body"]) == {"labels": ["grain-agent-in-progress"]}
+    assert json.loads(call["body"]) == {"labels": ["grain-todo-in-progress"]}
 
 
 def test_remove_label_tolerates_a_404_the_label_is_already_gone():
     transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
     # Should not raise.
-    GitHubClient(transport, token="t").remove_label("o", "r", 1, "grain-agent")
+    GitHubClient(transport, token="t").remove_label("o", "r", 1, "grain-todo")
 
 
 def test_remove_label_raises_on_other_errors():
     transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
     with pytest.raises(GitHubError):
-        GitHubClient(transport, token="t").remove_label("o", "r", 1, "grain-agent")
+        GitHubClient(transport, token="t").remove_label("o", "r", 1, "grain-todo")
 
 
 def test_close_issue_patches_the_issue_closed():
@@ -116,7 +116,7 @@ def test_close_issue_raises_on_a_non_200():
 
 def test_anonymous_client_sends_no_authorization_header():
     transport = FakeTransport(responses=[ApiResponse(200, {}, b"[]")])
-    GitHubClient(transport, token=None).list_issues("o", "r", "grain-agent")
+    GitHubClient(transport, token=None).list_issues("o", "r", "grain-todo")
     assert "Authorization" not in transport.calls[0]["headers"]
 
 
@@ -247,9 +247,9 @@ def test_a_token_source_resolves_a_credential_per_repo():
 
     transport = FakeTransport()
     client = GitHubClient(transport, PerRepo())
-    client.list_issues("o", "tasks", "grain-agent")
-    client.list_issues("o", "code", "grain-agent")
-    client.list_issues("o", "unmapped", "grain-agent")
+    client.list_issues("o", "tasks", "grain-todo")
+    client.list_issues("o", "code", "grain-todo")
+    client.list_issues("o", "unmapped", "grain-todo")
     assert transport.calls[0]["headers"]["Authorization"] == "token task-token"
     assert transport.calls[1]["headers"]["Authorization"] == "token code-token"
     # No credential covers the third -- an anonymous request, not a crash:
@@ -261,8 +261,8 @@ def test_a_token_source_resolves_a_credential_per_repo():
 def test_a_bare_token_still_applies_to_every_repo():
     transport = FakeTransport()
     client = GitHubClient(transport, token="t")
-    client.list_issues("o", "one", "grain-agent")
-    client.list_issues("other", "two", "grain-agent")
+    client.list_issues("o", "one", "grain-todo")
+    client.list_issues("other", "two", "grain-todo")
     assert all(c["headers"]["Authorization"] == "token t" for c in transport.calls)
 
 
@@ -385,13 +385,13 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
     real = GitHubClient(transport, token="t")
     dry = DryRunGitHubClient(real)
 
-    issues = dry.list_issues("o", "r", "grain-agent")
+    issues = dry.list_issues("o", "r", "grain-todo")
     assert [i.number for i in issues] == [1]
     assert dry.get_issue("o", "r", 1).title == "issue 1"
     assert dry.branch_exists("o", "r", "grain/issue-1") is True
 
-    dry.add_label("o", "r", 1, "grain-agent-in-progress")
-    dry.remove_label("o", "r", 1, "grain-agent")
+    dry.add_label("o", "r", 1, "grain-todo-in-progress")
+    dry.remove_label("o", "r", 1, "grain-todo")
     dry.close_issue("o", "r", 1)
     pr = dry.create_pull_request("o", "r", head="grain/issue-1", base="main", title="x")
     out = capsys.readouterr().out

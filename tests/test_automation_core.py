@@ -25,7 +25,7 @@ from grain.run import FakeRunner
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def issue_json(number: int, body: str = "do it", labels=("grain-agent",)) -> dict:
+def issue_json(number: int, body: str = "do it", labels=("grain-todo",)) -> dict:
     return {
         # "id" isn't read by list_issues itself, but the same fixture also
         # serves as FakeTransport's shared default response for whichever
@@ -49,7 +49,7 @@ def pr_trigger_json(number: int) -> dict:
     return {
         "number": number, "title": f"pr {number}", "body": "please review",
         "html_url": f"https://github.com/o/r/pull/{number}",
-        "labels": [{"name": "grain-agent"}],
+        "labels": [{"name": "grain-todo"}],
         "pull_request": {"url": "..."},
     }
 
@@ -402,7 +402,7 @@ def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypa
         c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/labels")
     ]
     assert len(label_posts) == 1
-    assert json.loads(label_posts[0]["body"]) == {"labels": ["grain-agent-awaiting-reply"]}
+    assert json.loads(label_posts[0]["body"]) == {"labels": ["grain-todo-awaiting-reply"]}
     # Recorded so a later reply can be matched against this exact comment.
     pending = orchestrator.state.pending_questions["5"]
     assert pending.question_comment_id == 555
@@ -503,7 +503,7 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_com
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
     )
-    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-todo-completed"]}
     # No branch was ever checked, and no PR was opened -- the analysis path
     # short-circuits before either.
     assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
@@ -681,7 +681,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
     )
-    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-todo-completed"]}
     # The completed label goes on and the in-progress label comes off; the
     # trigger label is never re-added for a genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
@@ -1014,7 +1014,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/7/labels"
     )
-    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-todo-completed"]}
     # bwsalmon/agents#23's close_issue is issue-triggered only -- a
     # PR-triggered task is continuing an existing PR, which has its own
     # lifecycle, so this path must never close anything. Unlike the
@@ -1201,7 +1201,7 @@ def test_a_task_naming_a_non_allow_listed_repo_is_parked_not_dispatched():
     assert orchestrator.state.pending_questions["4"].question_comment_id == 555
     added = [json.loads(c["body"])["labels"] for c in transport.calls
              if c["method"] == "POST" and c["path"].endswith("/labels")]
-    assert added == [["grain-agent-awaiting-reply"]]
+    assert added == [["grain-todo-awaiting-reply"]]
 
 
 def test_a_task_with_no_repo_directive_and_no_default_is_parked():
@@ -1359,7 +1359,7 @@ def gemini_runner(**overrides) -> FakeRunner:
     return runner
 
 
-GEMINI_LABELS = ("grain-agent", "grain-gemini-key")
+GEMINI_LABELS = ("grain-todo", "grain-gemini-key")
 
 
 def test_gemini_key_label_without_config_is_parked():
@@ -1494,7 +1494,7 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
 def test_a_grain_github_label_records_the_override_for_the_dispatched_sandbox():
     credential_store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, labels=("grain-agent", "grain-github-workflow"))],
+        issues=[issue_json(4, labels=("grain-todo", "grain-github-workflow"))],
         credentials=credentials_with("workflow"),
         credential_store=credential_store,
     )
@@ -1523,7 +1523,7 @@ def test_a_grain_github_label_with_no_credentials_wired_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, labels=("grain-agent", "grain-github-workflow"))]).encode()),  # list_issues
+            [issue_json(4, labels=("grain-todo", "grain-github-workflow"))]).encode()),  # list_issues
         ApiResponse(200, {}, b"[]"),                                  # list_comments
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),         # the park comment
     ])
@@ -1542,7 +1542,7 @@ def test_a_grain_github_label_naming_an_unconfigured_key_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, labels=("grain-agent", "grain-github-nonexistent"))]).encode()),
+            [issue_json(4, labels=("grain-todo", "grain-github-nonexistent"))]).encode()),
         ApiResponse(200, {}, b"[]"),
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),
     ])
@@ -1560,7 +1560,7 @@ def test_two_grain_github_labels_on_one_issue_is_parked_as_ambiguous():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, labels=("grain-agent", "grain-github-workflow", "grain-github-release"))]
+            [issue_json(4, labels=("grain-todo", "grain-github-workflow", "grain-github-release"))]
         ).encode()),
         ApiResponse(200, {}, b"[]"),
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),
@@ -1588,7 +1588,7 @@ def test_a_dispatch_failure_with_a_grain_github_label_does_not_leak_into_the_nex
     runner = FakeRunner()
     runner.expect("bash -c", returncode=128, stderr="fatal: Authentication failed")
     orchestrator, transport = make_orchestrator(
-        issues=[issue_json(4, labels=("grain-agent", "grain-github-workflow"))],
+        issues=[issue_json(4, labels=("grain-todo", "grain-github-workflow"))],
         runner=runner,
         credentials=credentials_with("workflow"),
         credential_store=credential_store,
@@ -1615,7 +1615,7 @@ def test_a_dispatch_failure_with_a_grain_github_label_does_not_leak_into_the_nex
 
 # --- Self-debug (bwsalmon/agents#62) ----------------------------------------
 
-SELF_DEBUG_LABELS = ("grain-agent", "grain-self-debug")
+SELF_DEBUG_LABELS = ("grain-todo", "grain-self-debug")
 
 
 def _mcp_config_args_from(runner) -> list[str]:

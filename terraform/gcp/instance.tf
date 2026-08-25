@@ -1,6 +1,6 @@
 locals {
   # The config repo is the task repo unless you say otherwise: issues filed
-  # here and labelled `grain-agent` are the queue. CI supplies config_repo
+  # here and labelled `grain-todo` are the queue. CI supplies config_repo
   # from github.repository, so the common case needs no configuration at
   # all.
   task_repo = var.task_repo != "" ? var.task_repo : var.config_repo

@@ -977,7 +977,7 @@ own, no relabeling needed.
 **Visible lifecycle, not just internal bookkeeping.** `_finish_question`
 now applies a new `awaiting_reply_label`
 (`AutomationConfig.awaiting_reply_label`, default
-`"grain-agent-awaiting-reply"`) in place of just removing the in-progress
+`"grain-todo-awaiting-reply"`) in place of just removing the in-progress
 label — the same reasoning that gave `trigger_label`/`in_progress_label`
 their own visible labels in the first place: an operator scanning the
 repo's issues should be able to tell "genuinely idle, waiting on a human"
@@ -1206,7 +1206,7 @@ already have; either just drops the record and logs.
 **A visible marker regardless of when (or whether) the issue closes.**
 bwsalmon/agents#54 also asked for a label on every task the agent
 considers its own part done with, `completed_label`
-(`AutomationConfig.completed_label`, default `"grain-agent-completed"`).
+(`AutomationConfig.completed_label`, default `"grain-todo-completed"`).
 It goes on immediately in every finishing path — `_finish_succeeded_issue`
 (the moment the PR opens), `_finish_succeeded_pr` (a PR-continuation task
 pushing more commits to a PR that already existed before the task, whose

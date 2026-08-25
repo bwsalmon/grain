@@ -79,7 +79,7 @@ or grinding to a timeout. That ends its turn: `dispatch.py` resets a fixed
 per-unit file before every dispatch, the tool call writes the question
 there, and once the unit finishes, `core.py`'s sweep reads it back, posts
 it as a `🤖`-signed comment on the task issue, and swaps the in-progress label
-for `grain-agent-awaiting-reply` — **without** re-adding the trigger label,
+for `grain-todo-awaiting-reply` — **without** re-adding the trigger label,
 so the task doesn't immediately redispatch and re-ask the same question in
 a loop.
 
@@ -291,7 +291,7 @@ every push to `main`, and a small service on the host watches instance
 metadata and re-runs `host bootstrap` whenever the config changes.
 
 That repo is also the task repo: an issue filed there and labelled
-`grain-agent` is what the agents pick up, so the queue and the deployment
+`grain-todo` is what the agents pick up, so the queue and the deployment
 that serves it are one thing to set up, not two.
 
 The GitHub token and the Claude Code token live in its Actions secrets,
@@ -530,9 +530,9 @@ A single-repo deployment sets it to its own repo and writes no directives
 at all — which is what `grain controller configure --task-repo X` with no
 `--target-repo` produces.
 
-The defaults worth knowing: `trigger_label: "grain-agent"`,
-`in_progress_label: "grain-agent-in-progress"`,
-`awaiting_reply_label: "grain-agent-awaiting-reply"`,
+The defaults worth knowing: `trigger_label: "grain-todo"`,
+`in_progress_label: "grain-todo-in-progress"`,
+`awaiting_reply_label: "grain-todo-awaiting-reply"`,
 `gemini_key_label: "grain-gemini-key"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
 `runs_per_hour: 60`, `max_runtime_minutes: 120`. Also
@@ -584,7 +584,7 @@ grain host health                            # every sandbox healthy
 
 ## Use it
 
-**File the task in the task repo, and label it `grain-agent`.** One repo
+**File the task in the task repo, and label it `grain-todo`.** One repo
 is the agent set's queue: it is the only repo polled, labelled, or
 commented on. The code being changed is a *target* repo, named by the task
 itself:
@@ -607,11 +607,11 @@ A target repo has to be on `/data/config/repo-allowlist.json`, the same
 list the git proxy enforces. A task naming anything else — or naming
 nothing, with no default configured — is **parked**: the orchestrator
 comments saying exactly what is wrong, swaps the trigger label for
-`grain-agent-awaiting-reply`, and picks the task back up once a maintainer
+`grain-todo-awaiting-reply`, and picks the task back up once a maintainer
 replies. Nothing dispatches on a guess about which repo was meant.
 
 The next `run-once` pass picks a labelled task up, moves the label to
-`grain-agent-in-progress`, and claims a free sandbox. Dispatch is
+`grain-todo-in-progress`, and claims a free sandbox. Dispatch is
 two-sided:
 
 - On the **sandbox**: the workspace at `/home/debian/workspace` is cloned

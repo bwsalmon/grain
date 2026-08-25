@@ -292,8 +292,8 @@ short of giving the host a GitHub/Claude credential — see
     the single-repo shape instead: the task repo as the sole allow-listed
     target *and* the default, so no task needs a directive.
     Everything else has a default worth knowing: `trigger_label:
-    "grain-agent"`, `in_progress_label: "grain-agent-in-progress"`,
-    `awaiting_reply_label: "grain-agent-awaiting-reply"`,
+    "grain-todo"`, `in_progress_label: "grain-todo-in-progress"`,
+    `awaiting_reply_label: "grain-todo-awaiting-reply"`,
     `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
     `runs_per_hour: 60`, `max_runtime_minutes: 120`. Override any of them by
     editing the file directly.

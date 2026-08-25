@@ -57,10 +57,10 @@ def test_the_six_labels_are_the_ones_the_deployment_actually_runs_on():
     """Names spelled out once, against the defaults the README, runbook
     and design docs all quote -- so a rename has to be deliberate."""
     assert [label.name for label in task_labels()] == [
-        "grain-agent",
-        "grain-agent-in-progress",
-        "grain-agent-awaiting-reply",
-        "grain-agent-completed",
+        "grain-todo",
+        "grain-todo-in-progress",
+        "grain-todo-awaiting-reply",
+        "grain-todo-completed",
         "grain-gemini-key",
         "grain-self-debug",
     ]
@@ -75,9 +75,9 @@ def test_a_renamed_label_follows_through_to_the_created_set():
     )
     names = {label.name for label in task_labels(config)}
     assert "do-it" in names and "needs-gemini" in names
-    assert "grain-agent" not in names
+    assert "grain-todo" not in names
     # Untouched fields still come from the defaults.
-    assert "grain-agent-in-progress" in names
+    assert "grain-todo-in-progress" in names
 
 
 def test_no_config_means_the_defaults_not_an_error():
@@ -134,10 +134,10 @@ def test_the_state_tier_is_exactly_the_dispatch_state_machine():
     for label in task_labels():
         by_kind.setdefault(label.kind, []).append(label.name)
     assert by_kind[STATE] == [
-        "grain-agent",
-        "grain-agent-in-progress",
-        "grain-agent-awaiting-reply",
-        "grain-agent-completed",
+        "grain-todo",
+        "grain-todo-in-progress",
+        "grain-todo-awaiting-reply",
+        "grain-todo-completed",
     ]
     assert by_kind[CAPABILITY] == ["grain-gemini-key", "grain-self-debug"]
 

@@ -57,8 +57,8 @@ class AutomationConfig:
     # task repo — a PR-continuation task (docs/roadmap.md item 9) is a task
     # issue carrying a `/pr` directive, not a labelled PR in some other
     # repo, so there is still exactly one trigger surface to watch.
-    trigger_label: str = "grain-agent"
-    in_progress_label: str = "grain-agent-in-progress"
+    trigger_label: str = "grain-todo"
+    in_progress_label: str = "grain-todo-in-progress"
     # Applied instead of in_progress_label once an `ask_question` call is
     # relayed (docs/roadmap.md item 13), and equally when a task is parked
     # for an unusable `/repo` directive -- visible on GitHub itself, the
@@ -66,7 +66,7 @@ class AutomationConfig:
     # can see at a glance which issues are idle waiting for a human versus
     # genuinely untouched. Removed the moment a trusted reply promotes the
     # issue back to trigger_label.
-    awaiting_reply_label: str = "grain-agent-awaiting-reply"
+    awaiting_reply_label: str = "grain-todo-awaiting-reply"
     # Applied once a task's work is done from the agent's own side --
     # a PR opened (or continued) for a fresh-branch/PR-continuation task, or
     # an analysis posted -- regardless of whether the task issue itself
@@ -75,7 +75,7 @@ class AutomationConfig:
     # `state.py`'s `OpenPullRequest`). Never removed once applied -- unlike
     # the other labels above, this one isn't part of the dispatch queue
     # state machine, just a visible marker of "the agent's part is done."
-    completed_label: str = "grain-agent-completed"
+    completed_label: str = "grain-todo-completed"
     # Asks for a short-lived Gemini API key for the task it's applied to
     # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once
     # the task's slot frees. A label, not a body directive
