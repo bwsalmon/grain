@@ -228,6 +228,25 @@ key -- set `enable_gemini_key = true` to also grant it
 both via Terraform. See grain's `docs/runbook.md`, "Enabling
 `grain-gemini-key`".
 
+## Locking the project down
+
+`lock_down_project = true` adds two project-level organization policies on
+top of the IAM roles above: no VM in the project — this deployment's own
+host included — may get an external IP, and no bucket may be made public.
+Unlike the IAM roles, these hold for *every* identity in the project, not
+just the ones this deployment grants, so they are worth turning on once
+you know the deployment does not need either capability — not a
+substitute for reviewing `vm_service_account_roles` and
+`agent_service_account_roles` in the first place.
+
+It needs `assign_external_ip = false` (and `enable_cloud_nat = true`, for
+the host's own egress) set first — Terraform refuses to plan otherwise,
+since the policy would deny the host's own external IP the moment it took
+effect. See `terraform/gcp/variables.tf`'s `lock_down_project` for the
+full reasoning, and re-run `bootstrap-gcp.sh` if this project's deployer
+was bootstrapped before this option existed — it needs
+`roles/orgpolicy.policyAdmin`, which older bootstraps did not grant.
+
 ## Day two
 
 **Change anything** — machine type, sandbox count, a target repo, an IAM
@@ -281,6 +300,7 @@ terraform/gcp/
   variables.tf              every knob, with why it exists
   iam.tf                    the host account, the agent account, their roles
   instance.tf               the VM, nested virtualization, the data disk
+  lockdown.tf               project-wide org-policy guardrails, opt-in
   network.tf                VPC, one firewall rule, optional Cloud NAT
   outputs.tf                instance name, zone, service accounts, ssh command
   versions.tf               provider/backend requirements

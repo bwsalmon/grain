@@ -70,6 +70,7 @@ gcloud services enable --project="$PROJECT_ID" \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   iap.googleapis.com \
+  orgpolicy.googleapis.com \
   serviceusage.googleapis.com \
   storage.googleapis.com \
   sts.googleapis.com
@@ -99,11 +100,16 @@ say "Granting the deployer what Terraform needs"
 # from the serviceUsageConsumer below) is what lets Terraform's own
 # google_project_service.generativelanguage (iam.tf, enable_gemini_key)
 # turn an API on -- serviceUsageConsumer only covers *using* an
-# already-enabled one.
+# already-enabled one. orgpolicy.policyAdmin is what lets Terraform's
+# google_org_policy_policy resources (lockdown.tf, lock_down_project) set
+# a project-level policy at all -- granted unconditionally, same as the
+# gemini-key role above, so turning the tfvars flag on later needs no
+# second bootstrap run.
 for role in \
   roles/compute.admin \
   roles/iam.serviceAccountAdmin \
   roles/iam.serviceAccountUser \
+  roles/orgpolicy.policyAdmin \
   roles/resourcemanager.projectIamAdmin \
   roles/serviceusage.serviceUsageAdmin \
   roles/serviceusage.serviceUsageConsumer

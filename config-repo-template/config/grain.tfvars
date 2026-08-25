@@ -114,6 +114,13 @@ ssh_source_ranges = ["35.235.240.0/20"]
 # Untested against nested virtualization on this image; see variables.tf.
 enable_shielded_vm = false
 
+# Project-wide organization-policy guardrails: no VM in the project may get
+# an external IP, and no bucket may be made public. Holds for every
+# identity in the project, not just this deployment's own -- a second,
+# blunter lock alongside the IAM roles above. Needs assign_external_ip =
+# false first (see variables.tf's lock_down_project).
+lock_down_project = false
+
 # How long the on-host deploy may run before it reports failure. A first
 # deploy downloads a base image and boots the controller plus every sandbox.
 deploy_timeout_minutes = 45
