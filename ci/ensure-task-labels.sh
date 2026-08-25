@@ -10,8 +10,12 @@
 #
 # Needs `gh` (stock on a GitHub runner) authenticated as something with
 # `issues: write` on the repo, via GH_TOKEN, and python3 for the label
-# table. Creating a label that already exists is the normal case on every
-# deploy after the first, and is not an error.
+# table. Converges rather than creates: a label that already exists is the
+# normal case on every deploy after the first, and has its colour and
+# description brought back in line with the table (`gh label create
+# --force`) rather than being left alone. Without that, the table would
+# only ever describe repos that had never seen the label, and a palette
+# change could not reach a running deployment at all.
 set -euo pipefail
 
 repo="${1:-${GITHUB_REPOSITORY:-}}"
@@ -29,13 +33,32 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # here with python's own traceback, not half-create a label set.
 labels="$(PYTHONPATH="$root" python3 -m grain.automation.labels)"
 
+# One listing up front, purely so the log can say which labels actually
+# moved -- `--force` alone reports a recolour and a no-op identically, and
+# "recoloured 4 labels" is the line worth having in the run that follows a
+# palette change. Best-effort: if the listing fails, every label just
+# reports as created.
+before="$(gh label list --repo "$repo" --limit 500 \
+            --json name,color,description \
+            --jq '.[] | [.name, .color, .description] | @tsv' 2>/dev/null || true)"
+
+was() {  # existing "colour<TAB>description" for a label, empty if it is new
+  printf '%s\n' "$before" | awk -F'\t' -v want="$1" \
+    '$1 == want { print $2 "\t" $3; exit }'
+}
+
 while IFS=$'\t' read -r name color description; do
   [ -n "$name" ] || continue
+  existing="$(was "$name")"
   if out="$(gh label create "$name" --repo "$repo" \
-              --color "$color" --description "$description" 2>&1)"; then
-    echo "created $name"
-  elif printf '%s' "$out" | grep -qi "already exists"; then
-    echo "$name already exists"
+              --color "$color" --description "$description" --force 2>&1)"; then
+    if [ -z "$existing" ]; then
+      echo "created $name"
+    elif [ "$existing" = "$color$(printf '\t')$description" ]; then
+      echo "$name unchanged"
+    else
+      echo "updated $name"
+    fi
   else
     # Never fatal: the labels are convergent, and a deploy that has
     # already applied its Terraform should not be failed by a label that

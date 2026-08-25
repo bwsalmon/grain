@@ -15,13 +15,28 @@ from dataclasses import fields
 from pathlib import Path
 
 from grain.automation.config import AutomationConfig
-from grain.automation.labels import Label, main, task_labels
+from grain.automation.labels import CAPABILITY, STATE, Label, main, task_labels
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # GitHub rejects a longer one outright, which would fail the label at
 # create time rather than at review time.
 _MAX_DESCRIPTION = 100
+
+# The two tiers are held apart by HSL lightness: a state label is a dark,
+# solid pill that carries down a list of issues, a capability label is
+# pale enough to read as an annotation beside it. The real palette sits at
+# 0.50 and 0.87, so these bounds are loose -- they exist to catch a
+# capability label picked in a loud colour (or the reverse), not to police
+# the exact shade.
+_STATE_MAX_LIGHTNESS = 0.60
+_CAPABILITY_MIN_LIGHTNESS = 0.75
+
+
+def _lightness(color: str) -> float:
+    """HSL lightness of a six-digit hex colour, 0 (black) to 1 (white)."""
+    r, g, b = (int(color[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    return (max(r, g, b) + min(r, g, b)) / 2
 
 
 def _label_fields() -> set[str]:
@@ -105,3 +120,55 @@ def test_the_module_prints_one_parseable_row_per_label():
 
 def test_main_returns_success():
     assert main() == 0
+
+
+def test_every_label_is_in_one_of_the_two_tiers():
+    assert {label.kind for label in task_labels()} <= {STATE, CAPABILITY}
+
+
+def test_the_state_tier_is_exactly_the_dispatch_state_machine():
+    """A task is in exactly one of these at a time, which is what makes
+    colouring them worth doing. The capability labels are modifiers -- a
+    task can carry both, and neither says where it has got to."""
+    by_kind = {}
+    for label in task_labels():
+        by_kind.setdefault(label.kind, []).append(label.name)
+    assert by_kind[STATE] == [
+        "grain-agent",
+        "grain-agent-in-progress",
+        "grain-agent-awaiting-reply",
+        "grain-agent-completed",
+    ]
+    assert by_kind[CAPABILITY] == ["grain-gemini-key", "grain-self-debug"]
+
+
+def test_state_labels_are_solid_and_capability_labels_are_pale():
+    """The property the palette exists for: state reads first when you
+    scan the queue, and an opt-in modifier never out-shouts it."""
+    for label in task_labels():
+        lightness = _lightness(label.color)
+        if label.kind == STATE:
+            assert lightness <= _STATE_MAX_LIGHTNESS, (
+                f"{label.name} (#{label.color}) is too pale for a state label: "
+                f"lightness {lightness:.2f} > {_STATE_MAX_LIGHTNESS}"
+            )
+        else:
+            assert lightness >= _CAPABILITY_MIN_LIGHTNESS, (
+                f"{label.name} (#{label.color}) is too loud for a capability "
+                f"label: lightness {lightness:.2f} < {_CAPABILITY_MIN_LIGHTNESS}, "
+                "which competes with the state pill next to it"
+            )
+
+
+def test_the_two_tiers_do_not_overlap_in_lightness():
+    """Not implied by the bounds above: both could drift toward the middle
+    and still pass individually, leaving nothing to see at a glance."""
+    lightness = {kind: [_lightness(l.color) for l in task_labels() if l.kind == kind]
+                 for kind in (STATE, CAPABILITY)}
+    assert max(lightness[STATE]) < min(lightness[CAPABILITY])
+
+
+def test_no_two_labels_share_a_colour():
+    """Two labels the same colour is two states that look like one."""
+    colors = [label.color for label in task_labels()]
+    assert len(set(colors)) == len(colors), f"duplicate colour among {colors}"
