@@ -376,3 +376,43 @@ def test_start_also_labels_selinux_for_a_vm_that_skipped_create(cluster, tmp_pat
     assert runner.ran(f"chcon -R -t virt_image_t {tmp_path}/instances")
     assert runner.ran(f"chcon -R -t virt_image_t {tmp_path}/images")
     assert runner.ran("virsh -c qemu:///system start sandbox-0")
+
+
+def test_create_grants_world_access_to_config_dir_and_image_dir(cluster, tmp_path):
+    """Found live: neither AppArmor nor SELinux was ever the actual
+    confining layer -- real diagnostics from a failing deploy showed
+    config_dir still root:root 0700 and every file in it still root:root
+    0600 right through a failed start, meaning libvirt's own
+    dynamic_ownership never chowned them to the unprivileged uid:gid qemu
+    actually runs as. Unlike the two MAC calls, this one has no "is the
+    subsystem present" guard -- plain Unix permissions always apply.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    a = LibvirtAdapter(sized_cluster, runner, network, config_dir=tmp_path / "instances")
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+
+    a.create(sized_cluster.spec_of("sandbox-0"))
+
+    assert runner.ran(f"chmod -R o+rwX {tmp_path}/instances")
+    assert runner.ran(f"chmod -R o+rwX {tmp_path}/images")
+
+
+def test_start_also_grants_dac_access_for_a_vm_that_skipped_create(cluster, tmp_path):
+    """The exact failure this reproduces: start() called with no
+    preceding create() at all, for a VM already defined from an earlier
+    attempt -- create()'s own chmod never ran for it either.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    a = LibvirtAdapter(sized_cluster, runner, network, config_dir=tmp_path / "instances")
+
+    a.start("sandbox-0")  # no create() call at all
+
+    assert runner.ran(f"chmod -R o+rwX {tmp_path}/instances")
+    assert runner.ran(f"chmod -R o+rwX {tmp_path}/images")
+    assert runner.ran("virsh -c qemu:///system start sandbox-0")
