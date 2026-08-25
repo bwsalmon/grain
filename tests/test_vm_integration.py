@@ -102,6 +102,15 @@ def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
             argv, returncode=124, stdout=exc.stdout or "",
             stderr=(exc.stderr or "") + f"\n[timed out after {kwargs['timeout']}s]",
         )
+    except FileNotFoundError as exc:
+        # The binary is not installed. `_host_ready` deliberately asks about
+        # tools a machine may simply not have, and a hosted CI runner is the
+        # awkward case: it has /dev/kvm, so it gets past the first gate, but
+        # no `virsh`, so this call is reached and raises. A missing tool means
+        # "host not ready", not a collection-time crash that takes the whole
+        # unit suite down with it. Reported as a failed CompletedProcess for
+        # the same reason a timeout is: callers only ever read `returncode`.
+        return subprocess.CompletedProcess(argv, returncode=127, stdout="", stderr=f"{exc}\n")
 
 
 def _host_ready() -> bool:
