@@ -114,12 +114,16 @@ Once the host is up, file an issue in this repository and label it
 `grain-agent`. The next polling pass claims a free sandbox, swaps the
 label for `grain-agent-in-progress`, and runs an agent against it. The
 deploy workflow creates every label this deployment uses the first time
-it runs -- these three, plus the opt-in ones further down -- so they are
-in the picker before you need them. The list itself lives in grain
-(`grain/automation/labels.py`), not in this repo's workflow, so a label
-grain adds arrives here with a `grain_ref` bump rather than a hand-edit.
-Nothing about filing a task involves a deploy: the host polls this repo
-on its own.
+it runs, and brings their colours back in step on every run after, so
+they are in the picker before you need them and stay legible once they
+are. The four state labels are solid colours -- blue queued, amber
+running, red waiting on you, green done -- so a glance down the issue
+list shows what is where; the opt-in capability labels further down are
+pale, so they annotate a row without competing with its state. The list
+itself lives in grain (`grain/automation/labels.py`), not in this repo's
+workflow, so a label grain adds arrives here with a `grain_ref` bump
+rather than a hand-edit. Nothing about filing a task involves a deploy:
+the host polls this repo on its own.
 
 The code being changed is usually somewhere else, named by a directive in
 the issue body:

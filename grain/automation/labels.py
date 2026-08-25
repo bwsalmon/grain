@@ -37,6 +37,29 @@ failure than CI creating the stock ones.
 it. Keeping the styling in this table means `AutomationConfig` stays what
 it is -- the automation loop's tunables -- and gains no field the loop
 itself never reads.
+
+**The palette is two tiers, and that is the whole point of it.** A task
+issue is in exactly one *state* at a time, and the reason to look at the
+queue at all is usually to see which -- so the four state labels are dark
+and saturated, which GitHub renders as a solid pill that carries down a
+list of issues at a glance. The *capability* labels are not states: they
+are opt-in modifiers that a human adds to one task, they say nothing
+about where that task has got to, and a task can carry both at once. They
+are pale, so they read as an annotation on the row rather than competing
+with the state pill next to them. `Label.kind` records which tier a label
+is in, and tests/test_automation_labels.py holds the two apart by
+lightness, so a capability label added in a loud colour fails the suite
+rather than quietly eroding the scan.
+
+Within the state tier the hues follow the lifecycle and the ordinary
+meaning of the colours, rather than the order they were added in: blue is
+queued and not yet started, amber is running now, red is stopped and
+waiting on a *human* (the only state that needs somebody to do
+something), and green is done. That green means finished and not
+"approved to start" is the one deliberate break with what these labels
+used to be coloured -- `grain-agent` was green because it is the label
+you apply to start a task, which read as a success colour on every issue
+that had not actually finished anything.
 """
 
 from __future__ import annotations
@@ -45,28 +68,38 @@ from dataclasses import dataclass
 
 from .config import AutomationConfig
 
+STATE = "state"
+CAPABILITY = "capability"
+
 # Keyed by the `AutomationConfig` field that names the label, never by the
 # label string itself: that is what makes a renamed default follow through
 # to the workflow automatically, and what lets `task_labels` accept a
-# real config for the callers that have one.
-_STYLES: dict[str, tuple[str, str]] = {
+# real config for the callers that have one. Ordered by lifecycle, which
+# is also the order the colours run through -- see the module docstring on
+# why the two tiers look as different as they do.
+_STYLES: dict[str, tuple[str, str, str]] = {
+    # Queued: labelled by a human, not yet claimed by a polling pass.
     "trigger_label": (
-        "0e8a16", "Hand this task to the agent set",
+        STATE, "1d76db", "Hand this task to the agent set",
     ),
+    # Running right now, in a claimed sandbox.
     "in_progress_label": (
-        "fbca04", "An agent is working on this",
+        STATE, "fbca04", "An agent is working on this",
     ),
+    # The one state that is waiting on a person -- loudest on purpose.
     "awaiting_reply_label": (
-        "d93f0b", "Parked: the agent needs a human reply",
+        STATE, "d93f0b", "Parked: the agent needs a human reply",
     ),
+    # Terminal, and green in the sense every CI badge is green.
     "completed_label": (
-        "6f42c1", "The agent's side is done: a PR is open, or an analysis is posted",
+        STATE, "0e8a16", "The agent's side is done: a PR is open, or an analysis is posted",
     ),
+    # Modifiers, not states: pale, so a row's state still reads first.
     "gemini_key_label": (
-        "1d76db", "Mint a short-lived Gemini API key for this task",
+        CAPABILITY, "d4c5f9", "Mint a short-lived Gemini API key for this task",
     ),
     "self_debug_label": (
-        "c5def5", "Let this task read grain's own controller logs",
+        CAPABILITY, "c5def5", "Let this task read grain's own controller logs",
     ),
 }
 
@@ -76,6 +109,10 @@ class Label:
     name: str
     color: str
     description: str
+    # STATE or CAPABILITY -- which tier of the palette this belongs to.
+    # Not sent to GitHub (a label has no such concept); it is what keeps
+    # the two tiers honest, here and in the tests.
+    kind: str
 
 
 def task_labels(config: AutomationConfig | None = None) -> list[Label]:
@@ -84,12 +121,12 @@ def task_labels(config: AutomationConfig | None = None) -> list[Label]:
     a runner never reads a deployment's own overrides.
     """
     labels = []
-    for field, (color, description) in _STYLES.items():
+    for field, (kind, color, description) in _STYLES.items():
         if config is not None:
             name = getattr(config, field)
         else:
             name = AutomationConfig.__dataclass_fields__[field].default
-        labels.append(Label(name=name, color=color, description=description))
+        labels.append(Label(name=name, color=color, description=description, kind=kind))
     return labels
 
 
