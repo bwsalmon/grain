@@ -636,19 +636,38 @@ minted for a task still in flight is unaffected (it still gets revoked
 normally when that task's slot frees) — this only stops new ones from
 being minted.
 
-## Enabling `grain-self-debug` (bwsalmon/agents#62)
+## Enabling `grain-self-debug` (bwsalmon/agents#62, #86)
 
-A task issue carrying the `grain-self-debug` label gets a `read_grain_logs`
-MCP tool: recent `journalctl` entries for grain's own controller services,
-`grain-automation.service` and `grain-git-proxy.service` — for triaging a
-bug in grain itself rather than the target repo's own code. Strictly
-read-only, and the exact opposite of `grain-gemini-key` in one way: nothing
-here needs a `controller configure` step or an operator decision to turn
-on. `provision/controller.sh` grants `grain-agent` read-only
-`systemd-journal` group membership unconditionally, so any deployment
-provisioned from this repo already has it — the label on a task issue is
-the only thing that decides whether that particular task's agent gets the
-tool at all.
+A task issue carrying the `grain-self-debug` label gets four extra MCP
+tools, all strictly read-only, for triaging a bug in grain itself rather
+than the target repo's own code:
+
+- `read_grain_logs`: recent `journalctl` entries for grain's own
+  controller services, `grain-automation.service` and
+  `grain-git-proxy.service`.
+- `check_grain_health`: `health.py`'s ssh/systemd/docker/disk checks —
+  the same ones `grain host health` reports — against either the task's
+  assigned sandbox or the controller itself.
+- `read_grain_config`: one of the deployment's own non-secret config
+  files under `/data/config` (`automation.json`, `repo-allowlist.json`,
+  `gemini-key.json`, `metadata-server.json`, `sandbox-github-key.json`),
+  checked against a fixed allowlist of those five names — never a raw
+  path, and never anything under `/data/secrets`.
+- `read_automation_audit_log`: recent lines of `audit.py`'s own
+  `FileAuditLog` output (`/data/state/automation/audit.log`) — one JSON
+  line per dispatch/sweep decision the state machine in `core.py` made.
+
+The exact opposite of `grain-gemini-key` in one way: nothing here needs a
+`controller configure` step or an operator decision to turn on.
+`provision/controller.sh` grants `grain-agent` read-only
+`systemd-journal` group membership unconditionally (for `read_grain_logs`
+specifically), and every file the other three tools read is already
+either world-readable by construction (`/data/config`'s contents,
+`/data/state/automation/audit.log`) or reachable over the same SSH path
+`grain-agent`'s MCP server already has to the sandbox — so any deployment
+provisioned from this repo already has everything these tools need. The
+label on a task issue is the only thing that decides whether that
+particular task's agent gets them at all.
 
 There is nothing to disable here short of not applying the label — there
 is no config file gating it the way `gemini-key.json` gates

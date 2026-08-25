@@ -385,17 +385,30 @@ def _gemini_key_line() -> str:
 def _self_debug_line() -> str:
     """Told to the agent only when this task's issue carried
     `self_debug_label` (bwsalmon/agents#62, `core.py`'s `_resolve_target`)
-    -- a seventh MCP tool most tasks never see at all, for triaging a bug
-    in grain itself rather than the target repo's own code.
+    -- four MCP tools most tasks never see at all, for triaging a bug in
+    grain itself rather than the target repo's own code (bwsalmon/agents#86
+    added the last three).
     """
     return (
-        "This task carries the grain-self-debug label, so you also have a "
-        "read_grain_logs tool: it reads recent journal entries from "
-        "grain's own controller services (grain-automation, "
-        "grain-git-proxy) -- useful for triaging a bug in grain itself, as "
-        "opposed to the target repo's own code. It is strictly read-only; "
-        "there is no way to change anything about the controller through "
-        "it."
+        "This task carries the grain-self-debug label, so you also have "
+        "four extra tools, all strictly read-only -- there is no way to "
+        "change anything about the controller or its own state through "
+        "any of them:\n"
+        "- read_grain_logs: recent journal entries from grain's own "
+        "controller services (grain-automation, grain-git-proxy).\n"
+        "- check_grain_health: the same ssh/systemd/docker/disk checks "
+        "`grain host health` reports, against either your assigned "
+        "sandbox or the controller itself.\n"
+        "- read_grain_config: one of grain's own non-secret config files "
+        "under /data/config on the controller (automation.json, "
+        "repo-allowlist.json, gemini-key.json, metadata-server.json, "
+        "sandbox-github-key.json) -- no credential or token is ever "
+        "reachable through it.\n"
+        "- read_automation_audit_log: recent entries from the dispatch/"
+        "sweep audit log -- one line per state-machine decision (a task "
+        "dispatched, skipped, succeeded, failed, or stranded, and why).\n"
+        "Use these to triage a bug in grain itself, as opposed to the "
+        "target repo's own code."
     )
 
 
@@ -726,12 +739,16 @@ _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
     "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__comment_on_issue,"
-    # bwsalmon/agents#62: pre-approved unconditionally, same as every other
-    # tool name here -- harmless on a task that never turns it on, since
-    # `mcp_server.py` only advertises (and answers) `read_grain_logs` when
-    # started with `--self-debug`, which `_mcp_config_json` only ever adds
-    # when the task issue actually carried `self_debug_label`.
+    # bwsalmon/agents#62/#86: pre-approved unconditionally, same as every
+    # other tool name here -- harmless on a task that never turns any of
+    # these on, since `mcp_server.py` only advertises (and answers) this
+    # whole self-debug roster when started with `--self-debug`, which
+    # `_mcp_config_json` only ever adds when the task issue actually
+    # carried `self_debug_label`.
     "mcp__grain-sandbox__read_grain_logs,"
+    "mcp__grain-sandbox__check_grain_health,"
+    "mcp__grain-sandbox__read_grain_config,"
+    "mcp__grain-sandbox__read_automation_audit_log,"
     f"{_NATIVE_TOOLS}"
 )
 

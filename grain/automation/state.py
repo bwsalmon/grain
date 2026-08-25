@@ -14,7 +14,7 @@ one record of which sandbox is doing what.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -82,6 +82,16 @@ class Assignment:
     # know which key to revoke once this assignment is freed, and by then
     # the task's own labels are no longer read.
     gemini_key_name: str | None = None
+    # bwsalmon/agents#83: whether the task's own `/auto-merge` directive
+    # asked for its resulting PR to be merged automatically rather than
+    # left for a human to review -- see `directives.py`'s own docstring.
+    # Recorded here, not re-derived at finish time, for the same "an issue
+    # body is editable mid-run" reason every other directive-derived field
+    # on this dataclass already is: `core.py`'s `_finish_succeeded_issue`
+    # needs it to decide how to record the PR it just opened
+    # (`OpenPullRequest.auto_merge`), and by finish time the task's own
+    # directives are no longer read.
+    auto_merge: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,19 @@ class OpenPullRequest:
     target_owner: str
     target_repo: str
     pr_number: int
+    # bwsalmon/agents#83: whether this PR came from a task carrying
+    # `/auto-merge` (`Assignment.auto_merge`, `core.py`'s
+    # `_finish_succeeded_issue`) -- `_close_finished_prs` merges it itself
+    # once it reads clean, rather than only ever waiting on a human to
+    # close it the way an ordinary task's PR does.
+    auto_merge: bool = False
+    # bwsalmon/agents#83: the task issue number of the fix `core.py`'s
+    # `_suggest_fix` filed for this PR, once it has (so a later cycle
+    # doesn't file a second one for the same conflict or failing check --
+    # `_close_finished_prs` only calls `_suggest_fix` while this is still
+    # `None`). Unset for the overwhelming common case of a PR that never
+    # needed one.
+    fix_issue: int | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +182,7 @@ class AutomationState:
                 target_repo=a.get("target_repo"),
                 base=a.get("base"),
                 gemini_key_name=a.get("gemini_key_name"),
+                auto_merge=a.get("auto_merge", False),
             )
             for name, a in raw.get("assignments", {}).items()
         }
@@ -177,6 +201,8 @@ class AutomationState:
             key: OpenPullRequest(
                 issue=o["issue"], target_owner=o["target_owner"],
                 target_repo=o["target_repo"], pr_number=o["pr_number"],
+                auto_merge=o.get("auto_merge", False),
+                fix_issue=o.get("fix_issue"),
             )
             for key, o in raw.get("open_pull_requests", {}).items()
         }
@@ -193,6 +219,7 @@ class AutomationState:
                     "kind": a.kind.value, "branch": a.branch,
                     "target_owner": a.target_owner, "target_repo": a.target_repo,
                     "base": a.base, "gemini_key_name": a.gemini_key_name,
+                    "auto_merge": a.auto_merge,
                 }
                 for name, a in self.assignments.items()
             },
@@ -208,6 +235,7 @@ class AutomationState:
                 key: {
                     "issue": o.issue, "target_owner": o.target_owner,
                     "target_repo": o.target_repo, "pr_number": o.pr_number,
+                    "auto_merge": o.auto_merge, "fix_issue": o.fix_issue,
                 }
                 for key, o in self.open_pull_requests.items()
             },
@@ -227,11 +255,12 @@ class AutomationState:
     def assign(self, sandbox: str, issue: int, unit: str, now: datetime, *,
                kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None,
                target_owner: str | None = None, target_repo: str | None = None,
-               base: str | None = None, gemini_key_name: str | None = None) -> None:
+               base: str | None = None, gemini_key_name: str | None = None,
+               auto_merge: bool = False) -> None:
         self.assignments[sandbox] = Assignment(
             issue=issue, unit=unit, started_at=now, kind=kind, branch=branch,
             target_owner=target_owner, target_repo=target_repo, base=base,
-            gemini_key_name=gemini_key_name,
+            gemini_key_name=gemini_key_name, auto_merge=auto_merge,
         )
 
     def release(self, sandbox: str) -> None:
@@ -254,14 +283,24 @@ class AutomationState:
 
     # --- open PRs awaiting a close (bwsalmon/agents#54) ------------------
     def record_open_pr(self, issue: int, target_owner: str, target_repo: str,
-                        pr_number: int) -> None:
+                        pr_number: int, *, auto_merge: bool = False) -> None:
         self.open_pull_requests[str(issue)] = OpenPullRequest(
             issue=issue, target_owner=target_owner, target_repo=target_repo,
-            pr_number=pr_number,
+            pr_number=pr_number, auto_merge=auto_merge,
         )
 
     def clear_open_pr(self, issue: int) -> None:
         self.open_pull_requests.pop(str(issue), None)
+
+    # --- suggested fixes (bwsalmon/agents#83) -----------------------------
+    def mark_fix_suggested(self, issue: int, fix_issue: int) -> None:
+        """Records that `core.py`'s `_suggest_fix` already filed
+        `fix_issue` for the open PR tracked against `issue`, so a later
+        `_close_finished_prs` cycle doesn't file a second one for the same
+        conflict or failing check.
+        """
+        pending = self.open_pull_requests[str(issue)]
+        self.open_pull_requests[str(issue)] = replace(pending, fix_issue=fix_issue)
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:
