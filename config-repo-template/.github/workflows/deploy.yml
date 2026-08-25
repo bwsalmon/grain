@@ -30,7 +30,7 @@ concurrency:
 permissions:
   contents: read
   id-token: write # for keyless auth to GCP
-  issues: write # to create the three labels the task queue runs on
+  issues: write # to create the labels the task queue runs on
 
 jobs:
   deploy:
@@ -66,7 +66,8 @@ jobs:
 
       # This repo is also the task queue: an issue here, labelled
       # `grain-agent`, is what the automation service picks up. Create the
-      # three labels it moves an issue between, so they are in the picker
+      # three labels it moves an issue between, plus the opt-in capability
+      # labels a human applies to a task, so they are all in the picker
       # before anyone files the first task.
       - name: Ensure the task labels exist
         env:
@@ -81,6 +82,19 @@ jobs:
           label grain-agent 0e8a16 "Hand this task to the agent set"
           label grain-agent-in-progress fbca04 "An agent is working on this"
           label grain-agent-awaiting-reply d93f0b "Parked: the agent needs a human reply"
+
+          # Not part of the dispatch state machine: a human applies this to
+          # ask for a short-lived Gemini API key to be minted for that task,
+          # placed in its sandbox, and revoked once the task's slot frees
+          # (bwsalmon/agents#47, #49). A label rather than a body directive
+          # so it carries the same "a human decided this" trust tier the
+          # trigger label does. Created unconditionally -- it has to be in
+          # the picker to be appliable at all -- but only *usable* once the
+          # deployment is configured for it (`enable_gemini_key = true` in
+          # config/grain.tfvars, or `grain controller configure
+          # --gemini-project-id`); until then a task carrying it is parked
+          # with a comment explaining why, the same as an unlisted `/repo`.
+          label grain-gemini-key 1d76db "Mint a short-lived Gemini API key for this task"
 
       # Preferred: Workload Identity Federation, so this repo holds no GCP
       # key at all. grain's terraform/gcp/bootstrap-gcp.sh sets it up and

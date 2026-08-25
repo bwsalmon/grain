@@ -617,13 +617,21 @@ def test_deploy_sh_only_requests_the_gcp_key_when_an_agent_account_is_configured
 
 
 def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
-    """Every label grain's automation applies has to exist in the queue
-    repo, and this repo *is* the queue repo -- so the workflow creates
-    them. A renamed default here would otherwise strand the queue."""
+    """Every label this deployment runs on has to exist in the queue repo,
+    and this repo *is* the queue repo -- so the workflow creates them. A
+    renamed default here would otherwise strand the queue.
+
+    Two kinds, and both need creating for the same reason. The first three
+    the orchestrator moves an issue between itself; `gemini_key_label` is
+    instead applied by a *human* to opt one task into a short-lived Gemini
+    API key (bwsalmon/agents#47, #49), which means it has to be in the
+    repo's label picker before anyone can apply it at all -- whether or not
+    the deployment has been configured to actually honour it.
+    """
     deploy = (WORKFLOWS / "deploy.yml").read_text()
     config = AutomationConfig(task_owner="an-org", task_repo="a-repo")
     for label in (config.trigger_label, config.in_progress_label,
-                  config.awaiting_reply_label):
+                  config.awaiting_reply_label, config.gemini_key_label):
         assert f"label {label} " in deploy, f"deploy.yml never creates {label!r}"
 
 
