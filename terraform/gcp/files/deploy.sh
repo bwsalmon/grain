@@ -162,6 +162,73 @@ ensure_packages() {
   systemctl enable --now libvirtd >/dev/null 2>&1 || true
 }
 
+# Found live (bwsalmon/agents#68): this used to be a `startup.sh` step, and
+# `startup.sh` only runs at boot -- so an already-running host never picked
+# up a change here (like adding controller_console below, bwsalmon/agents#58)
+# until it happened to reboot, and a transient failure on that one boot-time
+# attempt (an apt mirror, a slow curl) left Cloud Logging silently stuck on
+# whatever config was live from the last successful boot, with nothing to
+# retry it. deploy.sh, by contrast, is re-fetched from instance metadata and
+# re-run on every config-repo push, and retried again every ~5 minutes by
+# config-sync.sh's own wake-up loop if it fails (see this file's header) --
+# exactly the self-healing convergence Cloud Logging needs too, and the same
+# reason `ensure_packages` above -- not `startup.sh` -- is what installs the
+# rest of this host's packages.
+#
+# Never fatally: this is a diagnostic convenience, and a diagnostic that can
+# abort the deploy it exists to help debug is the wrong trade -- the same
+# rule provision/controller.sh's own journal-forwarding block follows, found
+# live in the very same deployment this block was written for.
+ensure_ops_agent() {
+  if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+    log "installing google-cloud-ops-agent"
+    if ! curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh \
+       || ! bash add-google-cloud-ops-agent-repo.sh --also-install; then
+      log "WARNING: could not install google-cloud-ops-agent; this host's logs will not reach Cloud Logging"
+    fi
+    rm -f add-google-cloud-ops-agent-repo.sh
+  fi
+  if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # No unit-name filter at the receiver level (upstream doesn't offer one)
+  # -- ships the whole systemd journal, filtered at query time instead:
+  # jsonPayload._SYSTEMD_UNIT="grain-config-sync.service" in Cloud Logging.
+  #
+  # controller_console picks up the *nested* controller VM's own logs
+  # (bwsalmon/agents#58) -- the controller runs on a separate kernel/journal
+  # one layer inside this host via libvirt/KVM, so journald above only ever
+  # covers this host's own units, never anything happening inside that
+  # guest. LibvirtAdapter's domain XML (grain/adapter/libvirt.py) points the
+  # controller's serial console at this exact path, and
+  # provision/controller.sh turns on ForwardToConsole so the controller's
+  # own journal (grain-automation.service, grain-git-proxy.service) reaches
+  # it. Hardcoded rather than derived from Terraform state: it's
+  # `LibvirtAdapter`'s own default config_dir (/var/lib/grain/instances,
+  # under this host's DATA_MNT), which nothing here overrides.
+  cat > /etc/google-cloud-ops-agent/config.yaml <<'YAML'
+logging:
+  receivers:
+    journald:
+      type: systemd_journald
+    controller_console:
+      type: files
+      include_paths:
+        - /var/lib/grain/instances/controller-console.log
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [journald, controller_console]
+YAML
+
+  if systemctl restart google-cloud-ops-agent; then
+    log "google-cloud-ops-agent configured, forwarding the journal and the controller's console log to Cloud Logging"
+  else
+    log "WARNING: could not restart google-cloud-ops-agent; Cloud Logging will not reflect this config"
+  fi
+}
+
 sync_source() {
   log "syncing $GRAIN_REPO_URL @ $GRAIN_REF"
   if [ ! -d "$SRC/.git" ]; then
@@ -348,6 +415,7 @@ load_config
 require_data_disk
 require_kvm
 ensure_packages
+ensure_ops_agent
 sync_source
 fetch_base_image
 write_cluster_file

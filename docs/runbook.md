@@ -132,9 +132,11 @@ sudo tail -f /var/lib/grain/instances/controller-console.log
 (`grain-automation.service`, `grain-git-proxy.service`) to that console;
 `LibvirtAdapter`'s domain XML (`grain/adapter/libvirt.py`) is what gives
 the console a `<log file=...>` sink on the host in the first place. On GCP
-this same file is tailed into Cloud Logging by the host's ops-agent
-(`terraform/gcp/files/startup.sh`), so it's also readable from the Cloud
-Console without SSH/IAP access to the host at all.
+this same file is tailed into Cloud Logging by the host's ops-agent,
+configured by `terraform/gcp/files/deploy.sh` (not `startup.sh` -- deploy.sh
+is what re-converges on every config-repo push, so a change here reaches an
+already-running host without a reboot), so it's also readable from the
+Cloud Console without SSH/IAP access to the host at all.
 
 ### Claude Code credential
 

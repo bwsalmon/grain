@@ -327,18 +327,35 @@ def test_grain_runs_unbuffered_so_a_killed_deploy_keeps_its_output():
     assert "python3 -u -m grain.cli" in DEPLOY_SH.read_text()
 
 
-def test_startup_installs_ops_agent_and_ships_the_full_journal():
+def test_deploy_configures_ops_agent_and_ships_the_full_journal():
     """Found live: a real deploy failure was undiagnosable from CI's own
     guest-attribute summary (a bare "exit=N"), and journalctl -u
     grain-config-sync needs an SSH/IAP path neither the deploy identity
     nor an operator may actually have. Cloud Logging sidesteps both.
     """
+    deploy = DEPLOY_SH.read_text()
+    assert "google-cloud-ops-agent" in deploy
+    assert "systemd_journald" in deploy
+    assert "systemctl restart google-cloud-ops-agent" in deploy
+    assert re.search(r"^ensure_ops_agent\n", deploy, re.M), \
+        "ensure_ops_agent is never actually called"
+
+
+def test_ops_agent_setup_is_not_boot_only():
+    """Found live (bwsalmon/agents#68): this used to be a startup.sh step,
+    which only runs at boot -- so a change to it (like adding
+    controller_console for bwsalmon/agents#58) never reached an
+    already-running host, and Cloud Logging silently stopped reflecting
+    reality until someone rebooted the host by hand. deploy.sh is what
+    config-sync re-fetches and re-runs on every config-repo push, and
+    retries again on its own every few minutes if it fails -- the
+    self-healing convergence Cloud Logging needs, the same reason
+    `ensure_packages` (not startup.sh) installs the rest of this host's
+    packages.
+    """
     startup = (TERRAFORM / "files" / "startup.sh").read_text()
-    assert "google-cloud-ops-agent" in startup
-    assert "systemd_journald" in startup
-    assert "systemctl restart google-cloud-ops-agent" in startup
-    assert re.search(r"^install_ops_agent\n", startup, re.M), \
-        "install_ops_agent is never actually called"
+    assert "google-cloud-ops-agent" not in startup
+    assert "install_ops_agent" not in startup
 
 
 def test_shell_scripts_are_syntactically_valid_and_fail_fast():

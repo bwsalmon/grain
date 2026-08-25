@@ -248,7 +248,7 @@ systemctl daemon-reload
 # `<log file=.../>` at a plain file on the host, which is what makes the
 # controller's logs reachable without `virsh console`ing in -- readable
 # with a plain `tail -f` on the host, and what the host-side ops-agent
-# config (terraform/gcp/files/startup.sh) tails into Cloud Logging on GCP.
+# config (terraform/gcp/files/deploy.sh) tails into Cloud Logging on GCP.
 mkdir -p /etc/systemd/journald.conf.d
 cat > /etc/systemd/journald.conf.d/forward-to-console.conf <<'UNIT'
 [Journal]
