@@ -111,7 +111,8 @@ def _ensure_admin_key(admin_public_key_path: Path, admin_private_key_path: Path,
         f"controller's own key is ever lost")
 
 
-def _ensure_metadata_server_started(admin_ssh: SshRunner, name: str) -> None:
+def _ensure_metadata_server_started(admin_ssh: SshRunner, name: str,
+                                     sandbox_count: int) -> None:
     """`grain metadata start` runs as a transient systemd unit
     (`grain/metadata/launcher.py`) and its own docstring says calling
     `start()` again for an already-running instance fails loudly rather
@@ -128,6 +129,12 @@ def _ensure_metadata_server_started(admin_ssh: SshRunner, name: str) -> None:
     locally on the controller -- exactly what running it as a remote
     command over `admin_ssh` gets for free, with no second implementation
     of what it already does.
+
+    `--sandboxes` has to be passed explicitly: this `grain.cli` invocation
+    runs on the controller, which has no `--cluster-file` of its own (that
+    file only ever exists on the host, per `build_cluster`'s default) --
+    without it, `Cluster.load` silently falls back to the two-sandbox
+    default and rejects any sandbox beyond `sandbox-1` as unknown.
     """
     result = admin_ssh.run(["sudo", "systemctl", "is-active", f"grain-metadata-{name}"],
                             check=False)
@@ -135,8 +142,8 @@ def _ensure_metadata_server_started(admin_ssh: SshRunner, name: str) -> None:
         return
     admin_ssh.run([
         "sudo", "bash", "-c",
-        f"cd /opt/grain && python3 -m grain.cli --data-dir /data metadata start "
-        f"{shlex.quote(name)}",
+        f"cd /opt/grain && python3 -m grain.cli --data-dir /data "
+        f"--sandboxes {sandbox_count} metadata start {shlex.quote(name)}",
     ])
 
 
@@ -328,7 +335,7 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                 f"2>/dev/null || echo {shlex.quote(trimmed)} >> ~/.ssh/authorized_keys",
             ])
         if config.gcp_service_account_key:
-            _ensure_metadata_server_started(admin_ssh, name)
+            _ensure_metadata_server_started(admin_ssh, name, cluster.sandbox_count)
         # No Claude credential is ever placed on a sandbox (docs/roadmap.md
         # item 8's "Update") -- `claude -p` runs on the controller now, and
         # stage 8's `configure_claude_token` call already places both the
