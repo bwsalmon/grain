@@ -99,6 +99,79 @@ class SandboxTokenStore:
         return token
 
 
+class SandboxCredentialOverrides:
+    """Maps a sandbox to the named `CredentialSet` credential its current
+    task must use in place of the owner/repo default -- bwsalmon/agents#52's
+    `grain-github-<name>` label, for a task that needs a scope the default
+    credential deliberately withholds (docs/design.md, "Scopes to
+    withhold" -- `workflow`, most notably).
+
+    File format: `{"sandbox-0": "workflow", ...}` -- absent entries mean
+    "no override, use the normal per-repo selection."
+
+    Deliberately re-read on every lookup, `Allowlist`'s "small file, no
+    staleness window" shape rather than `SandboxTokens`' load-once-at-
+    startup one just above: sandbox *identity* only changes at sandbox
+    recreate, but which credential a sandbox's current task should use
+    changes on every dispatch and every release, and nothing here
+    restarts the proxy that often. That is also why this file lives under
+    `/data/config`, not `/data/secrets` alongside the credentials it
+    merely *names* -- `/data/secrets` is the "replace and restart"
+    tier (`CredentialSet`'s own docstring), and this is not.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def for_sandbox(self, sandbox: str) -> str | None:
+        try:
+            raw = json.loads(self._path.read_text())
+        except FileNotFoundError:
+            return None
+        return raw.get(sandbox)
+
+
+class SandboxCredentialStore:
+    """The controller's write side of the same file
+    `SandboxCredentialOverrides` reads. `grain/automation/core.py`'s
+    `_dispatch` calls `set`/`clear` for every dispatch attempt (whether or
+    not it goes on to succeed), and `sweeper.py`'s `_release` calls `clear`
+    unconditionally when a sandbox's slot frees -- between the two, an
+    override never outlives the task that asked for it: `set`/`clear` at
+    the top of `_dispatch` closes the gap a `CommandError` partway through
+    dispatch would otherwise leave (no `Assignment` ever recorded for
+    `_release` to find), and `_release`'s own `clear` is what actually
+    ends an override the moment a *successful* dispatch's task finishes.
+
+    Same atomic-write discipline as `SandboxTokenStore`: a temp file plus
+    `rename`, so a killed write can't corrupt the file the proxy trusts on
+    its very next (unrestarted) request.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def _load(self) -> dict[str, str]:
+        return json.loads(self._path.read_text()) if self._path.exists() else {}
+
+    def _save(self, overrides: dict[str, str]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps(overrides, indent=2))
+        tmp.replace(self._path)
+
+    def set(self, sandbox: str, name: str) -> None:
+        overrides = self._load()
+        overrides[sandbox] = name
+        self._save(overrides)
+
+    def clear(self, sandbox: str) -> None:
+        overrides = self._load()
+        if sandbox in overrides:
+            del overrides[sandbox]
+            self._save(overrides)
+
+
 def extract_basic_auth_token(header: str | None) -> str | None:
     """Pull the token out of `Authorization: Basic base64(user:token)`.
 
