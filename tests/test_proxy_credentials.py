@@ -86,3 +86,23 @@ def test_get_anonymous_has_no_token(tmp_path):
     cred = creds.get("anonymous")
     assert cred.name == "anonymous"
     assert cred.token is None
+
+
+# --- token_for() (the automation.github.TokenSource shape) ------------------
+
+def test_token_for_returns_the_selected_credentials_token(secrets_dir):
+    creds = CredentialSet(secrets_dir)
+    assert creds.token_for("bwsalmon", "grain") == "bot-token-value"
+
+
+def test_token_for_is_none_when_nothing_covers_the_repo(tmp_path):
+    (tmp_path / "credentials.json").write_text(json.dumps({"only/this": "bot"}))
+    (tmp_path / "bot.token").write_text("x")
+    creds = CredentialSet(tmp_path)
+    assert creds.token_for("nobody", "covers-this") is None
+
+
+def test_token_for_is_none_for_an_anonymous_credential(tmp_path):
+    (tmp_path / "credentials.json").write_text(json.dumps({"*": "anonymous"}))
+    creds = CredentialSet(tmp_path)
+    assert creds.token_for("public", "repo") is None
