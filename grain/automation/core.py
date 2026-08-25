@@ -424,7 +424,8 @@ class Orchestrator:
             return
         target = self._target_of(outcome)
         branch = branch_name(outcome.issue)
-        if not self.github.branch_exists(target.owner, target.name, branch):
+        head = self.github.get_branch_head(target.owner, target.name, branch)
+        if head is None:
             # The unit exited zero, but that is not the same claim as "a PR
             # can be opened" — the agent may never have pushed, or pushed
             # somewhere other than the branch dispatch() told it to. Verify,
@@ -453,13 +454,19 @@ class Orchestrator:
         # in sync" trade-off `get_pull_request` already makes elsewhere.
         issue = self.github.get_issue(task.owner, task.name, outcome.issue)
         base = outcome.base or self.github.default_branch(target.owner, target.name)
+        # bwsalmon/agents#79: the body used to be built entirely from
+        # metadata (which task, which sandbox) and never said anything
+        # about what the change actually did, so a number of these PRs read
+        # as description-free. `head.message` is the pushed branch's own
+        # tip commit message -- `dispatch.py`'s `_prompt` now tells the
+        # agent that message becomes the PR body verbatim, so it's the one
+        # place an agent can put a real account of its own change.
         pr = self.github.create_pull_request(
             target.owner, target.name,
             head=branch, base=base,
             title=f"🤖 grain: {task}#{outcome.issue}: {issue.title}",
-            body=f"Closes {task}#{outcome.issue}.\n\nOpened automatically after "
-                 f"task {task}#{outcome.issue} finished on {outcome.sandbox}."
-                 f"\n\n---\n{_AUTOMATION_SIGNATURE}",
+            body=f"{head.message.strip()}\n\n---\n"
+                 f"Closes {task}#{outcome.issue}.\n\n{_AUTOMATION_SIGNATURE}",
         )
         # The task issue itself isn't closed here -- see `_close_finished_prs`
         # (bwsalmon/agents#54) for why that waits on the PR's own state
