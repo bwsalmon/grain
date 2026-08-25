@@ -76,12 +76,35 @@ class Assignment:
     base: str | None = None
     # The full resource name of a Gemini API key minted for this task
     # (bwsalmon/agents#47, `gemini_keys.create_key`), or `None` for the
-    # common case of no `/gemini-key` directive. Recorded here, not
-    # re-derived at sweep time, for the same reason `target_owner`/
-    # `target_repo` are: `sweeper.py`'s `_release` needs to know which key
-    # to revoke once this assignment is freed, and by then the task's own
-    # directives are long gone.
+    # common case of no `gemini_key_label` on the task issue. Recorded
+    # here, not re-derived at sweep time, for the same reason
+    # `target_owner`/`target_repo` are: `sweeper.py`'s `_release` needs to
+    # know which key to revoke once this assignment is freed, and by then
+    # the task's own labels are no longer read.
     gemini_key_name: str | None = None
+
+
+@dataclass(frozen=True)
+class OpenPullRequest:
+    """Tracks one task issue whose PR (opened by `core.py`'s
+    `_finish_succeeded_issue`) is still open, so a later `run_once` can
+    close the task issue once that PR itself closes (bwsalmon/agents#54)
+    rather than the moment the PR is opened -- the trigger for that lives
+    in the *target* repo, not the task repo the issue itself is in
+    (`AutomationConfig`'s task/target split), so there is no label move or
+    webhook to react to; this is what a poll on a later `run_once` checks
+    against.
+
+    `issue` is the task issue's own number, in the task repo -- what
+    `close_issue` needs; `target_owner`/`target_repo`/`pr_number` are where
+    to look for that PR's current state, recorded once at PR-creation time
+    the same "decide once, don't re-derive" way `Assignment.target_owner`
+    already is.
+    """
+    issue: int
+    target_owner: str
+    target_repo: str
+    pr_number: int
 
 
 @dataclass(frozen=True)
@@ -111,6 +134,11 @@ class AutomationState:
     # Keyed by str(issue number) -- JSON object keys must be strings, same
     # reason `assignments` is keyed by sandbox name rather than an int.
     pending_questions: dict[str, PendingQuestion] = field(default_factory=dict)
+    # Same string-keying reason as `pending_questions` -- one task issue can
+    # only ever have one PR open for it at a time (a fresh dispatch never
+    # redispatches an issue already `in_progress_issues()`), so the issue
+    # number is a safe, simple key here too.
+    open_pull_requests: dict[str, OpenPullRequest] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "AutomationState":
@@ -145,8 +173,16 @@ class AutomationState:
             )
             for key, q in raw.get("pending_questions", {}).items()
         }
+        open_pull_requests = {
+            key: OpenPullRequest(
+                issue=o["issue"], target_owner=o["target_owner"],
+                target_repo=o["target_repo"], pr_number=o["pr_number"],
+            )
+            for key, o in raw.get("open_pull_requests", {}).items()
+        }
         return cls(assignments=assignments, run_timestamps=run_timestamps,
-                    pending_questions=pending_questions)
+                    pending_questions=pending_questions,
+                    open_pull_requests=open_pull_requests)
 
     def save(self, path: Path) -> None:
         data = {
@@ -167,6 +203,13 @@ class AutomationState:
                     "kind": q.kind.value, "branch": q.branch,
                 }
                 for key, q in self.pending_questions.items()
+            },
+            "open_pull_requests": {
+                key: {
+                    "issue": o.issue, "target_owner": o.target_owner,
+                    "target_repo": o.target_repo, "pr_number": o.pr_number,
+                }
+                for key, o in self.open_pull_requests.items()
             },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +251,17 @@ class AutomationState:
 
     def clear_pending_question(self, issue: int) -> None:
         self.pending_questions.pop(str(issue), None)
+
+    # --- open PRs awaiting a close (bwsalmon/agents#54) ------------------
+    def record_open_pr(self, issue: int, target_owner: str, target_repo: str,
+                        pr_number: int) -> None:
+        self.open_pull_requests[str(issue)] = OpenPullRequest(
+            issue=issue, target_owner=target_owner, target_repo=target_repo,
+            pr_number=pr_number,
+        )
+
+    def clear_open_pr(self, issue: int) -> None:
+        self.open_pull_requests.pop(str(issue), None)
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:

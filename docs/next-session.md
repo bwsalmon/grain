@@ -70,6 +70,36 @@ now fixed:**
   else (a genuine 5xx or auth error). Covered by
   `tests/test_automation_core.py::test_a_requeue_tolerates_a_404_from_add_label_for_a_stale_assignment`
   and `::test_a_requeue_still_raises_a_non_404_github_error`.
+- **`AutomationState` was only ever written to disk once per `run_once`
+  call, after everything else finished** (`cli.py`'s
+  `cmd_automation_run_once`) — not incrementally as `core.py` mutated it
+  in memory (`state.assign()` in `_dispatch`, `state.release()` inside
+  `sweeper.py`'s `sweep()`). The controller VM can be restarted or
+  recreated at any moment, including mid-`run_once` — precisely the
+  "host is stopped, or a run dies mid-flight" case the stranded-work
+  sweeper (docs/design.md) exists for — and a crash between an in-memory
+  `state.assign()` and that one end-of-run save was invisible to every
+  recovery path: `_dispatch` had already removed the trigger label (a
+  real, already-committed GitHub side effect) before the matching
+  assignment was ever written to disk, so the issue would never again
+  surface in `_dispatch`'s own poll (no longer trigger-labelled) *and*
+  the sweeper had no assignment on disk to find it stranded with either —
+  a task lost for good, silently, with no audit trail. Found by inspection
+  (bwsalmon/agents#51), not live — worth calling out as a gap in the
+  "restarting the VM doesn't strand tasks" story despite the sweeper
+  itself being solid. **Fixed**: `Orchestrator` gained a `state_path`
+  field and a `_save_state()` helper; `core.py` now saves immediately
+  after each state mutation and *before* the GitHub call that depends on
+  it becoming irreversible (`_dispatch`'s `state.assign()` before the
+  trigger-label removal, `_sweep`'s `sweep()` call — which already
+  released every finished/stranded slot in memory — before any of its
+  outcomes get processed, plus the smaller `record_pending_question`/
+  `clear_pending_question` sites). `cli.py`'s final `state.save()` stays
+  as a redundant safety net; `--dry-run` still never touches the real
+  file (`state_path=None` in that case). Covered by
+  `tests/test_automation_core.py::test_dispatch_persists_the_assignment_before_the_trigger_label_comes_off`,
+  `::test_a_task_stranded_by_a_controller_crash_mid_dispatch_is_recovered_on_restart`,
+  and `::test_a_sweep_release_is_persisted_before_the_pr_is_opened`.
 
 `docs/design.md` and `docs/roadmap.md` (item 8) are reconciled with this —
 both describe the current architecture, not the sandbox-side one.

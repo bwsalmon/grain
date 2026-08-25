@@ -67,6 +67,23 @@ class AutomationConfig:
     # genuinely untouched. Removed the moment a trusted reply promotes the
     # issue back to trigger_label.
     awaiting_reply_label: str = "grain-agent-awaiting-reply"
+    # Applied once a task's work is done from the agent's own side --
+    # a PR opened (or continued) for a fresh-branch/PR-continuation task, or
+    # an analysis posted -- regardless of whether the task issue itself
+    # closes automatically (bwsalmon/agents#54: an analysis never does; a
+    # fresh-branch task now waits for its PR to close, see
+    # `state.py`'s `OpenPullRequest`). Never removed once applied -- unlike
+    # the other labels above, this one isn't part of the dispatch queue
+    # state machine, just a visible marker of "the agent's part is done."
+    completed_label: str = "grain-agent-completed"
+    # Asks for a short-lived Gemini API key for the task it's applied to
+    # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once
+    # the task's slot frees. A label, not a body directive
+    # (bwsalmon/agents#49, `directives.py`'s own docstring on why) -- the
+    # same "a human decided this" trust tier the trigger label carries,
+    # checked directly against `issue.labels` in `core.py`'s
+    # `_resolve_target` rather than parsed out of untrusted issue text.
+    gemini_key_label: str = "grain-gemini-key"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

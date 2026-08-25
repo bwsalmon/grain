@@ -33,8 +33,8 @@ from .adapter.deploy import deploy_tree
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_github_credential,
-    configure_repo, credential_repos,
+    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
+    configure_github_credential, configure_repo, credential_repos,
     ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
@@ -69,6 +69,11 @@ class BootstrapConfig:
     gcp_agent_service_account_email: str | None = None
     gcp_project_id: str | None = None
     gcp_numeric_project_id: int = 0
+    # Turns on the grain-gemini-key task label (bwsalmon/agents#47, #49):
+    # the GCP project a short-lived Gemini API key is minted in. Reuses
+    # gcp_service_account_key above -- see configure_gemini_key's own
+    # docstring -- so this is only meaningful alongside it.
+    gemini_project_id: str | None = None
     github_host: str = "api.github.com"
     git_forward_host: str = "github.com"
     github_use_tls: bool = True
@@ -249,6 +254,8 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
             project_id=config.gcp_project_id,
             numeric_project_id=config.gcp_numeric_project_id,
         )
+    if config.gemini_project_id:
+        configure_gemini_key(admin_ssh, config.gemini_project_id)
 
     # Stage 9: sandboxes.
     log("stage 9/11: sandboxes")

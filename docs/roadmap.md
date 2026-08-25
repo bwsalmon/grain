@@ -1169,3 +1169,51 @@ collide on name alone. Purely a prompt addition — no new MCP tool, no new
 state to persist, nothing for `core.py` to verify, since unlike the branch
 name nothing downstream ever needs to check what the agent actually did
 with it.
+
+## 17. Close a task issue when its PR closes, not when the agent finishes
+
+- [x] Done
+
+`_finish_succeeded_issue` used to close the task issue the instant it
+opened a PR for it — before anyone had reviewed anything. Opening a PR only
+proves the agent's own part is done; the task itself isn't, until a human
+has merged (or decided to close without merging) that PR. bwsalmon/agents#54
+asked for the issue to track the PR's own close instead.
+
+**No webhook, so a poll.** docs/design.md's cron-not-webhooks stance
+(item 8) still holds, and the PR lives in the *target* repo (item 15's
+task/target split) while every label and close this deployment writes
+lives on the task issue in the *task* repo — so there's no label move to
+piggyback on either. `_finish_succeeded_issue` now records the PR against
+the issue (`state.py`'s `OpenPullRequest`: issue number, target owner/repo,
+PR number) instead of closing anything itself, and a new pass,
+`_close_finished_prs` (run between `_promote_answered_questions` and
+`_dispatch` in `run_once`, the same slot item 13's own polling pass
+occupies), checks every such record each cycle and closes the task issue
+once `GitHubClient.get_pull_request` reports that PR's own `state` as
+`"closed"` — merged or closed without merging both read that way, and
+count the same here: either means nobody is pushing more commits to it.
+`PullRequestDetail` gained the `state` field this needs, defaulted to
+`"open"` so no existing caller (none of which cared about it before this)
+needed updating.
+
+A 404 from `get_pull_request` (the target repo or the PR itself is gone —
+an operator narrowed the allowlist, or the PR was deleted outright) or from
+`close_issue` (the task issue itself is gone) is the same "stale record,
+not a reason to crash the cycle" tolerance `_requeue`/`_finish_question`
+already have; either just drops the record and logs.
+
+**A visible marker regardless of when (or whether) the issue closes.**
+bwsalmon/agents#54 also asked for a label on every task the agent
+considers its own part done with, `completed_label`
+(`AutomationConfig.completed_label`, default `"grain-agent-completed"`).
+It goes on immediately in every finishing path — `_finish_succeeded_issue`
+(the moment the PR opens), `_finish_succeeded_pr` (a PR-continuation task
+pushing more commits to a PR that already existed before the task, whose
+own lifecycle this deployment was never closing anyway), and
+`_finish_analysis` — independent of whether the issue itself ever
+auto-closes. An analysis (item 12's sibling, bwsalmon/agents#50) still
+never auto-closes at all: there is no PR whose merge or close is a natural
+"done" signal to wait on, only a summary a human should actually read
+first, so `_finish_analysis` drops `close_issue` entirely rather than
+switching it to poll anything.
