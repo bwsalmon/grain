@@ -290,17 +290,25 @@ config/
   backend.hcl               where Terraform state lives
 .github/workflows/
   plan.yml                  pull request: fmt, validate (grain's Terraform, fetched fresh)
-  deploy.yml                push to main: apply, push secrets, wait (same fetch)
+  deploy.yml                push to main: wires up grain's ci/ scripts (same fetch)
 ```
 
 Everything that *does* the applying — the Terraform module, the scripts it
 ships into instance metadata (`startup.sh`, `config-sync.sh`, `deploy.sh`),
 and the one-time `bootstrap-gcp.sh` — lives in
 [grain](https://github.com/bwsalmon/grain)'s `terraform/gcp/`, not here.
-Both workflows check that directory out fresh, at the ref
+So do the deploy steps themselves, in grain's `ci/`: `deploy.yml` supplies
+the values only it can (which secrets, which config directory, which repo)
+and calls a script for each step. That is deliberate — this file is one
+you fork and then own, so anything written *here* is something nobody
+re-syncs, and two real fixes once sat in the template for months without
+reaching a deployment that had forked it. A fix in grain now arrives with
+a `grain_ref` bump.
+
+Both workflows check those directories out fresh, at the ref
 `config/grain.tfvars` names (`grain_ref` — the same ref the on-host deploy
-itself fetches grain from), rather than carrying a copy of it that would
-drift the moment either repo changed. See `terraform/gcp/` in a grain
+itself fetches grain from), rather than carrying a copy that would drift
+the moment either repo changed. See `terraform/gcp/` and `ci/` in a grain
 checkout for the Terraform and shell source itself:
 
 ```
