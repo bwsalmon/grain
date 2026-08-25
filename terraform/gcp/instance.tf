@@ -170,6 +170,16 @@ resource "google_compute_instance" "host" {
       error_message = "default_target_repo must be one of target_repos (or, with target_repos empty, the task repo itself)."
     }
 
+    precondition {
+      # lockdown.tf's compute.vmExternalIpAccess policy denies external
+      # IPs project-wide, this host included -- catch the
+      # self-contradiction here rather than have the host's own
+      # access_config fail against a policy this same apply just put in
+      # place.
+      condition     = !(var.lock_down_project && var.assign_external_ip)
+      error_message = "lock_down_project denies external IPs project-wide, including on this host; set assign_external_ip = false (and enable_cloud_nat = true for egress) before turning lock_down_project on."
+    }
+
     # grain-github-token and grain-claude-token are never declared here --
     # the deploy workflow adds them directly with `gcloud compute
     # instances add-metadata` after this resource exists, so the value
