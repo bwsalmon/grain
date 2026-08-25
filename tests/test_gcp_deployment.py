@@ -25,7 +25,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-from grain.automation.config import AutomationConfig
 from grain.inventory import Cluster
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,12 +33,16 @@ TERRAFORM = ROOT / "terraform" / "gcp"
 DEPLOY_SH = TERRAFORM / "files" / "deploy.sh"
 TFVARS = TEMPLATE / "config" / "grain.tfvars"
 WORKFLOWS = TEMPLATE / ".github" / "workflows"
+# Not on the host and not Terraform: the one script a *config repo's* CI
+# runs out of a grain checkout (see grain/automation/labels.py).
+ENSURE_LABELS = ROOT / "ci" / "ensure-task-labels.sh"
 
 SHELL_SCRIPTS = [
     TERRAFORM / "files" / "startup.sh",
     TERRAFORM / "files" / "config-sync.sh",
     DEPLOY_SH,
     TERRAFORM / "bootstrap-gcp.sh",
+    ENSURE_LABELS,
 ]
 
 
@@ -616,15 +619,39 @@ def test_deploy_sh_only_requests_the_gcp_key_when_an_agent_account_is_configured
     assert 'if [ -n "$AGENT_SERVICE_ACCOUNT_EMAIL" ]; then' in deploy_sh
 
 
-def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
-    """Every label grain's automation applies has to exist in the queue
-    repo, and this repo *is* the queue repo -- so the workflow creates
-    them. A renamed default here would otherwise strand the queue."""
+def test_the_deploy_workflow_creates_the_task_labels_from_grains_own_list():
+    """Every label this deployment runs on has to exist in the queue repo,
+    and a config repo *is* the queue repo -- so its deploy workflow creates
+    them. What it must not do is carry the list: this workflow is the file
+    every deployment forks and then owns, so a list written into it is one
+    nobody re-syncs, and the label added in grain goes on not existing in
+    any picker (which is what happened to `grain-agent-completed`,
+    `grain-self-debug` and `grain-gemini-key`). It delegates to grain's
+    ci/ensure-task-labels.sh instead, out of the grain-src checkout it
+    already makes -- so a new label ships with a grain_ref bump.
+
+    Which labels that script creates is grain's own business and pinned in
+    tests/test_automation_labels.py, against AutomationConfig's fields.
+    """
     deploy = (WORKFLOWS / "deploy.yml").read_text()
-    config = AutomationConfig(task_owner="an-org", task_repo="a-repo")
-    for label in (config.trigger_label, config.in_progress_label,
-                  config.awaiting_reply_label):
-        assert f"label {label} " in deploy, f"deploy.yml never creates {label!r}"
+    assert "grain-src/ci/ensure-task-labels.sh" in deploy, \
+        "deploy.yml no longer runs the label script from the grain checkout"
+    assert "gh label create" not in deploy, \
+        "deploy.yml has grown its own copy of the label list again"
+
+
+def test_the_label_script_is_executable_and_reachable_at_the_path_ci_uses():
+    """deploy.yml runs it directly rather than through `bash`, so a file
+    committed without the executable bit fails the deploy with nothing but
+    "Permission denied" -- and the path is hardcoded in a workflow this
+    repo does not run, so a move here is invisible until a deploy breaks.
+    """
+    assert ENSURE_LABELS.exists(), f"{ENSURE_LABELS} is gone; deploy.yml still calls it"
+    assert os.access(ENSURE_LABELS, os.X_OK), f"{ENSURE_LABELS} is not executable"
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    called = ENSURE_LABELS.relative_to(ROOT).as_posix()
+    assert f"grain-src/{called}" in deploy, \
+        f"deploy.yml does not call the script at its actual path ({called})"
 
 
 def test_config_repo_template_vendors_no_terraform_or_scripts():
