@@ -1,4 +1,6 @@
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import grain.automation.capture as capture_module
 from grain.automation.config import AutomationConfig
@@ -7,6 +9,7 @@ from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.history import RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.automation.sweeper import Outcome, sweep
+from grain.proxy.tokens import SandboxCredentialOverrides, SandboxCredentialStore
 from grain.run import FakeRunner
 
 GEMINI_KEY_NAME = "projects/1/locations/global/keys/abc"
@@ -418,3 +421,72 @@ def test_credential_warnings_default_to_empty_for_every_existing_caller():
     runner = runner_reporting("inactive", "success")
     result = sweep(state, lambda name: runner, runner, config(), NOW)
     assert result.credential_warnings == []
+
+
+# --- credential_store.clear() on release (bwsalmon/agents#52) ---------------
+
+def test_a_successful_release_clears_any_credential_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    assert SandboxCredentialOverrides(store._path).for_sandbox("sandbox-0") is None
+
+
+def test_a_failed_release_also_clears_any_credential_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("failed", "exit-code")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    assert SandboxCredentialOverrides(store._path).for_sandbox("sandbox-0") is None
+
+
+def test_a_stranded_release_also_clears_any_credential_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", returncode=1)
+    for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
+        runner.expect(prefix, stdout=stdout, returncode=returncode)
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    assert SandboxCredentialOverrides(store._path).for_sandbox("sandbox-0") is None
+
+
+def test_release_with_no_override_set_does_not_crash():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)  # must not raise
+
+
+def test_release_with_no_credential_store_does_not_crash():
+    # Every caller of sweep() written before this feature doesn't pass
+    # credential_store at all -- must keep working exactly as before.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW)  # must not raise
+    assert "sandbox-0" not in state.assignments
+
+
+def test_a_release_clears_only_this_sandboxs_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+    store.set("sandbox-1", "release")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    overrides = SandboxCredentialOverrides(store._path)
+    assert overrides.for_sandbox("sandbox-0") is None
+    assert overrides.for_sandbox("sandbox-1") == "release"

@@ -18,7 +18,7 @@ from .audit import FileAuditLog
 from .core import GitProxy
 from .credentials import CredentialSet
 from .forward import RealForwarder
-from .tokens import SandboxTokens
+from .tokens import SandboxCredentialOverrides, SandboxTokens
 
 
 def make_handler(proxy: GitProxy) -> type[BaseHTTPRequestHandler]:
@@ -85,6 +85,12 @@ def build_proxy(data_dir: Path) -> GitProxy:
         tokens=SandboxTokens(data_dir / "secrets" / "sandbox-tokens.json"),
         forwarder=forwarder,
         audit=FileAuditLog(data_dir / "state" / "git-proxy" / "audit.log"),
+        # bwsalmon/agents#52: under /data/config, not /data/secrets --
+        # see SandboxCredentialOverrides' own docstring for why it needs
+        # the same re-read-every-request treatment as Allowlist above.
+        credential_overrides=SandboxCredentialOverrides(
+            data_dir / "config" / "sandbox-github-key.json"
+        ),
     )
 
 

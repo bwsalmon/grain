@@ -442,6 +442,7 @@ re-run.
   config/
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
     automation.json                      # AutomationConfig
+    sandbox-github-key.json              # sandbox name -> named credential override, if any
   state/
     automation/state.json, audit.log, sessions/
     automation/units/grain-task-<sandbox>/
@@ -475,7 +476,11 @@ scope.** The `workflow` one is the non-obvious privilege escalation: an
 agent that can edit `.github/workflows/**` can make CI run code of its
 choosing with whatever secrets that workflow holds. Withholding the scope
 makes *GitHub* reject the push, which is a control your bugs cannot
-bypass. `grain github audit` checks this — see [Operate](#operate).
+bypass. `grain github audit` checks this — see [Operate](#operate). A task
+that genuinely needs such a scope names a separate, narrowly-provisioned
+credential instead of widening the default one — see "Label an issue
+`grain-github-<name>`" below; `grain github audit` will (correctly) flag
+that credential too, since the scope really is there, deliberately.
 
 **Repo allowlist**, `/data/config/repo-allowlist.json` — the *target*
 repos this deployment may work in. Enforced twice against one file: by the
@@ -652,6 +657,22 @@ parked with a comment, the same as an unlisted `/repo`. The raw key never
 rides in the prompt file, only its path in the sandbox — see
 `grain/automation/gemini_keys.py` for why this is minted on the
 controller's own account rather than the sandbox-facing metadata broker.
+
+**Label an issue `grain-github-<name>`** to have that task's git pushes use
+a named credential instead of the deployment's default one — for a task
+that genuinely needs a scope the default deliberately withholds (the
+`workflow` scope, most notably: see "Withhold `workflow`..." above). An
+operator provisions the credential first with `grain controller configure
+--github-key <name>=PATH` (see `docs/runbook.md`), which writes only
+`/data/secrets/github/<name>.token` — deliberately not a
+`credentials.json` entry, so it never becomes any repo's *default*
+credential, only a task-selected override. A label naming a credential
+that was never provisioned parks the task with a comment, same as an
+unlisted `/repo`; more than one `grain-github-*` label on the same issue
+does too, since which one applies would otherwise be a guess. The override
+applies for exactly that task's lifetime — set right before dispatch,
+cleared the moment its sandbox's slot frees — and, like the trigger label
+itself, only someone who can apply a label can ask for it.
 
 **Requiring a human to apply the label is the prompt-injection gate.**
 Anyone who can file an issue can put text in front of the agent; the

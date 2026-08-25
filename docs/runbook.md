@@ -408,6 +408,7 @@ session record itself is still kept, just without transcript content.
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
     automation.json                      # AutomationConfig
     gemini-key.json                      # GeminiKeyConfig (optional, see below)
+    sandbox-github-key.json              # sandbox name -> named credential override, if any (bwsalmon/agents#52)
   state/
     automation/state.json, audit.log
     automation/sessions/<key>.json, <key>.jsonl   # session history + captured trajectories
@@ -418,14 +419,18 @@ Rotation is uniformly **"replace the file, restart the one service that
 reads it"** (`docs/design.md`, "Operations") — nothing here watches
 `secrets/` for changes the way the allowlist watches `config/`:
 
-- **A GitHub credential** (`bot.token`, `personal.token`, ...): overwrite
-  the file with the new token, `chmod 0600` it, restart the git proxy
-  (`python3 -m grain.proxy.server`) and, if `automation.json`'s `owner`/
-  `repo` resolve to that credential, the process invoking `automation
-  run-once` too — `CredentialSet` and `build_orchestrator` both load once at
-  construction (`grain/proxy/credentials.py`'s own docstring is explicit
-  about this), so a running process keeps using the old token until
-  restarted.
+- **A GitHub credential** (`bot.token`, `personal.token`, a named
+  `grain-github-<name>` key, ...): overwrite the file with the new token,
+  `chmod 0600` it, restart the git proxy (`python3 -m grain.proxy.server`)
+  and, if `automation.json`'s `owner`/`repo` resolve to that credential,
+  the process invoking `automation run-once` too — `CredentialSet` and
+  `build_orchestrator` both load once at construction
+  (`grain/proxy/credentials.py`'s own docstring is explicit about this), so
+  a running process keeps using the old token until restarted. (The
+  *selection* of which sandbox uses which named key,
+  `/data/config/sandbox-github-key.json`, is a different file, lives under
+  `config/` rather than `secrets/`, and *is* hot-reloaded — see "Adding a
+  named GitHub key" below.)
 - **A sandbox token**: generate a new one, update its entry in
   `sandbox-tokens.json`, restart the git proxy. **The old token stays valid
   everywhere else that reads the same file until the proxy restarts** —
@@ -621,6 +626,45 @@ To disable it again: delete `/data/config/gemini-key.json`. Any key already
 minted for a task still in flight is unaffected (it still gets revoked
 normally when that task's slot frees) — this only stops new ones from
 being minted.
+
+## Adding a named GitHub key (bwsalmon/agents#52)
+
+A task labelled `grain-github-<name>` pushes through the git proxy using
+the named credential `<name>` for that task only, instead of the
+deployment's default (`credentials.json`-selected) one — for a task that
+genuinely needs a scope the default deliberately withholds, `workflow`
+being the case this was built for (`docs/design.md`, "Scopes to
+withhold"). Provisioning one is a single step, and there is no on/off
+switch to flip first:
+
+1. Run `grain controller configure --repo owner/name --github-key
+   <name>=PATH` (any other `controller configure` flags in the same
+   invocation still apply normally — this one is additive, and repeatable
+   for more than one named key). This writes only
+   `/data/secrets/github/<name>.token` — deliberately **not** a
+   `credentials.json` entry, so `<name>` never becomes any repo's default
+   credential, only a label-selected override.
+2. A task now asks for it by carrying a `grain-github-<name>` label — a
+   real GitHub label, applied by a human, the same trust tier as the
+   trigger label itself; not a `/directive` line in the issue body. Until
+   step 1 is done for that name, the label parks the task with a comment
+   explaining why, the same as an unlisted `/repo`. Two different
+   `grain-github-*` labels on the same issue park it too — which one
+   applies would otherwise be a guess.
+3. Run `grain github audit` and expect `<name>` to come back **`flagged`**
+   if it carries `workflow` (or another withheld scope) — that is correct,
+   not a bug: the scope really is there, deliberately, for this one
+   credential. `bot`/`personal` (or whatever covers `credentials.json`'s
+   `*` fallback) should still come back clean.
+
+The override applies only for the lifetime of the task that asked for
+it — written to `/data/config/sandbox-github-key.json` right before
+dispatch (hot-reloaded, no proxy restart needed, the same as
+`repo-allowlist.json`) and cleared the moment that sandbox's slot frees,
+whether the task succeeded, failed, or was stranded. There is nothing to
+disable deployment-wide: simply stop applying the label, or delete the
+`<name>.token` file (a label still naming it then parks the task, same as
+step 1 never having run).
 
 ## Gaps: what this runbook can't yet tell you to automate
 
