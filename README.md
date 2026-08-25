@@ -760,7 +760,7 @@ deployment.
 python3 -m pytest              # unit tests: no hypervisor, no network, no root
 ```
 
-536 unit tests pass on a bare machine; the live suites skip themselves
+705 unit tests pass on a bare machine; the live suites skip themselves
 cleanly there, so the command above is safe anywhere. They come in when the
 machine can run them:
 
@@ -771,6 +771,14 @@ machine can run them:
 | `test_controller_integration.py` | the same, but the base image must already be cached |
 | `test_bootstrap_integration.py` | the same — the two-key sandbox and the deploy/configure verbs |
 | `test_live_issue_to_pr.py` | the same — a full issue→PR run against a mocked GitHub |
+
+`.github/workflows/tests.yml` runs that same unscoped `python3 -m pytest`
+on every pull request and every push to `main`, against Python 3.11 and
+3.13 — the floor `pyproject.toml` declares and the stock interpreter on
+the Debian the host runs. A hosted runner has no `/dev/kvm` and no
+netfilter, so the live suites skip there exactly as they do on a bare
+machine, and the job holds no credential of any kind: it runs PR-branch
+code before a human has read it.
 
 ```sh
 python3 -m tests.loadtest      # boot the real pool and measure it under kind + build load
