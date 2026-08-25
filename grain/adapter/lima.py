@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..inventory import Cluster, VmSpec
+from ..inventory import CONTROLLER_IP_PLACEHOLDER, Cluster, VmSpec
 from ..run import Runner
 from .base import HostAdapter, Network, VmInfo, VmState
 
@@ -66,6 +66,9 @@ def render_instance_config(cluster: Cluster, spec: VmSpec,
         "",
     ]
     if provision_script:
+        provision_script = provision_script.replace(
+            CONTROLLER_IP_PLACEHOLDER, str(cluster.controller_ip)
+        )
         lines += [
             "provision:",
             "- mode: system",

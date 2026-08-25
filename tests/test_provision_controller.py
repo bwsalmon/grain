@@ -135,6 +135,18 @@ def test_git_proxy_unit_binds_the_controllers_private_address_not_0000():
     assert "--host 0.0.0.0" not in text
 
 
+def test_controller_ip_is_the_substitutable_placeholder_not_the_default_subnet():
+    """The adapter fills this in per-deployment (grain/inventory.py's
+    CONTROLLER_IP_PLACEHOLDER) -- a literal 10.100.0.2 here would only be
+    right for the default subnet and silently wrong on any other one.
+    """
+    from grain.inventory import CONTROLLER_IP_PLACEHOLDER
+
+    text = read()
+    assert f'CONTROLLER_IP="{CONTROLLER_IP_PLACEHOLDER}"' in text
+    assert "10.100.0.2" not in text
+
+
 def test_creates_opt_grain_for_the_manual_code_deploy_step():
     assert "/opt/grain" in read()
 

@@ -22,11 +22,12 @@
 set -eux
 
 GCE_METADATA_SERVER_VERSION="4.2.5"
-# Matches Cluster().controller_ip for the default subnet (10.100.0.0/24) —
-# see grain/inventory.py. Edit this if the deployment uses a non-default
-# subnet (there is no --subnet flag on `grain` yet; it's a Cluster()
-# constructor argument today).
-CONTROLLER_IP="10.100.0.2"
+# Substituted for this cluster's actual controller address when the adapter
+# bakes this script into the controller's user-data (grain/inventory.py's
+# CONTROLLER_IP_PLACEHOLDER, grain/adapter/libvirt.py's `render_user_data`)
+# — correct on any subnet a deployment configures, not only the default
+# 10.100.0.0/24.
+CONTROLLER_IP="__GRAIN_CONTROLLER_IP__"
 
 apt-get update
 apt-get install -y --no-install-recommends \

@@ -33,7 +33,7 @@ import ipaddress
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..inventory import Cluster, Role, VmSpec
+from ..inventory import CONTROLLER_IP_PLACEHOLDER, Cluster, Role, VmSpec
 from ..run import Runner
 from .base import HostAdapter, Network, VmInfo, VmState
 
@@ -160,16 +160,22 @@ def render_meta_data(name: str, ssh_public_keys: Sequence[str] = ()) -> str:
     return meta
 
 
-def render_user_data(provision_script: str | None) -> str:
+def render_user_data(provision_script: str | None, cluster: Cluster) -> str:
     """A raw shebang script is a valid NoCloud user-data payload as-is —
     cloud-init's scripts-user module runs it directly at first boot, the
     same shape `docs/design.md` already used for the Lima provisioning
     stanza. With nothing to run, an empty cloud-config is still a valid
     NoCloud user-data file.
+
+    Substitutes `CONTROLLER_IP_PLACEHOLDER` for this cluster's actual
+    controller address, so a script like provision/controller.sh binds to
+    the right address on any subnet, not only the default.
     """
-    if provision_script:
-        return provision_script
-    return "#cloud-config\n{}\n"
+    if not provision_script:
+        return "#cloud-config\n{}\n"
+    return provision_script.replace(
+        CONTROLLER_IP_PLACEHOLDER, str(cluster.controller_ip)
+    )
 
 
 def render_network_config(cluster: Cluster, spec: VmSpec) -> str:
@@ -365,7 +371,7 @@ class LibvirtAdapter(HostAdapter):
         # for automation dispatch. See __init__'s docstring.
         keys = [admin_key] if spec.role is Role.CONTROLLER else [admin_key, controller_key]
         meta_data_path.write_text(render_meta_data(spec.name, keys))
-        user_data_path.write_text(render_user_data(provision_script))
+        user_data_path.write_text(render_user_data(provision_script, self.cluster))
         network_config_path.write_text(render_network_config(self.cluster, spec))
 
         seed_path = self.config_dir / f"{spec.name}-seed.iso"

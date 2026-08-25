@@ -38,6 +38,16 @@ _HOST_OFFSET = 1
 _CONTROLLER_OFFSET = 2
 _SANDBOX_OFFSET = 10
 
+# A provisioning script (provision/controller.sh) is plain text with no
+# Cluster in scope of its own, but needs the controller's actual private
+# address, which depends on `subnet` -- not fixed the way the offsets above
+# are. The adapters substitute this for `str(cluster.controller_ip)` when
+# they bake a script into a VM's user-data (see adapter/libvirt.py's
+# `render_user_data` and adapter/lima.py's `render_instance_config`), so the
+# script stays correct on any subnet a deployment configures, not only the
+# default.
+CONTROLLER_IP_PLACEHOLDER = "__GRAIN_CONTROLLER_IP__"
+
 
 class Role(str, Enum):
     CONTROLLER = "controller"
