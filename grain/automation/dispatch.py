@@ -424,6 +424,13 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     "true only once the label was actually seen" record, for
     `self_debug_label` -- `core.py`'s `_resolve_target` sets it straight
     from `issue.labels`, no minting step required.
+
+    bwsalmon/agents#79: the closing instructions ask for a real commit
+    message because `core.py`'s `_finish_succeeded_issue` now builds the
+    opened PR's body from the pushed branch's own head commit message
+    (`GitHubClient.get_branch_head`) rather than from generic metadata --
+    the previous body said nothing about the change itself, which is what
+    left a number of generated PRs reading as description-free.
     """
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
     self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
@@ -443,8 +450,12 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
         f"{self_debug_section}"
-        "When you are done, commit your changes and push them with exactly "
-        "this command:\n"
+        "When you are done, commit your changes with a clear, descriptive "
+        "commit message -- a short summary line, then a blank line, then a "
+        "paragraph explaining what changed and why. Your final commit "
+        "message becomes the pull request's description verbatim, so write "
+        "it for a human reviewer, not just for git log. Then push with "
+        "exactly this command:\n"
         f"    git push origin HEAD:{branch}\n"
         "The controller opens the pull request itself once it sees that "
         "branch — you have no GitHub API access from here, so do not "

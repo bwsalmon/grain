@@ -1,11 +1,67 @@
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from grain.automation.github import (
-    ApiResponse, Comment, DryRunGitHubClient, FakeTransport, GitHubClient, GitHubError,
-    PullRequest, PullRequestDetail, ReviewComment,
+    ApiResponse, BranchHead, Comment, DryRunGitHubClient, FakeTransport, GitHubClient,
+    GitHubError, PullRequest, PullRequestDetail, ReviewComment, RealTransport,
 )
+
+
+# --- RealTransport (the one piece of `github.py` that makes a real
+# network call) -- exercised here against a real local HTTP server rather
+# than mocked, since the whole point is to check that `http.client` is
+# driven correctly (method/path/headers/body out, status/headers/body
+# back). `use_tls=False` is a real, documented configuration -- the
+# mocked-GitHub live-test seam (docs/roadmap.md item 8) -- so this is not
+# testing a code path production never takes.
+
+class _EchoHandler(BaseHTTPRequestHandler):
+    def _handle(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        _EchoHandler.last_request = {
+            "method": self.command, "path": self.path,
+            "headers": dict(self.headers), "body": body,
+        }
+        self.send_response(200)
+        self.send_header("X-Reply", "yes")
+        self.send_header("Content-Length", "5")
+        self.end_headers()
+        self.wfile.write(b"hello")
+
+    def do_GET(self):
+        self._handle()
+
+    def do_POST(self):
+        self._handle()
+
+    def log_message(self, format, *args):
+        pass
+
+
+def test_real_transport_sends_the_request_and_parses_the_response():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        transport = RealTransport(f"127.0.0.1:{port}", use_tls=False)
+        resp = transport.request(
+            method="POST", path="/repos/acme/widgets/issues",
+            headers={"Accept": "application/vnd.github+json"}, body=b"payload",
+        )
+        assert resp.status == 200
+        assert resp.body == b"hello"
+        assert resp.headers["X-Reply"] == "yes"
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert _EchoHandler.last_request["method"] == "POST"
+    assert _EchoHandler.last_request["path"] == "/repos/acme/widgets/issues"
+    assert _EchoHandler.last_request["body"] == b"payload"
+    assert _EchoHandler.last_request["headers"]["Accept"] == "application/vnd.github+json"
 
 
 def issue_json(number: int, *, is_pr: bool = False, labels=("grain-agent",)) -> dict:
@@ -55,6 +111,23 @@ def test_list_issues_follows_link_header_pagination():
     issues = client.list_issues("o", "r", "grain-agent")
     assert [i.number for i in issues] == [1, 2]
     assert transport.calls[1]["path"] == "/repos/o/r/issues?page=2"
+
+
+def test_next_page_path_returns_none_when_the_link_header_has_no_next_rel():
+    from grain.automation.github import _next_page_path
+
+    header = '<https://api.github.com/repos/o/r/issues?page=1>; rel="prev"'
+    assert _next_page_path(header) is None
+
+
+def test_next_page_path_skips_earlier_segments_to_find_next():
+    from grain.automation.github import _next_page_path
+
+    header = (
+        '<https://api.github.com/repos/o/r/issues?page=1>; rel="prev", '
+        '<https://api.github.com/repos/o/r/issues?page=3>; rel="next"'
+    )
+    assert _next_page_path(header) == "/repos/o/r/issues?page=3"
 
 
 def test_list_issues_raises_on_a_non_200():
@@ -140,6 +213,37 @@ def test_branch_exists_raises_on_other_errors():
     transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
     with pytest.raises(GitHubError):
         GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1")
+
+
+def test_get_branch_head_returns_the_sha_and_message_on_200():
+    body = json.dumps(
+        {"commit": {"sha": "abc123", "commit": {"message": "Fix the thing\n\nDetails."}}}
+    ).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    head = GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1")
+    assert head == BranchHead(sha="abc123", message="Fix the thing\n\nDetails.")
+
+
+def test_get_branch_head_returns_none_on_404():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    assert GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1") is None
+
+
+def test_get_branch_head_raises_on_other_errors():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1")
+
+
+def test_dry_run_client_passes_get_branch_head_through():
+    body = json.dumps(
+        {"commit": {"sha": "abc123", "commit": {"message": "Fix the thing"}}}
+    ).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+    assert dry.get_branch_head("o", "r", "grain/issue-1") == BranchHead(
+        sha="abc123", message="Fix the thing"
+    )
 
 
 def test_create_pull_request_posts_head_base_and_title():

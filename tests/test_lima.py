@@ -93,6 +93,15 @@ def test_destroy_is_idempotent(adapter):
     assert not runner.ran("limactl delete")
 
 
+def test_destroy_deletes_a_vm_that_exists(adapter):
+    a, runner = adapter
+    runner.expect(
+        "limactl list --json", stdout=lima_list({"name": "sandbox-0", "status": "Stopped"})
+    )
+    a.destroy("sandbox-0")
+    assert runner.ran("limactl delete --force sandbox-0")
+
+
 def test_stop_only_stops_a_running_vm(adapter):
     a, runner = adapter
     runner.expect(
@@ -100,6 +109,33 @@ def test_stop_only_stops_a_running_vm(adapter):
     )
     a.stop("sandbox-0")
     assert not runner.ran("limactl stop")
+
+
+def test_stop_stops_a_running_vm(adapter):
+    a, runner = adapter
+    runner.expect(
+        "limactl list --json", stdout=lima_list({"name": "sandbox-0", "status": "Running"})
+    )
+    a.stop("sandbox-0")
+    assert runner.ran("limactl stop sandbox-0")
+
+
+def test_list_vms_reads_as_empty_when_limactl_is_missing(adapter):
+    # A dry run on a host with no limactl installed: absent, not a crash --
+    # the same "read-only commands still execute" contract DryRunRunner
+    # documents for exactly this case.
+    a, runner = adapter
+    runner.expect("limactl list --json", returncode=127, stderr="limactl: not found")
+    assert a.list_vms() == []
+
+
+def test_list_vms_skips_blank_lines(adapter):
+    a, runner = adapter
+    runner.expect(
+        "limactl list --json",
+        stdout="\n" + json.dumps({"name": "sandbox-0", "status": "Running"}) + "\n\n",
+    )
+    assert [i.name for i in a.list_vms()] == ["sandbox-0"]
 
 
 def test_instance_config_pins_the_assigned_address(cluster):
