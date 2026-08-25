@@ -233,12 +233,46 @@ class Orchestrator:
     # `gemini_keys.py`'s own docstring for why this lives on the controller
     # account, never a sandbox's.
     gemini_key_config: GeminiKeyConfig | None = None
+    # bwsalmon/agents#51: where to persist `AutomationState` immediately
+    # after each mutation, not just once at the very end of `run_once`
+    # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
+    # final, redundant safety net). `None` is what every existing test
+    # helper leaves this at -- those only ever assert against
+    # `orchestrator.state` in memory, never against a file on disk, so
+    # `_save_state` below is a no-op for them. Production (`cli.py`'s
+    # `build_orchestrator`) always sets this to the real state path.
+    #
+    # Why this matters: a controller VM can be restarted (or recreated)
+    # at any moment, including mid-`run_once` -- that is the whole premise
+    # of the stranded-work sweeper (docs/design.md: "if the host is
+    # stopped, or a run dies mid-flight"). Before this field existed, the
+    # *only* place `AutomationState` hit disk was one `state.save()` call
+    # after `run_once` returned in full. A crash between an in-memory
+    # `state.assign()` in `_dispatch` and that final save was invisible to
+    # every recovery path: the real GitHub side effect that follows it
+    # (`remove_label` off the trigger label) had already landed, so the
+    # issue would never again show up in `_dispatch`'s own poll (it no
+    # longer carries the trigger label) *and* the freshly-dispatched
+    # assignment naming it was never written to disk, so the sweeper could
+    # never find it stranded either -- a task genuinely lost forever, with
+    # no audit trail and no automatic recovery. Persisting right after each
+    # `state.assign()`/`sweep()` call, before the GitHub side effect that
+    # depends on it, closes that gap: whichever side of the crash the
+    # process lands on, the *persisted* state is never behind a
+    # already-committed GitHub side effect, so the next `run_once` either
+    # sees the assignment (and the sweep's `UnitState.ABSENT` case reclaims
+    # it as stranded) or never removed the trigger label to begin with.
+    state_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
             self.audit = NullAuditLog()
         if self.history is None:
             self.history = NullSessionHistory()
+
+    def _save_state(self) -> None:
+        if self.state_path is not None:
+            self.state.save(self.state_path)
 
     def _ssh_runner_for(self, sandbox: str) -> Runner:
         if self.ssh_runner_factory is not None:
@@ -288,6 +322,13 @@ class Orchestrator:
         result = sweep(self.state, self._ssh_runner_for, self.base_runner,
                         self.config, now, history=self.history,
                         gemini_key_config=self.gemini_key_config)
+        # `sweep()` already called `state.release()` in memory for every
+        # outcome above -- persist that now, before any of the GitHub calls
+        # below (a PR, a label move) make this run's outcome irreversible.
+        # See `state_path`'s own docstring (bwsalmon/agents#51) for why this
+        # ordering, not just the fact of saving, is what actually closes the
+        # crash gap.
+        self._save_state()
         for outcome in result.succeeded:
             self._finish_succeeded(outcome)
         for outcome in (*result.failed, *result.stranded):
@@ -465,6 +506,13 @@ class Orchestrator:
         self.state.record_pending_question(
             outcome.issue, comment_id, kind=outcome.kind, branch=outcome.branch,
         )
+        # bwsalmon/agents#51: the GitHub-side label swap above already
+        # landed by the time this runs; persist the pending-question record
+        # that goes with it so a crash right after doesn't leave a
+        # `_promote_answered_questions` with nothing to check a later reply
+        # against (the fallback -- re-applying the trigger label by hand --
+        # still works either way, but this keeps the automatic path intact).
+        self._save_state()
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"asked a question, awaiting reply: {question[:200]!r}")
 
@@ -538,6 +586,7 @@ class Orchestrator:
                 # Same "stale assignment" story as _requeue/_finish_question
                 # -- the issue is gone from the currently configured repo.
                 self.state.clear_pending_question(pending.issue)
+                self._save_state()
                 self.audit.record(
                     sandbox=None, issue=pending.issue,
                     outcome=f"issue #{pending.issue} not found in "
@@ -562,6 +611,11 @@ class Orchestrator:
                 pending.issue, self.config.trigger_label,
             )
             self.state.clear_pending_question(pending.issue)
+            # bwsalmon/agents#51: the trigger label is back on by now (the
+            # calls above), which is what makes this issue reachable again
+            # from `_dispatch`'s own poll -- persist the state that matches
+            # before anything else in this cycle can crash on top of it.
+            self._save_state()
             self.audit.record(
                 sandbox=None, issue=pending.issue,
                 outcome=f"{reply.user} ({reply.author_association}) replied -- "
@@ -721,6 +775,10 @@ class Orchestrator:
             number, self.config.awaiting_reply_label,
         )
         self.state.record_pending_question(number, comment_id)
+        # Same reasoning as `_finish_question` (bwsalmon/agents#51): persist
+        # the pending-question baseline right after the label swap it
+        # accompanies.
+        self._save_state()
         self.audit.record(sandbox=None, issue=number,
                            outcome=f"parked, awaiting reply: {reason}")
 
@@ -891,6 +949,16 @@ class Orchestrator:
                                    target_repo=task.repo.name, base=task.base,
                                    gemini_key_name=gemini_key_name)
             self.state.record_run(now)
+            # Persist the new assignment *before* the trigger label comes
+            # off below (bwsalmon/agents#51) -- removing that label is the
+            # step that makes this dispatch irreversible from `_dispatch`'s
+            # own polling's point of view (a labelled-issue query will never
+            # see this issue again once it's off), so a controller crash or
+            # VM restart after this point must find the assignment already
+            # on disk, or the sweeper has nothing to reclaim it with. See
+            # `state_path`'s own docstring for the full failure mode this
+            # closes.
+            self._save_state()
             self.github.remove_label(
                 self.config.task_owner, self.config.task_repo,
                 number, self.config.trigger_label,

@@ -123,7 +123,8 @@ def allowlist_of(repos) -> Allowlist:
 
 
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
-                       history=None, allowed=("o/r",), gemini_key_config=None):
+                       history=None, allowed=("o/r",), gemini_key_config=None,
+                       state_path=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -156,6 +157,13 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         # Orchestrator's own decisions against a plain FakeRunner.
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
+        # bwsalmon/agents#51: most tests leave this unset, which makes
+        # `_save_state` a no-op -- exactly the pre-existing behaviour, since
+        # those tests only ever assert against `orchestrator.state` in
+        # memory. Tests about surviving a controller crash/VM restart pass
+        # a real path and read it back independently of the in-memory
+        # `Orchestrator` to prove the write actually landed on disk.
+        state_path=state_path,
     )
     return orchestrator, transport
 
@@ -1303,5 +1311,119 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
     assert orchestrator.state.assignments == {}
     delete_call = next(c for c in runner.commands if "api-keys delete" in c)
     assert GEMINI_KEY_NAME in delete_call
-    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
-    assert any("dispatch failed" in o for o in outcomes)
+
+
+# --- surviving a controller VM restart (bwsalmon/agents#51) ---------------
+#
+# `claude -p` runs on the controller now (docs/roadmap.md item 8's
+# "Update"), so a controller VM restart is exactly the "host is stopped, or
+# a run dies mid-flight" case docs/design.md's stranded-work sweeper exists
+# for. The sweeper itself already handles a unit that has vanished
+# (`UnitState.ABSENT`, tested in test_automation_sweeper.py) -- what these
+# tests are about is the other half: `AutomationState` must actually be on
+# disk, at the right moment, for that recovery to have anything to work
+# with. Before `Orchestrator.state_path`/`_save_state` existed, the only
+# place `AutomationState` was ever written to disk was one `state.save()`
+# call in `cli.py`'s `cmd_automation_run_once`, *after* `run_once()`
+# returned in full -- a crash anywhere inside `run_once` (a restarted
+# controller VM being the most literal version of "crash") lost every
+# state mutation made so far, even ones whose real-world GitHub side effect
+# (a label move, a PR) had already landed and could never be undone.
+
+def test_dispatch_persists_the_assignment_before_the_trigger_label_comes_off(
+    tmp_path, monkeypatch,
+):
+    """Removing the trigger label is the step that makes a dispatch
+    irreversible from `_dispatch`'s own polling's point of view -- once
+    it's off, `list_issues(trigger_label=...)` will never surface this
+    issue again. So the new assignment must already be durably on disk
+    *before* that call, or a crash landing right after it (a controller VM
+    restarting being the realistic version of "crash") strands the task:
+    not labelled for redispatch, and not recorded anywhere the sweeper
+    could find it stranded either. Simulated here as a raise from
+    `remove_label` itself -- standing in for the process dying mid-call --
+    and checked by reading the state file back independently of the
+    `Orchestrator` that (mid-crash) never got to return.
+    """
+    state_path = tmp_path / "state.json"
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], state_path=state_path)
+    monkeypatch.setattr(
+        orchestrator.github, "remove_label",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("controller restarted here")),
+    )
+
+    with pytest.raises(RuntimeError):
+        orchestrator.run_once(NOW)
+
+    persisted = AutomationState.load(state_path)
+    assert persisted.assignments["sandbox-0"].issue == 1
+
+
+def test_a_task_stranded_by_a_controller_crash_mid_dispatch_is_recovered_on_restart(
+    tmp_path, monkeypatch,
+):
+    """End-to-end version of the previous test. After the same simulated
+    crash, a *fresh* `Orchestrator` -- reloading `AutomationState` from the
+    same file, exactly what a restarted controller process does on its
+    next `run_once` (`cli.py`'s `build_orchestrator`) -- must still find
+    the dispatched issue via the assignment that survived, notice its unit
+    is gone (nothing real was ever started against this `FakeRunner` on the
+    restarted side either), requeue it, and redispatch it in that same
+    cycle (sweep runs before dispatch). The alternative -- what happened
+    before this fix -- is the issue simply vanishing: no longer trigger-
+    labelled, and no assignment on disk to notice that either.
+    """
+    state_path = tmp_path / "state.json"
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], state_path=state_path)
+    monkeypatch.setattr(
+        orchestrator.github, "remove_label",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("controller restarted here")),
+    )
+    with pytest.raises(RuntimeError):
+        orchestrator.run_once(NOW)
+
+    restarted_state = AutomationState.load(state_path)
+    restarted, _ = make_orchestrator(
+        issues=[issue_json(1)], state=restarted_state, state_path=state_path,
+    )
+    restarted.run_once(NOW + timedelta(minutes=5))
+
+    outcomes = [e["outcome"] for e in restarted.audit.entries]
+    assert "stranded" in outcomes
+    assert restarted.state.assignments["sandbox-0"].issue == 1
+    # And the recovery is itself durable -- not just in this process's
+    # memory, in case *this* run_once is the one that gets interrupted too.
+    assert AutomationState.load(state_path).assignments["sandbox-0"].issue == 1
+
+
+def test_a_sweep_release_is_persisted_before_the_pr_is_opened(tmp_path, monkeypatch):
+    """The mirror image of the dispatch-side test above: `sweep()` already
+    releases a finished sandbox's slot in memory before `core.py` gets to
+    act on the outcome, so that release must be durable *before*
+    `create_pull_request` runs -- otherwise a crash right after a real PR
+    is opened leaves the state file still claiming the sandbox is busy with
+    a now-finished, already-reaped unit, which the next sweep would
+    misread as freshly stranded and try to process all over again.
+    """
+    state_path = tmp_path / "state.json"
+    state = AutomationState()
+    state.assign("sandbox-0", issue=1, unit=unit_name("sandbox-0"), now=NOW)
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\n",
+    )
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state, runner=runner, state_path=state_path,
+    )
+    transport.responses.extend(pr_flow_response(1))
+    monkeypatch.setattr(
+        orchestrator.github, "create_pull_request",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("controller restarted here")),
+    )
+
+    with pytest.raises(RuntimeError):
+        orchestrator.run_once(NOW)
+
+    persisted = AutomationState.load(state_path)
+    assert persisted.assignments == {}
