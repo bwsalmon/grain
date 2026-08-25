@@ -1,12 +1,26 @@
 import shlex
 
 from grain.automation.mcp_server import (
-    TOOLS, McpServer, ask_question, complete_analysis, edit_file, read_file, read_grain_logs,
-    run_command, write_file,
+    TOOLS, McpServer, ask_question, check_grain_health, complete_analysis, edit_file,
+    read_automation_audit_log, read_file, read_grain_config, read_grain_logs, run_command,
+    write_file,
 )
 from grain.run import FakeRunner
 
 WORKSPACE = "/home/debian/workspace"
+
+
+def healthy_runner() -> FakeRunner:
+    runner = FakeRunner()
+    runner.expect("true", returncode=0)
+    runner.expect("systemctl is-system-running", stdout="running\n")
+    runner.expect("docker info", stdout="Server Version: 27.0.0\n")
+    runner.expect(
+        "df -P /",
+        stdout="Filesystem     1024-blocks     Used Available Capacity Mounted on\n"
+               "/dev/vda1         20642428  8258764  11316384      43% /\n",
+    )
+    return runner
 
 
 def test_run_command_runs_inside_the_workspace():
@@ -194,6 +208,178 @@ def test_tools_list_includes_read_grain_logs_when_self_debug_is_enabled():
     response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in response["result"]["tools"]}
     assert "read_grain_logs" in names
+
+
+# --- check_grain_health, read_grain_config, read_automation_audit_log
+# (bwsalmon/agents#86) ---------------------------------------------------
+
+def test_check_grain_health_checks_the_sandbox_runner_not_the_local_one():
+    sandbox_runner = healthy_runner()
+    local_runner = FakeRunner()
+    result = check_grain_health(sandbox_runner, local_runner, "sandbox")
+    assert not result.is_error
+    assert "status=healthy" in result.text
+    assert local_runner.calls == []
+
+
+def test_check_grain_health_checks_the_local_runner_for_the_controller():
+    sandbox_runner = FakeRunner()
+    local_runner = healthy_runner()
+    result = check_grain_health(sandbox_runner, local_runner, "controller")
+    assert not result.is_error
+    assert "status=healthy" in result.text
+    assert sandbox_runner.calls == []
+
+
+def test_check_grain_health_flags_a_degraded_report_as_an_error():
+    local_runner = healthy_runner()
+    local_runner.expect("docker info", returncode=1, stderr="docker daemon down")
+    result = check_grain_health(FakeRunner(), local_runner, "controller")
+    assert result.is_error
+    assert "status=degraded" in result.text
+
+
+def test_check_grain_health_rejects_an_unknown_target_without_running_anything():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    result = check_grain_health(sandbox_runner, local_runner, "the-moon")
+    assert result.is_error
+    assert "Unknown target" in result.text
+    assert sandbox_runner.calls == []
+    assert local_runner.calls == []
+
+
+def test_read_grain_config_reads_an_allowed_file():
+    runner = FakeRunner()
+    runner.expect("cat -- /data/config/automation.json", stdout='{"task_owner": "bwsalmon"}\n')
+    result = read_grain_config(runner, "automation")
+    assert not result.is_error
+    assert "bwsalmon" in result.text
+    assert runner.calls[0][0] == ["cat", "--", "/data/config/automation.json"]
+
+
+def test_read_grain_config_reports_a_missing_optional_file_without_erroring():
+    runner = FakeRunner()
+    runner.expect("cat -- /data/config/gemini-key.json", returncode=1, stderr="No such file")
+    result = read_grain_config(runner, "gemini-key")
+    assert not result.is_error
+    assert "does not exist" in result.text
+
+
+def test_read_grain_config_rejects_an_unknown_file_without_running_anything():
+    runner = FakeRunner()
+    result = read_grain_config(runner, "controller-ssh")
+    assert result.is_error
+    assert "Unknown file" in result.text
+    assert runner.calls == []
+
+
+def test_read_automation_audit_log_reads_the_fixed_path():
+    runner = FakeRunner()
+    runner.expect("tail -n 200", stdout='{"outcome": "dispatched"}\n')
+    result = read_automation_audit_log(runner)
+    assert not result.is_error
+    assert "dispatched" in result.text
+    assert runner.calls[0][0] == ["tail", "-n", "200", "--", "/data/state/automation/audit.log"]
+
+
+def test_read_automation_audit_log_honors_a_custom_line_count():
+    runner = FakeRunner()
+    runner.expect("tail -n 10", stdout="line\n")
+    read_automation_audit_log(runner, lines=10)
+    assert runner.calls[0][0] == ["tail", "-n", "10", "--", "/data/state/automation/audit.log"]
+
+
+def test_read_automation_audit_log_surfaces_a_nonzero_exit_without_raising():
+    runner = FakeRunner()
+    runner.expect("tail -n 200", returncode=1, stderr="No such file or directory")
+    result = read_automation_audit_log(runner)
+    assert result.is_error
+    assert "No such file or directory" in result.text
+
+
+def test_tools_list_includes_all_four_self_debug_tools_when_enabled():
+    server = McpServer(FakeRunner(), WORKSPACE, self_debug=True)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in response["result"]["tools"]}
+    assert {
+        "read_grain_logs", "check_grain_health", "read_grain_config",
+        "read_automation_audit_log",
+    } <= names
+
+
+def test_tools_call_check_grain_health_is_refused_when_self_debug_is_disabled():
+    local_runner = FakeRunner()
+    server = McpServer(FakeRunner(), WORKSPACE, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "check_grain_health", "arguments": {"target": "controller"}},
+    })
+    assert response["result"]["isError"] is True
+    assert local_runner.calls == []
+
+
+def test_tools_call_read_grain_config_is_refused_when_self_debug_is_disabled():
+    local_runner = FakeRunner()
+    server = McpServer(FakeRunner(), WORKSPACE, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_grain_config", "arguments": {"file": "automation"}},
+    })
+    assert response["result"]["isError"] is True
+    assert local_runner.calls == []
+
+
+def test_tools_call_read_automation_audit_log_is_refused_when_self_debug_is_disabled():
+    local_runner = FakeRunner()
+    server = McpServer(FakeRunner(), WORKSPACE, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_automation_audit_log", "arguments": {}},
+    })
+    assert response["result"]["isError"] is True
+    assert local_runner.calls == []
+
+
+def test_tools_call_routes_check_grain_health_to_the_local_runner_for_the_controller():
+    sandbox_runner = FakeRunner()
+    local_runner = healthy_runner()
+    server = McpServer(sandbox_runner, WORKSPACE, self_debug=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "check_grain_health", "arguments": {"target": "controller"}},
+    })
+    assert response["result"]["isError"] is False
+    assert "status=healthy" in response["result"]["content"][0]["text"]
+    assert sandbox_runner.calls == []
+
+
+def test_tools_call_routes_read_grain_config_to_the_local_runner_not_the_sandbox_runner():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    local_runner.expect("cat -- /data/config/repo-allowlist.json", stdout='["owner/repo"]\n')
+    server = McpServer(sandbox_runner, WORKSPACE, self_debug=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_grain_config", "arguments": {"file": "repo-allowlist"}},
+    })
+    assert response["result"]["isError"] is False
+    assert "owner/repo" in response["result"]["content"][0]["text"]
+    assert sandbox_runner.calls == []
+
+
+def test_tools_call_routes_read_automation_audit_log_to_the_local_runner_not_the_sandbox_runner():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    local_runner.expect("tail -n 200", stdout="hi\n")
+    server = McpServer(sandbox_runner, WORKSPACE, self_debug=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_automation_audit_log", "arguments": {}},
+    })
+    assert response["result"]["isError"] is False
+    assert "hi" in response["result"]["content"][0]["text"]
+    assert sandbox_runner.calls == []
 
 
 def test_tools_call_read_grain_logs_is_refused_when_self_debug_is_disabled():
