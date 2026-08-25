@@ -5,12 +5,10 @@ locals {
   # all.
   task_repo = var.task_repo != "" ? var.task_repo : var.config_repo
 
-  # Empty when agent_service_account_roles is empty -- google_service_account.agent
-  # doesn't exist in that case (see iam.tf's count), and no agent identity
-  # is part of this deployment at all.
-  agent_service_account_email = (
-    length(var.agent_service_account_roles) > 0 ? google_service_account.agent[0].email : ""
-  )
+  # Empty when local.agent_account_needed (iam.tf) is false --
+  # google_service_account.agent doesn't exist in that case, and no agent
+  # identity is part of this deployment at all.
+  agent_service_account_email = local.agent_account_needed ? google_service_account.agent[0].email : ""
 
   # Everything the on-VM deploy script needs, and nothing it does not: no
   # secret values here either -- the runtime credentials arrive separately,

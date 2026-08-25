@@ -19,7 +19,7 @@ output "host_service_account" {
 }
 
 output "agent_service_account" {
-  value       = length(var.agent_service_account_roles) > 0 ? google_service_account.agent[0].email : null
+  value       = local.agent_account_needed ? google_service_account.agent[0].email : null
   description = "The narrow identity sandboxed agents are meant to impersonate, when configured."
 }
 
