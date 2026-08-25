@@ -130,6 +130,11 @@ class SweepResult:
     succeeded: list[Outcome] = field(default_factory=list)
     failed: list[Outcome] = field(default_factory=list)
     stranded: list[Outcome] = field(default_factory=list)
+    # bwsalmon/agents#82: released because the task issue was closed on
+    # GitHub, not because the unit itself reached any terminal state --
+    # kept as its own list (not folded into `stranded`) since `core.py`
+    # must not requeue these the way it requeues a failed/stranded run.
+    cancelled: list[Outcome] = field(default_factory=list)
     health_warnings: list[HealthWarning] = field(default_factory=list)
     # Same `HealthWarning` shape (sandbox + detail), reused rather than a
     # new dataclass for two fields that mean the same thing here: a
@@ -222,8 +227,27 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
           controller_runner: Runner, config: AutomationConfig, now: datetime,
           history: SessionHistory | None = None,
           gemini_key_config: GeminiKeyConfig | None = None,
-          credential_store: SandboxCredentialStore | None = None) -> SweepResult:
-    """`controller_runner` is new (docs/roadmap.md item 8's "Update"):
+          credential_store: SandboxCredentialStore | None = None,
+          is_issue_closed: Callable[[int], bool] | None = None) -> SweepResult:
+    """`is_issue_closed` (bwsalmon/agents#82): `core.py`'s hook onto
+    GitHub, called with a task issue number and answering whether it's
+    been closed there. This module still knows nothing about GitHub
+    itself (see this file's own docstring) -- it takes the answer as an
+    injected callable rather than a `GitHubClient` of its own, the same
+    "this module only mutates `AutomationState`" boundary every other
+    GitHub-shaped decision here already respects.
+
+    Only called for a unit that would otherwise be left running untouched
+    (still `ACTIVE`, within `max_runtime`) -- not for one this same pass
+    already found `DONE_SUCCESS`/`DONE_FAILED`/`ABSENT`, or stranded past
+    its runtime budget. Those already have a terminal outcome to report;
+    "cancelled" is only meaningful for a task issue closed out from under
+    work that is still genuinely in flight. `None` (every existing caller
+    that predates this) skips the check entirely, same as it always
+    answering "not closed" -- zero behaviour change and zero extra
+    GitHub calls for a deployment or test that doesn't care.
+
+    `controller_runner` is new (docs/roadmap.md item 8's "Update"):
     `claude -p` now runs on the controller, not the sandbox, so the unit
     `unit_status`/`reap` are checking against lives there too — the
     per-sandbox `runner` from `ssh_runner_for` is still needed for
@@ -245,12 +269,12 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
     for sandbox, assignment in list(state.assignments.items()):
         runner = ssh_runner_for(sandbox)
         unit = unit_name(sandbox)
-        status = unit_status(controller_runner, unit)
         outcome = Outcome(sandbox=sandbox, issue=assignment.issue,
                            kind=assignment.kind, branch=assignment.branch,
                            target_owner=assignment.target_owner,
                            target_repo=assignment.target_repo,
                            base=assignment.base)
+        status = unit_status(controller_runner, unit)
 
         if status is UnitState.DONE_SUCCESS:
             reap(controller_runner, unit)
@@ -290,6 +314,21 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
                 credential_store=credential_store,
             )
             result.stranded.append(outcome)
+        elif is_issue_closed is not None and is_issue_closed(assignment.issue):
+            # ACTIVE and within budget, but the task issue was closed on
+            # GitHub since dispatch (bwsalmon/agents#82) -- a human said
+            # "stop" while this was still genuinely running, so it gets
+            # the same reap-then-release treatment as a run past its
+            # runtime budget, just reported distinctly: this was not
+            # abandoned, it was called off.
+            reap(controller_runner, unit)
+            warning, credential_warning = _release(
+                state, runner, sandbox, history=history, assignment=assignment, unit=unit,
+                outcome_label="cancelled", now=now, controller_runner=controller_runner,
+                gemini_key_config=gemini_key_config,
+                credential_store=credential_store,
+            )
+            result.cancelled.append(outcome)
         else:
             # ACTIVE and within budget — leave it running, and leave its
             # slot alone: cleanup/health only run on a sandbox that's
