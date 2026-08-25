@@ -197,6 +197,31 @@ fetch_secret_to_file() {
 
 # ---------------------------------------------------------------- bootstrap -
 
+# Found live: a real deploy kept failing with "Cannot access storage file
+# ... Permission denied" for a VM disk under $DATA_MNT/instances, and every
+# operator who hit it lacked osLoginExternalUser -- so SSH/IAP was a dead
+# end for checking the actual file owner vs. what libvirt's qemu.conf
+# expects. This surfaces the same facts through the one channel that was
+# actually reachable: Cloud Logging, via deploy.sh's own stdout.
+dump_storage_diagnostics() {
+  log "--- storage diagnostics: $DATA_MNT/instances ---"
+  ls -la "$DATA_MNT/instances" 2>&1 | while IFS= read -r line; do log "  $line"; done
+
+  local qemu_user qemu_group
+  qemu_user=$(awk -F'"' '/^[[:space:]]*user[[:space:]]*=/{print $2; exit}' /etc/libvirt/qemu.conf)
+  qemu_group=$(awk -F'"' '/^[[:space:]]*group[[:space:]]*=/{print $2; exit}' /etc/libvirt/qemu.conf)
+  log "qemu.conf: user='${qemu_user:-<unset, defaults to root>}' group='${qemu_group:-<unset, defaults to root>}'"
+  grep -E '^[[:space:]]*dynamic_ownership' /etc/libvirt/qemu.conf 2>&1 \
+    | while IFS= read -r line; do log "  qemu.conf: $line"; done
+
+  if [ -n "$qemu_user" ]; then
+    getent passwd "$qemu_user" 2>&1 | while IFS= read -r line; do log "  passwd: $line"; done
+  fi
+  if [ -n "$qemu_group" ]; then
+    getent group "$qemu_group" 2>&1 | while IFS= read -r line; do log "  group: $line"; done
+  fi
+}
+
 run_bootstrap() {
   local gh_file="$RUNDIR/github.token"
   local claude_file="$RUNDIR/claude.token"
@@ -231,7 +256,10 @@ run_bootstrap() {
 
   # The token *paths* are fine to log; the files themselves are 0600 on tmpfs.
   log "running: python3 -m grain.cli ${args[*]}"
-  ( cd "$SRC" && python3 -m grain.cli "${args[@]}" )
+  if ! ( cd "$SRC" && python3 -m grain.cli "${args[@]}" ); then
+    dump_storage_diagnostics
+    return 1
+  fi
 }
 
 # -------------------------------------------------------------------- main --
