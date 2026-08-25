@@ -1,9 +1,9 @@
 """GCP provisioning has two sides, in two repos, that must agree: the
 Terraform module and its shell scripts live in this repo's own
-terraform/gcp/, config-repo-template/ holds only the deployment's
+terraform/gcp/, templates/gcp/ holds only the deployment's
 configuration and the two workflows that pull terraform/gcp/ fresh at
 CI time (see docs/roadmap.md and the "Remove duplicated code for gcp
-provisioning templates" issue this split closed -- config-repo-template
+provisioning templates" issue this split closed -- templates/gcp
 used to vendor a full copy of terraform/gcp/, which drifted from this
 one the moment either repo changed).
 
@@ -28,7 +28,7 @@ from pathlib import Path
 from grain.inventory import Cluster
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATE = ROOT / "config-repo-template"
+TEMPLATE = ROOT / "templates" / "gcp"
 TERRAFORM = ROOT / "terraform" / "gcp"
 DEPLOY_SH = TERRAFORM / "files" / "deploy.sh"
 TFVARS = TEMPLATE / "config" / "grain.tfvars"
@@ -751,16 +751,16 @@ def test_the_ci_scripts_do_not_depend_on_the_config_repo_layout():
 
 
 def test_config_repo_template_vendors_no_terraform_or_scripts():
-    """The whole point of this split: a fork of config-repo-template must
+    """The whole point of this split: a fork of templates/gcp must
     never again carry its own copy of the Terraform module or its
     scripts, or it silently drifts from terraform/gcp/ the moment either
     repo changes -- which is exactly the bug this test suite exists to
     catch before a deploy does.
     """
     assert not (TEMPLATE / "terraform").exists(), \
-        "config-repo-template/terraform/ has come back -- Terraform belongs only in terraform/gcp/"
+        "templates/gcp/terraform/ has come back -- Terraform belongs only in terraform/gcp/"
     assert not (TEMPLATE / "scripts").exists(), \
-        "config-repo-template/scripts/ has come back -- scripts belong only in terraform/gcp/"
+        "templates/gcp/scripts/ has come back -- scripts belong only in terraform/gcp/"
 
 
 def test_both_workflows_pull_terraform_from_grain_at_the_tfvars_ref():

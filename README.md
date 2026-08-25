@@ -276,14 +276,15 @@ doing a step by hand.
 
 ### On GCP, from a config repo
 
-[`config-repo-template/`](config-repo-template/) is a repository template
+[`templates/gcp/`](templates/gcp/) is a repository template
 that does everything above on GCP with nobody SSHing anywhere. Fork it and
 it holds only the deployment's configuration and its two workflows — the
-Terraform module itself, and the scripts it ships into instance metadata,
-live in this repo's own [`terraform/gcp/`](terraform/gcp/) and are pulled
-fresh by both workflows, pinned to the same `grain_ref` the deployment
-already uses to fetch grain onto the host, so a fork never carries a copy
-of either that could drift. Terraform creates the host — nested
+Terraform module and the scripts it ships into instance metadata live in
+this repo's own [`terraform/gcp/`](terraform/gcp/), and the deploy steps
+themselves in [`ci/`](ci/), so the workflow a fork owns is wiring rather
+than logic. All of it is pulled fresh by both workflows, pinned to the
+same `grain_ref` the deployment already uses to fetch grain onto the host,
+so a fork never carries a copy of any of it that could drift. Terraform creates the host — nested
 virtualization on, a persistent disk for `/var/lib/grain`, and a service
 account whose roles are one committed list — GitHub Actions applies it on
 every push to `main`, and a small service on the host watches instance
@@ -848,6 +849,9 @@ grain/
   proxy/              the git proxy: allowlist, tokens, credentials, audit
   metadata/           per-sandbox gce_metadata_server instances
 provision/            controller.sh, sandbox.sh — cloud-init user-data
+ci/                   the deploy steps a config repo's own CI runs
+terraform/gcp/        the GCP module, and the scripts it ships to the host
+templates/gcp/        the config-repo template: configuration and workflows
 tests/
   loadtest.py         the harness behind the resource-budget numbers
   test_*.py           unit suites, plus the live suites in the table above

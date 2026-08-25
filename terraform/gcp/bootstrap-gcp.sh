@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time setup, run once by a human with project-owner rights, from a
 # clone of grain (this script is not vendored into a config repo -- see
-# config-repo-template/README.md). Everything after this is done by CI
+# templates/gcp/README.md). Everything after this is done by CI
 # from a pull request.
 #
 # It creates the things that cannot bootstrap themselves: the Terraform

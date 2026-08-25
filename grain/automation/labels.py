@@ -11,7 +11,7 @@ repo's own deploy workflow.
 
 **Why the list lives here and not in that workflow.** The workflow is in
 the *config* repo -- one per deployment, forked from
-`config-repo-template/` and then owned by whoever runs it. A label list
+`templates/gcp/` and then owned by whoever runs it. A label list
 written there is a copy, and a copy has to be re-synced by hand into
 every fork the day a label is added; the label added in bwsalmon/agents#47
 (`gemini_key_label`) and the two before it (`completed_label`,
@@ -20,7 +20,7 @@ them, which is exactly that failure. So the list is here, next to the
 config that names the labels, and `ci/ensure-task-labels.sh` applies it
 from the grain checkout the workflow already makes -- the same "grain is
 the single source, the config repo pulls it fresh at the pinned ref"
-split that stopped `config-repo-template/` vendoring the Terraform module.
+split that stopped `templates/gcp/` vendoring the Terraform module.
 
 **Defaults, not a deployment's overrides.** `task_labels()` with no
 argument reads `AutomationConfig`'s *class* defaults rather than a live
