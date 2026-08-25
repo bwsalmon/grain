@@ -18,6 +18,7 @@ wherever the rest of the suite does.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -126,6 +127,99 @@ def test_sync_source_retries_its_git_commands():
     body = sync_source.group(0)
     assert "retry git clone" in body
     assert "retry git -C" in body and "fetch" in body
+
+
+def _terraform_apply_script():
+    """The Terraform apply step's run: block, with the GitHub Actions
+    expressions it references replaced by inert text -- ${{ ... }} is not
+    valid shell syntax, so the raw step body can't run as-is."""
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    match = re.search(
+        r"- name: Terraform apply\n(?:.*\n)*?        run: \|\n((?:.*\n)*?)\n      - name:",
+        deploy,
+    )
+    assert match, "Terraform apply step not found in deploy.yml"
+    return re.sub(r"\$\{\{[^}]*\}\}", "DUMMY", match.group(1))
+
+
+def _run_terraform_apply_script(fake_terraform):
+    """Runs the extracted apply step against a stand-in `terraform` and a
+    no-op `sleep`, so the retry/backoff logic can be exercised for real
+    without a GCP call or an actual wait."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "terraform").write_text(fake_terraform)
+        (bin_dir / "terraform").chmod(0o755)
+        (bin_dir / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
+        (bin_dir / "sleep").chmod(0o755)
+
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "DEPLOY_GENERATION": "test"}
+        return subprocess.run(
+            ["bash", "-c", _terraform_apply_script()],
+            env=env, capture_output=True, text=True,
+        )
+
+
+_FAKE_TERRAFORM_COUNTING = """#!/usr/bin/env bash
+n_file="{n_file}"
+n=$(cat "$n_file")
+n=$((n + 1))
+echo "$n" > "$n_file"
+if [ "$n" -le {fail_count} ]; then
+  echo "Error: {message}" >&2
+  exit 1
+fi
+echo "Apply complete! Resources: 1 added, 0 changed, 0 destroyed."
+"""
+
+
+def test_deploy_yml_retries_terraform_apply_on_stockout():
+    """Found live: GCP stock-outs (ZONE_RESOURCE_POOL_EXHAUSTED and its
+    siblings) are a common, transient failure creating a VM or disk in a
+    given zone, and used to fail the whole rollout outright -- a retry a
+    few minutes later routinely succeeds once the zone frees up capacity.
+    """
+    with tempfile.NamedTemporaryFile() as n_file:
+        Path(n_file.name).write_text("0")
+        fake = _FAKE_TERRAFORM_COUNTING.format(
+            n_file=n_file.name, fail_count=2,
+            message="does not have enough resources available to fulfill the request",
+        )
+        result = _run_terraform_apply_script(fake)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert Path(n_file.name).read_text().strip() == "3", \
+            "expected two failed attempts before the third succeeded"
+        assert "retrying" in result.stdout
+
+
+def test_deploy_yml_does_not_retry_a_non_stockout_terraform_failure():
+    """Retrying a real config error or quota limit would just waste the
+    backoff budget on a failure that will never clear itself."""
+    with tempfile.NamedTemporaryFile() as n_file:
+        Path(n_file.name).write_text("0")
+        fake = _FAKE_TERRAFORM_COUNTING.format(
+            n_file=n_file.name, fail_count=999,
+            message="Invalid value for variable",
+        )
+        result = _run_terraform_apply_script(fake)
+        assert result.returncode == 1
+        assert Path(n_file.name).read_text().strip() == "1", \
+            "a non-stockout failure should not be retried"
+
+
+def test_deploy_yml_gives_up_on_terraform_apply_after_max_attempts():
+    """A stock-out that never clears must not retry forever."""
+    with tempfile.NamedTemporaryFile() as n_file:
+        Path(n_file.name).write_text("0")
+        fake = _FAKE_TERRAFORM_COUNTING.format(
+            n_file=n_file.name, fail_count=999,
+            message="RESOURCE_POOL_EXHAUSTED",
+        )
+        result = _run_terraform_apply_script(fake)
+        assert result.returncode == 1
+        attempts = int(Path(n_file.name).read_text().strip())
+        assert 2 <= attempts <= 10, f"expected a bounded number of attempts, got {attempts}"
 
 
 def test_run_bootstrap_dumps_storage_diagnostics_on_failure():
