@@ -363,7 +363,7 @@ def _agent_id_line(agent_id_value: str) -> str:
 
 def _gemini_key_line() -> str:
     """Told to the agent only when a key was actually minted for this task
-    (`core.py`'s `_dispatch`, gated on the task's `/gemini-key` directive)
+    (`core.py`'s `_dispatch`, gated on the task issue's `gemini_key_label`)
     -- the path, never the key value itself, so the raw secret never lands
     in the prompt file (which is written to disk under
     `/data/state/automation/units` and is part of the same transcript
@@ -400,7 +400,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     to a known value instead of parsing whatever `secrets.token_hex` picked.
 
     `gemini_key` is `dispatch()`'s own record of whether the task's
-    `/gemini-key` directive actually got a key minted (`core.py`'s
+    `gemini_key_label` actually got a key minted (`core.py`'s
     `_dispatch`) — true only once a key genuinely landed in the sandbox, so
     the prompt never claims one exists when `configure_gemini_key` was
     never called.
@@ -800,9 +800,9 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 
     `gemini_key` (bwsalmon/agents#47) is the raw key string `core.py`'s
     `_dispatch` minted for this task, or `None` for the common case of no
-    `/gemini-key` directive — threaded through to both `_start_task` (which
-    places it in the sandbox) and the prompt (which tells the agent it's
-    there, only when it actually is).
+    `gemini_key_label` on the task issue — threaded through to both
+    `_start_task` (which places it in the sandbox) and the prompt (which
+    tells the agent it's there, only when it actually is).
     """
     push_branch = branch_name(issue.number)
     return _start_task(
@@ -838,8 +838,8 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     task repo is the only repo this deployment ever comments on.
 
     `gemini_key` (bwsalmon/agents#47) is `dispatch()`'s own parameter of the
-    same name — see its docstring; a `/gemini-key` directive on the task
-    issue works identically for a PR-continuation dispatch.
+    same name — see its docstring; `gemini_key_label` on the task issue
+    works identically for a PR-continuation dispatch.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,

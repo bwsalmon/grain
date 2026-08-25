@@ -24,7 +24,7 @@ from grain.run import FakeRunner
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def issue_json(number: int, body: str = "do it") -> dict:
+def issue_json(number: int, body: str = "do it", labels=("grain-agent",)) -> dict:
     return {
         # "id" isn't read by list_issues itself, but the same fixture also
         # serves as FakeTransport's shared default response for whichever
@@ -34,7 +34,7 @@ def issue_json(number: int, body: str = "do it") -> dict:
         # never queue a dedicated comments response.
         "id": number, "number": number, "title": f"issue {number}", "body": body,
         "html_url": f"https://github.com/o/r/issues/{number}",
-        "labels": [{"name": "grain-agent"}],
+        "labels": [{"name": label} for label in labels],
     }
 
 
@@ -1163,7 +1163,7 @@ def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkey
     assert history.calls[0]["target"] == "other/service"
 
 
-# --- Gemini API key (bwsalmon/agents#47) ------------------------------------
+# --- Gemini API key (bwsalmon/agents#47, label not directive: #49) ---------
 
 GEMINI_KEY_NAME = "projects/1/locations/global/keys/abc"
 
@@ -1177,11 +1177,14 @@ def gemini_runner(**overrides) -> FakeRunner:
     return runner
 
 
-def test_gemini_key_directive_without_config_is_parked():
+GEMINI_LABELS = ("grain-agent", "grain-gemini-key")
+
+
+def test_gemini_key_label_without_config_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, body="do it\n/gemini-key")]).encode()),  # list_issues
+            [issue_json(4, labels=GEMINI_LABELS)]).encode()),         # list_issues
         ApiResponse(200, {}, b"[]"),                                  # list_comments
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),         # the park comment
     ])
@@ -1191,14 +1194,14 @@ def test_gemini_key_directive_without_config_is_parked():
     assert orchestrator.state.assignments == {}
     comment = next(c for c in transport.calls if c["method"] == "POST"
                     and c["path"].endswith("/comments"))
-    assert "gemini-key" in json.loads(comment["body"])["body"]
+    assert "grain-gemini-key" in json.loads(comment["body"])["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any(o.startswith("parked, awaiting reply") for o in outcomes)
     # Refused before anything was ever minted.
     assert not any("gcloud" in c for c in orchestrator.base_runner.commands)
 
 
-def test_a_task_with_no_gemini_key_directive_never_calls_gcloud():
+def test_a_task_with_no_gemini_key_label_never_calls_gcloud():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
         issues=[issue_json(4)], runner=runner,
@@ -1210,10 +1213,10 @@ def test_a_task_with_no_gemini_key_directive_never_calls_gcloud():
     assert not any("gcloud" in c for c in runner.commands)
 
 
-def test_gemini_key_directive_with_config_places_the_key_in_the_sandbox():
+def test_gemini_key_label_with_config_places_the_key_in_the_sandbox():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1226,10 +1229,10 @@ def test_gemini_key_directive_with_config_places_the_key_in_the_sandbox():
     assert key_call[1] == "AIzaSecretValue"
 
 
-def test_gemini_key_directive_tells_the_agent_where_the_key_is():
+def test_gemini_key_label_tells_the_agent_where_the_key_is():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1246,7 +1249,7 @@ def test_gemini_key_directive_tells_the_agent_where_the_key_is():
 def test_gemini_key_is_recorded_on_the_assignment_for_later_revocation():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1259,7 +1262,7 @@ def test_gemini_key_is_recorded_on_the_assignment_for_later_revocation():
 def test_gemini_key_display_name_folds_in_the_sandbox_and_issue():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1274,7 +1277,7 @@ def test_gemini_key_mint_failure_does_not_crash_the_cycle():
     runner = FakeRunner()
     runner.expect("gcloud services api-keys create", returncode=1, stderr="PERMISSION_DENIED")
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1291,7 +1294,7 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
     """
     runner = gemini_runner(**{"bash -c": {"returncode": 128, "stderr": "fatal: Authentication failed"}})
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 

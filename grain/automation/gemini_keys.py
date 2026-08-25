@@ -1,5 +1,6 @@
 """Mints and revokes short-lived Gemini API keys for a task that asks for
-one with a `/gemini-key` directive (`directives.py`) -- bwsalmon/agents#47.
+one with `config.gemini_key_label` on the task issue (`core.py`'s
+`_resolve_target`, bwsalmon/agents#49) -- bwsalmon/agents#47.
 
 **Why `gcloud`, not the metadata broker.** docs/design.md's "GCP
 credentials" deliberately keeps a sandbox from ever holding a raw GCP
@@ -90,10 +91,10 @@ class GeminiKeyConfig:
     """Operator-set tunables -- the same JSON-file-under-`/data/config`
     shape as `AutomationConfig`/`MetadataConfig`. Its presence (or absence)
     at `/data/config/gemini-key.json` is the on/off switch for the whole
-    feature: `core.py`'s `_resolve_target` refuses a `/gemini-key` task with
-    a parked-and-explained comment when this is `None`, the same "unusable
-    directive parks the task" shape it already applies to an unlisted
-    `/repo`.
+    feature: `core.py`'s `_resolve_target` refuses a task carrying
+    `gemini_key_label` with a parked-and-explained comment when this is
+    `None`, the same "unusable request parks the task" shape it already
+    applies to an unlisted `/repo`.
     """
 
     project_id: str

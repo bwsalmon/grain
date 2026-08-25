@@ -345,6 +345,72 @@ def test_grain_config_publishes_the_agent_service_account_email():
     assert "agent_service_account_email" in DEPLOY_SH.read_text()
 
 
+def test_grain_config_publishes_gemini_project_id():
+    """bwsalmon/agents#49: enable_gemini_key has to reach deploy.sh the
+    same way agent_service_account_email already does, or a
+    Terraform-managed deployment has no way to turn the grain-gemini-key
+    task label on short of a manual `controller configure` afterward.
+    """
+    instance = (TERRAFORM / "instance.tf").read_text()
+    assert "gemini_project_id" in instance
+    assert "var.enable_gemini_key" in instance
+    deploy_sh = DEPLOY_SH.read_text()
+    assert "gemini_project_id" in deploy_sh
+    assert "--gemini-project-id" in deploy_sh
+    # Only passed alongside the agent account's own key -- gemini_keys.py
+    # authenticates gcloud with that same key, so a GEMINI_PROJECT_ID with
+    # no key to go with it must never reach `host bootstrap`.
+    assert re.search(
+        r'if fetch_secret_to_file "\$GCP_KEY_ATTR".*?GEMINI_PROJECT_ID.*?\bfi\b',
+        deploy_sh, re.S,
+    ), "--gemini-project-id must be nested inside the successful GCP key fetch"
+
+
+def test_gemini_key_iam_is_gated_on_enable_gemini_key():
+    """The IAM side of bwsalmon/agents#47's Gemini key feature: an
+    operator turns it on declaratively with one Terraform variable rather
+    than granting roles and enabling the API by hand (bwsalmon/agents#49).
+    """
+    source = _tf_source()
+    local = re.search(r"agent_account_needed\s*=\s*(.+)", source)
+    assert local, "agent_account_needed local not found"
+    assert "enable_gemini_key" in local.group(1), (
+        "enable_gemini_key alone (agent_service_account_roles left empty) "
+        "must still create the agent account"
+    )
+
+    api = re.search(
+        r'resource "google_project_service" "generativelanguage" \{.*?\n\}',
+        source, re.S,
+    )
+    assert api, "google_project_service.generativelanguage not found"
+    assert "var.enable_gemini_key" in api.group(0)
+    assert "generativelanguage.googleapis.com" in api.group(0)
+    # Never auto-disabled: turning the variable back off, or a
+    # `terraform destroy`, must not reach into the project and disable an
+    # API something else there might also depend on.
+    assert "disable_on_destroy = false" in api.group(0)
+
+    role = re.search(
+        r'resource "google_project_iam_member" "agent_gemini_keys" \{.*?\n\}',
+        source, re.S,
+    )
+    assert role, "google_project_iam_member.agent_gemini_keys not found"
+    assert "var.enable_gemini_key" in role.group(0)
+    assert "roles/serviceusage.apiKeysAdmin" in role.group(0)
+    assert "google_service_account.agent[0].email" in role.group(0)
+
+
+def test_bootstrap_gcp_sh_grants_service_usage_admin():
+    """serviceUsageConsumer alone (already granted) only covers *using* an
+    already-enabled API -- enabling generativelanguage.googleapis.com via
+    Terraform's google_project_service needs serviceUsageAdmin too, or
+    `terraform apply` fails on a fresh project with enable_gemini_key set.
+    """
+    source = (TERRAFORM / "bootstrap-gcp.sh").read_text()
+    assert "roles/serviceusage.serviceUsageAdmin" in source
+
+
 def test_iam_grants_the_deployer_key_management_only_on_the_narrow_agent_account():
     """Found live: neither of the deployer's project-wide roles
     (bootstrap-gcp.sh's serviceAccountAdmin/serviceAccountUser) includes

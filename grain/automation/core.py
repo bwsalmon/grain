@@ -187,10 +187,10 @@ class ResolvedTask:
     repo: RepoRef
     pr: PullRequestDetail | None
     base: str
-    # Whether the task's text carried a `/gemini-key` directive
-    # (bwsalmon/agents#47) -- `_resolve_target` already refuses one this
-    # deployment can't honour (no `GeminiKeyConfig` configured), so by the
-    # time this reaches `_dispatch` it is always safe to act on.
+    # Whether the task issue carried `config.gemini_key_label`
+    # (bwsalmon/agents#47, #49) -- `_resolve_target` already refuses one
+    # this deployment can't honour (no `GeminiKeyConfig` configured), so by
+    # the time this reaches `_dispatch` it is always safe to act on.
     gemini_key: bool = False
 
 
@@ -225,10 +225,10 @@ class Orchestrator:
     # real `SshRunner` per sandbox; a test can inject a lookup straight to
     # per-sandbox fakes without needing to match SshRunner's exact argv.
     ssh_runner_factory: Callable[[str], Runner] | None = None
-    # bwsalmon/agents#47: the on/off switch for `/gemini-key`. `None`
+    # bwsalmon/agents#47: the on/off switch for `gemini_key_label`. `None`
     # (production's default for a deployment that never ran `grain
     # controller configure --gemini-project-id ...`) makes `_resolve_target`
-    # refuse the directive with an explanation, the same "unusable directive
+    # refuse the label with an explanation, the same "unusable request
     # parks the task" shape an unlisted `/repo` already gets — see
     # `gemini_keys.py`'s own docstring for why this lives on the controller
     # account, never a sandbox's.
@@ -619,16 +619,21 @@ class Orchestrator:
             if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
         ]
         directives = parse_directives(texts)
-        if directives.gemini_key and self.gemini_key_config is None:
-            # Same "unusable directive parks the task" shape as an unlisted
+        # bwsalmon/agents#49: a label, not a `/gemini-key` directive --
+        # `directives.py`'s own docstring has the reasoning. `issue.labels`
+        # is read directly, the same trust tier the trigger label itself
+        # already relies on.
+        gemini_key = self.config.gemini_key_label in issue.labels
+        if gemini_key and self.gemini_key_config is None:
+            # Same "unusable request parks the task" shape as an unlisted
             # `/repo` below -- checked before the target/allowlist reads,
             # so a task that can never be honoured is parked without also
             # spending a GitHub call on a repo it will never reach.
             raise DirectiveError(
-                "this task has a `/gemini-key` directive, but this "
-                "deployment has no Gemini key support configured. An "
-                "operator enables it with `grain controller configure "
-                "--gemini-project-id ...` (see gemini_keys.py)."
+                f"this task carries the `{self.config.gemini_key_label}` "
+                "label, but this deployment has no Gemini key support "
+                "configured. An operator enables it with `grain controller "
+                "configure --gemini-project-id ...` (see gemini_keys.py)."
             )
         target = directives.target
         if target is None:
@@ -669,7 +674,7 @@ class Orchestrator:
                   "deployment's credential can't see it."
             ) from exc
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
-                            gemini_key=directives.gemini_key)
+                            gemini_key=gemini_key)
 
     def _park(self, number: int, reason: str) -> None:
         """Takes a task out of the queue with an explanation, instead of

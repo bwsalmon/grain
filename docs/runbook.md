@@ -568,13 +568,17 @@ this procedure.
 5. If using the machine-account pattern, invite `grain-agent-bot` (or
    whatever account the token belongs to) as a collaborator on the repo.
 
-## Enabling `/gemini-key` (optional, bwsalmon/agents#47)
+## Enabling `grain-gemini-key` (optional, bwsalmon/agents#47, #49)
 
-A task whose text carries a bare `/gemini-key` line gets a short-lived
+A task issue carrying the `grain-gemini-key` label gets a short-lived
 Gemini API key minted for it, placed in its sandbox, and revoked once the
 task's slot frees (success, failure, or stranded — see
-`grain/automation/sweeper.py`'s docstring). Off by default; nothing above
-requires it.
+`grain/automation/sweeper.py`'s docstring). A label, not a body directive
+— `grain/automation/directives.py`'s module docstring has the reasoning.
+Off by default; nothing above requires it. Terraform-managed deployments
+(`terraform/gcp/`) can turn the IAM side of this on declaratively with
+`enable_gemini_key = true` in `grain.tfvars` instead of steps 1-2 below —
+see `terraform/gcp/variables.tf`.
 
 1. Complete step 8's GCP service account setup first
    (`--gcp-service-account-key-file`/`--gcp-agent-service-account-email`/
@@ -588,11 +592,13 @@ requires it.
    other `controller configure` flags in the same invocation still apply
    normally — this one is additive). This writes
    `/data/config/gemini-key.json`, read fresh on every `automation
-   run-once` invocation, same as `repo-allowlist.json`.
-4. A task now enables it with a bare `/gemini-key` line anywhere in the
-   issue body (or a trusted reply) — see the README's directives section.
-   Until step 3 is done, that directive parks the task with a comment
-   explaining why, the same as an unlisted `/repo`.
+   run-once` invocation, same as `repo-allowlist.json`. A Terraform-managed
+   deployment does this automatically as part of `host bootstrap` instead
+   — see `terraform/gcp/files/deploy.sh`.
+4. A task now enables it by carrying the `grain-gemini-key` label — see
+   the README's directives section. Until step 3 is done, that label parks
+   the task with a comment explaining why, the same as an unlisted
+   `/repo`.
 
 To disable it again: delete `/data/config/gemini-key.json`. Any key already
 minted for a task still in flight is unaffected (it still gets revoked

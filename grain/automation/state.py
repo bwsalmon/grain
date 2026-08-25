@@ -76,11 +76,11 @@ class Assignment:
     base: str | None = None
     # The full resource name of a Gemini API key minted for this task
     # (bwsalmon/agents#47, `gemini_keys.create_key`), or `None` for the
-    # common case of no `/gemini-key` directive. Recorded here, not
-    # re-derived at sweep time, for the same reason `target_owner`/
-    # `target_repo` are: `sweeper.py`'s `_release` needs to know which key
-    # to revoke once this assignment is freed, and by then the task's own
-    # directives are long gone.
+    # common case of no `gemini_key_label` on the task issue. Recorded
+    # here, not re-derived at sweep time, for the same reason
+    # `target_owner`/`target_repo` are: `sweeper.py`'s `_release` needs to
+    # know which key to revoke once this assignment is freed, and by then
+    # the task's own labels are no longer read.
     gemini_key_name: str | None = None
 
 
