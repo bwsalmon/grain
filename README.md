@@ -611,8 +611,12 @@ comments saying exactly what is wrong, swaps the trigger label for
 replies. Nothing dispatches on a guess about which repo was meant.
 
 The next `run-once` pass picks a labelled task up, moves the label to
-`grain-agent-in-progress`, and claims a free sandbox. Dispatch is
-two-sided:
+`grain-agent-in-progress`, and claims a free sandbox. It also applies a
+second label naming *which* sandbox took it — `grain-agent-0`,
+`grain-agent-1`, and so on — re-applied every `run-once` cycle for as long
+as the task stays in progress and removed the moment it stops, however it
+stops (bwsalmon/agents#95), so it never sits stale once the work has moved
+on or a human has knocked it off by hand. Dispatch is two-sided:
 
 - On the **sandbox**: the workspace at `/home/debian/workspace` is cloned
   (first task) or fetched-and-reset (every task after) through the git

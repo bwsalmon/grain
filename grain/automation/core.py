@@ -137,6 +137,7 @@ from .gemini_keys import create_key as create_gemini_key
 from .gemini_keys import delete_key as delete_gemini_key
 from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
+from .labels import agent_label
 from .ssh import SshRunner
 from .state import AutomationState, OpenPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
@@ -418,6 +419,7 @@ class Orchestrator:
 
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
+        self._refresh_agent_labels()
         self._promote_answered_questions(now)
         self._close_finished_prs()
         self._dispatch(now)
@@ -486,6 +488,46 @@ class Orchestrator:
             # still be live and needs revoking by hand.
             self.audit.record(sandbox=warning.sandbox, issue=None,
                                outcome=f"credential warning: {warning.detail}")
+
+    def _refresh_agent_labels(self) -> None:
+        """Re-applies `labels.agent_label` for every assignment `_sweep`
+        just above left standing (bwsalmon/agents#95) -- run every cycle,
+        not just at dispatch, so a task that sits through many `run_once`
+        calls keeps saying *which* sandbox is doing the work rather than
+        that label only ever being right the moment it was first applied.
+        `GitHubClient.add_label` is a no-op against a label the issue
+        already carries, so this costs nothing on the common case where
+        nothing has changed since last cycle; it only actually does
+        something the rare time a label was knocked off by hand or never
+        landed because an earlier cycle's call failed partway.
+
+        Deliberately reads `self.state.assignments` *after* `_sweep` has
+        already released anything that finished this cycle -- an
+        assignment `_sweep`'s own finish handling just freed has already
+        had its label removed by that same handling (`_finish_succeeded_issue`
+        et al.), and re-adding it here a moment later would undo that.
+
+        A 404 means the same "stale assignment" story every other
+        GitHub-facing call in this module already tolerates: the task issue
+        this assignment names is gone from the currently configured repo.
+        Logged and skipped rather than raised, so one stale assignment
+        can't stop every other still-live one from being refreshed.
+        """
+        for sandbox, assignment in self.state.assignments.items():
+            try:
+                self.github.add_label(
+                    self.config.task_owner, self.config.task_repo,
+                    assignment.issue, agent_label(sandbox),
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.audit.record(
+                    sandbox=sandbox, issue=assignment.issue,
+                    outcome=f"could not refresh agent label: issue #{assignment.issue} "
+                            f"not found in {self.config.task_owner}/{self.config.task_repo} "
+                            "-- stale assignment?",
+                )
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
         if outcome.kind is TriggerKind.PR:
@@ -561,6 +603,10 @@ class Orchestrator:
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
         )
+        self.github.remove_label(
+            task.owner, task.name,
+            outcome.issue, agent_label(outcome.sandbox),
+        )
         self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number,
                                    auto_merge=outcome.auto_merge)
         # bwsalmon/agents#51: persist the open-PR record right after the
@@ -608,6 +654,10 @@ class Orchestrator:
         self.github.remove_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, agent_label(outcome.sandbox),
         )
         self.audit.record(
             sandbox=outcome.sandbox, issue=outcome.issue,
@@ -667,6 +717,10 @@ class Orchestrator:
         self.github.add_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.awaiting_reply_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, agent_label(outcome.sandbox),
         )
         self.state.record_pending_question(
             outcome.issue, comment_id, kind=outcome.kind, branch=outcome.branch,
@@ -731,6 +785,10 @@ class Orchestrator:
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
+        )
+        self.github.remove_label(
+            task.owner, task.name,
+            outcome.issue, agent_label(outcome.sandbox),
         )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"completed analysis: {summary[:200]!r}")
@@ -1039,6 +1097,10 @@ class Orchestrator:
                 self.config.task_owner, self.config.task_repo,
                 outcome.issue, self.config.trigger_label,
             )
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                outcome.issue, agent_label(outcome.sandbox),
+            )
         except GitHubError as exc:
             if exc.status != 404:
                 raise
@@ -1068,6 +1130,10 @@ class Orchestrator:
         self.github.remove_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, agent_label(outcome.sandbox),
         )
         self.audit.record(
             sandbox=outcome.sandbox, issue=outcome.issue,
@@ -1447,6 +1513,10 @@ class Orchestrator:
             self.github.add_label(
                 self.config.task_owner, self.config.task_repo,
                 number, self.config.in_progress_label,
+            )
+            self.github.add_label(
+                self.config.task_owner, self.config.task_repo,
+                number, agent_label(sandbox),
             )
             # bwsalmon/agents#83: harmless (and 404-tolerant, per
             # `remove_label`'s own docstring) for the overwhelming common
