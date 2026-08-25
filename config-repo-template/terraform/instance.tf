@@ -5,10 +5,17 @@ locals {
   # all.
   task_repo = var.task_repo != "" ? var.task_repo : var.config_repo
 
+  # Empty when agent_service_account_roles is empty -- google_service_account.agent
+  # doesn't exist in that case (see iam.tf's count), and no agent identity
+  # is part of this deployment at all.
+  agent_service_account_email = (
+    length(var.agent_service_account_roles) > 0 ? google_service_account.agent[0].email : ""
+  )
+
   # Everything the on-VM deploy script needs, and nothing it does not: no
-  # secret values here either -- the two runtime credentials arrive
-  # separately, pushed straight into instance metadata by the deploy
-  # workflow after `terraform apply` returns, never through Terraform.
+  # secret values here either -- the runtime credentials arrive separately,
+  # pushed straight into instance metadata by the deploy workflow after
+  # `terraform apply` returns, never through Terraform.
   grain_config = {
     grain_repo_url                = var.grain_repo_url
     grain_ref                     = var.grain_ref
@@ -19,6 +26,7 @@ locals {
     target_repos                  = var.target_repos
     default_target_repo           = var.default_target_repo
     credential_name               = var.credential_name
+    agent_service_account_email   = local.agent_service_account_email
     deploy_timeout_secs           = var.deploy_timeout_minutes * 60
     bootstrap_ssh_timeout_seconds = var.bootstrap_ssh_timeout_seconds
   }

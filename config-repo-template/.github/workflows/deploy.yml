@@ -125,6 +125,7 @@ jobs:
           ZONE: ${{ steps.tf.outputs.zone }}
           GRAIN_GITHUB_TOKEN: ${{ secrets.GRAIN_GITHUB_TOKEN }}
           GRAIN_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.GRAIN_CLAUDE_CODE_OAUTH_TOKEN }}
+          AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}
         run: |
           set -euo pipefail
 
@@ -146,6 +147,32 @@ jobs:
 
           push_secret "grain-github-token" "$GRAIN_GITHUB_TOKEN"
           push_secret "grain-claude-token" "$GRAIN_CLAUDE_CODE_OAUTH_TOKEN"
+
+          # Minted fresh every run, straight to instance metadata, never a
+          # repo secret: the short-lived-credential principle grain's own
+          # docs/design.md argues for at the sandbox layer, applied one
+          # layer up to the impersonation source itself. Every previous
+          # key for this account is deleted right after -- otherwise a run
+          # that never gets read back (a host that's down, or a config-sync
+          # cycle that hasn't reached this generation yet) leaves the old
+          # key valid indefinitely, and GCP allows at most 10 per account.
+          if [ -n "$AGENT_SERVICE_ACCOUNT" ]; then
+            umask 077
+            key_file="$(mktemp)"
+            new_key_id="$(gcloud iam service-accounts keys create "$key_file" \
+              --iam-account="$AGENT_SERVICE_ACCOUNT" --format='value(name.basename())')"
+            push_secret "grain-agent-service-account-key" "$(cat "$key_file")"
+            shred -u "$key_file" 2>/dev/null || rm -f "$key_file"
+
+            gcloud iam service-accounts keys list --iam-account="$AGENT_SERVICE_ACCOUNT" \
+              --managed-by=user --format='value(name.basename())' \
+              | grep -v "^${new_key_id}\$" \
+              | while read -r old_key_id; do
+                  gcloud iam service-accounts keys delete "$old_key_id" \
+                    --iam-account="$AGENT_SERVICE_ACCOUNT" --quiet
+                  echo "invalidated previous key: $old_key_id"
+                done
+          fi
 
       # The host reports progress through guest attributes, so CI fails
       # when the rollout fails rather than when `terraform apply` returns.

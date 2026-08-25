@@ -248,6 +248,64 @@ def test_no_step_if_condition_references_the_secrets_context():
                 )
 
 
+def test_grain_config_publishes_the_agent_service_account_email():
+    instance = (TERRAFORM / "instance.tf").read_text()
+    assert "agent_service_account_email" in instance
+    assert "agent_service_account_email" in DEPLOY_SH.read_text()
+
+
+def test_iam_grants_the_deployer_key_management_only_on_the_narrow_agent_account():
+    """Found live: neither of the deployer's project-wide roles
+    (bootstrap-gcp.sh's serviceAccountAdmin/serviceAccountUser) includes
+    key management (iam.serviceAccountKeys.*) -- that needs its own role,
+    and scoping it to just the agent account here, rather than granting it
+    project-wide in bootstrap-gcp.sh, keeps the deployer from being able
+    to mint keys for every service account in the project.
+    """
+    source = _tf_source()
+    assert "serviceAccountKeyAdmin" in source
+    assert re.search(
+        r'resource "google_service_account_iam_member" "deployer_manages_agent_keys" \{'
+        r'.*?service_account_id\s*=\s*google_service_account\.agent\[0\]\.name',
+        source, re.S,
+    ), "the deployer-manages-agent-keys binding must be scoped to the agent account"
+
+
+def test_deploy_yml_mints_and_invalidates_the_agent_key_only_when_one_exists():
+    """Minted fresh every run, straight to instance metadata -- the
+    short-lived-credential principle grain's own docs/design.md argues
+    for at the sandbox layer, applied one layer up to the impersonation
+    source. Every previous key is deleted right after, or GCP's 10-key
+    cap eventually breaks deploys.
+    """
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    assert "AGENT_SERVICE_ACCOUNT" in deploy
+    assert "gcloud iam service-accounts keys create" in deploy
+    assert "gcloud iam service-accounts keys delete" in deploy
+    assert 'if [ -n "$AGENT_SERVICE_ACCOUNT" ]; then' in deploy, (
+        "a deployment with no agent account must not attempt to mint a key for one"
+    )
+
+
+def test_deploy_yml_never_stores_the_agent_key_as_a_repo_secret():
+    """The whole point: unlike GRAIN_GITHUB_TOKEN/GRAIN_CLAUDE_CODE_OAUTH_TOKEN,
+    this credential is minted fresh every run and never round-trips
+    through a GitHub Actions secret.
+    """
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    assert "secrets.GCP_AGENT" not in deploy
+    assert "secrets.GRAIN_AGENT" not in deploy
+
+
+def test_deploy_sh_only_requests_the_gcp_key_when_an_agent_account_is_configured():
+    deploy_sh = DEPLOY_SH.read_text()
+    assert "GCP_KEY_ATTR" in deploy_sh
+    assert "--gcp-service-account-key-file" in deploy_sh
+    assert "--gcp-agent-service-account-email" in deploy_sh
+    assert "--gcp-project-id" in deploy_sh
+    assert 'if [ -n "$AGENT_SERVICE_ACCOUNT_EMAIL" ]; then' in deploy_sh
+
+
 def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
     """Every label grain's automation applies has to exist in the queue
     repo, and this repo *is* the queue repo -- so the workflow creates
