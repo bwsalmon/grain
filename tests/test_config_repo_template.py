@@ -248,6 +248,74 @@ def test_no_step_if_condition_references_the_secrets_context():
                 )
 
 
+def test_agent_compute_roles_exclude_the_grain_host_by_iam_condition():
+    """instanceAdmin.v1 and osLogin both act on compute.googleapis.com/Instance
+    resources and support resource.name conditions (Google's own documented
+    pattern for this exact "except this one instance" shape) -- an agent
+    must not be able to touch, add an SSH key to, or OS-Login into its own
+    deployment's host VM.
+    """
+    source = _tf_source()
+    roles_local = re.search(r"agent_conditioned_compute_roles\s*=.*?\]", source, re.S)
+    assert roles_local, "agent_conditioned_compute_roles local not found"
+    assert "roles/compute.instanceAdmin.v1" in roles_local.group(0)
+    assert "roles/compute.osLogin" in roles_local.group(0)
+    # iap.tunnelResourceAccessor deliberately excluded from this list --
+    # see test_iap_tunnel_access_is_granted_project_wide_not_conditioned.
+    assert "iap.tunnelResourceAccessor" not in roles_local.group(0)
+
+    resource = re.search(
+        r'resource "google_project_iam_member" "agent_compute" \{.*?\n\}',
+        source, re.S,
+    )
+    assert resource, "agent_compute resource not found"
+    body = resource.group(0)
+    assert "condition {" in body
+    assert r'resource.type != \"compute.googleapis.com/Instance\"' in body
+    assert "local.grain_host_resource" in body
+
+    host_local = re.search(r"grain_host_resource\s*=.*", source)
+    assert host_local, "grain_host_resource local not found"
+    assert "instances/${var.name_prefix}-host" in host_local.group(0)  # exact exclusion target
+
+
+def test_iap_tunnel_access_is_granted_project_wide_not_conditioned():
+    """Found live (a real GCP user's report): conditioning
+    roles/iap.tunnelResourceAccessor to exclude one instance from a
+    project-level grant does not reliably work -- it denied *all* tunnel
+    access rather than excluding just the target. Deliberately
+    unconditioned here; safe only because this role alone grants no
+    authentication capability (the two conditioned roles above are what
+    would let an agent actually log in). This test exists so a future
+    edit adding a condition block to this specific resource gets noticed
+    and re-verified against a real project, not silently trusted.
+    """
+    source = _tf_source()
+    resource = re.search(
+        r'resource "google_project_iam_member" "agent_iap_tunnel" \{.*?\n\}',
+        source, re.S,
+    )
+    assert resource, "agent_iap_tunnel resource not found"
+    assert "condition" not in resource.group(0)
+
+
+def test_agent_account_exists_for_compute_only_mode_with_no_metadata_server_roles():
+    """agent_can_manage_compute_instances alone (agent_service_account_roles
+    left empty) must still create the agent account -- gating solely on
+    agent_service_account_roles would make this feature a no-op for
+    anyone who wants compute access but no metadata-server role.
+    """
+    source = _tf_source()
+    local = re.search(r"agent_account_needed\s*=\s*(.+)", source)
+    assert local, "agent_account_needed local not found"
+    assert "agent_can_manage_compute_instances" in local.group(1)
+    assert "agent_service_account_roles" in local.group(1)
+    # And every gate that decides whether google_service_account.agent[0]
+    # exists has to use it -- the old inline expression drifting back in
+    # anywhere would silently break the compute-only path again.
+    assert "length(var.agent_service_account_roles) > 0 ?" not in source
+
+
 def test_grain_config_publishes_the_agent_service_account_email():
     instance = (TERRAFORM / "instance.tf").read_text()
     assert "agent_service_account_email" in instance

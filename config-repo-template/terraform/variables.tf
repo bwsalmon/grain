@@ -183,11 +183,36 @@ variable "agent_service_account_roles" {
     Project roles for a second, narrow service account that sandboxed
     agents get tokens for, via the controller's metadata server
     impersonating it (docs/design.md, "GCP credentials"). Leave empty and
-    no such account is created. Non-empty and the host account is granted
+    no such account is created (unless agent_can_manage_compute_instances
+    is true -- see below). Non-empty and the host account is granted
     roles/iam.serviceAccountTokenCreator on it -- but see the README:
     pointing grain's metadata server at it still needs one manual step.
   EOT
   default = []
+}
+
+variable "agent_can_manage_compute_instances" {
+  type        = bool
+  description = <<-EOT
+    Grants the agent account (creating it even if agent_service_account_roles
+    is left empty) create/delete/start/stop and SSH access to Compute
+    Engine instances -- roles/compute.instanceAdmin.v1,
+    roles/compute.osLogin, and roles/iap.tunnelResourceAccessor.
+
+    The first two exclude the grain host VM itself by IAM condition (see
+    iam.tf's agent_compute local): an agent cannot touch its own
+    deployment's instance, add an SSH key to it, or provision an OS Login
+    account on it. iap.tunnelResourceAccessor cannot be conditioned the
+    same way -- GCP does not reliably support excluding one instance from
+    a project-level grant of that specific role (confirmed live: doing so
+    denied *all* tunnel access rather than excluding just the one
+    instance) -- so it is granted project-wide. That role alone only
+    opens a network tunnel to an instance's SSH port; it grants no
+    authentication capability by itself, and the two excluded roles above
+    are what would actually let an agent log in, so the host stays
+    unreachable in practice despite the tunnel role being unconditioned.
+  EOT
+  default     = false
 }
 
 # ----------------------------------------------------------------- grain ---
