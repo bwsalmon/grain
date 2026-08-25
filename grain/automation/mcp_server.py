@@ -75,6 +75,34 @@ every other task never sees this tool exists. Strictly read-only: the
 checked against a fixed allowlist of the two services this deployment
 actually runs (`provision/controller.sh`), never passed through as a raw
 systemd unit name.
+
+Three more tools, `check_grain_health`, `read_grain_config`, and
+`read_automation_audit_log` (bwsalmon/agents#86), round out the
+self-debug surface -- same gating as `read_grain_logs` (advertised and
+answered only under `--self-debug`), same "read-only, fixed allowlist,
+never a raw path from the model" discipline:
+
+- `check_grain_health` runs `health.py`'s existing `check_health` --
+  ssh/systemd/docker/disk -- against either the assigned sandbox
+  (`self.runner`) or the controller itself (`self.local_runner`), the same
+  checks `grain host health` already exposes to an operator, now available
+  to the agent for triaging a sandbox that's gone degraded or unreachable
+  mid-task.
+- `read_grain_config` reads one of the deployment's own config files under
+  `/data/config` on the controller -- `automation.json`,
+  `repo-allowlist.json`, `gemini-key.json`, `metadata-server.json`,
+  `sandbox-github-key.json`. Every one of those is already non-secret by
+  construction (`configure.py` never writes a token or key under
+  `/data/config`; every credential lives under `/data/secrets` instead,
+  which this tool has no path to reach at all) -- `file` is checked
+  against a fixed allowlist of those five names, not a raw path, so this
+  can never be pointed anywhere else on the controller's filesystem.
+- `read_automation_audit_log` reads recent lines of `audit.py`'s own
+  `FileAuditLog` output (`/data/state/automation/audit.log`) -- one JSON
+  line per dispatch/sweep decision the state machine in `core.py` made
+  (a task dispatched, skipped, succeeded, failed, stranded, and why), the
+  durable record of *why* the orchestrator did or didn't act, not just
+  what it's doing right now.
 """
 
 from __future__ import annotations
@@ -89,6 +117,7 @@ from pathlib import Path, PurePosixPath
 from typing import TextIO
 
 from ..run import Runner, RealRunner
+from .health import check_health
 from .ssh import SshRunner
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -243,6 +272,123 @@ _READ_GRAIN_LOGS_TOOL = {
     },
 }
 
+# bwsalmon/agents#86: which machine `check_grain_health` can be pointed at
+# -- an enum, not a free-form address, so it can never be redirected at
+# anything other than the two machines already in play for this dispatch.
+_HEALTH_TARGETS = ("sandbox", "controller")
+
+_CHECK_GRAIN_HEALTH_TOOL = {
+    "name": "check_grain_health",
+    "description": (
+        "Run grain's own health checks -- SSH reachability, systemd "
+        "state, docker responsiveness, disk usage -- against either your "
+        "assigned sandbox or the controller grain's own services run on. "
+        "The same checks `grain host health` reports to an operator, for "
+        "triaging a sandbox or controller that has gone degraded or "
+        "unreachable, not the target repo's own code. Read-only. Only "
+        "available on a task whose issue carries the grain-self-debug "
+        "label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "target": {
+                "type": "string",
+                "enum": list(_HEALTH_TARGETS),
+                "description": (
+                    "Which machine to check: 'sandbox' (your assigned "
+                    "sandbox) or 'controller' (where grain's own services "
+                    "run)."
+                ),
+            },
+        },
+        "required": ["target"],
+    },
+}
+
+# bwsalmon/agents#86: the exact non-secret config files `configure.py`
+# writes under `/data/config` -- an allowlist, not a free-form path, so
+# `read_grain_config` can never be pointed at `/data/secrets` or anywhere
+# else on the controller's filesystem.
+_SELF_DEBUG_CONFIG_FILES = {
+    "automation": "automation.json",
+    "repo-allowlist": "repo-allowlist.json",
+    "gemini-key": "gemini-key.json",
+    "metadata-server": "metadata-server.json",
+    "sandbox-github-key": "sandbox-github-key.json",
+}
+
+_DATA_CONFIG_DIR = "/data/config"
+
+_READ_GRAIN_CONFIG_TOOL = {
+    "name": "read_grain_config",
+    "description": (
+        "Read one of grain's own non-secret configuration files from "
+        "/data/config on the controller: automation.json, "
+        "repo-allowlist.json, gemini-key.json, metadata-server.json, or "
+        "sandbox-github-key.json -- for triaging a bug in grain itself, "
+        "not the target repo's own code. Every credential and token this "
+        "deployment holds lives under /data/secrets instead, which this "
+        "tool has no path to reach at all: only these five names are "
+        "readable. Reports a file as unconfigured rather than erroring if "
+        "this deployment never wrote it (gemini-key.json and "
+        "sandbox-github-key.json are both optional). Only available on a "
+        "task whose issue carries the grain-self-debug label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "file": {
+                "type": "string",
+                "enum": sorted(_SELF_DEBUG_CONFIG_FILES),
+                "description": "Which config file to read.",
+            },
+        },
+        "required": ["file"],
+    },
+}
+
+# bwsalmon/agents#86: `audit.py`'s own FileAuditLog output path -- a fixed
+# constant, not a parameter, since there is exactly one audit log on a
+# deployment and no reason a tool call should ever name a different one.
+_AUDIT_LOG_PATH = "/data/state/automation/audit.log"
+
+_READ_AUTOMATION_AUDIT_LOG_TOOL = {
+    "name": "read_automation_audit_log",
+    "description": (
+        "Read recent entries from grain's own dispatch/sweep audit log -- "
+        "one JSON line per state-machine decision the orchestrator in "
+        "core.py made (a task dispatched, skipped, succeeded, failed, or "
+        "stranded, and why) -- for triaging why the orchestrator did or "
+        "didn't act on a task, not the target repo's own code. "
+        "Read-only. Only available on a task whose issue carries the "
+        "grain-self-debug label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "lines": {
+                "type": "integer",
+                "description": "Number of most recent lines to return (default 200).",
+            },
+        },
+        "required": [],
+    },
+}
+
+# bwsalmon/agents#86: the full self-debug roster -- `tools/list` appends
+# this whole list, rather than each tool individually, so a fifth
+# self-debug tool later needs only one line added here.
+_SELF_DEBUG_TOOLS = [
+    _READ_GRAIN_LOGS_TOOL,
+    _CHECK_GRAIN_HEALTH_TOOL,
+    _READ_GRAIN_CONFIG_TOOL,
+    _READ_AUTOMATION_AUDIT_LOG_TOOL,
+]
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -383,6 +529,69 @@ def read_grain_logs(local_runner: Runner, unit: str, *, lines: int | None = None
     return ToolResult(text=text, is_error=result.returncode != 0)
 
 
+def check_grain_health(runner: Runner, local_runner: Runner, target: str) -> ToolResult:
+    """Runs `health.py`'s existing `check_health` (bwsalmon/agents#86)
+    against whichever machine `target` names. `runner` (the sandbox's own
+    `SshRunner`) and `local_runner` (the controller, same as
+    `read_grain_logs`) are both already available on `McpServer`; this
+    just picks between them rather than opening a third kind of
+    connection. `target` is checked against `_HEALTH_TARGETS` before
+    either runner is touched -- the input schema's `enum` already
+    constrains it, but this function does not trust the caller to have
+    honoured it, same discipline `read_grain_logs` already holds `unit`
+    to.
+    """
+    if target not in _HEALTH_TARGETS:
+        return ToolResult(
+            text=f"Unknown target {target!r}. Must be one of: {', '.join(_HEALTH_TARGETS)}.",
+            is_error=True,
+        )
+    chosen = runner if target == "sandbox" else local_runner
+    report = check_health(chosen)
+    text = f"status={report.status.value}\n{report.summary()}"
+    return ToolResult(text=text, is_error=not report.ok)
+
+
+def read_grain_config(local_runner: Runner, file: str) -> ToolResult:
+    """Reads one of the fixed, non-secret config files under
+    `/data/config` (bwsalmon/agents#86) -- run against `local_runner`, the
+    controller, for the same reason `read_grain_logs` does: the files live
+    there, so there is no SSH hop to the sandbox to make. `file` is
+    resolved through `_SELF_DEBUG_CONFIG_FILES` before it ever reaches an
+    argv, never joined onto `_DATA_CONFIG_DIR` directly from caller input.
+    """
+    filename = _SELF_DEBUG_CONFIG_FILES.get(file)
+    if filename is None:
+        return ToolResult(
+            text=(f"Unknown file {file!r}. Must be one of: "
+                  f"{', '.join(sorted(_SELF_DEBUG_CONFIG_FILES))}."),
+            is_error=True,
+        )
+    path = f"{_DATA_CONFIG_DIR}/{filename}"
+    result = local_runner.run(["cat", "--", path], check=False)
+    if result.returncode != 0:
+        # Most commonly a genuinely absent optional file (gemini-key.json,
+        # sandbox-github-key.json) rather than a real failure -- reported
+        # as plain informational text, not an error, so the agent doesn't
+        # treat "this deployment never turned this feature on" as a tool
+        # malfunction.
+        return ToolResult(text=f"{filename} does not exist on this deployment.")
+    return ToolResult(text=result.stdout)
+
+
+def read_automation_audit_log(local_runner: Runner, *, lines: int | None = None) -> ToolResult:
+    """Reads recent lines of `audit.py`'s `FileAuditLog` output
+    (bwsalmon/agents#86) -- the durable, one-line-per-decision record of
+    the dispatch/sweep state machine in `core.py`, run against
+    `local_runner` since the file lives on the controller, same as
+    `read_grain_logs`/`read_grain_config`.
+    """
+    n = lines if lines is not None else 200
+    result = local_runner.run(["tail", "-n", str(n), "--", _AUDIT_LOG_PATH], check=False)
+    text = f"exit={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    return ToolResult(text=text, is_error=result.returncode != 0)
+
+
 class McpServer:
     """The JSON-RPC method dispatch, kept separate from stdio plumbing
     (`serve()`) so `handle()` can be exercised directly in tests with a
@@ -432,7 +641,7 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
-            tools = TOOLS + ([_READ_GRAIN_LOGS_TOOL] if self.self_debug else [])
+            tools = TOOLS + (_SELF_DEBUG_TOOLS if self.self_debug else [])
             return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
         if method == "tools/call":
             return self._handle_call(msg_id, msg.get("params") or {})
@@ -494,6 +703,33 @@ class McpServer:
                     is_error=True,
                 )
             return read_grain_logs(self.local_runner, args["unit"], lines=args.get("lines"))
+        if name == "check_grain_health":
+            if not self.self_debug:
+                return ToolResult(
+                    text="check_grain_health is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-debug label.",
+                    is_error=True,
+                )
+            return check_grain_health(self.runner, self.local_runner, args["target"])
+        if name == "read_grain_config":
+            if not self.self_debug:
+                return ToolResult(
+                    text="read_grain_config is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-debug label.",
+                    is_error=True,
+                )
+            return read_grain_config(self.local_runner, args["file"])
+        if name == "read_automation_audit_log":
+            if not self.self_debug:
+                return ToolResult(
+                    text="read_automation_audit_log is not enabled for this "
+                         "task -- only available when the task issue carries "
+                         "the grain-self-debug label.",
+                    is_error=True,
+                )
+            return read_automation_audit_log(self.local_runner, lines=args.get("lines"))
         return None
 
 
