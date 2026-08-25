@@ -121,6 +121,61 @@ def test_a_run_within_a_custom_max_runtime_stays_active():
     assert "sandbox-0" in state.assignments
 
 
+# --- cancel-on-close (bwsalmon/agents#82) -----------------------------------
+
+def test_a_still_active_run_whose_issue_closed_is_cancelled_and_reaped():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    is_issue_closed=lambda number: number == 1)
+    assert result.cancelled == [Outcome("sandbox-0", 1)]
+    assert result.succeeded == result.failed == result.stranded == []
+    assert "sandbox-0" not in state.assignments
+    assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
+
+
+def test_a_still_active_run_whose_issue_is_still_open_is_left_alone():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    is_issue_closed=lambda number: False)
+    assert result.cancelled == []
+    assert "sandbox-0" in state.assignments
+    assert not runner.ran("sudo systemctl stop")
+
+
+def test_a_still_active_run_is_left_alone_with_no_is_issue_closed_hook():
+    # Every caller that predates bwsalmon/agents#82 leaves this unset --
+    # must behave exactly as before, with no cancel-on-close check at all.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert result.cancelled == []
+    assert "sandbox-0" in state.assignments
+
+
+def test_a_cancelled_runs_slot_gets_the_same_cleanup_hook_as_any_other_release():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          is_issue_closed=lambda number: True)
+    assert runner.ran("kind delete clusters --all")
+    assert runner.ran("docker system prune -af --volumes")
+
+
+def test_a_unit_that_already_finished_is_not_reported_cancelled_even_if_closed():
+    # is_issue_closed is only ever consulted for a unit that would
+    # otherwise be left running untouched -- a run that already exited is
+    # reported succeeded/failed as usual, not cancelled, regardless of the
+    # issue's state by sweep time.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    is_issue_closed=lambda number: True)
+    assert result.succeeded == [Outcome("sandbox-0", 1)]
+    assert result.cancelled == []
+
+
 def test_sweep_uses_the_per_sandbox_runner_factory():
     now = NOW
     state = AutomationState()

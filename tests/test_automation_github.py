@@ -5,8 +5,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from grain.automation.github import (
-    ApiResponse, BranchHead, Comment, DryRunGitHubClient, FakeTransport, GitHubClient,
-    GitHubError, PullRequest, PullRequestDetail, ReviewComment, RealTransport,
+    ApiResponse, BranchHead, CheckRun, Comment, DryRunGitHubClient, FakeTransport,
+    GitHubClient, GitHubError, Issue, PullRequest, PullRequestDetail, RealTransport,
+    ReviewComment,
 )
 
 
@@ -270,6 +271,120 @@ def test_create_pull_request_raises_on_a_non_201():
         )
 
 
+def test_create_issue_posts_title_body_and_labels():
+    body = json.dumps(issue_json(9)).encode()
+    transport = FakeTransport(responses=[ApiResponse(201, {}, body)])
+    issue = GitHubClient(transport, token="t").create_issue(
+        "o", "r", title="issue 9", body="do the thing",
+        labels=["grain-agent-needs-approval"],
+    )
+    assert issue == Issue(
+        number=9, title="issue 9", body="do the thing",
+        html_url="https://github.com/o/r/issues/9",
+        labels=frozenset({"grain-agent"}),
+    )
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/r/issues"
+    sent = json.loads(call["body"])
+    assert sent["title"] == "issue 9"
+    assert sent["body"] == "do the thing"
+    assert sent["labels"] == ["grain-agent-needs-approval"]
+
+
+def test_create_issue_omits_labels_key_when_none_given():
+    transport = FakeTransport(
+        responses=[ApiResponse(201, {}, json.dumps(issue_json(9)).encode())]
+    )
+    GitHubClient(transport, token="t").create_issue("o", "r", title="issue 9")
+    assert "labels" not in json.loads(transport.calls[0]["body"])
+
+
+def test_create_issue_raises_on_a_non_201():
+    transport = FakeTransport(responses=[ApiResponse(422, {}, b"nope")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").create_issue("o", "r", title="x")
+
+
+def test_merge_pull_request_puts_to_the_merge_endpoint():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b'{"merged": true}')])
+    GitHubClient(transport, token="t").merge_pull_request("o", "r", 5)
+    call = transport.calls[0]
+    assert call["method"] == "PUT"
+    assert call["path"] == "/repos/o/r/pulls/5/merge"
+
+
+def test_merge_pull_request_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(405, {}, b"not mergeable")])
+    with pytest.raises(GitHubError) as exc:
+        GitHubClient(transport, token="t").merge_pull_request("o", "r", 5)
+    assert exc.value.status == 405
+
+
+def check_runs_json(*runs: tuple[str, str, str | None]) -> dict:
+    return {
+        "total_count": len(runs),
+        "check_runs": [
+            {"name": name, "status": status, "conclusion": conclusion}
+            for name, status, conclusion in runs
+        ],
+    }
+
+
+def test_list_check_runs_reads_the_check_run_shape():
+    transport = FakeTransport(responses=[ApiResponse(
+        200, {}, json.dumps(check_runs_json(("build", "completed", "failure"))).encode(),
+    )])
+    runs = GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+    assert runs == [CheckRun(name="build", status="completed", conclusion="failure")]
+    assert transport.calls[0]["path"] == "/repos/o/r/commits/feature-x/check-runs?per_page=100"
+
+
+def test_list_check_runs_tolerates_a_still_running_check_with_no_conclusion():
+    transport = FakeTransport(responses=[ApiResponse(
+        200, {}, json.dumps(check_runs_json(("build", "in_progress", None))).encode(),
+    )])
+    runs = GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+    assert runs == [CheckRun(name="build", status="in_progress", conclusion=None)]
+
+
+def test_list_check_runs_follows_link_header_pagination():
+    transport = FakeTransport(responses=[
+        ApiResponse(
+            200,
+            {"Link": '<https://api.github.com/repos/o/r/commits/feature-x/check-runs?page=2>; rel="next"'},
+            json.dumps(check_runs_json(("a", "completed", "success"))).encode(),
+        ),
+        ApiResponse(200, {}, json.dumps(check_runs_json(("b", "completed", "success"))).encode()),
+    ])
+    runs = GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+    assert [r.name for r in runs] == ["a", "b"]
+
+
+def test_list_check_runs_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+
+
+def test_get_pull_request_reads_mergeable():
+    body = pr_json(5)
+    body["mergeable"] = False
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(body).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.mergeable is False
+
+
+def test_get_pull_request_defaults_mergeable_to_none_when_absent():
+    """`None` is GitHub's own "still computing" answer, and also what a
+    fixture missing the key entirely should read as -- never guessed at as
+    either clean or conflicted.
+    """
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(pr_json(5)).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.mergeable is None
+
+
 # --- PR read path (docs/roadmap.md item 9) --------------------------------
 
 def pr_json(number: int, *, head_ref: str = "feature-branch", base_ref: str = "main") -> dict:
@@ -508,6 +623,26 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
     # reached the transport — every mutation, including PR creation and
     # closing the issue, only printed.
     assert len(transport.calls) == 3
+
+
+def test_dry_run_client_passes_check_runs_through_but_prints_issue_and_merge(capsys):
+    transport = FakeTransport(responses=[
+        ApiResponse(200, {}, json.dumps(check_runs_json(("build", "completed", "success"))).encode()),
+    ])
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+
+    runs = dry.list_check_runs("o", "r", "feature-x")
+    assert [r.name for r in runs] == ["build"]
+
+    issue = dry.create_issue("o", "r", title="fix it", labels=["grain-agent-needs-approval"])
+    dry.merge_pull_request("o", "r", 5)
+    out = capsys.readouterr().out
+    assert "file issue" in out
+    assert "merge PR" in out
+    assert isinstance(issue, Issue)
+    # Only the check-runs read reached the transport -- both mutations only
+    # printed.
+    assert len(transport.calls) == 1
 
 
 def test_dry_run_client_passes_list_comments_through_but_prints_create_comment(capsys):

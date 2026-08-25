@@ -652,6 +652,23 @@ comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
 
+**A completed task's PR is watched, too** (bwsalmon/agents#83): each
+`run-once` pass checks every still-open PR against a definite conflict
+(GitHub's own `mergeable` field reading `false`) or a definite failing
+check, and the first time either shows up for a given PR, grain files a
+*new* task suggesting the fix — never a second one for the same PR. That
+task is filed with `grain-agent-needs-approval`, not the trigger label, so
+it sits visibly in the queue without being picked up on its own; a comment
+on the original task links to it. Apply the trigger label to it, the same
+action that starts every other task, and the agent set attempts the fix on
+a fresh branch built on top of the original PR's own branch — a PR stacked
+on that PR, not a second one against the target repo's default branch.
+That new task also carries `/auto-merge`, so once its own PR reads clean
+(no conflict, no pending or failing check) grain merges it straight into
+the original PR's branch itself — no second round of human review for the
+fix. A stuck fix (one that itself ends up with a conflict or a failing
+check) is left open rather than chained into another suggestion.
+
 **Label a task `grain-gemini-key`** to have a short-lived Gemini API key
 minted for that task, placed in its sandbox (the prompt tells the agent
 exactly where), and revoked automatically once the task's slot frees —
@@ -667,18 +684,38 @@ rides in the prompt file, only its path in the sandbox — see
 `grain/automation/gemini_keys.py` for why this is minted on the
 controller's own account rather than the sandbox-facing metadata broker.
 
-**Label a task `grain-self-debug`** (bwsalmon/agents#62) to give the agent
-a `read_grain_logs` tool: recent `journalctl` entries for grain's own
-controller services, `grain-automation.service` and
-`grain-git-proxy.service` — for triaging a bug in grain itself, not the
-target repo's own code. Same trust tier as the other two labels above, and
-on unconditionally at the account level (`provision/controller.sh` grants
-`grain-agent` read-only `systemd-journal` group membership regardless of
-whether any task ever uses it), so unlike `grain-gemini-key` there is no
-separate `controller configure` step — the label alone turns the tool on
-for that task. Strictly read-only: the tool can only read the journal for
-one of those two services, never write to anything or reach any other
-unit on the controller.
+**Label a task `grain-self-debug`** (bwsalmon/agents#62, #86) to give the
+agent four extra tools, all strictly read-only, for triaging a bug in
+grain itself rather than the target repo's own code:
+
+- `read_grain_logs`: recent `journalctl` entries for grain's own
+  controller services, `grain-automation.service` and
+  `grain-git-proxy.service`.
+- `check_grain_health`: the same ssh/systemd/docker/disk checks `grain
+  host health` reports to an operator, against either the task's assigned
+  sandbox or the controller itself.
+- `read_grain_config`: one of grain's own non-secret config files under
+  `/data/config` on the controller (`automation.json`,
+  `repo-allowlist.json`, `gemini-key.json`, `metadata-server.json`,
+  `sandbox-github-key.json`) — every credential and token this deployment
+  holds lives under `/data/secrets` instead, which none of these tools can
+  reach.
+- `read_automation_audit_log`: recent entries from the dispatch/sweep
+  audit log — one line per state-machine decision the orchestrator made
+  (a task dispatched, skipped, succeeded, failed, or stranded, and why).
+
+Same trust tier as the other two labels above, and on unconditionally at
+the account level (`provision/controller.sh` grants `grain-agent`
+read-only `systemd-journal` group membership regardless of whether any
+task ever uses it), so unlike `grain-gemini-key` there is no separate
+`controller configure` step — the label alone turns these tools on for
+that task. Strictly read-only throughout: `read_grain_logs` can only read
+the journal for one of those two services, `check_grain_health` never
+mutates anything it checks, `read_grain_config` is checked against a
+fixed allowlist of non-secret file names rather than a raw path, and
+`read_automation_audit_log` only ever reads the one audit log file — none
+of the four can write to anything or reach any other file, unit, or
+credential on the controller.
 
 **Label an issue `grain-github-<name>`** to have that task's git pushes use
 a named credential instead of the deployment's default one — for a task
