@@ -159,6 +159,22 @@ variable "ssh_source_ranges" {
   default     = ["35.235.240.0/20"]
 }
 
+variable "enable_os_login" {
+  type        = bool
+  description = <<-EOT
+    IAM-driven SSH auth instead of manually managed keys -- the more
+    secure default, but it means every SSH session needs
+    roles/compute.osLogin, or roles/compute.osLoginExternalUser (an
+    organization-level grant) for an identity outside this project's
+    org -- found live: a real operator hit exactly that wall and had no
+    way to self-grant it. Set false to fall back to the classic
+    SSH-key-based path gcloud compute ssh already uses when OS Login is
+    off, no IAM role needed. ssh_source_ranges still gates who can reach
+    port 22 either way.
+  EOT
+  default     = true
+}
+
 # ------------------------------------------------------------------- IAM ---
 
 variable "vm_service_account_roles" {

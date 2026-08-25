@@ -114,7 +114,7 @@ resource "google_compute_instance" "host" {
   }
 
   metadata = {
-    enable-oslogin          = "TRUE"
+    enable-oslogin          = var.enable_os_login ? "TRUE" : "FALSE"
     enable-guest-attributes = "TRUE"
 
     startup-script = file("${path.module}/files/startup.sh")
