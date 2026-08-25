@@ -260,7 +260,7 @@ configuration, and the workflows that apply it.
 ```
 config/
   grain.tfvars              the deployment, as configuration
-  backend.hcl                where Terraform state lives
+  backend.hcl               where Terraform state lives
 .github/workflows/
   plan.yml                  pull request: fmt, validate (grain's Terraform, fetched fresh)
   deploy.yml                push to main: apply, push secrets, wait (same fetch)
