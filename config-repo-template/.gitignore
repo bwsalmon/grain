@@ -1,14 +1,7 @@
-# Terraform state never belongs in git -- it lives in the GCS bucket
-# config/backend.hcl points at.
-.terraform/
-.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-crash.log
-
-# Nor does anything holding a credential. Secrets go in this repo's
-# Actions secrets and, from there, straight into the host's own instance
-# metadata.
+# Nothing here holds a credential. Secrets go in this repo's Actions
+# secrets and, from there, straight into the host's own instance
+# metadata. (Terraform itself -- state, its own .terraform/ cache -- lives
+# in grain's terraform/gcp, fetched fresh in CI, not in this repo at all.)
 *.tfvars.json
 *.auto.tfvars
 *.json.key

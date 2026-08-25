@@ -39,10 +39,12 @@ Fork this directory into a new repository (private is fine; the host never
 reads it), then:
 
 **1. Bootstrap the GCP side.** Once, from a laptop with project-owner
-rights:
+rights, from a clone of [grain](https://github.com/bwsalmon/grain) itself
+— the Terraform module and this script both live there, not in your fork:
 
 ```sh
-./scripts/bootstrap-gcp.sh --project my-project --repo my-org/my-config-repo
+git clone https://github.com/bwsalmon/grain
+./grain/terraform/gcp/bootstrap-gcp.sh --project my-project --repo my-org/my-config-repo
 ```
 
 This creates the Terraform state bucket, the service account CI runs as,
@@ -148,8 +150,8 @@ opened.
 > [withholds the `workflow` scope](https://github.com/bwsalmon/grain/blob/main/docs/design.md)
 > from its token, so an agent cannot touch `.github/workflows/**` at all;
 > and nothing here applies until a human merges to `main`. Put branch
-> protection on `main` and a `CODEOWNERS` entry on `config/` and
-> `terraform/` if agents work in this repo.
+> protection on `main` and a `CODEOWNERS` entry on `config/` if agents
+> work in this repo.
 
 ## Configuration here, secrets there
 
@@ -245,24 +247,40 @@ automation state. Remove that block first if you really mean it.
 
 ## Layout
 
+This repo holds exactly two things: the deployment described as
+configuration, and the workflows that apply it.
+
 ```
 config/
   grain.tfvars              the deployment, as configuration
-  backend.hcl               where Terraform state lives
-terraform/
+  backend.hcl                where Terraform state lives
+.github/workflows/
+  plan.yml                  pull request: fmt, validate (grain's Terraform, fetched fresh)
+  deploy.yml                push to main: apply, push secrets, wait (same fetch)
+```
+
+Everything that *does* the applying — the Terraform module, the scripts it
+ships into instance metadata (`startup.sh`, `config-sync.sh`, `deploy.sh`),
+and the one-time `bootstrap-gcp.sh` — lives in
+[grain](https://github.com/bwsalmon/grain)'s `terraform/gcp/`, not here.
+Both workflows check that directory out fresh, at the ref
+`config/grain.tfvars` names (`grain_ref` — the same ref the on-host deploy
+itself fetches grain from), rather than carrying a copy of it that would
+drift the moment either repo changed. See `terraform/gcp/` in a grain
+checkout for the Terraform and shell source itself:
+
+```
+terraform/gcp/
   variables.tf              every knob, with why it exists
   iam.tf                    the host account, the agent account, their roles
-  secrets.tf                secret containers; never a secret value
   instance.tf               the VM, nested virtualization, the data disk
   network.tf                VPC, one firewall rule, optional Cloud NAT
+  outputs.tf                instance name, zone, service accounts, ssh command
+  versions.tf               provider/backend requirements
   files/
     startup.sh              boot: mount the data disk, start config-sync
     config-sync.sh          watch metadata, run a deploy when it changes
     deploy.sh               converge the host onto the config
-.github/workflows/
-  plan.yml                  pull request: fmt, validate, plan
-  deploy.yml                push to main: apply, push secrets, wait
-scripts/
   bootstrap-gcp.sh          one-time: state bucket, deployer SA, WIF
 ```
 
