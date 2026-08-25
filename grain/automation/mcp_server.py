@@ -49,6 +49,17 @@ per unit (the same "compute once, share" shape `transcript_path`/
 `branch_name` already use) and tells the agent to stop; `core.py`'s sweep
 reads that file back before deciding how a finished run resolved, and is
 the one that actually posts the comment.
+
+A sixth tool, `complete_analysis` (bwsalmon/agents#50), is the same shape
+as `ask_question` for the opposite reason: some tasks only ever needed an
+answer, an investigation, or a recommendation, never a code change, and
+forcing one through the branch/PR path just to say so is a poor fit -- see
+`docs/roadmap.md` item 2's "verify, don't trust" for why a pushed branch is
+otherwise the *only* signal a fresh-issue task is done. Like
+`ask_question`, it records its argument to a fixed per-unit local file
+rather than touching the sandbox or GitHub itself; `core.py`'s sweep reads
+it back and, if present, posts it as the closing comment on the task issue
+instead of checking for a branch and opening a PR.
 """
 
 from __future__ import annotations
@@ -153,6 +164,27 @@ TOOLS = [
             "required": ["question"],
         },
     },
+    {
+        "name": "complete_analysis",
+        "description": (
+            "Mark this task as a completed analysis instead of opening a "
+            "pull request. Use this when the task only asked for an "
+            "answer, an investigation, or a recommendation -- not a code "
+            "change. This posts your summary as a comment on the GitHub "
+            "issue and closes it; no branch is checked and no pull "
+            "request is opened. Do not call this if you made and pushed "
+            "code changes -- push a branch instead. After calling this, "
+            "do not take any further actions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "summary": {"type": "string"},
+            },
+            "required": ["summary"],
+        },
+    },
 ]
 
 
@@ -252,6 +284,23 @@ def ask_question(question_path: str, question: str) -> ToolResult:
     )
 
 
+def complete_analysis(analysis_path: str, summary: str) -> ToolResult:
+    """Records `summary` for `core.py` to post as the closing comment on
+    the task issue (bwsalmon/agents#50) -- same shape as `ask_question`:
+    a plain local file write, no `Runner`/SSH involved, since the summary
+    is for a human via GitHub, not the sandbox. Overwrites on a repeat call
+    within the same dispatch, and `dispatch.py` resets this file at the
+    start of every dispatch, for the same reasons `ask_question` already
+    documents for its own file.
+    """
+    Path(analysis_path).write_text(summary)
+    return ToolResult(
+        text="Your summary has been recorded and will be posted as a "
+             "comment on the GitHub issue, which will then be closed. Do "
+             "not take any further actions -- end your turn now."
+    )
+
+
 class McpServer:
     """The JSON-RPC method dispatch, kept separate from stdio plumbing
     (`serve()`) so `handle()` can be exercised directly in tests with a
@@ -259,12 +308,16 @@ class McpServer:
     """
 
     def __init__(self, runner: Runner, workspace: str, *,
-                 question_path: str | None = None) -> None:
+                 question_path: str | None = None,
+                 analysis_path: str | None = None) -> None:
         self.runner = runner
         self.workspace = workspace
         # None only in tests that don't care about ask_question -- `main()`
         # always supplies a real path in production.
         self.question_path = question_path
+        # Same "None only in tests" treatment as question_path, for
+        # complete_analysis (bwsalmon/agents#50).
+        self.analysis_path = analysis_path
 
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
@@ -326,12 +379,21 @@ class McpServer:
                     is_error=True,
                 )
             return ask_question(self.question_path, args["question"])
+        if name == "complete_analysis":
+            if self.analysis_path is None:
+                return ToolResult(
+                    text="complete_analysis is not configured for this session.",
+                    is_error=True,
+                )
+            return complete_analysis(self.analysis_path, args["summary"])
         return None
 
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
+          analysis_path: str | None = None,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
-    server = McpServer(runner, workspace, question_path=question_path)
+    server = McpServer(runner, workspace, question_path=question_path,
+                        analysis_path=analysis_path)
     for line in stdin:
         line = line.strip()
         if not line:
@@ -353,12 +415,14 @@ def main() -> None:
     parser.add_argument("--key-path", required=True)
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--question-path", required=True)
+    parser.add_argument("--analysis-path", required=True)
     args = parser.parse_args()
     runner = SshRunner(
         inner=RealRunner(), user=args.user,
         address=ipaddress.IPv4Address(args.address), key_path=Path(args.key_path),
     )
-    serve(runner, args.workspace, question_path=args.question_path)
+    serve(runner, args.workspace, question_path=args.question_path,
+          analysis_path=args.analysis_path)
 
 
 if __name__ == "__main__":

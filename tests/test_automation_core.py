@@ -428,6 +428,68 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
     assert pending.branch == "feature-x"
 
 
+# --- complete_analysis (bwsalmon/agents#50) ---------------------------------
+
+def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_issue(
+    monkeypatch, tmp_path,
+):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    analysis_file = tmp_path / "analysis.txt"
+    analysis_file.write_text("Investigated X; no code change was needed.")
+    monkeypatch.setattr(core_module, "analysis_path", lambda unit: str(analysis_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
+        ApiResponse(200, {}, b"{}"),  # close_issue
+        ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    comment_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
+    )
+    comment_body = json.loads(comment_call["body"])["body"]
+    assert "Investigated X; no code change was needed." in comment_body
+    assert "Posted automatically by grain-agent" in comment_body
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert json.loads(close_call["body"]) == {"state": "closed"}
+    # No branch was ever checked, and no PR was opened -- the analysis path
+    # short-circuits before either.
+    assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
+    assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("completed analysis" in o and "Investigated X" in o for o in outcomes)
+
+
+def test_an_analysis_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, tmp_path):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    analysis_file = tmp_path / "analysis.txt"
+    analysis_file.write_text("does this issue even exist?")
+    monkeypatch.setattr(core_module, "analysis_path", lambda unit: str(analysis_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale assignment" in o for o in outcomes)
+    # Best-effort only: no close/label call was even attempted once the
+    # comment itself 404'd -- there's no issue left to close either way.
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert not any(c["method"] == "DELETE" for c in transport.calls)
+
+
 def test_dispatch_fetches_the_issue_conversation_for_the_prompt():
     """`_dispatch` must fetch the top-level comment thread for every issue
     dispatch, not just PRs -- otherwise a redispatch after a human answers

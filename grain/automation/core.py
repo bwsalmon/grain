@@ -109,8 +109,8 @@ from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
 from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
-    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, dispatch, dispatch_pr,
-    question_path, unit_name,
+    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, analysis_path, branch_name, dispatch,
+    dispatch_pr, question_path, unit_name,
 )
 from .gemini_keys import GeminiKeyConfig
 from .gemini_keys import create_key as create_gemini_key
@@ -155,6 +155,20 @@ def _pending_question(sandbox: str) -> str | None:
     """
     try:
         text = Path(question_path(unit_name(sandbox))).read_text().strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _pending_analysis(sandbox: str) -> str | None:
+    """Reads back a `complete_analysis` call, if the agent made one this
+    run (bwsalmon/agents#50) -- the same file-based handoff `_pending_question`
+    already uses for `ask_question`: `mcp_server.py`'s tool and this read
+    both run on the controller, so no `Runner`/SSH is involved, and absence
+    just means "no analysis to report," never an exception.
+    """
+    try:
+        text = Path(analysis_path(unit_name(sandbox))).read_text().strip()
     except OSError:
         return None
     return text or None
@@ -308,6 +322,10 @@ class Orchestrator:
         if question is not None:
             self._finish_question(outcome, question)
             return
+        analysis = _pending_analysis(outcome.sandbox)
+        if analysis is not None:
+            self._finish_analysis(outcome, analysis)
+            return
         target = self._target_of(outcome)
         branch = branch_name(outcome.issue)
         if not self.github.branch_exists(target.owner, target.name, branch):
@@ -449,6 +467,50 @@ class Orchestrator:
         )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"asked a question, awaiting reply: {question[:200]!r}")
+
+    def _finish_analysis(self, outcome: Outcome, summary: str) -> None:
+        """The agent called `complete_analysis` instead of pushing a branch
+        (bwsalmon/agents#50) -- some tasks only ever needed an answer, an
+        investigation, or a recommendation, not a code change, and forcing
+        those through the branch/PR path is a poor fit. Unlike
+        `_finish_question`, this is a genuine finish, not a park: the
+        summary is posted as the closing comment and the issue is closed
+        outright, the same "post first, then update state" order
+        `_finish_succeeded_issue`'s own PR path already uses -- if
+        `create_comment` fails partway there is nothing yet to roll back.
+        No branch is ever checked and no PR is opened; that is the whole
+        point of this path over the default one.
+
+        A 404 here means the same thing it means in `_finish_question`/
+        `_requeue`: a stale assignment against an issue that's since
+        changed out from under it. Best-effort only in that case -- there
+        is no issue left to close or label either.
+        """
+        task = self._task
+        try:
+            self.github.create_comment(
+                task.owner, task.name, outcome.issue,
+                f"{_AUTOMATION_SIGNATURE}\n\n"
+                "This task has been completed as an analysis -- no code "
+                f"change was needed:\n\n{summary}",
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            self.audit.record(
+                sandbox=outcome.sandbox, issue=outcome.issue,
+                outcome=f"completed analysis but issue #{outcome.issue} not found in "
+                        f"{task.owner}/{task.name} -- stale assignment? "
+                        f"summary was: {summary[:200]!r}",
+            )
+            return
+        self.github.close_issue(task.owner, task.name, outcome.issue)
+        self.github.remove_label(
+            task.owner, task.name,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
+                           outcome=f"completed analysis: {summary[:200]!r}")
 
     # --- pending questions (docs/roadmap.md item 13) ---------------------
 
