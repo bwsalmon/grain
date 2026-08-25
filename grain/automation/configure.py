@@ -188,7 +188,7 @@ def configure_gcp_service_account(runner: Runner, key: str, *, service_account_e
     instance impersonates.
 
     `key` is minted fresh per deploy and never lands in this repo or
-    Actions secrets long-lived (config-repo-template's deploy.yml creates
+    Actions secrets long-lived (the gcp config-repo template's deploy.yml creates
     it via the deployer's own WIF session and immediately invalidates the
     previous one) -- the short-lived-credential principle docs/design.md
     argues for at the *sandbox* layer applied one layer up, to the source

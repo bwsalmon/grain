@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Push the deployment secrets into the host instance own metadata, and
+# mint a fresh agent service account key for this run.
+#
+# The only place a secret value is ever decrypted. It goes straight into
+# the instance own metadata over the Compute API -- never through Secret
+# Manager, so the deployer needs no project-wide secret access, and never
+# through Terraform, so it is not in the state file. The host reads it
+# back locally, with no GCP credential at all: metadata is local to the
+# instance that owns it.
+#
+# The secret values arrive as environment variables because only the
+# calling workflow can read the secrets context; nothing here is ever
+# passed on a command line, where it would be visible in a process list.
+#
+# Required env:
+#   PROJECT, INSTANCE, ZONE   from the Terraform outputs
+# Optional env (empty leaves the host copy untouched):
+#   GRAIN_GITHUB_TOKEN
+#   GRAIN_CLAUDE_CODE_OAUTH_TOKEN
+#   AGENT_SERVICE_ACCOUNT     email of the agent account, when configured
+set -euo pipefail
+
+project="${PROJECT:?PROJECT is not set: the terraform project_id output}"
+instance="${INSTANCE:?INSTANCE is not set: the terraform instance_name output}"
+zone="${ZONE:?ZONE is not set: the terraform zone output}"
+agent_service_account="${AGENT_SERVICE_ACCOUNT:-}"
+
+push_secret() {
+  local key="$1" value="$2" tmp
+  if [ -z "$value" ]; then
+    echo "::warning::$key is empty; leaving the host copy untouched"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  umask 077
+  printf '%s' "$value" > "$tmp"
+  gcloud compute instances add-metadata "$instance" \
+    --project="$project" --zone="$zone" \
+    --metadata-from-file="$key=$tmp" >/dev/null
+  rm -f "$tmp"
+  echo "$key: pushed"
+}
+
+push_secret "grain-github-token" "${GRAIN_GITHUB_TOKEN:-}"
+push_secret "grain-claude-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
+
+# Minted fresh every run, straight to instance metadata, never a repo
+# secret: the short-lived-credential principle grain own docs/design.md
+# argues for at the sandbox layer, applied one layer up to the
+# impersonation source itself. Every previous key for this account is
+# deleted right after -- otherwise a run that never gets read back (a host
+# that is down, or a config-sync cycle that has not reached this
+# generation yet) leaves the old key valid indefinitely, and GCP allows at
+# most 10 per account.
+if [ -n "$agent_service_account" ]; then
+  umask 077
+  key_file="$(mktemp)"
+  new_key_id="$(gcloud iam service-accounts keys create "$key_file" \
+    --iam-account="$agent_service_account" --format='value(name.basename())')"
+  push_secret "grain-agent-service-account-key" "$(cat "$key_file")"
+  shred -u "$key_file" 2>/dev/null || rm -f "$key_file"
+
+  gcloud iam service-accounts keys list --iam-account="$agent_service_account" \
+    --managed-by=user --format='value(name.basename())' \
+    | grep -v "^${new_key_id}\$" \
+    | while read -r old_key_id; do
+        gcloud iam service-accounts keys delete "$old_key_id" \
+          --iam-account="$agent_service_account" --quiet
+        echo "invalidated previous key: $old_key_id"
+      done
+fi

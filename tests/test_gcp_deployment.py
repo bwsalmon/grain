@@ -1,9 +1,9 @@
 """GCP provisioning has two sides, in two repos, that must agree: the
 Terraform module and its shell scripts live in this repo's own
-terraform/gcp/, config-repo-template/ holds only the deployment's
+terraform/gcp/, templates/gcp/ holds only the deployment's
 configuration and the two workflows that pull terraform/gcp/ fresh at
 CI time (see docs/roadmap.md and the "Remove duplicated code for gcp
-provisioning templates" issue this split closed -- config-repo-template
+provisioning templates" issue this split closed -- templates/gcp
 used to vendor a full copy of terraform/gcp/, which drifted from this
 one the moment either repo changed).
 
@@ -28,22 +28,67 @@ from pathlib import Path
 from grain.inventory import Cluster
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMPLATE = ROOT / "config-repo-template"
+TEMPLATE = ROOT / "templates" / "gcp"
 TERRAFORM = ROOT / "terraform" / "gcp"
 DEPLOY_SH = TERRAFORM / "files" / "deploy.sh"
 TFVARS = TEMPLATE / "config" / "grain.tfvars"
 WORKFLOWS = TEMPLATE / ".github" / "workflows"
-# Not on the host and not Terraform: the one script a *config repo's* CI
-# runs out of a grain checkout (see grain/automation/labels.py).
-ENSURE_LABELS = ROOT / "ci" / "ensure-task-labels.sh"
+# Not on the host and not Terraform: the scripts a *config repo's* CI runs
+# out of a grain checkout. deploy.yml is a file every deployment forks and
+# then owns, so anything written there is something nobody re-syncs -- the
+# step bodies live here instead and the workflow only wires them up.
+CI = ROOT / "ci"
+ENSURE_LABELS = CI / "ensure-task-labels.sh"
+TERRAFORM_APPLY = CI / "terraform-apply.sh"
+READ_OUTPUTS = CI / "read-terraform-outputs.sh"
+PUSH_SECRETS = CI / "push-host-secrets.sh"
+
+# The two steps allowed to keep a body in deploy.yml, because neither can
+# come from grain: the first decides which grain to fetch and runs before
+# there is one, and the second checks that fetch actually carries the
+# scripts every other step needs.
+_BOOTSTRAP_STEPS = {
+    "Determine which grain ref to pull Terraform and scripts from",
+    "Check grain has the deploy scripts this workflow runs",
+}
 
 SHELL_SCRIPTS = [
     TERRAFORM / "files" / "startup.sh",
     TERRAFORM / "files" / "config-sync.sh",
     DEPLOY_SH,
     TERRAFORM / "bootstrap-gcp.sh",
-    ENSURE_LABELS,
+    *sorted(CI.glob("*.sh")),
 ]
+
+
+def _deploy_run_directives():
+    """(step name, the text after `run:`) for every shell step in
+    deploy.yml, in order. A `|` value means the step has its own body."""
+    directives, current = [], None
+    for line in (WORKFLOWS / "deploy.yml").read_text().splitlines():
+        named = re.match(r"      - name: (.+)", line)
+        if named:
+            current = named.group(1).strip()
+        runs = re.match(r"        run: (.*)", line)
+        if runs:
+            directives.append((current, runs.group(1).strip()))
+    return directives
+
+
+def _scripts_deploy_yml_calls():
+    """The ci/ scripts deploy.yml invokes, as repo-relative paths."""
+    text = (WORKFLOWS / "deploy.yml").read_text()
+    return set(re.findall(r"grain-src/(ci/[\w.-]+\.sh)", text))
+
+
+def _preflight_script_names():
+    """The ci/ scripts deploy.yml's preflight step checks for, as
+    repo-relative paths -- it enumerates bare names in a `for` loop."""
+    text = (WORKFLOWS / "deploy.yml").read_text()
+    match = re.search(r"for script in (.*?); do", text, re.S)
+    assert match, "deploy.yml no longer preflights the grain checkout"
+    names = match.group(1).replace("\\", " ").split()
+    return {f"ci/{name}.sh" for name in names}
 
 
 def _tf_source():
@@ -132,23 +177,11 @@ def test_sync_source_retries_its_git_commands():
     assert "retry git -C" in body and "fetch" in body
 
 
-def _terraform_apply_script():
-    """The Terraform apply step's run: block, with the GitHub Actions
-    expressions it references replaced by inert text -- ${{ ... }} is not
-    valid shell syntax, so the raw step body can't run as-is."""
-    deploy = (WORKFLOWS / "deploy.yml").read_text()
-    match = re.search(
-        r"- name: Terraform apply\n(?:.*\n)*?        run: \|\n((?:.*\n)*?)\n      - name:",
-        deploy,
-    )
-    assert match, "Terraform apply step not found in deploy.yml"
-    return re.sub(r"\$\{\{[^}]*\}\}", "DUMMY", match.group(1))
-
-
 def _run_terraform_apply_script(fake_terraform):
-    """Runs the extracted apply step against a stand-in `terraform` and a
-    no-op `sleep`, so the retry/backoff logic can be exercised for real
-    without a GCP call or an actual wait."""
+    """Runs ci/terraform-apply.sh -- the actual script the workflow calls,
+    no longer a body extracted out of the YAML -- against a stand-in
+    `terraform` and a no-op `sleep`, so the retry/backoff logic is
+    exercised for real without a GCP call or an actual wait."""
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "bin"
         bin_dir.mkdir()
@@ -157,14 +190,26 @@ def _run_terraform_apply_script(fake_terraform):
         (bin_dir / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
         (bin_dir / "sleep").chmod(0o755)
 
-        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "DEPLOY_GENERATION": "test"}
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "DEPLOY_GENERATION": "test",
+            # Only ever handed to the fake terraform, which ignores them.
+            "CONFIG_DIR": tmp,
+            "CONFIG_REPO": "an-org/a-repo",
+        }
         return subprocess.run(
-            ["bash", "-c", _terraform_apply_script()],
-            env=env, capture_output=True, text=True,
+            [str(TERRAFORM_APPLY)], env=env, capture_output=True, text=True,
         )
 
 
+# init and validate always succeed and are not counted: the retry budget
+# is apply's alone, so counting the other two would mask a regression that
+# retried the wrong command.
 _FAKE_TERRAFORM_COUNTING = """#!/usr/bin/env bash
+if [ "$1" != "apply" ]; then
+  exit 0
+fi
 n_file="{n_file}"
 n=$(cat "$n_file")
 n=$((n + 1))
@@ -368,8 +413,10 @@ def test_the_config_repo_is_the_task_repo_by_default():
     # deployer credential before a human reviews it -- see plan.yml's own
     # module comment. Nothing there consumes config_repo.
     deploy = (WORKFLOWS / "deploy.yml").read_text()
-    assert "config_repo=${{ github.repository }}" in deploy, \
-        "deploy.yml does not tell Terraform which repo it is running in"
+    assert "CONFIG_REPO: ${{ github.repository }}" in deploy, \
+        "deploy.yml does not tell the apply script which repo it is running in"
+    assert '-var="config_repo=$config_repo"' in TERRAFORM_APPLY.read_text(), \
+        "terraform-apply.sh no longer passes config_repo through to Terraform"
 
 
 def test_no_step_if_condition_references_the_secrets_context():
@@ -570,17 +617,14 @@ def test_read_outputs_step_sets_every_steps_tf_output_used_elsewhere():
     secret budget and booted with no GCP access. Catch any output that's
     referenced but never captured, not just this one.
     """
-    deploy = (WORKFLOWS / "deploy.yml").read_text()
-    used = set(re.findall(r"steps\.tf\.outputs\.(\w+)", deploy))
-    match = re.search(
-        r"- name: Read outputs\n(?:.*\n)*?        run: \|\n((?:.*\n)*?)\n      - name:",
-        deploy,
-    )
-    assert match, "Read outputs step not found in deploy.yml"
-    set_names = set(re.findall(r'echo "(\w+)=', match.group(1)))
+    used = set(re.findall(r"steps\.tf\.outputs\.(\w+)",
+                          (WORKFLOWS / "deploy.yml").read_text()))
+    assert used, "deploy.yml consumes no terraform outputs at all any more"
+    set_names = set(re.findall(r'echo "(\w+)=', READ_OUTPUTS.read_text()))
     missing = used - set_names
     assert not missing, (
-        f"steps.tf.outputs referenced but never captured by Read outputs: {missing}"
+        f"steps.tf.outputs referenced but never captured by "
+        f"{READ_OUTPUTS.name}: {missing}"
     )
 
 
@@ -592,10 +636,13 @@ def test_deploy_yml_mints_and_invalidates_the_agent_key_only_when_one_exists():
     cap eventually breaks deploys.
     """
     deploy = (WORKFLOWS / "deploy.yml").read_text()
-    assert "AGENT_SERVICE_ACCOUNT" in deploy
-    assert "gcloud iam service-accounts keys create" in deploy
-    assert "gcloud iam service-accounts keys delete" in deploy
-    assert 'if [ -n "$AGENT_SERVICE_ACCOUNT" ]; then' in deploy, (
+    assert "AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}" in deploy, (
+        "deploy.yml no longer hands the agent account to the push-secrets script"
+    )
+    push = PUSH_SECRETS.read_text()
+    assert "gcloud iam service-accounts keys create" in push
+    assert "gcloud iam service-accounts keys delete" in push
+    assert 'if [ -n "$agent_service_account" ]; then' in push, (
         "a deployment with no agent account must not attempt to mint a key for one"
     )
 
@@ -640,31 +687,80 @@ def test_the_deploy_workflow_creates_the_task_labels_from_grains_own_list():
         "deploy.yml has grown its own copy of the label list again"
 
 
-def test_the_label_script_is_executable_and_reachable_at_the_path_ci_uses():
-    """deploy.yml runs it directly rather than through `bash`, so a file
+def test_every_script_deploy_yml_calls_exists_and_is_executable():
+    """deploy.yml runs these directly rather than through `bash`, so a file
     committed without the executable bit fails the deploy with nothing but
-    "Permission denied" -- and the path is hardcoded in a workflow this
-    repo does not run, so a move here is invisible until a deploy breaks.
+    "Permission denied" -- and the paths are hardcoded in a workflow this
+    repo does not run, so a rename here is invisible until a deploy breaks.
     """
-    assert ENSURE_LABELS.exists(), f"{ENSURE_LABELS} is gone; deploy.yml still calls it"
-    assert os.access(ENSURE_LABELS, os.X_OK), f"{ENSURE_LABELS} is not executable"
-    deploy = (WORKFLOWS / "deploy.yml").read_text()
-    called = ENSURE_LABELS.relative_to(ROOT).as_posix()
-    assert f"grain-src/{called}" in deploy, \
-        f"deploy.yml does not call the script at its actual path ({called})"
+    called = _scripts_deploy_yml_calls()
+    assert called, "deploy.yml calls no ci/ scripts at all any more"
+    for rel in sorted(called):
+        script = ROOT / rel
+        assert script.exists(), f"deploy.yml calls {rel}, which does not exist"
+        assert os.access(script, os.X_OK), f"{rel} is not executable"
+
+
+def test_deploy_yml_keeps_no_step_bodies_of_its_own():
+    """The rule this whole split exists to hold. A config repo forks
+    deploy.yml and then owns its copy, so any logic written there is logic
+    nobody re-syncs -- which is how a null-safe agent_service_account
+    output and a stock-out retry both sat in the template for months
+    without reaching a live deployment. Every step therefore either calls
+    a script out of the grain checkout, or is one of the two bootstrap
+    steps that cannot (see _BOOTSTRAP_STEPS).
+    """
+    for name, directive in _deploy_run_directives():
+        if directive == "|":
+            assert name in _BOOTSTRAP_STEPS, (
+                f"step {name!r} has grown a body of its own in deploy.yml; "
+                "put it in ci/ and call it, or a fork will freeze this copy"
+            )
+        else:
+            assert directive.startswith("grain-src/ci/"), (
+                f"step {name!r} runs {directive!r} inline rather than a ci/ script"
+            )
+
+
+def test_the_preflight_lists_exactly_the_scripts_the_workflow_calls():
+    """The preflight turns an old grain_ref into one clear error instead of
+    a mid-rollout "No such file or directory". That only holds while its
+    list matches reality: a step added with a script missing from the list
+    goes back to failing late, and a name left behind after a rename fails
+    every deploy against a grain that is perfectly fine.
+    """
+    listed, called = _preflight_script_names(), _scripts_deploy_yml_calls()
+    assert listed == called, (
+        f"preflight checks for scripts the workflow never runs: {listed - called}; "
+        f"runs scripts the preflight never checks: {called - listed}"
+    )
+
+
+def test_the_ci_scripts_do_not_depend_on_the_config_repo_layout():
+    """A script reaching for `config/` or `grain-src/` by name would put
+    the config repo's layout back into grain, which is the same coupling
+    from the other side: the workflow passes CONFIG_DIR and the script
+    finds grain relative to itself.
+    """
+    for script in sorted(CI.glob("*.sh")):
+        body = script.read_text()
+        assert "grain-src" not in body, \
+            f"{script.name} names the checkout path its caller chose"
+        assert not re.search(r"(?<![\w/$\"])config/(backend\.hcl|grain\.tfvars)", body), \
+            f"{script.name} hardcodes a config-repo path instead of using CONFIG_DIR"
 
 
 def test_config_repo_template_vendors_no_terraform_or_scripts():
-    """The whole point of this split: a fork of config-repo-template must
+    """The whole point of this split: a fork of templates/gcp must
     never again carry its own copy of the Terraform module or its
     scripts, or it silently drifts from terraform/gcp/ the moment either
     repo changes -- which is exactly the bug this test suite exists to
     catch before a deploy does.
     """
     assert not (TEMPLATE / "terraform").exists(), \
-        "config-repo-template/terraform/ has come back -- Terraform belongs only in terraform/gcp/"
+        "templates/gcp/terraform/ has come back -- Terraform belongs only in terraform/gcp/"
     assert not (TEMPLATE / "scripts").exists(), \
-        "config-repo-template/scripts/ has come back -- scripts belong only in terraform/gcp/"
+        "templates/gcp/scripts/ has come back -- scripts belong only in terraform/gcp/"
 
 
 def test_both_workflows_pull_terraform_from_grain_at_the_tfvars_ref():
@@ -678,13 +774,20 @@ def test_both_workflows_pull_terraform_from_grain_at_the_tfvars_ref():
             f"{name} does not check out grain at all"
         assert "path: grain-src" in workflow, \
             f"{name} does not check grain out to grain-src"
-        assert "grain-src/terraform/gcp" in workflow, \
-            f"{name} never points a Terraform step at the checked-out module"
         assert "grain_ref" in workflow, \
             f"{name} does not read grain_ref out of config/grain.tfvars"
         # No local terraform/ directory to run any of this from.
         assert re.search(r"working-directory:\s*terraform\b", workflow) is None, \
             f"{name} still points at a vendored terraform/ directory"
+
+    # plan.yml drives Terraform itself (fmt/validate only, deliberately
+    # never authenticated), so it names the module directly. deploy.yml
+    # names no grain path but ci/: its scripts cd to the module themselves,
+    # which is why grain can move terraform/gcp without breaking a fork.
+    assert "grain-src/terraform/gcp" in (WORKFLOWS / "plan.yml").read_text(), \
+        "plan.yml never points a Terraform step at the checked-out module"
+    assert "grain-src/terraform/gcp" not in (WORKFLOWS / "deploy.yml").read_text(), \
+        "deploy.yml has gone back to hardcoding grain's internal layout"
 
 
 def test_deploy_yml_passes_absolute_config_paths_to_terraform():
@@ -695,7 +798,10 @@ def test_deploy_yml_passes_absolute_config_paths_to_terraform():
     with github.workspace instead.
     """
     deploy = (WORKFLOWS / "deploy.yml").read_text()
-    assert "-backend-config=${{ github.workspace }}/config/backend.hcl" in deploy
-    assert "-var-file=${{ github.workspace }}/config/grain.tfvars" in deploy
-    assert "-backend-config=../config/backend.hcl" not in deploy
-    assert "-var-file=../config/grain.tfvars" not in deploy
+    assert "CONFIG_DIR: ${{ github.workspace }}/config" in deploy, \
+        "deploy.yml no longer anchors the config directory to github.workspace"
+    apply = TERRAFORM_APPLY.read_text()
+    assert '-backend-config="$config_dir/backend.hcl"' in apply
+    assert '-var-file="$config_dir/grain.tfvars"' in apply
+    assert "../config/" not in apply, \
+        "a relative path here resolves inside the grain checkout, not the config repo"
