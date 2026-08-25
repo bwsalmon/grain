@@ -15,6 +15,7 @@ from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, GEMINI_KEY_
 from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
+from grain.automation.ssh import SshRunner
 from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
 from grain.proxy.allowlist import Allowlist
@@ -209,6 +210,45 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         state_path=state_path,
     )
     return orchestrator, transport
+
+
+def test_orchestrator_defaults_audit_and_history_to_no_op_implementations_when_none_given():
+    from grain.automation.audit import NullAuditLog
+    from grain.automation.history import NullSessionHistory
+
+    transport = OrchestratorTransport(default=ApiResponse(200, {}, b"[]"))
+    orchestrator = Orchestrator(
+        cluster=Cluster(sandbox_count=1),
+        github=GitHubClient(transport, token="t"),
+        config=AutomationConfig(task_owner="o", task_repo="r", default_target_repo="o/r"),
+        state=AutomationState(),
+        base_runner=FakeRunner(),
+        token_store=SandboxTokenStore(Path(tempfile.mkdtemp()) / "sandbox-tokens.json"),
+        allowlist=allowlist_of(("o/r",)),
+        # audit/history both left at their None default.
+    )
+    assert isinstance(orchestrator.audit, NullAuditLog)
+    assert isinstance(orchestrator.history, NullSessionHistory)
+    # Both are no-ops: recording through them must not raise.
+    orchestrator.audit.record(sandbox=None, issue=None, outcome="ignored")
+
+
+def test_ssh_runner_for_builds_a_real_sshrunner_when_no_factory_is_injected():
+    """Every other test in this file passes `ssh_runner_factory` to bypass
+    `_ssh_runner_for`'s own `SshRunner` construction -- `SshRunner`'s argv
+    wrapping is covered on its own terms by test_automation_ssh.py, and
+    tests here target `Orchestrator`'s own decisions against a plain
+    `FakeRunner`. This one checks the production default path itself:
+    `Orchestrator` wires up a real `SshRunner` correctly when nothing
+    overrides it.
+    """
+    orchestrator, _ = make_orchestrator()
+    orchestrator.ssh_runner_factory = None
+    runner = orchestrator._ssh_runner_for("sandbox-0")
+    assert isinstance(runner, SshRunner)
+    assert runner.user == orchestrator.config.ssh_user
+    assert runner.address == orchestrator.cluster.address_of("sandbox-0")
+    assert runner.key_path == orchestrator.config.ssh_key_path
 
 
 def test_dispatches_the_lowest_numbered_candidate_first():
@@ -452,6 +492,25 @@ def test_a_question_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, 
     assert orchestrator.state.pending_questions == {}
 
 
+def test_a_question_comment_raises_on_a_non_404_github_error(monkeypatch, tmp_path):
+    """Only a 404 is treated as "stale assignment, move on" here too -- a
+    genuine API failure must still surface.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    question_file = tmp_path / "question.txt"
+    question_file.write_text("does this issue even exist?")
+    monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
+
+
 def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monkeypatch, tmp_path):
     state = AutomationState()
     state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
@@ -548,6 +607,22 @@ def test_an_analysis_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch,
     # comment itself 404'd -- there's no issue left to close either way.
     assert not any(c["method"] == "PATCH" for c in transport.calls)
     assert not any(c["method"] == "DELETE" for c in transport.calls)
+
+
+def test_an_analysis_comment_raises_on_a_non_404_github_error(monkeypatch, tmp_path):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    analysis_file = tmp_path / "analysis.txt"
+    analysis_file.write_text("does this issue even exist?")
+    monkeypatch.setattr(core_module, "analysis_path", lambda unit: str(analysis_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 def test_dispatch_fetches_the_issue_conversation_for_the_prompt():
@@ -933,6 +1008,42 @@ def test_an_unhealthy_freed_sandbox_is_logged_but_still_reused():
     assert any("opened PR o/r#42" in o for o in outcomes)
 
 
+def test_a_freed_sandboxs_failed_gemini_key_revocation_is_logged_but_still_freed():
+    """Same visibility-only treatment as the health-warning case above
+    (bwsalmon/agents#47): a Gemini key that fails to revoke when its task's
+    sandbox is freed doesn't block the sweep -- it's surfaced in the audit
+    log for an operator to revoke by hand.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1),
+                 gemini_key_name="projects/proj/locations/global/keys/abc")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    runner.expect("true", returncode=0)
+    runner.expect("systemctl is-system-running", stdout="running\n")
+    runner.expect("docker info", stdout="Server Version: 27.0.0\n")
+    runner.expect(
+        "df -P /",
+        stdout="Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+               "/dev/vda1 1 1 1 10% /\n",
+    )
+    runner.expect("gcloud services api-keys delete", returncode=1, stderr="API unreachable")
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state, runner=runner,
+        gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments  # still freed
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(
+        o.startswith("credential warning:") and "API unreachable" in o for o in outcomes
+    )
+
+
 def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_path):
     token_store = SandboxTokenStore(tmp_path / "sandbox-tokens.json")
     orchestrator, _ = make_orchestrator(issues=[issue_json(1)], token_store=token_store)
@@ -1223,6 +1334,45 @@ def test_a_task_naming_a_non_allow_listed_repo_is_parked_not_dispatched():
     assert added == [["grain-agent-awaiting-reply"]]
 
 
+def test_parking_tolerates_a_404_when_the_issue_vanished_mid_cycle():
+    """Same 404 tolerance `_finish_question` gets: an issue that vanished
+    between the listing and `_park`'s own comment call isn't a reason to
+    crash the cycle -- there's nothing left to park either way.
+    """
+    orchestrator, transport = make_orchestrator(
+        issues=[issue_json(4, body="/repo somewhere/else")],
+        allowed=("o/r",),
+    )
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/repo somewhere/else")]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                   # list_comments
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),             # the park comment 404s
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("could not park issue #4" in o for o in outcomes)
+
+
+def test_parking_raises_on_a_non_404_error_posting_the_comment():
+    orchestrator, transport = make_orchestrator(
+        issues=[issue_json(4, body="/repo somewhere/else")],
+        allowed=("o/r",),
+    )
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/repo somewhere/else")]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                   # list_comments
+        ApiResponse(500, {}, b"internal error"),                       # the park comment fails
+    ])
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
+
+
 def test_a_task_with_no_repo_directive_and_no_default_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     orchestrator.config = AutomationConfig(task_owner="o", task_repo="r")
@@ -1306,6 +1456,22 @@ def test_a_nonexistent_target_repo_is_parked_rather_than_crashing_the_cycle():
     comment = next(c for c in transport.calls if c["method"] == "POST"
                     and c["path"].endswith("/comments"))
     assert "404" in json.loads(comment["body"])["body"]
+
+
+def test_a_non_404_error_reading_the_target_repo_raises_rather_than_parking():
+    """Only a 404 is treated as "this repo doesn't exist/isn't visible,
+    park the task" -- a genuine API failure reading the target repo's
+    default branch must still surface, not be silently parked alongside it.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r", "gone/away"))
+    transport.responses.append(
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/repo gone/away")]).encode())  # list_issues
+    )
+    transport.repo_status = 500
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 def test_a_base_directive_overrides_the_target_repos_default_branch():
@@ -1506,6 +1672,30 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
     assert GEMINI_KEY_NAME in delete_call
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("dispatch failed" in o for o in outcomes)
+
+
+def test_a_dispatch_failure_whose_gemini_key_cleanup_also_fails_reports_both():
+    """Best-effort cleanup of an orphaned key can itself fail (Google's API
+    unreachable, say) -- that must not mask the original dispatch failure
+    it was trying to clean up after, so both land in the one audit outcome.
+    """
+    runner = gemini_runner(**{
+        "bash -c": {"returncode": 128, "stderr": "fatal: Authentication failed"},
+        "gcloud services api-keys delete": {"returncode": 1, "stderr": "API unreachable"},
+    })
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(
+        "dispatch failed" in o and "also failed to revoke" in o and "API unreachable" in o
+        for o in outcomes
+    )
 
 
 # --- grain-github-<name> label (bwsalmon/agents#52) -------------------------

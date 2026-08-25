@@ -416,6 +416,18 @@ def test_unit_status_done_success_defensive_fallback_without_remain_after_exit()
     assert unit_status(runner, "grain-task-sandbox-0") is UnitState.DONE_SUCCESS
 
 
+def test_unit_status_done_failed_defensive_fallback_without_remain_after_exit():
+    # Same defensive fallback as the DONE_SUCCESS case above (reachable
+    # only for a unit started without RemainAfterExit=yes, not the path
+    # start_unit itself takes) -- but with a non-success Result.
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=inactive\nResult=exit-code\n",
+    )
+    assert unit_status(runner, "grain-task-sandbox-0") is UnitState.DONE_FAILED
+
+
 def test_unit_status_done_failed_via_active_state():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=failed\nResult=exit-code\n")

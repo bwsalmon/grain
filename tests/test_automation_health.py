@@ -36,6 +36,13 @@ def test_disk_usage_percent_returns_none_with_no_percent_sign():
     assert _disk_usage_percent("Filesystem Used\n/dev/vda1 1234\n") is None
 
 
+def test_disk_usage_percent_returns_none_when_the_percent_field_is_not_a_number():
+    # Ends in "%" (passes the shape check) but isn't parseable as an int --
+    # must fail to parse, not raise.
+    header = "Filesystem     1024-blocks     Used Available Capacity Mounted on\n"
+    assert _disk_usage_percent(header + "/dev/vda1 1 2 3 ab% /\n") is None
+
+
 # --- individual checks -----------------------------------------------------
 
 def test_check_disk_ok_below_watermark():
