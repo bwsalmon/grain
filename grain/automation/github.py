@@ -191,6 +191,18 @@ class PullRequestDetail:
     # definition) never cared before this field existed and a stale fixture
     # omitting it shouldn't suddenly need updating.
     state: str = "open"
+    # GitHub's own field: `true`/`false` once it has finished computing
+    # whether this PR can merge cleanly against its base, `null` (read here
+    # as `None`) while that computation is still in flight -- GitHub does
+    # this asynchronously, so a request right after a push can legitimately
+    # see `None` for a cycle or two. `core.py`'s `_close_finished_prs`
+    # (bwsalmon/agents#83) reads `False` as "has a conflict, suggest a fix"
+    # and treats `None` the same as "don't know yet, check again next
+    # cycle" -- never as either a conflict or a clean merge, since guessing
+    # either way could file a needless fix or auto-merge something broken.
+    # Defaulted to `None` for the same "existing callers never cared"
+    # reason `state` is.
+    mergeable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +245,27 @@ class ReviewComment:
     body: str
     path: str
     line: int | None
+
+
+@dataclass(frozen=True)
+class CheckRun:
+    """One check run against a commit -- GitHub's own shape for CI results
+    (a GitHub Actions job, or any third-party check that posts through the
+    Checks API), read by `core.py`'s `_close_finished_prs` (bwsalmon/agents#83)
+    to decide whether an open PR's tests are failing.
+
+    `status` is GitHub's own lifecycle field: `"queued"`, `"in_progress"`,
+    or `"completed"` -- only `"completed"` has a meaningful `conclusion` at
+    all, which is why callers check `status` before ever looking at it.
+    `conclusion` is `None` until then, and one of `"success"`, `"failure"`,
+    `"neutral"`, `"cancelled"`, `"skipped"`, `"timed_out"`, or
+    `"action_required"` once it is -- GitHub's own enum, not narrowed here,
+    since which of those count as "broken" is a policy decision for the
+    caller, not this client.
+    """
+    name: str
+    status: str
+    conclusion: str | None
 
 
 def _next_page_path(link_header: str | None) -> str | None:
@@ -424,6 +457,52 @@ class GitHubClient:
         data = json.loads(resp.body)
         return PullRequest(number=data["number"], html_url=data["html_url"])
 
+    def create_issue(self, owner: str, repo: str, *, title: str, body: str = "",
+                      labels: list[str] | None = None) -> Issue:
+        """Files a new issue on the task repo -- bwsalmon/agents#83's
+        `core.py`'s `_suggest_fix` is the only caller today, filing the
+        follow-up task that fixes an open PR's conflicts or failing checks.
+        `labels` lets it land already carrying `needs_approval_label`
+        (`AutomationConfig`) in the same request, rather than a second
+        `add_label` call that could fail partway and leave the issue
+        unlabelled.
+        """
+        payload: dict = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = list(labels)
+        resp = self.transport.request(
+            method="POST", path=f"/repos/{owner}/{repo}/issues",
+            headers=self._headers(owner, repo, json_body=True),
+            body=json.dumps(payload).encode(),
+        )
+        if resp.status != 201:
+            raise GitHubError(resp.status, resp.body)
+        data = json.loads(resp.body)
+        return Issue(
+            number=data["number"], title=data["title"], body=data.get("body") or "",
+            html_url=data["html_url"],
+            labels=frozenset(l["name"] for l in data.get("labels", [])),
+        )
+
+    def merge_pull_request(self, owner: str, repo: str, number: int) -> None:
+        """Merges a PR directly, rather than leaving it for a human to
+        click -- bwsalmon/agents#83's `core.py`'s `_close_finished_prs`
+        calls this only for a PR whose task carried `/auto-merge`, and only
+        once it reads clean (no conflict, no failing/pending check). A 405
+        (not mergeable -- GitHub's own answer if `mergeable` went stale
+        between the read and this call) or 409 (base branch moved
+        underneath it) is left for the caller to decide whether to retry
+        next cycle; only a genuine `GitHubError` a caller doesn't expect is
+        the difference between those and, say, a 404.
+        """
+        resp = self.transport.request(
+            method="PUT", path=f"/repos/{owner}/{repo}/pulls/{number}/merge",
+            headers=self._headers(owner, repo, json_body=True),
+            body=json.dumps({}).encode(),
+        )
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
         resp = self.transport.request(
             method="GET", path=f"/repos/{owner}/{repo}/pulls/{number}",
@@ -436,7 +515,7 @@ class GitHubClient:
             number=data["number"], title=data["title"], body=data.get("body") or "",
             html_url=data["html_url"],
             head_ref=data["head"]["ref"], base_ref=data["base"]["ref"],
-            state=data.get("state", "open"),
+            state=data.get("state", "open"), mergeable=data.get("mergeable"),
         )
 
     def default_branch(self, owner: str, repo: str) -> str:
@@ -483,6 +562,32 @@ class GitHubClient:
                 ))
             path = _next_page_path(resp.headers.get("Link"))
         return comments
+
+    def list_check_runs(self, owner: str, repo: str, ref: str) -> list[CheckRun]:
+        """Check runs against `ref` -- a branch name works fine here, GitHub
+        resolves it to that branch's current tip itself, so callers never
+        need a commit sha in hand (`core.py`'s `_close_finished_prs`, which
+        only ever has `PullRequestDetail.head_ref`, bwsalmon/agents#83).
+        Paginates the same `Link`-header way every other list endpoint
+        here does, but the response body itself is shaped differently --
+        `{"total_count": N, "check_runs": [...]}`, not a bare array, which
+        is GitHub's own shape for this one endpoint.
+        """
+        runs: list[CheckRun] = []
+        path = f"/repos/{owner}/{repo}/commits/{quote(ref, safe='')}/check-runs?per_page=100"
+        while path:
+            resp = self.transport.request(
+                method="GET", path=path, headers=self._headers(owner, repo), body=None
+            )
+            if resp.status != 200:
+                raise GitHubError(resp.status, resp.body)
+            for item in json.loads(resp.body)["check_runs"]:
+                runs.append(CheckRun(
+                    name=item["name"], status=item["status"],
+                    conclusion=item.get("conclusion"),
+                ))
+            path = _next_page_path(resp.headers.get("Link"))
+        return runs
 
     def list_comments(self, owner: str, repo: str, number: int) -> list[Comment]:
         """The plain top-level conversation on an issue or PR (docs/roadmap.md
@@ -564,6 +669,15 @@ class DryRunGitHubClient:
         print(f"+ open PR {owner}/{repo}: {head!r} -> {base!r} ({title!r})")
         return PullRequest(number=0, html_url=f"(dry run) {owner}/{repo}: {head} -> {base}")
 
+    def create_issue(self, owner: str, repo: str, *, title: str, body: str = "",
+                      labels: list[str] | None = None) -> Issue:
+        print(f"+ file issue {owner}/{repo}: {title!r} {list(labels or [])}")
+        return Issue(number=0, title=title, body=body,
+                      html_url=f"(dry run) {owner}/{repo}", labels=frozenset(labels or []))
+
+    def merge_pull_request(self, owner: str, repo: str, number: int) -> None:
+        print(f"+ merge PR {owner}/{repo}#{number}")
+
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
         return self.inner.get_pull_request(owner, repo, number)
 
@@ -572,6 +686,9 @@ class DryRunGitHubClient:
 
     def list_review_comments(self, owner: str, repo: str, number: int) -> list[ReviewComment]:
         return self.inner.list_review_comments(owner, repo, number)
+
+    def list_check_runs(self, owner: str, repo: str, ref: str) -> list[CheckRun]:
+        return self.inner.list_check_runs(owner, repo, ref)
 
     def list_comments(self, owner: str, repo: str, number: int) -> list[Comment]:
         return self.inner.list_comments(owner, repo, number)

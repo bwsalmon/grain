@@ -644,6 +644,23 @@ comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
 
+**A completed task's PR is watched, too** (bwsalmon/agents#83): each
+`run-once` pass checks every still-open PR against a definite conflict
+(GitHub's own `mergeable` field reading `false`) or a definite failing
+check, and the first time either shows up for a given PR, grain files a
+*new* task suggesting the fix — never a second one for the same PR. That
+task is filed with `grain-agent-needs-approval`, not the trigger label, so
+it sits visibly in the queue without being picked up on its own; a comment
+on the original task links to it. Apply the trigger label to it, the same
+action that starts every other task, and the agent set attempts the fix on
+a fresh branch built on top of the original PR's own branch — a PR stacked
+on that PR, not a second one against the target repo's default branch.
+That new task also carries `/auto-merge`, so once its own PR reads clean
+(no conflict, no pending or failing check) grain merges it straight into
+the original PR's branch itself — no second round of human review for the
+fix. A stuck fix (one that itself ends up with a conflict or a failing
+check) is left open rather than chained into another suggestion.
+
 **Label a task `grain-gemini-key`** to have a short-lived Gemini API key
 minted for that task, placed in its sandbox (the prompt tells the agent
 exactly where), and revoked automatically once the task's slot frees —

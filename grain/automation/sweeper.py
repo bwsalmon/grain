@@ -117,6 +117,12 @@ class Outcome:
     target_owner: str | None = None
     target_repo: str | None = None
     base: str | None = None
+    # bwsalmon/agents#83: carried straight from the freed Assignment, same
+    # reason `target_owner`/`base` are -- `core.py`'s
+    # `_finish_succeeded_issue` needs to know whether the task that just
+    # finished asked for `/auto-merge`, and the assignment is gone the
+    # instant `_release` frees the slot.
+    auto_merge: bool = False
 
 
 @dataclass(frozen=True)
@@ -250,7 +256,7 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
                            kind=assignment.kind, branch=assignment.branch,
                            target_owner=assignment.target_owner,
                            target_repo=assignment.target_repo,
-                           base=assignment.base)
+                           base=assignment.base, auto_merge=assignment.auto_merge)
 
         if status is UnitState.DONE_SUCCESS:
             reap(controller_runner, unit)
