@@ -114,13 +114,41 @@ jobs:
         working-directory: grain-src/terraform/gcp
         run: terraform validate -no-color
 
+      # GCP stock-outs (ZONE_RESOURCE_POOL_EXHAUSTED and its siblings) are a
+      # common, transient failure creating a VM or disk in a given zone --
+      # a plain retry a few minutes later routinely succeeds once the zone
+      # frees up capacity, so back off and retry instead of failing the
+      # whole rollout on what is usually a non-issue. Any other failure
+      # (a bad config, a real quota limit, ...) still fails immediately --
+      # retrying those would just waste the backoff budget.
       - name: Terraform apply
         working-directory: grain-src/terraform/gcp
         run: |
-          terraform apply -input=false -auto-approve -no-color \
-            -var-file=${{ github.workspace }}/config/grain.tfvars \
-            -var="config_repo=${{ github.repository }}" \
-            -var="deploy_generation=${DEPLOY_GENERATION}"
+          set -uo pipefail
+
+          apply() {
+            terraform apply -input=false -auto-approve -no-color \
+              -var-file=${{ github.workspace }}/config/grain.tfvars \
+              -var="config_repo=${{ github.repository }}" \
+              -var="deploy_generation=${DEPLOY_GENERATION}"
+          }
+
+          max_attempts=5
+          delay=60
+          attempt=1
+          out="$(mktemp)"
+          while true; do
+            if apply 2>&1 | tee "$out"; then
+              exit 0
+            fi
+            if [ "$attempt" -ge "$max_attempts" ] || ! grep -qiE 'RESOURCE_POOL_EXHAUSTED|does not have enough resources available' "$out"; then
+              exit 1
+            fi
+            echo "::warning::terraform apply hit a stock-out (attempt $attempt/$max_attempts); retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+          done
 
       - name: Read outputs
         id: tf
