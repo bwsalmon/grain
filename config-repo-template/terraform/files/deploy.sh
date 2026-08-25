@@ -57,6 +57,18 @@ trap cleanup EXIT
 # ------------------------------------------------------------------ config --
 
 load_config() {
+  # 077 guards the config blob and env.sh this writes into $RUNDIR -- both
+  # carry deployment configuration, and env.sh is sourced. It is restored
+  # before returning, which is the whole point: found live, leaving it set
+  # leaked into sync_source's `git clone`, so /opt/grain-src came out
+  # 0700/0600, `deploy_tree` faithfully copied those modes onto the
+  # controller's /opt/grain, and every dispatched task unit then died on
+  # `cd /opt/grain: Permission denied` before `claude -p` ever started --
+  # surfacing as task issues flapping between the trigger and in-progress
+  # labels once a minute as the sweeper requeued each instant failure.
+  # `die` exits the script, so the failure paths below need no restore.
+  local prior_umask
+  prior_umask="$(umask)"
   umask 077
   mkdir -p "$RUNDIR"
   md instance/attributes/grain-config > "$RUNDIR/config.json" \
@@ -109,6 +121,7 @@ PY
   # shellcheck source=/dev/null
   . "$RUNDIR/env.sh"
   [ -n "$TASK_REPO" ] || die "task_repo is empty; set it in config/grain.tfvars"
+  umask "$prior_umask"
 }
 
 # ------------------------------------------------------------------- host ---
@@ -159,6 +172,13 @@ sync_source() {
   else
     die "grain_ref '$GRAIN_REF' is not a branch, tag, or commit of $GRAIN_REPO_URL"
   fi
+  # Converge the modes too, not just the contents: a host whose checkout
+  # was made by an earlier build of this script -- under the umask that
+  # used to leak out of load_config -- keeps 0700/0600 forever otherwise,
+  # since the clone above only runs when .git is missing. Nothing here is
+  # secret: $GRAIN_REPO_URL is fetched anonymously and carries no
+  # credential, and no secret is ever written under $SRC.
+  chmod -R u=rwX,go=rX "$SRC"
   log "grain at $(git -C "$SRC" rev-parse --short HEAD)"
 }
 
