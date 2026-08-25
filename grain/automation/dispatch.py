@@ -297,15 +297,15 @@ def question_path(unit: str) -> str:
     return f"{_unit_dir(unit)}/question.txt"
 
 
-def analysis_path(unit: str) -> str:
-    """The fixed path `mcp_server.py`'s `complete_analysis` tool writes to,
-    and `core.py`'s sweep reads back after a unit finishes (bwsalmon/agents#50)
-    -- the same "compute once, share" shape `question_path` already uses,
-    and reset the same way at the start of every dispatch to this sandbox
-    so a completed-analysis summary from an earlier, unrelated task can
-    never be misread as belonging to this one.
+def comment_path(unit: str) -> str:
+    """The fixed path `mcp_server.py`'s `comment_on_issue` tool writes to,
+    and `core.py`'s sweep reads back after a unit finishes (bwsalmon/agents#50,
+    reworked by bwsalmon/agents#89) -- the same "compute once, share" shape
+    `question_path` already uses, and reset the same way at the start of
+    every dispatch to this sandbox so a comment from an earlier, unrelated
+    task can never be misread as belonging to this one.
     """
-    return f"{_unit_dir(unit)}/analysis.txt"
+    return f"{_unit_dir(unit)}/comment.txt"
 
 
 def branch_name(issue: int) -> str:
@@ -475,9 +475,12 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         "attempt to open a PR or comment directly.\n\n"
         "If this task doesn't need a code change at all -- it only asked "
         "for an answer, an investigation, or a recommendation -- call the "
-        "complete_analysis tool with your findings instead of pushing a "
-        "branch. That posts your findings as a comment on this issue and "
-        "closes it, with no pull request opened.\n\n"
+        "comment_on_issue tool with your findings instead of pushing a "
+        "branch. That posts your findings as a comment on this issue. If "
+        "you do push commits, a pull request is opened for them "
+        "regardless of whether you also call comment_on_issue -- it never "
+        "prevents a pull request from opening on its own; it only stands "
+        "in for one when you never pushed anything.\n\n"
         "If you are genuinely blocked and need the human's input, use the "
         "ask_question tool instead."
     )
@@ -676,7 +679,7 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
 
 
 def _mcp_config_json(target: SandboxTarget, question_path_value: str,
-                      analysis_path_value: str, *, self_debug: bool = False) -> str:
+                      comment_path_value: str, *, self_debug: bool = False) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
     `mcp_server.py` is invoked as its own process, per dispatch, with the
     assigned sandbox's connection details baked into its argv here. Nothing
@@ -686,12 +689,12 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
     `question_path_value` is the same "only place it's named" treatment
     for `ask_question` (docs/roadmap.md item 12): the agent supplies only
     the question text; where it lands is decided here, not by the tool
-    call. `analysis_path_value` is the identical treatment for
-    `complete_analysis` (bwsalmon/agents#50). `self_debug` (bwsalmon/agents#62)
-    is `dispatch()`'s own record of whether this task's issue carried
-    `self_debug_label` -- true only then does `mcp_server.py` get
-    `--self-debug`, which is what makes it advertise and answer
-    `read_grain_logs` at all.
+    call. `comment_path_value` is the identical treatment for
+    `comment_on_issue` (bwsalmon/agents#50, bwsalmon/agents#89).
+    `self_debug` (bwsalmon/agents#62) is `dispatch()`'s own record of
+    whether this task's issue carried `self_debug_label` -- true only then
+    does `mcp_server.py` get `--self-debug`, which is what makes it
+    advertise and answer `read_grain_logs` at all.
     """
     args = [
         "-m", "grain.automation.mcp_server",
@@ -700,7 +703,7 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
         "--key-path", target.ssh_key_path,
         "--workspace", target.workspace,
         "--question-path", question_path_value,
-        "--analysis-path", analysis_path_value,
+        "--comment-path", comment_path_value,
     ]
     if self_debug:
         args.append("--self-debug")
@@ -735,7 +738,7 @@ _NATIVE_TOOLS = "Task"
 _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
-    "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__complete_analysis,"
+    "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__comment_on_issue,"
     # bwsalmon/agents#62/#86: pre-approved unconditionally, same as every
     # other tool name here -- harmless on a task that never turns any of
     # these on, since `mcp_server.py` only advertises (and answers) this
@@ -802,16 +805,15 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     # CONTROLLER_AGENT_USER, same as the rest of this unit) can create it
     # fresh on its own; nothing here needs to pre-create or chown it.
     controller_runner.run(["sudo", "rm", "-f", q_path])
-    a_path = analysis_path(unit)
+    c_path = comment_path(unit)
     # Same reset discipline as q_path above, for the same reason
-    # (bwsalmon/agents#50): a leftover completed-analysis summary from an
-    # earlier dispatch to this sandbox must never be misread as belonging
-    # to this one.
-    controller_runner.run(["sudo", "rm", "-f", a_path])
+    # (bwsalmon/agents#50): a leftover comment from an earlier dispatch to
+    # this sandbox must never be misread as belonging to this one.
+    controller_runner.run(["sudo", "rm", "-f", c_path])
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path, a_path, self_debug=self_debug),
+        stdin=_mcp_config_json(target, q_path, c_path, self_debug=self_debug),
     )
     out_path = transcript_path(unit)
     start_unit(

@@ -15,7 +15,7 @@ UNIT_DIR = "/data/state/automation/units/grain-task-sandbox-0"
 PROMPT_PATH = f"{UNIT_DIR}/prompt.md"
 MCP_CONFIG_PATH = f"{UNIT_DIR}/mcp-config.json"
 QUESTION_PATH = f"{UNIT_DIR}/question.txt"
-ANALYSIS_PATH = f"{UNIT_DIR}/analysis.txt"
+COMMENT_PATH = f"{UNIT_DIR}/comment.txt"
 
 
 def make_issue(number=1) -> Issue:
@@ -218,7 +218,7 @@ def test_dispatch_resets_the_question_file_before_every_dispatch():
     assert runner.ran(f"sudo rm -f {QUESTION_PATH}")
 
 
-def test_dispatch_writes_an_mcp_config_naming_the_analysis_path():
+def test_dispatch_writes_an_mcp_config_naming_the_comment_path():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
              remote_url=REMOTE_URL, token=TOKEN)
@@ -228,18 +228,18 @@ def test_dispatch_writes_an_mcp_config_naming_the_analysis_path():
     )
     mcp_config = json.loads(mcp_stdin)
     server = mcp_config["mcpServers"]["grain-sandbox"]
-    assert server["args"][server["args"].index("--analysis-path") + 1] == ANALYSIS_PATH
+    assert server["args"][server["args"].index("--comment-path") + 1] == COMMENT_PATH
 
 
-def test_dispatch_resets_the_analysis_file_before_every_dispatch():
+def test_dispatch_resets_the_comment_file_before_every_dispatch():
     """Same reset discipline as the question file, for the same reason
-    (bwsalmon/agents#50): a leftover completed-analysis summary from an
-    earlier, unrelated task must never survive into this one.
+    (bwsalmon/agents#50): a leftover comment from an earlier, unrelated
+    task must never survive into this one.
     """
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
              remote_url=REMOTE_URL, token=TOKEN)
-    assert runner.ran(f"sudo rm -f {ANALYSIS_PATH}")
+    assert runner.ran(f"sudo rm -f {COMMENT_PATH}")
 
 
 def test_dispatch_includes_the_issue_conversation_in_the_prompt():
@@ -275,7 +275,7 @@ def test_dispatch_prompt_points_a_blocked_agent_at_ask_question():
     assert "ask_question" in prompt_stdin
 
 
-def test_dispatch_prompt_points_an_agent_at_complete_analysis():
+def test_dispatch_prompt_points_an_agent_at_comment_on_issue():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
              remote_url=REMOTE_URL, token=TOKEN)
@@ -283,7 +283,7 @@ def test_dispatch_prompt_points_an_agent_at_complete_analysis():
         stdin for argv, stdin in runner.calls
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
-    assert "complete_analysis" in prompt_stdin
+    assert "comment_on_issue" in prompt_stdin
 
 
 def test_dispatch_prepares_credentials_and_workspace_before_the_prompt():
@@ -324,7 +324,7 @@ def test_dispatch_runs_claude_from_opt_grain_with_only_mcp_and_native_exceptions
     assert "mcp__grain-sandbox__run_command" in unit_call
     assert "mcp__grain-sandbox__edit_file" in unit_call
     assert "mcp__grain-sandbox__ask_question" in unit_call
-    assert "mcp__grain-sandbox__complete_analysis" in unit_call
+    assert "mcp__grain-sandbox__comment_on_issue" in unit_call
     assert "--allowedTools" in unit_call and "Task" in unit_call
     assert "--no-session-persistence" in unit_call
     # The permission-mode flag existed only to auto-approve the native

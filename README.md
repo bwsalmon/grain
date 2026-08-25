@@ -58,7 +58,7 @@ dedicated unprivileged `grain-agent` account, with:
   the *assigned* sandbox's workspace, over SSH — the sandbox's address,
   user, and key are baked into the MCP server's argv at dispatch time,
   never into a tool call's own arguments. `ask_question` and
-  `complete_analysis` are different: neither ever touches the sandbox at
+  `comment_on_issue` are different: neither ever touches the sandbox at
   all, and both only ever write to a local file on the controller for the
   orchestrator to relay as a GitHub comment (see "Asking the human a
   question" and "Analysis-only tasks" below) — the agent still gets no
@@ -109,13 +109,21 @@ only thing that posts the comment, and only from this one path
 
 Not every task is a code change. One filed only as a question, an
 investigation, or a request for a recommendation can end with a call to the
-`complete_analysis` MCP tool instead of a `git push` (bwsalmon/agents#50).
-That works exactly like `ask_question`'s file handoff — `dispatch.py`
-resets a fixed per-unit file before every dispatch, the tool call writes
-the summary there, and once the unit finishes, `core.py`'s sweep reads it
-back — but the outcome is different: the summary is posted as a `🤖`-signed
-comment on the task issue and the issue is closed outright, with no branch
-ever checked and no pull request opened. Nothing is left pending
+`comment_on_issue` MCP tool instead of a `git push` (bwsalmon/agents#50,
+reworked by bwsalmon/agents#89). That works like `ask_question`'s file
+handoff — `dispatch.py` resets a fixed per-unit file before every dispatch,
+the tool call writes the comment there, and once the unit finishes,
+`core.py`'s sweep reads it back — but what happens with it depends on the
+branch, which is always checked first: if the agent never pushed anything,
+the comment is posted as a `🤖`-signed comment on the task issue instead of
+a pull request, and the task is tagged `grain-agent-completed` without the
+issue itself being closed. If the agent *did* push commits, a pull request
+opens for them exactly as it would without any comment at all — calling
+`comment_on_issue` never suppresses a pull request the branch actually
+earned, which is what `complete_analysis` (its predecessor) used to get
+wrong: it skipped the branch check outright whenever the agent called it,
+so an agent confused about which tool to call at the end of a task could
+push real commits and still lose the PR. Nothing is left pending
 afterwards, unlike a question — there is no reply to wait for.
 
 ## Documentation

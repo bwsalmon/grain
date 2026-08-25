@@ -1337,3 +1337,41 @@ is the hook `_sweep` wires in, and `_finish_cancelled` handles the result:
 mid-flight forever, but unlike `_requeue`'s failed/stranded handling the
 trigger label never goes back on — a closed issue must not come back for
 redispatch.
+
+## 21. Stop letting an agent's own signal decide whether a PR opens
+
+- [x] Done
+
+bwsalmon/agents#89: `complete_analysis` (item 12's sibling, bwsalmon/agents#50)
+was checked *before* the branch in `_finish_succeeded_issue` and, if the
+agent had called it at all, skipped the branch check outright. That made
+the tool call and the branch two signals that could disagree, and in
+practice they did — an agent that pushed real commits and then also
+(mistakenly, the common failure mode the issue was filed over) called
+`complete_analysis` at the end had `core.py` silently drop the PR those
+commits earned, since the file-based signal won regardless of what was
+actually on the branch.
+
+**The fix is to stop trusting a self-report for something already
+verifiable.** The branch is now checked first, unconditionally, in every
+case — exactly the "verify, don't trust" bar item 2 already set for
+whether a branch exists at all, just applied one step further to whether
+the *no-PR* outcome is legitimate too. The tool (renamed `comment_on_issue`
+to match: it no longer marks a task as an analysis, it just leaves a
+comment) still records its argument to the same kind of fixed per-unit
+file `ask_question` already uses, and `core.py`'s sweep still reads it
+back, but only ever *after* `get_branch_head` has already come back empty
+— a comment can request the no-PR outcome, but only when the branch
+actually is empty; it can never override a branch that has real commits on
+it. A comment left with real commits on the branch is simply not consulted
+at all: the PR opens exactly as it would if the agent had never called the
+tool, since a pushed branch has never needed anything to explain it.
+
+An empty branch with *no* comment still requeues exactly as before item 12
+ever added an analysis path at all: "the agent said nothing and pushed
+nothing" is still a run worth retrying, not a silent success, and this
+issue never asked for that safety net to go away. `_finish_analysis`
+(the handler that used to run whenever `complete_analysis` had been called,
+branch or not) is now `_finish_no_changes`, only ever reached once the
+branch check has already ruled out a PR — its own docstring covers what
+was renamed and why.

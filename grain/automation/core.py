@@ -46,10 +46,10 @@ anything itself, and a dedicated poll, `_close_finished_prs`, checks every
 such record each `run_once` and closes the ones whose PR itself now reads
 `state == "closed"`. `completed_label` goes on immediately either way — it
 marks the agent's own contribution as finished, independent of whether the
-issue itself ever auto-closes (an analysis, `_finish_analysis`, gets the same
-label but is never auto-closed at all: bwsalmon/agents#54 asked for that
-explicitly, since an analysis has no PR whose merge/close is a natural
-"done" signal to wait on).
+issue itself ever auto-closes (a no-branch finish, `_finish_no_changes`,
+gets the same label but is never auto-closed at all: bwsalmon/agents#54
+asked for that explicitly, since it has no PR whose merge/close is a
+natural "done" signal to wait on).
 
 **One task repo, many target repos.** The repo polled above is the *task
 repo* — a queue of issues for the agent set, not the code being changed.
@@ -129,7 +129,7 @@ from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
 from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
-    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, analysis_path, branch_name, dispatch,
+    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, comment_path, dispatch,
     dispatch_pr, question_path, unit_name,
 )
 from .gemini_keys import GeminiKeyConfig
@@ -232,15 +232,20 @@ def _pending_question(sandbox: str) -> str | None:
     return text or None
 
 
-def _pending_analysis(sandbox: str) -> str | None:
-    """Reads back a `complete_analysis` call, if the agent made one this
-    run (bwsalmon/agents#50) -- the same file-based handoff `_pending_question`
+def _pending_comment(sandbox: str) -> str | None:
+    """Reads back a `comment_on_issue` call, if the agent made one this run
+    (bwsalmon/agents#50) -- the same file-based handoff `_pending_question`
     already uses for `ask_question`: `mcp_server.py`'s tool and this read
     both run on the controller, so no `Runner`/SSH is involved, and absence
-    just means "no analysis to report," never an exception.
+    just means "no comment to post," never an exception.
+
+    bwsalmon/agents#89: this alone no longer decides whether a PR opens --
+    see `_finish_succeeded_issue`, which now always checks the branch
+    first and only falls back to this comment once that branch turns out
+    to have nothing on it.
     """
     try:
-        text = Path(analysis_path(unit_name(sandbox))).read_text().strip()
+        text = Path(comment_path(unit_name(sandbox))).read_text().strip()
     except OSError:
         return None
     return text or None
@@ -494,13 +499,22 @@ class Orchestrator:
             self._finish_succeeded_issue(outcome)
 
     def _finish_succeeded_issue(self, outcome: Outcome) -> None:
+        """bwsalmon/agents#89: the branch is always checked first now, and
+        it alone decides whether a PR gets opened -- `comment_on_issue`
+        (bwsalmon/agents#50) used to be checked *before* the branch and,
+        if the agent had called it, short-circuited the branch check
+        entirely. That made the two signals disagreeable: an agent that
+        pushed real commits and then also (mistakenly, the common failure
+        mode this issue was filed over) called `comment_on_issue` at the
+        end had its PR silently dropped, since the file-based comment won
+        regardless of what was actually on the branch. Checking the branch
+        first and treating a pending comment only as a fallback for when
+        that branch turns out empty means a comment can never suppress a
+        PR that real commits earned.
+        """
         question = _pending_question(outcome.sandbox)
         if question is not None:
             self._finish_question(outcome, question)
-            return
-        analysis = _pending_analysis(outcome.sandbox)
-        if analysis is not None:
-            self._finish_analysis(outcome, analysis)
             return
         target = self._target_of(outcome)
         branch = branch_name(outcome.issue)
@@ -510,8 +524,15 @@ class Orchestrator:
             # can be opened" — the agent may never have pushed, or pushed
             # somewhere other than the branch dispatch() told it to. Verify,
             # don't trust (docs/roadmap.md item 2), and make the gap visible
-            # rather than treating a branchless "success" as done.
-            self._requeue(outcome, f"succeeded but branch {branch!r} does not exist")
+            # rather than treating a branchless "success" as done -- unless
+            # the agent left a comment explaining why there's nothing to
+            # push, in which case an empty branch is the expected shape of
+            # a research-only task, not a failure to retry.
+            comment = _pending_comment(outcome.sandbox)
+            if comment is None:
+                self._requeue(outcome, f"succeeded but branch {branch!r} does not exist")
+            else:
+                self._finish_no_changes(outcome, comment)
             return
 
         # PR first, in-progress label off second: if create_pull_request
@@ -681,23 +702,28 @@ class Orchestrator:
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"asked a question, awaiting reply: {question[:200]!r}")
 
-    def _finish_analysis(self, outcome: Outcome, summary: str) -> None:
-        """The agent called `complete_analysis` instead of pushing a branch
-        (bwsalmon/agents#50) -- some tasks only ever needed an answer, an
-        investigation, or a recommendation, not a code change, and forcing
-        those through the branch/PR path is a poor fit. Unlike
-        `_finish_question`, this is a genuine finish, not a park: the
-        summary is posted as a comment, the same "post first, then update
-        state" order `_finish_succeeded_issue`'s own PR path already uses --
-        if `create_comment` fails partway there is nothing yet to roll back.
-        No branch is ever checked and no PR is opened; that is the whole
-        point of this path over the default one.
+    def _finish_no_changes(self, outcome: Outcome, comment: str) -> None:
+        """The agent finished without ever pushing a branch, and left a
+        `comment_on_issue` comment behind explaining why (bwsalmon/agents#50,
+        reworked by bwsalmon/agents#89) -- some tasks only ever needed an
+        answer, an investigation, or a recommendation, not a code change,
+        and forcing those through the branch/PR path is a poor fit. Only
+        ever called from `_finish_succeeded_issue` once its own branch
+        check has already come back empty, so there is nothing left to
+        verify here -- unlike the old `complete_analysis` tool this
+        replaced, a comment on its own never gets this far if the branch
+        actually had commits on it.
 
-        The issue itself is *not* closed (bwsalmon/agents#54): an analysis
+        Unlike `_finish_question`, this is a genuine finish, not a park:
+        the comment is posted, the same "post first, then update state"
+        order `_finish_succeeded_issue`'s own PR path already uses -- if
+        `create_comment` fails partway there is nothing yet to roll back.
+
+        The issue itself is *not* closed (bwsalmon/agents#54): this path
         only ever produced an answer, not a change for anyone to review or
         merge, so there is no later event to wait on the way a PR's own
         close is for the fresh-branch path -- closing it outright here would
-        make it easy to miss before anyone's actually read the summary. Only
+        make it easy to miss before anyone's actually read the comment. Only
         `completed_label` marks it as agent-done; a human closes it by hand
         once they're satisfied.
 
@@ -711,17 +737,17 @@ class Orchestrator:
             self.github.create_comment(
                 task.owner, task.name, outcome.issue,
                 f"{_AUTOMATION_SIGNATURE}\n\n"
-                "This task has been completed as an analysis -- no code "
-                f"change was needed:\n\n{summary}",
+                "This task has been completed with no code change -- "
+                f"nothing was pushed:\n\n{comment}",
             )
         except GitHubError as exc:
             if exc.status != 404:
                 raise
             self.audit.record(
                 sandbox=outcome.sandbox, issue=outcome.issue,
-                outcome=f"completed analysis but issue #{outcome.issue} not found in "
+                outcome=f"finished with no changes but issue #{outcome.issue} not found in "
                         f"{task.owner}/{task.name} -- stale assignment? "
-                        f"summary was: {summary[:200]!r}",
+                        f"comment was: {comment[:200]!r}",
             )
             return
         self.github.add_label(
@@ -733,7 +759,7 @@ class Orchestrator:
             outcome.issue, self.config.in_progress_label,
         )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
-                           outcome=f"completed analysis: {summary[:200]!r}")
+                           outcome=f"finished with no changes: {comment[:200]!r}")
 
     # --- pending questions (docs/roadmap.md item 13) ---------------------
 
