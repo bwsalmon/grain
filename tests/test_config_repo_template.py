@@ -118,6 +118,29 @@ def test_sync_source_retries_its_git_commands():
     assert "retry git -C" in body and "fetch" in body
 
 
+def test_run_bootstrap_dumps_storage_diagnostics_on_failure():
+    """Found live: a "Cannot access storage file ... Permission denied"
+    failure kept recurring through three straight AppArmor/SELinux fixes,
+    and the operator hitting it lacked osLoginExternalUser -- so SSH/IAP
+    couldn't confirm the actual file owner vs. what qemu.conf expects
+    either. deploy.sh's own stdout, which already reaches Cloud Logging,
+    is the one channel guaranteed reachable -- so a bootstrap failure
+    dumps the storage ownership facts there instead of just a traceback.
+    """
+    deploy_sh = DEPLOY_SH.read_text()
+    diag = re.search(r"^dump_storage_diagnostics\(\) \{.*?\n\}", deploy_sh, re.S | re.M)
+    assert diag, "dump_storage_diagnostics() function not found"
+    body = diag.group(0)
+    assert "qemu.conf" in body
+    assert "dynamic_ownership" in body
+    assert "getent passwd" in body and "getent group" in body
+
+    run_bootstrap = re.search(r"^run_bootstrap\(\) \{.*?\n\}", deploy_sh, re.S | re.M)
+    assert run_bootstrap, "run_bootstrap() function not found"
+    assert "dump_storage_diagnostics" in run_bootstrap.group(0), \
+        "run_bootstrap never calls dump_storage_diagnostics on failure"
+
+
 def test_startup_installs_ops_agent_and_ships_the_full_journal():
     """Found live: a real deploy failure was undiagnosable from CI's own
     guest-attribute summary (a bare "exit=N"), and journalctl -u
