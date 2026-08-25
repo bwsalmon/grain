@@ -51,7 +51,7 @@ variable "machine_type" {
     virtualization -- N1, N2, N2D, C2, C3, or M-series. E2 does not.
     docs/design.md sizes the reference deployment at n2-highmem-4.
   EOT
-  default = "n2-highmem-4"
+  default     = "n2-highmem-4"
 }
 
 variable "boot_image" {
@@ -74,7 +74,7 @@ variable "data_disk_gb" {
     with every credential and all automation state. Size it for the base
     image plus each guest's disk_gb.
   EOT
-  default = 200
+  default     = 200
 }
 
 variable "data_disk_type" {
@@ -91,7 +91,7 @@ variable "enable_shielded_vm" {
     virtualization on this image; turn it on and confirm /dev/kvm still
     appears before relying on it.
   EOT
-  default = false
+  default     = false
 }
 
 variable "deploy_generation" {
@@ -101,7 +101,7 @@ variable "deploy_generation" {
     service watches it and redeploys whenever it changes; CI sets it to
     the commit SHA, which is what makes a push to this repo roll out.
   EOT
-  default = "manual"
+  default     = "manual"
 }
 
 # ---------------------------------------------------------------- network --
@@ -130,7 +130,7 @@ variable "subnet_cidr" {
     CIDR for the created subnet. Must not overlap the *guest* subnet grain
     runs inside the host (10.100.0.0/24 by default, see cluster.toml).
   EOT
-  default = "10.20.0.0/24"
+  default     = "10.20.0.0/24"
 }
 
 variable "assign_external_ip" {
@@ -140,7 +140,7 @@ variable "assign_external_ip" {
     Debian mirror, and the Anthropic API either way; set this false and
     enable_cloud_nat true to get that without an inbound-reachable address.
   EOT
-  default = true
+  default     = true
 }
 
 variable "enable_cloud_nat" {
@@ -156,7 +156,7 @@ variable "ssh_source_ranges" {
     so SSH goes through `gcloud compute ssh --tunnel-through-iap` and port
     22 is not open to the internet. Add your office CIDR to widen it.
   EOT
-  default = ["35.235.240.0/20"]
+  default     = ["35.235.240.0/20"]
 }
 
 # ------------------------------------------------------------------- IAM ---
@@ -188,7 +188,7 @@ variable "agent_service_account_roles" {
     roles/iam.serviceAccountTokenCreator on it -- but see the README:
     pointing grain's metadata server at it still needs one manual step.
   EOT
-  default = []
+  default     = []
 }
 
 variable "agent_can_manage_compute_instances" {
@@ -249,7 +249,7 @@ variable "cluster_overrides" {
     sandbox_mem_mb, ...). Values are emitted as TOML: bare if they look
     numeric, quoted otherwise.
   EOT
-  default = {}
+  default     = {}
 }
 
 variable "config_repo" {
@@ -259,7 +259,7 @@ variable "config_repo" {
     github.repository; set it in the tfvars only if you run Terraform by
     hand. It is the default task repo -- see task_repo.
   EOT
-  default = ""
+  default     = ""
 }
 
 variable "task_repo" {
@@ -270,7 +270,7 @@ variable "task_repo" {
     so an issue filed here and labelled `grain-agent` becomes a task. Set
     it only to point the deployment at a separate task repo.
   EOT
-  default = ""
+  default     = ""
 }
 
 variable "target_repos" {
@@ -280,7 +280,7 @@ variable "target_repos" {
     issue. Leave empty for a single-repo deployment: the task repo
     becomes the only target.
   EOT
-  default = []
+  default     = []
 }
 
 variable "default_target_repo" {
