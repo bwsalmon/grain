@@ -481,6 +481,20 @@ class Orchestrator:
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
         )
+        # bwsalmon/agents#85: a human can add or remove labels while an
+        # issue is already in progress. `_dispatch`'s own poll is immune to
+        # that in the moment -- it's gated on `AutomationState.in_progress_issues()`,
+        # not on GitHub's labels, so re-applying `trigger_label` mid-run
+        # doesn't cause a second dispatch of the same run. But if it's still
+        # on the issue once this run finishes, the *next* poll would treat a
+        # task that just completed as a fresh, never-run one. Stripped here
+        # defensively, alongside `in_progress_label` -- `remove_label`
+        # already tolerates the overwhelmingly common case where it was
+        # never re-applied at all (a 404, treated as success).
+        self.github.remove_label(
+            task.owner, task.name,
+            outcome.issue, self.config.trigger_label,
+        )
         self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number)
         # bwsalmon/agents#51: persist the open-PR record right after the
         # label moves that go with it, before anything later in this cycle
@@ -527,6 +541,13 @@ class Orchestrator:
         self.github.remove_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
+        )
+        # bwsalmon/agents#85: see `_finish_succeeded_issue`'s comment --
+        # strips a `trigger_label` a human may have re-applied mid-run, so
+        # a finished task isn't picked up again on the next poll.
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.trigger_label,
         )
         self.audit.record(
             sandbox=outcome.sandbox, issue=outcome.issue,
@@ -586,6 +607,14 @@ class Orchestrator:
         self.github.add_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.awaiting_reply_label,
+        )
+        # bwsalmon/agents#85: see `_finish_succeeded_issue`'s comment --
+        # strips a `trigger_label` a human may have re-applied mid-run.
+        # Without this, the next poll would redispatch the very question
+        # this task is now waiting on a human to answer.
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.trigger_label,
         )
         self.state.record_pending_question(
             outcome.issue, comment_id, kind=outcome.kind, branch=outcome.branch,
@@ -650,6 +679,12 @@ class Orchestrator:
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
+        )
+        # bwsalmon/agents#85: see `_finish_succeeded_issue`'s comment --
+        # strips a `trigger_label` a human may have re-applied mid-run.
+        self.github.remove_label(
+            task.owner, task.name,
+            outcome.issue, self.config.trigger_label,
         )
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"completed analysis: {summary[:200]!r}")

@@ -1248,3 +1248,46 @@ new `create_pull_request` call, so it's unchanged) now tells the agent
 plainly that its final commit message becomes the PR description verbatim,
 and asks for a summary line plus a paragraph of explanation — the same
 shape a human would write for a reviewer, not a `git log`-only note.
+
+## 19. Labels added or removed after a task is already in progress
+
+- [x] Done
+
+bwsalmon/agents#85 asked for a decision: what should happen when a human
+adds or removes a label on a task issue that's already been picked up and
+dispatched? The honest answer was that most of the system already had one,
+by construction, and just needed to be stated and closed where it wasn't
+quite true yet — see `docs/design.md`'s "Issue intake" section for the
+full writeup this summarizes.
+
+**Decision: every label is a dispatch-time input, snapshotted once.**
+`_resolve_target` reads `trigger_label` and every capability label
+(`gemini_key_label`, `self_debug_label`, `grain-github-<name>`) exactly
+once, at the same moment it reads the `/repo`/`/base` directives, and pins
+the result onto the `Assignment` or bakes it into the dispatched unit's
+static config. A label changed while that run is in flight has no effect
+on it — there is no live channel into a running `claude -p` process to act
+on it — and only takes effect on that issue's next dispatch. Whether an
+issue counts as "in progress" (and so is skipped by `_dispatch`'s own poll)
+is decided by the controller's own on-disk `AutomationState`, not by
+re-reading GitHub's labels, so re-applying `trigger_label` mid-run cannot
+trigger a second, concurrent dispatch of the same issue either.
+
+**The one real gap: a stray `trigger_label` outliving the run it was
+re-applied during.** `remove_label`/`add_label` calls were already
+idempotent enough that none of this crashed, but the four paths that take
+an issue out of "in progress" for good — `_finish_succeeded_issue`,
+`_finish_succeeded_pr`, `_finish_question`, `_finish_analysis` — never
+explicitly removed `trigger_label`, because under normal operation it was
+always already off. A human re-applying it mid-run (by mistake, or to mean
+"run it again after this") broke that assumption: the issue finished still
+carrying `trigger_label`, and the very next poll redispatched a task that
+had just completed, or was already parked waiting on a human's reply to a
+question. **Fixed**: all four paths now also remove `trigger_label`,
+defensively, right alongside `in_progress_label` — a no-op in the common
+case (the same 404-tolerant `remove_label` `_requeue` already relies on
+for a stale assignment), and closes the loophole in the rare one.
+`_requeue` and `_promote_answered_questions` are untouched, since they are
+the two places that intentionally put `trigger_label` back on. Covered by
+`tests/test_automation_core.py::test_a_succeeded_run_defensively_strips_a_trigger_label_reapplied_mid_run`
+and updated assertions in the existing finish-path tests.

@@ -810,6 +810,44 @@ is opened. The PR's base branch comes from the target repo's own
 one global `base_branch` setting stopped being a defensible guess once one
 deployment dispatches into many repos.
 
+**Labels changed after a task is already in progress (bwsalmon/agents#85)
+follow the same rule: read once at dispatch, immune to any edit for the
+rest of that run.** `_resolve_target` reads every capability label
+(`gemini_key_label`, `self_debug_label`, `grain-github-<name>`) exactly
+once, at the same moment it reads `/repo`/`/base`, and pins the result onto
+the `Assignment` (`gemini_key_name`) or bakes it directly into the
+dispatched unit's static config (`self_debug`, threaded through
+`dispatch.py`'s own MCP config for the sandbox's whole run). Adding or
+removing one of these mid-run has no effect on the run already in flight —
+there is no live channel back into a running `claude -p` process to change
+it — and only takes effect on that issue's *next* dispatch. The same holds
+for the state labels (`trigger_label`, `in_progress_label`,
+`awaiting_reply_label`): whether an issue counts as "in progress" is
+decided by the controller's own on-disk `AutomationState.in_progress_issues()`,
+never by re-reading GitHub's labels, so a human re-applying `trigger_label`
+to an issue that's already running cannot cause a second, concurrent
+dispatch of it.
+
+That still leaves one real gap, now closed: every terminal transition off
+an in-progress run (a fresh PR, a push to an existing PR, an
+`ask_question` park, a `complete_analysis`) removes `in_progress_label` but
+— before this fix — never touched `trigger_label`, on the assumption that
+it was already off (removed at dispatch) and nothing since would have put
+it back. A human breaking that assumption by re-applying `trigger_label`
+while the run was in flight (by mistake, or to mean "run it again after
+this") left the issue carrying `trigger_label` once the run finished, and
+the very next poll would redispatch it — a task already completed, or
+already parked awaiting a reply, run again for reasons nobody asked for.
+Each of those four finish paths (`core.py`'s `_finish_succeeded_issue`,
+`_finish_succeeded_pr`, `_finish_question`, `_finish_analysis`) now also
+removes `trigger_label` defensively. This is a no-op in the overwhelming
+common case — `remove_label` already tolerates a 404 for "the label wasn't
+there," the same tolerance `_requeue` relies on for a stale assignment —
+and closes the loophole in the rare one. `_requeue` and
+`_promote_answered_questions` are untouched: they are the two places that
+*intentionally* put `trigger_label` back on, for a retry or a resolved
+question.
+
 Polling, not `OpenHands/automation` — see
 [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
 `grain/automation/core.py` is the loop; `grain automation run-once`,

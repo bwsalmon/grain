@@ -78,13 +78,15 @@ def branch_json(message: str = DEFAULT_COMMIT_MESSAGE, sha: str = "deadbeef") ->
 
 
 def pr_flow_response(pr_number: int, *, commit_message: str = DEFAULT_COMMIT_MESSAGE) -> list[ApiResponse]:
-    """The five responses one `_finish_succeeded_issue` call consumes, in
+    """The six responses one `_finish_succeeded_issue` call consumes, in
     exact call order: `get_branch_head` (200 -> the branch is really there,
     with its head commit's own message, bwsalmon/agents#79),
     `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
     `add_label` (bwsalmon/agents#54 -- `completed_label` goes on the moment
-    the PR exists), then `remove_label` (in-progress comes off).
+    the PR exists), `remove_label` (in-progress comes off), then a second
+    `remove_label` (bwsalmon/agents#85 -- defensively strips `trigger_label`
+    in case a human re-applied it while the run was still in flight).
     `FakeTransport.responses` is a strict FIFO queue regardless of which
     call consumes each entry, so a test with more than one succeeded
     outcome needs this whole handful per outcome, in order, or a later call
@@ -102,6 +104,7 @@ def pr_flow_response(pr_number: int, *, commit_message: str = DEFAULT_COMMIT_MES
         ApiResponse(201, {}, json.dumps(
             {"number": pr_number, "html_url": f"https://github.com/o/r/pull/{pr_number}"}
         ).encode()),
+        ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
     ]
@@ -393,6 +396,7 @@ def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypa
         ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
         ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
         ApiResponse(200, {}, b"{}"),  # add_label (awaiting-reply on)
+        ApiResponse(200, {}, b"{}"),  # remove_label (trigger off, bwsalmon/agents#85)
     ])
 
     orchestrator.run_once(NOW)
@@ -418,6 +422,12 @@ def test_a_succeeded_run_that_asked_a_question_posts_a_comment_not_a_pr(monkeypa
     ]
     assert len(label_posts) == 1
     assert json.loads(label_posts[0]["body"]) == {"labels": ["grain-agent-awaiting-reply"]}
+    # bwsalmon/agents#85: in-progress comes off, and trigger is defensively
+    # stripped too (in case a human re-applied it mid-run) -- two DELETEs.
+    label_deletes = [
+        c for c in transport.calls if c["method"] == "DELETE" and "/labels/" in c["path"]
+    ]
+    assert len(label_deletes) == 2
     # Recorded so a later reply can be matched against this exact comment.
     pending = orchestrator.state.pending_questions["5"]
     assert pending.question_comment_id == 555
@@ -467,6 +477,7 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
         ApiResponse(201, {}, json.dumps({"id": 777}).encode()),  # create_comment
         ApiResponse(200, {}, b"{}"),  # remove_label
         ApiResponse(200, {}, b"{}"),  # add_label (awaiting-reply on)
+        ApiResponse(200, {}, b"{}"),  # remove_label (trigger off, bwsalmon/agents#85)
     ])
 
     orchestrator.run_once(NOW)
@@ -500,6 +511,7 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_com
         ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
         ApiResponse(200, {}, b"{}"),  # add_label (completed)
         ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+        ApiResponse(200, {}, b"{}"),  # remove_label (trigger off, bwsalmon/agents#85)
     ])
 
     orchestrator.run_once(NOW)
@@ -519,6 +531,12 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_com
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
     )
     assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    # bwsalmon/agents#85: trigger is defensively stripped alongside
+    # in-progress, in case a human re-applied it mid-run.
+    label_deletes = [
+        c for c in transport.calls if c["method"] == "DELETE" and "/labels/" in c["path"]
+    ]
+    assert len(label_deletes) == 2
     # No branch was ever checked, and no PR was opened -- the analysis path
     # short-circuits before either.
     assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
@@ -702,14 +720,43 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     )
     assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
     # The completed label goes on and the in-progress label comes off; the
-    # trigger label is never re-added for a genuinely finished run.
+    # trigger label is never re-added for a genuinely finished run, and
+    # (bwsalmon/agents#85) is defensively removed too, in case a human
+    # re-applied it while the run was still in flight.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     label_mutations = [c for c in mutating if "labels" in c["path"]]
-    assert len(label_mutations) == 2
+    assert len(label_mutations) == 3
     # The open PR is recorded so a later run can close the issue once it does.
     assert orchestrator.state.open_pull_requests == {
         "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
     }
+
+
+def test_a_succeeded_run_defensively_strips_a_trigger_label_reapplied_mid_run():
+    """bwsalmon/agents#85: a human can label (or relabel) an issue while
+    it's already in progress. `_dispatch`'s poll is immune to that in the
+    moment -- it's gated on `AutomationState.in_progress_issues()`, not on
+    GitHub's own labels -- but if `trigger_label` is still on the issue
+    once this run finishes, the very next poll would treat a task that just
+    completed as a fresh, never-run one. `_finish_succeeded_issue` must
+    remove it defensively, the same way it already removes `in_progress_label`.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+
+    orchestrator.run_once(NOW)
+
+    trigger_delete = next(
+        c for c in transport.calls
+        if c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent"
+    )
+    assert trigger_delete is not None
 
 
 def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
@@ -1018,6 +1065,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
         ApiResponse(200, {}, b"{}"),   # branch_exists("feature-x"): true
         ApiResponse(200, {}, b"{}"),   # add_label: completed
         ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
+        ApiResponse(200, {}, b"{}"),   # remove_label: trigger off (bwsalmon/agents#85)
     ])
 
     orchestrator.run_once(NOW)
@@ -1028,7 +1076,9 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     # No PR-creation call at all -- the PR this dispatch worked already existed.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 2  # completed label goes on, in-progress comes off
+    # completed label goes on, in-progress comes off, trigger defensively
+    # stripped too (bwsalmon/agents#85)
+    assert len(mutating) == 3
     completed_call = next(
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/7/labels"
