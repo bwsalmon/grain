@@ -11,7 +11,7 @@ because that dump ran on any non-zero exit at all.
 
 Same trick as that dump, aimed at the right facts this time: print them to
 stdout, which on GCP is already tailed into Cloud Logging (the host journal,
-via the ops agent -- terraform/gcp/files/startup.sh) and locally is just the
+via the ops agent -- terraform/gcp/files/deploy.sh) and locally is just the
 terminal. No SSH or IAP path to the host is needed to read either, which is
 the property that made `dump_storage_diagnostics` worth having: the operator
 hitting that failure had no such path.

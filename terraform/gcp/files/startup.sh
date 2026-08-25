@@ -72,56 +72,6 @@ UNIT
   log "grain-config-sync.service enabled"
 }
 
-# Found live: a real deploy failure was undiagnosable from CI's own guest-
-# attribute summary (a bare "exit=N"), and journalctl -u grain-config-sync
-# needs an SSH/IAP path neither the deploy identity nor an operator may
-# actually have. Cloud Logging sidesteps both -- readable from the Cloud
-# Console in a browser, using nothing but whatever IAM the viewer's own
-# account already has there. vm_service_account_roles already grants
-# logging.logWriter by default; this is what actually uses it.
-install_ops_agent() {
-  if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
-    log "installing google-cloud-ops-agent"
-    curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
-    bash add-google-cloud-ops-agent-repo.sh --also-install
-    rm -f add-google-cloud-ops-agent-repo.sh
-  fi
-
-  # No unit-name filter at the receiver level (upstream doesn't offer one)
-  # -- ships the whole systemd journal, filtered at query time instead:
-  # jsonPayload._SYSTEMD_UNIT="grain-config-sync.service" in Cloud Logging.
-  #
-  # controller_console picks up the *nested* controller VM's own logs
-  # (bwsalmon/agents#58) -- the controller runs on a separate kernel/journal
-  # one layer inside this host via libvirt/KVM, so journald above only ever
-  # covers this host's own units, never anything happening inside that
-  # guest. LibvirtAdapter's domain XML (grain/adapter/libvirt.py) points the
-  # controller's serial console at this exact path, and
-  # provision/controller.sh turns on ForwardToConsole so the controller's
-  # own journal (grain-automation.service, grain-git-proxy.service) reaches
-  # it. Hardcoded rather than derived from Terraform state: it's
-  # `LibvirtAdapter`'s own default config_dir (/var/lib/grain/instances,
-  # under this host's DATA_MNT), which nothing here overrides.
-  cat > /etc/google-cloud-ops-agent/config.yaml <<'YAML'
-logging:
-  receivers:
-    journald:
-      type: systemd_journald
-    controller_console:
-      type: files
-      include_paths:
-        - /var/lib/grain/instances/controller-console.log
-  service:
-    pipelines:
-      default_pipeline:
-        receivers: [journald, controller_console]
-YAML
-
-  systemctl restart google-cloud-ops-agent
-  log "google-cloud-ops-agent installed and forwarding the journal and the controller's console log to Cloud Logging"
-}
-
 mount_data_disk
-install_ops_agent
 install_config_sync
 log "done; watch the rollout with: journalctl -u grain-config-sync -f"

@@ -83,9 +83,10 @@ gcloud compute ssh grain-host --zone us-central1-a --tunnel-through-iap \
 
 No IAP/SSH access, or none of your accounts have it? The host also ships its
 entire systemd journal to Cloud Logging (`google-cloud-ops-agent`, installed
-by `startup.sh` -- it's what `vm_service_account_roles`'s default
-`logging.logWriter` role is actually for). Filter to just this service in
-the [Logs Explorer](https://console.cloud.google.com/logs), or:
+and configured by `deploy.sh` on every deploy -- it's what
+`vm_service_account_roles`'s default `logging.logWriter` role is actually
+for). Filter to just this service in the
+[Logs Explorer](https://console.cloud.google.com/logs), or:
 
 ```sh
 gcloud logging read \
