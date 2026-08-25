@@ -226,6 +226,24 @@ UNIT
 
 systemctl daemon-reload
 
+# --- Forward the controller's own journal to its serial console
+# (bwsalmon/agents#58). grain-automation.service and grain-git-proxy.service
+# above set no StandardOutput=, so their output already lands in the
+# journal; ForwardToConsole just gives it a second destination. That
+# destination matters because the serial console is the one place a
+# process *outside* this VM can see: `LibvirtAdapter`'s domain XML
+# (grain/adapter/libvirt.py's render_domain_xml) points the console's
+# `<log file=.../>` at a plain file on the host, which is what makes the
+# controller's logs reachable without `virsh console`ing in -- readable
+# with a plain `tail -f` on the host, and what the host-side ops-agent
+# config (terraform/gcp/files/startup.sh) tails into Cloud Logging on GCP.
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/forward-to-console.conf <<'UNIT'
+[Journal]
+ForwardToConsole=yes
+UNIT
+systemctl reload systemd-journald
+
 mkdir -p /etc/grain-tools
 cat > /etc/grain-tools/README <<'DOC'
 This is a grain controller. It holds every credential in the system
@@ -253,6 +271,9 @@ Set up by provision/controller.sh:
 - /opt/grain, empty, where this repo's code is deployed by hand
 - grain-automation.{service,timer} and grain-git-proxy.service, installed
   but not enabled
+- journald forwarding this VM's own journal to its serial console
+  (/etc/systemd/journald.conf.d/forward-to-console.conf), so the host-side
+  console log libvirt captures (grain/adapter/libvirt.py) carries it too
 
 Still manual, per docs/runbook.md's first-time setup checklist:
 - deploying this repo's code to /opt/grain

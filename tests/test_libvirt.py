@@ -79,6 +79,7 @@ def test_create_writes_seed_and_domain_xml_and_defines_it(adapter, cluster, tmp_
     assert "<vcpu>2</vcpu>" in xml
     assert "<memory unit='MiB'>8192</memory>" in xml
     assert cluster.interface_of("sandbox-0") in xml
+    assert f"<log file='{tmp_path}/sandbox-0-console.log' append='on'/>" in xml
     network_config = (tmp_path / "sandbox-0-network-config").read_text()
     assert str(cluster.address_of("sandbox-0")) in network_config
     assert "nameservers" in network_config
@@ -118,9 +119,17 @@ def test_stop_only_stops_a_running_vm(adapter):
 
 def test_domain_xml_pins_the_assigned_address_via_mac(cluster):
     spec = cluster.spec_of("sandbox-1")
-    out = render_domain_xml(cluster, spec, Path("/x/sandbox-1.qcow2"), Path("/x/sandbox-1-seed.iso"))
+    out = render_domain_xml(cluster, spec, Path("/x/sandbox-1.qcow2"), Path("/x/sandbox-1-seed.iso"),
+                             Path("/x/sandbox-1-console.log"))
     assert cluster.interface_of("sandbox-1") in out
     assert mac_for(cluster.address_of("sandbox-1")) in out
+
+
+def test_domain_xml_logs_the_serial_console_to_the_host(cluster):
+    spec = cluster.spec_of("sandbox-1")
+    out = render_domain_xml(cluster, spec, Path("/x/sandbox-1.qcow2"), Path("/x/sandbox-1-seed.iso"),
+                             Path("/x/sandbox-1-console.log"))
+    assert "<log file='/x/sandbox-1-console.log' append='on'/>" in out
 
 
 def test_mac_is_deterministic_and_distinct_per_vm(cluster):

@@ -110,6 +110,23 @@ informally reachable through whoever holds the controller's own dispatch
 key. Holding the admin *private* key is what gates this, the same way
 holding any other SSH key gates any other login.
 
+No SSH access at all (a VM that fails to boot, or a controller whose own
+git proxy/automation loop is wedged)? The controller's serial console is
+also captured to a plain file on the **host**, `virsh console` needs no
+active session for:
+
+```sh
+sudo tail -f /var/lib/grain/instances/controller-console.log
+```
+
+`provision/controller.sh` forwards the controller's own journal
+(`grain-automation.service`, `grain-git-proxy.service`) to that console;
+`LibvirtAdapter`'s domain XML (`grain/adapter/libvirt.py`) is what gives
+the console a `<log file=...>` sink on the host in the first place. On GCP
+this same file is tailed into Cloud Logging by the host's ops-agent
+(`terraform/gcp/files/startup.sh`), so it's also readable from the Cloud
+Console without SSH/IAP access to the host at all.
+
 ### Claude Code credential
 
 `claude -p` runs on the controller now, as a dedicated `grain-agent`
