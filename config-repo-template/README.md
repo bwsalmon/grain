@@ -211,15 +211,22 @@ sandboxed agent's ADC is meant to resolve to, via the metadata server the
 controller runs per sandbox — the host's own roles stay out of a sandbox's
 reach.
 
-> **Known gap.** Terraform creates that account and the impersonation
-> binding, but grain's metadata server currently reads its impersonation
-> source from a key file at `/data/secrets/gcp-service-account.json`
-> rather than from the instance's ADC, and the controller is a nested VM
-> that does not reach `169.254.169.254` by default. Until
-> [roadmap item 4](https://github.com/bwsalmon/grain/blob/main/docs/roadmap.md)
-> closes, wiring agents to this account is a manual step on the
-> controller. Leave `agent_service_account_roles` empty and none of this
-> applies.
+Terraform creates that account and the impersonation binding; wiring the
+metadata server to it needs no manual step either -- `deploy.yml` mints a
+fresh key for the account on every run and pushes it straight to the
+host's instance metadata (never a repo secret), and `deploy.sh` passes it
+to `grain host bootstrap` automatically, alongside the account's own
+email and project id. Leave `agent_service_account_roles` empty (and
+`enable_gemini_key` false) and none of this applies -- no account, no key,
+nothing pushed.
+
+A short-lived Gemini API key for a task (asked for by labelling the task
+issue `grain-gemini-key`, the same "a human decided this" trust tier the
+`grain-agent` trigger label itself carries) reuses this same account and
+key -- set `enable_gemini_key = true` to also grant it
+`roles/serviceusage.apiKeysAdmin` and enable the Generative Language API,
+both via Terraform. See grain's `docs/runbook.md`, "Enabling
+`grain-gemini-key`".
 
 ## Day two
 

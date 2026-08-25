@@ -25,7 +25,7 @@ resource "google_project_iam_member" "host" {
 # gate on agent_service_account_roles specifically.
 
 locals {
-  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances
+  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key
 
   # Only compute.instanceAdmin.v1 and compute.osLogin -- see
   # variables.tf's agent_can_manage_compute_instances for why
@@ -103,5 +103,34 @@ resource "google_project_iam_member" "agent_iap_tunnel" {
   count   = var.agent_can_manage_compute_instances ? 1 : 0
   project = var.project_id
   role    = "roles/iap.tunnelResourceAccessor"
+  member  = "serviceAccount:${google_service_account.agent[0].email}"
+}
+
+# The Generative Language API itself -- grain/automation/gemini_keys.py's
+# `apikeys.googleapis.com` calls fail with API-not-enabled until this
+# exists, same as any other GCP API. disable_on_destroy is false: a
+# `terraform destroy` (or turning enable_gemini_key back off) must not
+# reach into the project and disable an API something else in it might
+# also depend on -- the same "don't touch shared project state" instinct
+# bootstrap-gcp.sh's own comments apply elsewhere.
+resource "google_project_service" "generativelanguage" {
+  count              = var.enable_gemini_key ? 1 : 0
+  project            = var.project_id
+  service            = "generativelanguage.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Lets the agent account mint and revoke Gemini API keys
+# (grain/automation/gemini_keys.py) -- project-wide, since
+# `gcloud services api-keys create/delete` operate at the project level,
+# not against a single resource. The narrower alternative
+# (apikeys.keys.create/.delete/.get without the rest of
+# serviceusage.apiKeysAdmin) has no predefined role in GCP as of this
+# writing, so a custom role would be the only way to shave this down
+# further -- left for an operator who wants it, not the default here.
+resource "google_project_iam_member" "agent_gemini_keys" {
+  count   = var.enable_gemini_key ? 1 : 0
+  project = var.project_id
+  role    = "roles/serviceusage.apiKeysAdmin"
   member  = "serviceAccount:${google_service_account.agent[0].email}"
 }

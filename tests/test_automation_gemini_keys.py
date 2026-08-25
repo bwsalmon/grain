@@ -101,7 +101,7 @@ def test_delete_key_is_quiet_and_scoped_to_the_project():
 def test_config_defaults_to_the_shared_gcp_service_account_key_path():
     # Same default configure_gcp_service_account already writes to --
     # a deployment that set that up for the metadata broker needs no
-    # second credential just to enable /gemini-key.
+    # second credential just to enable the grain-gemini-key label.
     assert str(config().key_path) == "/data/secrets/gcp-service-account.json"
 
 

@@ -513,6 +513,7 @@ at all — which is what `grain controller configure --task-repo X` with no
 The defaults worth knowing: `trigger_label: "grain-agent"`,
 `in_progress_label: "grain-agent-in-progress"`,
 `awaiting_reply_label: "grain-agent-awaiting-reply"`,
+`gemini_key_label: "grain-gemini-key"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
 `runs_per_hour: 60`, `max_runtime_minutes: 120`. Also
 `github_host: "api.github.com"`, `git_forward_host: "github.com"`, and
@@ -623,15 +624,18 @@ comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
 
-**Add a bare `/gemini-key` line** to have a short-lived Gemini API key
+**Label a task `grain-gemini-key`** to have a short-lived Gemini API key
 minted for that task, placed in its sandbox (the prompt tells the agent
 exactly where), and revoked automatically once the task's slot frees —
-success, failure, or stranded, whichever comes first. Off by default: a
-deployment enables it once with `grain controller configure
---gemini-project-id <project>` (see `docs/runbook.md`, "Enabling
-`/gemini-key`"); a task naming it before that's done is parked with a
-comment, the same as an unlisted `/repo`. The raw key never rides in the
-prompt file, only its path in the sandbox — see
+success, failure, or stranded, whichever comes first. A label, not a body
+directive (bwsalmon/agents#49): the same "a human decided this" trust
+tier the trigger label itself carries, applied at any point before or
+during the run rather than parsed out of the issue's own untrusted text.
+Off by default: a deployment enables it once with `grain controller
+configure --gemini-project-id <project>` (see `docs/runbook.md`, "Enabling
+`grain-gemini-key`"); a task carrying the label before that's done is
+parked with a comment, the same as an unlisted `/repo`. The raw key never
+rides in the prompt file, only its path in the sandbox — see
 `grain/automation/gemini_keys.py` for why this is minted on the
 controller's own account rather than the sandbox-facing metadata broker.
 

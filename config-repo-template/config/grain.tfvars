@@ -88,6 +88,13 @@ agent_service_account_roles = [
   # "roles/storage.objectViewer",
 ]
 
+# Grants the narrow agent account above roles/serviceusage.apiKeysAdmin and
+# enables the Generative Language API, so a task labelled `grain-gemini-key`
+# can have a short-lived Gemini API key minted for it. Creates the agent
+# account even if agent_service_account_roles above is left empty. See
+# grain's docs/runbook.md, "Enabling grain-gemini-key".
+enable_gemini_key = false
+
 # -- Network ----------------------------------------------------------------
 
 create_network = true

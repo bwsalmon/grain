@@ -53,8 +53,8 @@ every outcome uniformly (succeeded, failed, stranded, and even a
 question-asking "success," since `core.py`'s `_finish_question` only
 decides *afterward* how to report an outcome this module already freed).
 `assignment.gemini_key_name` (`state.py`) is `None` for the overwhelming
-common case of no `/gemini-key` directive, so this is a no-op for every
-task that never asked for one. `delete_key` runs against `controller_runner`
+common case of no `gemini_key_label` on the task issue, so this is a
+no-op for every task that never asked for one. `delete_key` runs against `controller_runner`
 (the same account that minted it in `core.py`'s `_dispatch`), never the
 per-sandbox `runner` -- a raw GCP credential capable of revoking a key was
 never going to be handed to a sandbox to do this itself. Best-effort: a

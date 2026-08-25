@@ -207,6 +207,33 @@ variable "agent_service_account_roles" {
   default     = []
 }
 
+variable "enable_gemini_key" {
+  type        = bool
+  description = <<-EOT
+    Grants the agent account (creating it even if agent_service_account_roles
+    is left empty, the same way agent_can_manage_compute_instances already
+    does) roles/serviceusage.apiKeysAdmin on the project, and enables the
+    Generative Language API (generativelanguage.googleapis.com) -- the two
+    things grain/automation/gemini_keys.py needs to mint and revoke a
+    short-lived Gemini API key for a task carrying the grain-gemini-key
+    label (docs/runbook.md, "Enabling grain-gemini-key"; bwsalmon/agents#47,
+    #49).
+
+    This only covers the permissions and account -- it does not by itself
+    turn the feature on. That still needs the deploy workflow to have
+    minted and placed the agent account's key (it does automatically once
+    that account exists, the same way it already does for the metadata
+    broker) and grain's own gemini-key.json switch, which the on-host
+    deploy writes automatically when this is true (see instance.tf's
+    grain_config and terraform/gcp/files/deploy.sh).
+
+    Applying this needs roles/serviceusage.serviceUsageAdmin on the
+    deployer running Terraform, to enable the API -- bootstrap-gcp.sh
+    grants it.
+  EOT
+  default     = false
+}
+
 variable "agent_can_manage_compute_instances" {
   type        = bool
   description = <<-EOT

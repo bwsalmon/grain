@@ -116,8 +116,9 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     history = FileSessionHistory(data_dir / "state" / "automation" / "sessions")
     # Absence is the off switch (bwsalmon/agents#47): a deployment that
     # never ran `grain controller configure --gemini-project-id ...` has no
-    # such file, and `Orchestrator._resolve_target` refuses a `/gemini-key`
-    # directive with an explanation rather than guessing at a project.
+    # such file, and `Orchestrator._resolve_target` refuses a task carrying
+    # `gemini_key_label` with an explanation rather than guessing at a
+    # project.
     gemini_key_config_path = data_dir / "config" / "gemini-key.json"
     gemini_key_config = (
         GeminiKeyConfig.load(gemini_key_config_path)
@@ -525,7 +526,8 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     if args.gemini_project_id:
         # Reuses the primary key --gcp-service-account-key-file already
         # placed (bwsalmon/agents#47, gemini_keys.py) -- no separate
-        # credential step, only the project id that turns `/gemini-key` on.
+        # credential step, only the project id that turns the
+        # grain-gemini-key task label on.
         configure_gemini_key(ssh, args.gemini_project_id)
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
@@ -564,6 +566,7 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         gcp_agent_service_account_email=args.gcp_agent_service_account_email,
         gcp_project_id=args.gcp_project_id,
         gcp_numeric_project_id=args.gcp_numeric_project_id,
+        gemini_project_id=args.gemini_project_id,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
@@ -828,6 +831,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="GCP project id -- required with --gcp-service-account-key-file")
     p.add_argument("--gcp-numeric-project-id", type=int, default=0,
                     help="GCP numeric project id (default: 0, i.e. omitted)")
+    p.add_argument("--gemini-project-id",
+                    help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
+                         "GCP project a short-lived Gemini API key is minted in for a task "
+                         "that carries it. Reuses the key --gcp-service-account-key-file "
+                         "already placed -- pass that too")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
@@ -950,9 +958,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gcp-numeric-project-id", type=int, default=0,
                     help="GCP numeric project id (default: 0, i.e. omitted)")
     p.add_argument("--gemini-project-id",
-                    help="enables the /gemini-key task directive (bwsalmon/agents#47): the "
+                    help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
                          "GCP project a short-lived Gemini API key is minted in for a task "
-                         "that asks for one. Reuses the key --gcp-service-account-key-file "
+                         "that carries it. Reuses the key --gcp-service-account-key-file "
                          "already placed -- run that first")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "

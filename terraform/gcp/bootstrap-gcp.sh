@@ -95,12 +95,17 @@ say "Granting the deployer what Terraform needs"
 # terraform/: the instance and network, the host's service account, and
 # the IAM bindings that account gets. No Secret Manager role: the two
 # runtime credentials go straight into instance metadata, which
-# compute.admin already covers.
+# compute.admin already covers. serviceusage.serviceUsageAdmin (distinct
+# from the serviceUsageConsumer below) is what lets Terraform's own
+# google_project_service.generativelanguage (iam.tf, enable_gemini_key)
+# turn an API on -- serviceUsageConsumer only covers *using* an
+# already-enabled one.
 for role in \
   roles/compute.admin \
   roles/iam.serviceAccountAdmin \
   roles/iam.serviceAccountUser \
   roles/resourcemanager.projectIamAdmin \
+  roles/serviceusage.serviceUsageAdmin \
   roles/serviceusage.serviceUsageConsumer
 do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \

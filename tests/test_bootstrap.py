@@ -341,6 +341,46 @@ def test_gcp_key_reaches_the_controller_and_starts_each_sandboxs_metadata_server
     )
 
 
+def test_gemini_project_id_writes_gemini_key_config_on_the_controller(env):
+    """bwsalmon/agents#49: terraform's enable_gemini_key flows through
+    grain-config's gemini_project_id into `host bootstrap`, which must
+    place /data/config/gemini-key.json the same way `grain controller
+    configure --gemini-project-id` already does by hand.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets",
+        gcp_service_account_key='{"type": "service_account"}',
+        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        gcp_project_id="acme",
+        gemini_project_id="acme",
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    assert any(
+        c.startswith(controller_prefix) and "gemini-key.json" in c
+        for c in runner.commands
+    )
+
+
+def test_no_gemini_project_id_never_writes_gemini_key_config(env):
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not any("gemini-key.json" in c for c in runner.commands)
+
+
 def test_metadata_server_start_is_skipped_when_already_active(env):
     """MetadataLauncher.start()'s own docstring: systemd-run refuses to
     reuse a unit name still active, so a bootstrap re-run has to check
