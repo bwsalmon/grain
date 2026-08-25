@@ -332,7 +332,7 @@ periodically by something else, not run as a daemon** — `docs/design.md`
 says "invoked by a systemd timer."
 
 **That timer is now shipped**: `provision/controller.sh` installs
-`grain-automation.service`/`.timer` (a two-minute `OnUnitActiveSec`, same
+`grain-automation.service`/`.timer` (a 30-second `OnUnitActiveSec`, same
 shape this section used to hand-draft) and `grain-git-proxy.service`, all
 disabled until step 12 of the first-time setup checklist enables them —
 they can't do anything useful before `/opt/grain` holds real code and
