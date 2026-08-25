@@ -316,6 +316,19 @@ def test_agent_account_exists_for_compute_only_mode_with_no_metadata_server_role
     assert "length(var.agent_service_account_roles) > 0 ?" not in source
 
 
+def test_os_login_is_toggleable():
+    """Found live: OS Login being on by default means every SSH session
+    needs roles/compute.osLogin, or roles/compute.osLoginExternalUser (an
+    organization-level grant) for an identity outside the project's org
+    -- a real operator hit that wall with no self-service way out.
+    enable_os_login has to exist and actually reach the instance's own
+    metadata, not just be declared and ignored.
+    """
+    source = _tf_source()
+    assert re.search(r'variable "enable_os_login" \{', source)
+    assert "var.enable_os_login" in (TERRAFORM / "instance.tf").read_text()
+
+
 def test_grain_config_publishes_the_agent_service_account_email():
     instance = (TERRAFORM / "instance.tf").read_text()
     assert "agent_service_account_email" in instance
