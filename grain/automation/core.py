@@ -8,6 +8,8 @@ docs/design.md" convention:
     for one more `run-once` interval — a *successful* sweep also verifies
     the pushed branch and opens the PR, since that is the other half of
     "this run is really done", not a separate pass,
+    poll every task issue with a PR still open for it (bwsalmon/agents#54)
+    and close the ones whose PR has itself closed since,
     list open trigger-labelled issues in the *task repo* not already
     tracked as in-progress, oldest first, so a backlog drains in the order
     it was filed, resolving each one's target repo from its own text,
@@ -31,6 +33,20 @@ since the prompt it received came from untrusted issue content
 through the same `_requeue` path as a failed or stranded run: `sweeper.py`
 still knows nothing about GitHub, and a run that produced nothing usable is
 not meaningfully different from one that failed outright.
+
+Closing the task issue is *not* a `_sweep`-side concern, though (bwsalmon/agents#54):
+opening a PR only proves the agent's own part is done, not that the task
+itself is — that is true once a human has reviewed and merged (or decided to
+close without merging) the PR it produced. `_finish_succeeded_issue` records
+that PR against the issue (`state.py`'s `OpenPullRequest`) instead of closing
+anything itself, and a dedicated poll, `_close_finished_prs`, checks every
+such record each `run_once` and closes the ones whose PR itself now reads
+`state == "closed"`. `completed_label` goes on immediately either way — it
+marks the agent's own contribution as finished, independent of whether the
+issue itself ever auto-closes (an analysis, `_finish_analysis`, gets the same
+label but is never auto-closed at all: bwsalmon/agents#54 asked for that
+explicitly, since an analysis has no PR whose merge/close is a natural
+"done" signal to wait on).
 
 **One task repo, many target repos.** The repo polled above is the *task
 repo* — a queue of issues for the agent set, not the code being changed.
@@ -198,10 +214,10 @@ class ResolvedTask:
     repo: RepoRef
     pr: PullRequestDetail | None
     base: str
-    # Whether the task's text carried a `/gemini-key` directive
-    # (bwsalmon/agents#47) -- `_resolve_target` already refuses one this
-    # deployment can't honour (no `GeminiKeyConfig` configured), so by the
-    # time this reaches `_dispatch` it is always safe to act on.
+    # Whether the task issue carried `config.gemini_key_label`
+    # (bwsalmon/agents#47, #49) -- `_resolve_target` already refuses one
+    # this deployment can't honour (no `GeminiKeyConfig` configured), so by
+    # the time this reaches `_dispatch` it is always safe to act on.
     gemini_key: bool = False
     # The named credential a `grain-github-<name>` label asked for
     # (bwsalmon/agents#52), or `None` for the overwhelming common case of no
@@ -242,10 +258,10 @@ class Orchestrator:
     # real `SshRunner` per sandbox; a test can inject a lookup straight to
     # per-sandbox fakes without needing to match SshRunner's exact argv.
     ssh_runner_factory: Callable[[str], Runner] | None = None
-    # bwsalmon/agents#47: the on/off switch for `/gemini-key`. `None`
+    # bwsalmon/agents#47: the on/off switch for `gemini_key_label`. `None`
     # (production's default for a deployment that never ran `grain
     # controller configure --gemini-project-id ...`) makes `_resolve_target`
-    # refuse the directive with an explanation, the same "unusable directive
+    # refuse the label with an explanation, the same "unusable request
     # parks the task" shape an unlisted `/repo` already gets — see
     # `gemini_keys.py`'s own docstring for why this lives on the controller
     # account, never a sandbox's.
@@ -265,12 +281,46 @@ class Orchestrator:
     # lifecycle. `None` alongside `credentials=None` above for the same
     # "feature not wired" reason.
     credential_store: SandboxCredentialStore | None = None
+    # bwsalmon/agents#51: where to persist `AutomationState` immediately
+    # after each mutation, not just once at the very end of `run_once`
+    # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
+    # final, redundant safety net). `None` is what every existing test
+    # helper leaves this at -- those only ever assert against
+    # `orchestrator.state` in memory, never against a file on disk, so
+    # `_save_state` below is a no-op for them. Production (`cli.py`'s
+    # `build_orchestrator`) always sets this to the real state path.
+    #
+    # Why this matters: a controller VM can be restarted (or recreated)
+    # at any moment, including mid-`run_once` -- that is the whole premise
+    # of the stranded-work sweeper (docs/design.md: "if the host is
+    # stopped, or a run dies mid-flight"). Before this field existed, the
+    # *only* place `AutomationState` hit disk was one `state.save()` call
+    # after `run_once` returned in full. A crash between an in-memory
+    # `state.assign()` in `_dispatch` and that final save was invisible to
+    # every recovery path: the real GitHub side effect that follows it
+    # (`remove_label` off the trigger label) had already landed, so the
+    # issue would never again show up in `_dispatch`'s own poll (it no
+    # longer carries the trigger label) *and* the freshly-dispatched
+    # assignment naming it was never written to disk, so the sweeper could
+    # never find it stranded either -- a task genuinely lost forever, with
+    # no audit trail and no automatic recovery. Persisting right after each
+    # `state.assign()`/`sweep()` call, before the GitHub side effect that
+    # depends on it, closes that gap: whichever side of the crash the
+    # process lands on, the *persisted* state is never behind a
+    # already-committed GitHub side effect, so the next `run_once` either
+    # sees the assignment (and the sweep's `UnitState.ABSENT` case reclaims
+    # it as stranded) or never removed the trigger label to begin with.
+    state_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
             self.audit = NullAuditLog()
         if self.history is None:
             self.history = NullSessionHistory()
+
+    def _save_state(self) -> None:
+        if self.state_path is not None:
+            self.state.save(self.state_path)
 
     def _ssh_runner_for(self, sandbox: str) -> Runner:
         if self.ssh_runner_factory is not None:
@@ -313,6 +363,7 @@ class Orchestrator:
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
         self._promote_answered_questions(now)
+        self._close_finished_prs()
         self._dispatch(now)
 
     # --- sweep --------------------------------------------------------
@@ -321,6 +372,13 @@ class Orchestrator:
                         self.config, now, history=self.history,
                         gemini_key_config=self.gemini_key_config,
                         credential_store=self.credential_store)
+        # `sweep()` already called `state.release()` in memory for every
+        # outcome above -- persist that now, before any of the GitHub calls
+        # below (a PR, a label move) make this run's outcome irreversible.
+        # See `state_path`'s own docstring (bwsalmon/agents#51) for why this
+        # ordering, not just the fact of saving, is what actually closes the
+        # crash gap.
+        self._save_state()
         for outcome in result.succeeded:
             self._finish_succeeded(outcome)
         for outcome in (*result.failed, *result.stranded):
@@ -378,7 +436,10 @@ class Orchestrator:
         # cross-repo link/mention on the issue even though (bwsalmon/agents#23)
         # a qualified `Closes` reference never auto-closes across repos —
         # GitHub only auto-closes within the same repo the PR is opened in.
-        # The task issue is closed explicitly below instead.
+        # The task issue is closed once that PR itself closes instead
+        # (bwsalmon/agents#54, `_close_finished_prs`), not the moment it's
+        # opened -- opening a PR is not the same claim as "this task is
+        # done," only "a human can review it now."
         task = self._task
         # The issue's title isn't on hand here — `Outcome` only carries the
         # number (see sweeper.py's `Outcome` docstring on what does and
@@ -395,14 +456,25 @@ class Orchestrator:
                  f"task {task}#{outcome.issue} finished on {outcome.sandbox}."
                  f"\n\n---\n{_AUTOMATION_SIGNATURE}",
         )
-        # The `Closes` text above never auto-closes across repos
-        # (bwsalmon/agents#23), so the task issue is closed explicitly here
-        # rather than left to rely on it.
-        self.github.close_issue(task.owner, task.name, outcome.issue)
+        # The task issue itself isn't closed here -- see `_close_finished_prs`
+        # (bwsalmon/agents#54) for why that waits on the PR's own state
+        # instead. `completed_label` goes on now regardless: it marks the
+        # agent's own part as done, which is true the moment a real PR
+        # exists, whether or not a human has reviewed or merged it yet.
+        self.github.add_label(
+            task.owner, task.name,
+            outcome.issue, self.config.completed_label,
+        )
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
         )
+        self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number)
+        # bwsalmon/agents#51: persist the open-PR record right after the
+        # label moves that go with it, before anything later in this cycle
+        # can crash on top of it -- the same ordering `_finish_question`
+        # already uses for its own pending-state record.
+        self._save_state()
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"opened PR {target}#{pr.number}: {pr.html_url}")
 
@@ -431,7 +503,15 @@ class Orchestrator:
         # task in-progress." Unlike the fresh-branch path there is no PR to
         # announce either: the task issue is simply no longer being worked,
         # and a human can label it again for another round if more feedback
-        # comes in, the same way they would for a fresh task.
+        # comes in, the same way they would for a fresh task. The task issue
+        # was never closed on this path even before bwsalmon/agents#54 (the
+        # PR predates the task and is a human's to manage), so there is no
+        # open-PR record to track here -- only `completed_label`, the same
+        # "agent's own part is done" marker the fresh-branch path applies.
+        self.github.add_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.completed_label,
+        )
         self.github.remove_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
@@ -498,6 +578,13 @@ class Orchestrator:
         self.state.record_pending_question(
             outcome.issue, comment_id, kind=outcome.kind, branch=outcome.branch,
         )
+        # bwsalmon/agents#51: the GitHub-side label swap above already
+        # landed by the time this runs; persist the pending-question record
+        # that goes with it so a crash right after doesn't leave a
+        # `_promote_answered_questions` with nothing to check a later reply
+        # against (the fallback -- re-applying the trigger label by hand --
+        # still works either way, but this keeps the automatic path intact).
+        self._save_state()
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"asked a question, awaiting reply: {question[:200]!r}")
 
@@ -507,17 +594,24 @@ class Orchestrator:
         investigation, or a recommendation, not a code change, and forcing
         those through the branch/PR path is a poor fit. Unlike
         `_finish_question`, this is a genuine finish, not a park: the
-        summary is posted as the closing comment and the issue is closed
-        outright, the same "post first, then update state" order
-        `_finish_succeeded_issue`'s own PR path already uses -- if
-        `create_comment` fails partway there is nothing yet to roll back.
+        summary is posted as a comment, the same "post first, then update
+        state" order `_finish_succeeded_issue`'s own PR path already uses --
+        if `create_comment` fails partway there is nothing yet to roll back.
         No branch is ever checked and no PR is opened; that is the whole
         point of this path over the default one.
+
+        The issue itself is *not* closed (bwsalmon/agents#54): an analysis
+        only ever produced an answer, not a change for anyone to review or
+        merge, so there is no later event to wait on the way a PR's own
+        close is for the fresh-branch path -- closing it outright here would
+        make it easy to miss before anyone's actually read the summary. Only
+        `completed_label` marks it as agent-done; a human closes it by hand
+        once they're satisfied.
 
         A 404 here means the same thing it means in `_finish_question`/
         `_requeue`: a stale assignment against an issue that's since
         changed out from under it. Best-effort only in that case -- there
-        is no issue left to close or label either.
+        is no issue left to label either.
         """
         task = self._task
         try:
@@ -537,7 +631,10 @@ class Orchestrator:
                         f"summary was: {summary[:200]!r}",
             )
             return
-        self.github.close_issue(task.owner, task.name, outcome.issue)
+        self.github.add_label(
+            task.owner, task.name,
+            outcome.issue, self.config.completed_label,
+        )
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
@@ -571,6 +668,7 @@ class Orchestrator:
                 # Same "stale assignment" story as _requeue/_finish_question
                 # -- the issue is gone from the currently configured repo.
                 self.state.clear_pending_question(pending.issue)
+                self._save_state()
                 self.audit.record(
                     sandbox=None, issue=pending.issue,
                     outcome=f"issue #{pending.issue} not found in "
@@ -595,10 +693,87 @@ class Orchestrator:
                 pending.issue, self.config.trigger_label,
             )
             self.state.clear_pending_question(pending.issue)
+            # bwsalmon/agents#51: the trigger label is back on by now (the
+            # calls above), which is what makes this issue reachable again
+            # from `_dispatch`'s own poll -- persist the state that matches
+            # before anything else in this cycle can crash on top of it.
+            self._save_state()
             self.audit.record(
                 sandbox=None, issue=pending.issue,
                 outcome=f"{reply.user} ({reply.author_association}) replied -- "
                         "requeued for redispatch",
+            )
+
+    # --- closing on PR close (bwsalmon/agents#54) -------------------------
+
+    def _close_finished_prs(self) -> None:
+        """Closes a task issue once the PR `_finish_succeeded_issue` opened
+        for it has itself closed — merged or closed without merging both
+        read `state == "closed"` from GitHub, and count the same way here:
+        either one means nobody is going to push more commits to that PR, so
+        the task it was opened for is done. There is no webhook to react to
+        this with (docs/design.md's cron-not-webhooks stance, this module's
+        own docstring) and no label move to piggyback on either, since the
+        PR lives in the *target* repo while every label this deployment
+        writes lives on the task issue in the *task* repo — so this polls
+        `state.open_pull_requests` (`_finish_succeeded_issue`'s own record)
+        instead, the same shape `_promote_answered_questions` already uses
+        to poll `state.pending_questions`.
+
+        A 404 from `get_pull_request` means the target repo or PR named in a
+        stale record is gone (an operator changed the allowlist, the PR was
+        deleted outright) — not a reason to crash the cycle, so the record
+        is just dropped. A 404 from `close_issue` means the *task* issue
+        itself is gone the same "stale assignment" way `_requeue` and
+        `_finish_question` already tolerate; the record is dropped there
+        too, since there is nothing left to close.
+        """
+        for pending in list(self.state.open_pull_requests.values()):
+            try:
+                pr = self.github.get_pull_request(
+                    pending.target_owner, pending.target_repo, pending.pr_number
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.state.clear_open_pr(pending.issue)
+                self._save_state()
+                self.audit.record(
+                    sandbox=None, issue=pending.issue,
+                    outcome=f"PR {pending.target_owner}/{pending.target_repo}#"
+                            f"{pending.pr_number} not found while checking for a "
+                            "close -- stale record?",
+                )
+                continue
+            if pr.state != "closed":
+                continue
+            try:
+                self.github.close_issue(
+                    self.config.task_owner, self.config.task_repo, pending.issue
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.state.clear_open_pr(pending.issue)
+                self._save_state()
+                self.audit.record(
+                    sandbox=None, issue=pending.issue,
+                    outcome=f"PR {pending.target_owner}/{pending.target_repo}#"
+                            f"{pending.pr_number} closed, but issue #{pending.issue} "
+                            f"not found in {self.config.task_owner}/"
+                            f"{self.config.task_repo} -- stale assignment?",
+                )
+                continue
+            self.state.clear_open_pr(pending.issue)
+            # bwsalmon/agents#51: same ordering discipline as every other
+            # state-clearing call above -- persist right after the GitHub
+            # side change it goes with, before anything later in this cycle
+            # can crash on top of it.
+            self._save_state()
+            self.audit.record(
+                sandbox=None, issue=pending.issue,
+                outcome=f"closed: PR {pending.target_owner}/{pending.target_repo}#"
+                        f"{pending.pr_number} closed",
             )
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
@@ -652,16 +827,21 @@ class Orchestrator:
             if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
         ]
         directives = parse_directives(texts)
-        if directives.gemini_key and self.gemini_key_config is None:
-            # Same "unusable directive parks the task" shape as an unlisted
+        # bwsalmon/agents#49: a label, not a `/gemini-key` directive --
+        # `directives.py`'s own docstring has the reasoning. `issue.labels`
+        # is read directly, the same trust tier the trigger label itself
+        # already relies on.
+        gemini_key = self.config.gemini_key_label in issue.labels
+        if gemini_key and self.gemini_key_config is None:
+            # Same "unusable request parks the task" shape as an unlisted
             # `/repo` below -- checked before the target/allowlist reads,
             # so a task that can never be honoured is parked without also
             # spending a GitHub call on a repo it will never reach.
             raise DirectiveError(
-                "this task has a `/gemini-key` directive, but this "
-                "deployment has no Gemini key support configured. An "
-                "operator enables it with `grain controller configure "
-                "--gemini-project-id ...` (see gemini_keys.py)."
+                f"this task carries the `{self.config.gemini_key_label}` "
+                "label, but this deployment has no Gemini key support "
+                "configured. An operator enables it with `grain controller "
+                "configure --gemini-project-id ...` (see gemini_keys.py)."
             )
         github_key = self._resolve_github_key(issue)
         target = directives.target
@@ -703,7 +883,7 @@ class Orchestrator:
                   "deployment's credential can't see it."
             ) from exc
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
-                            gemini_key=directives.gemini_key, github_key=github_key)
+                            gemini_key=gemini_key, github_key=github_key)
 
     def _resolve_github_key(self, issue: Issue) -> str | None:
         """The named credential a `grain-github-<name>` label on `issue`
@@ -790,6 +970,10 @@ class Orchestrator:
             number, self.config.awaiting_reply_label,
         )
         self.state.record_pending_question(number, comment_id)
+        # Same reasoning as `_finish_question` (bwsalmon/agents#51): persist
+        # the pending-question baseline right after the label swap it
+        # accompanies.
+        self._save_state()
         self.audit.record(sandbox=None, issue=number,
                            outcome=f"parked, awaiting reply: {reason}")
 
@@ -972,6 +1156,16 @@ class Orchestrator:
                                    target_repo=task.repo.name, base=task.base,
                                    gemini_key_name=gemini_key_name)
             self.state.record_run(now)
+            # Persist the new assignment *before* the trigger label comes
+            # off below (bwsalmon/agents#51) -- removing that label is the
+            # step that makes this dispatch irreversible from `_dispatch`'s
+            # own polling's point of view (a labelled-issue query will never
+            # see this issue again once it's off), so a controller crash or
+            # VM restart after this point must find the assignment already
+            # on disk, or the sweeper has nothing to reclaim it with. See
+            # `state_path`'s own docstring for the full failure mode this
+            # closes.
+            self._save_state()
             self.github.remove_label(
                 self.config.task_owner, self.config.task_repo,
                 number, self.config.trigger_label,

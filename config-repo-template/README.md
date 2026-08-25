@@ -211,15 +211,41 @@ sandboxed agent's ADC is meant to resolve to, via the metadata server the
 controller runs per sandbox — the host's own roles stay out of a sandbox's
 reach.
 
-> **Known gap.** Terraform creates that account and the impersonation
-> binding, but grain's metadata server currently reads its impersonation
-> source from a key file at `/data/secrets/gcp-service-account.json`
-> rather than from the instance's ADC, and the controller is a nested VM
-> that does not reach `169.254.169.254` by default. Until
-> [roadmap item 4](https://github.com/bwsalmon/grain/blob/main/docs/roadmap.md)
-> closes, wiring agents to this account is a manual step on the
-> controller. Leave `agent_service_account_roles` empty and none of this
-> applies.
+Terraform creates that account and the impersonation binding; wiring the
+metadata server to it needs no manual step either -- `deploy.yml` mints a
+fresh key for the account on every run and pushes it straight to the
+host's instance metadata (never a repo secret), and `deploy.sh` passes it
+to `grain host bootstrap` automatically, alongside the account's own
+email and project id. Leave `agent_service_account_roles` empty (and
+`enable_gemini_key` false) and none of this applies -- no account, no key,
+nothing pushed.
+
+A short-lived Gemini API key for a task (asked for by labelling the task
+issue `grain-gemini-key`, the same "a human decided this" trust tier the
+`grain-agent` trigger label itself carries) reuses this same account and
+key -- set `enable_gemini_key = true` to also grant it
+`roles/serviceusage.apiKeysAdmin` and enable the Generative Language API,
+both via Terraform. See grain's `docs/runbook.md`, "Enabling
+`grain-gemini-key`".
+
+## Locking the project down
+
+`lock_down_project = true` adds two project-level organization policies on
+top of the IAM roles above: no VM in the project — this deployment's own
+host included — may get an external IP, and no bucket may be made public.
+Unlike the IAM roles, these hold for *every* identity in the project, not
+just the ones this deployment grants, so they are worth turning on once
+you know the deployment does not need either capability — not a
+substitute for reviewing `vm_service_account_roles` and
+`agent_service_account_roles` in the first place.
+
+It needs `assign_external_ip = false` (and `enable_cloud_nat = true`, for
+the host's own egress) set first — Terraform refuses to plan otherwise,
+since the policy would deny the host's own external IP the moment it took
+effect. See `terraform/gcp/variables.tf`'s `lock_down_project` for the
+full reasoning, and re-run `bootstrap-gcp.sh` if this project's deployer
+was bootstrapped before this option existed — it needs
+`roles/orgpolicy.policyAdmin`, which older bootstraps did not grant.
 
 ## Day two
 
@@ -253,7 +279,7 @@ configuration, and the workflows that apply it.
 ```
 config/
   grain.tfvars              the deployment, as configuration
-  backend.hcl                where Terraform state lives
+  backend.hcl               where Terraform state lives
 .github/workflows/
   plan.yml                  pull request: fmt, validate (grain's Terraform, fetched fresh)
   deploy.yml                push to main: apply, push secrets, wait (same fetch)
@@ -274,6 +300,7 @@ terraform/gcp/
   variables.tf              every knob, with why it exists
   iam.tf                    the host account, the agent account, their roles
   instance.tf               the VM, nested virtualization, the data disk
+  lockdown.tf               project-wide org-policy guardrails, opt-in
   network.tf                VPC, one firewall rule, optional Cloud NAT
   outputs.tf                instance name, zone, service accounts, ssh command
   versions.tf               provider/backend requirements

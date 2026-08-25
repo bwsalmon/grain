@@ -88,7 +88,8 @@ def sh(name, value):
 out = ""
 for key in ("grain_repo_url", "grain_ref", "debian_image_url",
             "task_repo", "default_target_repo", "credential_name",
-            "bootstrap_ssh_timeout_seconds", "agent_service_account_email"):
+            "bootstrap_ssh_timeout_seconds", "agent_service_account_email",
+            "gemini_project_id"):
     out += sh(key.upper(), cfg.get(key, "") or "")
 targets = cfg.get("target_repos") or []
 out += "TARGET_REPOS=(" + " ".join(shlex.quote(t) for t in targets) + ")\n"
@@ -290,6 +291,14 @@ run_bootstrap() {
       args+=(--gcp-service-account-key-file "$gcp_key_file"
               --gcp-agent-service-account-email "$AGENT_SERVICE_ACCOUNT_EMAIL"
               --gcp-project-id "$(md project/project-id)")
+      # gemini_project_id (terraform/gcp's enable_gemini_key) reuses the
+      # same key just placed above -- grain/automation/gemini_keys.py's own
+      # docstring on why one primary key covers both. Only meaningful once
+      # that key actually arrived, hence nested here rather than gated on
+      # GEMINI_PROJECT_ID alone.
+      if [ -n "$GEMINI_PROJECT_ID" ]; then
+        args+=(--gemini-project-id "$GEMINI_PROJECT_ID")
+      fi
     else
       log "WARNING: agent_service_account_roles is set but no GCP service account key"
       log "         was found in instance metadata; sandboxed agents will have no GCP access."

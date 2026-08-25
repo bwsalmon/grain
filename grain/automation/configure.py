@@ -215,8 +215,8 @@ def configure_gcp_service_account(runner: Runner, key: str, *, service_account_e
 def configure_gemini_key(runner: Runner, project_id: str) -> None:
     """Writes `/data/config/gemini-key.json` (bwsalmon/agents#47), the
     on/off switch `core.py`'s `_resolve_target` checks before honouring a
-    task's `/gemini-key` directive -- absent, the directive is refused with
-    an explanation, the same "unusable directive parks the task" shape an
+    task issue's `gemini_key_label` -- absent, the label is refused with
+    an explanation, the same "unusable request parks the task" shape an
     unlisted `/repo` already gets.
 
     Deliberately places no new credential of its own: `gemini_keys.py`

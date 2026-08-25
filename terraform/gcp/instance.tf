@@ -10,6 +10,13 @@ locals {
   # identity is part of this deployment at all.
   agent_service_account_email = local.agent_account_needed ? google_service_account.agent[0].email : ""
 
+  # Non-secret (docs/roadmap.md's "config, like task_repo" precedent for
+  # agent_service_account_email above): just the project id that turns the
+  # grain-gemini-key task label on, read by deploy.sh alongside the agent
+  # account's own key. Empty when enable_gemini_key is false, so deploy.sh
+  # never passes --gemini-project-id and the feature stays off.
+  gemini_project_id = var.enable_gemini_key ? var.project_id : ""
+
   # Everything the on-VM deploy script needs, and nothing it does not: no
   # secret values here either -- the runtime credentials arrive separately,
   # pushed straight into instance metadata by the deploy workflow after
@@ -25,6 +32,7 @@ locals {
     default_target_repo           = var.default_target_repo
     credential_name               = var.credential_name
     agent_service_account_email   = local.agent_service_account_email
+    gemini_project_id             = local.gemini_project_id
     deploy_timeout_secs           = var.deploy_timeout_minutes * 60
     bootstrap_ssh_timeout_seconds = var.bootstrap_ssh_timeout_seconds
   }
@@ -160,6 +168,16 @@ resource "google_compute_instance" "host" {
         : contains(var.target_repos, var.default_target_repo)
       )
       error_message = "default_target_repo must be one of target_repos (or, with target_repos empty, the task repo itself)."
+    }
+
+    precondition {
+      # lockdown.tf's compute.vmExternalIpAccess policy denies external
+      # IPs project-wide, this host included -- catch the
+      # self-contradiction here rather than have the host's own
+      # access_config fail against a policy this same apply just put in
+      # place.
+      condition     = !(var.lock_down_project && var.assign_external_ip)
+      error_message = "lock_down_project denies external IPs project-wide, including on this host; set assign_external_ip = false (and enable_cloud_nat = true for egress) before turning lock_down_project on."
     }
 
     # grain-github-token and grain-claude-token are never declared here --

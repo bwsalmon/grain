@@ -184,8 +184,31 @@ def test_get_pull_request_reads_head_and_base_ref():
         number=5, title="pr 5", body="please review",
         html_url="https://github.com/o/r/pull/5",
         head_ref="feature-branch", base_ref="main",
+        state="open",
     )
     assert transport.calls[0]["path"] == "/repos/o/r/pulls/5"
+
+
+def test_get_pull_request_reads_a_closed_state():
+    """`state` (bwsalmon/agents#54) is what `core.py`'s `_close_finished_prs`
+    polls to decide whether a task issue's PR is done -- "closed" covers
+    both merged and closed-without-merging, both read this way by GitHub.
+    """
+    body = pr_json(5)
+    body["state"] = "closed"
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(body).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.state == "closed"
+
+
+def test_get_pull_request_defaults_state_to_open_when_absent():
+    # A fixture (or, in principle, a very old cached response) missing the
+    # "state" key entirely must not KeyError -- every real GitHub response
+    # for this endpoint has always included it, but there's no reason to
+    # make that a hard requirement when a safe default exists.
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(pr_json(5)).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.state == "open"
 
 
 def test_get_pull_request_raises_on_a_non_200():

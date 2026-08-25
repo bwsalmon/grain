@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from grain.automation.state import AutomationState, TriggerKind
+from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 
 
 def test_free_sandbox_skips_assigned_ones():
@@ -220,6 +220,55 @@ def test_load_of_a_pre_item_13_state_file_has_no_pending_questions(tmp_path: Pat
     path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
     loaded = AutomationState.load(path)
     assert loaded.pending_questions == {}
+
+
+# --- open PRs awaiting a close (bwsalmon/agents#54) -----------------------
+
+def test_record_open_pr_records_target_and_pr_number():
+    state = AutomationState()
+    state.record_open_pr(5, "other", "service", 42)
+    open_pr = state.open_pull_requests["5"]
+    assert open_pr.issue == 5
+    assert open_pr.target_owner == "other"
+    assert open_pr.target_repo == "service"
+    assert open_pr.pr_number == 42
+
+
+def test_clear_open_pr_removes_it():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.clear_open_pr(5)
+    assert state.open_pull_requests == {}
+
+
+def test_clear_open_pr_on_an_absent_issue_is_a_no_op():
+    state = AutomationState()
+    state.clear_open_pr(5)  # must not raise
+    assert state.open_pull_requests == {}
+
+
+def test_save_and_load_round_trips_open_pull_requests(tmp_path: Path):
+    state = AutomationState()
+    state.record_open_pr(5, "other", "service", 42)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    open_pr = loaded.open_pull_requests["5"]
+    assert open_pr == OpenPullRequest(
+        issue=5, target_owner="other", target_repo="service", pr_number=42,
+    )
+
+
+def test_load_of_a_pre_54_state_file_has_no_open_pull_requests(tmp_path: Path):
+    # A state file written before bwsalmon/agents#54 existed has no
+    # "open_pull_requests" key at all -- loading it must default to empty
+    # rather than KeyError, the same tolerance `pending_questions` already
+    # has for a state file written before item 13.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.open_pull_requests == {}
 
 
 def test_load_of_a_pre_item_9_state_file_defaults_to_issue_kind(tmp_path: Path):

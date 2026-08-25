@@ -881,11 +881,19 @@ to restrict to specific resources.
 
 ### A Gemini API key doesn't fit this broker (bwsalmon/agents#47)
 
-A task can ask, with a bare `/gemini-key` line, for a short-lived
-[Gemini API key](https://ai.google.dev/gemini-api/docs/api-key) minted for
-it, placed in its sandbox, and revoked once the task's slot frees. The
-mechanism deliberately sits *outside* the metadata broker above rather than
-reusing it, for two reasons:
+A task can ask, by carrying the `grain-gemini-key` label
+(`AutomationConfig.gemini_key_label`, bwsalmon/agents#49), for a
+short-lived [Gemini API key](https://ai.google.dev/gemini-api/docs/api-key)
+minted for it, placed in its sandbox, and revoked once the task's slot
+frees. A label rather than a body directive, deliberately: the same
+"a human decided this, not the issue's own untrusted text" trust tier the
+trigger label itself already relies on, checked directly against
+`issue.labels` in `core.py`'s `_resolve_target` rather than parsed out of
+the issue body or a trusted reply (`directives.py`'s own module docstring
+has the fuller reasoning for why the other three -- `/repo`, `/pr`,
+`/base` -- still need to be directives instead: they carry a *value*, and
+a value can't be a label). The mechanism deliberately sits *outside* the
+metadata broker above rather than reusing it, for two reasons:
 
 - **A literal API key isn't a token the broker can hand out.** ADC-style
   token-probing (what `gce_metadata_server` serves) works because every

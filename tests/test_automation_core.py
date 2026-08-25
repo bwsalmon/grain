@@ -15,7 +15,7 @@ from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, GEMINI_KEY_
 from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
-from grain.automation.state import AutomationState, TriggerKind
+from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
 from grain.proxy.allowlist import Allowlist
 from grain.proxy.credentials import CredentialSet
@@ -25,7 +25,7 @@ from grain.run import FakeRunner
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def issue_json(number: int, body: str = "do it", extra_labels: tuple = ()) -> dict:
+def issue_json(number: int, body: str = "do it", labels=("grain-agent",)) -> dict:
     return {
         # "id" isn't read by list_issues itself, but the same fixture also
         # serves as FakeTransport's shared default response for whichever
@@ -35,7 +35,7 @@ def issue_json(number: int, body: str = "do it", extra_labels: tuple = ()) -> di
         # never queue a dedicated comments response.
         "id": number, "number": number, "title": f"issue {number}", "body": body,
         "html_url": f"https://github.com/o/r/issues/{number}",
-        "labels": [{"name": "grain-agent"}, *({"name": n} for n in extra_labels)],
+        "labels": [{"name": label} for label in labels],
     }
 
 
@@ -64,17 +64,22 @@ def pr_detail_json(number: int, head_ref: str = "feature-x", base_ref: str = "ma
 
 
 def pr_flow_response(pr_number: int) -> list[ApiResponse]:
-    """The five responses one `_finish_succeeded` call consumes, in exact
-    call order: `branch_exists` (200 -> the branch is really there),
+    """The five responses one `_finish_succeeded_issue` call consumes, in
+    exact call order: `branch_exists` (200 -> the branch is really there),
     `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
-    `close_issue` (bwsalmon/agents#23 -- the task issue closed explicitly,
-    since a cross-repo `Closes` reference never auto-closes), then
-    `remove_label` (in-progress comes off). `FakeTransport.responses`
-    is a strict FIFO queue regardless of which call consumes each entry, so
-    a test with more than one succeeded outcome needs this whole handful
-    per outcome, in order, or a later call silently eats an earlier
-    outcome's response.
+    `add_label` (bwsalmon/agents#54 -- `completed_label` goes on the moment
+    the PR exists), then `remove_label` (in-progress comes off).
+    `FakeTransport.responses` is a strict FIFO queue regardless of which
+    call consumes each entry, so a test with more than one succeeded
+    outcome needs this whole handful per outcome, in order, or a later call
+    silently eats an earlier outcome's response.
+
+    The task issue itself is *not* closed here any more (bwsalmon/agents#54):
+    that now waits on the PR itself closing, polled once per `run_once` by
+    `_close_finished_prs` -- see `open_pr_response` for the extra, separate
+    response that pass consumes, later in the *same* `run_once` this
+    handful runs in, for every open-PR record a test's outcome(s) produce.
     """
     return [
         ApiResponse(200, {}, b"{}"),
@@ -85,6 +90,20 @@ def pr_flow_response(pr_number: int) -> list[ApiResponse]:
         ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
     ]
+
+
+def open_pr_response(pr_number: int, *, state: str = "open") -> ApiResponse:
+    """One `get_pull_request` response, for `_close_finished_prs`'s own poll
+    (bwsalmon/agents#54) of an open-PR record `_finish_succeeded_issue`
+    just wrote. That poll runs once per `run_once`, after every outcome in
+    the sweep has already been finished -- so in a test scripting `N`
+    successful fresh-PR outcomes via `pr_flow_response`, this many more
+    responses are appended *after* all of them, one per outcome, in the
+    same order those outcomes were finished in.
+    """
+    return ApiResponse(200, {}, json.dumps(
+        {**pr_detail_json(pr_number), "state": state}
+    ).encode())
 
 
 class OrchestratorTransport(FakeTransport):
@@ -132,7 +151,7 @@ def credentials_with(*names: str) -> CredentialSet:
 
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
-                       credentials=None, credential_store=None):
+                       credentials=None, credential_store=None, state_path=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -166,6 +185,13 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
         credentials=credentials, credential_store=credential_store,
+        # bwsalmon/agents#51: most tests leave this unset, which makes
+        # `_save_state` a no-op -- exactly the pre-existing behaviour, since
+        # those tests only ever assert against `orchestrator.state` in
+        # memory. Tests about surviving a controller crash/VM restart pass
+        # a real path and read it back independently of the in-memory
+        # `Orchestrator` to prove the write actually landed on disk.
+        state_path=state_path,
     )
     return orchestrator, transport
 
@@ -266,7 +292,10 @@ def test_a_finished_run_is_swept_and_its_slot_reused_in_the_same_pass():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(1) + pr_flow_response(2))
+    transport.responses.extend(
+        pr_flow_response(1) + pr_flow_response(2)
+        + [open_pr_response(1), open_pr_response(2)]
+    )
     orchestrator.run_once(NOW)
     # Both prior runs finished and were freed; the new issue lands on one.
     assert 1 in {a.issue for a in orchestrator.state.assignments.values()}
@@ -440,7 +469,7 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
 
 # --- complete_analysis (bwsalmon/agents#50) ---------------------------------
 
-def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_issue(
+def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_completed(
     monkeypatch, tmp_path,
 ):
     state = AutomationState()
@@ -454,7 +483,7 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
         ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
-        ApiResponse(200, {}, b"{}"),  # close_issue
+        ApiResponse(200, {}, b"{}"),  # add_label (completed)
         ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
     ])
 
@@ -467,8 +496,14 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_
     comment_body = json.loads(comment_call["body"])["body"]
     assert "Investigated X; no code change was needed." in comment_body
     assert "Posted automatically by grain-agent" in comment_body
-    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
-    assert json.loads(close_call["body"]) == {"state": "closed"}
+    # bwsalmon/agents#54: an analysis is never auto-closed -- only tagged,
+    # so a human decides whether the summary answers the task.
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
     # No branch was ever checked, and no PR was opened -- the analysis path
     # short-circuits before either.
     assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
@@ -616,7 +651,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
@@ -624,7 +659,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     branch_call = transport.calls[0]
     assert branch_call["method"] == "GET"
     assert branch_call["path"] == "/repos/o/r/branches/grain%2Fissue-5"
-    pr_call = next(c for c in transport.calls if c["method"] == "POST")
+    pr_call = next(c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/o/r/pulls")
     assert pr_call["path"] == "/repos/o/r/pulls"
     sent = json.loads(pr_call["body"])
     assert sent["head"] == "grain/issue-5"
@@ -638,16 +673,24 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("opened PR o/r#42" in o for o in outcomes)
-    # bwsalmon/agents#23: the task issue is closed explicitly, since a
-    # cross-repo `Closes` reference in the PR body never auto-closes it.
-    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
-    assert close_call["path"] == "/repos/o/r/issues/5"
-    assert json.loads(close_call["body"]) == {"state": "closed"}
-    # The in-progress label comes off; the trigger label is never re-added
-    # for a genuinely finished run.
+    # bwsalmon/agents#54: the task issue is *not* closed the moment the PR
+    # is opened any more -- only tagged as agent-completed. It gets closed
+    # later, once the PR itself closes (see the dedicated tests for that).
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    # The completed label goes on and the in-progress label comes off; the
+    # trigger label is never re-added for a genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     label_mutations = [c for c in mutating if "labels" in c["path"]]
-    assert len(label_mutations) == 1
+    assert len(label_mutations) == 2
+    # The open PR is recorded so a later run can close the issue once it does.
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
+    }
 
 
 def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
@@ -671,6 +714,122 @@ def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     assert len(mutating) == 2  # remove in-progress, add trigger back
+
+
+# --- closing on PR close (bwsalmon/agents#54) ------------------------------
+
+def test_close_finished_prs_leaves_the_issue_alone_while_the_pr_is_still_open():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(open_pr_response(42, state="open"))
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
+    }
+
+
+def test_close_finished_prs_closes_the_task_issue_once_its_pr_closes():
+    """The core behaviour bwsalmon/agents#54 asked for: a task issue closes
+    once the PR opened for it does -- merged or closed without merging both
+    read "closed" here and are treated the same.
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(200, {}, b"{}"),  # close_issue
+    ])
+
+    orchestrator.run_once(NOW)
+
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert close_call["path"] == "/repos/o/r/issues/5"
+    assert json.loads(close_call["body"]) == {"state": "closed"}
+    assert orchestrator.state.open_pull_requests == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("closed" in o and "o/r#42" in o for o in outcomes)
+
+
+def test_close_finished_prs_closes_the_task_issue_in_the_task_repo_not_the_target():
+    state = AutomationState()
+    state.record_open_pr(5, "other", "service", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state, allowed=("o/r", "other/service"))
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(200, {}, b"{}"),  # close_issue
+    ])
+
+    orchestrator.run_once(NOW)
+
+    pr_get_call = transport.calls[0]
+    assert pr_get_call["path"] == "/repos/other/service/pulls/42"
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert close_call["path"] == "/repos/o/r/issues/5"
+
+
+def test_close_finished_prs_tolerates_a_404_from_get_pull_request():
+    """A stale record (the target repo or PR named in it is gone -- an
+    operator changed the allowlist, or the PR was deleted outright) must
+    not crash the cycle, the same "stale assignment" tolerance `_requeue`
+    and `_finish_question` already have.
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale" in o for o in outcomes)
+
+
+def test_close_finished_prs_tolerates_a_404_from_close_issue():
+    # The PR really did close, but the task issue itself is gone from the
+    # currently configured task repo -- there is nothing left to close.
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.open_pull_requests == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale assignment" in o for o in outcomes)
+
+
+def test_close_finished_prs_still_raises_a_non_404_error_from_get_pull_request():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
+
+
+def test_close_finished_prs_still_raises_a_non_404_error_from_close_issue():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(500, {}, b"internal error"),
+    ])
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 # --- workspace/token wiring into dispatch() (docs/roadmap.md item 2) ------
@@ -740,7 +899,7 @@ def test_an_unhealthy_freed_sandbox_is_logged_but_still_reused():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
@@ -838,6 +997,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
         ApiResponse(200, {}, b"{}"),   # branch_exists("feature-x"): true
+        ApiResponse(200, {}, b"{}"),   # add_label: completed
         ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
     ])
 
@@ -849,11 +1009,20 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     # No PR-creation call at all -- the PR this dispatch worked already existed.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 1  # only the in-progress label comes off
+    assert len(mutating) == 2  # completed label goes on, in-progress comes off
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/7/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
     # bwsalmon/agents#23's close_issue is issue-triggered only -- a
     # PR-triggered task is continuing an existing PR, which has its own
-    # lifecycle, so this path must never close anything.
+    # lifecycle, so this path must never close anything. Unlike the
+    # fresh-branch path (bwsalmon/agents#54) there is also no open-PR
+    # record to poll later: the PR predates the task and isn't this
+    # deployment's to close.
     assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {}
 
 
 def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
@@ -899,7 +1068,7 @@ def test_a_swept_success_is_recorded_into_the_injected_history(monkeypatch, tmp_
     history = RecordingSessionHistory()
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner,
                                                  history=history)
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
@@ -977,13 +1146,13 @@ def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
     orchestrator, transport = make_orchestrator(
         issues=[], state=state, runner=runner, allowed=("o/r", "other/service"),
     )
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
     branch_call = transport.calls[0]
     assert branch_call["path"] == "/repos/other/service/branches/grain%2Fissue-5"
-    pr_call = next(c for c in transport.calls if c["method"] == "POST")
+    pr_call = next(c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/other/service/pulls")
     assert pr_call["path"] == "/repos/other/service/pulls"
     sent = json.loads(pr_call["body"])
     # The base recorded at dispatch, not re-read and not a global default.
@@ -993,10 +1162,13 @@ def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
     # kept for the link/mention even though (bwsalmon/agents#23) it never
     # auto-closes across repos.
     assert "Closes o/r#5" in sent["body"]
-    # The task issue is closed explicitly, in the *task* repo -- not the
-    # target repo the PR itself was opened in.
-    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
-    assert close_call["path"] == "/repos/o/r/issues/5"
+    # The task issue is *not* closed here any more (bwsalmon/agents#54) --
+    # only recorded, in the *task* repo's `open_pull_requests`, against the
+    # *target* repo's PR, so a later run can close it once that PR does.
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="other", target_repo="service", pr_number=42),
+    }
     # The in-progress label comes off the *task* repo.
     delete_calls = [c for c in transport.calls if c["method"] == "DELETE"]
     assert delete_calls[0]["path"].startswith("/repos/o/r/issues/5/labels")
@@ -1166,14 +1338,14 @@ def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkey
         issues=[], state=state, runner=runner, history=history,
         allowed=("o/r", "other/service"),
     )
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
     assert history.calls[0]["target"] == "other/service"
 
 
-# --- Gemini API key (bwsalmon/agents#47) ------------------------------------
+# --- Gemini API key (bwsalmon/agents#47, label not directive: #49) ---------
 
 GEMINI_KEY_NAME = "projects/1/locations/global/keys/abc"
 
@@ -1187,11 +1359,14 @@ def gemini_runner(**overrides) -> FakeRunner:
     return runner
 
 
-def test_gemini_key_directive_without_config_is_parked():
+GEMINI_LABELS = ("grain-agent", "grain-gemini-key")
+
+
+def test_gemini_key_label_without_config_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, body="do it\n/gemini-key")]).encode()),  # list_issues
+            [issue_json(4, labels=GEMINI_LABELS)]).encode()),         # list_issues
         ApiResponse(200, {}, b"[]"),                                  # list_comments
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),         # the park comment
     ])
@@ -1201,14 +1376,14 @@ def test_gemini_key_directive_without_config_is_parked():
     assert orchestrator.state.assignments == {}
     comment = next(c for c in transport.calls if c["method"] == "POST"
                     and c["path"].endswith("/comments"))
-    assert "gemini-key" in json.loads(comment["body"])["body"]
+    assert "grain-gemini-key" in json.loads(comment["body"])["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any(o.startswith("parked, awaiting reply") for o in outcomes)
     # Refused before anything was ever minted.
     assert not any("gcloud" in c for c in orchestrator.base_runner.commands)
 
 
-def test_a_task_with_no_gemini_key_directive_never_calls_gcloud():
+def test_a_task_with_no_gemini_key_label_never_calls_gcloud():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
         issues=[issue_json(4)], runner=runner,
@@ -1220,10 +1395,10 @@ def test_a_task_with_no_gemini_key_directive_never_calls_gcloud():
     assert not any("gcloud" in c for c in runner.commands)
 
 
-def test_gemini_key_directive_with_config_places_the_key_in_the_sandbox():
+def test_gemini_key_label_with_config_places_the_key_in_the_sandbox():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1236,10 +1411,10 @@ def test_gemini_key_directive_with_config_places_the_key_in_the_sandbox():
     assert key_call[1] == "AIzaSecretValue"
 
 
-def test_gemini_key_directive_tells_the_agent_where_the_key_is():
+def test_gemini_key_label_tells_the_agent_where_the_key_is():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1256,7 +1431,7 @@ def test_gemini_key_directive_tells_the_agent_where_the_key_is():
 def test_gemini_key_is_recorded_on_the_assignment_for_later_revocation():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1269,7 +1444,7 @@ def test_gemini_key_is_recorded_on_the_assignment_for_later_revocation():
 def test_gemini_key_display_name_folds_in_the_sandbox_and_issue():
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1284,7 +1459,7 @@ def test_gemini_key_mint_failure_does_not_crash_the_cycle():
     runner = FakeRunner()
     runner.expect("gcloud services api-keys create", returncode=1, stderr="PERMISSION_DENIED")
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1301,7 +1476,7 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
     """
     runner = gemini_runner(**{"bash -c": {"returncode": 128, "stderr": "fatal: Authentication failed"}})
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, body="do it\n/gemini-key")],
+        issues=[issue_json(4, labels=GEMINI_LABELS)],
         runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
 
@@ -1319,7 +1494,7 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
 def test_a_grain_github_label_records_the_override_for_the_dispatched_sandbox():
     credential_store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(4, extra_labels=("grain-github-workflow",))],
+        issues=[issue_json(4, labels=("grain-agent", "grain-github-workflow"))],
         credentials=credentials_with("workflow"),
         credential_store=credential_store,
     )
@@ -1348,7 +1523,7 @@ def test_a_grain_github_label_with_no_credentials_wired_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, extra_labels=("grain-github-workflow",))]).encode()),  # list_issues
+            [issue_json(4, labels=("grain-agent", "grain-github-workflow"))]).encode()),  # list_issues
         ApiResponse(200, {}, b"[]"),                                  # list_comments
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),         # the park comment
     ])
@@ -1367,7 +1542,7 @@ def test_a_grain_github_label_naming_an_unconfigured_key_is_parked():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, extra_labels=("grain-github-nonexistent",))]).encode()),
+            [issue_json(4, labels=("grain-agent", "grain-github-nonexistent"))]).encode()),
         ApiResponse(200, {}, b"[]"),
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),
     ])
@@ -1385,7 +1560,7 @@ def test_two_grain_github_labels_on_one_issue_is_parked_as_ambiguous():
     orchestrator, transport = make_orchestrator(issues=[])
     transport.responses.extend([
         ApiResponse(200, {}, json.dumps(
-            [issue_json(4, extra_labels=("grain-github-workflow", "grain-github-release"))]
+            [issue_json(4, labels=("grain-agent", "grain-github-workflow", "grain-github-release"))]
         ).encode()),
         ApiResponse(200, {}, b"[]"),
         ApiResponse(201, {}, json.dumps({"id": 9}).encode()),
@@ -1413,7 +1588,7 @@ def test_a_dispatch_failure_with_a_grain_github_label_does_not_leak_into_the_nex
     runner = FakeRunner()
     runner.expect("bash -c", returncode=128, stderr="fatal: Authentication failed")
     orchestrator, transport = make_orchestrator(
-        issues=[issue_json(4, extra_labels=("grain-github-workflow",))],
+        issues=[issue_json(4, labels=("grain-agent", "grain-github-workflow"))],
         runner=runner,
         credentials=credentials_with("workflow"),
         credential_store=credential_store,
@@ -1436,3 +1611,119 @@ def test_a_dispatch_failure_with_a_grain_github_label_does_not_leak_into_the_nex
     assert "sandbox-0" in orchestrator.state.assignments
     overrides = json.loads(credential_store._path.read_text())
     assert "sandbox-0" not in overrides
+
+
+# --- surviving a controller VM restart (bwsalmon/agents#51) ---------------
+#
+# `claude -p` runs on the controller now (docs/roadmap.md item 8's
+# "Update"), so a controller VM restart is exactly the "host is stopped, or
+# a run dies mid-flight" case docs/design.md's stranded-work sweeper exists
+# for. The sweeper itself already handles a unit that has vanished
+# (`UnitState.ABSENT`, tested in test_automation_sweeper.py) -- what these
+# tests are about is the other half: `AutomationState` must actually be on
+# disk, at the right moment, for that recovery to have anything to work
+# with. Before `Orchestrator.state_path`/`_save_state` existed, the only
+# place `AutomationState` was ever written to disk was one `state.save()`
+# call in `cli.py`'s `cmd_automation_run_once`, *after* `run_once()`
+# returned in full -- a crash anywhere inside `run_once` (a restarted
+# controller VM being the most literal version of "crash") lost every
+# state mutation made so far, even ones whose real-world GitHub side effect
+# (a label move, a PR) had already landed and could never be undone.
+
+def test_dispatch_persists_the_assignment_before_the_trigger_label_comes_off(
+    tmp_path, monkeypatch,
+):
+    """Removing the trigger label is the step that makes a dispatch
+    irreversible from `_dispatch`'s own polling's point of view -- once
+    it's off, `list_issues(trigger_label=...)` will never surface this
+    issue again. So the new assignment must already be durably on disk
+    *before* that call, or a crash landing right after it (a controller VM
+    restarting being the realistic version of "crash") strands the task:
+    not labelled for redispatch, and not recorded anywhere the sweeper
+    could find it stranded either. Simulated here as a raise from
+    `remove_label` itself -- standing in for the process dying mid-call --
+    and checked by reading the state file back independently of the
+    `Orchestrator` that (mid-crash) never got to return.
+    """
+    state_path = tmp_path / "state.json"
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], state_path=state_path)
+    monkeypatch.setattr(
+        orchestrator.github, "remove_label",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("controller restarted here")),
+    )
+
+    with pytest.raises(RuntimeError):
+        orchestrator.run_once(NOW)
+
+    persisted = AutomationState.load(state_path)
+    assert persisted.assignments["sandbox-0"].issue == 1
+
+
+def test_a_task_stranded_by_a_controller_crash_mid_dispatch_is_recovered_on_restart(
+    tmp_path, monkeypatch,
+):
+    """End-to-end version of the previous test. After the same simulated
+    crash, a *fresh* `Orchestrator` -- reloading `AutomationState` from the
+    same file, exactly what a restarted controller process does on its
+    next `run_once` (`cli.py`'s `build_orchestrator`) -- must still find
+    the dispatched issue via the assignment that survived, notice its unit
+    is gone (nothing real was ever started against this `FakeRunner` on the
+    restarted side either), requeue it, and redispatch it in that same
+    cycle (sweep runs before dispatch). The alternative -- what happened
+    before this fix -- is the issue simply vanishing: no longer trigger-
+    labelled, and no assignment on disk to notice that either.
+    """
+    state_path = tmp_path / "state.json"
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], state_path=state_path)
+    monkeypatch.setattr(
+        orchestrator.github, "remove_label",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("controller restarted here")),
+    )
+    with pytest.raises(RuntimeError):
+        orchestrator.run_once(NOW)
+
+    restarted_state = AutomationState.load(state_path)
+    restarted, _ = make_orchestrator(
+        issues=[issue_json(1)], state=restarted_state, state_path=state_path,
+    )
+    restarted.run_once(NOW + timedelta(minutes=5))
+
+    outcomes = [e["outcome"] for e in restarted.audit.entries]
+    assert "stranded" in outcomes
+    assert restarted.state.assignments["sandbox-0"].issue == 1
+    # And the recovery is itself durable -- not just in this process's
+    # memory, in case *this* run_once is the one that gets interrupted too.
+    assert AutomationState.load(state_path).assignments["sandbox-0"].issue == 1
+
+
+def test_a_sweep_release_is_persisted_before_the_pr_is_opened(tmp_path, monkeypatch):
+    """The mirror image of the dispatch-side test above: `sweep()` already
+    releases a finished sandbox's slot in memory before `core.py` gets to
+    act on the outcome, so that release must be durable *before*
+    `create_pull_request` runs -- otherwise a crash right after a real PR
+    is opened leaves the state file still claiming the sandbox is busy with
+    a now-finished, already-reaped unit, which the next sweep would
+    misread as freshly stranded and try to process all over again.
+    """
+    state_path = tmp_path / "state.json"
+    state = AutomationState()
+    state.assign("sandbox-0", issue=1, unit=unit_name("sandbox-0"), now=NOW)
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\n",
+    )
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state, runner=runner, state_path=state_path,
+    )
+    transport.responses.extend(pr_flow_response(1))
+    monkeypatch.setattr(
+        orchestrator.github, "create_pull_request",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("controller restarted here")),
+    )
+
+    with pytest.raises(RuntimeError):
+        orchestrator.run_once(NOW)
+
+    persisted = AutomationState.load(state_path)
+    assert persisted.assignments == {}

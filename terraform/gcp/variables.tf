@@ -207,6 +207,33 @@ variable "agent_service_account_roles" {
   default     = []
 }
 
+variable "enable_gemini_key" {
+  type        = bool
+  description = <<-EOT
+    Grants the agent account (creating it even if agent_service_account_roles
+    is left empty, the same way agent_can_manage_compute_instances already
+    does) roles/serviceusage.apiKeysAdmin on the project, and enables the
+    Generative Language API (generativelanguage.googleapis.com) -- the two
+    things grain/automation/gemini_keys.py needs to mint and revoke a
+    short-lived Gemini API key for a task carrying the grain-gemini-key
+    label (docs/runbook.md, "Enabling grain-gemini-key"; bwsalmon/agents#47,
+    #49).
+
+    This only covers the permissions and account -- it does not by itself
+    turn the feature on. That still needs the deploy workflow to have
+    minted and placed the agent account's key (it does automatically once
+    that account exists, the same way it already does for the metadata
+    broker) and grain's own gemini-key.json switch, which the on-host
+    deploy writes automatically when this is true (see instance.tf's
+    grain_config and terraform/gcp/files/deploy.sh).
+
+    Applying this needs roles/serviceusage.serviceUsageAdmin on the
+    deployer running Terraform, to enable the API -- bootstrap-gcp.sh
+    grants it.
+  EOT
+  default     = false
+}
+
 variable "agent_can_manage_compute_instances" {
   type        = bool
   description = <<-EOT
@@ -227,6 +254,44 @@ variable "agent_can_manage_compute_instances" {
     authentication capability by itself, and the two excluded roles above
     are what would actually let an agent log in, so the host stays
     unreachable in practice despite the tunnel role being unconditioned.
+  EOT
+  default     = false
+}
+
+# ------------------------------------------------------------- lockdown ---
+
+variable "lock_down_project" {
+  type        = bool
+  description = <<-EOT
+    Project-wide organization-policy guardrails against external exposure:
+    no VM in the project -- this deployment's own host included -- may be
+    given an external IP (constraints/compute.vmExternalIpAccess, denied
+    for all instances), and no bucket in the project may be made publicly
+    readable (constraints/storage.publicAccessPrevention, enforced).
+
+    Unlike vm_service_account_roles or agent_service_account_roles above,
+    this is not an IAM grant -- it holds regardless of which identity is
+    acting, including a human operator's own gcloud session or an agent
+    that somehow escalated past agent_can_manage_compute_instances's
+    per-instance IAM condition. That is what makes it worth having
+    alongside the IAM roles above rather than instead of reviewing them:
+    a second, blunter lock, not a replacement for the first.
+
+    "External IP" and "public bucket" are what GCP's organization-policy
+    system actually has a constraint for at the project level -- there is
+    no constraint for "no bucket may be created" outright, only for how
+    one may be configured once it exists, which for a bucket is almost
+    always what "locked down" is really asking for.
+
+    Off by default, and setting this true together with
+    assign_external_ip = true fails the plan rather than the apply -- see
+    instance.tf's precondition -- because the policy would deny the
+    host's own external IP the moment it took effect. Set
+    assign_external_ip = false (and enable_cloud_nat = true, for egress)
+    first.
+
+    Applying this needs roles/orgpolicy.policyAdmin on the deployer
+    running Terraform -- bootstrap-gcp.sh grants it.
   EOT
   default     = false
 }
