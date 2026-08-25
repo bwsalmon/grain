@@ -131,6 +131,13 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         audit=audit, history=history, gemini_key_config=gemini_key_config,
+        # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
+        # mid-`run_once`, rather than only once at the very end (see
+        # `state_path`'s own docstring on `Orchestrator` for why that matters
+        # across a controller VM restart). `None` under `--dry-run`, same as
+        # `cmd_automation_run_once`'s existing final save already being
+        # skipped there -- a dry run must never write real state to disk.
+        state_path=None if args.dry_run else state_path,
     )
     return orchestrator, state_path
 
