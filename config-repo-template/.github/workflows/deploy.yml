@@ -65,36 +65,36 @@ jobs:
           path: grain-src
 
       # This repo is also the task queue: an issue here, labelled
-      # `grain-agent`, is what the automation service picks up. Create the
-      # three labels it moves an issue between, plus the opt-in capability
-      # labels a human applies to a task, so they are all in the picker
-      # before anyone files the first task.
+      # `grain-agent`, is what the automation service picks up. Put every
+      # label the queue runs on in the picker before anyone files the
+      # first task -- the ones the orchestrator moves an issue between,
+      # and the opt-in ones a human applies to a single task.
+      #
+      # The list itself is grain's (`grain/automation/labels.py`, applied
+      # by `ci/ensure-task-labels.sh`), read out of the checkout above
+      # rather than written out here: a copy in this workflow is one every
+      # config repo has to re-sync by hand the day a label is added, which
+      # is how `grain-agent-completed`, `grain-self-debug` and
+      # `grain-gemini-key` all shipped without ever reaching a picker. Same
+      # single-source split as the Terraform module this file stopped
+      # vendoring. A new label now arrives with a grain_ref bump.
       - name: Ensure the task labels exist
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          label() {
-            gh label create "$1" --repo "${{ github.repository }}" \
-              --color "$2" --description "$3" 2>/dev/null \
-              && echo "created $1" || echo "$1 already exists"
-          }
-          label grain-agent 0e8a16 "Hand this task to the agent set"
-          label grain-agent-in-progress fbca04 "An agent is working on this"
-          label grain-agent-awaiting-reply d93f0b "Parked: the agent needs a human reply"
-
-          # Not part of the dispatch state machine: a human applies this to
-          # ask for a short-lived Gemini API key to be minted for that task,
-          # placed in its sandbox, and revoked once the task's slot frees
-          # (bwsalmon/agents#47, #49). A label rather than a body directive
-          # so it carries the same "a human decided this" trust tier the
-          # trigger label does. Created unconditionally -- it has to be in
-          # the picker to be appliable at all -- but only *usable* once the
-          # deployment is configured for it (`enable_gemini_key = true` in
-          # config/grain.tfvars, or `grain controller configure
-          # --gemini-project-id`); until then a task carrying it is parked
-          # with a comment explaining why, the same as an unlisted `/repo`.
-          label grain-gemini-key 1d76db "Mint a short-lived Gemini API key for this task"
+          script=grain-src/ci/ensure-task-labels.sh
+          # grain_ref may point at a grain older than this workflow --
+          # holding a deployment back on an older ref is supported, and
+          # this file is the config repo's to update independently. The
+          # labels are convergent and nothing downstream reads them, so a
+          # grain without the script yet is worth a note, not a failed
+          # rollout that has not even reached Terraform.
+          if [ ! -x "$script" ]; then
+            echo "::warning::$script is not in grain at this grain_ref; skipping label creation"
+            exit 0
+          fi
+          "$script" "${{ github.repository }}"
 
       # Preferred: Workload Identity Federation, so this repo holds no GCP
       # key at all. grain's terraform/gcp/bootstrap-gcp.sh sets it up and
