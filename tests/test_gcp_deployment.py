@@ -556,6 +556,31 @@ def test_iam_grants_the_deployer_key_management_only_on_the_narrow_agent_account
     ), "the deployer-manages-agent-keys binding must be scoped to the agent account"
 
 
+def test_read_outputs_step_sets_every_steps_tf_output_used_elsewhere():
+    """Found live (issue #69): the "Push secrets to the host" step reads
+    steps.tf.outputs.agent_service_account, but "Read outputs" never ran
+    `terraform output ... agent_service_account` to populate it -- a
+    GitHub Actions expression referencing an output nobody set just
+    resolves to an empty string, no error, no warning. AGENT_SERVICE_ACCOUNT
+    was therefore always empty, so the block that mints and pushes the
+    agent's GCP key never ran, and every host waited out its optional
+    secret budget and booted with no GCP access. Catch any output that's
+    referenced but never captured, not just this one.
+    """
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    used = set(re.findall(r"steps\.tf\.outputs\.(\w+)", deploy))
+    match = re.search(
+        r"- name: Read outputs\n(?:.*\n)*?        run: \|\n((?:.*\n)*?)\n      - name:",
+        deploy,
+    )
+    assert match, "Read outputs step not found in deploy.yml"
+    set_names = set(re.findall(r'echo "(\w+)=', match.group(1)))
+    missing = used - set_names
+    assert not missing, (
+        f"steps.tf.outputs referenced but never captured by Read outputs: {missing}"
+    )
+
+
 def test_deploy_yml_mints_and_invalidates_the_agent_key_only_when_one_exists():
     """Minted fresh every run, straight to instance metadata -- the
     short-lived-credential principle grain's own docs/design.md argues

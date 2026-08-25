@@ -158,6 +158,12 @@ jobs:
             echo "project_id=$(terraform output -raw project_id)"
             echo "instance=$(terraform output -raw instance_name)"
             echo "zone=$(terraform output -raw zone)"
+            # agent_service_account is null (not just absent) whenever no
+            # agent account is configured -- `-raw` errors on a null value,
+            # so that case has to fall back to empty rather than aborting
+            # the whole step, the same way the null-safe outputs at the
+            # bottom of this workflow already do.
+            echo "agent_service_account=$(terraform output -raw agent_service_account 2>/dev/null || true)"
           } >> "$GITHUB_OUTPUT"
 
       # The only place a secret value is ever decrypted. It goes straight
