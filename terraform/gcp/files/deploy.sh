@@ -25,6 +25,13 @@ readonly CLAUDE_TOKEN_ATTR="grain-claude-token"
 # there is no wait budget worth calling "required": if
 # agent_service_account_email is unset, one will just never arrive.
 readonly GCP_KEY_ATTR="grain-agent-service-account-key"
+# What a storage-permission failure looks like in grain's output, as
+# opposed to any other reason a bootstrap can exit non-zero. Deliberately
+# not a bare "Permission denied": SSH's own "Permission denied (publickey)"
+# -- the *other* thing an unreachable controller prints -- matches that, and
+# misfiling a boot failure as a storage failure is the bug this exists to
+# stop repeating.
+readonly STORAGE_FAILURE_RE='Cannot access storage file|Could not open .*Permission denied|virsh -c qemu:///system start'
 readonly SECRET_WAIT_REQUIRED=600
 readonly SECRET_WAIT_OPTIONAL=180
 
@@ -229,6 +236,12 @@ fetch_secret_to_file() {
 # end for checking the actual file owner vs. what libvirt's qemu.conf
 # expects. This surfaces the same facts through the one channel that was
 # actually reachable: Cloud Logging, via deploy.sh's own stdout.
+#
+# Only for a failure of that shape (see $STORAGE_FAILURE_RE). It used to run
+# on *any* non-zero exit from grain, which is how a "stage 5/11: wait for the
+# controller" timeout came to be reported as ownership tables for files that
+# had nothing to do with it. grain prints its own diagnostics for the boot
+# waits now -- grain/adapter/diagnostics.py -- down this same channel.
 dump_storage_diagnostics() {
   log "--- storage diagnostics: $DATA_MNT/instances ---"
   ls -la "$DATA_MNT/instances" 2>&1 | while IFS= read -r line; do log "  $line"; done
@@ -249,6 +262,7 @@ dump_storage_diagnostics() {
 }
 
 run_bootstrap() {
+  local bootstrap_log="$RUNDIR/bootstrap.log"
   local gh_file="$RUNDIR/github.token"
   local claude_file="$RUNDIR/claude.token"
   local gcp_key_file="$RUNDIR/gcp-service-account.json"
@@ -306,11 +320,25 @@ run_bootstrap() {
   fi
 
   # The token *paths* are fine to log; the files themselves are 0600 on tmpfs.
+  # Output is teed as well as printed so the failure path can tell what kind
+  # of failure it was; `set -o pipefail` is what keeps grain's exit status,
+  # not tee's, deciding that. $RUNDIR is tmpfs and removed on exit.
+  # -u: unbuffered. Through a pipe (tee, and the journal beyond it) python
+  # block-buffers stdout, so a deploy killed by config-sync's own
+  # deploy_timeout_secs used to lose whatever grain had printed but not
+  # flushed -- exactly the diagnostics a timed-out deploy is read for.
   log "running: python3 -m grain.cli ${args[*]}"
-  if ! ( cd "$SRC" && python3 -m grain.cli "${args[@]}" ); then
-    dump_storage_diagnostics
-    return 1
+  if ( cd "$SRC" && python3 -u -m grain.cli "${args[@]}" ) 2>&1 | tee "$bootstrap_log"; then
+    return 0
   fi
+
+  if grep -qE "$STORAGE_FAILURE_RE" "$bootstrap_log"; then
+    dump_storage_diagnostics
+  else
+    log "not a storage-permission failure -- skipping storage diagnostics"
+    log "(grain prints its own diagnostics for a failed boot wait, above)"
+  fi
+  return 1
 }
 
 # -------------------------------------------------------------------- main --

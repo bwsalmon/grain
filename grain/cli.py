@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .adapter.base import EgressMode, VmState
 from .adapter.deploy import DEFAULT_DEST, deploy_tree
+from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.net_linux import LinuxNetwork, render_host_input_rules, render_ruleset
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
@@ -452,12 +453,24 @@ def cmd_host_wait(args: argparse.Namespace) -> int:
     """
     cluster = build_cluster(args)
     base_runner = _runner(args)
+    adapter = build_adapter(cluster, base_runner, args)
     for name in _targets(cluster, args.name):
         ssh = build_ssh_runner(cluster, base_runner, name, args)
-        print(f"{name:<12} waiting for SSH ...")
-        wait_for_ssh(ssh, timeout=args.timeout)
+        print(f"{name:<12} waiting for SSH (up to {args.timeout:.0f}s) ...")
+        # Same diagnostics `host bootstrap`'s stage 5 prints, for the same
+        # reason -- this command is the manual half of that stage, and a
+        # bare TimeoutError is just as unreadable run by hand.
+        try:
+            wait_for_ssh(ssh, timeout=args.timeout)
+        except TimeoutError:
+            dump_host_diagnostics(adapter, name)
+            raise
         print(f"{name:<12} waiting for cloud-init ...")
-        wait_for_provisioning(ssh)
+        try:
+            wait_for_provisioning(ssh)
+        except (RuntimeError, TimeoutError):
+            dump_guest_diagnostics(ssh)
+            raise
         print(f"{name:<12} ready")
     return 0
 

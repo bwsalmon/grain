@@ -151,6 +151,40 @@ def test_run_bootstrap_dumps_storage_diagnostics_on_failure():
         "run_bootstrap never calls dump_storage_diagnostics on failure"
 
 
+def test_storage_diagnostics_only_run_for_a_storage_shaped_failure():
+    """Reported live: a "stage 5/11: wait for the controller" timeout --
+    nothing to do with storage -- was followed by these ownership tables,
+    because the dump ran on any non-zero exit at all. grain prints its own
+    diagnostics for a failed boot wait now (grain/adapter/diagnostics.py);
+    this one has to stay filed under the failure it was written for.
+
+    Notably not a bare "Permission denied": SSH's own "Permission denied
+    (publickey)", which is exactly what an unreachable controller prints,
+    would match that and put the misfiling right back.
+    """
+    deploy_sh = DEPLOY_SH.read_text()
+    assert "STORAGE_FAILURE_RE" in deploy_sh
+    pattern = re.search(r"^readonly STORAGE_FAILURE_RE='(.*)'$", deploy_sh, re.M)
+    assert pattern, "STORAGE_FAILURE_RE not found"
+    alternatives = pattern.group(1).split("|")
+    assert "Cannot access storage file" in alternatives
+    assert "Permission denied" not in alternatives
+
+    run_bootstrap = re.search(r"^run_bootstrap\(\) \{.*?\n\}", deploy_sh, re.S | re.M)
+    body = run_bootstrap.group(0)
+    assert 'grep -qE "$STORAGE_FAILURE_RE"' in body, \
+        "run_bootstrap dumps storage diagnostics unconditionally again"
+    assert "tee" in body, "the bootstrap output is not captured to classify the failure"
+
+
+def test_grain_runs_unbuffered_so_a_killed_deploy_keeps_its_output():
+    """Through a pipe python block-buffers stdout, so a deploy killed by
+    config-sync's deploy_timeout_secs would lose the diagnostics printed
+    just before the kill -- the ones such a deploy is read for.
+    """
+    assert "python3 -u -m grain.cli" in DEPLOY_SH.read_text()
+
+
 def test_startup_installs_ops_agent_and_ships_the_full_journal():
     """Found live: a real deploy failure was undiagnosable from CI's own
     guest-attribute summary (a bare "exit=N"), and journalctl -u

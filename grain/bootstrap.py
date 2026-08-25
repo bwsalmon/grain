@@ -30,6 +30,7 @@ from pathlib import Path
 
 from .adapter.base import VmState
 from .adapter.deploy import deploy_tree
+from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
@@ -155,6 +156,51 @@ def _ensure_started(adapter: LibvirtAdapter, name: str, spec: VmSpec,
     return False
 
 
+def _wait_until_ready(adapter: LibvirtAdapter, name: str, ssh: SshRunner, *,
+                       fresh: bool, timeout: float, log: Logger) -> None:
+    """Both boot waits for one VM, each followed by the diagnostics its own
+    failure needs.
+
+    Reported live as "it fails on wait for the controller (5/11)" and
+    nothing else: neither wait says anything about *why* on its own -- one
+    carries a line of `ssh` stderr, the other cloud-init's bare
+    `status: error` -- and on GCP the only thing printed after either was
+    deploy.sh's storage-ownership dump, which is about a different failure
+    entirely. `grain/adapter/diagnostics.py` prints the facts that actually
+    separate the causes, down the one channel (stdout, tailed into Cloud
+    Logging) that needs no SSH path to the host to read.
+
+    `fresh` decides only how hard an unfinished cloud-init is treated, not
+    whether it is checked. A VM this run created has to be provisioned or
+    nothing downstream works, so that is fatal. A VM that was already
+    running might have been provisioned by any earlier run, so the same
+    check is a warning: it is the previous run's failure resurfacing at the
+    top of this one, where it is readable, instead of stage 6's `cat:
+    /data/secrets/controller-ssh.pub: No such file or directory` -- which is
+    what a re-run after a failed provision used to fail with, `fresh` being
+    false the second time around and the check skipped entirely.
+    """
+    try:
+        wait_for_ssh(ssh, timeout=timeout)
+    except TimeoutError:
+        dump_host_diagnostics(adapter, name, log)
+        raise
+    try:
+        wait_for_provisioning(ssh)
+    except (RuntimeError, TimeoutError) as exc:
+        dump_guest_diagnostics(ssh, log)
+        if fresh:
+            # The console log can hold what the guest never got far enough
+            # to write to /var/log -- worth the second dump on a first boot.
+            dump_host_diagnostics(adapter, name, log)
+            raise
+        log(f"WARNING: {exc}")
+        log(f"WARNING: continuing anyway -- {name} was already running before "
+            f"this run, so this is an earlier run's provisioning failure; the "
+            f"first stage that needs what it should have created will fail on "
+            f"its own")
+
+
 def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
               config: BootstrapConfig, log: Logger = _default_log) -> None:
     # Stage 1: preflight. Deliberately thin -- /dev/kvm, required binaries,
@@ -183,15 +229,16 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
     )
 
     # Stage 5: wait.
-    log("stage 5/11: wait for the controller")
+    log(f"stage 5/11: wait for the controller at "
+        f"{cluster.address_of(controller_name)} "
+        f"(up to {config.ssh_timeout:.0f}s for SSH)")
     admin_ssh = SshRunner(
         inner=base_runner, user=config.ssh_user,
         address=cluster.address_of(controller_name),
         key_path=config.admin_private_key_path,
     )
-    wait_for_ssh(admin_ssh, timeout=config.ssh_timeout)
-    if controller_fresh:
-        wait_for_provisioning(admin_ssh)
+    _wait_until_ready(adapter, controller_name, admin_ssh, fresh=controller_fresh,
+                       timeout=config.ssh_timeout, log=log)
 
     # Stage 6: controller key. Only reachable now because stage 2's admin
     # key is trusted by the controller too (docs/bootstrap.md's "key roles"
@@ -266,10 +313,9 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
             inner=base_runner, user=config.ssh_user,
             address=cluster.address_of(name), key_path=config.admin_private_key_path,
         )
-        wait_for_ssh(sandbox_ssh, timeout=config.ssh_timeout)
-        if sandbox_fresh:
-            wait_for_provisioning(sandbox_ssh)
-        elif controller_key_changed:
+        _wait_until_ready(adapter, name, sandbox_ssh, fresh=sandbox_fresh,
+                           timeout=config.ssh_timeout, log=log)
+        if not sandbox_fresh and controller_key_changed:
             # Repair over the admin key, the only second way in
             # (docs/bootstrap.md's Phase 1 fix) -- append rather than
             # recreate, since recreating would also throw away everything

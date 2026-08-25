@@ -74,6 +74,15 @@ don't pass one (add them with `grain controller configure` later, or a
 second `host bootstrap` run), and log in to Claude Code for you — see
 "Claude Code credential" below, still the one genuinely manual step.
 
+**If it stops at "stage 5/11: wait for the controller"**: the stage prints
+its own diagnostics before it raises — the domain's state, whether the guest
+ever ARPed or answered a ping, and the tail of its serial console log
+(`/var/lib/grain/instances/controller-console.log`) when it never answered
+SSH; `cloud-init status --long` and the tail of the guest's
+`/var/log/cloud-init-output.log` when it answered but provisioning failed.
+On GCP all of that is in Cloud Logging with the rest of the deploy output.
+See docs/bootstrap.md, "When the wait fails".
+
 **Verify**: `grain --data-dir /data automation status` should list every
 sandbox as `free`, `grain --data-dir /data github audit` should print no
 `flagged` verdicts, and `grain host health` should report every sandbox
