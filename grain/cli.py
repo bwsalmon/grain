@@ -130,6 +130,20 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         GeminiKeyConfig.load(gemini_key_config_path)
         if gemini_key_config_path.exists() else None
     )
+    # bwsalmon/agents#98: same "absence is the off switch" shape as
+    # gemini_key_config above -- a deployment that never wrote
+    # metadata-server.json (`provision/controller.sh`'s setup, or `grain
+    # controller configure --gcp-agent-service-account-email ...`) gets no
+    # `_ensure_metadata_server` support, not a crash. When it *is* present,
+    # this is the same `runner` (the controller's own, not a per-sandbox
+    # one) `build_metadata_launcher` already uses for the standalone `grain
+    # metadata start` command -- `MetadataLauncher.start` always runs on the
+    # controller as `metadata_user`, never on the sandbox itself.
+    metadata_config_path = data_dir / "config" / "metadata-server.json"
+    metadata_launcher = (
+        build_launcher(data_dir, cluster, runner)
+        if metadata_config_path.exists() else None
+    )
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
@@ -138,6 +152,7 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         audit=audit, history=history, gemini_key_config=gemini_key_config,
+        metadata_launcher=metadata_launcher,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
         # mid-`run_once`, rather than only once at the very end (see

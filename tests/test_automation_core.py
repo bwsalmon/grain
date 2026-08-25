@@ -18,6 +18,9 @@ from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.ssh import SshRunner
 from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
+from grain.metadata.config import MetadataConfig
+from grain.metadata.launcher import MetadataLauncher
+from grain.metadata.launcher import unit_name as metadata_unit_name
 from grain.proxy.allowlist import Allowlist
 from grain.proxy.credentials import CredentialSet
 from grain.proxy.tokens import SandboxCredentialStore, SandboxTokenStore
@@ -188,7 +191,8 @@ def credentials_with(*names: str) -> CredentialSet:
 
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
-                       credentials=None, credential_store=None, state_path=None):
+                       credentials=None, credential_store=None, state_path=None,
+                       metadata_launcher=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -221,6 +225,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         # Orchestrator's own decisions against a plain FakeRunner.
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
+        metadata_launcher=metadata_launcher,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -1509,6 +1514,78 @@ def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_pat
     second_token = json.loads((tmp_path / "sandbox-tokens.json").read_text())["sandbox-0"]
 
     assert first_token == second_token
+
+
+# --- GCP metadata server (bwsalmon/agents#98) --------------------------
+
+def make_metadata_launcher(tmp_path, runner) -> MetadataLauncher:
+    """Mirrors `tests/test_metadata_launcher.py`'s own `make_launcher` --
+    `sandbox_count=2` here to match `make_orchestrator`'s `Cluster`, since
+    `MetadataLauncher.status_all`/per-sandbox unit names have to agree with
+    whichever sandbox `_dispatch` actually assigns (`sandbox-0`, the only
+    free one in a fresh two-sandbox cluster).
+    """
+    config = MetadataConfig(
+        service_account_email="narrow@p.iam.gserviceaccount.com",
+        project_id="p", numeric_project_id=1,
+        key_path=tmp_path / "secrets" / "gcp-service-account.json",
+    )
+    return MetadataLauncher(
+        cluster=Cluster(sandbox_count=2), config=config, runner=runner, data_dir=tmp_path,
+    )
+
+
+def test_dispatch_does_nothing_metadata_related_when_no_launcher_is_configured(tmp_path):
+    """The "not configured" default (bwsalmon/agents#98's `metadata_launcher
+    = None`) must not change a single existing dispatch's behaviour --
+    every test above this one runs with no metadata_launcher at all.
+    """
+    runner = FakeRunner()
+    orchestrator, _ = make_orchestrator(issues=[issue_json(1)], runner=runner)
+    orchestrator.run_once(NOW)
+    assert not any("grain-metadata" in c for c in runner.commands)
+
+
+def test_dispatch_starts_the_metadata_server_for_a_sandbox_that_has_none_running(tmp_path):
+    runner = FakeRunner()  # no "systemctl show" scripted -> UnitState.ABSENT
+    launcher = make_metadata_launcher(tmp_path, runner)
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner, metadata_launcher=launcher,
+    )
+    orchestrator.run_once(NOW)
+    assert runner.ran(f"sudo systemd-run --unit={metadata_unit_name('sandbox-0')}")
+
+
+def test_dispatch_leaves_an_already_active_metadata_server_alone(tmp_path):
+    runner = FakeRunner()
+    unit = metadata_unit_name("sandbox-0")
+    runner.expect(
+        f"systemctl show {unit}",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
+    )
+    launcher = make_metadata_launcher(tmp_path, runner)
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner, metadata_launcher=launcher,
+    )
+    orchestrator.run_once(NOW)
+    assert not runner.ran(f"sudo systemd-run --unit={unit}")
+
+
+def test_dispatch_reaps_and_restarts_a_failed_metadata_server(tmp_path):
+    runner = FakeRunner()
+    unit = metadata_unit_name("sandbox-0")
+    runner.expect(
+        f"systemctl show {unit}",
+        stdout="LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\n",
+    )
+    launcher = make_metadata_launcher(tmp_path, runner)
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner, metadata_launcher=launcher,
+    )
+    orchestrator.run_once(NOW)
+    assert runner.ran(f"sudo systemctl stop {unit}")
+    assert runner.ran(f"sudo systemctl reset-failed {unit}")
+    assert runner.ran(f"sudo systemd-run --unit={unit}")
 
 
 # --- PR-continuation dispatch (docs/roadmap.md item 9, via a `/pr` task) ---
