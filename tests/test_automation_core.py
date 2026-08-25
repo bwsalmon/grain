@@ -15,7 +15,7 @@ from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, GEMINI_KEY_
 from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
-from grain.automation.state import AutomationState, TriggerKind
+from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
 from grain.proxy.allowlist import Allowlist
 from grain.proxy.tokens import SandboxTokenStore
@@ -63,17 +63,22 @@ def pr_detail_json(number: int, head_ref: str = "feature-x", base_ref: str = "ma
 
 
 def pr_flow_response(pr_number: int) -> list[ApiResponse]:
-    """The five responses one `_finish_succeeded` call consumes, in exact
-    call order: `branch_exists` (200 -> the branch is really there),
+    """The five responses one `_finish_succeeded_issue` call consumes, in
+    exact call order: `branch_exists` (200 -> the branch is really there),
     `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
-    `close_issue` (bwsalmon/agents#23 -- the task issue closed explicitly,
-    since a cross-repo `Closes` reference never auto-closes), then
-    `remove_label` (in-progress comes off). `FakeTransport.responses`
-    is a strict FIFO queue regardless of which call consumes each entry, so
-    a test with more than one succeeded outcome needs this whole handful
-    per outcome, in order, or a later call silently eats an earlier
-    outcome's response.
+    `add_label` (bwsalmon/agents#54 -- `completed_label` goes on the moment
+    the PR exists), then `remove_label` (in-progress comes off).
+    `FakeTransport.responses` is a strict FIFO queue regardless of which
+    call consumes each entry, so a test with more than one succeeded
+    outcome needs this whole handful per outcome, in order, or a later call
+    silently eats an earlier outcome's response.
+
+    The task issue itself is *not* closed here any more (bwsalmon/agents#54):
+    that now waits on the PR itself closing, polled once per `run_once` by
+    `_close_finished_prs` -- see `open_pr_response` for the extra, separate
+    response that pass consumes, later in the *same* `run_once` this
+    handful runs in, for every open-PR record a test's outcome(s) produce.
     """
     return [
         ApiResponse(200, {}, b"{}"),
@@ -84,6 +89,20 @@ def pr_flow_response(pr_number: int) -> list[ApiResponse]:
         ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
     ]
+
+
+def open_pr_response(pr_number: int, *, state: str = "open") -> ApiResponse:
+    """One `get_pull_request` response, for `_close_finished_prs`'s own poll
+    (bwsalmon/agents#54) of an open-PR record `_finish_succeeded_issue`
+    just wrote. That poll runs once per `run_once`, after every outcome in
+    the sweep has already been finished -- so in a test scripting `N`
+    successful fresh-PR outcomes via `pr_flow_response`, this many more
+    responses are appended *after* all of them, one per outcome, in the
+    same order those outcomes were finished in.
+    """
+    return ApiResponse(200, {}, json.dumps(
+        {**pr_detail_json(pr_number), "state": state}
+    ).encode())
 
 
 class OrchestratorTransport(FakeTransport):
@@ -264,7 +283,10 @@ def test_a_finished_run_is_swept_and_its_slot_reused_in_the_same_pass():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(1) + pr_flow_response(2))
+    transport.responses.extend(
+        pr_flow_response(1) + pr_flow_response(2)
+        + [open_pr_response(1), open_pr_response(2)]
+    )
     orchestrator.run_once(NOW)
     # Both prior runs finished and were freed; the new issue lands on one.
     assert 1 in {a.issue for a in orchestrator.state.assignments.values()}
@@ -438,7 +460,7 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
 
 # --- complete_analysis (bwsalmon/agents#50) ---------------------------------
 
-def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_issue(
+def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_completed(
     monkeypatch, tmp_path,
 ):
     state = AutomationState()
@@ -452,7 +474,7 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
         ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
-        ApiResponse(200, {}, b"{}"),  # close_issue
+        ApiResponse(200, {}, b"{}"),  # add_label (completed)
         ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
     ])
 
@@ -465,8 +487,14 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_closes_the_
     comment_body = json.loads(comment_call["body"])["body"]
     assert "Investigated X; no code change was needed." in comment_body
     assert "Posted automatically by grain-agent" in comment_body
-    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
-    assert json.loads(close_call["body"]) == {"state": "closed"}
+    # bwsalmon/agents#54: an analysis is never auto-closed -- only tagged,
+    # so a human decides whether the summary answers the task.
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
     # No branch was ever checked, and no PR was opened -- the analysis path
     # short-circuits before either.
     assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
@@ -614,7 +642,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
@@ -622,7 +650,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     branch_call = transport.calls[0]
     assert branch_call["method"] == "GET"
     assert branch_call["path"] == "/repos/o/r/branches/grain%2Fissue-5"
-    pr_call = next(c for c in transport.calls if c["method"] == "POST")
+    pr_call = next(c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/o/r/pulls")
     assert pr_call["path"] == "/repos/o/r/pulls"
     sent = json.loads(pr_call["body"])
     assert sent["head"] == "grain/issue-5"
@@ -636,16 +664,24 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     assert "Posted automatically by grain-agent" in sent["body"]
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("opened PR o/r#42" in o for o in outcomes)
-    # bwsalmon/agents#23: the task issue is closed explicitly, since a
-    # cross-repo `Closes` reference in the PR body never auto-closes it.
-    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
-    assert close_call["path"] == "/repos/o/r/issues/5"
-    assert json.loads(close_call["body"]) == {"state": "closed"}
-    # The in-progress label comes off; the trigger label is never re-added
-    # for a genuinely finished run.
+    # bwsalmon/agents#54: the task issue is *not* closed the moment the PR
+    # is opened any more -- only tagged as agent-completed. It gets closed
+    # later, once the PR itself closes (see the dedicated tests for that).
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    # The completed label goes on and the in-progress label comes off; the
+    # trigger label is never re-added for a genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     label_mutations = [c for c in mutating if "labels" in c["path"]]
-    assert len(label_mutations) == 1
+    assert len(label_mutations) == 2
+    # The open PR is recorded so a later run can close the issue once it does.
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
+    }
 
 
 def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
@@ -669,6 +705,122 @@ def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     assert len(mutating) == 2  # remove in-progress, add trigger back
+
+
+# --- closing on PR close (bwsalmon/agents#54) ------------------------------
+
+def test_close_finished_prs_leaves_the_issue_alone_while_the_pr_is_still_open():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(open_pr_response(42, state="open"))
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
+    }
+
+
+def test_close_finished_prs_closes_the_task_issue_once_its_pr_closes():
+    """The core behaviour bwsalmon/agents#54 asked for: a task issue closes
+    once the PR opened for it does -- merged or closed without merging both
+    read "closed" here and are treated the same.
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(200, {}, b"{}"),  # close_issue
+    ])
+
+    orchestrator.run_once(NOW)
+
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert close_call["path"] == "/repos/o/r/issues/5"
+    assert json.loads(close_call["body"]) == {"state": "closed"}
+    assert orchestrator.state.open_pull_requests == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("closed" in o and "o/r#42" in o for o in outcomes)
+
+
+def test_close_finished_prs_closes_the_task_issue_in_the_task_repo_not_the_target():
+    state = AutomationState()
+    state.record_open_pr(5, "other", "service", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state, allowed=("o/r", "other/service"))
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(200, {}, b"{}"),  # close_issue
+    ])
+
+    orchestrator.run_once(NOW)
+
+    pr_get_call = transport.calls[0]
+    assert pr_get_call["path"] == "/repos/other/service/pulls/42"
+    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
+    assert close_call["path"] == "/repos/o/r/issues/5"
+
+
+def test_close_finished_prs_tolerates_a_404_from_get_pull_request():
+    """A stale record (the target repo or PR named in it is gone -- an
+    operator changed the allowlist, or the PR was deleted outright) must
+    not crash the cycle, the same "stale assignment" tolerance `_requeue`
+    and `_finish_question` already have.
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale" in o for o in outcomes)
+
+
+def test_close_finished_prs_tolerates_a_404_from_close_issue():
+    # The PR really did close, but the task issue itself is gone from the
+    # currently configured task repo -- there is nothing left to close.
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.open_pull_requests == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "stale assignment" in o for o in outcomes)
+
+
+def test_close_finished_prs_still_raises_a_non_404_error_from_get_pull_request():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
+
+
+def test_close_finished_prs_still_raises_a_non_404_error_from_close_issue():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        open_pr_response(42, state="closed"),
+        ApiResponse(500, {}, b"internal error"),
+    ])
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 # --- workspace/token wiring into dispatch() (docs/roadmap.md item 2) ------
@@ -738,7 +890,7 @@ def test_an_unhealthy_freed_sandbox_is_logged_but_still_reused():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
@@ -836,6 +988,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
         ApiResponse(200, {}, b"{}"),   # branch_exists("feature-x"): true
+        ApiResponse(200, {}, b"{}"),   # add_label: completed
         ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
     ])
 
@@ -847,11 +1000,20 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     # No PR-creation call at all -- the PR this dispatch worked already existed.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 1  # only the in-progress label comes off
+    assert len(mutating) == 2  # completed label goes on, in-progress comes off
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/7/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
     # bwsalmon/agents#23's close_issue is issue-triggered only -- a
     # PR-triggered task is continuing an existing PR, which has its own
-    # lifecycle, so this path must never close anything.
+    # lifecycle, so this path must never close anything. Unlike the
+    # fresh-branch path (bwsalmon/agents#54) there is also no open-PR
+    # record to poll later: the PR predates the task and isn't this
+    # deployment's to close.
     assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {}
 
 
 def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
@@ -897,7 +1059,7 @@ def test_a_swept_success_is_recorded_into_the_injected_history(monkeypatch, tmp_
     history = RecordingSessionHistory()
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner,
                                                  history=history)
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
@@ -975,13 +1137,13 @@ def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
     orchestrator, transport = make_orchestrator(
         issues=[], state=state, runner=runner, allowed=("o/r", "other/service"),
     )
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 
     branch_call = transport.calls[0]
     assert branch_call["path"] == "/repos/other/service/branches/grain%2Fissue-5"
-    pr_call = next(c for c in transport.calls if c["method"] == "POST")
+    pr_call = next(c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/other/service/pulls")
     assert pr_call["path"] == "/repos/other/service/pulls"
     sent = json.loads(pr_call["body"])
     # The base recorded at dispatch, not re-read and not a global default.
@@ -991,10 +1153,13 @@ def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
     # kept for the link/mention even though (bwsalmon/agents#23) it never
     # auto-closes across repos.
     assert "Closes o/r#5" in sent["body"]
-    # The task issue is closed explicitly, in the *task* repo -- not the
-    # target repo the PR itself was opened in.
-    close_call = next(c for c in transport.calls if c["method"] == "PATCH")
-    assert close_call["path"] == "/repos/o/r/issues/5"
+    # The task issue is *not* closed here any more (bwsalmon/agents#54) --
+    # only recorded, in the *task* repo's `open_pull_requests`, against the
+    # *target* repo's PR, so a later run can close it once that PR does.
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="other", target_repo="service", pr_number=42),
+    }
     # The in-progress label comes off the *task* repo.
     delete_calls = [c for c in transport.calls if c["method"] == "DELETE"]
     assert delete_calls[0]["path"].startswith("/repos/o/r/issues/5/labels")
@@ -1164,7 +1329,7 @@ def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkey
         issues=[], state=state, runner=runner, history=history,
         allowed=("o/r", "other/service"),
     )
-    transport.responses.extend(pr_flow_response(42))
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
 
     orchestrator.run_once(NOW)
 

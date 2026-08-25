@@ -169,6 +169,15 @@ class PullRequestDetail:
     html_url: str
     head_ref: str
     base_ref: str
+    # GitHub's own field, "open" or "closed" -- "closed" covers both merged
+    # and closed-without-merging, which `core.py`'s `_close_finished_prs`
+    # (bwsalmon/agents#54) treats the same way: either one means nobody is
+    # going to push more commits to this PR, so the task issue it was opened
+    # for is done. Defaulted to "open" rather than required, since most
+    # existing callers (dispatching to continue a PR, mid-flight by
+    # definition) never cared before this field existed and a stale fixture
+    # omitting it shouldn't suddenly need updating.
+    state: str = "open"
 
 
 @dataclass(frozen=True)
@@ -393,6 +402,7 @@ class GitHubClient:
             number=data["number"], title=data["title"], body=data.get("body") or "",
             html_url=data["html_url"],
             head_ref=data["head"]["ref"], base_ref=data["base"]["ref"],
+            state=data.get("state", "open"),
         )
 
     def default_branch(self, owner: str, repo: str) -> str:

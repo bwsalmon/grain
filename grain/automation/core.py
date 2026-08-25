@@ -8,6 +8,8 @@ docs/design.md" convention:
     for one more `run-once` interval — a *successful* sweep also verifies
     the pushed branch and opens the PR, since that is the other half of
     "this run is really done", not a separate pass,
+    poll every task issue with a PR still open for it (bwsalmon/agents#54)
+    and close the ones whose PR has itself closed since,
     list open trigger-labelled issues in the *task repo* not already
     tracked as in-progress, oldest first, so a backlog drains in the order
     it was filed, resolving each one's target repo from its own text,
@@ -31,6 +33,20 @@ since the prompt it received came from untrusted issue content
 through the same `_requeue` path as a failed or stranded run: `sweeper.py`
 still knows nothing about GitHub, and a run that produced nothing usable is
 not meaningfully different from one that failed outright.
+
+Closing the task issue is *not* a `_sweep`-side concern, though (bwsalmon/agents#54):
+opening a PR only proves the agent's own part is done, not that the task
+itself is — that is true once a human has reviewed and merged (or decided to
+close without merging) the PR it produced. `_finish_succeeded_issue` records
+that PR against the issue (`state.py`'s `OpenPullRequest`) instead of closing
+anything itself, and a dedicated poll, `_close_finished_prs`, checks every
+such record each `run_once` and closes the ones whose PR itself now reads
+`state == "closed"`. `completed_label` goes on immediately either way — it
+marks the agent's own contribution as finished, independent of whether the
+issue itself ever auto-closes (an analysis, `_finish_analysis`, gets the same
+label but is never auto-closed at all: bwsalmon/agents#54 asked for that
+explicitly, since an analysis has no PR whose merge/close is a natural
+"done" signal to wait on).
 
 **One task repo, many target repos.** The repo polled above is the *task
 repo* — a queue of issues for the agent set, not the code being changed.
@@ -315,6 +331,7 @@ class Orchestrator:
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
         self._promote_answered_questions(now)
+        self._close_finished_prs()
         self._dispatch(now)
 
     # --- sweep --------------------------------------------------------
@@ -386,7 +403,10 @@ class Orchestrator:
         # cross-repo link/mention on the issue even though (bwsalmon/agents#23)
         # a qualified `Closes` reference never auto-closes across repos —
         # GitHub only auto-closes within the same repo the PR is opened in.
-        # The task issue is closed explicitly below instead.
+        # The task issue is closed once that PR itself closes instead
+        # (bwsalmon/agents#54, `_close_finished_prs`), not the moment it's
+        # opened -- opening a PR is not the same claim as "this task is
+        # done," only "a human can review it now."
         task = self._task
         # The issue's title isn't on hand here — `Outcome` only carries the
         # number (see sweeper.py's `Outcome` docstring on what does and
@@ -403,14 +423,25 @@ class Orchestrator:
                  f"task {task}#{outcome.issue} finished on {outcome.sandbox}."
                  f"\n\n---\n{_AUTOMATION_SIGNATURE}",
         )
-        # The `Closes` text above never auto-closes across repos
-        # (bwsalmon/agents#23), so the task issue is closed explicitly here
-        # rather than left to rely on it.
-        self.github.close_issue(task.owner, task.name, outcome.issue)
+        # The task issue itself isn't closed here -- see `_close_finished_prs`
+        # (bwsalmon/agents#54) for why that waits on the PR's own state
+        # instead. `completed_label` goes on now regardless: it marks the
+        # agent's own part as done, which is true the moment a real PR
+        # exists, whether or not a human has reviewed or merged it yet.
+        self.github.add_label(
+            task.owner, task.name,
+            outcome.issue, self.config.completed_label,
+        )
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
         )
+        self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number)
+        # bwsalmon/agents#51: persist the open-PR record right after the
+        # label moves that go with it, before anything later in this cycle
+        # can crash on top of it -- the same ordering `_finish_question`
+        # already uses for its own pending-state record.
+        self._save_state()
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"opened PR {target}#{pr.number}: {pr.html_url}")
 
@@ -439,7 +470,15 @@ class Orchestrator:
         # task in-progress." Unlike the fresh-branch path there is no PR to
         # announce either: the task issue is simply no longer being worked,
         # and a human can label it again for another round if more feedback
-        # comes in, the same way they would for a fresh task.
+        # comes in, the same way they would for a fresh task. The task issue
+        # was never closed on this path even before bwsalmon/agents#54 (the
+        # PR predates the task and is a human's to manage), so there is no
+        # open-PR record to track here -- only `completed_label`, the same
+        # "agent's own part is done" marker the fresh-branch path applies.
+        self.github.add_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.completed_label,
+        )
         self.github.remove_label(
             self.config.task_owner, self.config.task_repo,
             outcome.issue, self.config.in_progress_label,
@@ -522,17 +561,24 @@ class Orchestrator:
         investigation, or a recommendation, not a code change, and forcing
         those through the branch/PR path is a poor fit. Unlike
         `_finish_question`, this is a genuine finish, not a park: the
-        summary is posted as the closing comment and the issue is closed
-        outright, the same "post first, then update state" order
-        `_finish_succeeded_issue`'s own PR path already uses -- if
-        `create_comment` fails partway there is nothing yet to roll back.
+        summary is posted as a comment, the same "post first, then update
+        state" order `_finish_succeeded_issue`'s own PR path already uses --
+        if `create_comment` fails partway there is nothing yet to roll back.
         No branch is ever checked and no PR is opened; that is the whole
         point of this path over the default one.
+
+        The issue itself is *not* closed (bwsalmon/agents#54): an analysis
+        only ever produced an answer, not a change for anyone to review or
+        merge, so there is no later event to wait on the way a PR's own
+        close is for the fresh-branch path -- closing it outright here would
+        make it easy to miss before anyone's actually read the summary. Only
+        `completed_label` marks it as agent-done; a human closes it by hand
+        once they're satisfied.
 
         A 404 here means the same thing it means in `_finish_question`/
         `_requeue`: a stale assignment against an issue that's since
         changed out from under it. Best-effort only in that case -- there
-        is no issue left to close or label either.
+        is no issue left to label either.
         """
         task = self._task
         try:
@@ -552,7 +598,10 @@ class Orchestrator:
                         f"summary was: {summary[:200]!r}",
             )
             return
-        self.github.close_issue(task.owner, task.name, outcome.issue)
+        self.github.add_label(
+            task.owner, task.name,
+            outcome.issue, self.config.completed_label,
+        )
         self.github.remove_label(
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
@@ -620,6 +669,78 @@ class Orchestrator:
                 sandbox=None, issue=pending.issue,
                 outcome=f"{reply.user} ({reply.author_association}) replied -- "
                         "requeued for redispatch",
+            )
+
+    # --- closing on PR close (bwsalmon/agents#54) -------------------------
+
+    def _close_finished_prs(self) -> None:
+        """Closes a task issue once the PR `_finish_succeeded_issue` opened
+        for it has itself closed — merged or closed without merging both
+        read `state == "closed"` from GitHub, and count the same way here:
+        either one means nobody is going to push more commits to that PR, so
+        the task it was opened for is done. There is no webhook to react to
+        this with (docs/design.md's cron-not-webhooks stance, this module's
+        own docstring) and no label move to piggyback on either, since the
+        PR lives in the *target* repo while every label this deployment
+        writes lives on the task issue in the *task* repo — so this polls
+        `state.open_pull_requests` (`_finish_succeeded_issue`'s own record)
+        instead, the same shape `_promote_answered_questions` already uses
+        to poll `state.pending_questions`.
+
+        A 404 from `get_pull_request` means the target repo or PR named in a
+        stale record is gone (an operator changed the allowlist, the PR was
+        deleted outright) — not a reason to crash the cycle, so the record
+        is just dropped. A 404 from `close_issue` means the *task* issue
+        itself is gone the same "stale assignment" way `_requeue` and
+        `_finish_question` already tolerate; the record is dropped there
+        too, since there is nothing left to close.
+        """
+        for pending in list(self.state.open_pull_requests.values()):
+            try:
+                pr = self.github.get_pull_request(
+                    pending.target_owner, pending.target_repo, pending.pr_number
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.state.clear_open_pr(pending.issue)
+                self._save_state()
+                self.audit.record(
+                    sandbox=None, issue=pending.issue,
+                    outcome=f"PR {pending.target_owner}/{pending.target_repo}#"
+                            f"{pending.pr_number} not found while checking for a "
+                            "close -- stale record?",
+                )
+                continue
+            if pr.state != "closed":
+                continue
+            try:
+                self.github.close_issue(
+                    self.config.task_owner, self.config.task_repo, pending.issue
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.state.clear_open_pr(pending.issue)
+                self._save_state()
+                self.audit.record(
+                    sandbox=None, issue=pending.issue,
+                    outcome=f"PR {pending.target_owner}/{pending.target_repo}#"
+                            f"{pending.pr_number} closed, but issue #{pending.issue} "
+                            f"not found in {self.config.task_owner}/"
+                            f"{self.config.task_repo} -- stale assignment?",
+                )
+                continue
+            self.state.clear_open_pr(pending.issue)
+            # bwsalmon/agents#51: same ordering discipline as every other
+            # state-clearing call above -- persist right after the GitHub
+            # side change it goes with, before anything later in this cycle
+            # can crash on top of it.
+            self._save_state()
+            self.audit.record(
+                sandbox=None, issue=pending.issue,
+                outcome=f"closed: PR {pending.target_owner}/{pending.target_repo}#"
+                        f"{pending.pr_number} closed",
             )
 
     def _requeue(self, outcome: Outcome, reason: str) -> None:
