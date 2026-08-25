@@ -262,6 +262,22 @@ def test_dry_run_wait_probes_ssh_and_cloud_init_for_every_target(capsys):
     assert "sandbox-0" in out
 
 
+def test_a_host_wait_that_times_out_prints_diagnostics(capsys, monkeypatch):
+    """`host wait` is the manual half of `host bootstrap`'s stage 5, and a
+    bare TimeoutError is as unreadable run by hand as it was in a deploy --
+    see grain/adapter/diagnostics.py.
+    """
+    def never(ssh, timeout):
+        raise TimeoutError("10.100.0.2 never became reachable over SSH")
+
+    monkeypatch.setattr("grain.cli.wait_for_ssh", never)
+    with pytest.raises(TimeoutError):
+        main(["--dry-run", "host", "wait", "controller"])
+    out = capsys.readouterr().out
+    assert "dominfo controller" in out
+    assert "serial console" in out
+
+
 def test_dry_run_deploy_prints_the_tar_over_ssh_pipeline(capsys):
     out = run(["--dry-run", "host", "deploy"], capsys)
     assert "tar -czf -" in out

@@ -421,3 +421,100 @@ def test_bootstrap_raises_when_gcp_key_given_without_email_or_project_id(env):
     )
     with pytest.raises(ValueError):
         bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+
+
+# --- stage 5/9: what a failed boot wait actually tells the operator -------
+#
+# Reported live as "it fails on wait for controller (5/11) and prints
+# storage info": the wait itself said nothing about why, and on GCP the only
+# thing printed after it was deploy.sh's storage-ownership dump, which is
+# about an entirely different failure. See grain/adapter/diagnostics.py.
+
+def failing_config(admin_private: Path, **kwargs) -> BootstrapConfig:
+    """`ssh_timeout=0` makes `wait_for_ssh` give up on the first refusal
+    rather than sleeping through a real 180s budget.
+    """
+    return BootstrapConfig(
+        task_repo="acme/widgets", admin_private_key_path=admin_private,
+        ssh_timeout=0, **kwargs,
+    )
+
+
+def test_a_controller_that_never_answers_ssh_dumps_host_diagnostics(env):
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(runner, cluster, admin_private)
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    runner.expect(f"{controller_prefix} -- true", returncode=255,
+                   stderr="Connection refused")
+    lines: list[str] = []
+
+    with pytest.raises(TimeoutError):
+        bootstrap(cluster=cluster, adapter=adapter, base_runner=runner,
+                   config=failing_config(admin_private), log=lines.append)
+
+    assert runner.ran("virsh -c qemu:///system dominfo controller")
+    assert runner.ran("ping -c 2 -W 2 10.100.0.2")
+    assert any("serial console" in line for line in lines)
+
+
+def test_the_wait_stage_names_the_address_and_the_timeout_in_play(env):
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(runner, cluster, admin_private)
+    lines: list[str] = []
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner,
+               config=config, log=lines.append)
+    stage5 = next(line for line in lines if line.startswith("stage 5/11"))
+    assert "10.100.0.2" in stage5 and "180s" in stage5
+
+
+def test_a_fresh_controller_whose_provisioning_failed_dumps_guest_diagnostics(env):
+    """cloud-init reports `status: error` and nothing else; the reason is in
+    the guest's own logs, which is where provision/controller.sh's `set -eux`
+    output (an apt or egress failure, say) actually lands.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(runner, cluster, admin_private)
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    runner.expect(
+        f"{controller_prefix} -- "
+        f"{shlex.quote('sudo timeout 900 cloud-init status --wait')}",
+        returncode=1, stdout="status: error",
+    )
+    lines: list[str] = []
+
+    with pytest.raises(RuntimeError, match="cloud-init did not finish cleanly"):
+        bootstrap(cluster=cluster, adapter=adapter, base_runner=runner,
+                   config=failing_config(admin_private), log=lines.append)
+
+    assert any("cloud-init status --long" in c for c in runner.commands)
+    assert any("cloud-init-output.log" in c for c in runner.commands)
+
+
+def test_an_already_running_vm_is_still_checked_for_provisioning(env):
+    """Found the hard way on the *re-run* after a failed provision: `fresh`
+    is false the second time, so the check used to be skipped entirely and
+    the run failed at stage 6 with `cat:
+    /data/secrets/controller-ssh.pub: No such file or directory` instead.
+    A warning, not a failure -- an already-running VM may have been
+    provisioned by any earlier run, and whatever really needs it fails on
+    its own if this mattered.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    runner.expect(
+        f"{controller_prefix} -- "
+        f"{shlex.quote('sudo timeout 900 cloud-init status --wait')}",
+        returncode=1, stdout="status: error",
+    )
+    lines: list[str] = []
+
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner,
+               config=config, log=lines.append)  # must not raise
+
+    assert any(line.startswith("WARNING") and "cloud-init" in line for line in lines)
+    assert any("cloud-init status --long" in c for c in runner.commands)
