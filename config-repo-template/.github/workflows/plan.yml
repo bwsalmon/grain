@@ -3,8 +3,8 @@
 # `data` sources during planning (`data "external"` runs an arbitrary
 # program and reads its JSON output -- a real, legitimate feature, not an
 # edge case), so an authenticated plan job triggered on `pull_request`
-# would hand a live deployer credential to whatever a PR's own `.tf`
-# files say to run, before any human reviews anything and with no
+# would hand a live deployer credential to whatever a PR's own config
+# says to run, before any human reviews anything and with no
 # workflow-file edit required to get there. Denying the deploy
 # workflow's own credential the `workflow` scope only closes the door on
 # an agent rewriting *this* file -- it does nothing about an unmodified,
@@ -15,13 +15,19 @@
 # authenticated plan preview before merge -- `deploy.yml`'s own
 # `terraform apply` log is the first real plan, and by then a human
 # already approved the merge.
+#
+# The Terraform module itself is not vendored here -- it is pulled fresh
+# from bwsalmon/grain at the ref config/grain.tfvars names (grain_ref),
+# same as the on-host deploy fetches grain. A PR can only steer which
+# ref of *grain* gets fetched, never which repository -- and `validate`,
+# unlike `plan`, never evaluates a data source, so that has no bearing
+# on the no-credential argument above.
 name: plan
 
 on:
   pull_request:
     paths:
       - "config/**"
-      - "terraform/**"
       - ".github/workflows/**"
 
 permissions:
@@ -33,18 +39,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Determine which grain ref to pull Terraform from
+        id: grain
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^grain_ref[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' config/grain.tfvars | head -1)"
+          echo "ref=${ref:-main}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout grain (the Terraform module lives there, not here)
+        uses: actions/checkout@v4
+        with:
+          repository: bwsalmon/grain
+          ref: ${{ steps.grain.outputs.ref }}
+          path: grain-src
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
 
       - name: Terraform fmt
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: terraform fmt -check -recursive -diff
 
       - name: Terraform init (no backend, no credentials)
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: terraform init -backend=false -input=false
 
       - name: Terraform validate
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: terraform validate -no-color

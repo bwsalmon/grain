@@ -2,6 +2,12 @@
 # into the host: Terraform reconciles the GCP side, the two secrets go
 # straight into the instance's own metadata, and the new commit SHA lands
 # there too -- which is what the on-VM config-sync service is watching.
+#
+# The Terraform module and its provisioning scripts are not vendored in
+# this repo -- they are pulled fresh from bwsalmon/grain at the ref
+# config/grain.tfvars names (grain_ref), the same ref the on-host deploy
+# fetches grain from. One field of config pins both what infrastructure
+# CI applies and what grain software the host runs.
 name: deploy
 
 on:
@@ -9,7 +15,6 @@ on:
     branches: [main]
     paths:
       - "config/**"
-      - "terraform/**"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
   # Uncomment to also redeploy on a schedule, which is how you track a
@@ -45,6 +50,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Determine which grain ref to pull Terraform and scripts from
+        id: grain
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^grain_ref[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' config/grain.tfvars | head -1)"
+          echo "ref=${ref:-main}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout grain (the Terraform module lives there, not here)
+        uses: actions/checkout@v4
+        with:
+          repository: bwsalmon/grain
+          ref: ${{ steps.grain.outputs.ref }}
+          path: grain-src
+
       # This repo is also the task queue: an issue here, labelled
       # `grain-agent`, is what the automation service picks up. Create the
       # three labels it moves an issue between, so they are in the picker
@@ -64,7 +83,8 @@ jobs:
           label grain-agent-awaiting-reply d93f0b "Parked: the agent needs a human reply"
 
       # Preferred: Workload Identity Federation, so this repo holds no GCP
-      # key at all. scripts/bootstrap-gcp.sh sets it up and prints both values.
+      # key at all. grain's terraform/gcp/bootstrap-gcp.sh sets it up and
+      # prints both values.
       - name: Authenticate to GCP (workload identity)
         if: ${{ env.HAS_WIF == 'true' }}
         uses: google-github-actions/auth@v2
@@ -87,24 +107,24 @@ jobs:
           terraform_version: "1.9.8"
 
       - name: Terraform init
-        working-directory: terraform
-        run: terraform init -input=false -backend-config=../config/backend.hcl
+        working-directory: grain-src/terraform/gcp
+        run: terraform init -input=false -backend-config=${{ github.workspace }}/config/backend.hcl
 
       - name: Terraform validate
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: terraform validate -no-color
 
       - name: Terraform apply
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: |
           terraform apply -input=false -auto-approve -no-color \
-            -var-file=../config/grain.tfvars \
+            -var-file=${{ github.workspace }}/config/grain.tfvars \
             -var="config_repo=${{ github.repository }}" \
             -var="deploy_generation=${DEPLOY_GENERATION}"
 
       - name: Read outputs
         id: tf
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: |
           {
             echo "project_id=$(terraform output -raw project_id)"
@@ -221,7 +241,7 @@ jobs:
 
       - name: Summary
         if: always()
-        working-directory: terraform
+        working-directory: grain-src/terraform/gcp
         run: |
           {
             echo "### grain rollout"

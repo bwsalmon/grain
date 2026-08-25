@@ -1,8 +1,17 @@
-"""The config repo template has three sides that must agree: Terraform
-declares variables, config/grain.tfvars sets them, and the on-host
-deploy.sh reads what Terraform puts in instance metadata. Nothing in CI
-would catch a drift between them until a deploy failed on a real VM, so
-check it here.
+"""GCP provisioning has two sides, in two repos, that must agree: the
+Terraform module and its shell scripts live in this repo's own
+terraform/gcp/, config-repo-template/ holds only the deployment's
+configuration and the two workflows that pull terraform/gcp/ fresh at
+CI time (see docs/roadmap.md and the "Remove duplicated code for gcp
+provisioning templates" issue this split closed -- config-repo-template
+used to vendor a full copy of terraform/gcp/, which drifted from this
+one the moment either repo changed).
+
+So there are still three sides that must agree -- Terraform declares
+variables, config/grain.tfvars sets them, and the on-host deploy.sh reads
+what Terraform puts in instance metadata -- they just live across two
+directories now instead of one. Nothing in CI would catch a drift between
+them until a deploy failed on a real VM, so check it here.
 
 Everything is stdlib -- no terraform binary, no yaml -- so it runs
 wherever the rest of the suite does.
@@ -18,8 +27,9 @@ from pathlib import Path
 from grain.automation.config import AutomationConfig
 from grain.inventory import Cluster
 
-TEMPLATE = Path(__file__).resolve().parent.parent / "config-repo-template"
-TERRAFORM = TEMPLATE / "terraform"
+ROOT = Path(__file__).resolve().parent.parent
+TEMPLATE = ROOT / "config-repo-template"
+TERRAFORM = ROOT / "terraform" / "gcp"
 DEPLOY_SH = TERRAFORM / "files" / "deploy.sh"
 TFVARS = TEMPLATE / "config" / "grain.tfvars"
 WORKFLOWS = TEMPLATE / ".github" / "workflows"
@@ -28,7 +38,7 @@ SHELL_SCRIPTS = [
     TERRAFORM / "files" / "startup.sh",
     TERRAFORM / "files" / "config-sync.sh",
     DEPLOY_SH,
-    TEMPLATE / "scripts" / "bootstrap-gcp.sh",
+    TERRAFORM / "bootstrap-gcp.sh",
 ]
 
 
@@ -201,11 +211,11 @@ def test_no_secret_value_is_committed_or_passed_through_terraform():
     """The template's central claim. Terraform never touches Secret
     Manager or a secret value -- the two runtime credentials go straight
     into instance metadata over the Compute API instead -- and nothing in
-    the repo holds a credential."""
+    either repo holds a credential."""
     source = _tf_source()
     assert "secret_manager" not in source.lower()
     assert "secretmanager" not in source.lower()
-    for path in TEMPLATE.rglob("*"):
+    for path in list(TEMPLATE.rglob("*")) + list(TERRAFORM.rglob("*")):
         if path.is_file():
             text = path.read_text(errors="ignore")
             assert "-----BEGIN" not in text, f"{path} looks like it holds a key"
@@ -396,3 +406,50 @@ def test_the_deploy_workflow_creates_the_labels_the_orchestrator_moves():
     for label in (config.trigger_label, config.in_progress_label,
                   config.awaiting_reply_label):
         assert f"label {label} " in deploy, f"deploy.yml never creates {label!r}"
+
+
+def test_config_repo_template_vendors_no_terraform_or_scripts():
+    """The whole point of this split: a fork of config-repo-template must
+    never again carry its own copy of the Terraform module or its
+    scripts, or it silently drifts from terraform/gcp/ the moment either
+    repo changes -- which is exactly the bug this test suite exists to
+    catch before a deploy does.
+    """
+    assert not (TEMPLATE / "terraform").exists(), \
+        "config-repo-template/terraform/ has come back -- Terraform belongs only in terraform/gcp/"
+    assert not (TEMPLATE / "scripts").exists(), \
+        "config-repo-template/scripts/ has come back -- scripts belong only in terraform/gcp/"
+
+
+def test_both_workflows_pull_terraform_from_grain_at_the_tfvars_ref():
+    """Neither workflow may vendor the Terraform module -- both must check
+    out bwsalmon/grain fresh, at whatever ref config/grain.tfvars names,
+    into the exact path the later Terraform steps then use.
+    """
+    for name in ("plan.yml", "deploy.yml"):
+        workflow = (WORKFLOWS / name).read_text()
+        assert "repository: bwsalmon/grain" in workflow, \
+            f"{name} does not check out grain at all"
+        assert "path: grain-src" in workflow, \
+            f"{name} does not check grain out to grain-src"
+        assert "grain-src/terraform/gcp" in workflow, \
+            f"{name} never points a Terraform step at the checked-out module"
+        assert "grain_ref" in workflow, \
+            f"{name} does not read grain_ref out of config/grain.tfvars"
+        # No local terraform/ directory to run any of this from.
+        assert re.search(r"working-directory:\s*terraform\b", workflow) is None, \
+            f"{name} still points at a vendored terraform/ directory"
+
+
+def test_deploy_yml_passes_absolute_config_paths_to_terraform():
+    """working-directory for every Terraform step is grain-src/terraform/gcp
+    now, not this repo's own terraform/ -- a relative ../config/... path
+    would resolve inside the grain-src checkout instead of this repo's
+    config/, so the var-file and backend-config flags have to be anchored
+    with github.workspace instead.
+    """
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    assert "-backend-config=${{ github.workspace }}/config/backend.hcl" in deploy
+    assert "-var-file=${{ github.workspace }}/config/grain.tfvars" in deploy
+    assert "-backend-config=../config/backend.hcl" not in deploy
+    assert "-var-file=../config/grain.tfvars" not in deploy

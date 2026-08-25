@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# One-time setup, run once by a human with project-owner rights. Everything
-# after this is done by CI from a pull request.
+# One-time setup, run once by a human with project-owner rights, from a
+# clone of grain (this script is not vendored into a config repo -- see
+# config-repo-template/README.md). Everything after this is done by CI
+# from a pull request.
 #
 # It creates the things that cannot bootstrap themselves: the Terraform
 # state bucket, the deployer service account CI runs as, and the workload
-# identity federation that lets this repo's workflows authenticate to GCP
-# *without a service account key* -- so the only GitHub secrets that hold a
-# real credential are grain's own two runtime tokens.
+# identity federation that lets the config repo's workflows authenticate
+# to GCP *without a service account key* -- so the only GitHub secrets
+# that hold a real credential are grain's own two runtime tokens.
 #
 # Idempotent: safe to re-run after changing anything.
 #
-#   ./scripts/bootstrap-gcp.sh --project my-project --repo my-org/my-config-repo
+#   ./terraform/gcp/bootstrap-gcp.sh --project my-project --repo my-org/my-config-repo
 #
 set -euo pipefail
 
