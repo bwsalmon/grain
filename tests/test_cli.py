@@ -41,6 +41,28 @@ def test_dry_run_up_executes_nothing_but_shows_everything(capsys):
     assert "policy drop" in out
 
 
+def test_dry_run_egress_applies_the_named_policy(capsys):
+    out = run(["--dry-run", "host", "egress", "allowlist"], capsys)
+    assert "+ nft -f -" in out
+    assert "masquerade" not in out
+
+
+def test_dry_run_egress_open_keeps_masquerade(capsys):
+    out = run(["--dry-run", "host", "egress", "open"], capsys)
+    assert "+ nft -f -" in out
+    assert "masquerade" in out
+
+
+def test_dry_run_stop_probes_every_targets_state_first(capsys):
+    out = run(["--dry-run", "--sandboxes", "2", "host", "stop", "sandboxes"], capsys)
+    assert out.count("virsh -c qemu:///system list --all") == 2
+
+
+def test_dry_run_destroy_probes_every_targets_state_first(capsys):
+    out = run(["--dry-run", "--sandboxes", "2", "host", "destroy", "sandboxes"], capsys)
+    assert out.count("virsh -c qemu:///system list --all") == 2
+
+
 def test_status_lists_every_vm_with_its_assigned_address(capsys):
     out = run(["--dry-run", "--sandboxes", "2", "host", "status"], capsys)
     assert "controller" in out and "10.100.0.2" in out
@@ -57,6 +79,19 @@ def test_targets_accept_group_aliases(capsys):
     out = run(["--dry-run", "host", "start", "sandboxes"], capsys)
     assert "sandbox-0" in out and "sandbox-1" in out
     assert "start --tty=false controller" not in out
+
+
+def test_build_cluster_applies_an_image_override(tmp_path):
+    import argparse
+
+    from grain.cli import build_cluster
+
+    args = argparse.Namespace(
+        cluster_file=str(tmp_path / "does-not-exist.json"),
+        sandboxes=None, image="/custom/base.qcow2",
+    )
+    cluster = build_cluster(args)
+    assert cluster.image == "/custom/base.qcow2"
 
 
 def test_a_subcommand_is_required():
@@ -226,6 +261,48 @@ def test_sessions_list_filters_by_kind(tmp_path, capsys):
     assert "pr#8" in out
 
 
+def test_sessions_list_filters_by_outcome(tmp_path, capsys):
+    from datetime import datetime, timezone
+
+    from grain.automation.history import FileSessionHistory
+    from grain.automation.state import TriggerKind
+
+    history = FileSessionHistory(tmp_path / "state" / "automation" / "sessions")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    history.record(issue=7, kind=TriggerKind.ISSUE, sandbox="sandbox-0", unit="u0",
+                    started_at=now, finished_at=now, outcome="succeeded",
+                    transcript_text=None)
+    history.record(issue=8, kind=TriggerKind.ISSUE, sandbox="sandbox-1", unit="u1",
+                    started_at=now, finished_at=now, outcome="failed",
+                    transcript_text=None)
+
+    out = run(
+        ["--data-dir", str(tmp_path), "sessions", "list", "--outcome", "failed"], capsys,
+    )
+    assert "issue#7" not in out
+    assert "issue#8" in out
+
+
+def test_sessions_browse_builds_history_from_the_data_dir_and_hands_it_to_the_tui(
+    tmp_path, monkeypatch,
+):
+    """`cmd_sessions_browse`'s own two lines -- the curses event loop
+    (`sessions_tui.run`) is deliberately not unit tested, per
+    `grain/automation/tui.py`'s own module docstring, so it's stubbed out
+    here to check only the wiring: the right, data-dir-rooted
+    `FileSessionHistory` reaches it.
+    """
+    from grain.automation.history import FileSessionHistory
+
+    captured = {}
+    monkeypatch.setattr(
+        "grain.cli.sessions_tui.run", lambda history: captured.setdefault("history", history)
+    )
+    assert main(["--data-dir", str(tmp_path), "sessions", "browse"]) == 0
+    assert isinstance(captured["history"], FileSessionHistory)
+    assert captured["history"].root == tmp_path / "state" / "automation" / "sessions"
+
+
 def test_sessions_list_filters_by_trigger_number(tmp_path, capsys):
     from datetime import datetime, timezone
 
@@ -278,6 +355,23 @@ def test_a_host_wait_that_times_out_prints_diagnostics(capsys, monkeypatch):
     assert "serial console" in out
 
 
+def test_a_host_wait_whose_cloud_init_never_finishes_prints_guest_diagnostics(capsys, monkeypatch):
+    """The other half of `host wait`'s two diagnostics dumps: a VM that
+    answers SSH but never finishes provisioning gets the guest-side dump
+    (`dump_guest_diagnostics`), not the host-side one `wait_for_ssh`'s own
+    timeout gets.
+    """
+    def never(ssh):
+        raise TimeoutError("cloud-init never reported done")
+
+    monkeypatch.setattr("grain.cli.wait_for_provisioning", never)
+    with pytest.raises(TimeoutError):
+        main(["--dry-run", "host", "wait", "controller"])
+    out = capsys.readouterr().out
+    assert "provisioning did not finish" in out
+    assert "cloud-init status --long" in out
+
+
 def test_dry_run_deploy_prints_the_tar_over_ssh_pipeline(capsys):
     out = run(["--dry-run", "host", "deploy"], capsys)
     assert "tar -czf -" in out
@@ -325,6 +419,17 @@ def test_dry_run_controller_configure_with_a_github_token_file(capsys, tmp_path)
     for line in out.splitlines():
         if line.startswith("+ ssh") and "dd of=" in line:
             assert "ghp_dryruntoken" not in line
+
+
+def test_dry_run_controller_configure_with_a_claude_token_file(capsys, tmp_path):
+    token_file = tmp_path / "claude-token"
+    token_file.write_text("sk-ant-oat01-dryruntoken\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--claude-token-file", str(token_file)],
+        capsys,
+    )
+    assert "dd of=/data/secrets/claude-oauth-token" in out
 
 
 def test_controller_configure_restarts_the_proxy_after_the_credential_write_too(capsys, tmp_path):
@@ -563,6 +668,25 @@ def test_sandbox_login_rejects_an_unknown_name():
 def test_sandbox_login_can_reach_the_controller_too(capsys):
     out = run(["--dry-run", "sandbox", "login", "controller"], capsys)
     assert "10.100.0.2" in out
+
+
+def test_sandbox_login_without_dry_run_execs_ssh_replacing_this_process(monkeypatch):
+    """Without `--dry-run`, `cmd_sandbox_login` never returns -- it replaces
+    the current process with an interactive `ssh` session
+    (`os.execvp`). `os.execvp` itself is stubbed out here so the test
+    process survives; what's under test is that the right argv reaches it.
+    """
+    captured = {}
+
+    def fake_execvp(file, argv):
+        captured["file"] = file
+        captured["argv"] = argv
+
+    monkeypatch.setattr("os.execvp", fake_execvp)
+    assert main(["--sandboxes", "2", "sandbox", "login", "sandbox-0"]) is None
+    assert captured["file"] == "ssh"
+    assert captured["argv"][0] == "ssh"
+    assert captured["argv"][-1] == "debian@10.100.0.10"
 
 
 def test_missing_tool_raises_a_legible_error_when_check_is_on():

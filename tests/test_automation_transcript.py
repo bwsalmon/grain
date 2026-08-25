@@ -68,6 +68,46 @@ def test_parse_event_handles_tool_result_block():
     assert "file1.py" in event.detail
 
 
+def test_parse_event_handles_a_tool_result_whose_content_is_itself_a_list_of_blocks():
+    # A real transcript shape `content: "..."` above doesn't cover: some
+    # tool results carry their own list of typed content blocks rather
+    # than a plain string.
+    line = json.dumps({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_1",
+                "content": [{"type": "text", "text": "file1.py"},
+                            {"type": "text", "text": "file2.py"}],
+                "is_error": False,
+            }],
+        },
+    })
+    event = parse_event(line)
+    assert "tool_result (ok)" in event.detail
+    assert "file1.py" in event.detail and "file2.py" in event.detail
+
+
+def test_parse_event_content_that_is_neither_a_string_nor_a_list_renders_as_empty():
+    # An unrecognized/future message shape must not crash the viewer.
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": 42}})
+    event = parse_event(line)
+    assert event.detail == ""
+
+
+def test_parse_event_skips_a_non_dict_entry_in_a_content_list():
+    line = json.dumps({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": ["not a block", {"type": "text", "text": "still works"}],
+        },
+    })
+    event = parse_event(line)
+    assert event.detail == "still works"
+
+
 def test_parse_event_marks_an_error_tool_result():
     line = json.dumps({
         "type": "user",
