@@ -1249,7 +1249,67 @@ plainly that its final commit message becomes the PR description verbatim,
 and asks for a summary line plus a paragraph of explanation — the same
 shape a human would write for a reviewer, not a `git log`-only note.
 
-## 19. Closing an issue should cancel the underlying agent
+## 19. Auto-suggest a fix for a completed task's conflicting or failing PR
+
+- [x] Done
+
+Item 17's own poll, `_close_finished_prs`, only ever watched an open PR
+for one thing: has it closed. bwsalmon/agents#83 asked for a second thing
+to watch for while it's still open — a conflict with its base branch, or a
+failing check — and for grain to do something about it rather than leave
+it for a human to notice by hand.
+
+**Read, don't guess.** `PullRequestDetail` gained `mergeable`
+(`GitHubClient.get_pull_request` already reads the whole object; the field
+was simply never carried through before). GitHub computes it
+asynchronously, so it is `None` for a cycle or two after a push —
+`_pr_health`'s `_PrHealth.has_conflict`/`.is_broken`/`.is_clean` all treat
+`None` as "don't know yet," never as either a conflict or a clean merge. A
+new `GitHubClient.list_check_runs` (paginated the same `Link`-header way
+every other list call here is, but the one endpoint whose body is
+`{"total_count", "check_runs"}` rather than a bare array) supplies the
+other half: any completed check with conclusion `failure`/`timed_out`/
+`action_required` counts as broken; anything still `queued`/`in_progress`
+counts as pending, not broken -- a check that hasn't finished yet may
+still pass.
+
+**Suggest, don't act — the issue's own words: "needing user approval."**
+`_suggest_fix` files a *new* task issue (`GitHubClient.create_issue`, also
+new) the moment `_pr_health` reads a definite conflict or failing check,
+carrying `/repo`, `/base <the open PR's own head ref>` and `/auto-merge`
+(directives.py's new fourth directive). It's filed with
+`needs_approval_label` (`AutomationConfig.needs_approval_label`, default
+`"grain-agent-needs-approval"`) instead of `trigger_label` — a new state
+label, styled the same dark tier `awaiting_reply_label` is in
+`labels.py`, for the same reason: it's a task nobody has approved to run
+yet. `_dispatch` strips it the moment a human's `trigger_label`
+(re-)approves the task and it actually dispatches — the same "exactly one
+state label at a time" invariant every other state transition here
+already holds to. `state.open_pull_requests` gained `fix_issue` so this
+only ever happens once per PR — a second failing check on the same PR
+after a fix has already been suggested doesn't file a second one.
+
+**The stacked branch needs no new dispatch machinery at all.** A task's
+`/base` already builds its fresh branch on top of *any* named branch, not
+just a target repo's default (item 15) — so `/base <original PR's head
+ref>` already *is* a stacked PR: `_resolve_target`/`dispatch()` need no
+changes whatsoever to produce one.
+
+**Auto-merge closes the loop the issue asked for: "If approved, auto-merge
+the stacked PR with the original."** `/auto-merge` (`Directives.auto_merge`,
+threaded through `Assignment`/`Outcome` the same way `target_owner`/`base`
+already are) marks the PR `_finish_succeeded_issue` opens for that task as
+`OpenPullRequest.auto_merge`. `_close_finished_prs` merges it itself
+(`GitHubClient.merge_pull_request`, a third new client method) the moment
+`_pr_health` reads it clean — mergeable, no pending or failing check —
+instead of only ever waiting on a human to close it the way an ordinary
+task's PR does. A 405/409 (the PR went stale between the read and the
+merge attempt) is logged and retried next cycle, not raised. Deliberately
+excluded from ever getting a fix suggested for it in turn — a fix for a
+fix risks an unbounded chain — so a fix whose own PR goes wrong is left
+open, visibly, rather than escalated.
+
+## 20. Closing an issue should cancel the underlying agent
 
 - [x] Done
 

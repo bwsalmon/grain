@@ -771,6 +771,9 @@ def test_dispatch_with_self_debug_adds_the_flag_and_tells_the_agent():
     prompt_stdin = _prompt_stdin(runner)
     assert "grain-self-debug" in prompt_stdin
     assert "read_grain_logs" in prompt_stdin
+    assert "check_grain_health" in prompt_stdin
+    assert "read_grain_config" in prompt_stdin
+    assert "read_automation_audit_log" in prompt_stdin
 
 
 def test_dispatch_pr_with_self_debug_adds_the_flag_and_tells_the_agent():
@@ -781,6 +784,9 @@ def test_dispatch_pr_with_self_debug_adds_the_flag_and_tells_the_agent():
     prompt_stdin = _prompt_stdin(runner)
     assert "grain-self-debug" in prompt_stdin
     assert "read_grain_logs" in prompt_stdin
+    assert "check_grain_health" in prompt_stdin
+    assert "read_grain_config" in prompt_stdin
+    assert "read_automation_audit_log" in prompt_stdin
 
 
 def test_dispatch_pr_with_no_self_debug_never_adds_the_flag():

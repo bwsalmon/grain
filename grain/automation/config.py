@@ -76,6 +76,17 @@ class AutomationConfig:
     # the other labels above, this one isn't part of the dispatch queue
     # state machine, just a visible marker of "the agent's part is done."
     completed_label: str = "grain-agent-completed"
+    # bwsalmon/agents#83: applied instead of `trigger_label` to a fix task
+    # `core.py`'s `_suggest_fix` files for a task whose PR has conflicts
+    # with its base or a failing check -- so it sits in the queue visibly,
+    # but `_dispatch`'s own poll (which only ever lists `trigger_label`)
+    # never picks it up on its own. A human applies `trigger_label` to it
+    # once they're satisfied the fix is worth attempting, the same action
+    # that starts every other task; `_dispatch` then strips this label off
+    # on the same cycle it dispatches, the same "exactly one state at a
+    # time" invariant `labels.py`'s own docstring holds every other state
+    # label to.
+    needs_approval_label: str = "grain-agent-needs-approval"
     # Asks for a short-lived Gemini API key for the task it's applied to
     # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once
     # the task's slot frees. A label, not a body directive

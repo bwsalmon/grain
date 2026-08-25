@@ -12,6 +12,12 @@ request is opened. This module is the parser for how a task says so.
                          instead of starting a fresh branch
     /base develop        optional: PR base override, instead of the target
                          repo's own default branch
+    /auto-merge true     optional: once this task's own PR is opened, merge
+                         it straight into `base` instead of leaving it for a
+                         human to review -- see `core.py`'s `_suggest_fix`
+                         (bwsalmon/agents#83), the only thing that writes
+                         this directive today, for why a task would ever
+                         want that
 
 A body line, not a label: a `repo:owner/name` label would have to exist in
 the task repo before it could be applied, is awkward to create once per
@@ -62,7 +68,7 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
 # left alone (a prose line starting with an absolute path, a Markdown list
 # of shell commands), which is why the name is matched from a fixed set
 # here rather than by shape.
-_DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base)\s+(\S+)\s*$")
+_DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base|auto-merge)\s+(\S+)\s*$")
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,11 @@ class Directives:
     target: RepoRef | None = None
     pr: int | None = None
     base: str | None = None
+    # Presence-only, so any value on the line counts -- there is no way to
+    # write a directive line that unsets a flag once it's on, the same
+    # "sticky" shape a label would have. `_apply` therefore ORs across
+    # texts rather than letting a later one override to False.
+    auto_merge: bool = False
 
 
 class DirectiveError(ValueError):
@@ -156,6 +167,7 @@ def _parse_one(text: str) -> Directives:
         target=RepoRef.parse(found["repo"], what="`/repo`") if "repo" in found else None,
         pr=_parse_pr(found["pr"]) if "pr" in found else None,
         base=found["base"] if "base" in found else None,
+        auto_merge="auto-merge" in found,
     )
 
 
@@ -174,4 +186,5 @@ def _apply(base: Directives, override: Directives) -> Directives:
         target=override.target if override.target is not None else base.target,
         pr=override.pr if override.pr is not None else base.pr,
         base=override.base if override.base is not None else base.base,
+        auto_merge=override.auto_merge or base.auto_merge,
     )
