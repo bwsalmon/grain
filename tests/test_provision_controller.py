@@ -10,6 +10,7 @@ live-boot half of this verification.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -118,9 +119,13 @@ def test_installs_systemd_units_but_does_not_enable_them():
         line for line in text.splitlines()
         if not line.strip().startswith("#") and "systemctl" in line
     ]
-    assert all("enable" not in line and "start" not in line for line in executable_lines), (
-        executable_lines
-    )
+    # On the verb, not on substrings: `systemctl restart systemd-journald`
+    # (the journal-forwarding block below) contains "start" but enables
+    # nothing of grain's -- which is what this is actually guarding.
+    assert all(
+        not re.search(r"systemctl\s+(--\S+\s+)*(enable|start)\b", line)
+        for line in executable_lines
+    ), executable_lines
     assert "systemctl daemon-reload" in text
 
 
@@ -132,3 +137,42 @@ def test_git_proxy_unit_binds_the_controllers_private_address_not_0000():
 
 def test_creates_opt_grain_for_the_manual_code_deploy_step():
     assert "/opt/grain" in read()
+
+
+def test_journal_forwarding_is_applied_with_a_job_type_journald_supports():
+    """Found live, and it took down the whole deploy: `systemctl reload
+    systemd-journald` fails with "Job type reload is not applicable for unit
+    systemd-journald.service" -- journald reads journald.conf at start, so
+    `restart` is what applies the drop-in.
+    """
+    text = read()
+    assert "/etc/systemd/journald.conf.d/forward-to-console.conf" in text
+    assert "ForwardToConsole=yes" in text
+    assert "systemctl reload systemd-journald" not in text
+    assert "systemctl restart systemd-journald" in text
+
+
+def test_journal_forwarding_cannot_abort_provisioning():
+    """The block is a diagnostic convenience; under `set -eux` its one
+    failing line aborted the entire script, cloud-init recorded the run as
+    failed, and `grain host bootstrap` stopped at stage 5 on a controller
+    that was in fact fully built. Logging must not be able to do that.
+    """
+    text = read()
+    line = next(l for l in text.splitlines()
+                if l.startswith("systemctl restart systemd-journald"))
+    assert line.rstrip().endswith("||") or "||" in line, line
+
+
+def test_no_command_reloads_a_unit_that_cannot_be_reloaded():
+    """`systemctl daemon-reload` (the manager) is always valid; a per-unit
+    `systemctl reload` is only valid for a unit that declares ExecReload,
+    which is exactly the assumption that failed here.
+    """
+    reloads = [
+        line for line in read().splitlines()
+        if not line.strip().startswith("#")
+        and "systemctl reload" in line
+        and "daemon-reload" not in line
+    ]
+    assert not reloads, reloads
