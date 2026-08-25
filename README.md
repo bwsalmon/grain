@@ -653,6 +653,19 @@ rides in the prompt file, only its path in the sandbox — see
 `grain/automation/gemini_keys.py` for why this is minted on the
 controller's own account rather than the sandbox-facing metadata broker.
 
+**Label a task `grain-self-debug`** (bwsalmon/agents#62) to give the agent
+a `read_grain_logs` tool: recent `journalctl` entries for grain's own
+controller services, `grain-automation.service` and
+`grain-git-proxy.service` — for triaging a bug in grain itself, not the
+target repo's own code. Same trust tier as the other two labels above, and
+on unconditionally at the account level (`provision/controller.sh` grants
+`grain-agent` read-only `systemd-journal` group membership regardless of
+whether any task ever uses it), so unlike `grain-gemini-key` there is no
+separate `controller configure` step — the label alone turns the tool on
+for that task. Strictly read-only: the tool can only read the journal for
+one of those two services, never write to anything or reach any other
+unit on the controller.
+
 **Requiring a human to apply the label is the prompt-injection gate.**
 Anyone who can file an issue can put text in front of the agent; the
 label is what makes a person decide it runs.

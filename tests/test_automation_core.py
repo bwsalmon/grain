@@ -1478,6 +1478,63 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
     assert GEMINI_KEY_NAME in delete_call
 
 
+# --- Self-debug (bwsalmon/agents#62) ----------------------------------------
+
+SELF_DEBUG_LABELS = ("grain-agent", "grain-self-debug")
+
+
+def _mcp_config_args_from(runner) -> list[str]:
+    mcp_config_dd = next(
+        stdin for argv, stdin in runner.calls
+        if argv[:2] == ["sudo", "dd"] and "mcp-config.json" in argv[2]
+    )
+    return json.loads(mcp_config_dd)["mcpServers"]["grain-sandbox"]["args"]
+
+
+def _prompt_stdin_from(runner) -> str:
+    return next(
+        stdin for argv, stdin in runner.calls
+        if argv[:1] == ["sudo"] and any("prompt.md" in a for a in argv)
+    )
+
+
+def test_a_task_with_no_self_debug_label_never_enables_the_tool():
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4)])
+
+    orchestrator.run_once(NOW)
+
+    runner = orchestrator.base_runner
+    assert "--self-debug" not in _mcp_config_args_from(runner)
+    assert "grain-self-debug" not in _prompt_stdin_from(runner)
+
+
+def test_self_debug_label_enables_the_tool_and_tells_the_agent():
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4, labels=SELF_DEBUG_LABELS)])
+
+    orchestrator.run_once(NOW)
+
+    runner = orchestrator.base_runner
+    assert "--self-debug" in _mcp_config_args_from(runner)
+    prompt = _prompt_stdin_from(runner)
+    assert "grain-self-debug" in prompt
+    assert "read_grain_logs" in prompt
+
+
+def test_self_debug_label_needs_no_deployment_config_unlike_gemini_key():
+    """Unlike `grain-gemini-key` (which parks a task when
+    `gemini_key_config` is unset), `grain-self-debug` never needs to --
+    there is no equivalent config gating it, so a plain deployment with
+    nothing extra configured still dispatches normally.
+    """
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4, labels=SELF_DEBUG_LABELS)])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert not any(o.startswith("parked") for o in outcomes)
+
+
 # --- surviving a controller VM restart (bwsalmon/agents#51) ---------------
 #
 # `claude -p` runs on the controller now (docs/roadmap.md item 8's

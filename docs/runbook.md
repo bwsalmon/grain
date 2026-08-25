@@ -622,6 +622,24 @@ minted for a task still in flight is unaffected (it still gets revoked
 normally when that task's slot frees) — this only stops new ones from
 being minted.
 
+## Enabling `grain-self-debug` (bwsalmon/agents#62)
+
+A task issue carrying the `grain-self-debug` label gets a `read_grain_logs`
+MCP tool: recent `journalctl` entries for grain's own controller services,
+`grain-automation.service` and `grain-git-proxy.service` — for triaging a
+bug in grain itself rather than the target repo's own code. Strictly
+read-only, and the exact opposite of `grain-gemini-key` in one way: nothing
+here needs a `controller configure` step or an operator decision to turn
+on. `provision/controller.sh` grants `grain-agent` read-only
+`systemd-journal` group membership unconditionally, so any deployment
+provisioned from this repo already has it — the label on a task issue is
+the only thing that decides whether that particular task's agent gets the
+tool at all.
+
+There is nothing to disable here short of not applying the label — there
+is no config file gating it the way `gemini-key.json` gates
+`grain-gemini-key`.
+
 ## Gaps: what this runbook can't yet tell you to automate
 
 Everything below needs either a real target GitHub repo/org, or code this

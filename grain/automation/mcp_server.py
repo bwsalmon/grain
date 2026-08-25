@@ -60,6 +60,21 @@ otherwise the *only* signal a fresh-issue task is done. Like
 rather than touching the sandbox or GitHub itself; `core.py`'s sweep reads
 it back and, if present, posts it as the closing comment on the task issue
 instead of checking for a branch and opening a PR.
+
+A seventh tool, `read_grain_logs` (bwsalmon/agents#62), is unlike every
+tool above in one specific way: it reads from the *controller*, where this
+process already runs, rather than reaching the sandbox over SSH -- there is
+no `Runner`-over-SSH hop to make, since `journalctl` for grain's own
+services already runs locally. It exists so a task can debug a bug in
+*grain itself* (a wedged dispatch loop, a git-proxy auth failure) rather
+than only ever the target repo's own code. Advertised and answered only
+when this process is started with `--self-debug`, which `dispatch.py` only
+ever passes when the task issue actually carried `self_debug_label` --
+every other task never sees this tool exists. Strictly read-only: the
+`journalctl` invocation behind it takes no mutating flag, and `unit` is
+checked against a fixed allowlist of the two services this deployment
+actually runs (`provision/controller.sh`), never passed through as a raw
+systemd unit name.
 """
 
 from __future__ import annotations
@@ -187,6 +202,47 @@ TOOLS = [
     },
 ]
 
+# The exact two controller services this deployment ever runs
+# (provision/controller.sh) -- an allowlist, not a free-form unit name, so
+# `read_grain_logs` can never be pointed at an arbitrary systemd unit on
+# the controller.
+_SELF_DEBUG_UNITS = {
+    "grain-automation": "grain-automation.service",
+    "grain-git-proxy": "grain-git-proxy.service",
+}
+
+# bwsalmon/agents#62: kept out of `TOOLS` above -- `McpServer` only ever
+# advertises this one when started with `--self-debug` (`main()`), which
+# `dispatch.py` only passes for a task whose issue carried
+# `self_debug_label`. Every other task's `tools/list` never mentions it.
+_READ_GRAIN_LOGS_TOOL = {
+    "name": "read_grain_logs",
+    "description": (
+        "Read recent journal log entries for one of grain's own "
+        "controller services -- for triaging a bug in grain itself, not "
+        "the target repo's own code. Read-only: this can only read the "
+        "journal, never change anything about the controller. Only "
+        "available on a task whose issue carries the grain-self-debug "
+        "label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "unit": {
+                "type": "string",
+                "enum": sorted(_SELF_DEBUG_UNITS),
+                "description": "Which controller service's log to read.",
+            },
+            "lines": {
+                "type": "integer",
+                "description": "Number of most recent lines to return (default 200).",
+            },
+        },
+        "required": ["unit"],
+    },
+}
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -301,6 +357,32 @@ def complete_analysis(analysis_path: str, summary: str) -> ToolResult:
     )
 
 
+def read_grain_logs(local_runner: Runner, unit: str, *, lines: int | None = None) -> ToolResult:
+    """Reads recent journal entries for one of grain's own controller
+    services (bwsalmon/agents#62), for triaging a bug in grain itself.
+
+    Run with `local_runner`, never `self.runner` (the `SshRunner` that
+    reaches the *sandbox*): the journal this reads lives on the controller,
+    where this process already runs, so there is no SSH hop to make, and
+    `self.runner`'s sandbox has no visibility into it at all. `unit` is
+    checked against `_SELF_DEBUG_UNITS` before it ever reaches an argv --
+    the input schema already constrains it to that same enum, but this
+    function does not trust the caller to have honoured it.
+    """
+    service = _SELF_DEBUG_UNITS.get(unit)
+    if service is None:
+        return ToolResult(
+            text=f"Unknown unit {unit!r}. Must be one of: {', '.join(sorted(_SELF_DEBUG_UNITS))}.",
+            is_error=True,
+        )
+    n = lines if lines is not None else 200
+    result = local_runner.run(
+        ["journalctl", "-u", service, "-n", str(n), "--no-pager"], check=False
+    )
+    text = f"exit={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    return ToolResult(text=text, is_error=result.returncode != 0)
+
+
 class McpServer:
     """The JSON-RPC method dispatch, kept separate from stdio plumbing
     (`serve()`) so `handle()` can be exercised directly in tests with a
@@ -309,7 +391,9 @@ class McpServer:
 
     def __init__(self, runner: Runner, workspace: str, *,
                  question_path: str | None = None,
-                 analysis_path: str | None = None) -> None:
+                 analysis_path: str | None = None,
+                 self_debug: bool = False,
+                 local_runner: Runner | None = None) -> None:
         self.runner = runner
         self.workspace = workspace
         # None only in tests that don't care about ask_question -- `main()`
@@ -318,6 +402,20 @@ class McpServer:
         # Same "None only in tests" treatment as question_path, for
         # complete_analysis (bwsalmon/agents#50).
         self.analysis_path = analysis_path
+        # bwsalmon/agents#62: whether this dispatch's task issue carried
+        # `self_debug_label` -- `main()` sets this from `--self-debug`,
+        # which `dispatch.py` only ever passes in that case. Gates both
+        # whether `read_grain_logs` is advertised at all (`tools/list`
+        # below) and whether it does anything if called anyway.
+        self.self_debug = self_debug
+        # Deliberately a *different* Runner than `self.runner`: that one is
+        # an `SshRunner` pointed at the assigned *sandbox*, but the journal
+        # `read_grain_logs` reads lives on the controller, where this
+        # process already runs -- `RealRunner()` runs it right here, no SSH
+        # hop. `None` (every real dispatch) builds a real one lazily-ish
+        # here rather than in `read_grain_logs` itself, so a test can still
+        # inject a `FakeRunner` the same way it already does for `runner`.
+        self.local_runner = local_runner if local_runner is not None else RealRunner()
 
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
@@ -334,7 +432,8 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
-            return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}}
+            tools = TOOLS + ([_READ_GRAIN_LOGS_TOOL] if self.self_debug else [])
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
         if method == "tools/call":
             return self._handle_call(msg_id, msg.get("params") or {})
         if msg_id is not None:
@@ -386,14 +485,23 @@ class McpServer:
                     is_error=True,
                 )
             return complete_analysis(self.analysis_path, args["summary"])
+        if name == "read_grain_logs":
+            if not self.self_debug:
+                return ToolResult(
+                    text="read_grain_logs is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-debug label.",
+                    is_error=True,
+                )
+            return read_grain_logs(self.local_runner, args["unit"], lines=args.get("lines"))
         return None
 
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
-          analysis_path: str | None = None,
+          analysis_path: str | None = None, self_debug: bool = False,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
     server = McpServer(runner, workspace, question_path=question_path,
-                        analysis_path=analysis_path)
+                        analysis_path=analysis_path, self_debug=self_debug)
     for line in stdin:
         line = line.strip()
         if not line:
@@ -416,13 +524,17 @@ def main() -> None:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--question-path", required=True)
     parser.add_argument("--analysis-path", required=True)
+    # bwsalmon/agents#62: off unless `dispatch.py`'s `_mcp_config_json`
+    # added it, which only happens for a task whose issue carried
+    # `self_debug_label`.
+    parser.add_argument("--self-debug", action="store_true")
     args = parser.parse_args()
     runner = SshRunner(
         inner=RealRunner(), user=args.user,
         address=ipaddress.IPv4Address(args.address), key_path=Path(args.key_path),
     )
     serve(runner, args.workspace, question_path=args.question_path,
-          analysis_path=args.analysis_path)
+          analysis_path=args.analysis_path, self_debug=args.self_debug)
 
 
 if __name__ == "__main__":

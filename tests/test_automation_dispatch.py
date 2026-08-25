@@ -724,3 +724,56 @@ def test_dispatch_pr_with_a_gemini_key_writes_it_and_tells_the_agent():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert GEMINI_KEY_PATH in prompt_stdin
+
+
+# --- Self-debug (bwsalmon/agents#62) ----------------------------------------
+
+def _mcp_config_args(runner) -> list[str]:
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    return json.loads(mcp_stdin)["mcpServers"]["grain-sandbox"]["args"]
+
+
+def _prompt_stdin(runner) -> str:
+    return next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+
+
+def test_dispatch_with_no_self_debug_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-debug" not in _mcp_config_args(runner)
+    assert "grain-self-debug" not in _prompt_stdin(runner)
+
+
+def test_dispatch_with_self_debug_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, self_debug=True)
+    assert "--self-debug" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-debug" in prompt_stdin
+    assert "read_grain_logs" in prompt_stdin
+
+
+def test_dispatch_pr_with_self_debug_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, self_debug=True)
+    assert "--self-debug" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-debug" in prompt_stdin
+    assert "read_grain_logs" in prompt_stdin
+
+
+def test_dispatch_pr_with_no_self_debug_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-debug" not in _mcp_config_args(runner)
+    assert "grain-self-debug" not in _prompt_stdin(runner)

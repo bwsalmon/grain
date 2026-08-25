@@ -84,6 +84,16 @@ class AutomationConfig:
     # checked directly against `issue.labels` in `core.py`'s
     # `_resolve_target` rather than parsed out of untrusted issue text.
     gemini_key_label: str = "grain-gemini-key"
+    # bwsalmon/agents#62: read-only access to grain's own controller logs
+    # (grain-automation.service, grain-git-proxy.service), via the
+    # `read_grain_logs` MCP tool -- for triaging a bug in grain itself,
+    # not the target repo's code. The same "a human decided this" label
+    # tier `gemini_key_label` already carries, checked directly against
+    # `issue.labels` in `core.py`'s `_resolve_target`. Unlike
+    # `gemini_key_label` this needs no per-deployment config to turn on:
+    # the controller-side group grant (provision/controller.sh) is
+    # unconditional, so the label alone is enough.
+    self_debug_label: str = "grain-self-debug"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

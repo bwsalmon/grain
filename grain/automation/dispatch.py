@@ -382,9 +382,26 @@ def _gemini_key_line() -> str:
     )
 
 
+def _self_debug_line() -> str:
+    """Told to the agent only when this task's issue carried
+    `self_debug_label` (bwsalmon/agents#62, `core.py`'s `_resolve_target`)
+    -- a seventh MCP tool most tasks never see at all, for triaging a bug
+    in grain itself rather than the target repo's own code.
+    """
+    return (
+        "This task carries the grain-self-debug label, so you also have a "
+        "read_grain_logs tool: it reads recent journal entries from "
+        "grain's own controller services (grain-automation, "
+        "grain-git-proxy) -- useful for triaging a bug in grain itself, as "
+        "opposed to the target repo's own code. It is strictly read-only; "
+        "there is no way to change anything about the controller through "
+        "it."
+    )
+
+
 def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = (),
             *, task_repo: str = "", target_repo: str = "", agent_id_value: str = "",
-            gemini_key: bool = False) -> str:
+            gemini_key: bool = False, self_debug: bool = False) -> str:
     """`task_repo` is where the issue itself lives (the agent set's queue);
     `target_repo` is where the code is. Two different repos in the general
     case — the prompt says which is which, because "the repository" would
@@ -403,9 +420,13 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     `gemini_key_label` actually got a key minted (`core.py`'s
     `_dispatch`) — true only once a key genuinely landed in the sandbox, so
     the prompt never claims one exists when `configure_gemini_key` was
-    never called.
+    never called. `self_debug` (bwsalmon/agents#62) is the same
+    "true only once the label was actually seen" record, for
+    `self_debug_label` -- `core.py`'s `_resolve_target` sets it straight
+    from `issue.labels`, no minting step required.
     """
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
+    self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
     return (
         f"You are working {task_repo}#{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n\n"
@@ -421,6 +442,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         "you.\n\n"
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
+        f"{self_debug_section}"
         "When you are done, commit your changes and push them with exactly "
         "this command:\n"
         f"    git push origin HEAD:{branch}\n"
@@ -445,7 +467,8 @@ def _format_review_comment(comment: ReviewComment) -> str:
 def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: str,
                thread_comments: list[Comment] = (), *, task_repo: str = "",
                target_repo: str = "", task_issue: int | None = None,
-               agent_id_value: str = "", gemini_key: bool = False) -> str:
+               agent_id_value: str = "", gemini_key: bool = False,
+               self_debug: bool = False) -> str:
     """A PR-continuation dispatch. The PR lives in `target_repo`; the task
     that asked for the work — and the conversation a human is having about
     it — lives in `task_repo`, as issue `task_issue` (a `/pr` directive on
@@ -453,7 +476,8 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
     `directives.py`).
 
     `agent_id_value` is `_prompt`'s own parameter of the same name — see its
-    docstring. `gemini_key` is likewise `_prompt`'s own parameter, unchanged.
+    docstring. `gemini_key` and `self_debug` are likewise `_prompt`'s own
+    parameters of the same names, unchanged.
     """
     feedback = (
         "\n\n".join(_format_review_comment(c) for c in comments)
@@ -466,6 +490,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         if task_issue is not None else ""
     )
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
+    self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
     return (
         f"You are continuing existing work on pull request "
         f"{target_repo}#{pr.number}: {pr.title}\n\n"
@@ -481,6 +506,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         "start over or open a competing branch.\n\n"
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
+        f"{self_debug_section}"
         "Review feedback on this pull request so far:\n\n"
         f"{feedback}\n\n"
         "Conversation on this pull request so far (a prior attempt may have "
@@ -626,7 +652,7 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
 
 
 def _mcp_config_json(target: SandboxTarget, question_path_value: str,
-                      analysis_path_value: str) -> str:
+                      analysis_path_value: str, *, self_debug: bool = False) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
     `mcp_server.py` is invoked as its own process, per dispatch, with the
     assigned sandbox's connection details baked into its argv here. Nothing
@@ -637,21 +663,28 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
     for `ask_question` (docs/roadmap.md item 12): the agent supplies only
     the question text; where it lands is decided here, not by the tool
     call. `analysis_path_value` is the identical treatment for
-    `complete_analysis` (bwsalmon/agents#50).
+    `complete_analysis` (bwsalmon/agents#50). `self_debug` (bwsalmon/agents#62)
+    is `dispatch()`'s own record of whether this task's issue carried
+    `self_debug_label` -- true only then does `mcp_server.py` get
+    `--self-debug`, which is what makes it advertise and answer
+    `read_grain_logs` at all.
     """
+    args = [
+        "-m", "grain.automation.mcp_server",
+        "--address", target.address,
+        "--user", target.ssh_user,
+        "--key-path", target.ssh_key_path,
+        "--workspace", target.workspace,
+        "--question-path", question_path_value,
+        "--analysis-path", analysis_path_value,
+    ]
+    if self_debug:
+        args.append("--self-debug")
     return json.dumps({
         "mcpServers": {
             "grain-sandbox": {
                 "command": "python3",
-                "args": [
-                    "-m", "grain.automation.mcp_server",
-                    "--address", target.address,
-                    "--user", target.ssh_user,
-                    "--key-path", target.ssh_key_path,
-                    "--workspace", target.workspace,
-                    "--question-path", question_path_value,
-                    "--analysis-path", analysis_path_value,
-                ],
+                "args": args,
             },
         },
     })
@@ -679,13 +712,20 @@ _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
     "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__complete_analysis,"
+    # bwsalmon/agents#62: pre-approved unconditionally, same as every other
+    # tool name here -- harmless on a task that never turns it on, since
+    # `mcp_server.py` only advertises (and answers) `read_grain_logs` when
+    # started with `--self-debug`, which `_mcp_config_json` only ever adds
+    # when the task issue actually carried `self_debug_label`.
+    "mcp__grain-sandbox__read_grain_logs,"
     f"{_NATIVE_TOOLS}"
 )
 
 
 def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, prompt: str, *, remote_url: str, token: str,
-                 branch: str | None = None, gemini_key: str | None = None) -> str:
+                 branch: str | None = None, gemini_key: str | None = None,
+                 self_debug: bool = False) -> str:
     """The common tail of both `dispatch()` and `dispatch_pr()`. Two
     runners now, not one (docs/roadmap.md item 8's "Update"): `sandbox_runner`
     still prepares the workspace and credentials on the sandbox itself,
@@ -700,7 +740,10 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     `gemini_key` (bwsalmon/agents#47) is the raw key string `core.py`'s
     `_dispatch` already minted via `gemini_keys.create_key`, or `None` for
     every task that didn't ask for one — this function never mints or
-    revokes a key itself, only places one that already exists.
+    revokes a key itself, only places one that already exists. `self_debug`
+    (bwsalmon/agents#62) is `dispatch()`'s own record of whether the task
+    issue carried `self_debug_label` — threaded straight through to
+    `_mcp_config_json`, the only place it has any effect.
     """
     configure_git_credentials(sandbox_runner, remote_url, token)
     ensure_workspace(sandbox_runner, remote_url, target.workspace, branch=branch)
@@ -740,7 +783,7 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path, a_path),
+        stdin=_mcp_config_json(target, q_path, a_path, self_debug=self_debug),
     )
     out_path = transcript_path(unit)
     start_unit(
@@ -765,7 +808,8 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
              target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
              base: str | None = None, comments: list[Comment] = (), task_repo: str = "",
-             target_repo: str = "", gemini_key: str | None = None) -> str:
+             target_repo: str = "", gemini_key: str | None = None,
+             self_debug: bool = False) -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
     `claude -p` on the controller, pointed at that same sandbox via
@@ -802,15 +846,21 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     `_dispatch` minted for this task, or `None` for the common case of no
     `gemini_key_label` on the task issue — threaded through to both
     `_start_task` (which places it in the sandbox) and the prompt (which
-    tells the agent it's there, only when it actually is).
+    tells the agent it's there, only when it actually is). `self_debug`
+    (bwsalmon/agents#62) is `core.py`'s own record of whether the task
+    issue carried `self_debug_label` — threaded through to `_start_task`
+    (which turns on `mcp_server.py`'s `read_grain_logs` tool) and the
+    prompt (which tells the agent about it, only when it's on).
     """
     push_branch = branch_name(issue.number)
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _prompt(issue, push_branch, target.workspace, comments,
                 task_repo=task_repo, target_repo=target_repo,
-                agent_id_value=agent_id(), gemini_key=gemini_key is not None),
+                agent_id_value=agent_id(), gemini_key=gemini_key is not None,
+                self_debug=self_debug),
         remote_url=remote_url, token=token, branch=base, gemini_key=gemini_key,
+        self_debug=self_debug,
     )
 
 
@@ -819,7 +869,7 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  comments: list[ReviewComment], *, remote_url: str, token: str,
                  thread_comments: list[Comment] = (), task_repo: str = "",
                  target_repo: str = "", task_issue: int | None = None,
-                 gemini_key: str | None = None) -> str:
+                 gemini_key: str | None = None, self_debug: bool = False) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
     (`pr.head_ref`) instead of the default branch, and the prompt carries the
@@ -839,15 +889,18 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 
     `gemini_key` (bwsalmon/agents#47) is `dispatch()`'s own parameter of the
     same name — see its docstring; `gemini_key_label` on the task issue
-    works identically for a PR-continuation dispatch.
+    works identically for a PR-continuation dispatch. `self_debug`
+    (bwsalmon/agents#62) is likewise `dispatch()`'s own parameter of the
+    same name, unchanged.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _pr_prompt(pr, comments, target.workspace, thread_comments,
                    task_repo=task_repo, target_repo=target_repo,
                    task_issue=task_issue, agent_id_value=agent_id(),
-                   gemini_key=gemini_key is not None),
+                   gemini_key=gemini_key is not None, self_debug=self_debug),
         remote_url=remote_url, token=token, branch=pr.head_ref, gemini_key=gemini_key,
+        self_debug=self_debug,
     )
 
 

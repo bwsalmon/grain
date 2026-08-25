@@ -208,6 +208,11 @@ class ResolvedTask:
     # this deployment can't honour (no `GeminiKeyConfig` configured), so by
     # the time this reaches `_dispatch` it is always safe to act on.
     gemini_key: bool = False
+    # bwsalmon/agents#62: whether the task issue carried
+    # `config.self_debug_label`. Unlike `gemini_key` above this never needs
+    # refusing -- no per-deployment config gates it -- so `_resolve_target`
+    # sets it straight from `issue.labels`, unconditionally.
+    self_debug: bool = False
 
 
 @dataclass
@@ -810,6 +815,12 @@ class Orchestrator:
                 "configured. An operator enables it with `grain controller "
                 "configure --gemini-project-id ...` (see gemini_keys.py)."
             )
+        # bwsalmon/agents#62: same label-tier read as gemini_key above, but
+        # with nothing to refuse -- the controller-side group grant that
+        # makes `read_grain_logs` work (provision/controller.sh) is
+        # unconditional, so there is no "not configured" case to park a
+        # task for.
+        self_debug = self.config.self_debug_label in issue.labels
         target = directives.target
         if target is None:
             if not self.config.default_target_repo:
@@ -849,7 +860,7 @@ class Orchestrator:
                   "deployment's credential can't see it."
             ) from exc
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
-                            gemini_key=gemini_key)
+                            gemini_key=gemini_key, self_debug=self_debug)
 
     def _park(self, number: int, reason: str) -> None:
         """Takes a task out of the queue with an explanation, instead of
@@ -1025,7 +1036,7 @@ class Orchestrator:
                         remote_url=self._remote_url(task.repo), token=token,
                         thread_comments=prompt_comments, task_repo=str(self._task),
                         target_repo=str(task.repo), task_issue=number,
-                        gemini_key=gemini_key_string,
+                        gemini_key=gemini_key_string, self_debug=task.self_debug,
                     )
                 else:
                     unit = dispatch(
@@ -1034,7 +1045,7 @@ class Orchestrator:
                         remote_url=self._remote_url(task.repo), token=token,
                         base=task.base, comments=prompt_comments,
                         task_repo=str(self._task), target_repo=str(task.repo),
-                        gemini_key=gemini_key_string,
+                        gemini_key=gemini_key_string, self_debug=task.self_debug,
                     )
             except CommandError as exc:
                 if gemini_key_name is not None:
