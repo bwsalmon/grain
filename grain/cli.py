@@ -28,12 +28,13 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_github_credential,
-    configure_repo,
+    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
+    configure_github_credential, configure_repo,
     credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
+from .automation.gemini_keys import GeminiKeyConfig
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
 from .automation.history import FileSessionHistory
@@ -113,6 +114,15 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     audit = FileAuditLog(data_dir / "state" / "automation" / "audit.log")
     token_store = SandboxTokenStore(data_dir / "secrets" / "sandbox-tokens.json")
     history = FileSessionHistory(data_dir / "state" / "automation" / "sessions")
+    # Absence is the off switch (bwsalmon/agents#47): a deployment that
+    # never ran `grain controller configure --gemini-project-id ...` has no
+    # such file, and `Orchestrator._resolve_target` refuses a `/gemini-key`
+    # directive with an explanation rather than guessing at a project.
+    gemini_key_config_path = data_dir / "config" / "gemini-key.json"
+    gemini_key_config = (
+        GeminiKeyConfig.load(gemini_key_config_path)
+        if gemini_key_config_path.exists() else None
+    )
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
@@ -120,7 +130,7 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # The same file the git proxy enforces (`build_proxy`), read from
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
-        audit=audit, history=history,
+        audit=audit, history=history, gemini_key_config=gemini_key_config,
     )
     return orchestrator, state_path
 
@@ -512,6 +522,11 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             ssh, key, service_account_email=args.gcp_agent_service_account_email,
             project_id=args.gcp_project_id, numeric_project_id=args.gcp_numeric_project_id,
         )
+    if args.gemini_project_id:
+        # Reuses the primary key --gcp-service-account-key-file already
+        # placed (bwsalmon/agents#47, gemini_keys.py) -- no separate
+        # credential step, only the project id that turns `/gemini-key` on.
+        configure_gemini_key(ssh, args.gemini_project_id)
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
 
@@ -934,6 +949,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="GCP project id -- required with --gcp-service-account-key-file")
     p.add_argument("--gcp-numeric-project-id", type=int, default=0,
                     help="GCP numeric project id (default: 0, i.e. omitted)")
+    p.add_argument("--gemini-project-id",
+                    help="enables the /gemini-key task directive (bwsalmon/agents#47): the "
+                         "GCP project a short-lived Gemini API key is minted in for a task "
+                         "that asks for one. Reuses the key --gcp-service-account-key-file "
+                         "already placed -- run that first")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")

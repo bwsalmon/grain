@@ -59,6 +59,54 @@ def test_save_and_load_round_trip(tmp_path: Path):
     assert loaded.run_timestamps == [now]
 
 
+# --- Gemini API key (bwsalmon/agents#47) ------------------------------------
+
+def test_assign_defaults_to_no_gemini_key():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now)
+    assert state.assignments["sandbox-0"].gemini_key_name is None
+
+
+def test_assign_records_a_gemini_key_name():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now,
+                 gemini_key_name="projects/1/locations/global/keys/abc")
+    assert state.assignments["sandbox-0"].gemini_key_name == (
+        "projects/1/locations/global/keys/abc"
+    )
+
+
+def test_save_and_load_round_trips_the_gemini_key_name(tmp_path: Path):
+    state = AutomationState()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0", now=now,
+                 gemini_key_name="projects/1/locations/global/keys/abc")
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gemini_key_name == (
+        "projects/1/locations/global/keys/abc"
+    )
+
+
+def test_load_of_a_pre_gemini_key_state_file_defaults_to_no_key(tmp_path: Path):
+    # An assignment written before bwsalmon/agents#47 has no such field at
+    # all -- must load as None, not KeyError.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "assignments": {
+            "sandbox-0": {
+                "issue": 1, "unit": "u0", "started_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    }))
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gemini_key_name is None
+
+
 def test_load_of_a_missing_file_is_an_empty_state(tmp_path: Path):
     state = AutomationState.load(tmp_path / "does-not-exist.json")
     assert state.assignments == {}

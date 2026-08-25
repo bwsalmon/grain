@@ -11,7 +11,8 @@ import grain.automation.core as core_module
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
-from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, unit_name
+from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, GEMINI_KEY_PATH, unit_name
+from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
@@ -122,7 +123,7 @@ def allowlist_of(repos) -> Allowlist:
 
 
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
-                       history=None, allowed=("o/r",)):
+                       history=None, allowed=("o/r",), gemini_key_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -154,6 +155,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         # covered by test_automation_ssh.py; these tests target
         # Orchestrator's own decisions against a plain FakeRunner.
         ssh_runner_factory=lambda _sandbox: fake_runner,
+        gemini_key_config=gemini_key_config,
     )
     return orchestrator, transport
 
@@ -1097,3 +1099,144 @@ def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkey
     orchestrator.run_once(NOW)
 
     assert history.calls[0]["target"] == "other/service"
+
+
+# --- Gemini API key (bwsalmon/agents#47) ------------------------------------
+
+GEMINI_KEY_NAME = "projects/1/locations/global/keys/abc"
+
+
+def gemini_runner(**overrides) -> FakeRunner:
+    runner = FakeRunner()
+    runner.expect("gcloud services api-keys create", stdout=f"{GEMINI_KEY_NAME}\n")
+    runner.expect("gcloud services api-keys get-key-string", stdout="AIzaSecretValue\n")
+    for prefix, kwargs in overrides.items():
+        runner.expect(prefix, **kwargs)
+    return runner
+
+
+def test_gemini_key_directive_without_config_is_parked():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="do it\n/gemini-key")]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                  # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),         # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "gemini-key" in json.loads(comment["body"])["body"]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+    # Refused before anything was ever minted.
+    assert not any("gcloud" in c for c in orchestrator.base_runner.commands)
+
+
+def test_a_task_with_no_gemini_key_directive_never_calls_gcloud():
+    runner = gemini_runner()
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4)], runner=runner,
+        gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert not any("gcloud" in c for c in runner.commands)
+
+
+def test_gemini_key_directive_with_config_places_the_key_in_the_sandbox():
+    runner = gemini_runner()
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="do it\n/gemini-key")],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    key_call = next(
+        (argv, stdin) for argv, stdin in runner.calls
+        if argv[:1] == ["dd"] and argv[1] == f"of={GEMINI_KEY_PATH}"
+    )
+    assert key_call[1] == "AIzaSecretValue"
+
+
+def test_gemini_key_directive_tells_the_agent_where_the_key_is():
+    runner = gemini_runner()
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="do it\n/gemini-key")],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    prompt = next(
+        stdin for argv, stdin in runner.calls
+        if argv[:1] == ["sudo"] and any("prompt.md" in a for a in argv)
+    )
+    assert GEMINI_KEY_PATH in prompt
+    assert "AIzaSecretValue" not in prompt
+
+
+def test_gemini_key_is_recorded_on_the_assignment_for_later_revocation():
+    runner = gemini_runner()
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="do it\n/gemini-key")],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert assignment.gemini_key_name == GEMINI_KEY_NAME
+
+
+def test_gemini_key_display_name_folds_in_the_sandbox_and_issue():
+    runner = gemini_runner()
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="do it\n/gemini-key")],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    create_call = next(c for c in runner.commands if "api-keys create" in c)
+    assert "sandbox-0" in create_call
+    assert "issue-4" in create_call
+
+
+def test_gemini_key_mint_failure_does_not_crash_the_cycle():
+    runner = FakeRunner()
+    runner.expect("gcloud services api-keys create", returncode=1, stderr="PERMISSION_DENIED")
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="do it\n/gemini-key")],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("dispatch failed" in o and "PERMISSION_DENIED" in o for o in outcomes)
+
+
+def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
+    """The key was minted but dispatch() never got far enough to record an
+    Assignment for sweeper.py to later revoke it through -- must not leak.
+    """
+    runner = gemini_runner(**{"bash -c": {"returncode": 128, "stderr": "fatal: Authentication failed"}})
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="do it\n/gemini-key")],
+        runner=runner, gemini_key_config=GeminiKeyConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.assignments == {}
+    delete_call = next(c for c in runner.commands if "api-keys delete" in c)
+    assert GEMINI_KEY_NAME in delete_call
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("dispatch failed" in o for o in outcomes)

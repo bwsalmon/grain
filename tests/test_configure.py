@@ -4,8 +4,8 @@ import shlex
 from pathlib import Path
 
 from grain.automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_github_credential,
-    configure_repo,
+    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
+    configure_github_credential, configure_repo,
     ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
@@ -266,3 +266,13 @@ def test_configure_gcp_service_account_key_is_never_in_argv():
     )
     for argv, _ in inner.calls:
         assert all(secret not in arg for arg in argv)
+
+
+def test_configure_gemini_key_writes_the_project_id():
+    ssh, inner = make_ssh()
+    configure_gemini_key(ssh, "acme")
+    config = json.loads(stdin_for(inner, "/data/config/gemini-key.json"))
+    assert config == {"project_id": "acme"}
+    assert any(
+        "sudo chmod 644 /data/config/gemini-key.json" in c for c in inner.commands
+    )

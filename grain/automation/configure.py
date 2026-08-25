@@ -34,6 +34,10 @@ SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
 # `grain metadata start` fails to find its config.
 GCP_SERVICE_ACCOUNT_KEY_PATH = "/data/secrets/gcp-service-account.json"
 METADATA_SERVER_CONFIG_PATH = "/data/config/metadata-server.json"
+# Must match grain/automation/gemini_keys.py's `GeminiKeyConfig` load path
+# -- same "kept in sync by hand" caveat as the pair above; see this
+# constant's own use in `configure_gemini_key`.
+GEMINI_KEY_CONFIG_PATH = "/data/config/gemini-key.json"
 
 
 def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
@@ -189,6 +193,24 @@ def configure_gcp_service_account(runner: Runner, key: str, *, service_account_e
         "metadata_user": metadata_user,
     }, indent=2) + "\n"
     _write_remote_file(runner, METADATA_SERVER_CONFIG_PATH, metadata_config, mode="644")
+
+
+def configure_gemini_key(runner: Runner, project_id: str) -> None:
+    """Writes `/data/config/gemini-key.json` (bwsalmon/agents#47), the
+    on/off switch `core.py`'s `_resolve_target` checks before honouring a
+    task's `/gemini-key` directive -- absent, the directive is refused with
+    an explanation, the same "unusable directive parks the task" shape an
+    unlisted `/repo` already gets.
+
+    Deliberately places no new credential of its own: `gemini_keys.py`
+    authenticates with the same primary GCP service-account key
+    `configure_gcp_service_account` already writes to
+    `GCP_SERVICE_ACCOUNT_KEY_PATH` -- run that first (this function does not
+    check that it exists, the same "operator sequencing, not enforced code"
+    latitude every other step in this module already gets).
+    """
+    gemini_key_json = json.dumps({"project_id": project_id}, indent=2) + "\n"
+    _write_remote_file(runner, GEMINI_KEY_CONFIG_PATH, gemini_key_json, mode="644")
 
 
 def ensure_sandbox_tokens(runner: Runner, sandbox_names: list[str]) -> None:

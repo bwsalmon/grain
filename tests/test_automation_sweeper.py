@@ -3,10 +3,13 @@ from datetime import datetime, timedelta, timezone
 import grain.automation.capture as capture_module
 from grain.automation.config import AutomationConfig
 from grain.automation.dispatch import unit_name
+from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.history import RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.automation.sweeper import Outcome, sweep
 from grain.run import FakeRunner
+
+GEMINI_KEY_NAME = "projects/1/locations/global/keys/abc"
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -319,3 +322,99 @@ def test_a_still_active_run_within_budget_captures_nothing():
     history = RecordingSessionHistory()
     sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert history.calls == []
+
+
+# --- Gemini API key revocation on release (bwsalmon/agents#47) -------------
+
+def state_with_gemini_key(sandbox: str, issue: int, started_at) -> AutomationState:
+    state = AutomationState()
+    state.assign(sandbox, issue, unit=f"grain-task-{sandbox}", now=started_at,
+                 gemini_key_name=GEMINI_KEY_NAME)
+    return state
+
+
+def test_a_task_with_no_gemini_key_never_calls_gcloud_on_release():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert not runner.ran("gcloud")
+
+
+def test_a_successful_release_revokes_the_minted_gemini_key():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    delete_call = next(c for c in runner.commands if "api-keys delete" in c)
+    assert GEMINI_KEY_NAME in delete_call
+    assert "--project=proj" in delete_call
+    assert result.credential_warnings == []
+
+
+def test_a_failed_release_still_revokes_the_minted_gemini_key():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("failed", "exit-code")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_a_stranded_release_still_revokes_the_minted_gemini_key():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", returncode=1)
+    for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
+        runner.expect(prefix, stdout=stdout, returncode=returncode)
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_gemini_key_revocation_happens_before_the_slot_is_freed_in_state():
+    # The assignment (carrying gemini_key_name) must still be on hand when
+    # revocation runs -- checked indirectly by asserting revocation
+    # actually happened at all, since state.release() would otherwise have
+    # already dropped it by the time _revoke_gemini_key ran.
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert "sandbox-0" not in state.assignments
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_gemini_key_revocation_with_no_config_is_skipped_not_crashed():
+    # A key was minted (an assignment carrying gemini_key_name) but this
+    # sweep call was never given a GeminiKeyConfig -- must not raise, and
+    # must not guess at a project id.
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert not any("api-keys delete" in c for c in runner.commands)
+    assert result.credential_warnings == []
+
+
+def test_gemini_key_revocation_failure_is_a_credential_warning_not_a_crash():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    runner.expect("gcloud auth activate-service-account", returncode=0)
+    runner.expect("gcloud services api-keys delete", returncode=1,
+                   stderr="PERMISSION_DENIED")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert len(result.credential_warnings) == 1
+    assert result.credential_warnings[0].sandbox == "sandbox-0"
+    assert "PERMISSION_DENIED" in result.credential_warnings[0].detail
+    # The slot still frees even though revocation failed.
+    assert "sandbox-0" not in state.assignments
+    assert result.succeeded == [Outcome("sandbox-0", 1)]
+
+
+def test_credential_warnings_default_to_empty_for_every_existing_caller():
+    # Every caller of sweep() written before this feature doesn't pass
+    # gemini_key_config at all -- must keep working exactly as before.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert result.credential_warnings == []
