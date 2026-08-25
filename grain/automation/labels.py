@@ -141,6 +141,30 @@ def task_labels(config: AutomationConfig | None = None) -> list[Label]:
     return labels
 
 
+def agent_label(sandbox: str) -> str:
+    """The label that names *which* sandbox is currently working a task --
+    e.g. `"sandbox-1"` becomes `"grain-agent-1"` -- applied alongside
+    `in_progress_label` the moment a task is dispatched (`core.py`'s
+    `_dispatch`), re-applied every `run_once` cycle for as long as the
+    assignment lasts (`_refresh_agent_labels`) so a label knocked off by
+    hand, or lost to an API call that failed partway, heals on the very
+    next cycle rather than staying wrong for the rest of the run, and
+    removed the moment the assignment ends, however it ends (bwsalmon/agents#95).
+
+    Deliberately not one of `_STYLES`/`task_labels()`: those are the fixed,
+    deployment-wide set `ci/ensure-task-labels.sh` creates ahead of time
+    from `AutomationConfig`'s defaults, but there is one of *these* per
+    sandbox, and how many sandboxes a deployment runs (`Cluster.sandbox_count`)
+    is host-side config a GitHub runner never has access to -- the same gap
+    the module docstring above already describes for why `task_labels()`
+    can't read a live config either. Nothing needs to pre-create it: GitHub
+    itself creates any label named in an "add labels" call that doesn't
+    already exist on the repo, with a default colour, exactly the way one
+    typed into the label picker by hand would be.
+    """
+    return f"grain-agent-{sandbox.removeprefix('sandbox-')}"
+
+
 def main() -> int:
     """`python3 -m grain.automation.labels` -- one tab-separated row per
     label, which is what `ci/ensure-task-labels.sh` loops over. Tab, not

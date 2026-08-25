@@ -15,7 +15,7 @@ from dataclasses import fields
 from pathlib import Path
 
 from grain.automation.config import AutomationConfig
-from grain.automation.labels import CAPABILITY, STATE, Label, main, task_labels
+from grain.automation.labels import CAPABILITY, STATE, Label, agent_label, main, task_labels
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -174,3 +174,23 @@ def test_no_two_labels_share_a_colour():
     """Two labels the same colour is two states that look like one."""
     colors = [label.color for label in task_labels()]
     assert len(set(colors)) == len(colors), f"duplicate colour among {colors}"
+
+
+def test_agent_label_names_the_sandbox_by_index():
+    """bwsalmon/agents#95: `agent_label` is what `core.py` puts on a task
+    issue to say which sandbox is working it -- named after the sandbox's
+    own index, not its full `sandbox-N` name, so the label reads as a short
+    "agent N" tag rather than repeating "sandbox" on every row."""
+    assert agent_label("sandbox-0") == "grain-agent-0"
+    assert agent_label("sandbox-1") == "grain-agent-1"
+
+
+def test_agent_label_is_not_one_of_the_pre_created_rows():
+    """Deliberately excluded from `task_labels()` -- there is one of these
+    per sandbox, and how many sandboxes a deployment runs isn't something
+    `ci/ensure-task-labels.sh` (a GitHub runner, no access to the host's
+    `Cluster` config) can know ahead of time. GitHub creates it itself the
+    first time `core.py` applies it to an issue."""
+    names = {label.name for label in task_labels()}
+    assert agent_label("sandbox-0") not in names
+    assert agent_label("sandbox-1") not in names

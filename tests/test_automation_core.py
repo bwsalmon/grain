@@ -81,13 +81,15 @@ def branch_json(message: str = DEFAULT_COMMIT_MESSAGE, sha: str = "deadbeef") ->
 
 
 def pr_flow_response(pr_number: int, *, commit_message: str = DEFAULT_COMMIT_MESSAGE) -> list[ApiResponse]:
-    """The five responses one `_finish_succeeded_issue` call consumes, in
+    """The six responses one `_finish_succeeded_issue` call consumes, in
     exact call order: `get_branch_head` (200 -> the branch is really there,
     with its head commit's own message, bwsalmon/agents#79),
     `get_issue` (the title `create_pull_request`'s own title folds in),
     `create_pull_request` (201, with the fields `GitHubClient` reads back),
     `add_label` (bwsalmon/agents#54 -- `completed_label` goes on the moment
-    the PR exists), then `remove_label` (in-progress comes off).
+    the PR exists), `remove_label` (in-progress comes off), then a second
+    `remove_label` (bwsalmon/agents#95 -- the per-sandbox agent label comes
+    off too).
     `FakeTransport.responses` is a strict FIFO queue regardless of which
     call consumes each entry, so a test with more than one succeeded
     outcome needs this whole handful per outcome, in order, or a later call
@@ -105,6 +107,7 @@ def pr_flow_response(pr_number: int, *, commit_message: str = DEFAULT_COMMIT_MES
         ApiResponse(201, {}, json.dumps(
             {"number": pr_number, "html_url": f"https://github.com/o/r/pull/{pr_number}"}
         ).encode()),
+        ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
         ApiResponse(200, {}, b"{}"),
     ]
@@ -411,7 +414,7 @@ def test_a_failed_run_is_requeued_via_labels_not_state():
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert "failed" in outcomes
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 2  # remove in-progress, add trigger back
+    assert len(mutating) == 3  # remove in-progress, add trigger back, remove agent label
 
 
 def test_a_requeue_tolerates_a_404_from_add_label_for_a_stale_assignment():
@@ -483,7 +486,7 @@ def test_a_still_active_run_whose_issue_closed_is_cancelled_not_requeued():
     # Only the label cleanup -- no re-add of the trigger label, unlike a
     # requeue: a closed issue must not come back for redispatch.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 1
+    assert len(mutating) == 2  # remove in-progress, remove agent label
 
 
 def test_a_still_active_run_whose_issue_is_still_open_is_left_running():
@@ -498,6 +501,30 @@ def test_a_still_active_run_whose_issue_is_still_open_is_left_running():
 
     assert "sandbox-0" in orchestrator.state.assignments
     assert not runner.ran("sudo systemctl stop")
+
+
+def test_a_still_active_run_has_its_agent_label_refreshed_every_tick():
+    """bwsalmon/agents#95: an assignment `_sweep` leaves standing gets its
+    per-sandbox agent label re-applied every `run_once` cycle, not just
+    once at dispatch -- so a task sitting mid-flight for many cycles keeps
+    saying which sandbox is doing the work even if the label was ever
+    knocked off, or an earlier cycle's own call to apply it failed partway.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(5)).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    add_calls = [
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    ]
+    assert any(json.loads(c["body"]) == {"labels": ["grain-agent-0"]} for c in add_calls)
 
 
 def test_a_cancel_on_close_poll_tolerates_a_404_for_a_stale_assignment():
@@ -961,7 +988,7 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     # trigger label is never re-added for a genuinely finished run.
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
     label_mutations = [c for c in mutating if "labels" in c["path"]]
-    assert len(label_mutations) == 2
+    assert len(label_mutations) == 3  # completed on, in-progress off, agent label off
     # The open PR is recorded so a later run can close the issue once it does.
     assert orchestrator.state.open_pull_requests == {
         "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
@@ -988,7 +1015,7 @@ def test_a_succeeded_run_with_no_pushed_branch_is_requeued_not_dropped():
     # No PR call was ever made — no POST to the pulls endpoint.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 2  # remove in-progress, add trigger back
+    assert len(mutating) == 3  # remove in-progress, add trigger back, remove agent label
 
 
 def test_a_succeeded_auto_merge_task_records_that_on_its_open_pr():
@@ -1312,6 +1339,46 @@ def test_close_finished_prs_retries_a_failed_auto_merge_next_cycle():
     assert any("auto-merge" in o and "failed" in o for o in outcomes)
 
 
+# --- per-sandbox agent labelling (bwsalmon/agents#95) ----------------------
+
+def test_dispatch_labels_the_issue_with_the_sandbox_that_took_it():
+    orchestrator, transport = make_orchestrator(issues=[issue_json(1)])
+    orchestrator.run_once(NOW)
+    assert orchestrator.state.assignments["sandbox-0"].issue == 1
+    add_calls = [
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/1/labels"
+    ]
+    assert any(json.loads(c["body"]) == {"labels": ["grain-agent-0"]} for c in add_calls)
+
+
+def test_a_refresh_tolerates_a_404_for_a_stale_assignment():
+    """The same "stale assignment, log and move on" tolerance every other
+    GitHub-facing call in a cycle already has (bwsalmon/agents#51 and
+    friends) -- a leftover assignment pointing at an issue number that no
+    longer exists in the currently configured repo must not crash the
+    refresh pass before `_dispatch` ever runs.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(issue_json(201)).encode()),  # cancel-on-close poll
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # refresh's own add_label
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(
+        "could not refresh agent label" in o and "stale assignment" in o
+        for o in outcomes
+    )
+
+
 # --- workspace/token wiring into dispatch() (docs/roadmap.md item 2) ------
 
 def test_dispatch_points_the_workspace_clone_at_the_git_proxy():
@@ -1520,6 +1587,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
         ApiResponse(200, {}, b"{}"),   # branch_exists("feature-x"): true
         ApiResponse(200, {}, b"{}"),   # add_label: completed
         ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
+        ApiResponse(200, {}, b"{}"),   # remove_label: agent label off
     ])
 
     orchestrator.run_once(NOW)
@@ -1530,7 +1598,7 @@ def test_a_pr_triggered_success_pushes_commits_and_does_not_open_a_new_pr():
     # No PR-creation call at all -- the PR this dispatch worked already existed.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 2  # completed label goes on, in-progress comes off
+    assert len(mutating) == 3  # completed label goes on, in-progress comes off, agent label off
     completed_call = next(
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/7/labels"
@@ -1563,8 +1631,9 @@ def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
     assert any("does not exist" in o for o in outcomes)
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     mutating = [c for c in transport.calls if c["method"] in ("POST", "DELETE")]
-    assert len(mutating) == 2  # remove in-progress, add trigger back — same
-                               # requeue path a failed/stranded run takes
+    assert len(mutating) == 3  # remove in-progress, add trigger back, remove
+                               # agent label — same requeue path a
+                               # failed/stranded run takes
 
 
 # --- session history wiring (docs/roadmap.md item 10) -----------------------
