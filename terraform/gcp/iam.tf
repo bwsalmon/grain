@@ -65,7 +65,7 @@ resource "google_service_account_iam_member" "host_impersonates_agent" {
 # Lets the deploy workflow mint (and invalidate) the agent account's own
 # key -- the impersonation *source* grain's metadata servers read, never
 # handed out directly (see grain's docs/design.md, "GCP credentials").
-# scripts/bootstrap-gcp.sh grants the deployer project-wide
+# bootstrap-gcp.sh, next to this file, grants the deployer project-wide
 # serviceAccountAdmin/serviceAccountUser, but neither of those covers key
 # management (iam.serviceAccountKeys.*) -- that needs its own role, and
 # scoping it to just this one account rather than granting it project-wide
