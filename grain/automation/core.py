@@ -115,6 +115,7 @@ regardless of what triggered it. What that leaves:
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -138,7 +139,8 @@ from .state import AutomationState, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.allowlist import Allowlist
-from ..proxy.tokens import SandboxTokenStore
+from ..proxy.credentials import CredentialSet
+from ..proxy.tokens import SandboxCredentialStore, SandboxTokenStore
 from ..run import CommandError, Runner
 
 # The same trust tier "can apply a label" implies -- write access to the
@@ -156,6 +158,15 @@ _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # credential actually posted it (a personal PAT and a dedicated machine
 # account otherwise look identical in a thread).
 _AUTOMATION_SIGNATURE = "🤖 _Posted automatically by grain-agent — not a human._"
+
+# bwsalmon/agents#52: a task labelled `grain-github-<name>` uses the named
+# credential `<name>` (`CredentialSet.get`) for every git push, in place of
+# the owner/repo default -- for a task that needs a scope the default
+# deliberately withholds (docs/design.md, "Scopes to withhold", e.g.
+# `workflow`). A real GitHub label, not a body directive like `/gemini-key`:
+# applying one already requires the same "can apply a label" trust tier the
+# trigger gate itself relies on, so this opens no new gate.
+_GITHUB_KEY_LABEL_RE = re.compile(r"^grain-github-(.+)$")
 
 
 def _pending_question(sandbox: str) -> str | None:
@@ -213,6 +224,12 @@ class ResolvedTask:
     # refusing -- no per-deployment config gates it -- so `_resolve_target`
     # sets it straight from `issue.labels`, unconditionally.
     self_debug: bool = False
+    # The named credential a `grain-github-<name>` label asked for
+    # (bwsalmon/agents#52), or `None` for the overwhelming common case of no
+    # such label. `_resolve_target` already refuses a name this deployment
+    # has no `<name>.token` for, so by the time this reaches `_dispatch` it
+    # is always safe to act on.
+    github_key: str | None = None
 
 
 @dataclass
@@ -254,6 +271,21 @@ class Orchestrator:
     # `gemini_keys.py`'s own docstring for why this lives on the controller
     # account, never a sandbox's.
     gemini_key_config: GeminiKeyConfig | None = None
+    # bwsalmon/agents#52: the same `CredentialSet` `cli.py`'s
+    # `build_orchestrator` already builds for `self.github`'s own
+    # `TokenSource` -- reused here (not reloaded) so `_resolve_target` can
+    # check whether a `grain-github-<name>` label names a credential this
+    # deployment actually has, before ever dispatching. `None` (a test that
+    # doesn't wire one) makes any such label refused outright, the same
+    # "unusable directive parks the task" shape an unconfigured
+    # `/gemini-key` already gets.
+    credentials: CredentialSet | None = None
+    # Where `_dispatch` records which sandbox should use which named
+    # credential, and `sweeper.py`'s `_release` clears it once the task
+    # ends -- see `SandboxCredentialStore`'s own docstring for the full
+    # lifecycle. `None` alongside `credentials=None` above for the same
+    # "feature not wired" reason.
+    credential_store: SandboxCredentialStore | None = None
     # bwsalmon/agents#51: where to persist `AutomationState` immediately
     # after each mutation, not just once at the very end of `run_once`
     # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
@@ -343,7 +375,8 @@ class Orchestrator:
     def _sweep(self, now: datetime) -> None:
         result = sweep(self.state, self._ssh_runner_for, self.base_runner,
                         self.config, now, history=self.history,
-                        gemini_key_config=self.gemini_key_config)
+                        gemini_key_config=self.gemini_key_config,
+                        credential_store=self.credential_store)
         # `sweep()` already called `state.release()` in memory for every
         # outcome above -- persist that now, before any of the GitHub calls
         # below (a PR, a label move) make this run's outcome irreversible.
@@ -821,6 +854,7 @@ class Orchestrator:
         # unconditional, so there is no "not configured" case to park a
         # task for.
         self_debug = self.config.self_debug_label in issue.labels
+        github_key = self._resolve_github_key(issue)
         target = directives.target
         if target is None:
             if not self.config.default_target_repo:
@@ -860,7 +894,48 @@ class Orchestrator:
                   "deployment's credential can't see it."
             ) from exc
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
-                            gemini_key=gemini_key, self_debug=self_debug)
+                            gemini_key=gemini_key, self_debug=self_debug,
+                            github_key=github_key)
+
+    def _resolve_github_key(self, issue: Issue) -> str | None:
+        """The named credential a `grain-github-<name>` label on `issue`
+        asks for (bwsalmon/agents#52), or `None` if no such label is on it.
+
+        A real GitHub label, unlike every other directive `_resolve_target`
+        reads: it comes straight off `issue.labels`, never from comment
+        text, since applying a label already requires the same trust tier
+        `_TRUSTED_REPLY_ASSOCIATIONS` gates comment-borne directives to.
+
+        Raises `DirectiveError` (parking the task, same as every other
+        unusable directive here) for two distinct problems: more than one
+        `grain-github-*` label on the same issue, which one applies is
+        ambiguous; or a name this deployment has no `<name>.token`
+        configured for, which would otherwise only surface as an opaque
+        500 from the git proxy on the sandbox's first push.
+        """
+        names = {
+            match.group(1) for label in issue.labels
+            if (match := _GITHUB_KEY_LABEL_RE.match(label))
+        }
+        if not names:
+            return None
+        if len(names) > 1:
+            labels = ", ".join(f"`grain-github-{n}`" for n in sorted(names))
+            raise DirectiveError(
+                f"this issue carries more than one named-GitHub-key label "
+                f"({labels}) -- which one applies is ambiguous, so nothing "
+                "was dispatched. Remove all but one."
+            )
+        (name,) = names
+        if self.credentials is None or self.credentials.get(name) is None:
+            raise DirectiveError(
+                f"this issue is labelled `grain-github-{name}`, asking for "
+                f"a named GitHub credential this deployment doesn't have. "
+                f"An operator adds a `{name}.token` file under "
+                "`/data/secrets/github` on the controller (see "
+                "`configure_named_github_key` in grain/automation/configure.py)."
+            )
+        return name
 
     def _park(self, number: int, reason: str) -> None:
         """Takes a task out of the queue with an explanation, instead of
@@ -981,6 +1056,18 @@ class Orchestrator:
                 ssh_key_path=CONTROLLER_AGENT_SSH_KEY_PATH,
             )
             token = self.token_store.ensure_token(sandbox)
+            if self.credential_store is not None:
+                # Written unconditionally, before the dispatch attempt
+                # below can fail partway -- see `SandboxCredentialStore`'s
+                # own docstring for why this, plus `_release`'s own clear,
+                # is what keeps an override from ever outliving the task
+                # that asked for it (or leaking into the next one, if this
+                # very attempt never gets far enough to be assigned at
+                # all).
+                if task.github_key is not None:
+                    self.credential_store.set(sandbox, task.github_key)
+                else:
+                    self.credential_store.clear(sandbox)
             # The prompt never carries the directive lines themselves --
             # they are addressed to this orchestrator, and an agent has no
             # way to act on one anyway (docs/design.md's split surface).

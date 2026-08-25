@@ -23,7 +23,7 @@ from .audit import AuditLog
 from .credentials import CredentialSet
 from .forward import Forwarder
 from .protocol import err_pkt, is_valid_git_request, parse_path
-from .tokens import SandboxTokens, extract_basic_auth_token
+from .tokens import SandboxCredentialOverrides, SandboxTokens, extract_basic_auth_token
 
 
 @dataclass(frozen=True)
@@ -41,12 +41,20 @@ class NullAuditLog:
 class GitProxy:
     def __init__(self, allowlist: Allowlist, credentials: CredentialSet,
                  tokens: SandboxTokens, forwarder: Forwarder,
-                 audit: AuditLog | None = None) -> None:
+                 audit: AuditLog | None = None,
+                 credential_overrides: SandboxCredentialOverrides | None = None) -> None:
         self.allowlist = allowlist
         self.credentials = credentials
         self.tokens = tokens
         self.forwarder = forwarder
         self.audit = audit or NullAuditLog()
+        # bwsalmon/agents#52: a task's `grain-github-<name>` label, applied
+        # per sandbox by `core.py`'s `_dispatch`. `None` for a deployment
+        # that never wires one (every existing caller/test) -- every
+        # request then falls back to the owner/repo ladder exactly as
+        # before, since `for_sandbox` would otherwise always answer None
+        # anyway.
+        self.credential_overrides = credential_overrides
 
     def handle(self, *, method: str, path: str, query: str,
                headers: dict[str, str], body: bytes | None) -> ProxyResponse:
@@ -78,16 +86,37 @@ class GitProxy:
                 403, {}, err_pkt(f"{req.owner}/{req.repo} is not allow-listed")
             )
 
-        credential = self.credentials.select(req.owner, req.repo)
-        if credential is None:
-            self.audit.record(
-                sandbox=sandbox, owner=req.owner, repo=req.repo,
-                action=req.action, credential=None,
-                outcome="error: no credential configured",
-            )
-            return ProxyResponse(
-                500, {}, err_pkt("no credential configured for this repository")
-            )
+        override_name = (
+            self.credential_overrides.for_sandbox(sandbox)
+            if self.credential_overrides is not None else None
+        )
+        if override_name is not None:
+            # This task's `grain-github-<name>` label names a credential
+            # explicitly -- it overrides the owner/repo ladder entirely
+            # rather than narrowing it, since the whole point is a scope
+            # the ladder's own credentials deliberately don't carry.
+            credential = self.credentials.get(override_name)
+            if credential is None:
+                self.audit.record(
+                    sandbox=sandbox, owner=req.owner, repo=req.repo,
+                    action=req.action, credential=None,
+                    outcome=f"error: no credential named {override_name!r} configured",
+                )
+                return ProxyResponse(
+                    500, {},
+                    err_pkt(f"no credential named {override_name!r} configured"),
+                )
+        else:
+            credential = self.credentials.select(req.owner, req.repo)
+            if credential is None:
+                self.audit.record(
+                    sandbox=sandbox, owner=req.owner, repo=req.repo,
+                    action=req.action, credential=None,
+                    outcome="error: no credential configured",
+                )
+                return ProxyResponse(
+                    500, {}, err_pkt("no credential configured for this repository")
+                )
 
         upstream = self.forwarder.forward(
             method=method,

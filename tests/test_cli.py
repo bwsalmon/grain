@@ -331,6 +331,52 @@ def test_controller_configure_restarts_the_proxy_after_the_credential_write_too(
     )
 
 
+def test_dry_run_controller_configure_with_a_github_key(capsys, tmp_path):
+    key_file = tmp_path / "workflow-token"
+    key_file.write_text("ghp_workflowtoken\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--github-key", f"workflow={key_file}"],
+        capsys,
+    )
+    assert "dd of=/data/secrets/github/workflow.token" in out
+    # bwsalmon/agents#52: never becomes any repo's default -- no
+    # credentials.json write for it (no --github-token-file given either).
+    assert "credentials.json" not in out
+    for line in out.splitlines():
+        if line.startswith("+ ssh") and "dd of=" in line:
+            assert "ghp_workflowtoken" not in line
+
+
+def test_dry_run_controller_configure_with_multiple_github_keys(capsys, tmp_path):
+    workflow_file = tmp_path / "workflow-token"
+    workflow_file.write_text("ghp_workflow\n")
+    release_file = tmp_path / "release-token"
+    release_file.write_text("ghp_release\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--github-key", f"workflow={workflow_file}",
+         "--github-key", f"release={release_file}"],
+        capsys,
+    )
+    assert "dd of=/data/secrets/github/workflow.token" in out
+    assert "dd of=/data/secrets/github/release.token" in out
+
+
+def test_controller_configure_rejects_a_malformed_github_key():
+    with pytest.raises(SystemExit, match="NAME=FILE"):
+        main(["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+              "--github-key", "not-a-valid-entry"])
+
+
+def test_controller_configure_rejects_the_reserved_anonymous_github_key_name(tmp_path):
+    key_file = tmp_path / "token"
+    key_file.write_text("tok")
+    with pytest.raises(SystemExit, match="reserved"):
+        main(["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+              "--github-key", f"anonymous={key_file}"])
+
+
 def test_dry_run_controller_configure_with_a_gcp_service_account_key_file(capsys, tmp_path):
     key_file = tmp_path / "gcp-key.json"
     key_file.write_text('{"type": "service_account"}\n')

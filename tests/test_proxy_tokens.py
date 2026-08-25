@@ -3,7 +3,10 @@ import json
 
 import pytest
 
-from grain.proxy.tokens import SandboxTokenStore, SandboxTokens, extract_basic_auth_token
+from grain.proxy.tokens import (
+    SandboxCredentialOverrides, SandboxCredentialStore,
+    SandboxTokenStore, SandboxTokens, extract_basic_auth_token,
+)
 
 
 @pytest.fixture
@@ -99,3 +102,77 @@ def test_save_is_atomic_no_partial_file_left_behind(tmp_path):
     SandboxTokenStore(path).ensure_token("sandbox-0")
     assert path.exists()
     assert not (tmp_path / "sandbox-tokens.json.tmp").exists()
+
+
+# --- SandboxCredentialOverrides / SandboxCredentialStore (bwsalmon/agents#52) ----
+
+def test_for_sandbox_with_no_file_is_none(tmp_path):
+    overrides = SandboxCredentialOverrides(tmp_path / "sandbox-github-key.json")
+    assert overrides.for_sandbox("sandbox-0") is None
+
+
+def test_for_sandbox_with_no_entry_is_none(tmp_path):
+    path = tmp_path / "sandbox-github-key.json"
+    path.write_text(json.dumps({"sandbox-1": "workflow"}))
+    overrides = SandboxCredentialOverrides(path)
+    assert overrides.for_sandbox("sandbox-0") is None
+
+
+def test_set_then_for_sandbox_round_trips(tmp_path):
+    path = tmp_path / "sandbox-github-key.json"
+    SandboxCredentialStore(path).set("sandbox-0", "workflow")
+    assert SandboxCredentialOverrides(path).for_sandbox("sandbox-0") == "workflow"
+
+
+def test_set_is_re_read_with_no_restart_needed(tmp_path):
+    # The whole point of this class over SandboxTokens: a single
+    # long-lived SandboxCredentialOverrides instance (as the proxy holds)
+    # must see a write made after it was constructed.
+    path = tmp_path / "sandbox-github-key.json"
+    overrides = SandboxCredentialOverrides(path)
+    assert overrides.for_sandbox("sandbox-0") is None
+    SandboxCredentialStore(path).set("sandbox-0", "workflow")
+    assert overrides.for_sandbox("sandbox-0") == "workflow"
+
+
+def test_set_preserves_other_sandboxes_already_on_file(tmp_path):
+    path = tmp_path / "sandbox-github-key.json"
+    store = SandboxCredentialStore(path)
+    store.set("sandbox-0", "workflow")
+    store.set("sandbox-1", "release")
+    data = json.loads(path.read_text())
+    assert data == {"sandbox-0": "workflow", "sandbox-1": "release"}
+
+
+def test_set_overwrites_a_prior_value_for_the_same_sandbox(tmp_path):
+    path = tmp_path / "sandbox-github-key.json"
+    store = SandboxCredentialStore(path)
+    store.set("sandbox-0", "workflow")
+    store.set("sandbox-0", "release")
+    assert SandboxCredentialOverrides(path).for_sandbox("sandbox-0") == "release"
+
+
+def test_clear_removes_an_override(tmp_path):
+    path = tmp_path / "sandbox-github-key.json"
+    store = SandboxCredentialStore(path)
+    store.set("sandbox-0", "workflow")
+    store.clear("sandbox-0")
+    assert SandboxCredentialOverrides(path).for_sandbox("sandbox-0") is None
+
+
+def test_clear_is_a_no_op_with_no_file(tmp_path):
+    # Called unconditionally by sweeper.py's _release for every freed
+    # sandbox, whether or not that task ever set an override.
+    store = SandboxCredentialStore(tmp_path / "sandbox-github-key.json")
+    store.clear("sandbox-0")  # must not raise
+    assert not (tmp_path / "sandbox-github-key.json").exists()
+
+
+def test_clear_preserves_other_sandboxes(tmp_path):
+    path = tmp_path / "sandbox-github-key.json"
+    store = SandboxCredentialStore(path)
+    store.set("sandbox-0", "workflow")
+    store.set("sandbox-1", "release")
+    store.clear("sandbox-0")
+    data = json.loads(path.read_text())
+    assert data == {"sandbox-1": "release"}

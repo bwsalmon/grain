@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from grain.proxy.server import build_proxy
+from grain.proxy.tokens import SandboxCredentialOverrides
 
 
 def test_build_proxy_defaults_to_the_real_github_forward_target(tmp_path: Path):
@@ -10,6 +11,10 @@ def test_build_proxy_defaults_to_the_real_github_forward_target(tmp_path: Path):
     proxy = build_proxy(tmp_path)
     assert proxy.forwarder.host == "github.com"
     assert proxy.forwarder.use_tls is True
+    # bwsalmon/agents#52: wired to the same /data/config path
+    # grain/cli.py's build_orchestrator writes overrides to.
+    assert isinstance(proxy.credential_overrides, SandboxCredentialOverrides)
+    assert proxy.credential_overrides._path == tmp_path / "config" / "sandbox-github-key.json"
 
 
 def test_build_proxy_honours_a_mock_git_forward_host_from_automation_json(tmp_path: Path):

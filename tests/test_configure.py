@@ -5,7 +5,7 @@ from pathlib import Path
 
 from grain.automation.configure import (
     configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_repo,
+    configure_github_credential, configure_named_github_key, configure_repo,
     ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
@@ -117,6 +117,38 @@ def test_configure_github_credential_sets_mode_600_on_the_token():
     assert any(
         "sudo chmod 600 /data/secrets/github/bot.token" in c for c in inner.commands
     )
+
+
+def test_configure_named_github_key_writes_only_the_token_file():
+    """Unlike configure_github_credential, this must never touch
+    credentials.json (bwsalmon/agents#52) -- a grain-github-<name> label
+    selects it directly, and writing a mapping entry would make it that
+    repo's *default* credential too, defeating the whole point of a named
+    override carrying a scope the default deliberately withholds.
+    """
+    ssh, inner = make_ssh()
+    configure_named_github_key(ssh, "  ghp_workflowtoken  \n", name="workflow")
+    token = stdin_for(inner, "/data/secrets/github/workflow.token")
+    assert token == "ghp_workflowtoken\n"  # stripped, then a single trailing newline
+    assert not any(
+        "credentials.json" in c for c in inner.commands
+    )
+
+
+def test_configure_named_github_key_sets_mode_600_on_the_token():
+    ssh, inner = make_ssh()
+    configure_named_github_key(ssh, "tok", name="workflow")
+    assert any(
+        "sudo chmod 600 /data/secrets/github/workflow.token" in c for c in inner.commands
+    )
+
+
+def test_named_github_key_is_never_in_argv():
+    ssh, inner = make_ssh()
+    secret = "ghp_supersecretworkflowvalue"
+    configure_named_github_key(ssh, secret, name="workflow")
+    for argv, _ in inner.calls:
+        assert all(secret not in arg for arg in argv)
 
 
 def test_ensure_sandbox_tokens_mints_one_per_sandbox_when_the_file_is_absent():
