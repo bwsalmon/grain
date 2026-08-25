@@ -129,8 +129,8 @@ from .audit import AuditLog, NullAuditLog
 from .config import AutomationConfig
 from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
-    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, branch_name, comment_path, dispatch,
-    dispatch_pr, question_path, unit_name,
+    CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, UnitState, branch_name, comment_path,
+    dispatch, dispatch_pr, question_path, unit_name,
 )
 from .gemini_keys import GeminiKeyConfig
 from .gemini_keys import create_key as create_gemini_key
@@ -142,6 +142,7 @@ from .ssh import SshRunner
 from .state import AutomationState, OpenPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
+from ..metadata.launcher import MetadataLauncher
 from ..proxy.allowlist import Allowlist
 from ..proxy.credentials import CredentialSet
 from ..proxy.tokens import SandboxCredentialStore, SandboxTokenStore
@@ -343,6 +344,20 @@ class Orchestrator:
     # lifecycle. `None` alongside `credentials=None` above for the same
     # "feature not wired" reason.
     credential_store: SandboxCredentialStore | None = None
+    # bwsalmon/agents#98: the controller-side launcher for the per-sandbox
+    # `gce_metadata_server` instance docs/design.md's "GCP credentials"
+    # describes -- `_ensure_metadata_server` starts a sandbox's instance
+    # before a task begins on it, since nothing else in this dispatch path
+    # ever did (found live: `gcloud`/ADC inside a sandbox had no listener to
+    # reach even though the sandbox image and `net_linux.py`'s DNAT rule both
+    # assume one is running). `None` (production's default for a deployment
+    # that never ran `provision/controller.sh`'s metadata-server setup, or
+    # simply has no `/data/config/metadata-server.json` yet) makes
+    # `_ensure_metadata_server` a no-op, the same "feature not configured"
+    # shape `gemini_key_config`/`credentials` above already have -- a
+    # deployment with no metadata-server config gets no ADC support, not an
+    # error.
+    metadata_launcher: MetadataLauncher | None = None
     # bwsalmon/agents#51: where to persist `AutomationState` immediately
     # after each mutation, not just once at the very end of `run_once`
     # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
@@ -1342,6 +1357,38 @@ class Orchestrator:
                            outcome=f"parked, awaiting reply: {reason}")
 
     # --- dispatch -------------------------------------------------------
+    def _ensure_metadata_server(self, sandbox: str) -> None:
+        """Makes sure `sandbox`'s `gce_metadata_server` instance is actually
+        running before a task starts on it (bwsalmon/agents#98). Nothing
+        else in this dispatch path ever started one -- `provision/sandbox.sh`
+        and `net_linux.py`'s DNAT rule both assume a listener is already
+        there, but only `grain metadata start` (`cli.py`'s standalone
+        command) ever called `MetadataLauncher.start`, and nothing calls
+        that automatically. The result, confirmed live: a fresh sandbox's
+        `gcloud`/ADC probe to `169.254.169.254` times out (nothing answers),
+        not merely "no credentialed account" -- there was never a metadata
+        server for it to reach in the first place.
+
+        `MetadataLauncher.start` is not itself safely repeatable (its own
+        docstring: `systemd-run` with a unit name already in use fails
+        loudly rather than double-binding the port) -- so this checks status
+        first. `ACTIVE` needs nothing. `DONE_FAILED` is reaped before
+        restarting, since the old unit name is still "in use" until then.
+        `ABSENT` and `DONE_SUCCESS` (a long-running server exiting 0 on its
+        own isn't expected, but treated the same as failed rather than
+        assumed impossible) both just start it. A no-op entirely when
+        `metadata_launcher` is unset -- see its own docstring on
+        `Orchestrator` for why that's "not configured", not an error.
+        """
+        if self.metadata_launcher is None:
+            return
+        state = self.metadata_launcher.status(sandbox)
+        if state is UnitState.ACTIVE:
+            return
+        if state is UnitState.DONE_FAILED:
+            self.metadata_launcher.stop(sandbox)
+        self.metadata_launcher.start(sandbox)
+
     def _dispatch(self, now: datetime) -> None:
         candidates = self.github.list_issues(
             self.config.task_owner, self.config.task_repo, self.config.trigger_label
@@ -1440,22 +1487,24 @@ class Orchestrator:
             ]
             # A `CommandError` here (an SSH/command failure anywhere in
             # dispatch()/dispatch_pr()'s path -- ensure_workspace,
-            # configure_git_credentials, starting the unit; or, new for
-            # bwsalmon/agents#47, gemini_keys.create_key's own gcloud calls
-            # below) must not take down every other candidate still queued
-            # this cycle. Found live (docs/next-session.md): a proxy-auth
-            # failure on one sandbox crashed `run_once` before it ever
-            # reached the next candidate. Neither the sandbox nor the
-            # issue's labels are touched below on failure -- the sandbox
-            # stays free and the issue keeps its trigger label, so both are
-            # simply retried on a later cycle, same "log and move on"
-            # discipline `_requeue`/`_finish_question` already apply to a
-            # GitHub-side 404. Only `CommandError` specifically: anything
-            # else is a real bug, not an expected failure mode, and should
-            # still surface immediately.
+            # configure_git_credentials, starting the unit; gemini_keys
+            # .create_key's own gcloud calls below (bwsalmon/agents#47); or
+            # `_ensure_metadata_server`'s systemd-run/systemctl calls on the
+            # controller (bwsalmon/agents#98)) must not take down every
+            # other candidate still queued this cycle. Found live
+            # (docs/next-session.md): a proxy-auth failure on one sandbox
+            # crashed `run_once` before it ever reached the next candidate.
+            # Neither the sandbox nor the issue's labels are touched below
+            # on failure -- the sandbox stays free and the issue keeps its
+            # trigger label, so both are simply retried on a later cycle,
+            # same "log and move on" discipline `_requeue`/`_finish_question`
+            # already apply to a GitHub-side 404. Only `CommandError`
+            # specifically: anything else is a real bug, not an expected
+            # failure mode, and should still surface immediately.
             gemini_key_string: str | None = None
             gemini_key_name: str | None = None
             try:
+                self._ensure_metadata_server(sandbox)
                 if task.gemini_key:
                     # `_resolve_target` already refused this task outright
                     # if `self.gemini_key_config` were `None` -- guaranteed
