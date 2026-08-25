@@ -297,6 +297,17 @@ def question_path(unit: str) -> str:
     return f"{_unit_dir(unit)}/question.txt"
 
 
+def analysis_path(unit: str) -> str:
+    """The fixed path `mcp_server.py`'s `complete_analysis` tool writes to,
+    and `core.py`'s sweep reads back after a unit finishes (bwsalmon/agents#50)
+    -- the same "compute once, share" shape `question_path` already uses,
+    and reset the same way at the start of every dispatch to this sandbox
+    so a completed-analysis summary from an earlier, unrelated task can
+    never be misread as belonging to this one.
+    """
+    return f"{_unit_dir(unit)}/analysis.txt"
+
+
 def branch_name(issue: int) -> str:
     """The exact branch a dispatch for this issue must push to.
 
@@ -415,9 +426,14 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         f"    git push origin HEAD:{branch}\n"
         "The controller opens the pull request itself once it sees that "
         "branch — you have no GitHub API access from here, so do not "
-        "attempt to open a PR or comment directly. If you are genuinely "
-        "blocked and need the human's input, use the ask_question tool "
-        "instead."
+        "attempt to open a PR or comment directly.\n\n"
+        "If this task doesn't need a code change at all -- it only asked "
+        "for an answer, an investigation, or a recommendation -- call the "
+        "complete_analysis tool with your findings instead of pushing a "
+        "branch. That posts your findings as a comment on this issue and "
+        "closes it, with no pull request opened.\n\n"
+        "If you are genuinely blocked and need the human's input, use the "
+        "ask_question tool instead."
     )
 
 
@@ -609,7 +625,8 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
     ])
 
 
-def _mcp_config_json(target: SandboxTarget, question_path_value: str) -> str:
+def _mcp_config_json(target: SandboxTarget, question_path_value: str,
+                      analysis_path_value: str) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
     `mcp_server.py` is invoked as its own process, per dispatch, with the
     assigned sandbox's connection details baked into its argv here. Nothing
@@ -619,7 +636,8 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str) -> str:
     `question_path_value` is the same "only place it's named" treatment
     for `ask_question` (docs/roadmap.md item 12): the agent supplies only
     the question text; where it lands is decided here, not by the tool
-    call.
+    call. `analysis_path_value` is the identical treatment for
+    `complete_analysis` (bwsalmon/agents#50).
     """
     return json.dumps({
         "mcpServers": {
@@ -632,6 +650,7 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str) -> str:
                     "--key-path", target.ssh_key_path,
                     "--workspace", target.workspace,
                     "--question-path", question_path_value,
+                    "--analysis-path", analysis_path_value,
                 ],
             },
         },
@@ -659,7 +678,7 @@ _NATIVE_TOOLS = "Task"
 _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
-    "mcp__grain-sandbox__ask_question,"
+    "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__complete_analysis,"
     f"{_NATIVE_TOOLS}"
 )
 
@@ -712,10 +731,16 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     # CONTROLLER_AGENT_USER, same as the rest of this unit) can create it
     # fresh on its own; nothing here needs to pre-create or chown it.
     controller_runner.run(["sudo", "rm", "-f", q_path])
+    a_path = analysis_path(unit)
+    # Same reset discipline as q_path above, for the same reason
+    # (bwsalmon/agents#50): a leftover completed-analysis summary from an
+    # earlier dispatch to this sandbox must never be misread as belonging
+    # to this one.
+    controller_runner.run(["sudo", "rm", "-f", a_path])
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path),
+        stdin=_mcp_config_json(target, q_path, a_path),
     )
     out_path = transcript_path(unit)
     start_unit(

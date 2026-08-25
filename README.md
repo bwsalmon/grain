@@ -53,15 +53,16 @@ dedicated unprivileged `grain-agent` account, with:
   a roster filter); both flags together do, and the advertised tool list in
   the `system/init` event shrinks to exactly what is named.
 - `--mcp-config <per-dispatch file> --strict-mcp-config` — pointing at
-  `grain/automation/mcp_server.py`, which exposes exactly five tools:
+  `grain/automation/mcp_server.py`, which exposes exactly six tools:
   `run_command`, `read_file`, `edit_file`, `write_file` all resolve against
   the *assigned* sandbox's workspace, over SSH — the sandbox's address,
   user, and key are baked into the MCP server's argv at dispatch time,
-  never into a tool call's own arguments. `ask_question` is different: it
-  never touches the sandbox at all, and only ever writes to a local file on
-  the controller for the orchestrator to relay as a GitHub comment (see
-  "Asking the human a question" below) — the agent still gets no GitHub API
-  access of its own.
+  never into a tool call's own arguments. `ask_question` and
+  `complete_analysis` are different: neither ever touches the sandbox at
+  all, and both only ever write to a local file on the controller for the
+  orchestrator to relay as a GitHub comment (see "Asking the human a
+  question" and "Analysis-only tasks" below) — the agent still gets no
+  GitHub API access of its own.
 - `TodoWrite` and `Task` also allowed — a `Task`-spawned subagent inherits
   the same empty roster (confirmed live by an explicit system denial, not
   self-report), so delegation is safe to leave on.
@@ -103,6 +104,19 @@ label by hand still works too, as a fallback.
 The agent still never gets GitHub API access of its own — `core.py` is the
 only thing that posts the comment, and only from this one path
 (docs/roadmap.md items 12–13).
+
+## Analysis-only tasks
+
+Not every task is a code change. One filed only as a question, an
+investigation, or a request for a recommendation can end with a call to the
+`complete_analysis` MCP tool instead of a `git push` (bwsalmon/agents#50).
+That works exactly like `ask_question`'s file handoff — `dispatch.py`
+resets a fixed per-unit file before every dispatch, the tool call writes
+the summary there, and once the unit finishes, `core.py`'s sweep reads it
+back — but the outcome is different: the summary is posted as a `🤖`-signed
+comment on the task issue and the issue is closed outright, with no branch
+ever checked and no pull request opened. Nothing is left pending
+afterwards, unlike a question — there is no reply to wait for.
 
 ## Documentation
 
