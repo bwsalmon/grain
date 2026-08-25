@@ -37,6 +37,24 @@ def test_metadata_start_rejects_an_unknown_name(tmp_path):
               "metadata", "start", "nope"])
 
 
+def test_metadata_stop_reaps_only_the_named_sandboxs_unit(tmp_path, capsys):
+    write_config(tmp_path)
+    assert main(["--data-dir", str(tmp_path), "--sandboxes", "2", "--dry-run",
+                 "metadata", "stop", "sandbox-0"]) == 0
+    out = capsys.readouterr().out
+    assert "grain-metadata-sandbox-0" in out
+    assert "grain-metadata-sandbox-1" not in out
+
+
+def test_metadata_stop_defaults_to_every_sandbox(tmp_path, capsys):
+    write_config(tmp_path)
+    assert main(["--data-dir", str(tmp_path), "--sandboxes", "2", "--dry-run",
+                 "metadata", "stop"]) == 0
+    out = capsys.readouterr().out
+    assert "grain-metadata-sandbox-0" in out
+    assert "grain-metadata-sandbox-1" in out
+
+
 def test_metadata_status_prints_a_line_per_sandbox(tmp_path, capsys):
     # No --dry-run: `systemctl show` is a read-only query (like `host
     # status`'s `virsh` calls), safe to actually run -- there's no unit by

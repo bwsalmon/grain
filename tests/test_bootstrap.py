@@ -122,6 +122,31 @@ def test_bootstrap_writes_the_controller_key_read_back_to_the_host_path(env):
     assert adapter.controller_public_key_path.read_text() == "ssh-ed25519 AAAAcontrollerkey\n"
 
 
+def test_a_recreated_controllers_changed_host_key_logs_a_repair_hint(env):
+    """A controller key that changed from a *previously recorded* one --
+    as opposed to `test_bootstrap_writes_the_controller_key_read_back_...`,
+    where there was no previous key to compare against -- means the
+    controller was recreated (docs/bootstrap.md, "Repairing a recreated
+    controller"): every sandbox still trusts the old key, and stage 9
+    fixes that. This only logs the hint; stage 9 itself is out of scope
+    here.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(runner, cluster, admin_private)
+    adapter.controller_public_key_path.parent.mkdir(parents=True, exist_ok=True)
+    adapter.controller_public_key_path.write_text("ssh-ed25519 AAAAoldkey\n")
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    runner.expect(
+        f"{controller_prefix} -- {shlex.quote('cat /data/secrets/controller-ssh.pub')}",
+        stdout="ssh-ed25519 AAAAnewkey\n",
+    )
+    lines: list[str] = []
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner,
+               config=config, log=lines.append)
+    assert adapter.controller_public_key_path.read_text() == "ssh-ed25519 AAAAnewkey\n"
+    assert any("controller key changed" in line for line in lines)
+
+
 def test_bootstrap_generates_an_admin_key_when_absent(env):
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(runner, cluster, admin_private)
@@ -149,6 +174,25 @@ def test_skip_if_present_creates_nothing_when_everything_already_runs(env):
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
     assert not runner.ran("virsh -c qemu:///system define")
     assert not runner.ran("virsh -c qemu:///system start")
+
+
+def test_a_stopped_controller_is_started_not_recreated(env):
+    """`_ensure_started`'s third state: merely stopped (as opposed to
+    absent, or already running) -- it should be started in place, never
+    destroyed and recreated.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "shut off"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not runner.ran("virsh -c qemu:///system define")
+    assert any(
+        c.startswith("virsh -c qemu:///system start") and "controller" in c
+        for c in runner.commands
+    )
 
 
 def test_deploy_runs_against_the_controller_every_time(env):

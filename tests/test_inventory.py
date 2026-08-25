@@ -50,6 +50,11 @@ def test_specs_carry_the_right_role_and_sizing():
     assert sandbox.mem_mb > controller.mem_mb
 
 
+def test_specs_lists_one_spec_per_name_in_the_same_order():
+    c = Cluster(sandbox_count=2)
+    assert [s.name for s in c.specs] == c.names
+
+
 def test_unknown_names_are_rejected_rather_than_guessed():
     c = Cluster(sandbox_count=2)
     for bad in ["sandbox-2", "sandbox-x", "nope", "sandbox-", ""]:
