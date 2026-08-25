@@ -163,6 +163,19 @@ class PullRequest:
 
 
 @dataclass(frozen=True)
+class BranchHead:
+    """The tip of a branch: its sha and that commit's own message.
+    `get_branch_head` returns this instead of a bare bool (bwsalmon/agents#79)
+    so `core.py` can seed a freshly opened PR's body with the agent's own
+    account of its change -- the commit message it already wrote to explain
+    the diff -- rather than the generic, content-free line the body used to
+    be built from alone.
+    """
+    sha: str
+    message: str
+
+
+@dataclass(frozen=True)
 class PullRequestDetail:
     """Enough of a PR object to dispatch against it (docs/roadmap.md item 9)
     — title/body for the prompt, `head_ref` for the branch to check out and
@@ -385,6 +398,27 @@ class GitHubClient:
             return False
         raise GitHubError(resp.status, resp.body)
 
+    def get_branch_head(self, owner: str, repo: str, branch: str) -> BranchHead | None:
+        """`branch`'s tip commit, or None if the branch doesn't exist -- the
+        same GET `branch_exists` makes, kept as its own method rather than
+        folded into it since most callers only ever need the boolean and
+        this one's response also carries the head commit's own message
+        (bwsalmon/agents#79), which only `core.py`'s fresh-PR path needs, to
+        seed a real description instead of a generic one.
+        """
+        resp = self.transport.request(
+            method="GET",
+            path=f"/repos/{owner}/{repo}/branches/{quote(branch, safe='')}",
+            headers=self._headers(owner, repo), body=None,
+        )
+        if resp.status == 404:
+            return None
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+        data = json.loads(resp.body)
+        commit = data["commit"]
+        return BranchHead(sha=commit["sha"], message=commit["commit"]["message"])
+
     def create_pull_request(self, owner: str, repo: str, *, head: str, base: str,
                              title: str, body: str = "") -> PullRequest:
         resp = self.transport.request(
@@ -531,6 +565,9 @@ class DryRunGitHubClient:
 
     def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
         return self.inner.branch_exists(owner, repo, branch)
+
+    def get_branch_head(self, owner: str, repo: str, branch: str) -> BranchHead | None:
+        return self.inner.get_branch_head(owner, repo, branch)
 
     def create_pull_request(self, owner: str, repo: str, *, head: str, base: str,
                              title: str, body: str = "") -> PullRequest:

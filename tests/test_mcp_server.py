@@ -1,9 +1,13 @@
+import io
+import json
 import shlex
+import sys
 
 from grain.automation.mcp_server import (
-    TOOLS, McpServer, ask_question, complete_analysis, edit_file, read_file, read_grain_logs,
-    run_command, write_file,
+    TOOLS, McpServer, ask_question, complete_analysis, edit_file, main, read_file,
+    read_grain_logs, run_command, serve, write_file,
 )
+from grain.automation.ssh import SshRunner
 from grain.run import FakeRunner
 
 WORKSPACE = "/home/debian/workspace"
@@ -99,6 +103,24 @@ def test_edit_file_replace_all_replaces_every_occurrence():
     assert dd_stdin == "bar bar bar\n"
 
 
+def test_edit_file_propagates_a_remote_read_failure():
+    runner = FakeRunner()
+    runner.expect("cat --", returncode=1, stderr="No such file or directory")
+    result = edit_file(runner, WORKSPACE, f"{WORKSPACE}/missing.txt", "a", "b")
+    assert result.is_error
+    assert "missing.txt" in result.text
+    assert not any(argv[0] == "dd" for argv, _ in runner.calls)
+
+
+def test_edit_file_reports_a_remote_write_failure():
+    runner = FakeRunner()
+    runner.expect("cat --", stdout="hello world\n")
+    runner.expect("dd", returncode=1, stderr="disk full")
+    result = edit_file(runner, WORKSPACE, f"{WORKSPACE}/f.txt", "world", "there")
+    assert result.is_error
+    assert "disk full" in result.text
+
+
 def test_write_file_creates_the_parent_directory_then_writes():
     runner = FakeRunner()
     result = write_file(runner, WORKSPACE, f"{WORKSPACE}/sub/f.txt", "content\n")
@@ -107,6 +129,15 @@ def test_write_file_creates_the_parent_directory_then_writes():
     dd_argv, dd_stdin = next((argv, s) for argv, s in runner.calls if argv[0] == "dd")
     assert dd_argv == ["dd", f"of={WORKSPACE}/sub/f.txt", "status=none"]
     assert dd_stdin == "content\n"
+
+
+def test_write_file_reports_a_mkdir_failure():
+    runner = FakeRunner()
+    runner.expect("mkdir -p", returncode=1, stderr="permission denied")
+    result = write_file(runner, WORKSPACE, f"{WORKSPACE}/sub/f.txt", "content\n")
+    assert result.is_error
+    assert "permission denied" in result.text
+    assert not any(argv[0] == "dd" for argv, _ in runner.calls)
 
 
 def test_ask_question_writes_the_question_to_the_fixed_path_not_the_sandbox(tmp_path):
@@ -282,6 +313,13 @@ def test_unknown_method_returns_an_error_when_it_has_an_id():
     assert response["error"]["code"] == -32601
 
 
+def test_unknown_method_with_no_id_produces_no_response():
+    # A JSON-RPC notification gets no response at all, even for an unknown
+    # method -- there is no id for an error to be correlated back to.
+    server = McpServer(FakeRunner(), WORKSPACE)
+    assert server.handle({"jsonrpc": "2.0", "method": "not/a/real/method"}) is None
+
+
 def test_tools_call_routes_ask_question_to_the_configured_path(tmp_path):
     path = tmp_path / "question.txt"
     server = McpServer(FakeRunner(), WORKSPACE, question_path=str(path))
@@ -320,3 +358,118 @@ def test_tools_call_complete_analysis_without_a_configured_path_errors_not_crash
         "params": {"name": "complete_analysis", "arguments": {"summary": "no change needed"}},
     })
     assert response["result"]["isError"] is True
+
+
+def test_tools_call_routes_read_file_to_the_sandbox_runner():
+    runner = FakeRunner()
+    runner.expect("cat --", stdout="alpha\n")
+    server = McpServer(runner, WORKSPACE)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+        "params": {"name": "read_file", "arguments": {"file_path": f"{WORKSPACE}/f.txt"}},
+    })
+    assert response["result"]["isError"] is False
+    assert "alpha" in response["result"]["content"][0]["text"]
+
+
+def test_tools_call_routes_edit_file_to_the_sandbox_runner():
+    runner = FakeRunner()
+    runner.expect("cat --", stdout="hello world\n")
+    server = McpServer(runner, WORKSPACE)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+        "params": {"name": "edit_file", "arguments": {
+            "file_path": f"{WORKSPACE}/f.txt", "old_string": "world", "new_string": "there",
+        }},
+    })
+    assert response["result"]["isError"] is False
+    dd_stdin = next(stdin for argv, stdin in runner.calls if argv[0] == "dd")
+    assert dd_stdin == "hello there\n"
+
+
+def test_tools_call_routes_write_file_to_the_sandbox_runner():
+    runner = FakeRunner()
+    server = McpServer(runner, WORKSPACE)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+        "params": {"name": "write_file", "arguments": {
+            "file_path": f"{WORKSPACE}/f.txt", "content": "hi\n",
+        }},
+    })
+    assert response["result"]["isError"] is False
+    dd_stdin = next(stdin for argv, stdin in runner.calls if argv[0] == "dd")
+    assert dd_stdin == "hi\n"
+
+
+# --- serve() (stdin/stdout loop) --------------------------------------------
+
+def test_serve_reads_a_request_and_writes_one_response_line():
+    runner = FakeRunner()
+    runner.expect("bash -c", stdout="ok\n")
+    request = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "run_command", "arguments": {"command": "echo ok"}},
+    })
+    stdin = io.StringIO(request + "\n")
+    stdout = io.StringIO()
+    serve(runner, WORKSPACE, stdin=stdin, stdout=stdout)
+    lines = stdout.getvalue().splitlines()
+    assert len(lines) == 1
+    response = json.loads(lines[0])
+    assert response["result"]["isError"] is False
+
+
+def test_serve_skips_blank_lines_and_malformed_json_without_responding():
+    stdin = io.StringIO("\n   \nnot json at all\n")
+    stdout = io.StringIO()
+    serve(FakeRunner(), WORKSPACE, stdin=stdin, stdout=stdout)
+    assert stdout.getvalue() == ""
+
+
+def test_serve_writes_nothing_for_a_notification():
+    stdin = io.StringIO(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+    stdout = io.StringIO()
+    serve(FakeRunner(), WORKSPACE, stdin=stdin, stdout=stdout)
+    assert stdout.getvalue() == ""
+
+
+# --- main() (CLI wiring) -----------------------------------------------------
+
+def test_main_wires_cli_args_into_serve(monkeypatch):
+    captured = {}
+
+    def fake_serve(runner, workspace, *, question_path, analysis_path, self_debug):
+        captured.update(
+            runner=runner, workspace=workspace, question_path=question_path,
+            analysis_path=analysis_path, self_debug=self_debug,
+        )
+
+    monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
+    monkeypatch.setattr(sys, "argv", [
+        "mcp_server", "--address", "10.100.0.5", "--user", "agent",
+        "--key-path", "/tmp/key", "--workspace", WORKSPACE,
+        "--question-path", "/tmp/q.txt", "--analysis-path", "/tmp/a.txt",
+        "--self-debug",
+    ])
+    main()
+    assert captured["workspace"] == WORKSPACE
+    assert captured["question_path"] == "/tmp/q.txt"
+    assert captured["analysis_path"] == "/tmp/a.txt"
+    assert captured["self_debug"] is True
+    assert isinstance(captured["runner"], SshRunner)
+
+
+def test_main_self_debug_defaults_to_off(monkeypatch):
+    captured = {}
+
+    def fake_serve(runner, workspace, *, question_path, analysis_path, self_debug):
+        captured["self_debug"] = self_debug
+
+    monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
+    monkeypatch.setattr(sys, "argv", [
+        "mcp_server", "--address", "10.100.0.5", "--user", "agent",
+        "--key-path", "/tmp/key", "--workspace", WORKSPACE,
+        "--question-path", "/tmp/q.txt", "--analysis-path", "/tmp/a.txt",
+    ])
+    main()
+    assert captured["self_debug"] is False

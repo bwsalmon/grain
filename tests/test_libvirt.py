@@ -118,6 +118,61 @@ def test_stop_only_stops_a_running_vm(adapter):
     assert not runner.ran("virsh -c qemu:///system shutdown")
 
 
+def test_stop_shuts_down_a_running_vm(adapter):
+    a, runner = adapter
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list(("sandbox-0", "running")))
+    a.stop("sandbox-0")
+    assert runner.ran("virsh -c qemu:///system shutdown sandbox-0")
+
+
+def test_list_vms_ignores_a_domain_not_in_this_cluster(adapter):
+    """`virsh list --all` reports every domain on the host, not just this
+    deployment's own -- a stray domain from something else entirely must
+    not be treated as one of this cluster's VMs.
+    """
+    a, runner = adapter
+    runner.expect(
+        "virsh -c qemu:///system list --all",
+        stdout=virsh_list(("some-unrelated-vm", "running"), ("sandbox-0", "running")),
+    )
+    names = [info.name for info in a.list_vms()]
+    assert "some-unrelated-vm" not in names
+    assert "sandbox-0" in names
+
+
+def test_list_vms_tolerates_a_line_with_no_state_column(adapter):
+    a, runner = adapter
+    header = " Id   Name       State\n----------------------------\n"
+    runner.expect("virsh -c qemu:///system list --all", stdout=header + " 0    sandbox-0\n")
+    infos = a.list_vms()
+    assert len(infos) == 1
+    assert infos[0].name == "sandbox-0"
+    assert infos[0].state is VmState.UNKNOWN
+
+
+def test_list_vms_reads_as_empty_when_virsh_is_missing(adapter):
+    # A dry run on a host with no virsh installed: absent, not a crash --
+    # the same "read-only commands still execute" contract DryRunRunner
+    # documents for exactly this case.
+    a, runner = adapter
+    runner.expect("virsh -c qemu:///system list --all", returncode=127, stderr="virsh: not found")
+    assert a.list_vms() == []
+
+
+def test_list_vms_skips_a_line_with_only_one_field(adapter):
+    """Defensive: a line that doesn't even carry a name is not parseable
+    at all, so it's skipped outright rather than raised on.
+    """
+    a, runner = adapter
+    header = " Id   Name       State\n----------------------------\n"
+    runner.expect(
+        "virsh -c qemu:///system list --all",
+        stdout=header + " 0\n 1    sandbox-0   running\n",
+    )
+    names = [info.name for info in a.list_vms()]
+    assert names == ["sandbox-0"]
+
+
 def test_domain_xml_pins_the_assigned_address_via_mac(cluster):
     spec = cluster.spec_of("sandbox-1")
     out = render_domain_xml(cluster, spec, Path("/x/sandbox-1.qcow2"), Path("/x/sandbox-1-seed.iso"),

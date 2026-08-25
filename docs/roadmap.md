@@ -1218,7 +1218,38 @@ never auto-closes at all: there is no PR whose merge or close is a natural
 first, so `_finish_analysis` drops `close_issue` entirely rather than
 switching it to poll anything.
 
-## 18. Closing an issue should cancel the underlying agent
+## 18. Give every generated PR a real description
+
+- [x] Done
+
+bwsalmon/agents#79: `_finish_succeeded_issue`'s PR body was built entirely
+from metadata it already had on hand — which task, which sandbox, a
+`Closes` line — and never said anything about what the change actually
+did, so a number of generated PRs read as description-free.
+
+**The pushed branch's own head commit message is the fix, not a new
+signal.** The agent already writes a commit message to explain its diff;
+the only gap was that nothing carried it into the PR. `GitHubClient` gains
+`get_branch_head` (`BranchHead`: `sha`, `message`), reading the same GET
+`branch_exists` already made against `/repos/{owner}/{repo}/branches/{branch}`
+— GitHub's own branch response nests the tip commit's message at
+`commit.commit.message`, so this costs no extra call over what "verify,
+don't trust" (item 2) already paid for. `_finish_succeeded_issue` calls
+this in place of `branch_exists` and leads the PR body with `head.message`,
+the `Closes <task>#<n>` line and the automation signature (item 14) kept
+below it as a `---`-separated footer rather than the whole story.
+`branch_exists` itself is untouched, still used as-is by the
+PR-continuation path (`_finish_succeeded_pr`), which opens no new PR and
+so has no body to seed.
+
+**The prompt has to ask for it.** `dispatch.py`'s `_prompt` (the
+fresh-issue dispatch; `_pr_prompt`'s PR-continuation path never triggers a
+new `create_pull_request` call, so it's unchanged) now tells the agent
+plainly that its final commit message becomes the PR description verbatim,
+and asks for a summary line plus a paragraph of explanation — the same
+shape a human would write for a reviewer, not a `git log`-only note.
+
+## 19. Closing an issue should cancel the underlying agent
 
 - [x] Done
 
