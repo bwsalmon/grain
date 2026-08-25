@@ -53,11 +53,28 @@ def deploy_tree(runner: Runner, source_root: Path, *, user: str,
     and extracts it to `dest` on the controller. `sudo` on the remote side:
     `dest` is root-owned (`provision/controller.sh` creates it that way so a
     `git clone` run as root lands cleanly), and the admin SSH user is not.
+
+    The modes on `dest` are set here rather than inherited from
+    `source_root`, because what the host's checkout happens to be is not
+    something this function gets to assume. Found live: the config repo's
+    `deploy.sh` cloned it under a leaked `umask 077`, tar faithfully
+    restored 0700/0600 -- including onto `dest` itself, since the archive
+    carries `.` -- and every dispatched task unit then died on
+    `cd /opt/grain: Permission denied` before `claude -p` ever ran. That
+    unit runs as `dispatch.py`'s `CONTROLLER_AGENT_USER`, which has to
+    traverse `dest` and import `grain.automation.mcp_server` out of it, so
+    a root-only tree there is not a deployment at all. Nothing in `dest` is
+    secret -- `EXCLUDES` drops `.git`, and every credential this project
+    handles lives under `/data`, never here.
     """
     tar_cmd = shlex.join([
         "tar", "-czf", "-", *[f"--exclude={e}" for e in EXCLUDES],
         "-C", str(source_root), ".",
     ])
-    remote_cmd = f"sudo mkdir -p {shlex.quote(dest)} && sudo tar -xzf - -C {shlex.quote(dest)}"
+    remote_cmd = (
+        f"sudo mkdir -p {shlex.quote(dest)}"
+        f" && sudo tar -xzf - -C {shlex.quote(dest)}"
+        f" && sudo chmod -R u=rwX,go=rX {shlex.quote(dest)}"
+    )
     ssh_cmd = shlex.join([*_ssh_prefix(user, address, key_path), "--", remote_cmd])
     runner.run(["bash", "-c", f"{tar_cmd} | {ssh_cmd}"])
