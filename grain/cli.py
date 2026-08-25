@@ -29,7 +29,7 @@ from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
     configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_repo,
+    configure_github_credential, configure_named_github_key, configure_repo,
     credential_repos,
 )
 from .automation.core import Orchestrator
@@ -49,7 +49,7 @@ from .metadata.config import instance_paths
 from .metadata.launcher import MetadataLauncher, build_launcher
 from .proxy.allowlist import Allowlist
 from .proxy.credentials import CredentialSet
-from .proxy.tokens import SandboxTokenStore
+from .proxy.tokens import SandboxCredentialStore, SandboxTokenStore
 from .run import DryRunRunner, RealRunner, Runner
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -113,6 +113,11 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     state_path = data_dir / "state" / "automation" / "state.json"
     audit = FileAuditLog(data_dir / "state" / "automation" / "audit.log")
     token_store = SandboxTokenStore(data_dir / "secrets" / "sandbox-tokens.json")
+    # bwsalmon/agents#52: the write side of the same file
+    # `grain/proxy/server.py`'s `build_proxy` reads for a `grain-github-
+    # <name>` label's override -- see `SandboxCredentialStore`'s own
+    # docstring for why it lives under config/, not secrets/.
+    credential_store = SandboxCredentialStore(data_dir / "config" / "sandbox-github-key.json")
     history = FileSessionHistory(data_dir / "state" / "automation" / "sessions")
     # Absence is the off switch (bwsalmon/agents#47): a deployment that
     # never ran `grain controller configure --gemini-project-id ...` has no
@@ -131,6 +136,7 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         audit=audit, history=history, gemini_key_config=gemini_key_config,
+        credentials=credentials, credential_store=credential_store,
     )
     return orchestrator, state_path
 
@@ -506,6 +512,14 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             ssh, credential_repos(task_repo, targets), token,
             credential_name=args.credential_name,
         )
+    for entry in args.github_key:
+        name, sep, path = entry.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--github-key must be NAME=FILE, got {entry!r}")
+        if name == "anonymous":
+            raise SystemExit("--github-key name 'anonymous' is reserved")
+        token = sys.stdin.read() if path == "-" else Path(path).read_text()
+        configure_named_github_key(ssh, token, name=name)
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
     if args.gcp_service_account_key_file:
@@ -935,6 +949,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
                     help="credentials.json entry name for --github-token-file (default: bot)")
+    p.add_argument("--github-key", action="append", default=[], metavar="NAME=FILE",
+                    help="write an additional named GitHub credential (bwsalmon/agents#52): "
+                         "a task labelled `grain-github-NAME` uses it for every git push "
+                         "instead of the default credential -- for a scope (e.g. `workflow`) "
+                         "the default deliberately withholds. FILE holds the token, or '-' "
+                         "for stdin. Repeatable; never becomes any repo's default credential")
     p.add_argument("--claude-token-file",
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller")

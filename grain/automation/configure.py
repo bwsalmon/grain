@@ -130,6 +130,23 @@ def configure_github_credential(runner: Runner, repos: list[str], token: str,
     )
 
 
+def configure_named_github_key(runner: Runner, token: str, *, name: str) -> None:
+    """Writes an additional named credential's token file only --
+    bwsalmon/agents#52's `grain-github-<name>` label, which selects it
+    directly (`CredentialSet.get`, `grain/proxy/core.py`) rather than
+    through the `credentials.json` owner/repo ladder `configure_github_
+    credential` maintains. Deliberately does not touch `credentials.json`:
+    unlike that function, this one must never make `name` any repo's
+    *default* credential too, since the whole point is a scope (e.g.
+    `workflow`) the default deliberately withholds -- see docs/design.md,
+    "Scopes to withhold".
+    """
+    _write_remote_file(
+        runner, f"{DATA_SECRETS_GITHUB}/{name}.token",
+        token.strip() + "\n", mode="600",
+    )
+
+
 def configure_claude_token(runner: Runner, token: str) -> None:
     """Places a Claude Code OAuth token on the controller -- one token
     placed once, not one per sandbox (docs/bootstrap.md, "The Claude

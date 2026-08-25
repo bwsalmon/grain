@@ -54,3 +54,35 @@ def test_anonymous_credential_has_no_token(tmp_path):
     cred = creds.select("public", "repo")
     assert cred.name == "anonymous"
     assert cred.token is None
+
+
+# --- get() (bwsalmon/agents#52: named-key lookup, bypassing credentials.json) ----
+
+def test_get_reads_a_named_credential_directly(secrets_dir):
+    creds = CredentialSet(secrets_dir)
+    cred = creds.get("personal")
+    assert cred.name == "personal"
+    assert cred.token == "personal-token-value"
+
+
+def test_get_works_for_a_credential_with_no_pattern_mapping(tmp_path):
+    # A key meant only for grain-github-<name> selection never needs a
+    # credentials.json entry at all (configure_named_github_key never
+    # writes one) -- get() must not depend on the pattern file.
+    (tmp_path / "workflow.token").write_text("workflow-token-value\n")
+    creds = CredentialSet(tmp_path)
+    cred = creds.get("workflow")
+    assert cred.name == "workflow"
+    assert cred.token == "workflow-token-value"
+
+
+def test_get_returns_none_for_an_unconfigured_name(secrets_dir):
+    creds = CredentialSet(secrets_dir)
+    assert creds.get("nonexistent") is None
+
+
+def test_get_anonymous_has_no_token(tmp_path):
+    creds = CredentialSet(tmp_path)
+    cred = creds.get("anonymous")
+    assert cred.name == "anonymous"
+    assert cred.token is None

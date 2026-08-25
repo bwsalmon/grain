@@ -53,6 +53,21 @@ class CredentialSet:
                 return self._load(name)
         return None
 
+    def get(self, name: str) -> Credential | None:
+        """A named credential directly, bypassing the owner/repo pattern
+        ladder `select` uses -- bwsalmon/agents#52's per-task
+        `grain-github-<name>` label, which names a credential explicitly
+        rather than letting the target repo pick one (e.g. a `workflow.token`
+        carrying the `workflow` scope docs/design.md's default ladder
+        deliberately withholds). `None` if no such credential is configured
+        (`<name>.token` missing, and `name` isn't the literal `"anonymous"`)
+        -- the same fail-closed "not configured" condition `select` already
+        returns `None` for, so `GitProxy` can treat both the same way.
+        """
+        if name != "anonymous" and not (self._dir / f"{name}.token").exists():
+            return None
+        return self._load(name)
+
     def token_for(self, owner: str, repo: str) -> str | None:
         """`select`'s token alone — `grain/automation/github.py`'s
         `TokenSource` shape, so the orchestrator's `GitHubClient` can

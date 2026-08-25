@@ -18,13 +18,14 @@ from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.inventory import Cluster
 from grain.proxy.allowlist import Allowlist
-from grain.proxy.tokens import SandboxTokenStore
+from grain.proxy.credentials import CredentialSet
+from grain.proxy.tokens import SandboxCredentialStore, SandboxTokenStore
 from grain.run import FakeRunner
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def issue_json(number: int, body: str = "do it") -> dict:
+def issue_json(number: int, body: str = "do it", extra_labels: tuple = ()) -> dict:
     return {
         # "id" isn't read by list_issues itself, but the same fixture also
         # serves as FakeTransport's shared default response for whichever
@@ -34,7 +35,7 @@ def issue_json(number: int, body: str = "do it") -> dict:
         # never queue a dedicated comments response.
         "id": number, "number": number, "title": f"issue {number}", "body": body,
         "html_url": f"https://github.com/o/r/issues/{number}",
-        "labels": [{"name": "grain-agent"}],
+        "labels": [{"name": "grain-agent"}, *({"name": n} for n in extra_labels)],
     }
 
 
@@ -122,8 +123,16 @@ def allowlist_of(repos) -> Allowlist:
     return Allowlist(path)
 
 
+def credentials_with(*names: str) -> CredentialSet:
+    path = Path(tempfile.mkdtemp())
+    for name in names:
+        (path / f"{name}.token").write_text(f"{name}-token-value")
+    return CredentialSet(path)
+
+
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
-                       history=None, allowed=("o/r",), gemini_key_config=None):
+                       history=None, allowed=("o/r",), gemini_key_config=None,
+                       credentials=None, credential_store=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -156,6 +165,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         # Orchestrator's own decisions against a plain FakeRunner.
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
+        credentials=credentials, credential_store=credential_store,
     )
     return orchestrator, transport
 
@@ -1302,3 +1312,127 @@ def test_a_dispatch_failure_after_minting_a_gemini_key_revokes_it():
     assert GEMINI_KEY_NAME in delete_call
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
     assert any("dispatch failed" in o for o in outcomes)
+
+
+# --- grain-github-<name> label (bwsalmon/agents#52) -------------------------
+
+def test_a_grain_github_label_records_the_override_for_the_dispatched_sandbox():
+    credential_store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, extra_labels=("grain-github-workflow",))],
+        credentials=credentials_with("workflow"),
+        credential_store=credential_store,
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments  # actually dispatched, not parked
+    overrides = json.loads(credential_store._path.read_text())
+    assert overrides["sandbox-0"] == "workflow"
+
+
+def test_a_task_with_no_grain_github_label_never_touches_the_credential_store():
+    credential_store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4)],
+        credentials=credentials_with("workflow"),
+        credential_store=credential_store,
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert not credential_store._path.exists()
+
+
+def test_a_grain_github_label_with_no_credentials_wired_is_parked():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, extra_labels=("grain-github-workflow",))]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                  # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),         # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "grain-github-workflow" in json.loads(comment["body"])["body"]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+
+
+def test_a_grain_github_label_naming_an_unconfigured_key_is_parked():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, extra_labels=("grain-github-nonexistent",))]).encode()),
+        ApiResponse(200, {}, b"[]"),
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),
+    ])
+    orchestrator.credentials = credentials_with("workflow")  # "nonexistent" isn't here
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "grain-github-nonexistent" in json.loads(comment["body"])["body"]
+
+
+def test_two_grain_github_labels_on_one_issue_is_parked_as_ambiguous():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, extra_labels=("grain-github-workflow", "grain-github-release"))]
+        ).encode()),
+        ApiResponse(200, {}, b"[]"),
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),
+    ])
+    orchestrator.credentials = credentials_with("workflow", "release")
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "ambiguous" in json.loads(comment["body"])["body"]
+
+
+def test_a_dispatch_failure_with_a_grain_github_label_does_not_leak_into_the_next_task():
+    """The override is written before the dispatch attempt, which can then
+    fail partway with no Assignment ever recorded -- sweeper.py's _release
+    never runs for this sandbox, so a later, unrelated, unlabelled task
+    picking up the same now-free sandbox must not silently inherit the
+    elevated credential. Same "must not leak" bar bwsalmon/agents#47's
+    gemini-key dispatch-failure test above already holds this feature to,
+    but for the override file rather than a minted key.
+    """
+    credential_store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    runner = FakeRunner()
+    runner.expect("bash -c", returncode=128, stderr="fatal: Authentication failed")
+    orchestrator, transport = make_orchestrator(
+        issues=[issue_json(4, extra_labels=("grain-github-workflow",))],
+        runner=runner,
+        credentials=credentials_with("workflow"),
+        credential_store=credential_store,
+    )
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.assignments == {}
+    overrides = json.loads(credential_store._path.read_text())
+    assert overrides["sandbox-0"] == "workflow"
+
+    # The sandbox is free again -- a later cycle dispatches an unrelated,
+    # unlabelled task to it. Fix the runner (the same one, since it's still
+    # what "sandbox-0" resolves to) and change what the queue returns.
+    del runner.responses["bash -c"]
+    transport.default = ApiResponse(200, {}, json.dumps([issue_json(5)]).encode())
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    overrides = json.loads(credential_store._path.read_text())
+    assert "sandbox-0" not in overrides

@@ -93,6 +93,7 @@ from .gemini_keys import GeminiKeyConfig, delete_key
 from .health import check_health
 from .history import NullSessionHistory, SessionHistory
 from .state import Assignment, AutomationState, TriggerKind
+from ..proxy.tokens import SandboxCredentialStore
 from ..run import CommandError, Runner
 
 
@@ -171,12 +172,14 @@ def _revoke_gemini_key(controller_runner: Runner, sandbox: str, assignment: Assi
 def _release(state: AutomationState, runner: Runner, sandbox: str, *,
              history: SessionHistory, assignment: Assignment, unit: str,
              outcome_label: str, now: datetime, controller_runner: Runner,
-             gemini_key_config: GeminiKeyConfig | None) -> tuple[HealthWarning | None, HealthWarning | None]:
+             gemini_key_config: GeminiKeyConfig | None,
+             credential_store: SandboxCredentialStore | None) -> tuple[HealthWarning | None, HealthWarning | None]:
     """Captures the session's trajectory, runs the between-task hook and a
     post-cleanup health check, revokes the task's Gemini API key if it
-    minted one, then frees the slot. Called from every branch below that
-    frees a sandbox, so this behaviour is identical regardless of why the
-    slot is being freed. Returns `(health_warning, credential_warning)`.
+    minted one, clears any named-GitHub-key override it set
+    (bwsalmon/agents#52), then frees the slot. Called from every branch
+    below that frees a sandbox, so this behaviour is identical regardless
+    of why the slot is being freed. Returns `(health_warning, credential_warning)`.
 
     Capture runs first, before cleanup or the state release — `claude -p`
     now runs on the controller (docs/roadmap.md item 8's "Update"), so
@@ -188,7 +191,11 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
     Key revocation runs before `state.release` too, for the same reason:
     `assignment` (carrying `gemini_key_name`) is gone from `state` the
     instant `release` is called, and this is the last point that still has
-    it in hand.
+    it in hand. The credential-override clear doesn't need `assignment` at
+    all (`SandboxCredentialStore.clear` is unconditional, a no-op if this
+    sandbox had no override), so its position relative to `state.release`
+    doesn't matter the same way -- it runs alongside the key revocation
+    purely because both are "end of task" credential cleanup.
     """
     transcript_text = capture_trajectory(unit)
     history.record(
@@ -201,6 +208,8 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
     credential_warning = _revoke_gemini_key(
         controller_runner, sandbox, assignment, gemini_key_config
     )
+    if credential_store is not None:
+        credential_store.clear(sandbox)
     state.release(sandbox)
     health_warning = (
         HealthWarning(sandbox, f"{report.status.value}: {report.summary()}")
@@ -212,7 +221,8 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
 def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
           controller_runner: Runner, config: AutomationConfig, now: datetime,
           history: SessionHistory | None = None,
-          gemini_key_config: GeminiKeyConfig | None = None) -> SweepResult:
+          gemini_key_config: GeminiKeyConfig | None = None,
+          credential_store: SandboxCredentialStore | None = None) -> SweepResult:
     """`controller_runner` is new (docs/roadmap.md item 8's "Update"):
     `claude -p` now runs on the controller, not the sandbox, so the unit
     `unit_status`/`reap` are checking against lives there too — the
@@ -248,6 +258,7 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="succeeded", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                credential_store=credential_store,
             )
             result.succeeded.append(outcome)
         elif status is UnitState.DONE_FAILED:
@@ -256,6 +267,7 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="failed", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                credential_store=credential_store,
             )
             result.failed.append(outcome)
         elif status is UnitState.ABSENT:
@@ -266,6 +278,7 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="stranded", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                credential_store=credential_store,
             )
             result.stranded.append(outcome)
         elif now - assignment.started_at > max_runtime:
@@ -274,6 +287,7 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="stranded", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                credential_store=credential_store,
             )
             result.stranded.append(outcome)
         else:
