@@ -117,6 +117,16 @@ def test_instance_config_embeds_a_provision_script_indented(cluster):
     assert "    apt-get update" in out
 
 
+def test_instance_config_substitutes_the_controller_ip_placeholder(cluster):
+    spec = cluster.spec_of("controller")
+    out = render_instance_config(
+        cluster, spec,
+        provision_script='CONTROLLER_IP="__GRAIN_CONTROLLER_IP__"\n',
+    )
+    assert f'CONTROLLER_IP="{cluster.controller_ip}"' in out
+    assert "__GRAIN_CONTROLLER_IP__" not in out
+
+
 def test_recreate_destroys_then_creates_then_starts(adapter, cluster):
     a, runner = adapter
     # absent throughout, so destroy is a no-op and create proceeds

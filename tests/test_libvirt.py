@@ -1,3 +1,4 @@
+import ipaddress
 import shlex
 from pathlib import Path
 
@@ -5,7 +6,7 @@ import pytest
 
 from grain.adapter.base import VmState
 from grain.adapter.libvirt import (
-    LibvirtAdapter, mac_for, render_domain_xml, render_meta_data,
+    LibvirtAdapter, mac_for, render_domain_xml, render_meta_data, render_user_data,
 )
 from grain.adapter.net_linux import LinuxNetwork
 from grain.inventory import Cluster
@@ -130,6 +131,18 @@ def test_domain_xml_logs_the_serial_console_to_the_host(cluster):
     out = render_domain_xml(cluster, spec, Path("/x/sandbox-1.qcow2"), Path("/x/sandbox-1-seed.iso"),
                              Path("/x/sandbox-1-console.log"))
     assert "<log file='/x/sandbox-1-console.log' append='on'/>" in out
+
+
+def test_user_data_substitutes_the_controller_ip_placeholder(cluster):
+    out = render_user_data('CONTROLLER_IP="__GRAIN_CONTROLLER_IP__"\n', cluster)
+    assert f'CONTROLLER_IP="{cluster.controller_ip}"' in out
+    assert "__GRAIN_CONTROLLER_IP__" not in out
+
+
+def test_user_data_substitution_follows_a_non_default_subnet(cluster):
+    other = Cluster(subnet=ipaddress.IPv4Network("10.200.0.0/24"))
+    out = render_user_data('CONTROLLER_IP="__GRAIN_CONTROLLER_IP__"\n', other)
+    assert 'CONTROLLER_IP="10.200.0.2"' in out
 
 
 def test_mac_is_deterministic_and_distinct_per_vm(cluster):
