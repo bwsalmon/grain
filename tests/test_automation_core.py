@@ -541,9 +541,9 @@ def test_a_pr_triggered_success_that_asked_a_question_also_posts_a_comment(monke
     assert pending.branch == "feature-x"
 
 
-# --- complete_analysis (bwsalmon/agents#50) ---------------------------------
+# --- comment_on_issue (bwsalmon/agents#50, reworked by bwsalmon/agents#89) --
 
-def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_completed(
+def test_a_succeeded_run_with_no_pushed_branch_and_a_comment_posts_it_and_tags_completed(
     monkeypatch, tmp_path,
 ):
     state = AutomationState()
@@ -551,11 +551,12 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_com
                  now=NOW - timedelta(hours=1))
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
-    analysis_file = tmp_path / "analysis.txt"
-    analysis_file.write_text("Investigated X; no code change was needed.")
-    monkeypatch.setattr(core_module, "analysis_path", lambda unit: str(analysis_file))
+    comment_file = tmp_path / "comment.txt"
+    comment_file.write_text("Investigated X; no code change was needed.")
+    monkeypatch.setattr(core_module, "comment_path", lambda unit: str(comment_file))
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
     transport.responses.extend([
+        ApiResponse(404, {}, b"not found"),  # get_branch_head: no branch pushed
         ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
         ApiResponse(200, {}, b"{}"),  # add_label (completed)
         ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
@@ -564,39 +565,87 @@ def test_a_succeeded_run_that_completed_analysis_posts_a_comment_and_tags_it_com
     orchestrator.run_once(NOW)
 
     assert "sandbox-0" not in orchestrator.state.assignments
+    # bwsalmon/agents#89: the branch is checked first, before the comment
+    # is ever consulted -- this is what makes a pushed branch always win.
+    branch_call = transport.calls[0]
+    assert branch_call["method"] == "GET"
+    assert branch_call["path"] == "/repos/o/r/branches/grain%2Fissue-5"
     comment_call = next(
         c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
     )
     comment_body = json.loads(comment_call["body"])["body"]
     assert "Investigated X; no code change was needed." in comment_body
     assert "Posted automatically by grain-agent" in comment_body
-    # bwsalmon/agents#54: an analysis is never auto-closed -- only tagged,
-    # so a human decides whether the summary answers the task.
+    # bwsalmon/agents#54: a no-branch finish is never auto-closed -- only
+    # tagged, so a human decides whether the comment answers the task.
     assert not any(c["method"] == "PATCH" for c in transport.calls)
     completed_call = next(
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
     )
     assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
-    # No branch was ever checked, and no PR was opened -- the analysis path
-    # short-circuits before either.
-    assert not any(c["path"].startswith("/repos/o/r/branches") for c in transport.calls)
+    # No PR was opened -- there was nothing to open one for.
     assert not any(c["path"] == "/repos/o/r/pulls" for c in transport.calls)
     outcomes = [e["outcome"] for e in orchestrator.audit.entries]
-    assert any("completed analysis" in o and "Investigated X" in o for o in outcomes)
+    assert any("finished with no changes" in o and "Investigated X" in o for o in outcomes)
 
 
-def test_an_analysis_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, tmp_path):
+def test_a_succeeded_run_with_a_pushed_branch_opens_a_pr_even_if_the_agent_also_left_a_comment(
+    monkeypatch, tmp_path,
+):
+    """bwsalmon/agents#89: the tool that is now `comment_on_issue` used to
+    be called `complete_analysis` and, if the agent called it at all, made
+    `core.py` skip the branch check outright -- so an agent that pushed
+    real commits and then also (mistakenly) called it had its own PR
+    silently dropped. The branch is now checked first and decides
+    everything on its own; a leftover comment file only matters once that
+    branch turns out to have nothing on it, so it must not stop a real PR
+    from opening.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    comment_file = tmp_path / "comment.txt"
+    comment_file.write_text("I also pushed a fix for this.")
+    monkeypatch.setattr(core_module, "comment_path", lambda unit: str(comment_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    # The exact same five-response PR flow a plain succeeded run consumes
+    # (`pr_flow_response`'s own docstring) -- if the comment file being
+    # present made an extra call happen anywhere in here, one of these
+    # responses would land on the wrong call and this would fail loudly.
+    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    pr_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"] == "/repos/o/r/pulls"
+    )
+    assert json.loads(pr_call["body"])["head"] == "grain/issue-5"
+    assert not any(
+        c["method"] == "POST" and c["path"].endswith("/comments") for c in transport.calls
+    )
+    assert orchestrator.state.open_pull_requests == {
+        "5": OpenPullRequest(issue=5, target_owner="o", target_repo="r", pr_number=42),
+    }
+
+
+def test_a_no_branch_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch, tmp_path):
     state = AutomationState()
     state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
                  now=NOW - timedelta(hours=1))
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
-    analysis_file = tmp_path / "analysis.txt"
-    analysis_file.write_text("does this issue even exist?")
-    monkeypatch.setattr(core_module, "analysis_path", lambda unit: str(analysis_file))
+    comment_file = tmp_path / "comment.txt"
+    comment_file.write_text("does this issue even exist?")
+    monkeypatch.setattr(core_module, "comment_path", lambda unit: str(comment_file))
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+    transport.responses.extend([
+        ApiResponse(404, {}, b"not found"),  # get_branch_head: no branch pushed
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # create_comment
+    ])
 
     orchestrator.run_once(NOW)  # must not raise
 
@@ -609,17 +658,20 @@ def test_an_analysis_comment_tolerates_a_404_for_a_stale_assignment(monkeypatch,
     assert not any(c["method"] == "DELETE" for c in transport.calls)
 
 
-def test_an_analysis_comment_raises_on_a_non_404_github_error(monkeypatch, tmp_path):
+def test_a_no_branch_comment_raises_on_a_non_404_github_error(monkeypatch, tmp_path):
     state = AutomationState()
     state.assign("sandbox-0", issue=201, unit="grain-task-sandbox-0",
                  now=NOW - timedelta(hours=1))
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
-    analysis_file = tmp_path / "analysis.txt"
-    analysis_file.write_text("does this issue even exist?")
-    monkeypatch.setattr(core_module, "analysis_path", lambda unit: str(analysis_file))
+    comment_file = tmp_path / "comment.txt"
+    comment_file.write_text("does this issue even exist?")
+    monkeypatch.setattr(core_module, "comment_path", lambda unit: str(comment_file))
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.append(ApiResponse(500, {}, b"internal error"))
+    transport.responses.extend([
+        ApiResponse(404, {}, b"not found"),  # get_branch_head: no branch pushed
+        ApiResponse(500, {}, b"internal error"),  # create_comment
+    ])
 
     with pytest.raises(GitHubError):
         orchestrator.run_once(NOW)

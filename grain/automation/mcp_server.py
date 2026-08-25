@@ -50,16 +50,27 @@ per unit (the same "compute once, share" shape `transcript_path`/
 reads that file back before deciding how a finished run resolved, and is
 the one that actually posts the comment.
 
-A sixth tool, `complete_analysis` (bwsalmon/agents#50), is the same shape
-as `ask_question` for the opposite reason: some tasks only ever needed an
-answer, an investigation, or a recommendation, never a code change, and
-forcing one through the branch/PR path just to say so is a poor fit -- see
-`docs/roadmap.md` item 2's "verify, don't trust" for why a pushed branch is
-otherwise the *only* signal a fresh-issue task is done. Like
-`ask_question`, it records its argument to a fixed per-unit local file
-rather than touching the sandbox or GitHub itself; `core.py`'s sweep reads
-it back and, if present, posts it as the closing comment on the task issue
-instead of checking for a branch and opening a PR.
+A sixth tool, `comment_on_issue` (bwsalmon/agents#50, reworked by
+bwsalmon/agents#89), is the same shape as `ask_question` for a related
+reason: some tasks only ever needed an answer, an investigation, or a
+recommendation, never a code change, and forcing one through the branch/PR
+path just to say so is a poor fit -- see `docs/roadmap.md` item 2's
+"verify, don't trust" for why a pushed branch is otherwise the *only*
+signal a fresh-issue task is done. Like `ask_question`, it records its
+argument to a fixed per-unit local file rather than touching the sandbox or
+GitHub itself.
+
+It used to be called `complete_analysis` and worked by *skipping* the
+branch check outright whenever the agent called it -- which meant an agent
+that got confused about which tool to call at the end of a task (a real,
+common failure mode, not a hypothetical) could push real commits and then
+still make `core.py` treat the run as a branchless analysis, silently
+discarding the PR that should have opened for them. `core.py`'s sweep now
+always checks whether the branch dispatch() told the agent to push to
+actually has anything on it, `comment_on_issue` or not; the file this tool
+writes only ever supplies the *comment* to post, and only ever suppresses a
+PR on the one occasion a pushed branch can't: when the agent never pushed
+anything at all.
 
 A seventh tool, `read_grain_logs` (bwsalmon/agents#62), is unlike every
 tool above in one specific way: it reads from the *controller*, where this
@@ -180,24 +191,25 @@ TOOLS = [
         },
     },
     {
-        "name": "complete_analysis",
+        "name": "comment_on_issue",
         "description": (
-            "Mark this task as a completed analysis instead of opening a "
-            "pull request. Use this when the task only asked for an "
-            "answer, an investigation, or a recommendation -- not a code "
-            "change. This posts your summary as a comment on the GitHub "
-            "issue and closes it; no branch is checked and no pull "
-            "request is opened. Do not call this if you made and pushed "
-            "code changes -- push a branch instead. After calling this, "
-            "do not take any further actions."
+            "Leave a comment on the task's GitHub issue. Use this when the "
+            "task only asked for an answer, an investigation, or a "
+            "recommendation -- not a code change: if you never push a "
+            "branch, this comment becomes the task's closing note and no "
+            "pull request is opened. If you do push commits, a pull "
+            "request is opened for them regardless of whether you also "
+            "call this -- calling it does not by itself prevent a pull "
+            "request from opening. After calling this, do not take any "
+            "further actions unless you still intend to push commits."
         ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "summary": {"type": "string"},
+                "comment": {"type": "string"},
             },
-            "required": ["summary"],
+            "required": ["comment"],
         },
     },
 ]
@@ -340,20 +352,28 @@ def ask_question(question_path: str, question: str) -> ToolResult:
     )
 
 
-def complete_analysis(analysis_path: str, summary: str) -> ToolResult:
-    """Records `summary` for `core.py` to post as the closing comment on
-    the task issue (bwsalmon/agents#50) -- same shape as `ask_question`:
-    a plain local file write, no `Runner`/SSH involved, since the summary
-    is for a human via GitHub, not the sandbox. Overwrites on a repeat call
-    within the same dispatch, and `dispatch.py` resets this file at the
-    start of every dispatch, for the same reasons `ask_question` already
-    documents for its own file.
+def comment_on_issue(comment_path: str, comment: str) -> ToolResult:
+    """Records `comment` for `core.py` to post on the task issue
+    (bwsalmon/agents#50, bwsalmon/agents#89) -- same shape as
+    `ask_question`: a plain local file write, no `Runner`/SSH involved,
+    since the comment is for a human via GitHub, not the sandbox.
+    Overwrites on a repeat call within the same dispatch, and `dispatch.py`
+    resets this file at the start of every dispatch, for the same reasons
+    `ask_question` already documents for its own file.
+
+    Unlike the `complete_analysis` tool this replaced, writing this file is
+    no longer what decides whether a pull request opens -- `core.py` always
+    checks the branch first (bwsalmon/agents#89) and only falls back to
+    posting this as a closing comment when that branch turns out to have
+    nothing on it.
     """
-    Path(analysis_path).write_text(summary)
+    Path(comment_path).write_text(comment)
     return ToolResult(
-        text="Your summary has been recorded and will be posted as a "
-             "comment on the GitHub issue, which will then be closed. Do "
-             "not take any further actions -- end your turn now."
+        text="Your comment has been recorded. If you never push a branch, "
+             "it will be posted on the GitHub issue as the task's closing "
+             "note; if you do push commits, a pull request opens for them "
+             "regardless. Do not take any further actions unless you "
+             "still intend to push commits."
     )
 
 
@@ -391,7 +411,7 @@ class McpServer:
 
     def __init__(self, runner: Runner, workspace: str, *,
                  question_path: str | None = None,
-                 analysis_path: str | None = None,
+                 comment_path: str | None = None,
                  self_debug: bool = False,
                  local_runner: Runner | None = None) -> None:
         self.runner = runner
@@ -400,8 +420,8 @@ class McpServer:
         # always supplies a real path in production.
         self.question_path = question_path
         # Same "None only in tests" treatment as question_path, for
-        # complete_analysis (bwsalmon/agents#50).
-        self.analysis_path = analysis_path
+        # comment_on_issue (bwsalmon/agents#50, bwsalmon/agents#89).
+        self.comment_path = comment_path
         # bwsalmon/agents#62: whether this dispatch's task issue carried
         # `self_debug_label` -- `main()` sets this from `--self-debug`,
         # which `dispatch.py` only ever passes in that case. Gates both
@@ -478,13 +498,13 @@ class McpServer:
                     is_error=True,
                 )
             return ask_question(self.question_path, args["question"])
-        if name == "complete_analysis":
-            if self.analysis_path is None:
+        if name == "comment_on_issue":
+            if self.comment_path is None:
                 return ToolResult(
-                    text="complete_analysis is not configured for this session.",
+                    text="comment_on_issue is not configured for this session.",
                     is_error=True,
                 )
-            return complete_analysis(self.analysis_path, args["summary"])
+            return comment_on_issue(self.comment_path, args["comment"])
         if name == "read_grain_logs":
             if not self.self_debug:
                 return ToolResult(
@@ -498,10 +518,10 @@ class McpServer:
 
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
-          analysis_path: str | None = None, self_debug: bool = False,
+          comment_path: str | None = None, self_debug: bool = False,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
     server = McpServer(runner, workspace, question_path=question_path,
-                        analysis_path=analysis_path, self_debug=self_debug)
+                        comment_path=comment_path, self_debug=self_debug)
     for line in stdin:
         line = line.strip()
         if not line:
@@ -523,7 +543,7 @@ def main() -> None:
     parser.add_argument("--key-path", required=True)
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--question-path", required=True)
-    parser.add_argument("--analysis-path", required=True)
+    parser.add_argument("--comment-path", required=True)
     # bwsalmon/agents#62: off unless `dispatch.py`'s `_mcp_config_json`
     # added it, which only happens for a task whose issue carried
     # `self_debug_label`.
@@ -534,7 +554,7 @@ def main() -> None:
         address=ipaddress.IPv4Address(args.address), key_path=Path(args.key_path),
     )
     serve(runner, args.workspace, question_path=args.question_path,
-          analysis_path=args.analysis_path, self_debug=args.self_debug)
+          comment_path=args.comment_path, self_debug=args.self_debug)
 
 
 if __name__ == "__main__":

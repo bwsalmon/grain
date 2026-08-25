@@ -4,7 +4,7 @@ import shlex
 import sys
 
 from grain.automation.mcp_server import (
-    TOOLS, McpServer, ask_question, complete_analysis, edit_file, main, read_file,
+    TOOLS, McpServer, ask_question, comment_on_issue, edit_file, main, read_file,
     read_grain_logs, run_command, serve, write_file,
 )
 from grain.automation.ssh import SshRunner
@@ -158,22 +158,22 @@ def test_ask_question_overwrites_a_prior_question_in_the_same_dispatch(tmp_path)
     assert path.read_text() == "second question"
 
 
-def test_complete_analysis_writes_the_summary_to_the_fixed_path_not_the_sandbox(tmp_path):
+def test_comment_on_issue_writes_the_comment_to_the_fixed_path_not_the_sandbox(tmp_path):
     """Same shape as `ask_question` -- never touches a `Runner` at all,
-    since the summary is for a human via GitHub, not the sandbox.
+    since the comment is for a human via GitHub, not the sandbox.
     """
-    path = tmp_path / "analysis.txt"
-    result = complete_analysis(str(path), "Approach A is already in place; no change needed.")
+    path = tmp_path / "comment.txt"
+    result = comment_on_issue(str(path), "Approach A is already in place; no change needed.")
     assert path.read_text() == "Approach A is already in place; no change needed."
     assert not result.is_error
     assert "recorded" in result.text.lower()
 
 
-def test_complete_analysis_overwrites_a_prior_summary_in_the_same_dispatch(tmp_path):
-    path = tmp_path / "analysis.txt"
-    complete_analysis(str(path), "first summary")
-    complete_analysis(str(path), "second summary")
-    assert path.read_text() == "second summary"
+def test_comment_on_issue_overwrites_a_prior_comment_in_the_same_dispatch(tmp_path):
+    path = tmp_path / "comment.txt"
+    comment_on_issue(str(path), "first comment")
+    comment_on_issue(str(path), "second comment")
+    assert path.read_text() == "second comment"
 
 
 # --- read_grain_logs (bwsalmon/agents#62) -----------------------------------
@@ -271,7 +271,7 @@ def test_tools_list_returns_exactly_the_six_tools():
     names = {t["name"] for t in response["result"]["tools"]}
     assert names == {
         "run_command", "read_file", "edit_file", "write_file", "ask_question",
-        "complete_analysis",
+        "comment_on_issue",
     }
     assert response["result"]["tools"] == TOOLS
 
@@ -340,22 +340,22 @@ def test_tools_call_ask_question_without_a_configured_path_errors_not_crashes():
     assert response["result"]["isError"] is True
 
 
-def test_tools_call_routes_complete_analysis_to_the_configured_path(tmp_path):
-    path = tmp_path / "analysis.txt"
-    server = McpServer(FakeRunner(), WORKSPACE, analysis_path=str(path))
+def test_tools_call_routes_comment_on_issue_to_the_configured_path(tmp_path):
+    path = tmp_path / "comment.txt"
+    server = McpServer(FakeRunner(), WORKSPACE, comment_path=str(path))
     response = server.handle({
         "jsonrpc": "2.0", "id": 9, "method": "tools/call",
-        "params": {"name": "complete_analysis", "arguments": {"summary": "no change needed"}},
+        "params": {"name": "comment_on_issue", "arguments": {"comment": "no change needed"}},
     })
     assert response["result"]["isError"] is False
     assert path.read_text() == "no change needed"
 
 
-def test_tools_call_complete_analysis_without_a_configured_path_errors_not_crashes():
-    server = McpServer(FakeRunner(), WORKSPACE)  # no analysis_path
+def test_tools_call_comment_on_issue_without_a_configured_path_errors_not_crashes():
+    server = McpServer(FakeRunner(), WORKSPACE)  # no comment_path
     response = server.handle({
         "jsonrpc": "2.0", "id": 10, "method": "tools/call",
-        "params": {"name": "complete_analysis", "arguments": {"summary": "no change needed"}},
+        "params": {"name": "comment_on_issue", "arguments": {"comment": "no change needed"}},
     })
     assert response["result"]["isError"] is True
 
@@ -438,23 +438,23 @@ def test_serve_writes_nothing_for_a_notification():
 def test_main_wires_cli_args_into_serve(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, analysis_path, self_debug):
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug):
         captured.update(
             runner=runner, workspace=workspace, question_path=question_path,
-            analysis_path=analysis_path, self_debug=self_debug,
+            comment_path=comment_path, self_debug=self_debug,
         )
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
     monkeypatch.setattr(sys, "argv", [
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
-        "--question-path", "/tmp/q.txt", "--analysis-path", "/tmp/a.txt",
+        "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
         "--self-debug",
     ])
     main()
     assert captured["workspace"] == WORKSPACE
     assert captured["question_path"] == "/tmp/q.txt"
-    assert captured["analysis_path"] == "/tmp/a.txt"
+    assert captured["comment_path"] == "/tmp/a.txt"
     assert captured["self_debug"] is True
     assert isinstance(captured["runner"], SshRunner)
 
@@ -462,14 +462,14 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
 def test_main_self_debug_defaults_to_off(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, analysis_path, self_debug):
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug):
         captured["self_debug"] = self_debug
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
     monkeypatch.setattr(sys, "argv", [
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
-        "--question-path", "/tmp/q.txt", "--analysis-path", "/tmp/a.txt",
+        "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
     ])
     main()
     assert captured["self_debug"] is False
