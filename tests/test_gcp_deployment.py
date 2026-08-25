@@ -632,8 +632,11 @@ def test_deploy_yml_mints_and_invalidates_the_agent_key_only_when_one_exists():
     """Minted fresh every run, straight to instance metadata -- the
     short-lived-credential principle grain's own docs/design.md argues
     for at the sandbox layer, applied one layer up to the impersonation
-    source. Every previous key is deleted right after, or GCP's 10-key
-    cap eventually breaks deploys.
+    source. Keys older than the previous run's are deleted right after,
+    or GCP's 10-key cap eventually breaks deploys -- see
+    test_push_host_secrets_keeps_the_previous_key_alive_through_a_rotation
+    for why the previous run's key is deliberately spared, not just this
+    run's.
     """
     deploy = (WORKFLOWS / "deploy.yml").read_text()
     assert "AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}" in deploy, (
@@ -645,6 +648,103 @@ def test_deploy_yml_mints_and_invalidates_the_agent_key_only_when_one_exists():
     assert 'if [ -n "$agent_service_account" ]; then' in push, (
         "a deployment with no agent account must not attempt to mint a key for one"
     )
+
+
+# A stand-in for `gcloud iam service-accounts keys ...` and `gcloud compute
+# instances add-metadata`, tracking existing keys as one id per line in
+# __STATE__ (append order == creation order) and every invocation in
+# __CALLS__, so the rotation logic can be exercised without a real project.
+_FAKE_GCLOUD = """#!/usr/bin/env bash
+set -euo pipefail
+STATE="__STATE__"
+CALLS="__CALLS__"
+echo "$*" >> "$CALLS"
+case "$1 $2 $3" in
+  "iam service-accounts keys")
+    case "$4" in
+      create)
+        key_file="$5"
+        n=$(( $(wc -l < "$STATE" 2>/dev/null || echo 0) + 1 ))
+        new_id="key$n"
+        echo "fake-key-content" > "$key_file"
+        echo "$new_id" >> "$STATE"
+        echo "$new_id"
+        ;;
+      list)
+        tac "$STATE" 2>/dev/null || true
+        ;;
+      delete)
+        key_id="$5"
+        grep -v "^${key_id}$" "$STATE" > "$STATE.tmp" 2>/dev/null || true
+        mv "$STATE.tmp" "$STATE"
+        ;;
+    esac
+    ;;
+  "compute instances add-metadata")
+    ;;
+esac
+"""
+
+
+def test_push_host_secrets_keeps_the_previous_key_alive_through_a_rotation():
+    """Regression test for bwsalmon/agents#93.
+
+    terraform-apply.sh bumps grain-deploy-generation -- which is what
+    wakes config-sync up -- *before* this script ever runs, so a host can
+    race ahead and re-converge on whatever agent-service-account key is
+    already sitting in instance metadata, not necessarily the one this
+    run is about to mint (deploy.sh's fetch_secret_to_file has no way to
+    tell a stale metadata value from a fresh one; it just reads whatever
+    is there). Deleting every key but the brand new one immediately, as
+    this script used to, could delete exactly the key such a host just
+    started relying on -- and since nothing re-triggers config-sync until
+    the next generation bump, every gcloud call on that host then failed
+    with `invalid_grant: Invalid JWT Signature` forever, not transiently.
+    Keeping the previous run's key alongside the new one closes that
+    race: a host that raced ahead stays valid through this run and picks
+    up the correct key on the next one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        state = tmp_path / "keys.state"
+        calls = tmp_path / "calls.log"
+        # Two keys already exist -- the steady state this script's own
+        # rotation leaves behind: an older one and the previous run's.
+        state.write_text("key1\nkey2\n")
+
+        fake = _FAKE_GCLOUD.replace("__STATE__", str(state)).replace("__CALLS__", str(calls))
+        (bin_dir / "gcloud").write_text(fake)
+        (bin_dir / "gcloud").chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PROJECT": "a-project",
+            "INSTANCE": "an-instance",
+            "ZONE": "us-central1-a",
+            "AGENT_SERVICE_ACCOUNT": "agent@a-project.iam.gserviceaccount.com",
+        }
+        result = subprocess.run(
+            [str(PUSH_SECRETS)], env=env, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        remaining = state.read_text().split()
+        assert remaining == ["key2", "key3"], (
+            "expected the previous run's key (key2) and the new key (key3) to "
+            f"survive the rotation, got {remaining}"
+        )
+        assert "invalidated previous key: key1" in result.stdout
+        assert "invalidated previous key: key2" not in result.stdout
+
+        list_calls = [line for line in calls.read_text().splitlines()
+                      if line.startswith("iam service-accounts keys list")]
+        assert list_calls, "the script never listed existing keys"
+        assert "--sort-by=~validAfterTime" in list_calls[0], (
+            "the key list must be sorted newest-first for 'keep the two newest' to be correct"
+        )
 
 
 def test_deploy_yml_never_stores_the_agent_key_as_a_repo_secret():
