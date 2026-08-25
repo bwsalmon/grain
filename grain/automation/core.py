@@ -135,7 +135,7 @@ from .gemini_keys import delete_key as delete_gemini_key
 from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
 from .ssh import SshRunner
-from .state import AutomationState, TriggerKind
+from .state import AutomationState, OpenPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
 from ..proxy.allowlist import Allowlist
@@ -167,6 +167,48 @@ _AUTOMATION_SIGNATURE = "🤖 _Posted automatically by grain-agent — not a hum
 # applying one already requires the same "can apply a label" trust tier the
 # trigger gate itself relies on, so this opens no new gate.
 _GITHUB_KEY_LABEL_RE = re.compile(r"^grain-github-(.+)$")
+
+# GitHub's own `CheckRun.conclusion` values that `_pr_health` (bwsalmon/agents#83)
+# reads as "this check is broken," not merely incomplete -- "cancelled",
+# "skipped" and "neutral" all mean the check has nothing to say about
+# whether the code is good, which isn't the same claim.
+_FAILING_CHECK_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
+
+
+@dataclass(frozen=True)
+class _PrHealth:
+    """What `_close_finished_prs` (bwsalmon/agents#83) needs to decide
+    whether an open PR is in trouble (conflicts with its base, or a failing
+    check) worth suggesting a fix for, or clean enough to auto-merge.
+    `mergeable` is `PullRequestDetail.mergeable` straight through -- `None`
+    while GitHub is still computing it, read as "don't know yet" by every
+    caller here, never guessed at either way.
+    """
+    mergeable: bool | None
+    checks_pending: bool
+    failing_checks: tuple[str, ...]
+
+    @property
+    def has_conflict(self) -> bool:
+        return self.mergeable is False
+
+    @property
+    def is_broken(self) -> bool:
+        """A definite "something is wrong" signal -- what `_close_finished_prs`
+        suggests a fix for. Pending checks don't count: a check still
+        running may yet pass, and filing a fix for a task that was never
+        actually broken would be pure noise.
+        """
+        return self.has_conflict or bool(self.failing_checks)
+
+    @property
+    def is_clean(self) -> bool:
+        """A definite "safe to merge" signal -- what `_close_finished_prs`
+        auto-merges on. Pending checks don't count here either: merging
+        before a check has even finished running is the one thing
+        `/auto-merge` must never do.
+        """
+        return self.mergeable is True and not self.checks_pending and not self.failing_checks
 
 
 def _pending_question(sandbox: str) -> str | None:
@@ -230,6 +272,12 @@ class ResolvedTask:
     # has no `<name>.token` for, so by the time this reaches `_dispatch` it
     # is always safe to act on.
     github_key: str | None = None
+    # bwsalmon/agents#83: whether the task issue carried `/auto-merge`
+    # (`directives.py`). Read straight off `Directives.auto_merge` -- there
+    # is nothing to refuse the way `gemini_key`/`github_key` sometimes are,
+    # since honouring it costs this deployment nothing it doesn't already
+    # have (the same GitHub credential that opens a PR can merge one).
+    auto_merge: bool = False
 
 
 @dataclass
@@ -474,7 +522,8 @@ class Orchestrator:
             task.owner, task.name,
             outcome.issue, self.config.in_progress_label,
         )
-        self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number)
+        self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number,
+                                   auto_merge=outcome.auto_merge)
         # bwsalmon/agents#51: persist the open-PR record right after the
         # label moves that go with it, before anything later in this cycle
         # can crash on top of it -- the same ordering `_finish_question`
@@ -711,6 +760,101 @@ class Orchestrator:
 
     # --- closing on PR close (bwsalmon/agents#54) -------------------------
 
+    def _pr_health(self, owner: str, repo: str, pr: PullRequestDetail) -> _PrHealth:
+        """Reads `pr`'s conflict/check status (bwsalmon/agents#83) --
+        `pr.mergeable` straight through, plus a check-runs read against its
+        own head branch (`GitHubClient.list_check_runs` accepts a branch
+        name directly, so no separate commit sha is ever needed here).
+        """
+        checks = self.github.list_check_runs(owner, repo, pr.head_ref)
+        return _PrHealth(
+            mergeable=pr.mergeable,
+            checks_pending=any(c.status != "completed" for c in checks),
+            failing_checks=tuple(
+                c.name for c in checks
+                if c.status == "completed" and c.conclusion in _FAILING_CHECK_CONCLUSIONS
+            ),
+        )
+
+    def _suggest_fix(self, pending: OpenPullRequest, pr: PullRequestDetail,
+                      health: _PrHealth) -> None:
+        """Files a new task to fix `pr` (bwsalmon/agents#83), once
+        `_close_finished_prs` has read a definite conflict or failing check
+        against it -- the issue this whole feature asked for: a completed
+        task's PR going stale (a conflicting rebase, a flaky-turned-broken
+        test) previously just sat there until a human noticed by hand.
+
+        The new task carries `/repo`, `/base pr.head_ref` and
+        `/auto-merge` -- the same directives `_resolve_target` already
+        knows how to honour, so no new dispatch machinery is needed: a
+        fresh branch built on top of `pr`'s own branch *is* a stacked PR,
+        and `/auto-merge` is what lets `_close_finished_prs` merge that
+        stacked PR back into `pr`'s branch itself once it reads clean,
+        without a second round of human review. Filed with
+        `needs_approval_label`, not `trigger_label` -- the issue this
+        deployment asked for is that grain only *suggests* the fix; a human
+        still has to apply `trigger_label` (the same action that starts
+        every other task) before the agent set attempts it.
+
+        Best-effort against a stale task issue the same way `_park`/
+        `_finish_question` already are: a 404 from either call means the
+        task repo or task issue #`pending.issue` is gone from underneath a
+        record this deployment still holds, not a reason to crash the
+        cycle -- the fix simply never gets suggested this cycle, and
+        `pending.fix_issue` stays unset so a later cycle tries again.
+        """
+        target = RepoRef(pending.target_owner, pending.target_repo)
+        task = self._task
+        reasons = []
+        if health.has_conflict:
+            reasons.append(f"it has conflicts with `{pr.base_ref}`")
+        if health.failing_checks:
+            names = ", ".join(f"`{n}`" for n in health.failing_checks)
+            reasons.append(f"these checks are failing: {names}")
+        reason = " and ".join(reasons)
+        try:
+            new_issue = self.github.create_issue(
+                task.owner, task.name,
+                title=f"🤖 grain: fix {target}#{pending.pr_number}",
+                body=(
+                    f"{_AUTOMATION_SIGNATURE}\n\n"
+                    f"Task {task}#{pending.issue} opened {target}#{pending.pr_number} "
+                    f"({pr.html_url}), but {reason}.\n\n"
+                    f"This task fixes that: it works from `{pr.head_ref}` (the same "
+                    "branch) and, once it succeeds, its own pull request is merged "
+                    f"back into `{pr.head_ref}` automatically -- no separate review "
+                    "needed for the fix itself.\n\n"
+                    f"Apply the `{self.config.trigger_label}` label to this issue to "
+                    "let the agent set attempt it.\n\n"
+                    f"/repo {target}\n/base {pr.head_ref}\n/auto-merge true\n"
+                ),
+                labels=[self.config.needs_approval_label],
+            )
+            self.github.create_comment(
+                task.owner, task.name, pending.issue,
+                f"{_AUTOMATION_SIGNATURE}\n\n"
+                f"{target}#{pending.pr_number} {reason} -- filed {task}#{new_issue.number} "
+                f"to fix it. Apply the `{self.config.trigger_label}` label there once "
+                "you're happy for the agent to attempt it.",
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            self.audit.record(
+                sandbox=None, issue=pending.issue,
+                outcome=f"wanted to suggest a fix for {target}#{pending.pr_number} "
+                        f"({reason}) but {task}#{pending.issue} was not found -- stale "
+                        "record?",
+            )
+            return
+        self.state.mark_fix_suggested(pending.issue, new_issue.number)
+        self._save_state()
+        self.audit.record(
+            sandbox=None, issue=pending.issue,
+            outcome=f"suggested fix {task}#{new_issue.number} for {target}#"
+                    f"{pending.pr_number}: {reason}",
+        )
+
     def _close_finished_prs(self) -> None:
         """Closes a task issue once the PR `_finish_succeeded_issue` opened
         for it has itself closed — merged or closed without merging both
@@ -732,6 +876,28 @@ class Orchestrator:
         itself is gone the same "stale assignment" way `_requeue` and
         `_finish_question` already tolerate; the record is dropped there
         too, since there is nothing left to close.
+
+        **bwsalmon/agents#83: while a PR is still open, this is also where
+        it's watched for trouble.** Two things can happen to a still-open
+        PR, both read from the same `_pr_health` call so a cycle never pays
+        for it twice:
+
+        - A task carrying `/auto-merge` (only ever a fix `_suggest_fix`
+          itself filed, though nothing stops a human writing the directive
+          by hand) gets merged the moment its PR reads clean --
+          `GitHubClient.merge_pull_request`, gated on `health.is_clean` so
+          this never merges anything still being computed, still running
+          checks, or already known broken. A 405/409 (the PR went stale
+          between the read and the merge attempt) is logged and retried
+          next cycle rather than raised.
+        - Anything else still open gets checked for real trouble
+          (`health.is_broken`) and, the first time that's true
+          (`pending.fix_issue is None` -- never a second time for the same
+          PR), `_suggest_fix` is called. A PR that itself came from
+          `/auto-merge` is deliberately excluded from this -- suggesting a
+          fix for a fix risks an unbounded chain, and this deployment would
+          rather leave a stuck auto-merge PR visibly open (still carrying
+          `completed_label`, still open on GitHub) than build one.
         """
         for pending in list(self.state.open_pull_requests.values()):
             try:
@@ -750,7 +916,38 @@ class Orchestrator:
                             "close -- stale record?",
                 )
                 continue
-            if pr.state != "closed":
+
+            merged_now = False
+            if pr.state == "open":
+                health = self._pr_health(
+                    pending.target_owner, pending.target_repo, pr
+                )
+                if pending.auto_merge:
+                    if health.is_clean:
+                        try:
+                            self.github.merge_pull_request(
+                                pending.target_owner, pending.target_repo,
+                                pending.pr_number,
+                            )
+                            merged_now = True
+                            self.audit.record(
+                                sandbox=None, issue=pending.issue,
+                                outcome=f"auto-merged {pending.target_owner}/"
+                                        f"{pending.target_repo}#{pending.pr_number}",
+                            )
+                        except GitHubError as exc:
+                            if exc.status not in (404, 405, 409):
+                                raise
+                            self.audit.record(
+                                sandbox=None, issue=pending.issue,
+                                outcome=f"auto-merge of {pending.target_owner}/"
+                                        f"{pending.target_repo}#{pending.pr_number} "
+                                        f"failed ({exc.status}) -- will retry",
+                            )
+                elif pending.fix_issue is None and health.is_broken:
+                    self._suggest_fix(pending, pr, health)
+
+            if pr.state != "closed" and not merged_now:
                 continue
             try:
                 self.github.close_issue(
@@ -895,7 +1092,7 @@ class Orchestrator:
             ) from exc
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
                             gemini_key=gemini_key, self_debug=self_debug,
-                            github_key=github_key)
+                            github_key=github_key, auto_merge=directives.auto_merge)
 
     def _resolve_github_key(self, issue: Issue) -> str | None:
         """The named credential a `grain-github-<name>` label on `issue`
@@ -1161,12 +1358,14 @@ class Orchestrator:
                                    kind=TriggerKind.PR, branch=task.pr.head_ref,
                                    target_owner=task.repo.owner,
                                    target_repo=task.repo.name, base=task.base,
-                                   gemini_key_name=gemini_key_name)
+                                   gemini_key_name=gemini_key_name,
+                                   auto_merge=task.auto_merge)
             else:
                 self.state.assign(sandbox, number, unit, now,
                                    target_owner=task.repo.owner,
                                    target_repo=task.repo.name, base=task.base,
-                                   gemini_key_name=gemini_key_name)
+                                   gemini_key_name=gemini_key_name,
+                                   auto_merge=task.auto_merge)
             self.state.record_run(now)
             # Persist the new assignment *before* the trigger label comes
             # off below (bwsalmon/agents#51) -- removing that label is the
@@ -1185,6 +1384,16 @@ class Orchestrator:
             self.github.add_label(
                 self.config.task_owner, self.config.task_repo,
                 number, self.config.in_progress_label,
+            )
+            # bwsalmon/agents#83: harmless (and 404-tolerant, per
+            # `remove_label`'s own docstring) for the overwhelming common
+            # case of a task that never carried this label at all -- only a
+            # `_suggest_fix`-filed task does, and this is what keeps it from
+            # still reading "needs approval" once a human's approval (the
+            # trigger label above) is exactly what just got it dispatched.
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                number, self.config.needs_approval_label,
             )
             self.audit.record(
                 sandbox=sandbox, issue=number,

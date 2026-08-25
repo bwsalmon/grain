@@ -40,7 +40,7 @@ itself never reads.
 
 **The palette is two tiers, and that is the whole point of it.** A task
 issue is in exactly one *state* at a time, and the reason to look at the
-queue at all is usually to see which -- so the four state labels are dark
+queue at all is usually to see which -- so the state labels are dark
 and saturated, which GitHub renders as a solid pill that carries down a
 list of issues at a glance. The *capability* labels are not states: they
 are opt-in modifiers that a human adds to one task, they say nothing
@@ -89,6 +89,17 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     # The one state that is waiting on a person -- loudest on purpose.
     "awaiting_reply_label": (
         STATE, "d93f0b", "Parked: the agent needs a human reply",
+    ),
+    # bwsalmon/agents#83: also waiting on a person, same reason
+    # awaiting_reply_label above is red -- grain filed this task itself (a
+    # fix for a conflicting or failing PR) and it must not be picked up
+    # until a human applies trigger_label to say the fix is worth
+    # attempting. A distinct shade of red, not the same one: the two are
+    # different states (a stalled *existing* task vs. a *new* one grain is
+    # asking permission to run) and `test_no_two_labels_share_a_colour`
+    # holds every label to a colour of its own regardless.
+    "needs_approval_label": (
+        STATE, "b60205", "Grain suggested this task -- apply the trigger label to run it",
     ),
     # Terminal, and green in the sense every CI badge is green.
     "completed_label": (
