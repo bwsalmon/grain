@@ -336,7 +336,8 @@ def test_gcp_key_reaches_the_controller_and_starts_each_sandboxs_metadata_server
     )
     assert any(
         c.startswith(controller_prefix)
-        and "cd /opt/grain && python3 -m grain.cli --data-dir /data metadata start sandbox-0" in c
+        and "cd /opt/grain && python3 -m grain.cli --data-dir /data "
+            "--sandboxes 1 metadata start sandbox-0" in c
         for c in runner.commands
     )
 
