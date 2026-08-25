@@ -297,6 +297,26 @@ class LibvirtAdapter(HostAdapter):
         for d in dirs:
             self.runner.run(["chcon", "-R", "-t", "virt_image_t", str(d)], check=True)
 
+    def _ensure_dac_allows(self, *dirs: Path) -> None:
+        """Found live: libvirt's own `dynamic_ownership` is supposed to
+        auto-chown a domain's disk/seed files to the uid:gid qemu actually
+        runs as -- an unprivileged account (uid:gid 64055 in the failing
+        deploy, almost certainly "libvirt-qemu"; qemu.conf never named it
+        explicitly, so libvirt resolved it on its own) -- but empirically
+        never did. Real diagnostics from that deploy showed config_dir
+        still root:root 0700 and every file in it still root:root 0600,
+        right through a failed `virsh start`. Three straight MAC fixes
+        (AppArmor, then SELinux) never touched this error because it was
+        never a MAC problem -- plain Unix permissions were the actual
+        blocker the whole time, unconditionally on every POSIX host, so
+        unlike the two calls above this one has no "is the subsystem even
+        present" guard to skip. Stop relying on libvirt's own relabeling
+        for this the same way those two stopped relying on it for MAC:
+        grant access directly, ourselves.
+        """
+        for d in dirs:
+            self.runner.run(["chmod", "-R", "o+rwX", str(d)], check=True)
+
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
         if self.state(spec.name) is not VmState.ABSENT:
@@ -348,6 +368,12 @@ class LibvirtAdapter(HostAdapter):
         xml_path.write_text(render_domain_xml(self.cluster, spec, disk_path, seed_path))
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "define", str(xml_path)])
 
+        # After every file this VM needs exists -- unlike the SELinux call
+        # above (which only has to reach the qcow2 file, created earlier),
+        # this has to cover the seed ISO too, or a start right after
+        # create() would just fail on that file instead.
+        self._ensure_dac_allows(*dirs)
+
     def start(self, name: str) -> None:
         # Found live: create()'s own allowlisting isn't enough on its own --
         # a VM already defined from an earlier attempt (predating this
@@ -358,6 +384,7 @@ class LibvirtAdapter(HostAdapter):
         dirs = self._confinement_dirs_for(self.cluster.spec_of(name))
         self._ensure_apparmor_allows(*dirs)
         self._ensure_selinux_allows(*dirs)
+        self._ensure_dac_allows(*dirs)
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "start", name])
 
     def stop(self, name: str) -> None:
