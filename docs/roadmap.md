@@ -177,6 +177,44 @@ not exercised, for the same "no real GCP project" reason as the token mint
 above, is `MetadataLauncher.start()` actually running against that real
 user/binary pair on a real controller.
 
+**Update (bwsalmon/agents#43): live-tested from inside a real dispatched
+sandbox, and the gap is one step earlier than "the token mint is
+unverified."** The task asked to create, SSH into, and delete a VM — read
+as testing the `agent_can_manage_compute_instances` path (iam.tf), which
+depends entirely on this item's metadata routing. From `sandbox-1`
+(confirmed via `hostname`, SSH'd in from a controller at `10.100.0.2`):
+no `gcloud`/GCP client library is preinstalled, and no local credential
+file exists, matching the design ("the sandbox... holds no credentials").
+A request to the metadata anycast address
+(`curl -H "Metadata-Flavor: Google" http://169.254.169.254/...`) times out
+at the TCP level — no RST, no response, port 80 simply never answers —
+which is one layer earlier than a failed token mint: it means either no
+`gce_metadata_server` instance is running for this sandbox, or the
+controller's DNAT rule (`net_linux.py`'s `render_ruleset`) was never
+applied for it. This is not a general egress lockout: `pypi.org`,
+`github.com`, and `storage.googleapis.com` are all reachable from the same
+sandbox over HTTPS. Installing the real `gcloud` CLI standalone (no
+`apt`/`pip` available, so via the tarball) and running it confirmed the
+same thing at the tool level: `gcloud auth list` reports no credentialed
+accounts and `gcloud compute instances list` fails for lack of an active
+account, exactly what "ADC's default probe gets no answer" predicts.
+
+Two more things worth recording: `agent_can_manage_compute_instances`
+defaults to `false` (`variables.tf`), so this deployment's config repo may
+simply not have turned it on, which alone would explain no agent service
+account and no reason to route metadata for one — that's a config
+question, not necessarily a code gap. And there is no way to tell which of
+these it is from inside the sandbox: the sandbox has no SSH path back to
+the controller (`10.100.0.2`) or host (`10.100.0.1`) — only an
+`authorized_keys` file, no private key, so `ssh` from here to either is a
+clean `Permission denied (publickey)`, which is the credential boundary
+working as designed, not a bug. Confirming which of "flag off," "metadata
+server not started for this sandbox," or "DNAT rule missing" applies needs
+an operator (or a task with controller/host access) checking
+`systemctl status grain-metadata-sandbox-1` and the controller's `nft`
+ruleset directly — outside what the four sandbox-scoped MCP tools can
+reach.
+
 ## 5. Lifecycle scripts
 
 - [x] Done
