@@ -233,3 +233,88 @@ def test_config_load_honours_a_custom_api_target():
     path = Path(tempfile.mkdtemp()) / "gemini-key.json"
     path.write_text(json.dumps({"project_id": "proj", "api_target_service": "x.googleapis.com"}))
     assert GeminiKeyConfig.load(path).api_target_service == "x.googleapis.com"
+
+
+# --- delete_expired_keys (bwsalmon/agents#131) ----------------------------
+
+def _key_listing(*entries) -> str:
+    """An `api-keys list --format=json` payload, with the fields real
+    gcloud returns for an API key."""
+    return json.dumps([
+        {"displayName": display_name,
+         "name": f"projects/1/locations/global/keys/{key_id}",
+         "uid": key_id, "createTime": created, "updateTime": created,
+         "restrictions": {}}
+        for display_name, key_id, created in entries
+    ])
+
+
+def _reap(listing, *, hours=24, now="2026-08-26T12:00:00+00:00"):
+    from datetime import datetime
+    from grain.automation.gemini_keys import delete_expired_keys
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud services api-keys list", stdout=listing)
+    runner.expect("gcloud services api-keys delete", stdout="")
+    deleted = delete_expired_keys(
+        runner, config(max_key_age_hours=hours), now=datetime.fromisoformat(now),
+    )
+    return deleted, runner
+
+
+def test_reap_deletes_a_grain_key_past_the_ttl():
+    deleted, runner = _reap(_key_listing(
+        ("grain-sandbox-0-issue-7", "old", "2026-08-20T00:00:00Z"),
+    ))
+    assert deleted == ["projects/1/locations/global/keys/old"]
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_reap_leaves_a_grain_key_inside_the_ttl():
+    deleted, runner = _reap(_key_listing(
+        ("grain-sandbox-0-issue-7", "fresh", "2026-08-26T11:00:00Z"),
+    ))
+    assert deleted == []
+    assert not any("api-keys delete" in c for c in runner.commands)
+
+
+def test_reap_never_touches_a_key_grain_did_not_mint():
+    """The property that separates this from the agent-key reap: an API
+    key is not scoped to a service account, so `api-keys list` returns
+    every key in the *project*. Only the display-name prefix keeps this
+    off someone else's credentials -- age alone must never be enough.
+    """
+    deleted, runner = _reap(_key_listing(
+        ("someone-elses-ancient-key", "theirs", "2020-01-01T00:00:00Z"),
+        ("", "unnamed", "2020-01-01T00:00:00Z"),
+    ))
+    assert deleted == []
+    assert not any("api-keys delete" in c for c in runner.commands)
+
+
+def test_reap_leaves_a_key_with_no_create_time_alone():
+    """Absent data loses rather than crashing -- the same stance the
+    agent-key reap takes with a missing validAfterTime."""
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud services api-keys list", stdout=json.dumps(
+        [{"displayName": "grain-sandbox-0-issue-7",
+          "name": "projects/1/locations/global/keys/x"}]))
+    from datetime import datetime
+    from grain.automation.gemini_keys import delete_expired_keys
+    assert delete_expired_keys(
+        runner, config(), now=datetime.fromisoformat("2026-08-26T12:00:00+00:00")) == []
+
+
+def test_reap_raises_command_error_on_an_unexpected_listing():
+    """Whatever gcloud hands back, this stays one reap's failure rather
+    than an exception that ends the whole cycle -- the lesson of the two
+    earlier attempts at this module's listing code."""
+    from datetime import datetime
+    from grain.automation.gemini_keys import delete_expired_keys
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud services api-keys list", stdout='{"keys": []}')
+    with pytest.raises(CommandError):
+        delete_expired_keys(
+            runner, config(), now=datetime.fromisoformat("2026-08-26T12:00:00+00:00"))

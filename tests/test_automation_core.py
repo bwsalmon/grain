@@ -2115,6 +2115,10 @@ def gemini_runner(**overrides) -> FakeRunner:
     runner = FakeRunner()
     runner.expect("gcloud services api-keys create", stdout=f"{GEMINI_KEY_NAME}\n")
     runner.expect("gcloud services api-keys get-key-string", stdout="AIzaSecretValue\n")
+    # bwsalmon/agents#131: the per-cycle reap lists the project's keys
+    # every run_once, the same way the agent-key reap does. Empty, so
+    # nothing is ever old enough to delete in these tests.
+    runner.expect("gcloud services api-keys list", stdout="[]")
     for prefix, kwargs in overrides.items():
         runner.expect(prefix, **kwargs)
     return runner
@@ -2144,7 +2148,10 @@ def test_gemini_key_label_without_config_is_parked():
     assert not any("gcloud" in c for c in orchestrator.base_runner.commands)
 
 
-def test_a_task_with_no_gemini_key_label_never_calls_gcloud():
+def test_a_task_with_no_gemini_key_label_never_mints_a_key():
+    """The per-cycle reap (bwsalmon/agents#131) does call gcloud every
+    run_once now, so "no gcloud at all" is no longer the property -- what
+    must not happen is a *mint* for a task that never asked for one."""
     runner = gemini_runner()
     orchestrator, _ = make_orchestrator(
         issues=[issue_json(4)], runner=runner,
@@ -2153,7 +2160,8 @@ def test_a_task_with_no_gemini_key_label_never_calls_gcloud():
 
     orchestrator.run_once(NOW)
 
-    assert not any("gcloud" in c for c in runner.commands)
+    assert not any("api-keys create" in c for c in runner.commands)
+    assert not any("get-key-string" in c for c in runner.commands)
 
 
 def test_gemini_key_label_with_config_places_the_key_in_the_sandbox():
