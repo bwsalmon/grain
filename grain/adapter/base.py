@@ -18,6 +18,7 @@ import ipaddress
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from typing import Protocol
 
@@ -56,6 +57,8 @@ class Network(Protocol):
 
     def apply_rules(self, egress: "EgressMode") -> None: ...
 
+    def install_boot_unit(self, repo_dir: Path, egress: "EgressMode") -> None: ...
+
 
 class HostAdapter(ABC):
     """Platform-specific VM lifecycle and networking."""
@@ -65,14 +68,30 @@ class HostAdapter(ABC):
         self.network = network
 
     # --- networking -------------------------------------------------------
-    def network_up(self) -> None:
-        """Create the private network and install the filtering policy.
+    def network_up(self, repo_dir: Path) -> None:
+        """Create the private network, install the filtering policy, and
+        make both survive a host reboot.
 
         Idempotent: safe to run on every boot and after any inventory change.
         Delegated, not abstract — the driver has no business knowing whether
         the host filters with nftables or pf.
+
+        The persistence step is not optional here the way `host up`'s
+        `--persist` flag is: this is the one-command bootstrap path
+        (`grain.bootstrap.bootstrap`), documented as the complete
+        replacement for the manual runbook — and the manual runbook is
+        explicit that skipping persistence leaves a host that looks healthy
+        (SSH and a direct connection to the controller both still work)
+        right up until it reboots, at which point the metadata anycast DNAT
+        silently vanishes and `gcloud`/ADC inside a sandbox starts timing
+        out reaching `169.254.169.254` with nothing to explain why
+        (bwsalmon/agents#111). `repo_dir` is threaded through rather than
+        assumed, matching `LinuxNetwork.install_boot_unit`'s own
+        `Path.cwd()`-vs-canonical-checkout distinction for the manual CLI
+        path.
         """
         self.network.up(EgressMode.OPEN)
+        self.network.install_boot_unit(repo_dir, EgressMode.OPEN)
 
     def egress_policy(self, mode: EgressMode) -> None:
         """Set whether sandboxes may reach the internet freely."""

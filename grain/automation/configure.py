@@ -20,9 +20,11 @@ import secrets
 from pathlib import PurePosixPath
 
 from .dispatch import CONTROLLER_AGENT_TOKEN_PATH
+from ..inventory import Cluster
 from ..run import Runner
 
 DATA_CONFIG = "/data/config"
+CLUSTER_CONFIG_PATH = "/data/config/cluster.toml"
 DATA_SECRETS_GITHUB = "/data/secrets/github"
 CLAUDE_TOKEN_PATH = "/data/secrets/claude-oauth-token"
 SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
@@ -94,6 +96,35 @@ def configure_repo(runner: Runner, task_repo: str, targets: list[str], *,
     _write_remote_file(runner, f"{DATA_CONFIG}/automation.json", automation_json, mode="644")
     allowlist_json = json.dumps(list(targets), indent=2) + "\n"
     _write_remote_file(runner, f"{DATA_CONFIG}/repo-allowlist.json", allowlist_json, mode="644")
+
+
+def configure_cluster(runner: Runner, cluster: Cluster) -> None:
+    """Writes `/data/config/cluster.toml` with the two `Cluster` fields the
+    controller-side automation service actually needs -- `sandbox_count`
+    and `subnet`, which is everything `sandbox_names`/`address_of`/
+    `controller_ip` derive from (`grain/inventory.py`). Every other
+    `Cluster` field (VM sizing, image, bridge name) only matters to `grain
+    host bootstrap` itself, which already reads the host's own
+    `--cluster-file`.
+
+    The controller has no `cluster.toml` of its own otherwise -- the host's
+    copy (`grain/bootstrap.py`'s `build_cluster`/`--cluster-file`) never
+    left the host -- so `grain-automation.service`'s `automation run-once`
+    silently ran with `Cluster()`'s bare defaults (always two sandboxes),
+    no matter what the real deployment's `sandbox_count` said. This file,
+    and `provision/controller.sh` pointing that service's `--cluster-file`
+    at it, is what closes that gap.
+
+    Written unconditionally on every bootstrap run, the same as
+    `configure_repo` above: a sync, not a create, so raising `sandbox_count`
+    after the first bootstrap reaches the controller on the very next one
+    rather than requiring the controller itself to be recreated.
+    """
+    cluster_toml = (
+        f"sandbox_count = {cluster.sandbox_count}\n"
+        f'subnet = "{cluster.subnet}"\n'
+    )
+    _write_remote_file(runner, CLUSTER_CONFIG_PATH, cluster_toml, mode="644")
 
 
 def credential_repos(task_repo: str, targets: list[str]) -> list[str]:

@@ -4,11 +4,12 @@ import shlex
 from pathlib import Path
 
 from grain.automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_named_github_key, configure_repo,
-    ensure_sandbox_tokens,
+    configure_claude_token, configure_cluster, configure_gcp_service_account,
+    configure_gemini_key, configure_github_credential, configure_named_github_key,
+    configure_repo, ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
+from grain.inventory import Cluster
 from grain.run import FakeRunner
 
 SSH_PREFIX = (
@@ -80,6 +81,44 @@ def test_configure_repo_uses_sudo_and_chmod_644_for_config():
         c.startswith("ssh") and "sudo chmod 644 /data/config/automation.json" in c
         for c in inner.commands
     )
+
+
+def test_configure_cluster_writes_sandbox_count_and_subnet():
+    ssh, inner = make_ssh()
+    configure_cluster(ssh, Cluster(sandbox_count=4))
+    written = stdin_for(inner, "/data/config/cluster.toml")
+    assert written == 'sandbox_count = 4\nsubnet = "10.100.0.0/24"\n'
+
+
+def test_configure_cluster_honours_a_non_default_subnet():
+    ssh, inner = make_ssh()
+    configure_cluster(ssh, Cluster(sandbox_count=2, subnet=ipaddress.IPv4Network("10.200.0.0/24")))
+    written = stdin_for(inner, "/data/config/cluster.toml")
+    assert written == 'sandbox_count = 2\nsubnet = "10.200.0.0/24"\n'
+
+
+def test_configure_cluster_uses_sudo_and_chmod_644():
+    ssh, inner = make_ssh()
+    configure_cluster(ssh, Cluster())
+    assert any(
+        c.startswith("ssh") and "sudo chmod 644 /data/config/cluster.toml" in c
+        for c in inner.commands
+    )
+
+
+def test_configure_cluster_round_trips_through_cluster_load(tmp_path):
+    """The whole point: a controller pointed at this file with
+    `--cluster-file` has to derive the same `sandbox_names` the host's own
+    `Cluster` does.
+    """
+    ssh, inner = make_ssh()
+    original = Cluster(sandbox_count=4)
+    configure_cluster(ssh, original)
+    written = stdin_for(inner, "/data/config/cluster.toml")
+    cluster_file = tmp_path / "cluster.toml"
+    cluster_file.write_text(written)
+    reloaded = Cluster.load(cluster_file)
+    assert reloaded.sandbox_names == original.sandbox_names
 
 
 def test_configure_github_credential_writes_token_and_credentials_json():
