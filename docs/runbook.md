@@ -166,11 +166,21 @@ short of giving the host a GitHub/Claude credential — see
    present. Confirm with `ls /dev/kvm`.
 2. **Bring the host network up**:
    ```sh
-   sudo python3 -m grain.cli host rules          # read the policy first
-   sudo python3 -m grain.cli host up
+   sudo python3 -m grain.cli host rules            # read the policy first
+   sudo python3 -m grain.cli host up --persist
    ```
    This creates the `br-grain` bridge and applies the default-open-egress
    nftables policy. Idempotent — safe to re-run after any inventory change.
+   `--persist` also installs and enables `grain-network.service`, a oneshot
+   unit that reruns this exact command at every boot: without it, a host
+   reboot leaves the sandboxes (which come back on their own via libvirt's
+   autostart) running with *no* firewall at all — sandbox-to-sandbox
+   isolation and the metadata anycast DNAT both silently gone, while SSH
+   and a direct connection to the controller keep working, so nothing looks
+   wrong until something inside a sandbox tries to reach
+   `169.254.169.254` (bwsalmon/agents#111). Re-run `host up --persist`
+   after any change to `--egress` too — the unit bakes in whichever mode
+   was active when it was last installed, not whatever is current.
 3. **Fetch a base image**, shared by the controller and every sandbox, and
    point `--image` at it (or set it in `--cluster-file`'s TOML — see
    `docs/bootstrap.md` Phase 2):

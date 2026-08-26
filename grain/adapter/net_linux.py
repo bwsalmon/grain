@@ -34,6 +34,8 @@ that need it, but nothing applies it automatically.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..inventory import (
     METADATA_ANYCAST,
     METADATA_PORT,
@@ -45,6 +47,8 @@ from .base import EgressMode
 
 TABLE = "grain"
 NAT_TABLE = "grain_nat"
+BOOT_UNIT_NAME = "grain-network.service"
+BOOT_UNIT_PATH = f"/etc/systemd/system/{BOOT_UNIT_NAME}"
 
 
 def render_ruleset(cluster: Cluster, egress: EgressMode) -> str:
@@ -140,6 +144,56 @@ def render_host_input_rules(cluster: Cluster, ssh_port: int = 22) -> str:
     )
 
 
+def render_boot_unit(repo_dir: Path, egress: EgressMode) -> str:
+    """A oneshot unit that reruns `grain host up` at every boot of the host.
+
+    Found live (bwsalmon/agents#111): `apply_rules()`'s ruleset lives only in
+    the running kernel's nftables state -- there is no `/etc/nftables.conf`
+    reload wired up, and `render_ruleset`'s own docstring already says the
+    host's INPUT chain is deliberately left unmanaged, but says nothing
+    about *this* ruleset surviving a reboot either, because until now
+    nothing made it. The sandboxes' domains autostart under libvirt across a
+    host reboot (docs/design.md, "Sandboxes come back on boot") -- but the
+    bridge and the nftables policy `network_up()` builds do not, since
+    `_ensure_bridge`'s `ip link add` and `apply_rules`'s `nft -f` are both
+    live-kernel-state commands with no on-disk counterpart. The result,
+    confirmed live: sandboxes keep running and stay reachable for anything
+    that does not depend on the ruleset (SSH, the git proxy over a *direct*
+    connection to the controller), while sandbox-to-sandbox isolation (rule
+    5, "anything else inside the subnet") and the metadata anycast DNAT
+    (rule 4's whole reason for existing) both silently vanish -- indistin-
+    guishable from "healthy" by every existing check, since none of them
+    ever probed the *host's* own firewall state. `gcloud`/ADC inside a
+    sandbox then times out reaching `169.254.169.254` with no error anywhere
+    to explain why, because there is no DNAT rule left to answer it.
+
+    `Before=libvirtd.service` is what closes the gap `docs/design.md`'s
+    autostart already opens: the bridge and policy must exist before
+    libvirt brings sandboxes back up and starts routing their traffic, not
+    at some later, unordered point in the boot sequence. `--egress` is
+    threaded through explicitly rather than left to `host up`'s own
+    "open" default, since re-applying the *wrong* egress policy on every
+    reboot would silently undo an operator's earlier `host egress
+    allowlist` -- the same one-mode-per-call design `cmd_egress` already
+    keeps explicit.
+    """
+    return (
+        "[Unit]\n"
+        "Description=grain host network policy (bridge + nftables)\n"
+        "After=network.target\n"
+        "Before=libvirtd.service\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"WorkingDirectory={repo_dir}\n"
+        f"ExecStart=/usr/bin/python3 -m grain.cli host up --egress {egress.value}\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
 class LinuxNetwork:
     """Creates the bridge and applies the ruleset."""
 
@@ -151,6 +205,22 @@ class LinuxNetwork:
         self._ensure_bridge()
         self._enable_forwarding()
         self.apply_rules(egress)
+
+    def install_boot_unit(self, repo_dir: Path, egress: EgressMode) -> None:
+        """Makes `up()`'s effect survive a host reboot, going forward.
+
+        Idempotent: a plain overwrite plus `enable`, both safe to repeat --
+        the same shape `provision/controller.sh`'s own units use, except
+        this one is enabled immediately rather than left for `host
+        bootstrap` to enable later, since nothing about it depends on a
+        credential or `/data` being populated first.
+        """
+        self.runner.run(
+            ["tee", BOOT_UNIT_PATH],
+            stdin=render_boot_unit(repo_dir, egress),
+        )
+        self.runner.run(["systemctl", "daemon-reload"])
+        self.runner.run(["systemctl", "enable", BOOT_UNIT_NAME])
 
     def apply_rules(self, egress: EgressMode) -> None:
         ruleset = render_ruleset(self.cluster, egress)
