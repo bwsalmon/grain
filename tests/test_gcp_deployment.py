@@ -1077,3 +1077,43 @@ def test_terraform_lets_ci_mint_the_minter_key():
     assert "google_service_account.host.name" in minter_block, \
         "the grant is not scoped to the host account"
     assert "roles/iam.serviceAccountKeyAdmin" in minter_block
+
+
+# Env values the runner sets itself, or that a ci/ script treats as a
+# genuinely optional tuning knob with a working default. Everything else a
+# script reads has to be passed by the workflow -- adding a name here is a
+# deliberate "this one really is optional", not a way past the test.
+_RUNNER_PROVIDED = {"GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "GITHUB_REPOSITORY"}
+_OPTIONAL_TUNING = {"TF_APPLY_MAX_ATTEMPTS", "TF_APPLY_RETRY_DELAY", "POLL_SECONDS"}
+
+
+def _env_reads(script: Path) -> set[str]:
+    """Env vars a ci/ script reads, by their `${VAR:-}`/`${VAR:?}` sites --
+    which is exactly where each script takes a value from its caller."""
+    return set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):[-?]", script.read_text()))
+
+
+def test_the_workflow_passes_every_value_the_ci_scripts_read():
+    """bwsalmon/agents#140: moving the step bodies into ci/ (grain#78) took
+    the *logic* out of the forked workflow, but the values those scripts
+    read still come from it. HOST_SERVICE_ACCOUNT and GRAIN_GITHUB_KEYS
+    were each added to a script and to this template but not to a live
+    config repo's own copy, and neither failed loudly -- the minter key was
+    silently never minted, and named GitHub keys silently did nothing.
+
+    This catches the template half at PR time: a script that starts reading
+    a value the workflow never passes fails here. It cannot catch a fork
+    that falls behind -- push-host-secrets.sh's own runtime warning is what
+    covers that -- but it does stop the template from being the thing that
+    is wrong.
+    """
+    deploy = (WORKFLOWS / "deploy.yml").read_text()
+    for script in sorted(CI.glob("*.sh")):
+        for name in sorted(_env_reads(script)):
+            if name in _RUNNER_PROVIDED or name in _OPTIONAL_TUNING:
+                continue
+            assert re.search(rf"^\s*{name}:", deploy, re.M), (
+                f"{script.name} reads ${name}, but deploy.yml never passes it -- "
+                "either wire it into the step's env: block, or add it to "
+                "_OPTIONAL_TUNING if it genuinely has a working default"
+            )

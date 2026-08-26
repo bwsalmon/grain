@@ -32,6 +32,27 @@ instance="${INSTANCE:?INSTANCE is not set: the terraform instance_name output}"
 zone="${ZONE:?ZONE is not set: the terraform zone output}"
 host_service_account="${HOST_SERVICE_ACCOUNT:-}"
 
+# Empty is never a legitimate state: `host_service_account` is an
+# unconditional Terraform output (the host always exists), so an empty
+# value means the calling workflow simply did not pass it. That is a
+# hand-edit every config repo owes this script whenever grain starts
+# reading a new value -- deploy.yml is forked and owned per deployment,
+# so the *values* side of bwsalmon/grain#78's split still drifts even
+# though the logic side no longer does.
+#
+# Found the slow way (bwsalmon/agents#140): the minter key silently never
+# got minted, the controller never got a credential, and every dispatch
+# failed -- with nothing anywhere saying why, because the block below just
+# skipped. Say so instead.
+if [ -z "$host_service_account" ]; then
+  echo "::warning::HOST_SERVICE_ACCOUNT is not set, so no minter key will be"
+  echo "::warning::minted or pushed -- the controller cannot mint per-dispatch"
+  echo "::warning::GCP keys and every dispatch will fail. Add"
+  echo "::warning::  HOST_SERVICE_ACCOUNT: \${{ steps.tf.outputs.host_service_account }}"
+  echo "::warning::to the 'Push secrets to the host' step in this repo's deploy.yml"
+  echo "::warning::(grain's templates/gcp/ has the current version)."
+fi
+
 push_secret() {
   local key="$1" value="$2" tmp
   if [ -z "$value" ]; then
