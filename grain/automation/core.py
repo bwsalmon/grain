@@ -11,6 +11,10 @@ docs/design.md" convention:
     stops any in-progress unit whose task issue was closed on GitHub since
     dispatch (bwsalmon/agents#82), reported back as "cancelled" rather than
     requeued,
+    requeue any issue still carrying the in-progress label that this
+    process's own state has no assignment for (bwsalmon/agents#139) — the
+    fallback for a restart that lost the state file that named it, not
+    just the crash-mid-run case a *surviving* state file already covers,
     poll every task issue with a PR still open for it (bwsalmon/agents#54)
     and close the ones whose PR has itself closed since,
     list open trigger-labelled issues in the *task repo* not already
@@ -490,6 +494,7 @@ class Orchestrator:
         self._sweep(now)
         self._janitor(now)
         self._refresh_agent_labels()
+        self._restart_orphaned_in_progress()
         self._promote_answered_questions(now)
         self._restart_commented_completions()
         self._close_finished_prs()
@@ -701,6 +706,101 @@ class Orchestrator:
                             f"not found in {self.config.task_owner}/{self.config.task_repo} "
                             "-- stale assignment?",
                 )
+
+    def _restart_orphaned_in_progress(self) -> None:
+        """bwsalmon/agents#139: the other half of the "controller can be
+        restarted or recreated at any moment" story bwsalmon/agents#51
+        already covers for a *state file that survives* the restart. That
+        fix made sure a crash between an in-memory `state.assign()` and
+        the next save can never lose the one on-disk record of an
+        in-progress assignment -- but it still assumes there is a state
+        file to reload. A restart that also loses `/data` (a fresh
+        volume, a wiped or corrupted `state.json`, a from-scratch
+        redeploy -- "reformatted" in the sense the issue title uses, not
+        `mcp_server.py`'s per-sandbox `reformat_sandbox`, which never
+        touches this file) comes back with `AutomationState.assignments`
+        empty, and every fallback the sweeper gives a *known* stranded
+        assignment (`sweeper.py`'s own docstring) has nothing left to act
+        on: an issue that still carries `in_progress_label` out on GitHub
+        is no longer `trigger_label`-ed, so `_dispatch`'s own poll never
+        sees it either. Without this, such an issue would sit
+        `in_progress` forever with no agent actually working it --
+        indistinguishable, from the queue's point of view, from a task
+        that's simply taking a long time.
+
+        So this treats GitHub's own labels as the fallback source of
+        truth, the same "poll, don't trust a cache" bar every other
+        reconciliation pass here already holds to: any issue carrying
+        `in_progress_label` that this process's own state has no
+        assignment for gets exactly the treatment `_requeue` gives a
+        stranded one -- `in_progress_label` off, `trigger_label` back on
+        -- so the next `_dispatch` picks it up fresh. Run after
+        `_sweep`/`_refresh_agent_labels`, so a *tracked* assignment
+        `_sweep` just finished this very cycle has already had its own
+        labels updated by the time this runs, and can never be
+        double-counted as orphaned here.
+
+        Every sandbox's `agent_label` is stripped, not just whichever one
+        was actually working the issue -- the `Assignment` that would
+        have named it is exactly what's gone, so there is no way left to
+        know which sandbox that was. Harmless either way:
+        `GitHubClient.remove_label` already treats a label the issue
+        never carried as success (see its own docstring), so stripping
+        every sandbox's label costs nothing beyond the extra calls.
+
+        Deliberately scoped to `in_progress_label` alone, not
+        `awaiting_reply_label`/`completed_label` too -- bwsalmon/agents#139
+        asks specifically about restarting "in progress" work, which is
+        the one state where a lost record means a live task's outcome
+        would never be heard from again. The other two are already
+        resting states with a human reply or a later poll expected to
+        move them along, not silently orphaned work in the sense this is
+        closing the gap on.
+
+        A 404 from `add_label` here means the same "stale listing" story
+        every other GitHub-facing call in this module already tolerates:
+        the issue this listing just returned closed or vanished in the
+        instant between that read and this write. `remove_label` never
+        raises on a 404 either way (its own docstring), so only
+        `add_label` needs the guard.
+        """
+        known = self.state.in_progress_issues()
+        for issue in self.github.list_issues(
+            self.config.task_owner, self.config.task_repo,
+            self.config.in_progress_label,
+        ):
+            if issue.number in known:
+                continue
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                issue.number, self.config.in_progress_label,
+            )
+            for sandbox in self.cluster.sandbox_names:
+                self.github.remove_label(
+                    self.config.task_owner, self.config.task_repo,
+                    issue.number, agent_label(sandbox),
+                )
+            try:
+                self.github.add_label(
+                    self.config.task_owner, self.config.task_repo,
+                    issue.number, self.config.trigger_label,
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.audit.record(
+                    sandbox=None, issue=issue.number,
+                    outcome=f"in progress with no known assignment but issue "
+                            f"#{issue.number} not found in {self.config.task_owner}/"
+                            f"{self.config.task_repo} -- stale listing?",
+                )
+                continue
+            self.audit.record(
+                sandbox=None, issue=issue.number,
+                outcome="in progress with no known assignment -- requeued "
+                        f"({self.config.in_progress_label!r} -> "
+                        f"{self.config.trigger_label!r})",
+            )
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
         if outcome.kind is TriggerKind.PR:

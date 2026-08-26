@@ -174,6 +174,17 @@ class OrchestratorTransport(FakeTransport):
     # `_pr_health` looks at it: not pending, not failing. A test about
     # conflicts or failing checks specifically overrides this attribute.
     check_runs_body: bytes = b'{"total_count": 0, "check_runs": []}'
+    # bwsalmon/agents#139: `_restart_orphaned_in_progress` runs this same
+    # "unconditional, unrelated to what most tests are actually testing"
+    # `list_issues` call every single `run_once`, regardless of state --
+    # answered here, bypassing the queue, for the identical reason the two
+    # routes above already are: without this, every existing test scripting
+    # an exact call sequence would need a spliced-in response for a listing
+    # it never asked to exercise. Empty by default (no orphaned in-progress
+    # issue), the same "the common case needs no test to know this exists"
+    # shape `check_runs_body` already has; a test about this feature
+    # specifically overrides it.
+    in_progress_issues_body: bytes = b"[]"
 
     def request(self, *, method: str, path: str, headers: dict, body):
         if method == "GET" and re.fullmatch(r"/repos/[^/]+/[^/]+", path):
@@ -188,6 +199,11 @@ class OrchestratorTransport(FakeTransport):
                 {"method": method, "path": path, "headers": dict(headers), "body": body}
             )
             return ApiResponse(200, {}, self.check_runs_body)
+        if method == "GET" and re.search(r"/issues\?labels=grain-agent-in-progress&", path):
+            self.calls.append(
+                {"method": method, "path": path, "headers": dict(headers), "body": body}
+            )
+            return ApiResponse(200, {}, self.in_progress_issues_body)
         return super().request(method=method, path=path, headers=headers, body=body)
 
 
@@ -1176,6 +1192,142 @@ def test_restarting_a_completed_issue_drops_its_stale_open_pr_record():
     assert orchestrator.state.open_pull_requests == {}
 
 
+# --- restart orphaned in-progress issues on a lost state (bwsalmon/agents#139) --
+
+def test_an_orphaned_in_progress_issue_is_requeued_to_the_trigger_label():
+    """No `Assignment` anywhere in `AutomationState` for issue #5 -- the
+    shape a wiped or never-loaded `state.json` leaves behind, e.g. after
+    grain itself is restarted or reformatted -- but GitHub still shows it
+    `in_progress_label`-ed from before that happened. `_dispatch`'s own
+    poll only ever lists `trigger_label`, so nothing else in `run_once`
+    would ever notice this issue again; `_restart_orphaned_in_progress`
+    is the only pass that reads `in_progress_label` itself rather than
+    trusting local state to already know about it.
+    """
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress", "grain-agent-working-0")),
+    ]).encode()
+
+    orchestrator.run_once(NOW)
+
+    calls = transport.calls
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-in-progress"
+        for c in calls
+    )
+    add_trigger = next(
+        c for c in calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(add_trigger["body"]) == {"labels": ["grain-agent"]}
+    # Every sandbox's working label is stripped, not just the one this
+    # issue happened to still carry -- the assignment that would have said
+    # which sandbox that was is exactly what's gone.
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-working-0"
+        for c in calls
+    )
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-working-1"
+        for c in calls
+    )
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("no known assignment" in o and "requeued" in o for o in outcomes)
+
+
+def test_a_tracked_in_progress_issue_is_left_alone_by_the_orphan_restart():
+    """The same `in_progress_label` listing, but this time
+    `AutomationState` does have an `Assignment` for it -- an ordinary
+    still-running task, not a lost one. This must never touch its labels;
+    that is `_sweep`'s decision to make once the unit itself actually
+    finishes, not something a lost-state fallback should preempt.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress", "grain-agent-working-0")),
+    ]).encode()
+    # The cancel-on-close poll's own `get_issue` read, for the still-active
+    # assignment `_sweep` leaves standing.
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(5)).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    # `_refresh_agent_labels` re-applying the still-live working label is
+    # expected and unrelated -- what must never happen is anything treating
+    # this as an orphan: the in-progress label coming off, or the trigger
+    # label going back on.
+    assert not any(
+        c["method"] == "DELETE" and c["path"].endswith("/labels/grain-agent-in-progress")
+        for c in transport.calls
+    )
+    assert not any(
+        c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+        and json.loads(c["body"]) == {"labels": ["grain-agent"]}
+        for c in transport.calls
+    )
+
+
+def test_an_orphaned_in_progress_issue_tolerates_a_404_when_re_adding_the_trigger_label():
+    """The issue named by a stale `in_progress_label` listing can vanish
+    (or its number get reused into a PR, or the repo change out from under
+    it) in the instant between that read and this write -- the same
+    "stale listing/assignment" tolerance every other GitHub-facing call in
+    this module already extends, not a reason to crash the whole cycle.
+    """
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress",)),
+    ]).encode()
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # remove_label: in_progress_label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-0's agent label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-1's agent label
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # add_label: trigger_label
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("no known assignment" in o and "not found" in o for o in outcomes)
+
+
+def test_an_orphaned_in_progress_issue_is_redispatched_in_the_same_run():
+    """End-to-end: once the trigger label is back on, the exact same
+    `run_once` cycle's own `_dispatch` pass -- which runs after this --
+    picks the issue straight back up, the same "recovered without waiting
+    for a second cron tick" property bwsalmon/agents#51's crash-recovery
+    fix already gives a *tracked* stranded assignment.
+    """
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)])
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress",)),
+    ]).encode()
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # remove_label: in_progress_label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-0's agent label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-1's agent label
+        ApiResponse(200, {}, b"{}"),  # add_label: trigger_label
+        # _dispatch's own list_issues(trigger_label) poll -- spelled out
+        # rather than left to fall through to `default`, since the four
+        # calls above already emptied the queue by the time it would run.
+        ApiResponse(200, {}, json.dumps([issue_json(5)]).encode()),
+        ApiResponse(200, {}, b"[]"),  # _dispatch's own list_comments
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 5
+
+
 # --- PR creation on a successful run (docs/roadmap.md item 2) -------------
 
 def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
@@ -1328,7 +1480,10 @@ def test_close_finished_prs_closes_the_task_issue_in_the_task_repo_not_the_targe
 
     orchestrator.run_once(NOW)
 
-    pr_get_call = transport.calls[0]
+    # Not transport.calls[0] any more (bwsalmon/agents#139):
+    # `_restart_orphaned_in_progress`'s own unconditional listing now runs
+    # ahead of `_close_finished_prs` in `run_once` and is call zero instead.
+    pr_get_call = next(c for c in transport.calls if c["method"] == "GET" and "/pulls/" in c["path"])
     assert pr_get_call["path"] == "/repos/other/service/pulls/42"
     close_call = next(c for c in transport.calls if c["method"] == "PATCH")
     assert close_call["path"] == "/repos/o/r/issues/5"
