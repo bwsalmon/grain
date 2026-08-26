@@ -181,9 +181,11 @@ def test_agent_label_names_the_sandbox_by_index():
     """bwsalmon/agents#95: `agent_label` is what `core.py` puts on a task
     issue to say which sandbox is working it -- named after the sandbox's
     own index, not its full `sandbox-N` name, so the label reads as a short
-    "agent N" tag rather than repeating "sandbox" on every row."""
-    assert agent_label("sandbox-0") == "grain-agent-0"
-    assert agent_label("sandbox-1") == "grain-agent-1"
+    "agent N" tag rather than repeating "sandbox" on every row. `working`,
+    not a bare number (bwsalmon/agents#101), so it doesn't read as one more
+    row of the `grain-agent-*` state family."""
+    assert agent_label("sandbox-0") == "grain-agent-working-0"
+    assert agent_label("sandbox-1") == "grain-agent-working-1"
 
 
 def test_agent_label_is_not_one_of_the_pre_created_rows():

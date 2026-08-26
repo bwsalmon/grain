@@ -83,9 +83,32 @@ when this process is started with `--self-debug`, which `dispatch.py` only
 ever passes when the task issue actually carried `self_debug_label` --
 every other task never sees this tool exists. Strictly read-only: the
 `journalctl` invocation behind it takes no mutating flag, and `unit` is
-checked against a fixed allowlist of the two services this deployment
-actually runs (`provision/controller.sh`), never passed through as a raw
-systemd unit name.
+checked against a fixed allowlist of the two long-running services this
+deployment actually runs (`provision/controller.sh`), never passed through
+as a raw systemd unit name.
+
+A third `unit` value, `grain-task` (bwsalmon/agents#97), reads the journal
+for the transient unit this very dispatch runs under -- `dispatch.py`'s
+`unit_name()`, the same `grain-task-<sandbox>` `systemd-run` gave the
+`claude -p` process this MCP server is a child of. It exists to close a
+real blind spot: `_start_task` only ever redirects `claude -p`'s stdout
+(its `--output-format stream-json` transcript, what `capture.py` later
+reads) to a file -- stderr is never redirected, so both `claude -p`'s own
+stderr and whatever this server writes to its own (inherited, same as any
+child process's unless explicitly piped) fall through to the unit's
+journal instead. `capture.py`'s docstring already names "a `claude -p`
+that crashed before writing anything" as a real, expected case its
+transcript capture returns `None` for -- before this, that crash had no
+diagnosis path at all beyond direct operator SSH access. A session cannot
+read its own mid-crash log the instant this server itself goes down, since
+that is the same tool surface a dead server can no longer answer -- but the
+unit name is fixed per sandbox and reused across dispatches
+(`unit_name()`'s own docstring), so the *next* dispatch to that sandbox, if
+also self-debug-labelled, can still read what an earlier crash on the same
+box left behind. Resolved server-side from `--task-unit`, which
+`dispatch.py` bakes into this process's own argv the same way it already
+does the sandbox address -- `unit` in a tool call only ever selects among
+the three fixed options, never supplies a systemd unit name itself.
 
 Three more tools, `check_grain_health`, `read_grain_config`, and
 `read_automation_audit_log` (bwsalmon/agents#86), round out the
@@ -307,7 +330,7 @@ TOOLS = [
     },
 ]
 
-# The exact two controller services this deployment ever runs
+# The exact two long-running controller services this deployment ever runs
 # (provision/controller.sh) -- an allowlist, not a free-form unit name, so
 # `read_grain_logs` can never be pointed at an arbitrary systemd unit on
 # the controller.
@@ -315,6 +338,17 @@ _SELF_DEBUG_UNITS = {
     "grain-automation": "grain-automation.service",
     "grain-git-proxy": "grain-git-proxy.service",
 }
+
+# bwsalmon/agents#97: a third, dynamic `unit` value -- unlike the two
+# above, there is no single fixed service name for it, since it names
+# whichever `grain-task-<sandbox>` unit *this* dispatch happens to be
+# running under (`McpServer.task_unit`, threaded from `dispatch.py`'s
+# `--task-unit`). Kept out of `_SELF_DEBUG_UNITS` because that dict's
+# values are literal, deployment-wide service names; this one is resolved
+# per-instance instead. Still just as fixed a choice from the model's point
+# of view -- `read_grain_logs`'s `unit` enum below names it as a literal
+# alongside the other two, never as a free-form unit string.
+_TASK_UNIT_KEY = "grain-task"
 
 # bwsalmon/agents#62: kept out of `TOOLS` above -- `McpServer` only ever
 # advertises this one when started with `--self-debug` (`main()`), which
@@ -324,8 +358,12 @@ _READ_GRAIN_LOGS_TOOL = {
     "name": "read_grain_logs",
     "description": (
         "Read recent journal log entries for one of grain's own "
-        "controller services -- for triaging a bug in grain itself, not "
-        "the target repo's own code. Read-only: this can only read the "
+        "controller services, or for this dispatch's own controller-side "
+        "process (grain-task) -- for triaging a bug in grain itself, not "
+        "the target repo's own code. grain-task is the only place to find "
+        "claude -p's own stderr, which never reaches the transcript file; "
+        "useful when a redispatch to this same sandbox needs to see why "
+        "an earlier run on it crashed. Read-only: this can only read the "
         "journal, never change anything about the controller. Only "
         "available on a task whose issue carries the grain-self-debug "
         "label."
@@ -336,8 +374,12 @@ _READ_GRAIN_LOGS_TOOL = {
         "properties": {
             "unit": {
                 "type": "string",
-                "enum": sorted(_SELF_DEBUG_UNITS),
-                "description": "Which controller service's log to read.",
+                "enum": sorted(_SELF_DEBUG_UNITS) + [_TASK_UNIT_KEY],
+                "description": (
+                    "Which unit's log to read: one of grain's own "
+                    "controller services, or grain-task for this "
+                    "dispatch's own claude -p process."
+                ),
             },
             "lines": {
                 "type": "integer",
@@ -681,24 +723,47 @@ def comment_on_issue(comment_path: str, comment: str) -> ToolResult:
     )
 
 
-def read_grain_logs(local_runner: Runner, unit: str, *, lines: int | None = None) -> ToolResult:
+def read_grain_logs(local_runner: Runner, unit: str, *, lines: int | None = None,
+                     task_unit: str | None = None) -> ToolResult:
     """Reads recent journal entries for one of grain's own controller
-    services (bwsalmon/agents#62), for triaging a bug in grain itself.
+    services (bwsalmon/agents#62), or for this dispatch's own transient
+    unit (bwsalmon/agents#97), for triaging a bug in grain itself.
 
     Run with `local_runner`, never `self.runner` (the `SshRunner` that
     reaches the *sandbox*): the journal this reads lives on the controller,
     where this process already runs, so there is no SSH hop to make, and
     `self.runner`'s sandbox has no visibility into it at all. `unit` is
-    checked against `_SELF_DEBUG_UNITS` before it ever reaches an argv --
-    the input schema already constrains it to that same enum, but this
-    function does not trust the caller to have honoured it.
+    checked against `_SELF_DEBUG_UNITS` (plus the one dynamic
+    `_TASK_UNIT_KEY` case below) before it ever reaches an argv -- the
+    input schema already constrains it to that same enum, but this function
+    does not trust the caller to have honoured it.
+
+    `task_unit` is `McpServer.task_unit` passed straight through -- the
+    literal `grain-task-<sandbox>` unit name `dispatch.py` baked into this
+    process's own `--task-unit` argv at startup, never something a tool
+    call can name itself. `None` only when a caller (a test, or a
+    deployment mid-rollout before `dispatch.py` started passing
+    `--task-unit`) never supplied one -- `grain-task` is then refused with
+    an explanation rather than crashing on a `None` unit name, the same
+    "absence is the off switch" treatment `gemini_key_config`/
+    `metadata_launcher` already get on `Orchestrator`.
     """
-    service = _SELF_DEBUG_UNITS.get(unit)
-    if service is None:
-        return ToolResult(
-            text=f"Unknown unit {unit!r}. Must be one of: {', '.join(sorted(_SELF_DEBUG_UNITS))}.",
-            is_error=True,
-        )
+    if unit == _TASK_UNIT_KEY:
+        if task_unit is None:
+            return ToolResult(
+                text="grain-task is not available: this dispatch was never "
+                     "given its own unit name.",
+                is_error=True,
+            )
+        service = f"{task_unit}.service"
+    else:
+        service = _SELF_DEBUG_UNITS.get(unit)
+        if service is None:
+            allowed = sorted(_SELF_DEBUG_UNITS) + [_TASK_UNIT_KEY]
+            return ToolResult(
+                text=f"Unknown unit {unit!r}. Must be one of: {', '.join(allowed)}.",
+                is_error=True,
+            )
     n = lines if lines is not None else 200
     result = local_runner.run(
         ["journalctl", "-u", service, "-n", str(n), "--no-pager"], check=False
@@ -863,7 +928,8 @@ class McpServer:
                  comment_path: str | None = None,
                  self_debug: bool = False,
                  self_repair: bool = False,
-                 local_runner: Runner | None = None) -> None:
+                 local_runner: Runner | None = None,
+                 task_unit: str | None = None) -> None:
         self.runner = runner
         self.workspace = workspace
         # None only in tests that don't care about ask_question -- `main()`
@@ -883,6 +949,12 @@ class McpServer:
         # -- a deliberately separate flag, not folded into `self_debug`,
         # since these four tools mutate state instead of only reading it.
         self.self_repair = self_repair
+        # bwsalmon/agents#97: this dispatch's own `grain-task-<sandbox>`
+        # unit name, from `--task-unit` -- `read_grain_logs`'s dynamic
+        # `grain-task` case resolves against this, never a name a tool call
+        # supplies itself. `None` only in tests that don't exercise that
+        # case; every real dispatch supplies it via `_mcp_config_json`.
+        self.task_unit = task_unit
         # Deliberately a *different* Runner than `self.runner`: that one is
         # an `SshRunner` pointed at the assigned *sandbox*, but the journal
         # `read_grain_logs` reads lives on the controller, where this
@@ -972,7 +1044,8 @@ class McpServer:
                          "grain-self-debug label.",
                     is_error=True,
                 )
-            return read_grain_logs(self.local_runner, args["unit"], lines=args.get("lines"))
+            return read_grain_logs(self.local_runner, args["unit"], lines=args.get("lines"),
+                                    task_unit=self.task_unit)
         if name == "check_grain_health":
             if not self.self_debug:
                 return ToolResult(
@@ -1041,11 +1114,11 @@ class McpServer:
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
           comment_path: str | None = None, self_debug: bool = False,
-          self_repair: bool = False,
+          self_repair: bool = False, task_unit: str | None = None,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
     server = McpServer(runner, workspace, question_path=question_path,
                         comment_path=comment_path, self_debug=self_debug,
-                        self_repair=self_repair)
+                        self_repair=self_repair, task_unit=task_unit)
     for line in stdin:
         line = line.strip()
         if not line:
@@ -1076,6 +1149,13 @@ def main() -> None:
     # -- a separate flag, since the two labels (and the tool rosters they
     # gate) are deliberately independent.
     parser.add_argument("--self-repair", action="store_true")
+    # bwsalmon/agents#97: this dispatch's own `grain-task-<sandbox>` unit
+    # name -- `dispatch.py`'s `unit_name()`, the same one `systemd-run`
+    # started this whole `claude -p` process under. Optional, not required
+    # like `--address` et al., so a test invoking `main()` directly without
+    # it still gets `McpServer.task_unit=None` (the "not supplied" case
+    # `read_grain_logs` already handles) rather than an argparse error.
+    parser.add_argument("--task-unit")
     args = parser.parse_args()
     runner = SshRunner(
         inner=RealRunner(), user=args.user,
@@ -1083,7 +1163,7 @@ def main() -> None:
     )
     serve(runner, args.workspace, question_path=args.question_path,
           comment_path=args.comment_path, self_debug=args.self_debug,
-          self_repair=args.self_repair)
+          self_repair=args.self_repair, task_unit=args.task_unit)
 
 
 if __name__ == "__main__":

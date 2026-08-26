@@ -229,6 +229,26 @@ def test_read_grain_logs_surfaces_a_nonzero_exit_without_raising():
     assert "no journal" in result.text
 
 
+# --- read_grain_logs: grain-task (bwsalmon/agents#97) -----------------------
+
+def test_read_grain_logs_reads_this_dispatchs_own_task_unit():
+    runner = FakeRunner()
+    runner.expect("journalctl -u grain-task-sandbox-0.service", stdout="claude -p stderr\n")
+    result = read_grain_logs(runner, "grain-task", task_unit="grain-task-sandbox-0")
+    assert not result.is_error
+    assert "claude -p stderr" in result.text
+    argv, _ = runner.calls[0]
+    assert argv == ["journalctl", "-u", "grain-task-sandbox-0.service", "-n", "200", "--no-pager"]
+
+
+def test_read_grain_logs_rejects_grain_task_when_no_task_unit_was_supplied():
+    runner = FakeRunner()
+    result = read_grain_logs(runner, "grain-task")
+    assert result.is_error
+    assert "not available" in result.text
+    assert runner.calls == []
+
+
 def test_tools_list_excludes_read_grain_logs_by_default():
     server = McpServer(FakeRunner(), WORKSPACE)
     response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -612,6 +632,26 @@ def test_tools_call_routes_reboot_controller_to_the_local_runner_not_the_sandbox
     assert sandbox_runner.calls == []
 
 
+def test_tools_call_read_grain_logs_grain_task_uses_this_servers_own_task_unit():
+    local_runner = FakeRunner()
+    local_runner.expect("journalctl -u grain-task-sandbox-2.service", stdout="crash trace\n")
+    server = McpServer(FakeRunner(), WORKSPACE, self_debug=True, local_runner=local_runner,
+                        task_unit="grain-task-sandbox-2")
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_grain_logs", "arguments": {"unit": "grain-task"}},
+    })
+    assert response["result"]["isError"] is False
+    assert "crash trace" in response["result"]["content"][0]["text"]
+
+
+def test_read_grain_logs_tool_schema_advertises_grain_task():
+    server = McpServer(FakeRunner(), WORKSPACE, self_debug=True)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tool = next(t for t in response["result"]["tools"] if t["name"] == "read_grain_logs")
+    assert "grain-task" in tool["inputSchema"]["properties"]["unit"]["enum"]
+
+
 # --- McpServer JSON-RPC dispatch -------------------------------------------
 
 def test_initialize_reports_protocol_and_server_info():
@@ -798,10 +838,12 @@ def test_serve_writes_nothing_for_a_notification():
 def test_main_wires_cli_args_into_serve(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug, self_repair):
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug,
+                   self_repair, task_unit):
         captured.update(
             runner=runner, workspace=workspace, question_path=question_path,
             comment_path=comment_path, self_debug=self_debug, self_repair=self_repair,
+            task_unit=task_unit,
         )
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
@@ -809,7 +851,7 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
-        "--self-debug", "--self-repair",
+        "--self-debug", "--self-repair", "--task-unit", "grain-task-sandbox-0",
     ])
     main()
     assert captured["workspace"] == WORKSPACE
@@ -817,13 +859,15 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
     assert captured["comment_path"] == "/tmp/a.txt"
     assert captured["self_debug"] is True
     assert captured["self_repair"] is True
+    assert captured["task_unit"] == "grain-task-sandbox-0"
     assert isinstance(captured["runner"], SshRunner)
 
 
 def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug, self_repair):
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug,
+                   self_repair, task_unit):
         captured["self_debug"] = self_debug
         captured["self_repair"] = self_repair
 
@@ -836,3 +880,20 @@ def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
     main()
     assert captured["self_debug"] is False
     assert captured["self_repair"] is False
+
+
+def test_main_task_unit_defaults_to_none(monkeypatch):
+    captured = {}
+
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug,
+                   self_repair, task_unit):
+        captured["task_unit"] = task_unit
+
+    monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
+    monkeypatch.setattr(sys, "argv", [
+        "mcp_server", "--address", "10.100.0.5", "--user", "agent",
+        "--key-path", "/tmp/key", "--workspace", WORKSPACE,
+        "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
+    ])
+    main()
+    assert captured["task_unit"] is None
