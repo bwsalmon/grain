@@ -26,4 +26,8 @@ cd "$root/terraform/gcp"
   # has to fall back to empty rather than aborting the whole step, the
   # same way write-deploy-summary.sh's null-safe outputs do.
   echo "agent_service_account=$(terraform output -raw agent_service_account 2>/dev/null || true)"
+  # bwsalmon/agents#131: the identity the controller mints agent keys
+  # *as*. Always set (unlike agent_service_account, which is null when
+  # no agent account is configured), but read null-safe all the same.
+  echo "host_service_account=$(terraform output -raw host_service_account 2>/dev/null || true)"
 } >> "$github_output"

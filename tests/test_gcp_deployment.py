@@ -996,3 +996,39 @@ def test_deploy_yml_passes_absolute_config_paths_to_terraform():
     assert '-var-file="$config_dir/grain.tfvars"' in apply
     assert "../config/" not in apply, \
         "a relative path here resolves inside the grain checkout, not the config repo"
+
+
+def test_the_controller_gets_a_minter_key_that_is_not_the_agent_account():
+    """bwsalmon/agents#131. gcp_keys.py mints the agent account's
+    per-dispatch keys, so it must authenticate as something else -- a
+    leaked agent key must not be able to mint its own replacement. The
+    whole chain has to name the *host* account: CI mints its key, deploy.sh
+    places it, and the two key files stay distinct on disk.
+    """
+    push = PUSH_SECRETS.read_text()
+    assert "grain-key-minter-key" in push, "CI never pushes a minter key"
+    assert "--iam-account=\"$host_service_account\"" in push, \
+        "the minter key is not minted for the host account"
+
+    outputs = READ_OUTPUTS.read_text()
+    assert "host_service_account" in outputs, \
+        "the host account is never captured for the push step to use"
+
+    deploy_sh = DEPLOY_SH.read_text()
+    assert "grain-key-minter-key" in deploy_sh
+    assert "--gcp-key-minter-key-file" in deploy_sh, \
+        "deploy.sh never hands the minter key to `grain host bootstrap`"
+    # Two different files, because they are two different accounts.
+    assert "gcp-key-minter.json" in deploy_sh and "gcp-service-account.json" in deploy_sh
+
+
+def test_terraform_lets_ci_mint_the_minter_key():
+    """The grant that makes the above possible: without keyAdmin on the
+    host account, CI's `keys create` fails and the controller never gets a
+    credential at all."""
+    iam = (TERRAFORM / "iam.tf").read_text()
+    assert 'resource "google_service_account_iam_member" "deployer_manages_host_keys"' in iam
+    minter_block = iam.split('"deployer_manages_host_keys"')[1].split("}")[0]
+    assert "google_service_account.host.name" in minter_block, \
+        "the grant is not scoped to the host account"
+    assert "roles/iam.serviceAccountKeyAdmin" in minter_block

@@ -35,7 +35,8 @@ from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
-    configure_gcp_service_account, configure_gemini_key, configure_github_credential,
+    configure_gcp_key_minter, configure_gcp_service_account, configure_gemini_key,
+    configure_github_credential,
     configure_janitor, configure_named_github_key, configure_repo, credential_repos,
     ensure_sandbox_tokens,
 )
@@ -84,6 +85,13 @@ class BootstrapConfig:
     gcp_agent_service_account_email: str | None = None
     gcp_project_id: str | None = None
     gcp_key_max_age_hours: int = 24
+    # bwsalmon/agents#131: a key for the *host* service account, which
+    # gcp_keys.py authenticates as to mint the agent account's per-dispatch
+    # keys. Independent of gcp_service_account_key above -- that one is the
+    # agent account's own key, and using it here would be the agent minting
+    # for itself. Absent, gcp_keys.py has no credential and every mint and
+    # reap fails; see that module's docstring.
+    gcp_key_minter_key: str | None = None
     # Turns on the grain-gemini-key task label (bwsalmon/agents#47, #49):
     # the GCP project a short-lived Gemini API key is minted in. Reuses
     # gcp_service_account_key above -- see configure_gemini_key's own
@@ -290,6 +298,8 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         configure_named_github_key(admin_ssh, token, name=name)
     if config.claude_token:
         configure_claude_token(admin_ssh, config.claude_token)
+    if config.gcp_key_minter_key:
+        configure_gcp_key_minter(admin_ssh, config.gcp_key_minter_key)
     if config.gcp_service_account_key:
         configure_gcp_service_account(admin_ssh, config.gcp_service_account_key)
     if config.gcp_agent_service_account_email and config.gcp_project_id:

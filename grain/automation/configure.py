@@ -35,6 +35,10 @@ SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
 # until `gemini_keys.py`'s own `gcloud auth activate-service-account` fails
 # to find the file.
 GCP_SERVICE_ACCOUNT_KEY_PATH = "/data/secrets/gcp-service-account.json"
+# bwsalmon/agents#131: the *minter* identity gcp_keys.py authenticates
+# as -- a key for the host service account, deliberately a different
+# file (and a different account) from the agent key above.
+GCP_KEY_MINTER_KEY_PATH = "/data/secrets/gcp-key-minter.json"
 # Must match grain/automation/gemini_keys.py's `GeminiKeyConfig` load path
 # -- same "kept in sync by hand" caveat as the pair above; see this
 # constant's own use in `configure_gemini_key`.
@@ -241,7 +245,8 @@ def configure_gcp_service_account(runner: Runner, key: str) -> None:
 
 
 def configure_agent_gcp_key(runner: Runner, *, service_account_email: str,
-                             project_id: str, max_key_age_hours: int = 24) -> None:
+                             project_id: str, max_key_age_hours: int = 24,
+                             key_path: str = GCP_KEY_MINTER_KEY_PATH) -> None:
     """Writes `/data/config/gcp-key.json` (bwsalmon/agents#126), the
     on/off switch `Orchestrator.gcp_key_config` (`cli.py`'s
     `build_orchestrator`) checks before minting a GCP service-account key
@@ -249,20 +254,44 @@ def configure_agent_gcp_key(runner: Runner, *, service_account_email: str,
     no GCP access at all, the same "unusable feature parks/skips, doesn't
     guess" shape `configure_gemini_key` already has for its own label.
 
-    Deliberately places no credential of its own: `gcp_keys.py` mints
-    keys as the controller's own attached (host) service account, never a
-    static file -- see that module's own docstring for why. This is
-    plain, non-secret configuration -- `service_account_email` and
-    `project_id` are already published as non-secret deploy config
-    (`terraform/gcp/instance.tf`'s `grain-config`), unlike
-    `configure_gcp_service_account`'s `key` argument above.
+    Places no credential of its own -- this is plain, non-secret
+    configuration (`service_account_email` and `project_id` are already
+    published as non-secret deploy config, `terraform/gcp/instance.tf`'s
+    `grain-config`), unlike `configure_gcp_service_account`'s `key`
+    argument above. It only *names* the minter credential;
+    `configure_gcp_key_minter` below is what actually places it.
+
+    bwsalmon/agents#131: `gcp_keys.py` used to need no credential at all,
+    on the (false) premise that the controller runs as the host service
+    account via a native GCE metadata server. The controller is a nested
+    libvirt guest, not a GCE VM, so `gcloud` there had no account at all
+    and every mint and reap failed -- see that module's docstring.
     """
     gcp_key_json = json.dumps({
         "service_account_email": service_account_email,
         "project_id": project_id,
         "max_key_age_hours": max_key_age_hours,
+        "key_path": key_path,
     }, indent=2) + "\n"
     _write_remote_file(runner, GCP_KEY_CONFIG_PATH, gcp_key_json, mode="644")
+
+
+def configure_gcp_key_minter(runner: Runner, key: str) -> None:
+    """Places the minter credential `gcp_keys.py` authenticates as
+    (bwsalmon/agents#131), at `GCP_KEY_MINTER_KEY_PATH`.
+
+    A key for the *host* service account, which `terraform/gcp/iam.tf`
+    grants `roles/iam.serviceAccountKeyAdmin` on the agent account. Never
+    the agent account's own key: minting has to be done by an identity the
+    agent itself does not hold, or a leaked agent key can mint its own
+    replacement and the whole expiry premise collapses.
+
+    Unlike `configure_gcp_service_account`'s key, this one is read by the
+    automation running as root rather than by a separate unprivileged
+    service user, so it stays `600` and root-owned -- nothing else on the
+    controller has any business reading it.
+    """
+    _write_remote_file(runner, GCP_KEY_MINTER_KEY_PATH, key.strip() + "\n", mode="600")
 
 
 def configure_gemini_key(runner: Runner, project_id: str) -> None:

@@ -32,16 +32,39 @@ def test_create_key_mints_for_the_configured_service_account():
     assert f"--iam-account={EMAIL}" in create_call
 
 
-def test_create_key_never_activates_a_service_account():
-    """Unlike gemini_keys.py, this must never authenticate via a static
-    key file -- the whole point (bwsalmon/agents#126) is that minting a
-    new agent key is done by the controller's own attached identity, never
-    a credential a sandbox could have leaked."""
+def test_create_key_activates_the_minter_before_minting():
+    """bwsalmon/agents#131. This originally asserted the opposite -- that
+    nothing here authenticates at all, on the premise that the controller
+    runs as the host service account via a native GCE metadata server. The
+    controller is a nested libvirt guest, not a GCE VM, so `gcloud` there
+    had no account and every mint failed with "You do not currently have
+    an active account selected".
+    """
     runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
     runner.expect("gcloud iam service-accounts keys create", stdout=f"{KEY_ID}\n")
     runner.expect("cat", stdout=KEY_JSON)
     create_key(runner, config())
-    assert not [c for c in runner.commands if "activate-service-account" in c]
+    activate = next(i for i, c in enumerate(runner.commands)
+                    if "activate-service-account" in c)
+    mint = next(i for i, c in enumerate(runner.commands) if "keys create" in c)
+    assert activate < mint
+
+
+def test_the_minter_is_not_the_account_being_minted_for():
+    """The separation bwsalmon/agents#126 exists for: a sandbox holding a
+    leaked agent key must not be able to mint itself a fresh one. The key
+    file activated here is the *minter's*, never the agent account's own
+    credential at /data/secrets/gcp-service-account.json.
+    """
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud iam service-accounts keys create", stdout=f"{KEY_ID}\n")
+    runner.expect("cat", stdout=KEY_JSON)
+    create_key(runner, config())
+    activate = next(c for c in runner.commands if "activate-service-account" in c)
+    assert "/data/secrets/gcp-key-minter.json" in activate
+    assert "gcp-service-account.json" not in activate
 
 
 def test_create_key_returns_the_bare_id_and_key_json():
@@ -144,10 +167,14 @@ def test_delete_key_is_quiet():
     assert "--quiet" in delete_call
 
 
-def test_delete_key_never_activates_a_service_account():
+def test_delete_key_activates_the_minter_first():
     runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
     delete_key(runner, config(), KEY_ID)
-    assert not [c for c in runner.commands if "activate-service-account" in c]
+    activate = next(i for i, c in enumerate(runner.commands)
+                    if "activate-service-account" in c)
+    delete = next(i for i, c in enumerate(runner.commands) if "keys delete" in c)
+    assert activate < delete
 
 
 # --- delete_expired_keys --------------------------------------------------
