@@ -34,9 +34,9 @@ from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_repo, credential_repos,
-    ensure_sandbox_tokens,
+    configure_claude_token, configure_cluster, configure_gcp_service_account,
+    configure_gemini_key, configure_github_credential, configure_repo,
+    credential_repos, ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -289,6 +289,7 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                     default_target_repo=default_target,
                     github_host=config.github_host, git_forward_host=config.git_forward_host,
                     github_use_tls=config.github_use_tls)
+    configure_cluster(admin_ssh, cluster)
     if config.github_token:
         configure_github_credential(
             admin_ssh, credential_repos(config.task_repo, targets), config.github_token,
