@@ -1420,3 +1420,42 @@ instead — see `terraform/gcp/variables.tf` and docs/runbook.md's "Enabling
 the janitor". It only has anything to clean up once the agent account
 already has the roles `agent_can_manage_compute_instances`/
 `enable_gemini_key` grant it — turning it on alone is a harmless no-op.
+
+## 23. A comment on a completed issue should restart it
+
+- [x] Done
+
+bwsalmon/agents#135: once a task issue carries `completed_label` (any of
+the three finish paths — a fresh PR opened, more commits pushed to an
+existing PR, or a no-branch "here's the answer" comment), it just sits
+there. A human reviewing that work who wants more done had no way to say
+so short of re-applying `trigger_label` by hand — a comment alone, even a
+maintainer's, did nothing.
+
+`core.py`'s `_restart_commented_completions` closes that gap with the same
+"poll, don't trust a webhook" shape `_promote_answered_questions` already
+uses for a reply to a question: `state.py`'s new `CompletedIssue` record
+tracks one completed issue's `list_comments` baseline, and a `run_once`
+pass diffs the current thread against it every cycle. A comment newer than
+the baseline from a `_TRUSTED_REPLY_ASSOCIATIONS` author — the same trust
+tier every other comment-triggered redispatch here already requires, so a
+random public commenter still can't restart the agent set on a whim —
+reopens the issue (`GitHubClient.reopen_issue`, the mirror image of
+`close_issue`, needed because bwsalmon/agents#54's `_close_finished_prs`
+may already have closed it once its PR closed), swaps `completed_label`
+back for `trigger_label`, and drops any `open_pull_requests` record still
+tracking that issue's old PR — otherwise a later `_close_finished_prs`
+would close the freshly reopened issue again the moment that stale PR
+itself closed, with no new work behind it.
+
+`CompletedIssue.baseline_comment_id` starts `None` rather than being
+filled in at completion time the way `PendingQuestion.question_comment_id`
+is: two of the three finish paths that apply `completed_label` never post
+a comment of their own, so there's no id finish time can hand back as "the
+highest comment on this issue right now." The first poll after completion
+primes the field from a fresh `list_comments` read instead of ever
+restarting on it — comparing on that very first read would risk treating
+either a comment already on the issue before the run even started, or (the
+third finish path's own `comment_on_issue` reply) the automation comment
+that finish path just posted, as a "new" one and restarting a task nobody
+actually asked to restart.

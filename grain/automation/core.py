@@ -458,6 +458,7 @@ class Orchestrator:
         self._janitor(now)
         self._refresh_agent_labels()
         self._promote_answered_questions(now)
+        self._restart_commented_completions()
         self._close_finished_prs()
         self._dispatch(now)
 
@@ -730,6 +731,11 @@ class Orchestrator:
         )
         self.state.record_open_pr(outcome.issue, target.owner, target.name, pr.number,
                                    auto_merge=outcome.auto_merge)
+        # bwsalmon/agents#135: tracked the same "poll and diff a baseline"
+        # way as a pending question, so a later human comment on this now-
+        # completed issue can restart it -- see
+        # `_restart_commented_completions`/`CompletedIssue`.
+        self.state.record_completed_issue(outcome.issue)
         # bwsalmon/agents#51: persist the open-PR record right after the
         # label moves that go with it, before anything later in this cycle
         # can crash on top of it -- the same ordering `_finish_question`
@@ -780,6 +786,10 @@ class Orchestrator:
             self.config.task_owner, self.config.task_repo,
             outcome.issue, agent_label(outcome.sandbox),
         )
+        # bwsalmon/agents#135: same restart-on-comment tracking the fresh-
+        # branch path records -- see `_finish_succeeded_issue`.
+        self.state.record_completed_issue(outcome.issue)
+        self._save_state()
         self.audit.record(
             sandbox=outcome.sandbox, issue=outcome.issue,
             outcome=f"pushed additional commits to {target} ({branch!r})",
@@ -916,6 +926,10 @@ class Orchestrator:
             task.owner, task.name,
             outcome.issue, agent_label(outcome.sandbox),
         )
+        # bwsalmon/agents#135: same restart-on-comment tracking the other
+        # two finish paths record -- see `_finish_succeeded_issue`.
+        self.state.record_completed_issue(outcome.issue)
+        self._save_state()
         self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
                            outcome=f"finished with no changes: {comment[:200]!r}")
 
@@ -979,6 +993,110 @@ class Orchestrator:
                 sandbox=None, issue=pending.issue,
                 outcome=f"{reply.user} ({reply.author_association}) replied -- "
                         "requeued for redispatch",
+            )
+
+    # --- restart on comment after completion (bwsalmon/agents#135) -------
+
+    def _restart_commented_completions(self) -> None:
+        """A completed task issue (`completed_label`) sits idle until a
+        human reviews it. If they come back with a follow-up comment
+        instead of relabelling it by hand, this puts `trigger_label` back
+        on -- reopening the issue first if `_close_finished_prs` had
+        already closed it -- so `_dispatch`'s own poll picks it up again
+        in this same `run_once` call, the same "poll, diff a recorded
+        baseline" shape `_promote_answered_questions` already uses for a
+        reply to a question.
+
+        Comments are read regardless of the issue's own open/closed state
+        on GitHub -- commenting on a closed issue is allowed, and is
+        exactly the common case this exists for: a human replying about
+        work that already merged. Gated to `_TRUSTED_REPLY_ASSOCIATIONS`,
+        the same trust tier every other comment-triggered redispatch here
+        already requires -- a random public commenter must not be able to
+        restart the agent set on a whim, the exact prompt-injection gate
+        the trigger label exists to close in the first place.
+
+        A 404 from `list_comments` means the same "stale record" thing it
+        means in `_promote_answered_questions`: the issue is gone from the
+        currently configured repo. A 404 from `reopen_issue` once a
+        restart is actually triggered means the same thing -- the record
+        is dropped in both cases rather than raised.
+        """
+        for completed in list(self.state.completed_issues.values()):
+            try:
+                comments = self.github.list_comments(
+                    self.config.task_owner, self.config.task_repo, completed.issue
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.state.clear_completed_issue(completed.issue)
+                self._save_state()
+                self.audit.record(
+                    sandbox=None, issue=completed.issue,
+                    outcome=f"issue #{completed.issue} not found in "
+                            f"{self.config.task_owner}/{self.config.task_repo} while "
+                            "checking for a restart comment -- stale record?",
+                )
+                continue
+            highest = max((c.id for c in comments), default=0)
+            if completed.baseline_comment_id is None:
+                # First poll since completion -- nothing to fairly compare
+                # a first read against (see `CompletedIssue`'s docstring),
+                # so this just primes the baseline rather than restarting.
+                self.state.prime_completed_baseline(completed.issue, highest)
+                self._save_state()
+                continue
+            reply = next(
+                (c for c in comments
+                 if c.id > completed.baseline_comment_id
+                 and c.author_association in _TRUSTED_REPLY_ASSOCIATIONS),
+                None,
+            )
+            if reply is None:
+                continue
+            try:
+                self.github.reopen_issue(
+                    self.config.task_owner, self.config.task_repo, completed.issue
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.state.clear_completed_issue(completed.issue)
+                self.state.clear_open_pr(completed.issue)
+                self._save_state()
+                self.audit.record(
+                    sandbox=None, issue=completed.issue,
+                    outcome=f"{reply.user} commented on completed issue "
+                            f"#{completed.issue}, but it was not found in "
+                            f"{self.config.task_owner}/{self.config.task_repo} while "
+                            "restarting it -- stale record?",
+                )
+                continue
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                completed.issue, self.config.completed_label,
+            )
+            self.github.add_label(
+                self.config.task_owner, self.config.task_repo,
+                completed.issue, self.config.trigger_label,
+            )
+            self.state.clear_completed_issue(completed.issue)
+            # bwsalmon/agents#54's own open-PR record, if this issue still
+            # has one, tracks a PR that's now beside the point -- leaving
+            # it would let a later `_close_finished_prs` close the issue
+            # this restart just reopened the moment that old PR itself
+            # closes, with no new work behind it.
+            self.state.clear_open_pr(completed.issue)
+            # bwsalmon/agents#51: persist right after the GitHub-side
+            # change it goes with, before anything later in this cycle can
+            # crash on top of it -- same discipline as every other state
+            # mutation in this module.
+            self._save_state()
+            self.audit.record(
+                sandbox=None, issue=completed.issue,
+                outcome=f"{reply.user} ({reply.author_association}) commented on a "
+                        "completed issue -- reopened and requeued",
             )
 
     # --- closing on PR close (bwsalmon/agents#54) -------------------------

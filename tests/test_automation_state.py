@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
+from grain.automation.state import AutomationState, CompletedIssue, OpenPullRequest, TriggerKind
 
 
 def test_free_sandbox_skips_assigned_ones():
@@ -312,6 +312,68 @@ def test_load_of_a_pre_54_state_file_has_no_open_pull_requests(tmp_path: Path):
     path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
     loaded = AutomationState.load(path)
     assert loaded.open_pull_requests == {}
+
+
+# --- restart on comment after completion (bwsalmon/agents#135) -----------
+
+def test_record_completed_issue_starts_with_no_baseline():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    completed = state.completed_issues["5"]
+    assert completed.issue == 5
+    assert completed.baseline_comment_id is None
+
+
+def test_prime_completed_baseline_fills_it_in():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    assert state.completed_issues["5"] == CompletedIssue(issue=5, baseline_comment_id=100)
+
+
+def test_clear_completed_issue_removes_it():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.clear_completed_issue(5)
+    assert state.completed_issues == {}
+
+
+def test_clear_completed_issue_on_an_absent_issue_is_a_no_op():
+    state = AutomationState()
+    state.clear_completed_issue(5)  # must not raise
+    assert state.completed_issues == {}
+
+
+def test_save_and_load_round_trips_completed_issues(tmp_path: Path):
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.completed_issues["5"] == CompletedIssue(issue=5, baseline_comment_id=100)
+
+
+def test_save_and_load_round_trips_an_unprimed_completed_issue(tmp_path: Path):
+    state = AutomationState()
+    state.record_completed_issue(5)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.completed_issues["5"] == CompletedIssue(issue=5, baseline_comment_id=None)
+
+
+def test_load_of_a_pre_135_state_file_has_no_completed_issues(tmp_path: Path):
+    # A state file written before bwsalmon/agents#135 existed has no
+    # "completed_issues" key at all -- loading it must default to empty
+    # rather than KeyError, the same tolerance every other addition here
+    # already has for a state file written before it existed.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.completed_issues == {}
 
 
 def test_load_of_a_pre_item_9_state_file_defaults_to_issue_kind(tmp_path: Path):

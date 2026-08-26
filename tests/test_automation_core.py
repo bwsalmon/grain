@@ -132,6 +132,21 @@ def open_pr_response(pr_number: int, *, state: str = "open",
     ).encode())
 
 
+def completion_priming_response() -> ApiResponse:
+    """One `list_comments` response for `_restart_commented_completions`'s
+    own poll (bwsalmon/agents#135) of a `completed_issues` record a
+    same-cycle `_finish_succeeded_issue`/`_finish_succeeded_pr`/
+    `_finish_no_changes` call just wrote -- that poll runs once per
+    `run_once`, right after every outcome in the sweep has already been
+    finished (`_close_finished_prs`'s own `open_pr_response` docstring has
+    the same "later in the same run_once" story), and the very first poll
+    a fresh record ever gets always just primes its baseline rather than
+    restarting anything, so an empty comment thread serves every such test
+    just as well as a populated one would.
+    """
+    return ApiResponse(200, {}, b"[]")
+
+
 class OrchestratorTransport(FakeTransport):
     """`FakeTransport` plus one always-served route: `GET /repos/{owner}/{repo}`,
     the target repo's default branch, which every dispatch now reads
@@ -400,6 +415,7 @@ def test_a_finished_run_is_swept_and_its_slot_reused_in_the_same_pass():
     orchestrator, transport = make_orchestrator(issues=[issue_json(1)], state=state, runner=runner)
     transport.responses.extend(
         pr_flow_response(1) + pr_flow_response(2)
+        + [completion_priming_response(), completion_priming_response()]
         + [open_pr_response(1), open_pr_response(2)]
     )
     orchestrator.run_once(NOW)
@@ -777,7 +793,9 @@ def test_a_succeeded_run_with_a_pushed_branch_opens_a_pr_even_if_the_agent_also_
     # (`pr_flow_response`'s own docstring) -- if the comment file being
     # present made an extra call happen anywhere in here, one of these
     # responses would land on the wrong call and this would fail loudly.
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -946,6 +964,216 @@ def test_a_non_404_error_while_checking_for_a_reply_still_raises():
         orchestrator.run_once(NOW)
 
 
+# --- restart on comment after completion (bwsalmon/agents#135) -----------
+
+def test_a_trusted_comment_restarts_a_completed_issue_and_redispatches_in_the_same_run():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)], state=state)
+    # The first GET this run makes is _restart_commented_completions's own
+    # list_comments call (nothing in state.assignments/pending_questions for
+    # the earlier passes to act on) -- everything after falls through to
+    # the shared `issues` default, which _dispatch's own list_issues/
+    # list_comments need.
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="maintainer", body="please also handle Y",
+                          author_association="OWNER"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.completed_issues == {}
+    assert orchestrator.state.assignments["sandbox-0"].issue == 5
+    reopen_call = next(
+        c for c in transport.calls
+        if c["method"] == "PATCH" and c["path"] == "/repos/o/r/issues/5"
+    )
+    assert json.loads(reopen_call["body"]) == {"state": "open"}
+    completed_removed = next(
+        c for c in transport.calls
+        if c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-completed"
+    )
+    assert completed_removed
+    trigger_added = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(trigger_added["body"]) == {"labels": ["grain-agent"]}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("maintainer" in o and "reopened" in o for o in outcomes)
+
+
+def test_an_untrusted_comment_does_not_restart_a_completed_issue():
+    """Same prompt-injection concern `_promote_answered_questions` already
+    guards against: a random public commenter must not be able to restart
+    the agent set on a completed issue just by leaving a comment.
+    """
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="rando", body="please reopen this",
+                          author_association="NONE"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "5" in orchestrator.state.completed_issues
+    assert orchestrator.state.assignments == {}
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+
+
+def test_no_new_comment_leaves_a_completed_issue_alone():
+    # The only comment present is the one already accounted for by the
+    # recorded baseline (id == baseline, not greater than it).
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(100, user="grain-agent-bot", body="the pr I opened",
+                          author_association="OWNER"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.completed_issues["5"].baseline_comment_id == 100
+    assert orchestrator.state.assignments == {}
+
+
+def test_the_first_poll_after_completion_only_primes_the_baseline():
+    """`CompletedIssue.baseline_comment_id` starts `None` -- the very first
+    poll after completion has nothing fair to compare a first read
+    against (a comment already on the issue when it finished isn't a
+    reply to the completion), so it must only ever prime, never restart.
+    """
+    state = AutomationState()
+    state.record_completed_issue(5)  # baseline still None -- freshly completed
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(50, user="maintainer", body="looks good",
+                          author_association="OWNER"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.completed_issues["5"].baseline_comment_id == 50
+    assert orchestrator.state.assignments == {}
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+
+
+def test_the_automation_comment_from_a_no_changes_finish_does_not_restart_its_own_task(
+    monkeypatch, tmp_path,
+):
+    """bwsalmon/agents#135: `_finish_no_changes` posts its own automation
+    comment before `completed_label` goes on. The same-cycle priming poll
+    (`_restart_commented_completions`) must fold that comment into the
+    baseline it primes, not mistake it for a human's reply and restart the
+    very task that just finished.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    comment_file = tmp_path / "comment.txt"
+    comment_file.write_text("Investigated X; no code change was needed.")
+    monkeypatch.setattr(core_module, "comment_path", lambda unit: str(comment_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(404, {}, b"not found"),  # get_branch_head: no branch pushed
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
+        ApiResponse(200, {}, b"{}"),  # add_label (completed)
+        ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+        ApiResponse(200, {}, b"{}"),  # remove_label (agent label off)
+        # _restart_commented_completions's own priming poll -- sees the
+        # automation comment it just posted (id 555) already there.
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(555, user="grain-agent-bot",
+                              body="This task has been completed with no code change",
+                              author_association="OWNER"),
+        ]).encode()),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.completed_issues["5"].baseline_comment_id == 555
+    assert orchestrator.state.assignments == {}
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+
+
+def test_a_404_while_checking_a_completed_issue_for_a_comment_clears_the_record():
+    state = AutomationState()
+    state.record_completed_issue(201)
+    state.prime_completed_baseline(201, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(404, {}, b'{"message": "Not Found"}'))
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.completed_issues == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("not found" in o and "201" in o for o in outcomes)
+
+
+def test_a_non_404_error_while_checking_a_completed_issue_still_raises():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(500, {}, b"boom"))
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
+
+
+def test_reopening_a_completed_issue_tolerates_a_404_for_a_stale_record():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(101, user="maintainer", body="go ahead",
+                              author_association="OWNER"),
+        ]).encode()),
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # reopen_issue
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.completed_issues == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("maintainer" in o and "not found" in o for o in outcomes)
+    # Best-effort only: no label mutation was even attempted once the
+    # reopen itself 404'd.
+    assert not any(c["method"] in ("POST", "DELETE") for c in transport.calls)
+
+
+def test_restarting_a_completed_issue_drops_its_stale_open_pr_record():
+    """bwsalmon/agents#54's open-PR tracking, if this issue still has an
+    entry, would otherwise let a later `_close_finished_prs` close the
+    issue this restart just reopened the moment that old, now-beside-the-
+    point PR itself closes.
+    """
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    state.record_open_pr(5, "o", "r", 42)
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="maintainer", body="one more thing",
+                          author_association="OWNER"),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.open_pull_requests == {}
+
+
 # --- PR creation on a successful run (docs/roadmap.md item 2) -------------
 
 def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
@@ -955,7 +1183,9 @@ def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -1037,7 +1267,9 @@ def test_a_succeeded_auto_merge_task_records_that_on_its_open_pr():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -1452,7 +1684,9 @@ def test_an_unhealthy_freed_sandbox_is_logged_but_still_reused():
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -1492,7 +1726,9 @@ def test_a_freed_sandboxs_failed_gemini_key_revocation_is_logged_but_still_freed
         issues=[], state=state, runner=runner,
         gemini_key_config=GeminiKeyConfig(project_id="proj"),
     )
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -1774,7 +2010,9 @@ def test_a_swept_success_is_recorded_into_the_injected_history(monkeypatch, tmp_
     history = RecordingSessionHistory()
     orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner,
                                                  history=history)
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -1852,7 +2090,9 @@ def test_the_pr_is_opened_in_the_target_repo_and_closes_the_task_issue():
     orchestrator, transport = make_orchestrator(
         issues=[], state=state, runner=runner, allowed=("o/r", "other/service"),
     )
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
@@ -2099,7 +2339,9 @@ def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkey
         issues=[], state=state, runner=runner, history=history,
         allowed=("o/r", "other/service"),
     )
-    transport.responses.extend(pr_flow_response(42) + [open_pr_response(42)])
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
 
     orchestrator.run_once(NOW)
 
