@@ -596,6 +596,49 @@ def test_gemini_key_iam_is_gated_on_enable_gemini_key():
     assert "google_service_account.agent[0].email" in role.group(0)
 
 
+def test_grain_config_publishes_janitor_settings():
+    """bwsalmon/agents#113: enable_janitor/janitor_ttl_hours have to reach
+    deploy.sh the same way enable_gemini_key/gemini_project_id already do,
+    or a Terraform-managed deployment has no way to turn the janitor on
+    short of a manual `controller configure` afterward. name_prefix must
+    travel alongside it -- the janitor needs to know it to avoid deleting
+    this deployment's own host/data-disk resources.
+    """
+    instance = (TERRAFORM / "instance.tf").read_text()
+    assert "janitor_ttl_hours" in instance
+    assert "var.enable_janitor" in instance
+    assert "name_prefix" in instance
+
+    deploy_sh = DEPLOY_SH.read_text()
+    assert "janitor_ttl_hours" in deploy_sh
+    assert "--janitor-ttl-hours" in deploy_sh
+    assert "--janitor-name-prefix" in deploy_sh
+    # Only passed alongside the agent account's own key -- janitor.py
+    # authenticates gcloud with that same key, so a JANITOR_TTL_HOURS with
+    # no key to go with it must never reach `host bootstrap`.
+    assert re.search(
+        r'if fetch_secret_to_file "\$GCP_KEY_ATTR".*?JANITOR_TTL_HOURS.*?\bfi\b',
+        deploy_sh, re.S,
+    ), "--janitor-ttl-hours must be nested inside the successful GCP key fetch"
+
+
+def test_janitor_iam_is_gated_on_enable_janitor():
+    """The janitor reuses whatever IAM roles agent_can_manage_compute_
+    instances/enable_gemini_key already grant the agent account (it has no
+    resource type of its own to clean up beyond GCE instances/disks and
+    Gemini API keys) -- so its own gate is only that the agent account
+    itself gets created when enable_janitor is turned on alone.
+    """
+    source = _tf_source()
+    local = re.search(r"agent_account_needed\s*=\s*(.+)", source)
+    assert local, "agent_account_needed local not found"
+    assert "enable_janitor" in local.group(1), (
+        "enable_janitor alone (agent_can_manage_compute_instances and "
+        "enable_gemini_key both left false) must still create the agent "
+        "account, so the janitor has a key to authenticate gcloud with"
+    )
+
+
 def test_bootstrap_gcp_sh_grants_service_usage_admin():
     """serviceUsageConsumer alone (already granted) only covers *using* an
     already-enabled API -- enabling generativelanguage.googleapis.com via

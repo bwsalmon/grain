@@ -95,6 +95,18 @@ agent_service_account_roles = [
 # grain's docs/runbook.md, "Enabling grain-gemini-key".
 enable_gemini_key = false
 
+# Runs a periodic janitor in the controller that deletes GCE instances,
+# their unattached disks, and grain-minted Gemini API keys older than
+# janitor_ttl_hours -- cleanup for whatever an agent creates in GCP as part
+# of a task and never tears down itself. Always skips the grain host VM,
+# its data disk, and anything labelled managed-by=terraform. Only cleans up
+# what the agent account can already reach, so turn on
+# agent_can_manage_compute_instances and/or enable_gemini_key above too for
+# it to have anything to do. See grain's docs/runbook.md, "Enabling the
+# janitor".
+enable_janitor    = false
+janitor_ttl_hours = 24
+
 # -- Network ----------------------------------------------------------------
 
 create_network = true

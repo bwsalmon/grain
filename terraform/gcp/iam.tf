@@ -20,12 +20,13 @@ resource "google_project_iam_member" "host" {
 
 # The narrow account agents get tokens for, minted by the controller's
 # metadata server. Created when you ask for it by listing roles, by
-# turning on agent_can_manage_compute_instances, or both -- either alone
-# is a real, supported combination, so the account's own existence can't
-# gate on agent_service_account_roles specifically.
+# turning on agent_can_manage_compute_instances, enable_gemini_key, or
+# enable_janitor, in any combination -- each alone is a real, supported
+# configuration, so the account's own existence can't gate on
+# agent_service_account_roles specifically.
 
 locals {
-  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key
+  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key || var.enable_janitor
 
   # Only compute.instanceAdmin.v1 and compute.osLogin -- see
   # variables.tf's agent_can_manage_compute_instances for why

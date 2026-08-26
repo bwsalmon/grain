@@ -144,6 +144,7 @@ def test_build_orchestrator_wires_config_state_and_audit_from_data_dir(tmp_path:
     assert state_path == tmp_path / "state" / "automation" / "state.json"
     assert orchestrator.state_path == state_path
     assert orchestrator.gemini_key_config is None  # no gemini-key.json written
+    assert orchestrator.janitor_config is None  # no janitor.json written
 
 
 def test_build_orchestrator_dry_run_wraps_github_and_disables_state_persistence(tmp_path: Path):
@@ -179,6 +180,30 @@ def test_build_orchestrator_loads_gemini_key_config_when_present(tmp_path: Path)
 
     assert orchestrator.gemini_key_config is not None
     assert orchestrator.gemini_key_config.project_id == "acme-project"
+
+
+def test_build_orchestrator_loads_janitor_config_when_present(tmp_path: Path):
+    """bwsalmon/agents#113: mirrors the gemini_key_config test above --
+    `janitor_config` is `None` unless `/data/config/janitor.json` exists,
+    the same "absence is the off switch" shape.
+    """
+    import argparse
+    import json as jsonlib
+
+    from grain.cli import build_orchestrator
+    from grain.inventory import Cluster
+    from grain.run import FakeRunner
+
+    _write_automation_json(tmp_path)
+    (tmp_path / "config" / "janitor.json").write_text(
+        jsonlib.dumps({"project_id": "acme-project", "ttl_hours": 12})
+    )
+    args = argparse.Namespace(data_dir=str(tmp_path), dry_run=False)
+    orchestrator, _ = build_orchestrator(Cluster(sandbox_count=1), FakeRunner(), args)
+
+    assert orchestrator.janitor_config is not None
+    assert orchestrator.janitor_config.project_id == "acme-project"
+    assert orchestrator.janitor_config.ttl_hours == 12
 
 
 def test_build_orchestrator_loads_metadata_launcher_when_present(tmp_path: Path):

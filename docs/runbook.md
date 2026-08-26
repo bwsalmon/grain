@@ -638,6 +638,45 @@ minted for a task still in flight is unaffected (it still gets revoked
 normally when that task's slot frees) — this only stops new ones from
 being minted.
 
+## Enabling the janitor (optional, bwsalmon/agents#113)
+
+`grain automation run-once` can also run a periodic janitor that deletes
+GCE instances, their unattached disks, and grain-minted Gemini API keys
+older than a configured TTL — cleanup for whatever a dispatched agent
+creates in GCP as part of a task and never tears down itself (docs/roadmap.md
+item 16 already tells every agent to fold its own id into anything it
+names, but nothing enforces that it also cleans up after itself). It
+always skips the grain host VM, its data disk, and anything carrying this
+deployment's own Terraform labels (default `managed-by=terraform`) — see
+`grain/automation/janitor.py`'s own docstring for the full safety model.
+Off by default; nothing above requires it. Terraform-managed deployments
+can turn this on declaratively with `enable_janitor = true` (and, if you
+want something other than the 24-hour default, `janitor_ttl_hours = <n>`)
+in `grain.tfvars` instead of the steps below — see `terraform/gcp/variables.tf`.
+
+The janitor only has anything to clean up once the agent account it
+authenticates as already has the roles to list and delete something: turn
+on `agent_can_manage_compute_instances` for the instance/disk half, and/or
+`enable_gemini_key` for the API-key half (both above). Enabling the janitor
+alone, with neither of those, is a harmless no-op that just logs a listing
+failure for each resource kind every cycle.
+
+1. Complete step 8's GCP service account setup first, same as
+   `grain-gemini-key` above — `grain/automation/janitor.py` authenticates
+   `gcloud` with that same primary key rather than asking for a second one.
+2. Run `grain controller configure --janitor-ttl-hours <n> --janitor-name-prefix <prefix>`
+   (any other `controller configure` flags in the same invocation still
+   apply normally — this one is additive). `--janitor-name-prefix` must
+   match this deployment's own resource naming (`name_prefix` in
+   `grain.tfvars`, default `grain`) — it's what tells the janitor which
+   exact instance/disk names are this deployment's own host and must never
+   be deleted. This writes `/data/config/janitor.json`, read fresh on every
+   `automation run-once` invocation, same as `repo-allowlist.json`. A
+   Terraform-managed deployment does this automatically as part of `host
+   bootstrap` instead — see `terraform/gcp/files/deploy.sh`.
+
+To disable it again: delete `/data/config/janitor.json`.
+
 ## Enabling `grain-self-debug` (bwsalmon/agents#62, #86)
 
 A task issue carrying the `grain-self-debug` label gets four extra MCP

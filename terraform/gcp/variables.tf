@@ -387,3 +387,37 @@ variable "bootstrap_ssh_timeout_seconds" {
   description = "How long grain host bootstrap waits for a freshly created VM (the controller, then each sandbox) to answer SSH at all, before giving up on it -- grain's own --ssh-timeout, default 180s. Nested virtualization on a real cloud VM can take longer than that to boot cold, well within deploy_timeout_minutes's much larger budget."
   default     = 600
 }
+
+# ---------------------------------------------------------------- janitor --
+
+variable "enable_janitor" {
+  type        = bool
+  description = <<-EOT
+    Runs a periodic janitor in the controller (bwsalmon/agents#113) that
+    deletes GCE instances, their unattached disks, and grain-minted Gemini
+    API keys older than janitor_ttl_hours -- cleanup for whatever an agent
+    creates in GCP as part of a task and never tears down itself. Skips the
+    grain host VM, its data disk (by name), and anything carrying this
+    deployment's own labels (default managed-by=terraform) -- see
+    grain/automation/janitor.py's own docstring for the full safety model.
+
+    Creates the agent account even if agent_service_account_roles is left
+    empty, agent_can_manage_compute_instances is false, and enable_gemini_key
+    is false, the same way those already do for each other -- but the
+    janitor only has anything to clean up once agent_can_manage_compute_
+    instances and/or enable_gemini_key actually grant it the roles to list
+    and delete something; turning this on alone is a harmless no-op that
+    just logs a listing failure each cycle.
+  EOT
+  default     = false
+}
+
+variable "janitor_ttl_hours" {
+  type        = number
+  description = <<-EOT
+    How old (in hours) a GCE instance, an unattached disk, or a grain-
+    minted Gemini API key must be before enable_janitor's janitor deletes
+    it. Only meaningful when enable_janitor is true.
+  EOT
+  default     = 24
+}

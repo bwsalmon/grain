@@ -38,6 +38,9 @@ METADATA_SERVER_CONFIG_PATH = "/data/config/metadata-server.json"
 # -- same "kept in sync by hand" caveat as the pair above; see this
 # constant's own use in `configure_gemini_key`.
 GEMINI_KEY_CONFIG_PATH = "/data/config/gemini-key.json"
+# Must match grain/automation/janitor.py's `JanitorConfig` load path --
+# same caveat, see this constant's own use in `configure_janitor`.
+JANITOR_CONFIG_PATH = "/data/config/janitor.json"
 
 
 def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
@@ -228,6 +231,33 @@ def configure_gemini_key(runner: Runner, project_id: str) -> None:
     """
     gemini_key_json = json.dumps({"project_id": project_id}, indent=2) + "\n"
     _write_remote_file(runner, GEMINI_KEY_CONFIG_PATH, gemini_key_json, mode="644")
+
+
+def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
+                       name_prefix: str = "grain") -> None:
+    """Writes `/data/config/janitor.json` (bwsalmon/agents#113), the
+    on/off switch `core.py`'s `_janitor` checks before scanning the
+    project for GCE instances, disks, and Gemini API keys past
+    `ttl_hours` old -- absent, `_janitor` is a no-op, the same "unusable
+    request parks the task" shape `configure_gemini_key` already gets, just
+    with nothing to park since this isn't tied to any one task.
+
+    Deliberately places no new credential of its own, same as
+    `configure_gemini_key`: `janitor.py` authenticates with the same
+    primary GCP service-account key `configure_gcp_service_account` already
+    writes to `GCP_SERVICE_ACCOUNT_KEY_PATH` -- run that first.
+
+    `name_prefix` must match the Terraform deployment's own `name_prefix`
+    (default `"grain"`) -- it names the exact host/data-disk resources the
+    janitor must never delete regardless of age. A deployment that
+    customises `name_prefix` and skips this argument would have the
+    janitor protecting the wrong names, so a Terraform-managed deployment
+    always passes its own `var.name_prefix` through (`deploy.sh`).
+    """
+    janitor_json = json.dumps({
+        "project_id": project_id, "ttl_hours": ttl_hours, "name_prefix": name_prefix,
+    }, indent=2) + "\n"
+    _write_remote_file(runner, JANITOR_CONFIG_PATH, janitor_json, mode="644")
 
 
 def ensure_sandbox_tokens(runner: Runner, sandbox_names: list[str]) -> None:
