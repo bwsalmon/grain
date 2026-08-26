@@ -671,7 +671,8 @@ check, and the first time either shows up for a given PR, grain files a
 task is filed with `grain-agent-needs-approval`, not the trigger label, so
 it sits visibly in the queue without being picked up on its own; a comment
 on the original task links to it. Apply the trigger label to it, the same
-action that starts every other task, and the agent set attempts the fix on
+action that starts every other task, or comment `/lgtm` on it
+(bwsalmon/agents#136) — either one lets the agent set attempt the fix on
 a fresh branch built on top of the original PR's own branch — a PR stacked
 on that PR, not a second one against the target repo's default branch.
 That new task also carries `/auto-merge`, so once its own PR reads clean
