@@ -266,6 +266,12 @@ sync_source() {
   # credential, and no secret is ever written under $SRC.
   chmod -R u=rwX,go=rX "$SRC"
   log "grain at $(git -C "$SRC" rev-parse --short HEAD)"
+
+  # `grain` on PATH (bwsalmon/agents#137): this host is where an operator
+  # would otherwise have to `cd "$SRC" && python3 -m grain.cli ...` by hand
+  # (the same tool run_bootstrap below already invokes that way) --
+  # `provision/controller.sh` makes the identical symlink on the controller.
+  ln -sf "$SRC/bin/grain" /usr/local/bin/grain
 }
 
 fetch_base_image() {

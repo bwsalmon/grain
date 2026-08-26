@@ -11,9 +11,11 @@ end.
 
 All commands below assume you're running as the repo's `python3 -m
 grain.cli ...` (shortened to `grain ...` below — there is no installed
-entry point yet, so substitute the full invocation, or `alias grain='python3
--m grain.cli'`). Unless noted, run these **on the controller VM**, not the
-host — the controller is where `/data` and every credential live.
+entry point, so substitute the full invocation, or symlink `bin/grain` onto
+`PATH`: `sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain`, done for you
+already on the controller and on a GCP host — see README.md's "Install").
+Unless noted, run these **on the controller VM**, not the host — the
+controller is where `/data` and every credential live.
 
 ## System map
 
