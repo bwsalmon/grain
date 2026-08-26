@@ -240,3 +240,28 @@ resource "google_project_iam_member" "agent_gke" {
 
   depends_on = [google_project_service.container, google_project_service.artifactregistry]
 }
+
+# bwsalmon/agents#146: container.admin alone cannot create a cluster.
+# Every GKE node pool runs as some service account, and GCP refuses to
+# attach one unless the caller separately holds iam.serviceAccountUser on
+# it -- confirmed live, against a real project, with this grant absent:
+# `gcloud container clusters create` failed with a 400
+# ("does not have access to service account ... Ask a project owner to
+# grant you the iam.serviceAccountUser role") both for the project's
+# default Compute Engine service account (the implicit choice when
+# --service-account is omitted) and for the agent account's own email
+# passed explicitly. Granting it here, on the agent account acting as
+# itself, is what makes `--service-account=<agent email>` work -- and is
+# the one node identity worth using: the default Compute Engine SA often
+# carries broader legacy project roles than this agent has, so pointing
+# node pools at it would be a privilege escalation for anything that ends
+# up running as a pod, where using the agent's own (already fully known,
+# already the boundary agent_gke_roles above sets) identity is not, since
+# roles/container.admin already gives it full access to whatever runs on
+# a cluster it can reach either way.
+resource "google_service_account_iam_member" "agent_acts_as_self_for_gke_nodes" {
+  count              = var.agent_can_manage_gke ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.agent[0].email}"
+}
