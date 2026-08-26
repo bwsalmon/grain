@@ -217,6 +217,23 @@ def test_configure_writes_automation_json_for_the_given_repo(env):
     assert any("dd of=/data/config/automation.json" in c for c in runner.commands)
 
 
+def test_configure_writes_cluster_toml_reflecting_the_real_sandbox_count(env):
+    """The controller has no `--cluster-file` of its own otherwise
+    (`grain/automation/configure.py`'s `configure_cluster` docstring) --
+    without this, `grain-automation.service` would silently dispatch
+    against `Cluster()`'s bare default of two sandboxes forever, no matter
+    what this deployment's real `sandbox_count` is.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert any("dd of=/data/config/cluster.toml" in c for c in runner.commands)
+
+
 def test_github_token_is_only_configured_when_supplied(env):
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(

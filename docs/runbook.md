@@ -428,6 +428,7 @@ session record itself is still kept, just without transcript content.
   config/
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
     automation.json                      # AutomationConfig
+    cluster.toml                         # sandbox_count, subnet -- the controller's own copy; see below
     gemini-key.json                      # GeminiKeyConfig (optional, see below)
     sandbox-github-key.json              # sandbox name -> named credential override, if any (bwsalmon/agents#52)
   state/
@@ -460,6 +461,19 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   all, despite `docs/design.md` describing rotation as "folded into
   recreate" — today that's aspirational, not implemented. Recreating a
   sandbox does *not* rotate its token; do that as a separate, manual step.
+- **`cluster.toml`**: written by `configure_cluster`
+  (`grain/automation/configure.py`) on every `grain host bootstrap` run, not
+  just the first — the host's own `--cluster-file` never leaves the host,
+  so without this copy `grain-automation.service`'s `--cluster-file
+  /data/config/cluster.toml` (`provision/controller.sh`) would resolve to
+  nothing and `Cluster.load` would silently fall back to its bare defaults
+  (`sandbox_count=2`) forever, regardless of what the real deployment's
+  `cluster.toml`/`cluster_overrides` said. Only `sandbox_count` and
+  `subnet` are written — the only two fields `sandbox_names`/`address_of`
+  depend on; everything else in `Cluster` (VM sizing, image, bridge) is a
+  host-side-only concern. Takes effect on the next `automation run-once`
+  tick (every 30s); no restart needed, since it's a oneshot invoked fresh
+  each time, not a long-lived process holding a stale copy in memory.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing
   `/data/secrets/controller-ssh`). `grain host recreate controller
