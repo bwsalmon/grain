@@ -739,7 +739,35 @@ def ensure_workspace(runner: Runner, remote_url: str, path: str = WORKSPACE_PATH
     ]
     if head_sync_line:
         lines.append(head_sync_line.rstrip("\n"))
-    lines.append(f"  git -C {shlex.quote(path)} clean -fdx")
+    # `git clean` cannot remove a file whose *parent directory* the sandbox
+    # user does not own, and a previous task that ran anything as root --
+    # a `sudo` invocation, a container writing into the workspace -- leaves
+    # exactly that behind. Found live: a root-owned `__pycache__` made
+    # `clean` exit 1, and since this script is `set -eu` that failed
+    # `ensure_workspace` itself, so every subsequent dispatch to that
+    # sandbox died at its first step. Nothing would ever have cleared it:
+    # the state that breaks the reset is the state the reset exists to
+    # remove.
+    #
+    # Deliberately not `sudo git clean`: running git as root inside a
+    # user-owned repository trips git's own dubious-ownership guard, and
+    # any file it did create would be one more thing the next reset cannot
+    # remove. Re-cloning is what a sandbox's first dispatch does anyway,
+    # and it reaches the same known-clean state from any corruption, not
+    # just this one.
+    #
+    # Scoped to `clean` failing rather than wrapping the whole reset: a
+    # `fetch` that fails is usually the network or the proxy, and throwing
+    # the checkout away to re-clone over that same network would turn a
+    # retryable blip into a slower one.
+    lines.append(f"  if ! git -C {shlex.quote(path)} clean -fdx; then")
+    lines.append(
+        "    echo 'workspace could not be cleaned (files a previous task left"
+        " root-owned?); re-cloning' >&2"
+    )
+    lines.append(f"    sudo rm -rf {shlex.quote(path)}")
+    lines.append(f"    git clone {shlex.quote(remote_url)} {shlex.quote(path)}")
+    lines.append("  fi")
     lines.append(checkout_line.rstrip("\n"))
     lines.append("else")
     lines.append(f"  git clone {shlex.quote(remote_url)} {shlex.quote(path)}")
