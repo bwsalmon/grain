@@ -2416,6 +2416,60 @@ def test_self_debug_label_needs_no_deployment_config_unlike_gemini_key():
     assert not any(o.startswith("parked") for o in outcomes)
 
 
+# --- Self-repair (bwsalmon/agents#99) ---------------------------------------
+
+SELF_REPAIR_LABELS = ("grain-agent", "grain-self-repair")
+
+
+def test_a_task_with_no_self_repair_label_never_enables_the_tools():
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4)])
+
+    orchestrator.run_once(NOW)
+
+    runner = orchestrator.base_runner
+    assert "--self-repair" not in _mcp_config_args_from(runner)
+    assert "grain-self-repair" not in _prompt_stdin_from(runner)
+
+
+def test_self_repair_label_enables_the_tools_and_tells_the_agent():
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4, labels=SELF_REPAIR_LABELS)])
+
+    orchestrator.run_once(NOW)
+
+    runner = orchestrator.base_runner
+    assert "--self-repair" in _mcp_config_args_from(runner)
+    prompt = _prompt_stdin_from(runner)
+    assert "grain-self-repair" in prompt
+    assert "restart_grain_service" in prompt
+    assert "reboot_controller" in prompt
+
+
+def test_self_repair_label_needs_no_deployment_config_unlike_gemini_key():
+    """Same shape as self_debug_label's own version of this test -- there
+    is no config gating grain-self-repair either, so a plain deployment
+    still dispatches normally."""
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4, labels=SELF_REPAIR_LABELS)])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert not any(o.startswith("parked") for o in outcomes)
+
+
+def test_self_debug_and_self_repair_labels_are_independent():
+    """Carrying grain-self-debug alone must not also turn on the
+    self-repair roster, and vice versa -- the two are separate labels
+    gating separate tool sets."""
+    orchestrator, _ = make_orchestrator(issues=[issue_json(4, labels=SELF_DEBUG_LABELS)])
+
+    orchestrator.run_once(NOW)
+
+    runner = orchestrator.base_runner
+    assert "--self-debug" in _mcp_config_args_from(runner)
+    assert "--self-repair" not in _mcp_config_args_from(runner)
+
+
 # --- surviving a controller VM restart (bwsalmon/agents#51) ---------------
 #
 # `claude -p` runs on the controller now (docs/roadmap.md item 8's

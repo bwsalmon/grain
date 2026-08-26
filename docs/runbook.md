@@ -679,6 +679,62 @@ There is nothing to disable here short of not applying the label — there
 is no config file gating it the way `gemini-key.json` gates
 `grain-gemini-key`.
 
+## Enabling `grain-self-repair` (bwsalmon/agents#99)
+
+A task issue carrying the `grain-self-repair` label gets four more MCP
+tools — the mutating counterpart to `grain-self-debug` above, kept behind
+a deliberately separate label since every self-debug tool is read-only and
+these are not:
+
+- `restart_grain_service`: `systemctl restart` on
+  `grain-automation.service` or `grain-git-proxy.service`, for a wedged
+  service short of rebooting the whole controller.
+- `reboot_sandbox`: reboot the task's own assigned sandbox VM.
+- `reformat_sandbox`: run the same between-task hygiene
+  (`kind delete clusters --all`, `docker system prune -af --volumes`)
+  the sweeper already runs automatically once a task finishes, callable
+  mid-task instead of only between tasks.
+- `reboot_controller`: reboot the controller VM the task's own `claude -p`
+  session is running on — the drastic, last-resort one. This ends the
+  task's turn immediately (the process making the call is about to be
+  killed) and interrupts every other task running concurrently on the same
+  controller, which grain's own stranded-work sweep recovers automatically
+  once the controller is back — the same incremental-state-persistence
+  path `docs/next-session.md` describes existing specifically so "the
+  controller VM can be restarted or recreated at any moment" without
+  losing a task.
+
+Same "no per-deployment config to turn on" shape as `grain-self-debug`:
+`provision/controller.sh` grants `grain-agent` a narrow, unconditional
+NOPASSWD sudo rule (`/etc/sudoers.d/grain-agent-self-repair`) covering
+exactly the three command lines `restart_grain_service`/`reboot_controller`
+need and nothing else; `reboot_sandbox`/`reformat_sandbox` need no new
+grant at all, since the sandbox's own cloud-init default user already
+carries passwordless sudo (docker group membership already covers
+`reformat_sandbox`'s two commands). The label on a task issue is what
+decides whether that task's agent actually gets any of the four.
+
+**What this deliberately does not do.** The issue that asked for this
+(bwsalmon/agents#99) named two more operations — recreating a sandbox
+from scratch, and re-running `grain host bootstrap` to reconverge the
+whole deployment — that are not exposed here, because they cannot be from
+where these tools run. Both are `HostAdapter` operations
+(`grain/adapter/base.py`) against the *host* machine's hypervisor, and the
+controller has no credential or network path to that machine at all in
+this design (`docs/design.md`, "One host machine runs everything";
+`provision/controller.sh` notes plainly that "the public half does NOT
+reach the host by anything this script can do" — admin access goes the
+other direction, host to controller). Closing that gap for real would mean
+building a new host-reachable channel (a host-side listener the controller
+authenticates to, or, on GCP, granting the controller's own service
+account IAM over the host instance it's itself running inside of, which
+`terraform/gcp/iam.tf`'s `agent_conditioned_compute_roles` deliberately
+excludes today) — a real design decision with its own blast-radius
+tradeoffs, not something to wire up silently as a side effect of this
+label. `reboot_sandbox`/`reformat_sandbox`/`reboot_controller` above cover
+the recovery ground reachable without it; a genuinely bad VM (corrupted
+disk, bad base image) still needs an operator's `grain host recreate`.
+
 ## Adding a named GitHub key (bwsalmon/agents#52)
 
 A task labelled `grain-github-<name>` pushes through the git proxy using

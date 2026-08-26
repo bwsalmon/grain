@@ -112,6 +112,14 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     "self_debug_label": (
         CAPABILITY, "c5def5", "Let this task read grain's own controller logs",
     ),
+    # bwsalmon/agents#99: the mutating counterpart to self_debug_label
+    # above, kept as its own row/colour rather than reusing self-debug's --
+    # `test_no_two_labels_share_a_colour` holds every label in this table
+    # to a colour of its own regardless, and the two are genuinely
+    # different grants (read-only vs. restart/reboot/reformat).
+    "self_repair_label": (
+        CAPABILITY, "fef2c0", "Let this task restart grain services or reboot/reformat its sandbox",
+    ),
 }
 
 

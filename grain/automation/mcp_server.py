@@ -137,6 +137,69 @@ never a raw path from the model" discipline:
   (a task dispatched, skipped, succeeded, failed, stranded, and why), the
   durable record of *why* the orchestrator did or didn't act, not just
   what it's doing right now.
+
+Four more tools, `restart_grain_service`, `reboot_sandbox`,
+`reformat_sandbox`, and `reboot_controller` (bwsalmon/agents#99), are the
+mutating half of the self surface -- gated by a *second* label,
+`grain-self-repair`, kept deliberately separate from `grain-self-debug`
+above: every tool that label turns on is read-only by construction, and a
+human who wants an agent to look at grain's own state should not have to
+also hand it the power to restart services, reboot VMs, or wipe a
+sandbox's docker/kind state. `main()`'s `--self-repair` flag (distinct
+from `--self-debug`) gates all four the same way -- advertised and
+answered only then, checked again inside `_dispatch_tool` the same way
+`self_debug` already is, never trusted from the input schema alone.
+
+**What these do and don't reach, and why.** `docs/design.md`'s "One host
+machine runs everything" split matters here: the controller and every
+sandbox are guest VMs the *host* machine's hypervisor manages
+(`grain/adapter/base.py`'s `HostAdapter`), and the host is a different
+machine the controller has no credential or network path to at all
+(`provision/controller.sh`: "The public half does NOT reach the host by
+anything this script can do"). That rules out the two operations an
+operator would actually reach for first -- `grain host recreate
+<sandbox>` (rebuild the VM from its image) and `grain host bootstrap`
+(re-converge the whole deployment) -- neither is exposed here, and neither
+can be without a new host-reachable channel this deployment doesn't have
+today; see `docs/runbook.md`'s "Enabling grain-self-repair" for the gap
+spelled out in full rather than silently faked. What *is* reachable from
+the controller with the runners `McpServer` already holds:
+
+- `restart_grain_service` restarts one of the same two units
+  `read_grain_logs` already reads the journal of -- `grain-automation
+  .service` or `grain-git-proxy.service` -- via `local_runner`, for a
+  service that's wedged short of needing the whole VM rebooted. The same
+  fixed `_SELF_DEBUG_UNITS` allowlist as `read_grain_logs`, not a raw unit
+  name.
+- `reboot_sandbox` reboots the one sandbox this task was ever assigned
+  (`self.runner` -- never a name the model supplies, the same "the sandbox
+  is fixed at process startup" invariant every other sandbox-facing tool
+  here already holds). The blast radius is exactly one sandbox: nothing
+  else in the pool is touched, and the orchestrator's own sweep already
+  tolerates a sandbox that drops off mid-task (`docs/design.md`'s
+  stranded-work handling).
+- `reformat_sandbox` runs `cleanup.py`'s existing between-task hygiene
+  (`kind delete clusters --all`, `docker system prune -af --volumes`) --
+  the same routine `grain host cleanup`/the sweeper's own post-task pass
+  already run, just callable mid-task instead of only between tasks. Short
+  of the VM rebuild this deployment's controller can't reach, this is the
+  deepest reset available.
+- `reboot_controller` is the one genuinely drastic tool here: it reboots
+  the controller VM `claude -p` and this very MCP server are running on.
+  Its own tool description says as much -- like `ask_question`, calling it
+  ends the turn, because the process making the call is about to die.
+  Unlike `reboot_sandbox`, the blast radius is the whole controller: every
+  other task dispatched concurrently on it is interrupted too. That is a
+  real cost, not a hidden one, but it is a *recoverable* one by
+  construction, not a new risk this tool introduces -- `docs/next-session
+  .md` documents `AutomationState` being persisted incrementally, before
+  each GitHub side effect that would otherwise make a mid-flight crash
+  unrecoverable, specifically so "the controller VM can be restarted or
+  recreated at any moment" without losing a task. `reboot_controller`
+  exercises that already-built recovery path deliberately, as a
+  last-resort tool for a controller that is wedged in a way no service
+  restart fixes (a hung kernel thread, a filled root disk, `systemd`
+  itself gone `degraded` in a way `systemctl restart` alone can't clear).
 """
 
 from __future__ import annotations
@@ -151,6 +214,7 @@ from pathlib import Path, PurePosixPath
 from typing import TextIO
 
 from ..run import Runner, RealRunner
+from .cleanup import cleanup
 from .health import check_health
 from .ssh import SshRunner
 
@@ -443,6 +507,100 @@ _SELF_DEBUG_TOOLS = [
     _READ_AUTOMATION_AUDIT_LOG_TOOL,
 ]
 
+# bwsalmon/agents#99: gated by `grain-self-repair`, a *separate* label from
+# `grain-self-debug` above -- see the module docstring for why the two are
+# kept apart. `_RESTART_GRAIN_SERVICE_TOOL` reuses `_SELF_DEBUG_UNITS`
+# directly rather than a second copy of the same two-service allowlist.
+_RESTART_GRAIN_SERVICE_TOOL = {
+    "name": "restart_grain_service",
+    "description": (
+        "Restart one of grain's own controller services -- for a service "
+        "that's wedged or stuck in a bad state short of needing the whole "
+        "controller rebooted. Runs `systemctl restart` on the controller "
+        "itself, not the target repo's code. Only available on a task "
+        "whose issue carries the grain-self-repair label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "unit": {
+                "type": "string",
+                "enum": sorted(_SELF_DEBUG_UNITS),
+                "description": "Which controller service to restart.",
+            },
+        },
+        "required": ["unit"],
+    },
+}
+
+_REBOOT_SANDBOX_TOOL = {
+    "name": "reboot_sandbox",
+    "description": (
+        "Reboot your assigned sandbox VM -- for a sandbox that's wedged in "
+        "a way `reformat_sandbox` alone won't clear (a hung docker daemon, "
+        "a degraded systemd). Only ever targets the one sandbox this task "
+        "was dispatched to, never named by you. The SSH connection this "
+        "runs over will itself be cut by the reboot, so a broken-pipe-like "
+        "error back from this call is the expected outcome, not a sign it "
+        "failed. Only available on a task whose issue carries the "
+        "grain-self-repair label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    },
+}
+
+_REFORMAT_SANDBOX_TOOL = {
+    "name": "reformat_sandbox",
+    "description": (
+        "Reset your assigned sandbox's docker/kind state -- the same "
+        "between-task hygiene (`kind delete clusters --all`, `docker "
+        "system prune -af --volumes`) grain already runs automatically "
+        "once a task finishes, callable mid-task instead of only between "
+        "tasks. Does not touch your git workspace or reboot the sandbox. "
+        "Only available on a task whose issue carries the grain-self-repair "
+        "label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    },
+}
+
+_REBOOT_CONTROLLER_TOOL = {
+    "name": "reboot_controller",
+    "description": (
+        "Reboot the controller VM this task's own `claude -p` session and "
+        "MCP server are running on -- the last-resort tool here, for a "
+        "controller wedged in a way no service restart fixes. This ends "
+        "your turn: the process making this call is about to be killed by "
+        "the reboot it just triggered, and any other task running "
+        "concurrently on this same controller is interrupted too (it will "
+        "be recovered automatically once the controller comes back -- "
+        "grain's stranded-work sweep exists exactly for this). Do not take "
+        "any further actions after calling this. Only available on a task "
+        "whose issue carries the grain-self-repair label."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    },
+}
+
+# bwsalmon/agents#99: same "one list, not four separate `if self.x:`
+# branches" shape as `_SELF_DEBUG_TOOLS` above.
+_SELF_REPAIR_TOOLS = [
+    _RESTART_GRAIN_SERVICE_TOOL,
+    _REBOOT_SANDBOX_TOOL,
+    _REFORMAT_SANDBOX_TOOL,
+    _REBOOT_CONTROLLER_TOOL,
+]
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -677,6 +835,88 @@ def read_automation_audit_log(local_runner: Runner, *, lines: int | None = None)
     return ToolResult(text=text, is_error=result.returncode != 0)
 
 
+def restart_grain_service(local_runner: Runner, unit: str) -> ToolResult:
+    """Restarts one of grain's own controller services (bwsalmon/agents#99)
+    -- run against `local_runner`, the controller, same as every other
+    self-* tool that reads or touches something on the controller itself
+    rather than the sandbox. `unit` is resolved through `_SELF_DEBUG_UNITS`
+    before it ever reaches an argv, the same discipline `read_grain_logs`
+    already holds it to -- reused directly rather than a second copy of
+    the same two-service allowlist.
+
+    `sudo` here relies on the narrow, unconditional NOPASSWD grant
+    `provision/controller.sh` gives `grain-agent` for exactly this command
+    line (and no other) -- the mutating counterpart to the `systemd-journal`
+    group membership that already makes `read_grain_logs` work.
+    """
+    service = _SELF_DEBUG_UNITS.get(unit)
+    if service is None:
+        return ToolResult(
+            text=f"Unknown unit {unit!r}. Must be one of: {', '.join(sorted(_SELF_DEBUG_UNITS))}.",
+            is_error=True,
+        )
+    result = local_runner.run(["sudo", "systemctl", "restart", service], check=False)
+    text = f"exit={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    return ToolResult(text=text, is_error=result.returncode != 0)
+
+
+def reboot_sandbox(runner: Runner) -> ToolResult:
+    """Reboots the assigned sandbox (bwsalmon/agents#99) over `runner` --
+    the same `SshRunner` `run_command`/`read_file`/etc. already use, so
+    this can never be pointed at any sandbox other than the one this task
+    was dispatched to. The sandbox's own cloud-init default user already
+    carries passwordless sudo (the same assumption `cleanup.py`/`health.py`
+    already make of it), so no new provisioning is needed for this one,
+    unlike `restart_grain_service`'s controller-side grant.
+
+    A reboot cuts the SSH session that issued it, so `runner.run` returning
+    a nonzero code or a transport-level failure here is the expected shape
+    of *success*, not a sign the reboot didn't happen -- reported as
+    informational text either way rather than as an error, so the agent
+    doesn't read its own successful reboot as a tool malfunction.
+    """
+    result = runner.run(["sudo", "reboot"], check=False)
+    return ToolResult(
+        text=(f"Reboot triggered (exit={result.returncode}). The SSH "
+              "connection this ran over may already have dropped as a "
+              "result -- that is expected, not a failure.")
+    )
+
+
+def reformat_sandbox(runner: Runner) -> ToolResult:
+    """Runs `cleanup.py`'s existing between-task hygiene against the
+    assigned sandbox (bwsalmon/agents#99) -- the same routine the sweeper
+    already runs automatically once a task's slot frees, exposed here so
+    an agent can reach for it mid-task instead of only ever getting it for
+    free between tasks. Reuses `cleanup()` directly rather than
+    reimplementing its steps, so the two never drift apart.
+    """
+    result = cleanup(runner)
+    return ToolResult(text=f"status={'ok' if result.ok else 'FAIL'}\n{result.summary()}",
+                       is_error=not result.ok)
+
+
+def reboot_controller(local_runner: Runner) -> ToolResult:
+    """Reboots the controller VM itself (bwsalmon/agents#99) -- the
+    genuinely drastic tool in this roster; see the module docstring for
+    the full reasoning on blast radius and why it's still safe to expose.
+    Run against `local_runner`, since there is no sandbox to reach over
+    SSH for this one -- the controller *is* where this process runs.
+
+    Relies on the same `provision/controller.sh` NOPASSWD grant
+    `restart_grain_service` does, for `systemctl reboot` specifically.
+    Like that reboot, this call's own process is about to be killed by the
+    action it just triggered, so the text returned here is unlikely to
+    ever reach the model -- `_dispatch_tool`'s caller sends the response
+    on a best-effort basis before the VM actually goes down.
+    """
+    local_runner.run(["sudo", "systemctl", "reboot"], check=False)
+    return ToolResult(
+        text="Controller reboot triggered. Do not take any further "
+             "actions -- this process is about to be killed."
+    )
+
+
 class McpServer:
     """The JSON-RPC method dispatch, kept separate from stdio plumbing
     (`serve()`) so `handle()` can be exercised directly in tests with a
@@ -687,6 +927,7 @@ class McpServer:
                  question_path: str | None = None,
                  comment_path: str | None = None,
                  self_debug: bool = False,
+                 self_repair: bool = False,
                  local_runner: Runner | None = None,
                  task_unit: str | None = None) -> None:
         self.runner = runner
@@ -703,6 +944,11 @@ class McpServer:
         # whether `read_grain_logs` is advertised at all (`tools/list`
         # below) and whether it does anything if called anyway.
         self.self_debug = self_debug
+        # bwsalmon/agents#99: the same "task issue carried the label"
+        # record as `self_debug`, for `self_repair_label`/`--self-repair`
+        # -- a deliberately separate flag, not folded into `self_debug`,
+        # since these four tools mutate state instead of only reading it.
+        self.self_repair = self_repair
         # bwsalmon/agents#97: this dispatch's own `grain-task-<sandbox>`
         # unit name, from `--task-unit` -- `read_grain_logs`'s dynamic
         # `grain-task` case resolves against this, never a name a tool call
@@ -733,7 +979,11 @@ class McpServer:
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
-            tools = TOOLS + (_SELF_DEBUG_TOOLS if self.self_debug else [])
+            tools = (
+                TOOLS
+                + (_SELF_DEBUG_TOOLS if self.self_debug else [])
+                + (_SELF_REPAIR_TOOLS if self.self_repair else [])
+            )
             return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
         if method == "tools/call":
             return self._handle_call(msg_id, msg.get("params") or {})
@@ -823,16 +1073,52 @@ class McpServer:
                     is_error=True,
                 )
             return read_automation_audit_log(self.local_runner, lines=args.get("lines"))
+        if name == "restart_grain_service":
+            if not self.self_repair:
+                return ToolResult(
+                    text="restart_grain_service is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-repair label.",
+                    is_error=True,
+                )
+            return restart_grain_service(self.local_runner, args["unit"])
+        if name == "reboot_sandbox":
+            if not self.self_repair:
+                return ToolResult(
+                    text="reboot_sandbox is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-repair label.",
+                    is_error=True,
+                )
+            return reboot_sandbox(self.runner)
+        if name == "reformat_sandbox":
+            if not self.self_repair:
+                return ToolResult(
+                    text="reformat_sandbox is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-repair label.",
+                    is_error=True,
+                )
+            return reformat_sandbox(self.runner)
+        if name == "reboot_controller":
+            if not self.self_repair:
+                return ToolResult(
+                    text="reboot_controller is not enabled for this task -- "
+                         "only available when the task issue carries the "
+                         "grain-self-repair label.",
+                    is_error=True,
+                )
+            return reboot_controller(self.local_runner)
         return None
 
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
           comment_path: str | None = None, self_debug: bool = False,
-          task_unit: str | None = None,
+          self_repair: bool = False, task_unit: str | None = None,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
     server = McpServer(runner, workspace, question_path=question_path,
                         comment_path=comment_path, self_debug=self_debug,
-                        task_unit=task_unit)
+                        self_repair=self_repair, task_unit=task_unit)
     for line in stdin:
         line = line.strip()
         if not line:
@@ -859,6 +1145,10 @@ def main() -> None:
     # added it, which only happens for a task whose issue carried
     # `self_debug_label`.
     parser.add_argument("--self-debug", action="store_true")
+    # bwsalmon/agents#99: same shape as --self-debug, for `self_repair_label`
+    # -- a separate flag, since the two labels (and the tool rosters they
+    # gate) are deliberately independent.
+    parser.add_argument("--self-repair", action="store_true")
     # bwsalmon/agents#97: this dispatch's own `grain-task-<sandbox>` unit
     # name -- `dispatch.py`'s `unit_name()`, the same one `systemd-run`
     # started this whole `claude -p` process under. Optional, not required
@@ -873,7 +1163,7 @@ def main() -> None:
     )
     serve(runner, args.workspace, question_path=args.question_path,
           comment_path=args.comment_path, self_debug=args.self_debug,
-          task_unit=args.task_unit)
+          self_repair=args.self_repair, task_unit=args.task_unit)
 
 
 if __name__ == "__main__":

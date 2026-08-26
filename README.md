@@ -726,6 +726,35 @@ fixed allowlist of non-secret file names rather than a raw path, and
 of the four can write to anything or reach any other file, unit, or
 credential on the controller.
 
+**Label a task `grain-self-repair`** (bwsalmon/agents#99) to give the
+agent four more tools — the mutating counterpart to `grain-self-debug`
+above, kept behind its own label since none of these are read-only:
+
+- `restart_grain_service`: `systemctl restart` on
+  `grain-automation.service` or `grain-git-proxy.service`, for a wedged
+  service short of rebooting the whole controller.
+- `reboot_sandbox`: reboot the task's own assigned sandbox VM.
+- `reformat_sandbox`: run the same between-task hygiene (`kind delete
+  clusters --all`, `docker system prune -af --volumes`) grain already
+  runs automatically once a task finishes, callable mid-task instead of
+  only between tasks.
+- `reboot_controller`: reboot the controller VM this task's own session is
+  running on — a last resort that ends the task's turn immediately and
+  interrupts any other task running concurrently on the same controller,
+  recovered automatically by grain's own stranded-work sweep once the
+  controller is back.
+
+Same "on unconditionally, no separate `controller configure` step" shape
+as `grain-self-debug` — `provision/controller.sh` grants `grain-agent` a
+narrow, unconditional sudo rule covering exactly the command lines
+`restart_grain_service`/`reboot_controller` need, nothing else. **What it
+deliberately doesn't cover**: rebuilding a sandbox from scratch or
+re-running `grain host bootstrap`, both `HostAdapter` operations against
+the *host* machine's hypervisor that this deployment's controller has no
+credential or network path to reach at all (see `docs/runbook.md`,
+"Enabling `grain-self-repair`," for the gap spelled out in full) — a
+genuinely bad VM still needs an operator's `grain host recreate`.
+
 **Label an issue `grain-github-<name>`** to have that task's git pushes use
 a named credential instead of the deployment's default one — for a task
 that genuinely needs a scope the default deliberately withholds (the

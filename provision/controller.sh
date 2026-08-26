@@ -97,6 +97,29 @@ ln -sf /home/grain-agent/.local/bin/claude /usr/local/bin/claude
 # already get with a plain `journalctl -u ...` themselves.
 usermod -aG systemd-journal grain-agent
 
+# The mutating counterpart to the read-only journal grant above
+# (bwsalmon/agents#99, "self-repair"): grain-agent otherwise has no sudo at
+# all, and restarting a controller service or rebooting the box needs
+# root. Exactly three command lines, matched verbatim by sudoers -- never
+# a blanket grant, and never a wildcard -- so this grant can restart
+# grain-automation.service, restart grain-git-proxy.service, or reboot,
+# and nothing else. Gated per-task on the grain-self-repair label the same
+# way read_grain_logs is gated on grain-self-debug
+# (grain/automation/mcp_server.py's `restart_grain_service`/
+# `reboot_controller`, `dispatch.py` only ever passes `--self-repair`
+# then); this file is unconditional on every deployment, the same
+# "software gate, not infra gate" split the systemd-journal group grant
+# above already uses. `visudo -cf` validates the file before it can ever
+# be loaded -- a syntax error here must not silently disable sudo
+# deployment-wide.
+cat > /etc/sudoers.d/grain-agent-self-repair <<'SUDOERS'
+grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-automation.service
+grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-git-proxy.service
+grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+SUDOERS
+chmod 0440 /etc/sudoers.d/grain-agent-self-repair
+visudo -cf /etc/sudoers.d/grain-agent-self-repair
+
 # --- /data: the disk that outlives a controller rebuild (docs/design.md,
 # "Secrets on /data"). On GCP this is expected to be a separate persistent
 # disk, attached before this script runs; nothing here formats or mounts
@@ -293,6 +316,12 @@ Set up by provision/controller.sh:
 - grain-agent's read-only membership in the systemd-journal group
   (bwsalmon/agents#62), so its MCP server can `journalctl` grain's own
   services when a task carries the grain-self-debug label
+- grain-agent's narrow sudo grant (bwsalmon/agents#99),
+  /etc/sudoers.d/grain-agent-self-repair -- exactly `systemctl restart
+  grain-automation.service`, `systemctl restart grain-git-proxy.service`,
+  and `systemctl reboot`, nothing else -- so its MCP server can restart a
+  wedged service or reboot the controller itself when a task carries the
+  grain-self-repair label
 - the /data/{secrets,config,state} layout grain/automation, grain/proxy and
   grain/metadata already expect, including /data/state/automation/units
   where each dispatch's prompt/MCP-config/transcript now live

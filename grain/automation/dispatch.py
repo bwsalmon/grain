@@ -416,9 +416,41 @@ def _self_debug_line() -> str:
     )
 
 
+def _self_repair_line() -> str:
+    """Told to the agent only when this task's issue carried
+    `self_repair_label` (bwsalmon/agents#99) -- a separate, deliberately
+    smaller set of tools than `_self_debug_line()`'s four: those are all
+    read-only, these four mutate state (restart a service, reboot or
+    reformat the sandbox, reboot the controller itself), which is exactly
+    why they sit behind their own label rather than being folded into
+    `grain-self-debug`.
+    """
+    return (
+        "This task also carries the grain-self-repair label, so you have "
+        "four more tools, all of which change something rather than just "
+        "reading it -- use them to recover from a failure in grain itself, "
+        "not to modify the target repo's own code:\n"
+        "- restart_grain_service: restart grain-automation.service or "
+        "grain-git-proxy.service on the controller.\n"
+        "- reboot_sandbox: reboot your assigned sandbox VM.\n"
+        "- reformat_sandbox: reset your assigned sandbox's docker/kind "
+        "state (the same hygiene grain already runs between tasks).\n"
+        "- reboot_controller: reboot the controller VM this session itself "
+        "is running on -- a last resort; this ends your turn immediately, "
+        "and interrupts any other task running concurrently on this "
+        "controller too (grain's own stranded-work recovery picks it back "
+        "up once the controller is back).\n"
+        "None of these can rebuild a VM from scratch or re-run grain's own "
+        "bootstrap -- this deployment's controller has no credential or "
+        "network path to the host machine that would take, so that stays a "
+        "human/operator action."
+    )
+
+
 def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = (),
             *, task_repo: str = "", target_repo: str = "", agent_id_value: str = "",
-            gemini_key: bool = False, self_debug: bool = False) -> str:
+            gemini_key: bool = False, self_debug: bool = False,
+            self_repair: bool = False) -> str:
     """`task_repo` is where the issue itself lives (the agent set's queue);
     `target_repo` is where the code is. Two different repos in the general
     case — the prompt says which is which, because "the repository" would
@@ -451,6 +483,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     """
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
     self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
+    self_repair_section = f"{_self_repair_line()}\n\n" if self_repair else ""
     return (
         f"You are working {task_repo}#{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n\n"
@@ -467,6 +500,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
         f"{self_debug_section}"
+        f"{self_repair_section}"
         "When you are done, commit your changes with a clear, descriptive "
         "commit message -- a short summary line, then a blank line, then a "
         "paragraph explaining what changed and why. Your final commit "
@@ -499,7 +533,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
                thread_comments: list[Comment] = (), *, task_repo: str = "",
                target_repo: str = "", task_issue: int | None = None,
                agent_id_value: str = "", gemini_key: bool = False,
-               self_debug: bool = False) -> str:
+               self_debug: bool = False, self_repair: bool = False) -> str:
     """A PR-continuation dispatch. The PR lives in `target_repo`; the task
     that asked for the work — and the conversation a human is having about
     it — lives in `task_repo`, as issue `task_issue` (a `/pr` directive on
@@ -522,6 +556,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
     )
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
     self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
+    self_repair_section = f"{_self_repair_line()}\n\n" if self_repair else ""
     return (
         f"You are continuing existing work on pull request "
         f"{target_repo}#{pr.number}: {pr.title}\n\n"
@@ -538,6 +573,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
         f"{self_debug_section}"
+        f"{self_repair_section}"
         "Review feedback on this pull request so far:\n\n"
         f"{feedback}\n\n"
         "Conversation on this pull request so far (a prior attempt may have "
@@ -684,7 +720,8 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
 
 def _mcp_config_json(target: SandboxTarget, question_path_value: str,
                       comment_path_value: str, task_unit: str, *,
-                      self_debug: bool = False) -> str:
+                      self_debug: bool = False,
+                      self_repair: bool = False) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
     `mcp_server.py` is invoked as its own process, per dispatch, with the
     assigned sandbox's connection details baked into its argv here. Nothing
@@ -719,6 +756,8 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
     ]
     if self_debug:
         args.append("--self-debug")
+    if self_repair:
+        args.append("--self-repair")
     return json.dumps({
         "mcpServers": {
             "grain-sandbox": {
@@ -761,6 +800,15 @@ _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__check_grain_health,"
     "mcp__grain-sandbox__read_grain_config,"
     "mcp__grain-sandbox__read_automation_audit_log,"
+    # bwsalmon/agents#99: same unconditional pre-approval as the four
+    # self-debug tools above, for the same reason -- `mcp_server.py` only
+    # advertises (and answers) this roster when started with
+    # `--self-repair`, which `_mcp_config_json` only adds for a task whose
+    # issue carried `self_repair_label`.
+    "mcp__grain-sandbox__restart_grain_service,"
+    "mcp__grain-sandbox__reboot_sandbox,"
+    "mcp__grain-sandbox__reformat_sandbox,"
+    "mcp__grain-sandbox__reboot_controller,"
     f"{_NATIVE_TOOLS}"
 )
 
@@ -768,7 +816,7 @@ _ALLOWED_TOOLS = (
 def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, prompt: str, *, remote_url: str, token: str,
                  branch: str | None = None, gemini_key: str | None = None,
-                 self_debug: bool = False) -> str:
+                 self_debug: bool = False, self_repair: bool = False) -> str:
     """The common tail of both `dispatch()` and `dispatch_pr()`. Two
     runners now, not one (docs/roadmap.md item 8's "Update"): `sandbox_runner`
     still prepares the workspace and credentials on the sandbox itself,
@@ -825,7 +873,9 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path, c_path, unit, self_debug=self_debug),
+        stdin=_mcp_config_json(target, q_path, c_path, unit,
+                                self_debug=self_debug,
+                                self_repair=self_repair),
     )
     out_path = transcript_path(unit)
     start_unit(
@@ -851,7 +901,7 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
              target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
              base: str | None = None, comments: list[Comment] = (), task_repo: str = "",
              target_repo: str = "", gemini_key: str | None = None,
-             self_debug: bool = False) -> str:
+             self_debug: bool = False, self_repair: bool = False) -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
     `claude -p` on the controller, pointed at that same sandbox via
@@ -893,6 +943,11 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     issue carried `self_debug_label` — threaded through to `_start_task`
     (which turns on `mcp_server.py`'s `read_grain_logs` tool) and the
     prompt (which tells the agent about it, only when it's on).
+    `self_repair` (bwsalmon/agents#99) is the identical treatment for
+    `self_repair_label` — a separate label/flag from `self_debug`, turning
+    on the mutating `restart_grain_service`/`reboot_sandbox`/
+    `reformat_sandbox`/`reboot_controller` roster instead of the read-only
+    one.
     """
     push_branch = branch_name(issue.number)
     return _start_task(
@@ -900,9 +955,9 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
         _prompt(issue, push_branch, target.workspace, comments,
                 task_repo=task_repo, target_repo=target_repo,
                 agent_id_value=agent_id(), gemini_key=gemini_key is not None,
-                self_debug=self_debug),
+                self_debug=self_debug, self_repair=self_repair),
         remote_url=remote_url, token=token, branch=base, gemini_key=gemini_key,
-        self_debug=self_debug,
+        self_debug=self_debug, self_repair=self_repair,
     )
 
 
@@ -911,7 +966,8 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  comments: list[ReviewComment], *, remote_url: str, token: str,
                  thread_comments: list[Comment] = (), task_repo: str = "",
                  target_repo: str = "", task_issue: int | None = None,
-                 gemini_key: str | None = None, self_debug: bool = False) -> str:
+                 gemini_key: str | None = None, self_debug: bool = False,
+                 self_repair: bool = False) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
     (`pr.head_ref`) instead of the default branch, and the prompt carries the
@@ -933,16 +989,18 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     same name — see its docstring; `gemini_key_label` on the task issue
     works identically for a PR-continuation dispatch. `self_debug`
     (bwsalmon/agents#62) is likewise `dispatch()`'s own parameter of the
-    same name, unchanged.
+    same name, unchanged. `self_repair` (bwsalmon/agents#99) is likewise
+    `dispatch()`'s own parameter of the same name, unchanged.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _pr_prompt(pr, comments, target.workspace, thread_comments,
                    task_repo=task_repo, target_repo=target_repo,
                    task_issue=task_issue, agent_id_value=agent_id(),
-                   gemini_key=gemini_key is not None, self_debug=self_debug),
+                   gemini_key=gemini_key is not None, self_debug=self_debug,
+                   self_repair=self_repair),
         remote_url=remote_url, token=token, branch=pr.head_ref, gemini_key=gemini_key,
-        self_debug=self_debug,
+        self_debug=self_debug, self_repair=self_repair,
     )
 
 

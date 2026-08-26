@@ -176,6 +176,25 @@ def test_journal_forwarding_cannot_abort_provisioning():
     assert line.rstrip().endswith("||") or "||" in line, line
 
 
+def test_grants_grain_agent_a_narrow_sudoers_rule_for_self_repair():
+    """bwsalmon/agents#99: the mutating counterpart to the read-only
+    systemd-journal group grant -- exactly the three command lines
+    `restart_grain_service`/`reboot_controller` (`mcp_server.py`) need,
+    matched verbatim by sudoers, never a wildcard or NOPASSWD:ALL."""
+    text = read()
+    assert "/etc/sudoers.d/grain-agent-self-repair" in text
+    assert "grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-automation.service" in text
+    assert "grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-git-proxy.service" in text
+    assert "grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl reboot" in text
+    assert "NOPASSWD: ALL" not in text
+    assert "NOPASSWD:ALL" not in text
+
+
+def test_the_sudoers_rule_is_syntax_checked_before_it_can_be_loaded():
+    text = read()
+    assert "visudo -cf /etc/sudoers.d/grain-agent-self-repair" in text
+
+
 def test_no_command_reloads_a_unit_that_cannot_be_reloaded():
     """`systemctl daemon-reload` (the manager) is always valid; a per-unit
     `systemctl reload` is only valid for a unit that declares ExecReload,
