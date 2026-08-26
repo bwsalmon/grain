@@ -82,10 +82,11 @@ class AutomationConfig:
     # but `_dispatch`'s own poll (which only ever lists `trigger_label`)
     # never picks it up on its own. A human applies `trigger_label` to it
     # once they're satisfied the fix is worth attempting, the same action
-    # that starts every other task; `_dispatch` then strips this label off
-    # on the same cycle it dispatches, the same "exactly one state at a
-    # time" invariant `labels.py`'s own docstring holds every other state
-    # label to.
+    # that starts every other task -- or, equivalently, comments `/lgtm`
+    # on it (bwsalmon/agents#136, `core.py`'s `_promote_lgtm_comments`);
+    # `_dispatch` then strips this label off on the same cycle it
+    # dispatches, the same "exactly one state at a time" invariant
+    # `labels.py`'s own docstring holds every other state label to.
     needs_approval_label: str = "grain-agent-needs-approval"
     # Asks for a short-lived Gemini API key for the task it's applied to
     # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once

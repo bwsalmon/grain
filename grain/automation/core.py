@@ -166,6 +166,14 @@ from ..run import CommandError, Runner
 # exists to close (docs/design.md's split surface).
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
+# `/lgtm` on its own line approves a `needs_approval_label` issue
+# (bwsalmon/agents#136) -- the comment-triggered equivalent of applying
+# `trigger_label` by hand. Line-anchored like `directives.py`'s own
+# `_DIRECTIVE_RE`, so a prose sentence that merely mentions "lgtm" doesn't
+# count, but this isn't a directive itself: it carries no value, and it
+# acts on a label rather than becoming part of a task's own configuration.
+_LGTM_RE = re.compile(r"^\s*/lgtm\s*$", re.MULTILINE | re.IGNORECASE)
+
 # A consistent, visible marker on everything grain-agent itself posts to
 # GitHub (docs/roadmap.md item 14) -- so a comment or PR is immediately
 # recognizable as automation output at a glance, regardless of which
@@ -497,6 +505,7 @@ class Orchestrator:
         self._restart_orphaned_in_progress()
         self._promote_answered_questions(now)
         self._restart_commented_completions()
+        self._promote_lgtm_comments()
         self._close_finished_prs()
         self._dispatch(now)
 
@@ -1279,6 +1288,86 @@ class Orchestrator:
                         "completed issue -- reopened and requeued",
             )
 
+    # --- lgtm approval on comment (bwsalmon/agents#136) -------------------
+
+    def _promote_lgtm_comments(self) -> None:
+        """A `needs_approval_label` issue (`_suggest_fix`, bwsalmon/agents#83)
+        sits idle until a human applies `trigger_label` by hand -- what this
+        adds is a second way to say the same thing: a trusted `/lgtm`
+        comment. Polls every open issue currently carrying
+        `needs_approval_label` each cycle and looks for a comment, from
+        someone in `_TRUSTED_REPLY_ASSOCIATIONS`, with a line that reads
+        `/lgtm` -- the same trust tier every other comment-triggered
+        promotion in this module already requires, since approving a task
+        is exactly the "a human decided this" act the trigger label itself
+        gates.
+
+        No baseline comment id to diff against, unlike
+        `_promote_answered_questions`/`_restart_commented_completions`:
+        `trigger_label` goes on and `needs_approval_label` comes straight
+        off in the same pass, so the issue no longer matches `list_issues`'s
+        own label filter on the next cycle -- there is nothing left that
+        could re-trigger on the same comment.
+
+        `needs_approval_label` is only ever applied by `_suggest_fix`, which
+        records the issue it just filed as `fix_issue` on the *original*
+        PR's own `OpenPullRequest` record -- so, the same way
+        `_promote_answered_questions`/`_restart_commented_completions` skip
+        straight past an empty `pending_questions`/`completed_issues`, this
+        skips the `list_issues` call entirely unless `state` says a
+        suggested fix is actually outstanding somewhere. Without that
+        guard, every single `run_once` on every deployment would carry one
+        more GitHub call for a feature the overwhelming majority of cycles
+        have nothing to do with.
+
+        A 404 from `list_issues` or `list_comments` means the task repo (or
+        one particular issue) is gone from underneath this deployment's own
+        config -- read the same as everywhere else in this module: nothing
+        to act on this cycle, not a reason to crash it.
+        """
+        if not any(o.fix_issue is not None
+                   for o in self.state.open_pull_requests.values()):
+            return
+        try:
+            issues = self.github.list_issues(
+                self.config.task_owner, self.config.task_repo,
+                self.config.needs_approval_label,
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            return
+        for issue in issues:
+            try:
+                comments = self.github.list_comments(
+                    self.config.task_owner, self.config.task_repo, issue.number
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                continue
+            approval = next(
+                (c for c in comments
+                 if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
+                 and _LGTM_RE.search(c.body)),
+                None,
+            )
+            if approval is None:
+                continue
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                issue.number, self.config.needs_approval_label,
+            )
+            self.github.add_label(
+                self.config.task_owner, self.config.task_repo,
+                issue.number, self.config.trigger_label,
+            )
+            self.audit.record(
+                sandbox=None, issue=issue.number,
+                outcome=f"{approval.user} ({approval.author_association}) "
+                        "commented /lgtm -- approved and requeued",
+            )
+
     # --- closing on PR close (bwsalmon/agents#54) -------------------------
 
     def _pr_health(self, owner: str, repo: str, pr: PullRequestDetail) -> _PrHealth:
@@ -1345,8 +1434,8 @@ class Orchestrator:
                     "branch) and, once it succeeds, its own pull request is merged "
                     f"back into `{pr.head_ref}` automatically -- no separate review "
                     "needed for the fix itself.\n\n"
-                    f"Apply the `{self.config.trigger_label}` label to this issue to "
-                    "let the agent set attempt it.\n\n"
+                    f"Apply the `{self.config.trigger_label}` label to this issue, or "
+                    "comment `/lgtm` on it, to let the agent set attempt it.\n\n"
                     f"/repo {target}\n/base {pr.head_ref}\n/auto-merge true\n"
                 ),
                 labels=[self.config.needs_approval_label],
@@ -1355,8 +1444,8 @@ class Orchestrator:
                 task.owner, task.name, pending.issue,
                 f"{_AUTOMATION_SIGNATURE}\n\n"
                 f"{target}#{pending.pr_number} {reason} -- filed {task}#{new_issue.number} "
-                f"to fix it. Apply the `{self.config.trigger_label}` label there once "
-                "you're happy for the agent to attempt it.",
+                f"to fix it. Apply the `{self.config.trigger_label}` label there, or "
+                "comment `/lgtm` on it, once you're happy for the agent to attempt it.",
             )
         except GitHubError as exc:
             if exc.status != 404:

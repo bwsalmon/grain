@@ -1619,6 +1619,10 @@ def test_close_finished_prs_does_not_suggest_a_fix_twice():
     state.record_open_pr(5, "o", "r", 42)
     state.mark_fix_suggested(5, 100)
     orchestrator, transport = make_orchestrator(issues=[], state=state)
+    # _promote_lgtm_comments runs first now that a fix is on record
+    # (bwsalmon/agents#136) -- it lists issues carrying needs_approval_label
+    # before _close_finished_prs gets to its own get_pull_request poll.
+    transport.responses.append(ApiResponse(200, {}, b"[]"))
     transport.responses.append(open_pr_response(42, mergeable=False))
 
     orchestrator.run_once(NOW)
@@ -1656,6 +1660,113 @@ def test_close_finished_prs_tolerates_a_404_while_suggesting_a_fix():
     orchestrator.run_once(NOW)  # must not raise
 
     assert orchestrator.state.open_pull_requests["5"].fix_issue is None
+
+
+# --- lgtm approval on comment (bwsalmon/agents#136) -------------------------
+
+def test_an_lgtm_comment_approves_a_suggested_fix_the_same_as_trigger_label_would():
+    """A trusted `/lgtm` comment on a `needs_approval_label` issue
+    (`_suggest_fix`, bwsalmon/agents#83) is a second way to approve it,
+    alongside a human applying `trigger_label` by hand
+    (`test_dispatch_strips_the_needs_approval_label_once_a_human_approves`).
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.mark_fix_suggested(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="maintainer", body="looks good\n/lgtm",
+                              author_association="OWNER"),
+        ]).encode()),
+        ApiResponse(200, {}, b"{}"),  # remove_label(needs_approval_label)
+        ApiResponse(200, {}, b"{}"),  # add_label(trigger_label)
+        open_pr_response(42, mergeable=True),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/100/labels/grain-agent-needs-approval"
+        for c in transport.calls
+    )
+    added = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/100/labels"
+    )
+    assert json.loads(added["body"]) == {"labels": ["grain-agent"]}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("maintainer" in o and "/lgtm" in o for o in outcomes)
+
+
+def test_an_untrusted_lgtm_comment_does_not_approve_a_suggested_fix():
+    """Same prompt-injection concern every other comment-triggered
+    promotion in this module already guards against (see
+    `test_an_untrusted_comment_does_not_restart_a_completed_issue`): a
+    random public commenter must not be able to approve a suggested fix
+    for the agent set to attempt just by leaving a comment.
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.mark_fix_suggested(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="rando", body="/lgtm",
+                              author_association="NONE"),
+        ]).encode()),
+        open_pr_response(42, mergeable=True),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] in ("DELETE", "POST") and "/labels" in c["path"]
+                   for c in transport.calls)
+
+
+def test_a_comment_without_lgtm_does_not_approve_a_suggested_fix():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.mark_fix_suggested(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="maintainer", body="not yet, this needs more work",
+                              author_association="OWNER"),
+        ]).encode()),
+        open_pr_response(42, mergeable=True),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] in ("DELETE", "POST") and "/labels" in c["path"]
+                   for c in transport.calls)
+
+
+def test_no_suggested_fix_on_record_skips_the_lgtm_poll_entirely():
+    """The overwhelming common case: no `_suggest_fix` has ever run, so
+    `state.open_pull_requests` carries no `fix_issue` at all. This must
+    add no GitHub call to a plain `run_once` -- see
+    `_promote_lgtm_comments`'s own docstring for why that guard matters.
+    """
+    orchestrator, transport = make_orchestrator(issues=[])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(
+        c["method"] == "GET" and "labels=grain-agent-needs-approval" in c["path"]
+        for c in transport.calls
+    )
 
 
 # --- auto-merging a stacked fix PR (bwsalmon/agents#83) --------------------
