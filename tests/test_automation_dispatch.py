@@ -848,3 +848,15 @@ def test_dispatch_pr_with_no_self_repair_never_adds_the_flag():
                 remote_url=REMOTE_URL, token=TOKEN)
     assert "--self-repair" not in _mcp_config_args(runner)
     assert "grain-self-repair" not in _prompt_stdin(runner)
+
+
+def test_dispatch_always_passes_this_dispatchs_own_task_unit():
+    # bwsalmon/agents#97: unlike --self-debug, --task-unit is passed
+    # regardless of whether the task issue carried self_debug_label --
+    # read_grain_logs's grain-task case is what gates on self-debug, not
+    # whether mcp_server.py knows its own unit name.
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    args = _mcp_config_args(runner)
+    assert args[args.index("--task-unit") + 1] == "grain-task-sandbox-0"

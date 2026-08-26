@@ -529,7 +529,7 @@ def test_a_still_active_run_has_its_agent_label_refreshed_every_tick():
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
     ]
-    assert any(json.loads(c["body"]) == {"labels": ["grain-agent-0"]} for c in add_calls)
+    assert any(json.loads(c["body"]) == {"labels": ["grain-agent-working-0"]} for c in add_calls)
 
 
 def test_a_cancel_on_close_poll_tolerates_a_404_for_a_stale_assignment():
@@ -1354,7 +1354,7 @@ def test_dispatch_labels_the_issue_with_the_sandbox_that_took_it():
         c for c in transport.calls
         if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/1/labels"
     ]
-    assert any(json.loads(c["body"]) == {"labels": ["grain-agent-0"]} for c in add_calls)
+    assert any(json.loads(c["body"]) == {"labels": ["grain-agent-working-0"]} for c in add_calls)
 
 
 def test_a_refresh_tolerates_a_404_for_a_stale_assignment():

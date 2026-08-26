@@ -395,7 +395,11 @@ def _self_debug_line() -> str:
         "change anything about the controller or its own state through "
         "any of them:\n"
         "- read_grain_logs: recent journal entries from grain's own "
-        "controller services (grain-automation, grain-git-proxy).\n"
+        "controller services (grain-automation, grain-git-proxy), or from "
+        "grain-task, this dispatch's own claude -p process -- the only "
+        "place to find its stderr, which never reaches the transcript "
+        "file, useful if a previous run on this same sandbox crashed "
+        "before doing anything.\n"
         "- check_grain_health: the same ssh/systemd/docker/disk checks "
         "`grain host health` reports, against either your assigned "
         "sandbox or the controller itself.\n"
@@ -715,7 +719,8 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
 
 
 def _mcp_config_json(target: SandboxTarget, question_path_value: str,
-                      comment_path_value: str, *, self_debug: bool = False,
+                      comment_path_value: str, task_unit: str, *,
+                      self_debug: bool = False,
                       self_repair: bool = False) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
     `mcp_server.py` is invoked as its own process, per dispatch, with the
@@ -731,7 +736,13 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
     `self_debug` (bwsalmon/agents#62) is `dispatch()`'s own record of
     whether this task's issue carried `self_debug_label` -- true only then
     does `mcp_server.py` get `--self-debug`, which is what makes it
-    advertise and answer `read_grain_logs` at all.
+    advertise and answer `read_grain_logs` at all. `task_unit`
+    (bwsalmon/agents#97) is `_start_task`'s own `unit_name(sandbox)` --
+    always passed, not gated on `self_debug` like the flag above, since
+    it's just a systemd unit name (no more sensitive than `--workspace`)
+    and `read_grain_logs`'s `grain-task` case is what actually gates on
+    self-debug, the same way `--workspace` is always passed despite
+    `read_file`/`write_file` having nothing to do with self-debug either.
     """
     args = [
         "-m", "grain.automation.mcp_server",
@@ -741,6 +752,7 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
         "--workspace", target.workspace,
         "--question-path", question_path_value,
         "--comment-path", comment_path_value,
+        "--task-unit", task_unit,
     ]
     if self_debug:
         args.append("--self-debug")
@@ -861,7 +873,8 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path, c_path, self_debug=self_debug,
+        stdin=_mcp_config_json(target, q_path, c_path, unit,
+                                self_debug=self_debug,
                                 self_repair=self_repair),
     )
     out_path = transcript_path(unit)

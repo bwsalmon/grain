@@ -620,11 +620,12 @@ replies. Nothing dispatches on a guess about which repo was meant.
 
 The next `run-once` pass picks a labelled task up, moves the label to
 `grain-agent-in-progress`, and claims a free sandbox. It also applies a
-second label naming *which* sandbox took it — `grain-agent-0`,
-`grain-agent-1`, and so on — re-applied every `run-once` cycle for as long
-as the task stays in progress and removed the moment it stops, however it
-stops (bwsalmon/agents#95), so it never sits stale once the work has moved
-on or a human has knocked it off by hand. Dispatch is two-sided:
+second label naming *which* sandbox took it — `grain-agent-working-0`,
+`grain-agent-working-1`, and so on — re-applied every `run-once` cycle for
+as long as the task stays in progress and removed the moment it stops,
+however it stops (bwsalmon/agents#95, bwsalmon/agents#101), so it never
+sits stale once the work has moved on or a human has knocked it off by
+hand. Dispatch is two-sided:
 
 - On the **sandbox**: the workspace at `/home/debian/workspace` is cloned
   (first task) or fetched-and-reset (every task after) through the git
@@ -694,7 +695,11 @@ grain itself rather than the target repo's own code:
 
 - `read_grain_logs`: recent `journalctl` entries for grain's own
   controller services, `grain-automation.service` and
-  `grain-git-proxy.service`.
+  `grain-git-proxy.service` — or, via a third `unit` value `grain-task`,
+  this dispatch's own controller-side `claude -p` unit. `claude -p`'s
+  stdout is redirected to the transcript file `capture.py` reads, but its
+  stderr never is, so `grain-task` is the only way to see why a run
+  crashed before writing anything (bwsalmon/agents#97).
 - `check_grain_health`: the same ssh/systemd/docker/disk checks `grain
   host health` reports to an operator, against either the task's assigned
   sandbox or the controller itself.
@@ -714,7 +719,7 @@ read-only `systemd-journal` group membership regardless of whether any
 task ever uses it), so unlike `grain-gemini-key` there is no separate
 `controller configure` step — the label alone turns these tools on for
 that task. Strictly read-only throughout: `read_grain_logs` can only read
-the journal for one of those two services, `check_grain_health` never
+the journal for one of those three fixed units, `check_grain_health` never
 mutates anything it checks, `read_grain_config` is checked against a
 fixed allowlist of non-secret file names rather than a raw path, and
 `read_automation_audit_log` only ever reads the one audit log file — none
