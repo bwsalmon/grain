@@ -5,7 +5,7 @@ from pathlib import Path
 
 from grain.automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
-    configure_gcp_service_account, configure_gemini_key, configure_github_credential,
+    configure_gcp_key_minter, configure_gemini_key, configure_github_credential,
     configure_named_github_key, configure_repo, ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
@@ -266,31 +266,30 @@ def test_configure_claude_token_is_never_in_argv():
         assert all(secret not in arg for arg in argv)
 
 
-def test_configure_gcp_service_account_writes_the_key_mode_600():
+def test_configure_gcp_key_minter_writes_the_key_mode_600():
     ssh, inner = make_ssh()
-    configure_gcp_service_account(ssh, '{"type": "service_account"}\n')
-    content = stdin_for(inner, "/data/secrets/gcp-service-account.json")
+    configure_gcp_key_minter(ssh, '{"type": "service_account"}\n')
+    content = stdin_for(inner, "/data/secrets/gcp-key-minter.json")
     assert content == '{"type": "service_account"}\n'  # stripped, single trailing newline
     assert any(
-        "sudo chmod 600 /data/secrets/gcp-service-account.json" in c for c in inner.commands
+        "sudo chmod 600 /data/secrets/gcp-key-minter.json" in c for c in inner.commands
     )
 
 
-def test_configure_gcp_service_account_never_chowns_the_shared_secrets_dir():
+def test_configure_gcp_key_minter_never_chowns_the_shared_secrets_dir():
     """/data/secrets is shared with the GitHub and Claude credentials,
     which must stay root-owned -- this must never chown anything, since
-    grain-automation.service (the only reader now that the metadata
-    broker is gone, bwsalmon/agents#126) already runs as root.
+    grain-automation.service (its only reader) already runs as root.
     """
     ssh, inner = make_ssh()
-    configure_gcp_service_account(ssh, "{}")
+    configure_gcp_key_minter(ssh, "{}")
     assert not [argv for argv, _ in inner.calls if "chown" in argv[-1]]
 
 
-def test_configure_gcp_service_account_key_is_never_in_argv():
+def test_configure_gcp_key_minter_key_is_never_in_argv():
     ssh, inner = make_ssh()
     secret = '{"private_key": "supersecretvalue"}'
-    configure_gcp_service_account(ssh, secret)
+    configure_gcp_key_minter(ssh, secret)
     for argv, _ in inner.calls:
         assert all(secret not in arg for arg in argv)
 

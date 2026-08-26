@@ -240,8 +240,8 @@ def test_leaves_a_gemini_key_younger_than_the_ttl():
 
 # --- config ---------------------------------------------------------------
 
-def test_config_defaults_to_the_shared_gcp_service_account_key_path():
-    assert str(config().key_path) == "/data/secrets/gcp-service-account.json"
+def test_config_defaults_to_the_controllers_one_gcp_credential():
+    assert str(config().key_path) == "/data/secrets/gcp-key-minter.json"
 
 
 def test_config_defaults_to_a_24_hour_ttl():

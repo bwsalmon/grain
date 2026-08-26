@@ -30,7 +30,6 @@ from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_gcp_key_minter,
-    configure_gcp_service_account,
     configure_gemini_key, configure_github_credential, configure_janitor,
     configure_named_github_key, configure_repo, credential_repos,
 )
@@ -542,42 +541,38 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
         configure_named_github_key(ssh, token, name=name)
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
-    if args.gcp_service_account_key_file:
-        key = (
-            sys.stdin.read() if args.gcp_service_account_key_file == "-"
-            else Path(args.gcp_service_account_key_file).read_text()
-        )
-        configure_gcp_service_account(ssh, key)
     if args.gcp_agent_service_account_email and args.gcp_project_id:
-        # bwsalmon/agents#126: independent of --gcp-service-account-key-file
-        # above -- plain, non-secret config, so it needs neither that key
-        # nor an all-or-nothing SystemExit when only one of the pair is
-        # given (a deployment naming just one just doesn't turn this
-        # feature on, the same latitude every other optional step here
-        # already has).
+        # bwsalmon/agents#126: plain, non-secret config, so no
+        # all-or-nothing SystemExit when only part of it is given (a
+        # deployment naming just one just doesn't turn this feature on,
+        # the same latitude every other optional step here already has).
         configure_agent_gcp_key(
             ssh, service_account_email=args.gcp_agent_service_account_email,
             project_id=args.gcp_project_id,
             max_key_age_hours=args.gcp_key_max_age_hours,
         )
     if args.gcp_key_minter_key_file:
-        # bwsalmon/agents#131: the identity gcp_keys.py mints *as*. A
-        # different account from --gcp-service-account-key-file above,
-        # which is the agent account's own key -- see gcp_keys.py's
-        # docstring on why the minter must not be the minted.
+        # bwsalmon/agents#131: the controller's one GCP credential -- the
+        # host account, which mints the agent's per-dispatch keys and is
+        # impersonated *as* the agent for janitor/Gemini work. The minter
+        # must not be the account being minted for; see gcp_keys.py.
         configure_gcp_key_minter(ssh, Path(args.gcp_key_minter_key_file).read_text())
     if args.gemini_project_id:
-        # Reuses the primary key --gcp-service-account-key-file already
-        # placed (bwsalmon/agents#47, gemini_keys.py) -- no separate
-        # credential step, only the project id that turns the
-        # grain-gemini-key task label on.
-        configure_gemini_key(ssh, args.gemini_project_id)
+        # Uses the minter key already placed, impersonating the agent
+        # account (bwsalmon/agents#47, #131) -- no separate credential
+        # step, only the project id that turns the grain-gemini-key task
+        # label on.
+        configure_gemini_key(
+            ssh, args.gemini_project_id,
+            impersonate_service_account=args.gcp_agent_service_account_email,
+        )
     if args.janitor_ttl_hours is not None:
         # Same reuse as --gemini-project-id above (bwsalmon/agents#113) --
         # the janitor authenticates with the same primary key.
         if not args.gcp_project_id:
             raise SystemExit("--janitor-ttl-hours requires --gcp-project-id")
         configure_janitor(ssh, args.gcp_project_id, args.janitor_ttl_hours,
+                           impersonate_service_account=args.gcp_agent_service_account_email,
                            name_prefix=args.janitor_name_prefix)
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
@@ -601,12 +596,6 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         Path(args.claude_token_file).read_text()
         if args.claude_token_file else None
     )
-    gcp_service_account_key = None
-    if args.gcp_service_account_key_file:
-        gcp_service_account_key = (
-            sys.stdin.read() if args.gcp_service_account_key_file == "-"
-            else Path(args.gcp_service_account_key_file).read_text()
-        )
     gcp_key_minter_key = None
     if args.gcp_key_minter_key_file:
         gcp_key_minter_key = Path(args.gcp_key_minter_key_file).read_text()
@@ -617,7 +606,6 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         credential_name=args.credential_name,
         github_keys=_read_named_github_keys(args.github_key),
         claude_token=claude_token,
-        gcp_service_account_key=gcp_service_account_key,
         gcp_agent_service_account_email=args.gcp_agent_service_account_email,
         gcp_project_id=args.gcp_project_id,
         gcp_key_max_age_hours=args.gcp_key_max_age_hours,
@@ -889,16 +877,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller and inject into the "
                          "grain-agent account's environment at dispatch time")
-    p.add_argument("--gcp-service-account-key-file",
-                    help="path to a file holding a GCP service account's JSON key, or '-' for "
-                         "stdin -- the primary credential gemini_keys.py's own gcloud calls "
-                         "authenticate with (unrelated to --gcp-agent-service-account-email "
-                         "below)")
     p.add_argument("--gcp-agent-service-account-email",
                     help="email of the narrow GCP service account grain mints a fresh, "
                          "short-lived key for on every dispatched sandbox (bwsalmon/"
-                         "agents#126) -- requires --gcp-project-id, but not "
-                         "--gcp-service-account-key-file")
+                         "agents#126) -- requires --gcp-project-id and "
+                         "--gcp-key-minter-key-file")
     p.add_argument("--gcp-project-id",
                     help="GCP project id -- required with --gcp-agent-service-account-email")
     p.add_argument("--gcp-key-minter-key-file",
@@ -912,14 +895,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gemini-project-id",
                     help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
                          "GCP project a short-lived Gemini API key is minted in for a task "
-                         "that carries it. Reuses the key --gcp-service-account-key-file "
-                         "already placed -- pass that too")
+                         "that carries it. Uses the minter key --gcp-key-minter-key-file, "
+                         "impersonating the agent account -- pass that too")
     p.add_argument("--janitor-ttl-hours", type=int,
                     help="enables the GCP janitor (bwsalmon/agents#113): deletes GCE "
                          "instances, their unattached disks, and grain-minted Gemini API "
                          "keys older than this many hours, skipping the grain host VM, its "
-                         "data disk, and anything labelled managed-by=terraform. Reuses the "
-                         "key --gcp-service-account-key-file already placed -- requires "
+                         "data disk, and anything labelled managed-by=terraform. Uses the "
+                         "minter key --gcp-key-minter-key-file, impersonating the agent -- requires "
                          "--gcp-project-id too")
     p.add_argument("--janitor-name-prefix", default="grain",
                     help="must match this deployment's Terraform name_prefix (default: "
@@ -1019,16 +1002,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--claude-token-file",
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller")
-    p.add_argument("--gcp-service-account-key-file",
-                    help="path to a file holding a GCP service account's JSON key, or '-' for "
-                         "stdin -- the primary credential gemini_keys.py's own gcloud calls "
-                         "authenticate with (unrelated to --gcp-agent-service-account-email "
-                         "below)")
     p.add_argument("--gcp-agent-service-account-email",
                     help="email of the narrow GCP service account grain mints a fresh, "
                          "short-lived key for on every dispatched sandbox (bwsalmon/"
-                         "agents#126) -- requires --gcp-project-id, but not "
-                         "--gcp-service-account-key-file")
+                         "agents#126) -- requires --gcp-project-id and "
+                         "--gcp-key-minter-key-file")
     p.add_argument("--gcp-project-id",
                     help="GCP project id -- required with --gcp-agent-service-account-email")
     p.add_argument("--gcp-key-minter-key-file",
@@ -1048,8 +1026,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="enables the GCP janitor (bwsalmon/agents#113): deletes GCE "
                          "instances, their unattached disks, and grain-minted Gemini API "
                          "keys older than this many hours, skipping the grain host VM, its "
-                         "data disk, and anything labelled managed-by=terraform. Reuses the "
-                         "key --gcp-service-account-key-file already placed -- requires "
+                         "data disk, and anything labelled managed-by=terraform. Uses the "
+                         "minter key --gcp-key-minter-key-file, impersonating the agent -- requires "
                          "--gcp-project-id too")
     p.add_argument("--janitor-name-prefix", default="grain",
                     help="must match this deployment's Terraform name_prefix (default: "

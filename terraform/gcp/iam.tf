@@ -106,6 +106,32 @@ resource "google_service_account_iam_member" "host_manages_agent_keys" {
   member             = "serviceAccount:${google_service_account.host.email}"
 }
 
+# bwsalmon/agents#131: lets the controller *act as* the agent account
+# without holding its key. The controller authenticates as the host
+# account (its one credential) and passes
+# --impersonate-service-account=<agent> on every gcloud call that should
+# run with the agent's permissions -- grain/automation/janitor.py and
+# gemini_keys.py.
+#
+# This is what removes the long-lived agent key from the controller
+# entirely. It matters most for the janitor, which is an exclusion-list
+# deleter ("everything older than the TTL except what it can identify as
+# grain's own"), so the agent account's own roles are its containment
+# boundary -- see janitor.py's docstring. Impersonation keeps that bound
+# exactly where it was while the credential at rest becomes the host's.
+#
+# It also makes core.py's periodic reap of expired agent keys correct by
+# construction: with no long-lived agent key on the controller, every
+# user-managed key under the agent account genuinely is a per-dispatch
+# key, so deleting the old ones can no longer take out the controller's
+# own credential.
+resource "google_service_account_iam_member" "host_impersonates_agent" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.host.email}"
+}
+
 # bwsalmon/agents#131: lets CI mint the host-account key it pushes to the
 # instance as `grain-key-minter-key`, on the same rotate-every-run schedule
 # as the agent key. Scoped to the host account alone, the same instinct
