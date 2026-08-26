@@ -13,9 +13,10 @@ already tolerates one runtime dependency of this kind, and `gcloud` is what
 an operator running the equivalent cleanup by hand would reach for anyway.
 `_activate` below authenticates with the exact same
 `/data/secrets/gcp-service-account.json` key `gemini_keys.py` and
-`configure_gcp_service_account` already use -- the grain-agent service
-account's own key, not a separate credential -- so this janitor can only
-ever do what that account's IAM roles already allow it to do: delete a
+already use -- the *host* account's key, from which this impersonates the
+grain-agent account (`--impersonate-service-account`, bwsalmon/agents#131)
+-- so this janitor can only ever do what the agent's IAM roles allow it
+to do: delete a
 compute instance if `agent_can_manage_compute_instances` granted
 `roles/compute.instanceAdmin.v1`, revoke an API key if `enable_gemini_key`
 granted `roles/serviceusage.apiKeysAdmin`. Turning `enable_janitor` on
@@ -78,9 +79,13 @@ from ..run import CommandError, Runner
 
 # Restated, not imported, from gemini_keys.py -- the two modules are never
 # imported into each other (same "kept in sync by hand" precedent
-# configure.py's own GCP_SERVICE_ACCOUNT_KEY_PATH/METADATA_SERVER_CONFIG_PATH
-# pair already sets).
-_DEFAULT_KEY_PATH = Path("/data/secrets/gcp-service-account.json")
+# configure.py's own path constants already set).
+# configure.py's GCP_KEY_MINTER_KEY_PATH, restated here rather than
+# imported (the same "kept in sync by hand" precedent configure.py's own
+# path constants already set). The host account's key: the controller's
+# single GCP credential since bwsalmon/agents#131 -- this module acts as
+# the *agent* account by impersonating it, not by holding its key.
+_DEFAULT_KEY_PATH = Path("/data/secrets/gcp-key-minter.json")
 
 DEFAULT_TTL_HOURS = 24
 DEFAULT_NAME_PREFIX = "grain"
@@ -98,7 +103,14 @@ class JanitorConfig:
 
     project_id: str
     ttl_hours: int = DEFAULT_TTL_HOURS
+    # bwsalmon/agents#131: the *host* account's key -- the controller's one
+    # credential. This module still acts as the agent account, but by
+    # impersonating it per call (`impersonate_service_account` below)
+    # rather than holding its key: the controller no longer has one.
     key_path: Path = _DEFAULT_KEY_PATH
+    # The agent account to act as. Unset means "act as whoever the key
+    # file is", which is how this behaved before impersonation.
+    impersonate_service_account: str | None = None
     # Must match terraform/gcp's var.name_prefix for a Terraform-managed
     # deployment -- what names the host VM (`<name_prefix>-host`) and its
     # data disk (`<name_prefix>-data`), the two resources this janitor must
@@ -139,6 +151,28 @@ def _activate(runner: Runner, config: JanitorConfig) -> None:
         "gcloud", "auth", "activate-service-account",
         f"--key-file={config.key_path}", "--quiet",
     ])
+
+
+def _impersonated(config) -> list[str]:
+    """The impersonation flag every gcloud call here carries, or nothing.
+
+    bwsalmon/agents#131: the controller authenticates as the *host* account
+    (the one credential it holds), then acts as the agent account for the
+    duration of each call. That keeps this code's effective permissions
+    exactly the agent's -- unchanged from when it held a long-lived agent
+    key file -- while removing that key from the controller entirely. The
+    flag is per-command rather than `gcloud config set
+    auth/impersonate_service_account`, which would be process-global and so
+    would silently apply to `gcp_keys.py` too, whose whole point is to act
+    as the host and *not* the agent.
+
+    Empty when unset, so a deployment configured before this change (or a
+    test) still behaves exactly as it did.
+    """
+    target = getattr(config, "impersonate_service_account", None)
+    if not target:
+        return []
+    return [f"--impersonate-service-account={target}"]
 
 
 def _list_resources(runner: Runner, argv: list[str]) -> tuple[list[dict], str | None]:
@@ -200,6 +234,7 @@ def _maybe_delete_instance(runner: Runner, config: JanitorConfig, instance: obje
     argv = [
         "gcloud", "compute", "instances", "delete", name,
         f"--zone={zone}", f"--project={config.project_id}", "--quiet",
+        *_impersonated(config),
     ]
     try:
         runner.run(argv)
@@ -237,6 +272,7 @@ def _maybe_delete_disk(runner: Runner, config: JanitorConfig, disk: object,
     argv = [
         "gcloud", "compute", "disks", "delete", name,
         f"--zone={zone}", f"--project={config.project_id}", "--quiet",
+        *_impersonated(config),
     ]
     try:
         runner.run(argv)
@@ -262,6 +298,7 @@ def _maybe_delete_gemini_key(runner: Runner, config: JanitorConfig, key: object,
     argv = [
         "gcloud", "services", "api-keys", "delete", name,
         f"--project={config.project_id}", "--quiet",
+        *_impersonated(config),
     ]
     try:
         runner.run(argv)
@@ -293,6 +330,7 @@ def run_janitor(runner: Runner, config: JanitorConfig, now: datetime, *,
     instances, error = _list_resources(runner, [
         "gcloud", "compute", "instances", "list",
         f"--project={config.project_id}", "--format=json",
+        *_impersonated(config),
     ])
     if error is not None:
         result.warnings.append(JanitorWarning("instance", "", f"could not list instances: {error}"))
@@ -303,6 +341,7 @@ def run_janitor(runner: Runner, config: JanitorConfig, now: datetime, *,
     disks, error = _list_resources(runner, [
         "gcloud", "compute", "disks", "list",
         f"--project={config.project_id}", "--format=json",
+        *_impersonated(config),
     ])
     if error is not None:
         result.warnings.append(JanitorWarning("disk", "", f"could not list disks: {error}"))
@@ -313,6 +352,7 @@ def run_janitor(runner: Runner, config: JanitorConfig, now: datetime, *,
     keys, error = _list_resources(runner, [
         "gcloud", "services", "api-keys", "list",
         f"--project={config.project_id}", "--format=json",
+        *_impersonated(config),
     ])
     if error is not None:
         result.warnings.append(JanitorWarning("gemini-key", "", f"could not list API keys: {error}"))

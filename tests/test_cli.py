@@ -520,17 +520,21 @@ def test_host_bootstrap_also_accepts_github_key(tmp_path):
               "--github-key", f"anonymous={key_file}"])
 
 
-def test_dry_run_controller_configure_with_a_gcp_service_account_key_file(capsys, tmp_path):
+def test_dry_run_controller_configure_with_the_minter_key_file(capsys, tmp_path):
+    """bwsalmon/agents#131: one GCP credential on the controller, the host
+    account's. It replaced --gcp-service-account-key-file, which placed the
+    *agent* account's own long-lived key."""
     key_file = tmp_path / "gcp-key.json"
     key_file.write_text('{"type": "service_account"}\n')
     out = run(
         ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
-         "--gcp-service-account-key-file", str(key_file),
+         "--gcp-key-minter-key-file", str(key_file),
          "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com",
          "--gcp-project-id", "acme"],
         capsys,
     )
-    assert "dd of=/data/secrets/gcp-service-account.json" in out
+    assert "dd of=/data/secrets/gcp-key-minter.json" in out
+    assert "dd of=/data/secrets/gcp-service-account.json" not in out
     assert "dd of=/data/config/gcp-key.json" in out
     for line in out.splitlines():
         if line.startswith("+ ssh") and "dd of=" in line:
@@ -671,7 +675,7 @@ def test_dry_run_bootstrap_runs_every_stage_without_touching_a_real_vm(tmp_path,
     assert "grain-automation.timer" in out
 
 
-def test_dry_run_bootstrap_with_a_gcp_service_account_key_and_agent_email(
+def test_dry_run_bootstrap_with_the_minter_key_and_agent_email(
     tmp_path, capsys,
 ):
     key_file = tmp_path / "gcp-key.json"
@@ -682,12 +686,13 @@ def test_dry_run_bootstrap_with_a_gcp_service_account_key_and_agent_email(
          "--controller-ssh-public-key", str(tmp_path / "controller-ssh.pub"),
          "host", "bootstrap", "--repo", "acme/widgets",
          "--admin-ssh-private-key", str(tmp_path / "admin-ssh"),
-         "--gcp-service-account-key-file", str(key_file),
+         "--gcp-key-minter-key-file", str(key_file),
          "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com",
          "--gcp-project-id", "acme"],
         capsys,
     )
-    assert "dd of=/data/secrets/gcp-service-account.json" in out
+    assert "dd of=/data/secrets/gcp-key-minter.json" in out
+    assert "dd of=/data/secrets/gcp-service-account.json" not in out
     assert "dd of=/data/config/gcp-key.json" in out
     # bwsalmon/agents#126: no per-sandbox metadata server to start anymore.
     assert "metadata start" not in out

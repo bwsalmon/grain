@@ -429,11 +429,14 @@ def test_gcp_service_account_is_only_configured_when_supplied(env):
     assert not any("gcp-service-account.json" in c for c in runner.commands)
 
 
-def test_gcp_service_account_key_reaches_the_controller(env):
-    """`gcp_service_account_key` is the primary key gemini_keys.py's own
-    gcloud calls authenticate with (docs/bootstrap.md Phase 3) -- unlike
-    before bwsalmon/agents#126, it no longer starts anything per sandbox:
-    the metadata broker it used to feed is gone.
+def test_no_gcp_key_config_is_written_without_the_minter_credential(env):
+    """Found live (bwsalmon/agents#131): /data/config/gcp-key.json is the
+    on/off switch `build_orchestrator` reads, and both minting and reaping
+    authenticate as the key it names. deploy.sh's fetch of that key is
+    best-effort (SECRET_WAIT_OPTIONAL), so a rollout that raced ahead of
+    CI's push step used to write the switch with no credential behind it --
+    turning the feature on in a state where every cycle failed on a missing
+    key file, rather than leaving it off until the key arrived.
     """
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
@@ -443,17 +446,13 @@ def test_gcp_service_account_key_reaches_the_controller(env):
     )
     config = BootstrapConfig(
         task_repo="acme/widgets",
-        gcp_service_account_key='{"type": "service_account"}',
+        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        gcp_project_id="acme",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
-
-    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
-    assert any(
-        c.startswith(controller_prefix) and "gcp-service-account.json" in c
-        for c in runner.commands
-    )
-    assert not any("metadata start" in c for c in runner.commands)
+    assert not [c for c in runner.commands if "/data/config/gcp-key.json" in c], \
+        "turned minting on without placing the credential it authenticates as"
 
 
 def test_gcp_agent_key_config_reaches_the_controller(env):
@@ -471,6 +470,10 @@ def test_gcp_agent_key_config_reaches_the_controller(env):
         task_repo="acme/widgets",
         gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
         gcp_project_id="acme",
+        # bwsalmon/agents#131: writing gcp-key.json is what turns minting on,
+        # and minting authenticates as this key -- so the switch is only
+        # written once the credential it names has been placed.
+        gcp_key_minter_key='{"type": "service_account"}\n',
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
@@ -496,7 +499,7 @@ def test_gemini_project_id_writes_gemini_key_config_on_the_controller(env):
     )
     config = BootstrapConfig(
         task_repo="acme/widgets",
-        gcp_service_account_key='{"type": "service_account"}',
+        gcp_key_minter_key='{"type": "service_account"}',
         gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
         gcp_project_id="acme",
         gemini_project_id="acme",
@@ -556,7 +559,7 @@ def test_janitor_ttl_hours_writes_janitor_config_on_the_controller(env):
     )
     config = BootstrapConfig(
         task_repo="acme/widgets",
-        gcp_service_account_key='{"type": "service_account"}',
+        gcp_key_minter_key='{"type": "service_account"}',
         gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
         gcp_project_id="acme",
         janitor_ttl_hours=12,

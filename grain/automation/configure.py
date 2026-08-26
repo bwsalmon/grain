@@ -34,7 +34,6 @@ SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
 # kept in sync by hand; a rename on one side and not the other is silent
 # until `gemini_keys.py`'s own `gcloud auth activate-service-account` fails
 # to find the file.
-GCP_SERVICE_ACCOUNT_KEY_PATH = "/data/secrets/gcp-service-account.json"
 # bwsalmon/agents#131: the *minter* identity gcp_keys.py authenticates
 # as -- a key for the host service account, deliberately a different
 # file (and a different account) from the agent key above.
@@ -218,32 +217,6 @@ def configure_claude_token(runner: Runner, token: str) -> None:
                         owner="grain-agent")
 
 
-def configure_gcp_service_account(runner: Runner, key: str) -> None:
-    """Places the primary GCP service-account key `gemini_keys.py`
-    authenticates its `gcloud` calls with (docs/bootstrap.md Phase 3).
-    Before bwsalmon/agents#126 this file also fed the per-sandbox
-    `gce_metadata_server` broker (`grain/metadata/`, removed by that same
-    change) as its impersonation source -- that consumer is gone, but
-    `gemini_keys.py`'s own Gemini-API-key minting is unaffected and still
-    reads this same path (see its own docstring for why it deliberately
-    keeps doing so, unlike the GCP-key-per-dispatch mechanism
-    `configure_agent_gcp_key` below sets up, which authenticates as the
-    controller's own attached identity instead and needs no key file at
-    all).
-
-    `key` is minted fresh per deploy and never lands in this repo or
-    Actions secrets long-lived (the gcp config-repo template's deploy.yml creates
-    it via the deployer's own WIF session and immediately invalidates the
-    previous one) -- the short-lived-credential principle docs/design.md
-    argues for at the *sandbox* layer applied one layer up, to this key
-    itself. Root-owned (no `owner=`, unlike `configure_claude_token`):
-    `/data/secrets` is shared with the GitHub and Claude credentials,
-    which must stay root-owned, and `grain-automation.service` (which
-    reads this on `gemini_keys.py`'s behalf) already runs as root.
-    """
-    _write_remote_file(runner, GCP_SERVICE_ACCOUNT_KEY_PATH, key.strip() + "\n", mode="600")
-
-
 def configure_agent_gcp_key(runner: Runner, *, service_account_email: str,
                              project_id: str, max_key_age_hours: int = 24,
                              key_path: str = GCP_KEY_MINTER_KEY_PATH) -> None:
@@ -257,8 +230,8 @@ def configure_agent_gcp_key(runner: Runner, *, service_account_email: str,
     Places no credential of its own -- this is plain, non-secret
     configuration (`service_account_email` and `project_id` are already
     published as non-secret deploy config, `terraform/gcp/instance.tf`'s
-    `grain-config`), unlike `configure_gcp_service_account`'s `key`
-    argument above. It only *names* the minter credential;
+    `grain-config`), unlike the minter key `configure_gcp_key_minter`
+    places. It only *names* the minter credential;
     `configure_gcp_key_minter` below is what actually places it.
 
     bwsalmon/agents#131: `gcp_keys.py` used to need no credential at all,
@@ -286,34 +259,36 @@ def configure_gcp_key_minter(runner: Runner, key: str) -> None:
     agent itself does not hold, or a leaked agent key can mint its own
     replacement and the whole expiry premise collapses.
 
-    Unlike `configure_gcp_service_account`'s key, this one is read by the
-    automation running as root rather than by a separate unprivileged
-    service user, so it stays `600` and root-owned -- nothing else on the
-    controller has any business reading it.
+    Read by the automation running as root, so it stays `600` and
+    root-owned -- nothing else on the controller has any business
+    reading it. This is the controller's only GCP credential.
     """
     _write_remote_file(runner, GCP_KEY_MINTER_KEY_PATH, key.strip() + "\n", mode="600")
 
 
-def configure_gemini_key(runner: Runner, project_id: str) -> None:
+def configure_gemini_key(runner: Runner, project_id: str, *,
+                          impersonate_service_account: str | None = None) -> None:
     """Writes `/data/config/gemini-key.json` (bwsalmon/agents#47), the
     on/off switch `core.py`'s `_resolve_target` checks before honouring a
     task issue's `gemini_key_label` -- absent, the label is refused with
     an explanation, the same "unusable request parks the task" shape an
     unlisted `/repo` already gets.
 
-    Deliberately places no new credential of its own: `gemini_keys.py`
-    authenticates with the same primary GCP service-account key
-    `configure_gcp_service_account` already writes to
-    `GCP_SERVICE_ACCOUNT_KEY_PATH` -- run that first (this function does not
-    check that it exists, the same "operator sequencing, not enforced code"
-    latitude every other step in this module already gets).
+    Places no credential of its own: `gemini_keys.py` authenticates with the
+    minter key `configure_gcp_key_minter` writes (the host account's), and
+    acts as the agent account by impersonating it -- `impersonate_service_account`
+    below, bwsalmon/agents#131. The controller holds no agent key at all.
     """
-    gemini_key_json = json.dumps({"project_id": project_id}, indent=2) + "\n"
+    payload = {"project_id": project_id}
+    if impersonate_service_account:
+        payload["impersonate_service_account"] = impersonate_service_account
+    gemini_key_json = json.dumps(payload, indent=2) + "\n"
     _write_remote_file(runner, GEMINI_KEY_CONFIG_PATH, gemini_key_json, mode="644")
 
 
 def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
-                       name_prefix: str = "grain") -> None:
+                       name_prefix: str = "grain",
+                       impersonate_service_account: str | None = None) -> None:
     """Writes `/data/config/janitor.json` (bwsalmon/agents#113), the
     on/off switch `core.py`'s `_janitor` checks before scanning the
     project for GCE instances, disks, and Gemini API keys past
@@ -321,10 +296,10 @@ def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
     request parks the task" shape `configure_gemini_key` already gets, just
     with nothing to park since this isn't tied to any one task.
 
-    Deliberately places no new credential of its own, same as
-    `configure_gemini_key`: `janitor.py` authenticates with the same
-    primary GCP service-account key `configure_gcp_service_account` already
-    writes to `GCP_SERVICE_ACCOUNT_KEY_PATH` -- run that first.
+    Places no credential of its own: `janitor.py` authenticates with the
+    minter key `configure_gcp_key_minter` writes (the host account's), and
+    acts as the agent account by impersonating it -- `impersonate_service_account`
+    below, bwsalmon/agents#131. The controller holds no agent key at all.
 
     `name_prefix` must match the Terraform deployment's own `name_prefix`
     (default `"grain"`) -- it names the exact host/data-disk resources the
@@ -333,9 +308,12 @@ def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
     janitor protecting the wrong names, so a Terraform-managed deployment
     always passes its own `var.name_prefix` through (`deploy.sh`).
     """
-    janitor_json = json.dumps({
+    payload = {
         "project_id": project_id, "ttl_hours": ttl_hours, "name_prefix": name_prefix,
-    }, indent=2) + "\n"
+    }
+    if impersonate_service_account:
+        payload["impersonate_service_account"] = impersonate_service_account
+    janitor_json = json.dumps(payload, indent=2) + "\n"
     _write_remote_file(runner, JANITOR_CONFIG_PATH, janitor_json, mode="644")
 
 

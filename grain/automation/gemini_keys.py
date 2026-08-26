@@ -38,17 +38,20 @@ buys nothing extra here) and against `openssl`-plus-hand-rolled-JWT
 (rejected: more code, for a controller that already tolerates one runtime
 dependency in this kind).
 
-**Authentication: the same primary key the metadata broker already
-holds.** `configure_gcp_service_account` (`configure.py`) is the one place
-a raw GCP credential is ever placed on this deployment, at
-`/data/secrets/gcp-service-account.json` -- see that function's own
-docstring, and docs/design.md's "Secrets on `/data`". Reusing it here
-(`GeminiKeyConfig.key_path` defaults to the identical path,
-kept in sync by hand the same way `configure.py`'s own
-`GCP_SERVICE_ACCOUNT_KEY_PATH`/`METADATA_SERVER_CONFIG_PATH` pair already
-is, since the two modules are never imported into each other) avoids a
-second GCP credential-provisioning step for a deployment that already did
-this one for `grain metadata start`. `gcloud auth activate-service-account`
+**Authentication: the controller's one credential, acting as the agent.**
+`configure_gcp_key_minter` (`configure.py`) places the only raw GCP
+credential on this deployment, at `/data/secrets/gcp-key-minter.json` --
+a key for the *host* service account (docs/design.md's "Secrets on
+`/data`"). This module needs the *agent* account's permissions, not the
+host's, so it authenticates with that key and then impersonates the agent
+per call (`--impersonate-service-account`, bwsalmon/agents#131).
+
+It used to hold the agent account's own long-lived key instead, at
+`/data/secrets/gcp-service-account.json`, purely because the metadata
+broker had already placed one. That broker is gone (bwsalmon/agents#126),
+and the key with it: a long-lived agent key on the controller also
+collided with `gcp_keys.py`'s periodic reap of agent keys older than 24
+hours, which had no way to tell it apart from a per-dispatch key. `gcloud auth activate-service-account`
 is called immediately before every `gcloud` invocation below, rather than
 once at process start, so this stays correct regardless of whatever else
 might otherwise be the CLI's active account on a shared controller -- cheap
@@ -107,11 +110,12 @@ from pathlib import Path
 
 from ..run import CommandError, Runner
 
-# configure.py's GCP_SERVICE_ACCOUNT_KEY_PATH, restated here rather than
-# imported -- see this module's own docstring on why the two are kept in
-# sync by hand, the same precedent configure.py's own
-# METADATA_SERVER_CONFIG_PATH/GCP_SERVICE_ACCOUNT_KEY_PATH pair set.
-_DEFAULT_KEY_PATH = Path("/data/secrets/gcp-service-account.json")
+# configure.py's GCP_KEY_MINTER_KEY_PATH, restated here rather than
+# imported (the same "kept in sync by hand" precedent configure.py's own
+# path constants already set). The host account's key: the controller's
+# single GCP credential since bwsalmon/agents#131 -- this module acts as
+# the *agent* account by impersonating it, not by holding its key.
+_DEFAULT_KEY_PATH = Path("/data/secrets/gcp-key-minter.json")
 
 DEFAULT_API_TARGET_SERVICE = "generativelanguage.googleapis.com"
 
@@ -128,7 +132,14 @@ class GeminiKeyConfig:
     """
 
     project_id: str
+    # bwsalmon/agents#131: the *host* account's key -- the controller's one
+    # credential. This module still acts as the agent account, but by
+    # impersonating it per call (`impersonate_service_account` below)
+    # rather than holding its key: the controller no longer has one.
     key_path: Path = _DEFAULT_KEY_PATH
+    # The agent account to act as. Unset means "act as whoever the key
+    # file is", which is how this behaved before impersonation.
+    impersonate_service_account: str | None = None
     api_target_service: str = DEFAULT_API_TARGET_SERVICE
 
     @classmethod
@@ -156,6 +167,28 @@ def _activate(runner: Runner, config: GeminiKeyConfig) -> None:
     ])
 
 
+def _impersonated(config) -> list[str]:
+    """The impersonation flag every gcloud call here carries, or nothing.
+
+    bwsalmon/agents#131: the controller authenticates as the *host* account
+    (the one credential it holds), then acts as the agent account for the
+    duration of each call. That keeps this code's effective permissions
+    exactly the agent's -- unchanged from when it held a long-lived agent
+    key file -- while removing that key from the controller entirely. The
+    flag is per-command rather than `gcloud config set
+    auth/impersonate_service_account`, which would be process-global and so
+    would silently apply to `gcp_keys.py` too, whose whole point is to act
+    as the host and *not* the agent.
+
+    Empty when unset, so a deployment configured before this change (or a
+    test) still behaves exactly as it did.
+    """
+    target = getattr(config, "impersonate_service_account", None)
+    if not target:
+        return []
+    return [f"--impersonate-service-account={target}"]
+
+
 def _find_key_by_display_name(
     runner: Runner, config: GeminiKeyConfig, display_name: str
 ) -> str:
@@ -177,6 +210,7 @@ def _find_key_by_display_name(
     list_argv = [
         "gcloud", "services", "api-keys", "list",
         f"--project={config.project_id}", "--format=json",
+        *_impersonated(config),
     ]
     result = runner.run(list_argv)
     try:
@@ -222,6 +256,7 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         f"--display-name={display_name}",
         f"--api-target=service={config.api_target_service}",
         "--format=value(name)", "--quiet",
+        *_impersonated(config),
     ])
     created = create_result.stdout.strip()
 
@@ -242,6 +277,7 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         key_string_result = runner.run([
             "gcloud", "services", "api-keys", "get-key-string", name,
             f"--project={config.project_id}", "--format=value(keyString)",
+            *_impersonated(config),
         ])
     except CommandError:
         _revoke_orphan(runner, config, display_name, name if name != created else None)
@@ -277,4 +313,5 @@ def delete_key(runner: Runner, config: GeminiKeyConfig, name: str) -> None:
     runner.run([
         "gcloud", "services", "api-keys", "delete", name,
         f"--project={config.project_id}", "--quiet",
+        *_impersonated(config),
     ])

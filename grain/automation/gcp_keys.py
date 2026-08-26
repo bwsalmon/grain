@@ -104,7 +104,7 @@ DEFAULT_MAX_KEY_AGE_HOURS = 24
 # configure.py's GCP_KEY_MINTER_KEY_PATH, restated here rather than
 # imported -- see this module's docstring, and the identical precedent
 # gemini_keys.py's own _DEFAULT_KEY_PATH sets against
-# configure.py's GCP_SERVICE_ACCOUNT_KEY_PATH.
+# configure.py's GCP_KEY_MINTER_KEY_PATH.
 _DEFAULT_MINTER_KEY_PATH = Path("/data/secrets/gcp-key-minter.json")
 
 

@@ -29,11 +29,12 @@ readonly CLAUDE_TOKEN_ATTR="grain-claude-token"
 # service account to mint one for -- never a long-lived Actions secret, so
 # there is no wait budget worth calling "required": if
 # agent_service_account_email is unset, one will just never arrive.
-readonly GCP_KEY_ATTR="grain-agent-service-account-key"
-# bwsalmon/agents#131: the host-account key the controller mints the
-# per-dispatch agent keys *as*. A different account from GCP_KEY_ATTR
-# above -- see grain/automation/gcp_keys.py on why the minter must not
-# be the account being minted for.
+# bwsalmon/agents#131: the controller's one GCP credential -- a key for
+# the *host* service account. It mints the per-dispatch agent keys with it
+# (the minter must not be the account being minted for, or a leaked agent
+# key could mint its own replacement), and impersonates the agent account
+# for janitor/Gemini work. The long-lived agent key this deployment used
+# to place alongside it is gone: nothing on the controller needs one.
 readonly MINTER_KEY_ATTR="grain-key-minter-key"
 # What a storage-permission failure looks like in grain's output, as
 # opposed to any other reason a bootstrap can exit non-zero. Deliberately
@@ -343,7 +344,6 @@ run_bootstrap() {
   local gh_file="$RUNDIR/github.token"
   local keys_file="$RUNDIR/github-keys.blob"
   local claude_file="$RUNDIR/claude.token"
-  local gcp_key_file="$RUNDIR/gcp-service-account.json"
   local args=(--cluster-file "$CLUSTER_FILE" host bootstrap --task-repo "$TASK_REPO")
   local repo
 
@@ -403,13 +403,13 @@ run_bootstrap() {
     minter_key_file="$RUNDIR/gcp-key-minter.json"
     if fetch_secret_to_file "$MINTER_KEY_ATTR" "$minter_key_file" "$SECRET_WAIT_OPTIONAL"; then
       args+=(--gcp-key-minter-key-file "$minter_key_file")
+      MINTER_PLACED=1
     else
       log "WARNING: no minter key in instance metadata; the controller cannot mint"
       log "         per-dispatch GCP keys and every dispatch will fail (agents#131)."
     fi
-    if fetch_secret_to_file "$GCP_KEY_ATTR" "$gcp_key_file" "$SECRET_WAIT_OPTIONAL"; then
-      args+=(--gcp-service-account-key-file "$gcp_key_file"
-              --gcp-agent-service-account-email "$AGENT_SERVICE_ACCOUNT_EMAIL"
+    if [ -n "${MINTER_PLACED:-}" ]; then
+      args+=(--gcp-agent-service-account-email "$AGENT_SERVICE_ACCOUNT_EMAIL"
               --gcp-project-id "$(md project/project-id)")
       # gemini_project_id (terraform/gcp's enable_gemini_key) reuses the
       # same key just placed above -- grain/automation/gemini_keys.py's own

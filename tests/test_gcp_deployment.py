@@ -556,7 +556,7 @@ def test_grain_config_publishes_gemini_project_id():
     # authenticates gcloud with that same key, so a GEMINI_PROJECT_ID with
     # no key to go with it must never reach `host bootstrap`.
     assert re.search(
-        r'if fetch_secret_to_file "\$GCP_KEY_ATTR".*?GEMINI_PROJECT_ID.*?\bfi\b',
+        r'MINTER_PLACED.*?GEMINI_PROJECT_ID.*?\bfi\b',
         deploy_sh, re.S,
     ), "--gemini-project-id must be nested inside the successful GCP key fetch"
 
@@ -617,7 +617,7 @@ def test_grain_config_publishes_janitor_settings():
     # authenticates gcloud with that same key, so a JANITOR_TTL_HOURS with
     # no key to go with it must never reach `host bootstrap`.
     assert re.search(
-        r'if fetch_secret_to_file "\$GCP_KEY_ATTR".*?JANITOR_TTL_HOURS.*?\bfi\b',
+        r'MINTER_PLACED.*?JANITOR_TTL_HOURS.*?\bfi\b',
         deploy_sh, re.S,
     ), "--janitor-ttl-hours must be nested inside the successful GCP key fetch"
 
@@ -687,14 +687,30 @@ def test_host_can_mint_and_revoke_the_agents_own_keys():
     assert "google_service_account.host.email" in body
 
 
-def test_host_no_longer_impersonates_the_agent_account():
-    """bwsalmon/agents#126 replaced the per-sandbox metadata-server broker
-    (which impersonated the agent account for short-lived tokens) with
-    minting real keys directly -- the impersonation grant that broker
-    needed must not still be here."""
+def test_the_host_impersonates_the_agent_for_controller_side_work():
+    """bwsalmon/agents#126 removed this grant along with the per-sandbox
+    metadata-server broker that needed it, and a test here pinned it gone.
+    bwsalmon/agents#131 brings it back for an unrelated reason, so that
+    pin is replaced rather than deleted: the controller now authenticates
+    as the host account -- its one credential -- and impersonates the
+    agent for janitor.py's and gemini_keys.py's calls, which is what let
+    the long-lived agent key come off the controller entirely.
+
+    Scope matters as much as existence: impersonating the *agent* keeps
+    the janitor's blast radius exactly the agent's own roles, which is its
+    containment boundary (see janitor.py). A grant pointed anywhere else
+    would quietly widen a tool that deletes by exclusion list.
+    """
     source = _tf_source()
-    assert "serviceAccountTokenCreator" not in source
-    assert "host_impersonates_agent" not in source
+    assert 'resource "google_service_account_iam_member" "host_impersonates_agent"' in source
+    body = source.split('"host_impersonates_agent"')[1].split("}")[0]
+    assert "roles/iam.serviceAccountTokenCreator" in body
+    assert "google_service_account.agent[0].name" in body, \
+        "the controller must impersonate the agent account, nothing broader"
+    assert "google_service_account.host.email" in body
+
+    # The broker itself stays gone -- this grant is not its return.
+    assert "gce_metadata_server" not in source
 
 
 def test_read_outputs_step_sets_every_steps_tf_output_used_elsewhere():
@@ -730,15 +746,21 @@ def test_deploy_yml_mints_and_invalidates_the_agent_key_only_when_one_exists():
     run's.
     """
     deploy = (WORKFLOWS / "deploy.yml").read_text()
-    assert "AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}" in deploy, (
-        "deploy.yml no longer hands the agent account to the push-secrets script"
+    assert "HOST_SERVICE_ACCOUNT: ${{ steps.tf.outputs.host_service_account }}" in deploy, (
+        "deploy.yml no longer hands the host account to the push-secrets script"
     )
     push = PUSH_SECRETS.read_text()
     assert "gcloud iam service-accounts keys create" in push
     assert "gcloud iam service-accounts keys delete" in push
-    assert 'if [ -n "$agent_service_account" ]; then' in push, (
-        "a deployment with no agent account must not attempt to mint a key for one"
+    assert 'if [ -n "$host_service_account" ]; then' in push, (
+        "a deployment with no host account must not attempt to mint a key for one"
     )
+    # bwsalmon/agents#131: the controller holds one credential. The
+    # long-lived agent key this script used to push alongside it is gone --
+    # nothing on the controller reads one, and leaving it would put a key
+    # under the agent account that gcp_keys.py's reap cannot tell apart
+    # from a per-dispatch key.
+    assert "grain-agent-service-account-key" not in push
 
 
 # A stand-in for `gcloud iam service-accounts keys ...` and `gcloud compute
@@ -815,7 +837,7 @@ def test_push_host_secrets_keeps_the_previous_key_alive_through_a_rotation():
             "PROJECT": "a-project",
             "INSTANCE": "an-instance",
             "ZONE": "us-central1-a",
-            "AGENT_SERVICE_ACCOUNT": "agent@a-project.iam.gserviceaccount.com",
+            "HOST_SERVICE_ACCOUNT": "host@a-project.iam.gserviceaccount.com",
         }
         result = subprocess.run(
             [str(PUSH_SECRETS)], env=env, capture_output=True, text=True,
@@ -827,8 +849,8 @@ def test_push_host_secrets_keeps_the_previous_key_alive_through_a_rotation():
             "expected the previous run's key (key2) and the new key (key3) to "
             f"survive the rotation, got {remaining}"
         )
-        assert "invalidated previous key: key1" in result.stdout
-        assert "invalidated previous key: key2" not in result.stdout
+        assert "invalidated previous minter key: key1" in result.stdout
+        assert "invalidated previous minter key: key2" not in result.stdout
 
         list_calls = [line for line in calls.read_text().splitlines()
                       if line.startswith("iam service-accounts keys list")]
@@ -850,8 +872,8 @@ def test_deploy_yml_never_stores_the_agent_key_as_a_repo_secret():
 
 def test_deploy_sh_only_requests_the_gcp_key_when_an_agent_account_is_configured():
     deploy_sh = DEPLOY_SH.read_text()
-    assert "GCP_KEY_ATTR" in deploy_sh
-    assert "--gcp-service-account-key-file" in deploy_sh
+    assert "MINTER_KEY_ATTR" in deploy_sh
+    assert "--gcp-key-minter-key-file" in deploy_sh
     assert "--gcp-agent-service-account-email" in deploy_sh
     assert "--gcp-project-id" in deploy_sh
     assert 'if [ -n "$AGENT_SERVICE_ACCOUNT_EMAIL" ]; then' in deploy_sh
@@ -1018,8 +1040,10 @@ def test_the_controller_gets_a_minter_key_that_is_not_the_agent_account():
     assert "grain-key-minter-key" in deploy_sh
     assert "--gcp-key-minter-key-file" in deploy_sh, \
         "deploy.sh never hands the minter key to `grain host bootstrap`"
-    # Two different files, because they are two different accounts.
-    assert "gcp-key-minter.json" in deploy_sh and "gcp-service-account.json" in deploy_sh
+    # bwsalmon/agents#131: one credential on the controller, the host's.
+    assert "gcp-key-minter.json" in deploy_sh
+    assert "gcp-service-account.json" not in deploy_sh, \
+        "the long-lived agent key is back on the controller"
 
 
 def test_terraform_lets_ci_mint_the_minter_key():

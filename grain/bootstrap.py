@@ -35,7 +35,7 @@ from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
-    configure_gcp_key_minter, configure_gcp_service_account, configure_gemini_key,
+    configure_gcp_key_minter, configure_gemini_key,
     configure_github_credential,
     configure_janitor, configure_named_github_key, configure_repo, credential_repos,
     ensure_sandbox_tokens,
@@ -72,35 +72,31 @@ class BootstrapConfig:
     # Never written to credentials.json -- see configure_named_github_key.
     github_keys: dict[str, str] = field(default_factory=dict)
     claude_token: str | None = None
-    # The primary GCP service-account key gemini_keys.py authenticates
-    # its own gcloud calls with -- see configure_gcp_service_account.
-    # Minted fresh per deploy, never a long-lived Actions secret.
-    gcp_service_account_key: str | None = None
     # bwsalmon/agents#126: the narrow "agent" service account grain mints
     # a fresh, short-lived key for on every dispatched sandbox -- plain,
-    # non-secret config (see configure_agent_gcp_key), unrelated to
-    # gcp_service_account_key above. Both are required together for
-    # bootstrap() to write /data/config/gcp-key.json; either alone leaves
-    # a deployment's sandboxes with no GCP access, not an error.
+    # non-secret config (see configure_agent_gcp_key). Required together
+    # with gcp_project_id and gcp_key_minter_key for bootstrap() to write
+    # /data/config/gcp-key.json; any one alone leaves a deployment's
+    # sandboxes with no GCP access, which is not an error.
     gcp_agent_service_account_email: str | None = None
     gcp_project_id: str | None = None
     gcp_key_max_age_hours: int = 24
     # bwsalmon/agents#131: a key for the *host* service account, which
     # gcp_keys.py authenticates as to mint the agent account's per-dispatch
-    # keys. Independent of gcp_service_account_key above -- that one is the
-    # agent account's own key, and using it here would be the agent minting
-    # for itself. Absent, gcp_keys.py has no credential and every mint and
-    # reap fails; see that module's docstring.
+    # keys, and that janitor.py/gemini_keys.py impersonate the agent from.
+    # The controller's one GCP credential (bwsalmon/agents#131): it must
+    # not be the agent account's own key, or the agent could mint its own
+    # replacement. Absent, none of those three can authenticate at all.
     gcp_key_minter_key: str | None = None
     # Turns on the grain-gemini-key task label (bwsalmon/agents#47, #49):
-    # the GCP project a short-lived Gemini API key is minted in. Reuses
-    # gcp_service_account_key above -- see configure_gemini_key's own
-    # docstring -- so this is only meaningful alongside it.
+    # the GCP project a short-lived Gemini API key is minted in. Uses
+    # gcp_key_minter_key above, impersonating the agent account -- see
+    # configure_gemini_key -- so it is only meaningful alongside it.
     gemini_project_id: str | None = None
     # bwsalmon/agents#113: turns on the GCP janitor. `None` (the default)
     # leaves it off; a Terraform-managed deployment sets this from
-    # enable_janitor/janitor_ttl_hours (deploy.sh). Reuses
-    # gcp_service_account_key above the same way gemini_project_id does --
+    # enable_janitor/janitor_ttl_hours (deploy.sh). Uses
+    # gcp_key_minter_key the same way gemini_project_id does --
     # bootstrap() raises if this is set without gcp_project_id, since the
     # janitor has no project to scan otherwise. name_prefix must match the
     # deployment's own Terraform name_prefix -- see configure_janitor's own
@@ -300,27 +296,40 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         configure_claude_token(admin_ssh, config.claude_token)
     if config.gcp_key_minter_key:
         configure_gcp_key_minter(admin_ssh, config.gcp_key_minter_key)
-    if config.gcp_service_account_key:
-        configure_gcp_service_account(admin_ssh, config.gcp_service_account_key)
-    if config.gcp_agent_service_account_email and config.gcp_project_id:
-        # bwsalmon/agents#126: independent of gcp_service_account_key
-        # above -- plain, non-secret config, not a credential-provisioning
-        # step, so it needs neither that key nor bootstrap() raising when
-        # only one of the pair is set (a deployment that names the email
-        # but not the project, or vice versa, just doesn't get this
-        # feature turned on, the same "unusable config parks/skips"
-        # latitude every other optional step in this module already has).
+    if (config.gcp_agent_service_account_email and config.gcp_project_id
+            and config.gcp_key_minter_key):
+        # bwsalmon/agents#126: plain, non-secret config rather than a
+        # credential-provisioning step, so bootstrap() does not raise when
+        # only part of it is set (a deployment that names the email but not
+        # the project, or vice versa, just doesn't get this feature turned
+        # on, the same "unusable config parks/skips" latitude every other
+        # optional step in this module already has).
+        #
+        # It is gated on the minter key as well, though, because writing
+        # this file is what *turns the feature on*: `cli.py`'s
+        # `build_orchestrator` reads /data/config/gcp-key.json and, if it
+        # exists, has `_dispatch` mint and `_sweep` reap. Both authenticate
+        # as the key this file names, so writing it without having placed
+        # that key leaves every cycle failing on "Cannot find key file"
+        # instead of quietly not using a feature that isn't ready. Found
+        # live: the minter key's own fetch is best-effort (deploy.sh's
+        # SECRET_WAIT_OPTIONAL), so a rollout that races ahead of CI's push
+        # step hits exactly that.
         configure_agent_gcp_key(
             admin_ssh, service_account_email=config.gcp_agent_service_account_email,
             project_id=config.gcp_project_id,
             max_key_age_hours=config.gcp_key_max_age_hours,
         )
     if config.gemini_project_id:
-        configure_gemini_key(admin_ssh, config.gemini_project_id)
+        configure_gemini_key(
+            admin_ssh, config.gemini_project_id,
+            impersonate_service_account=config.gcp_agent_service_account_email,
+        )
     if config.janitor_ttl_hours is not None:
         if not config.gcp_project_id:
             raise ValueError("janitor_ttl_hours requires gcp_project_id")
         configure_janitor(admin_ssh, config.gcp_project_id, config.janitor_ttl_hours,
+                           impersonate_service_account=config.gcp_agent_service_account_email,
                            name_prefix=config.janitor_name_prefix)
 
     # Stage 9: sandboxes.
