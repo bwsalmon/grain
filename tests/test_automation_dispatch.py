@@ -951,3 +951,80 @@ def test_dispatch_always_passes_this_dispatchs_own_task_unit():
              remote_url=REMOTE_URL, token=TOKEN)
     args = _mcp_config_args(runner)
     assert args[args.index("--task-unit") + 1] == "grain-task-sandbox-0"
+
+
+# --- a workspace the sandbox user cannot clean ----------------------------
+
+def _generated_workspace_script(**kwargs) -> str:
+    runner = FakeRunner()
+    runner.expect("bash", stdout="")
+    ensure_workspace(runner, "https://git.example/repo.git", **kwargs)
+    return runner.calls[0][0][2]
+
+
+def _run_workspace_script(tmp_path, *, clean_exit: int) -> tuple[list[str], int]:
+    """Runs the real generated script with stand-in `git` and `sudo`, so
+    the control flow is exercised rather than pattern-matched. `git clean`
+    exits `clean_exit`; every other git subcommand succeeds.
+    """
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    (bin_dir / "git").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "git $*" >> {log}\n'
+        f'for a in "$@"; do [ "$a" = clean ] && exit {clean_exit}; done\n'
+        "exit 0\n"
+    )
+    (bin_dir / "sudo").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "sudo $*" >> {log}\n'
+        'exit 0\n'
+    )
+    for name in ("git", "sudo"):
+        (bin_dir / name).chmod(0o755)
+
+    workspace = tmp_path / "workspace"
+    (workspace / ".git").mkdir(parents=True)
+    script = _generated_workspace_script(path=str(workspace))
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-c", script], env=env,
+                            capture_output=True, text=True)
+    calls = log.read_text().splitlines() if log.exists() else []
+    return calls, result.returncode
+
+
+def test_a_clean_that_succeeds_never_reclones(tmp_path):
+    calls, code = _run_workspace_script(tmp_path, clean_exit=0)
+    assert code == 0
+    assert not [c for c in calls if c.startswith("sudo ")], calls
+    assert not [c for c in calls if "clone" in c], calls
+
+
+def test_an_unremovable_workspace_is_recloned_rather_than_failing(tmp_path):
+    """Found live: a previous task left a root-owned __pycache__, so
+    `git clean -fdx` exited 1. The script is `set -eu`, so that failed
+    ensure_workspace itself and every later dispatch to that sandbox died
+    at its first step -- the state that breaks the reset being exactly the
+    state the reset exists to remove.
+    """
+    calls, code = _run_workspace_script(tmp_path, clean_exit=1)
+    assert code == 0, "a workspace that cannot be cleaned must not fail the dispatch"
+    assert any(c.startswith("sudo rm -rf") for c in calls), calls
+    assert any("clone" in c for c in calls), calls
+    # and the checkout still runs afterwards, on the fresh clone
+    assert any("checkout" in c for c in calls), calls
+
+
+def test_the_reset_does_not_reclone_when_fetch_fails(tmp_path):
+    """Scoped deliberately: a failing fetch is usually the network or the
+    proxy, and re-cloning over that same network turns a retryable blip
+    into a slower one. It must still fail loudly."""
+    script = _generated_workspace_script()
+    fetch_line = next(l for l in script.splitlines() if "fetch --prune" in l)
+    assert not fetch_line.strip().startswith("if !"), (
+        "fetch failure must still abort under set -eu, not trigger a re-clone"
+    )
