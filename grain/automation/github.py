@@ -407,6 +407,24 @@ class GitHubClient:
         if resp.status != 200:
             raise GitHubError(resp.status, resp.body)
 
+    def reopen_issue(self, owner: str, repo: str, number: int) -> None:
+        """Reopens a task issue GitHub had closed. bwsalmon/agents#135:
+        `_close_finished_prs` closes a task issue once its PR itself
+        closes, but a human reviewing that "done" work may still come back
+        with a follow-up comment instead of relabelling it -- `core.py`'s
+        `_restart_commented_completions` is what reacts to that, and this
+        is the other half of `close_issue`'s own PATCH, just the other
+        state value.
+        """
+        resp = self.transport.request(
+            method="PATCH",
+            path=f"/repos/{owner}/{repo}/issues/{number}",
+            headers=self._headers(owner, repo, json_body=True),
+            body=json.dumps({"state": "open"}).encode(),
+        )
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+
     def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
         """Whether `branch` is really on the remote.
 
@@ -667,6 +685,9 @@ class DryRunGitHubClient:
 
     def close_issue(self, owner: str, repo: str, number: int) -> None:
         print(f"+ close issue {owner}/{repo}#{number}")
+
+    def reopen_issue(self, owner: str, repo: str, number: int) -> None:
+        print(f"+ reopen issue {owner}/{repo}#{number}")
 
     def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
         return self.inner.branch_exists(owner, repo, branch)

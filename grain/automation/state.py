@@ -157,6 +157,32 @@ class PendingQuestion:
     branch: str | None = None
 
 
+@dataclass(frozen=True)
+class CompletedIssue:
+    """Tracks one task issue currently carrying `completed_label`, so a
+    later poll (`core.py`'s `_restart_commented_completions`,
+    bwsalmon/agents#135) can restart it -- reopen it if GitHub had already
+    closed it, and put `trigger_label` back on -- once a human comments on
+    it instead of relabelling it by hand.
+
+    `baseline_comment_id` starts `None` rather than being filled in at
+    completion time the way `PendingQuestion.question_comment_id` is: two
+    of the three finish paths that apply `completed_label`
+    (`_finish_succeeded_issue`, `_finish_succeeded_pr`) never post a
+    comment of their own, so there is no id finish time can hand back as
+    "the highest comment on this issue right now." The first poll after
+    completion primes this field from a fresh `list_comments` read instead
+    of comparing against anything -- comparing on that very first read
+    would risk treating either a comment already on the issue before this
+    run even started, or (the third finish path's own
+    `comment_on_issue` reply) the automation comment `_finish_no_changes`/
+    `_finish_question` just posted, as a "new" one and restarting a task
+    nobody actually asked to restart.
+    """
+    issue: int
+    baseline_comment_id: int | None = None
+
+
 @dataclass
 class AutomationState:
     assignments: dict[str, Assignment] = field(default_factory=dict)
@@ -169,6 +195,9 @@ class AutomationState:
     # redispatches an issue already `in_progress_issues()`), so the issue
     # number is a safe, simple key here too.
     open_pull_requests: dict[str, OpenPullRequest] = field(default_factory=dict)
+    # Same string-keying reason again -- bwsalmon/agents#135, one task issue
+    # is never completed twice at once.
+    completed_issues: dict[str, CompletedIssue] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "AutomationState":
@@ -214,9 +243,16 @@ class AutomationState:
             )
             for key, o in raw.get("open_pull_requests", {}).items()
         }
+        completed_issues = {
+            key: CompletedIssue(
+                issue=c["issue"], baseline_comment_id=c.get("baseline_comment_id"),
+            )
+            for key, c in raw.get("completed_issues", {}).items()
+        }
         return cls(assignments=assignments, run_timestamps=run_timestamps,
                     pending_questions=pending_questions,
-                    open_pull_requests=open_pull_requests)
+                    open_pull_requests=open_pull_requests,
+                    completed_issues=completed_issues)
 
     def save(self, path: Path) -> None:
         data = {
@@ -247,6 +283,10 @@ class AutomationState:
                     "auto_merge": o.auto_merge, "fix_issue": o.fix_issue,
                 }
                 for key, o in self.open_pull_requests.items()
+            },
+            "completed_issues": {
+                key: {"issue": c.issue, "baseline_comment_id": c.baseline_comment_id}
+                for key, c in self.completed_issues.items()
             },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -311,6 +351,25 @@ class AutomationState:
         """
         pending = self.open_pull_requests[str(issue)]
         self.open_pull_requests[str(issue)] = replace(pending, fix_issue=fix_issue)
+
+    # --- restart on comment after completion (bwsalmon/agents#135) -------
+    def record_completed_issue(self, issue: int) -> None:
+        self.completed_issues[str(issue)] = CompletedIssue(issue=issue)
+
+    def prime_completed_baseline(self, issue: int, baseline_comment_id: int) -> None:
+        """Fills in the "highest comment id seen so far" baseline the
+        first time `core.py`'s `_restart_commented_completions` polls a
+        freshly completed issue -- see `CompletedIssue`'s own docstring
+        for why this can't just be passed to `record_completed_issue` up
+        front.
+        """
+        existing = self.completed_issues[str(issue)]
+        self.completed_issues[str(issue)] = replace(
+            existing, baseline_comment_id=baseline_comment_id,
+        )
+
+    def clear_completed_issue(self, issue: int) -> None:
+        self.completed_issues.pop(str(issue), None)
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:
