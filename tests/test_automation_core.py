@@ -2079,7 +2079,11 @@ def test_gcp_key_is_recorded_on_the_assignment_for_later_revocation():
     assert orchestrator.state.assignments["sandbox-0"].gcp_key_id == "abc123"
 
 
-def test_gcp_key_mint_failure_does_not_crash_the_cycle():
+def test_gcp_key_mint_failure_degrades_to_dispatching_without_one():
+    """bwsalmon/agents#138: unlike a dispatch failure (below), a broken
+    minter must not become a standing veto on every dispatch for as long
+    as it stays broken -- the sandbox still gets its task, just without a
+    GCP key, and the failure is only surfaced for visibility."""
     runner = FakeRunner()
     runner.expect("gcloud iam service-accounts keys create", returncode=1,
                   stderr="PERMISSION_DENIED")
@@ -2088,9 +2092,10 @@ def test_gcp_key_mint_failure_does_not_crash_the_cycle():
         gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
     )
     orchestrator.run_once(NOW)
-    assert "sandbox-0" not in orchestrator.state.assignments
+    assert orchestrator.state.assignments["sandbox-0"].gcp_key_id is None
+    assert not runner.ran("keys delete")
     outcomes = [entry["outcome"] for entry in orchestrator.audit.entries]
-    assert any("dispatch failed" in o for o in outcomes)
+    assert any("dispatched to" in o and "PERMISSION_DENIED" in o for o in outcomes)
 
 
 def test_a_dispatch_failure_after_minting_a_gcp_key_revokes_it():

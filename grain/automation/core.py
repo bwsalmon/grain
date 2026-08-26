@@ -1945,9 +1945,8 @@ class Orchestrator:
             ]
             # A `CommandError` here (an SSH/command failure anywhere in
             # dispatch()/dispatch_pr()'s path -- ensure_workspace,
-            # configure_git_credentials, starting the unit; gemini_keys
-            # .create_key's own gcloud calls below (bwsalmon/agents#47); or
-            # gcp_keys.create_key's own gcloud calls (bwsalmon/agents#126))
+            # configure_git_credentials, starting the unit; or gemini_keys
+            # .create_key's own gcloud calls below (bwsalmon/agents#47))
             # must not take down every other candidate still queued this
             # cycle. Found live (docs/next-session.md): a proxy-auth
             # failure on one sandbox crashed `run_once` before it ever
@@ -1959,10 +1958,17 @@ class Orchestrator:
             # GitHub-side 404. Only `CommandError` specifically: anything
             # else is a real bug, not an expected failure mode, and should
             # still surface immediately.
+            #
+            # gcp_keys.create_key's own gcloud calls (bwsalmon/agents#126)
+            # are deliberately *not* covered by this catch, unlike the
+            # Gemini key -- see the `gcp_key_mint_error` handling just below
+            # (bwsalmon/agents#138) for why that failure is degraded instead
+            # of treated as this candidate's dispatch failing outright.
             gemini_key_string: str | None = None
             gemini_key_name: str | None = None
             gcp_key_json: str | None = None
             gcp_key_id: str | None = None
+            gcp_key_mint_error: str | None = None
             try:
                 if task.gemini_key:
                     # `_resolve_target` already refused this task outright
@@ -1978,8 +1984,26 @@ class Orchestrator:
                     # key above -- see `gcp_keys.py`'s own docstring for why
                     # this mirrors the old metadata broker's "every sandbox,
                     # every dispatch" behaviour rather than a task label.
-                    minted_gcp = create_gcp_key(self.base_runner, self.gcp_key_config)
-                    gcp_key_json, gcp_key_id = minted_gcp.key_json, minted_gcp.key_id
+                    #
+                    # bwsalmon/agents#138: unlike the Gemini key, this one
+                    # has no label gate, so a broken minter (bad IAM grant,
+                    # a GCP outage, an expired minter key) would otherwise
+                    # be a standing veto on *every* dispatch for as long as
+                    # it stayed broken, if this were left to the general
+                    # `except CommandError` below. Caught locally instead:
+                    # fall back to `gcp_key_json = None`, the exact shape
+                    # `dispatch()`/`configure_gcp_key` already treat as "no
+                    # GCP key configured for this deployment" (see
+                    # dispatch.py's own docstring), so the sandbox is
+                    # dispatched in degraded mode -- without a key -- rather
+                    # than not dispatched at all. The failure is still
+                    # surfaced below once the dispatch outcome is known, so
+                    # an agent can pick it up from the audit log.
+                    try:
+                        minted_gcp = create_gcp_key(self.base_runner, self.gcp_key_config)
+                        gcp_key_json, gcp_key_id = minted_gcp.key_json, minted_gcp.key_id
+                    except CommandError as exc:
+                        gcp_key_mint_error = str(exc)
                 if task.pr is not None:
                     review_comments = self.github.list_review_comments(
                         task.repo.owner, task.repo.name, task.pr.number
@@ -2086,5 +2110,8 @@ class Orchestrator:
             self.audit.record(
                 sandbox=sandbox, issue=number,
                 outcome=(f"dispatched to {task.repo}"
-                          + (f" (PR #{task.pr.number})" if task.pr else "")),
+                          + (f" (PR #{task.pr.number})" if task.pr else "")
+                          + (f" (degraded: GCP service-account key mint "
+                             f"failed, dispatched without one: "
+                             f"{gcp_key_mint_error})" if gcp_key_mint_error else "")),
             )
