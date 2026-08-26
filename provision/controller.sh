@@ -177,6 +177,14 @@ install -m0600 -o grain-agent -g grain-agent \
 # over `sudo -i`) lands cleanly here with no extra chown step. -------------
 install -d -m0755 /opt/grain
 
+# `grain` on PATH (bwsalmon/agents#137): a plain symlink to the wrapper at
+# `/opt/grain/bin/grain`, so `grain automation status` works instead of
+# `cd /opt/grain && python3 -m grain.cli automation status`. Dangling until
+# the manual deploy step above lands `bin/grain` there -- that's fine, this
+# script never deploys code itself (see this file's header), and a dangling
+# symlink on a controller that hasn't been deployed to yet is accurate.
+ln -sf /opt/grain/bin/grain /usr/local/bin/grain
+
 # --- systemd units, installed but not enabled: enabling grain-automation
 # before /opt/grain holds real code and /data/secrets/config hold real
 # credentials would just fail (or worse, run against nothing). Matches

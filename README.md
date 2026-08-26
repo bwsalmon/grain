@@ -211,19 +211,25 @@ need cloud access.
 ## Install
 
 There is no package and no entry point — `grain` is invoked as
-`python3 -m grain.cli`. Clone it wherever you run it:
+`python3 -m grain.cli`, wrapped by `bin/grain` (`exec python3 -m grain.cli
+"$@"`, resolved against its own real path so it works from anywhere it's
+symlinked onto `PATH`, not just from inside the checkout). Clone it
+wherever you run it, then put that wrapper on `PATH`:
 
 ```sh
 git clone https://github.com/bwsalmon/grain
 cd grain
-alias grain='python3 -m grain.cli'      # the rest of this file assumes it
+sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain   # the rest of this file assumes it
 ```
 
 The same tree is deployed twice: **on the host**, where `grain host …`
 drives the hypervisor, and **on the controller** at `/opt/grain`, where
 everything else runs. Which machine a command belongs on is not
 cosmetic — the controller is the only one with `/data` and the
-credentials.
+credentials. `bin/grain` is symlinked onto the controller's `PATH`
+automatically (`provision/controller.sh`, and `terraform/gcp/files/deploy.sh`
+for the GCP host that plays the same role there) — this manual step is only
+needed for a host you set up yourself.
 
 | Command group | Runs on |
 |---|---|
