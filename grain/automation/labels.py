@@ -143,13 +143,22 @@ def task_labels(config: AutomationConfig | None = None) -> list[Label]:
 
 def agent_label(sandbox: str) -> str:
     """The label that names *which* sandbox is currently working a task --
-    e.g. `"sandbox-1"` becomes `"grain-agent-1"` -- applied alongside
+    e.g. `"sandbox-1"` becomes `"grain-agent-working-1"` -- applied alongside
     `in_progress_label` the moment a task is dispatched (`core.py`'s
     `_dispatch`), re-applied every `run_once` cycle for as long as the
     assignment lasts (`_refresh_agent_labels`) so a label knocked off by
     hand, or lost to an API call that failed partway, heals on the very
     next cycle rather than staying wrong for the rest of the run, and
     removed the moment the assignment ends, however it ends (bwsalmon/agents#95).
+
+    `working`, not bare `grain-agent-1` (bwsalmon/agents#101): the bare form
+    read as just another member of the `grain-agent-*` family of *state*
+    labels (`grain-agent-in-progress`, `grain-agent-completed`, ...) with
+    nothing marking it as the odd one out -- one-per-sandbox rather than
+    one-per-deployment, and naming a sandbox rather than a state. Spelling
+    out `working` makes the label legible on its own on an issue: "sandbox 1
+    is working this" rather than a bare number a reader has to already know
+    the convention to parse.
 
     Deliberately not one of `_STYLES`/`task_labels()`: those are the fixed,
     deployment-wide set `ci/ensure-task-labels.sh` creates ahead of time
@@ -162,7 +171,7 @@ def agent_label(sandbox: str) -> str:
     already exist on the repo, with a default colour, exactly the way one
     typed into the label picker by hand would be.
     """
-    return f"grain-agent-{sandbox.removeprefix('sandbox-')}"
+    return f"grain-agent-working-{sandbox.removeprefix('sandbox-')}"
 
 
 def main() -> int:
