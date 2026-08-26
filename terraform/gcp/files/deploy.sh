@@ -96,7 +96,7 @@ out = ""
 for key in ("grain_repo_url", "grain_ref", "debian_image_url",
             "task_repo", "default_target_repo", "credential_name",
             "bootstrap_ssh_timeout_seconds", "agent_service_account_email",
-            "gemini_project_id"):
+            "gemini_project_id", "name_prefix", "janitor_ttl_hours"):
     out += sh(key.upper(), cfg.get(key, "") or "")
 targets = cfg.get("target_repos") or []
 out += "TARGET_REPOS=(" + " ".join(shlex.quote(t) for t in targets) + ")\n"
@@ -379,6 +379,15 @@ run_bootstrap() {
       # GEMINI_PROJECT_ID alone.
       if [ -n "$GEMINI_PROJECT_ID" ]; then
         args+=(--gemini-project-id "$GEMINI_PROJECT_ID")
+      fi
+      # janitor_ttl_hours (terraform/gcp's enable_janitor, bwsalmon/agents#113)
+      # reuses the same key too -- grain/automation/janitor.py authenticates
+      # with it the same way gemini_keys.py does. Same nesting reasoning as
+      # GEMINI_PROJECT_ID above. name_prefix must always accompany it: it
+      # names the exact host/data-disk resources the janitor must never
+      # delete, so it's passed unconditionally here, not gated on its own.
+      if [ -n "$JANITOR_TTL_HOURS" ]; then
+        args+=(--janitor-ttl-hours "$JANITOR_TTL_HOURS" --janitor-name-prefix "$NAME_PREFIX")
       fi
     else
       log "WARNING: agent_service_account_roles is set but no GCP service account key"

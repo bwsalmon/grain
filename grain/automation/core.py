@@ -141,6 +141,7 @@ from .gemini_keys import create_key as create_gemini_key
 from .gemini_keys import delete_key as delete_gemini_key
 from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
+from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
 from .ssh import SshRunner
 from .state import AutomationState, OpenPullRequest, TriggerKind
@@ -365,6 +366,14 @@ class Orchestrator:
     # with no GCP key config gets no GCP access in its sandboxes, not an
     # error.
     gcp_key_config: GcpKeyConfig | None = None
+    # bwsalmon/agents#113: the on/off switch for the GCP janitor. `None`
+    # (production's default for a deployment that never ran `grain
+    # controller configure --janitor-ttl-hours ...`, or a test that doesn't
+    # care) makes `_janitor` a no-op, the same "feature not configured"
+    # shape `gemini_key_config`/`gcp_key_config` above already have. See
+    # `janitor.py`'s own docstring for what it deletes and how it avoids
+    # grain's own core infrastructure.
+    janitor_config: JanitorConfig | None = None
     # bwsalmon/agents#51: where to persist `AutomationState` immediately
     # after each mutation, not just once at the very end of `run_once`
     # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
@@ -446,6 +455,7 @@ class Orchestrator:
 
     def run_once(self, now: datetime) -> None:
         self._sweep(now)
+        self._janitor(now)
         self._refresh_agent_labels()
         self._promote_answered_questions(now)
         self._close_finished_prs()
@@ -549,6 +559,39 @@ class Orchestrator:
             self.audit.record(
                 sandbox=None, issue=None,
                 outcome=f"reaped expired GCP service-account key {key_id}",
+            )
+
+    # --- janitor (bwsalmon/agents#113) ---------------------------------
+    def _janitor(self, now: datetime) -> None:
+        """No-op when `janitor_config` is unset (production's default for
+        a deployment that never enabled it). Run after `_sweep` so a key
+        `_sweep` just revoked for a freed sandbox is already gone from
+        `self.state.assignments` by the time `protected_gemini_key_names`
+        below is built — not that it would matter either way, since a
+        revoked key is no longer live in the project regardless of what
+        this set contains.
+        """
+        if self.janitor_config is None:
+            return
+        protected_gemini_key_names = frozenset(
+            assignment.gemini_key_name
+            for assignment in self.state.assignments.values()
+            if assignment.gemini_key_name is not None
+        )
+        result = run_janitor(
+            self.base_runner, self.janitor_config, now,
+            protected_gemini_key_names=protected_gemini_key_names,
+        )
+        for deleted in result.deleted:
+            self.audit.record(sandbox=None, issue=None,
+                               outcome=f"janitor deleted {deleted.kind} {deleted.name}")
+        for warning in result.warnings:
+            # Visibility only, same treatment as the health/credential
+            # warnings above -- a listing or deletion failure this cycle
+            # doesn't stop the janitor from trying again next cycle.
+            self.audit.record(
+                sandbox=None, issue=None,
+                outcome=f"janitor warning ({warning.kind} {warning.name}): {warning.detail}",
             )
 
     def _refresh_agent_labels(self) -> None:

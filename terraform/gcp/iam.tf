@@ -23,13 +23,16 @@ resource "google_project_iam_member" "host" {
 # (bwsalmon/agents#126, grain/automation/gcp_keys.py) and pushes it into
 # the sandbox for the duration of that one task, revoking it once the
 # task's slot frees (or, failing that, once it turns 24 hours old -- see
-# gcp_keys.py's own docstring). Created when you ask for it by listing
-# roles, by turning on agent_can_manage_compute_instances, or both --
-# either alone is a real, supported combination, so the account's own
-# existence can't gate on agent_service_account_roles specifically.
+# gcp_keys.py's own docstring). It's also what the janitor's Gemini-key
+# and compute-instance cleanup (bwsalmon/agents#113) run as. Created when
+# you ask for it by listing roles, by turning on
+# agent_can_manage_compute_instances, enable_gemini_key, or
+# enable_janitor, in any combination -- each alone is a real, supported
+# configuration, so the account's own existence can't gate on
+# agent_service_account_roles specifically.
 
 locals {
-  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key || var.agent_can_manage_gke
+  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key || var.enable_janitor || var.agent_can_manage_gke
 
   # Unconditioned, unlike agent_conditioned_compute_roles below -- see
   # variables.tf's agent_can_manage_gke for why there is no equivalent

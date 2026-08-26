@@ -18,6 +18,7 @@ from grain.automation.gcp_keys import GcpKeyConfig
 from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
+from grain.automation.janitor import JanitorConfig
 from grain.automation.ssh import SshRunner
 from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
@@ -192,7 +193,7 @@ def credentials_with(*names: str) -> CredentialSet:
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
                        credentials=None, credential_store=None, state_path=None,
-                       gcp_key_config=None):
+                       gcp_key_config=None, janitor_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -225,7 +226,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         # Orchestrator's own decisions against a plain FakeRunner.
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
-        gcp_key_config=gcp_key_config,
+        gcp_key_config=gcp_key_config, janitor_config=janitor_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -2622,3 +2623,76 @@ def test_a_sweep_release_is_persisted_before_the_pr_is_opened(tmp_path, monkeypa
 
     persisted = AutomationState.load(state_path)
     assert persisted.assignments == {}
+
+
+# --- GCP janitor (bwsalmon/agents#113) --------------------------------------
+
+def test_janitor_is_a_noop_without_config():
+    runner = FakeRunner()
+    orchestrator, _ = make_orchestrator(issues=[], runner=runner)
+
+    orchestrator.run_once(NOW)
+
+    assert not any("gcloud" in c for c in runner.commands)
+
+
+def test_janitor_deletes_an_old_instance_and_logs_it():
+    runner = FakeRunner()
+    runner.expect("gcloud compute instances list", stdout=json.dumps([{
+        "name": "agent-thing",
+        "zone": "https://www.googleapis.com/compute/v1/projects/proj/zones/us-central1-a",
+        "creationTimestamp": "2020-01-01T00:00:00Z", "labels": {},
+    }]))
+    orchestrator, _ = make_orchestrator(
+        issues=[], runner=runner,
+        janitor_config=JanitorConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert any("instances delete" in c and "agent-thing" in c for c in runner.commands)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("janitor deleted instance agent-thing" in o for o in outcomes)
+
+
+def test_janitor_never_touches_the_grain_host_instance():
+    runner = FakeRunner()
+    runner.expect("gcloud compute instances list", stdout=json.dumps([{
+        "name": "grain-host",
+        "zone": "https://www.googleapis.com/compute/v1/projects/proj/zones/us-central1-a",
+        "creationTimestamp": "2020-01-01T00:00:00Z", "labels": {},
+    }]))
+    orchestrator, _ = make_orchestrator(
+        issues=[], runner=runner,
+        janitor_config=JanitorConfig(project_id="proj"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert not any("instances delete" in c for c in runner.commands)
+
+
+def test_janitor_never_deletes_a_gemini_key_still_referenced_by_a_live_assignment():
+    """Defensive extra check alongside the age cutoff -- task runtimes are
+    always well under a sane TTL in practice, but a key `state.assignments`
+    still names is never a candidate no matter what the listing says.
+    Exercises `_janitor` directly (as `_ssh_runner_for` is elsewhere in this
+    file) so this stays about the janitor's own wiring, not sweep's.
+    """
+    live_key = "projects/1/locations/global/keys/abc"
+    state = AutomationState()
+    state.assign("sandbox-0", issue=1, unit=unit_name("sandbox-0"), now=NOW,
+                 gemini_key_name=live_key)
+    runner = FakeRunner()
+    runner.expect("gcloud services api-keys list", stdout=json.dumps([{
+        "name": live_key, "displayName": "grain-sandbox-0-issue-1",
+        "createTime": "2020-01-01T00:00:00Z",
+    }]))
+    orchestrator, _ = make_orchestrator(
+        issues=[], runner=runner, state=state,
+        janitor_config=JanitorConfig(project_id="proj"),
+    )
+
+    orchestrator._janitor(NOW)
+
+    assert not any("api-keys delete" in c for c in runner.commands)
