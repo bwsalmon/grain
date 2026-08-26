@@ -1002,6 +1002,16 @@ friction. bwsalmon/agents#126 filed the removal explicitly in those terms:
 use a service-account key, mirroring the Gemini key's own shape, rather
 than keep running a broker nothing else in this design still needed.
 
+That covers every key this deployment's own dispatch minted and knows
+about; it does not cover a key (or a GCE instance, or a disk) an agent
+minted or created itself with its own GCP access mid-task and never tore
+back down, nor the rare stranded-mint case `gemini_keys.py`'s own docstring
+describes. `grain/automation/janitor.py` (bwsalmon/agents#113) is the
+backstop for exactly that gap: an optional, TTL-based sweep, run from
+`core.py`'s `run_once` alongside the stranded-work sweeper, that deletes
+whatever of those it can positively rule out as *not* being grain's own
+core infrastructure. See its own module docstring for the exclusion model.
+
 ## OpenHands integration
 
 Superseded as the plan of record by
