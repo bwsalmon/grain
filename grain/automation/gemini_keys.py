@@ -78,10 +78,14 @@ name (bwsalmon/agents#100). Feeding that operation id straight into
 time, no matter how long the caller waits first: it isn't a not-ready-yet
 race, it's the wrong kind of resource id entirely, one `get-key-string`
 can never resolve. `_await_operation` below polls
-`api-keys operations describe` until Google reports the operation `done`,
-then reads the created key's resource name back out of its `response`
-payload, and only *then* calls `get-key-string`. A `name` that already
-looks like a key (doesn't start with `operations/`) skips polling
+`services operations describe` (bwsalmon/agents#104: not `services
+api-keys operations describe` -- that subcommand does not exist on this
+`gcloud`, api-keys' long-running operations are described through the
+plain `services operations` group, one level up, the same place `gcloud
+services enable`'s operations live) until Google reports the operation
+`done`, then reads the created key's resource name back out of its
+`response` payload, and only *then* calls `get-key-string`. A `name` that
+already looks like a key (doesn't start with `operations/`) skips polling
 entirely, so this stays a no-op against a `gcloud` whose `create` already
 waits and returns the key directly.
 """
@@ -162,7 +166,7 @@ def _await_operation(runner: Runner, config: GeminiKeyConfig, operation_name: st
     deadline = time.monotonic() + _OPERATION_POLL_TIMEOUT_SECONDS
     while True:
         describe_argv = [
-            "gcloud", "services", "api-keys", "operations", "describe",
+            "gcloud", "services", "operations", "describe",
             operation_name, f"--project={config.project_id}", "--format=json",
         ]
         result = runner.run(describe_argv)
