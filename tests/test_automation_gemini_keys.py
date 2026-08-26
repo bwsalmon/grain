@@ -92,7 +92,7 @@ def test_create_key_resolves_an_operation_returned_by_create():
     runner = FakeRunner()
     runner.expect("gcloud services api-keys create", stdout=f"{OPERATION_NAME}\n")
     runner.expect(
-        f"gcloud services api-keys operations describe {OPERATION_NAME}",
+        f"gcloud services operations describe {OPERATION_NAME}",
         stdout=json.dumps({"done": True, "response": {"name": KEY_NAME}}),
     )
     runner.expect("gcloud services api-keys get-key-string", stdout="secret-value\n")
@@ -107,7 +107,7 @@ def test_create_key_raises_when_the_operation_reports_an_error():
     runner = FakeRunner()
     runner.expect("gcloud services api-keys create", stdout=f"{OPERATION_NAME}\n")
     runner.expect(
-        f"gcloud services api-keys operations describe {OPERATION_NAME}",
+        f"gcloud services operations describe {OPERATION_NAME}",
         stdout=json.dumps({"done": True, "error": {"message": "quota exceeded"}}),
     )
     with pytest.raises(CommandError):
@@ -162,7 +162,7 @@ def test_create_key_gives_up_on_an_operation_that_never_finishes(monkeypatch):
     runner = FakeRunner()
     runner.expect("gcloud services api-keys create", stdout=f"{OPERATION_NAME}\n")
     runner.expect(
-        f"gcloud services api-keys operations describe {OPERATION_NAME}",
+        f"gcloud services operations describe {OPERATION_NAME}",
         stdout=json.dumps({"done": False}),
     )
     with pytest.raises(CommandError):
