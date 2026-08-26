@@ -347,7 +347,7 @@ periodically by something else, not run as a daemon** — `docs/design.md`
 says "invoked by a systemd timer."
 
 **That timer is now shipped**: `provision/controller.sh` installs
-`grain-automation.service`/`.timer` (a 30-second `OnUnitActiveSec`, same
+`grain-automation.service`/`.timer` (a two-minute `OnUnitActiveSec`, same
 shape this section used to hand-draft) and `grain-git-proxy.service`, all
 disabled until step 12 of the first-time setup checklist enables them —
 they can't do anything useful before `/opt/grain` holds real code and
@@ -477,7 +477,7 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   `subnet` are written — the only two fields `sandbox_names`/`address_of`
   depend on; everything else in `Cluster` (VM sizing, image, bridge) is a
   host-side-only concern. Takes effect on the next `automation run-once`
-  tick (every 30s); no restart needed, since it's a oneshot invoked fresh
+  tick (every 2 min); no restart needed, since it's a oneshot invoked fresh
   each time, not a long-lived process holding a stale copy in memory.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing

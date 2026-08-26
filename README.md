@@ -571,7 +571,7 @@ holds credentials:
 
 ```sh
 sudo systemctl enable --now grain-git-proxy.service
-sudo systemctl enable --now grain-automation.timer     # 30-second cadence
+sudo systemctl enable --now grain-automation.timer     # two-minute cadence
 ```
 
 `systemctl cat grain-automation.timer` shows the exact unit; edit
