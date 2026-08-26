@@ -12,7 +12,8 @@ from grain.run import CommandError, FakeRunner
 
 EMAIL = "grain-agent@my-proj.iam.gserviceaccount.com"
 KEY_ID = "abc123def456"
-KEY_JSON = json.dumps({"type": "service_account", "private_key": "fake"})
+KEY_JSON = json.dumps(
+    {"type": "service_account", "private_key": "fake", "private_key_id": KEY_ID})
 
 
 def config(**overrides) -> GcpKeyConfig:
@@ -288,3 +289,53 @@ def test_config_load_honours_a_custom_max_key_age():
         "max_key_age_hours": 6,
     }))
     assert GcpKeyConfig.load(path).max_key_age_hours == 6
+
+
+# --- where the key id comes from (bwsalmon/agents#140) --------------------
+
+def test_the_key_id_comes_from_the_key_file_when_gcloud_prints_nothing():
+    """The bug, reported live: `keys create --format=value(name.basename())`
+    prints nothing on the controller's gcloud, so every mint died on
+    "gcloud printed no key id". The credentials file gcloud just wrote
+    carries private_key_id, which is the same id `keys delete` takes.
+    """
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud iam service-accounts keys create", stdout="")  # prints nothing
+    runner.expect("cat", stdout=KEY_JSON)
+    key = create_key(runner, config())
+    assert key.key_id == KEY_ID
+    assert key.key_json == KEY_JSON
+
+
+def test_the_key_file_wins_over_what_gcloud_printed():
+    """The file was written by the same call that made the key, so it
+    cannot disagree with what is actually on disk; stdout can."""
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud iam service-accounts keys create", stdout="something-else\n")
+    runner.expect("cat", stdout=KEY_JSON)
+    assert create_key(runner, config()).key_id == KEY_ID
+
+
+def test_a_key_file_with_no_id_falls_back_to_what_gcloud_printed():
+    """The fallback exists for a gcloud whose file shape differs -- better
+    a working mint than a hard failure, given the file is the new thing."""
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud iam service-accounts keys create", stdout=f"{KEY_ID}\n")
+    runner.expect("cat", stdout=json.dumps({"type": "service_account"}))
+    assert create_key(runner, config()).key_id == KEY_ID
+
+
+def test_no_id_from_either_source_raises_without_a_bogus_delete():
+    """A key exists that this call cannot name. Say so rather than calling
+    `keys delete ""` -- the periodic reap is the net for it."""
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud iam service-accounts keys create", stdout="")
+    runner.expect("cat", stdout=json.dumps({"type": "service_account"}))
+    runner.expect("gcloud iam service-accounts keys delete", stdout="")
+    with pytest.raises(CommandError):
+        create_key(runner, config())
+    assert not [c for c in runner.commands if "keys delete" in c]

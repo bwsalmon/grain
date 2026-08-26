@@ -174,22 +174,26 @@ def create_key(runner: Runner, config: GcpKeyConfig) -> GcpKey:
     docstring) -- never a sandbox's, and never the agent account itself.
 
     `gcloud iam service-accounts keys create` writes the key's private
-    material to a file, not stdout -- unlike `gemini_keys.py`'s
-    `api-keys create`, there is no separate "look the value up afterward"
-    step needed: `--format=value(name.basename())` on this (synchronous,
-    non-long-running) call reliably prints the created key's own bare id,
-    the same shape `ci/push-host-secrets.sh`'s existing (and, on this
-    project, actually-run) use of the identical command already relies on.
+    material to a file, not stdout. This module used to take the key's id
+    from that command's own `--format=value(name.basename())` output --
+    and on the controller's gcloud that prints *nothing*, so every mint
+    died on "gcloud printed no key id" (bwsalmon/agents#140). The same
+    mistake `gemini_keys.py` made twice: an assumption about what a gcloud
+    command prints, never checked against the real thing. `gcloud`
+    versions differ here, and CI's is not the controller's.
+
+    So the id comes from the key file instead. A Google credentials file
+    carries `private_key_id`, which *is* the id `keys delete` takes -- it
+    is written by the same call that created the key, needs no second
+    gcloud invocation, and cannot disagree with the key actually on disk.
+    `create`'s stdout is kept only as a fallback for the case where the
+    file is unreadable, which is the one situation the file cannot answer.
     """
     tmp_path = f"/tmp/grain-agent-gcp-key-{secrets_module.token_hex(8)}.json"
     _activate(runner, config)
     create_argv = _keys_create_argv(tmp_path, config)
     create_result = runner.run(create_argv)
-    key_id = create_result.stdout.strip()
-    if not key_id:
-        raise CommandError(
-            create_argv, 1, f"gcloud printed no key id: {create_result.stdout!r}"
-        )
+    printed_id = create_result.stdout.strip()
 
     # A key now exists in the project whether or not the rest of this
     # function succeeds -- read the file back (and remove it from the
@@ -202,8 +206,18 @@ def create_key(runner: Runner, config: GcpKeyConfig) -> GcpKey:
         key_json = runner.run(["cat", tmp_path]).stdout
         if not key_json.strip():
             raise CommandError(["cat", tmp_path], 1, "created key file was empty")
+        key_id = _key_id_from_key_file(key_json) or printed_id
+        if not key_id:
+            raise CommandError(
+                create_argv, 1,
+                "the created key file carries no private_key_id and gcloud "
+                f"printed no id either: {key_json[:200]!r}",
+            )
     except CommandError:
-        _revoke_orphan(runner, config, key_id)
+        # `printed_id` may be empty, in which case there is no id to revoke
+        # by and the key is left for the periodic reap to catch -- see
+        # `delete_expired_keys`, which exists for exactly this.
+        _revoke_orphan(runner, config, printed_id)
         raise
     finally:
         # Best-effort: the temp file lives only on the controller's own
@@ -214,13 +228,38 @@ def create_key(runner: Runner, config: GcpKeyConfig) -> GcpKey:
     return GcpKey(key_id=key_id, key_json=key_json)
 
 
+def _key_id_from_key_file(key_json: str) -> str | None:
+    """The key's own id, out of the credentials file gcloud just wrote.
+
+    `private_key_id` is the same bare id `keys delete` takes. `None` for
+    anything unparseable rather than raising, so the caller can fall back
+    to whatever `create` printed before giving up.
+    """
+    try:
+        parsed = json.loads(key_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    key_id = parsed.get("private_key_id")
+    return key_id if isinstance(key_id, str) and key_id else None
+
+
 def _revoke_orphan(runner: Runner, config: GcpKeyConfig, key_id: str) -> None:
     """Best-effort revocation of a key `create_key` minted but could not
     return. Never raises -- the caller is already re-raising the failure
     that got us here, and a cleanup error must not replace it with a less
     informative one (the same discipline `gemini_keys.py`'s own
     `_revoke_orphan` holds to).
+
+    An empty `key_id` is a no-op: `create_key` reaches this with one only
+    when the key file was unreadable *and* gcloud printed nothing, so
+    there is no id to revoke by. `delete_expired_keys` is the net for that
+    case -- calling `keys delete ""` would just be a confusing second
+    error on top of the real one.
     """
+    if not key_id:
+        return
     try:
         delete_key(runner, config, key_id)
     except CommandError:
