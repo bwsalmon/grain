@@ -77,8 +77,8 @@ def test_create_writes_seed_and_domain_xml_and_defines_it(adapter, cluster, tmp_
     runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
     a.create(cluster.spec_of("sandbox-0"))
     xml = (tmp_path / "sandbox-0.xml").read_text()
-    assert "<vcpu>2</vcpu>" in xml
-    assert "<memory unit='MiB'>8192</memory>" in xml
+    assert "<vcpu>6</vcpu>" in xml
+    assert "<memory unit='MiB'>15360</memory>" in xml
     assert cluster.interface_of("sandbox-0") in xml
     assert f"<log file='{tmp_path}/sandbox-0-console.log' append='on'/>" in xml
     network_config = (tmp_path / "sandbox-0-network-config").read_text()

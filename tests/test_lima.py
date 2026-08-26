@@ -81,8 +81,8 @@ def test_create_writes_a_config_and_invokes_lima(adapter, cluster, tmp_path):
     runner.expect("limactl list --json", stdout=lima_list())
     a.create(cluster.spec_of("sandbox-0"))
     written = (tmp_path / "sandbox-0.yaml").read_text()
-    assert "cpus: 2" in written
-    assert '"8192MiB"' in written
+    assert "cpus: 6" in written
+    assert '"15360MiB"' in written
     assert runner.ran("limactl create --name=sandbox-0")
 
 
