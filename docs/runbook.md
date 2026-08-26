@@ -646,7 +646,11 @@ than the target repo's own code:
 
 - `read_grain_logs`: recent `journalctl` entries for grain's own
   controller services, `grain-automation.service` and
-  `grain-git-proxy.service`.
+  `grain-git-proxy.service` — or, via `unit: grain-task`
+  (bwsalmon/agents#97), this dispatch's own controller-side `claude -p`
+  unit. That unit's stdout is what `capture.py` redirects into the
+  transcript file, but its stderr never is, so `grain-task` is the only
+  way to see why a run crashed before writing anything to it.
 - `check_grain_health`: `health.py`'s ssh/systemd/docker/disk checks —
   the same ones `grain host health` reports — against either the task's
   assigned sandbox or the controller itself.
