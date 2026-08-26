@@ -16,7 +16,9 @@ from grain.automation.dispatch import (
 )
 from grain.automation.gcp_keys import GcpKeyConfig
 from grain.automation.gemini_keys import GeminiKeyConfig
-from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
+from grain.automation.github import (
+    ApiResponse, Comment, FakeTransport, GitHubClient, GitHubError, Issue,
+)
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.janitor import JanitorConfig
 from grain.automation.ssh import SshRunner
@@ -2946,3 +2948,137 @@ def test_janitor_never_deletes_a_gemini_key_still_referenced_by_a_live_assignmen
     orchestrator._janitor(NOW)
 
     assert not any("api-keys delete" in c for c in runner.commands)
+
+
+# --- grain's own comments never count as a human speaking ----------------
+
+SIGNATURE = core_module._AUTOMATION_SIGNATURE
+
+
+def signed(body: str) -> str:
+    """A comment body in the exact shape every automation comment in
+    `core.py` is built in -- the signature on a line of its own, then the
+    message. Written through `_AUTOMATION_SIGNATURE` rather than a copy of
+    its text, so a reworded marker can never leave these tests passing
+    against a string production stopped using.
+    """
+    return f"{SIGNATURE}\n\n{body}"
+
+
+def test_a_comment_grain_posted_itself_does_not_restart_a_completed_issue():
+    """The live bug: `_suggest_fix` comments on a *completed* issue to
+    announce the follow-up task it just filed for that issue's stale PR.
+    grain posts as a maintainer's own credential, so GitHub reports that
+    comment as "OWNER" -- inside `_TRUSTED_REPLY_ASSOCIATIONS` -- and
+    `_restart_commented_completions` read it as a human follow-up and put
+    `trigger_label` back on. The task reopened itself, with nobody having
+    asked.
+    """
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="grain-agent-bot", author_association="OWNER",
+                          body=signed("o/r#7 has conflicts with `main` -- filed "
+                                      "o/r#8 to fix it.")),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "5" in orchestrator.state.completed_issues
+    assert orchestrator.state.assignments == {}
+    assert not any(c["method"] == "PATCH" for c in transport.calls)
+
+
+def test_a_maintainers_quote_reply_still_restarts_a_completed_issue():
+    """The false negative the filter has to avoid: GitHub's own "Quote
+    reply" button copies the comment being replied to -- signature and all
+    -- into the new comment's body as `>`-prefixed lines. That is a human
+    replying, which is precisely what this feature exists to notice, so
+    only an *unquoted* signature line means grain wrote it.
+    """
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)], state=state)
+    quoted = "\n".join(f"> {line}" for line in signed("filed o/r#8 to fix it.").splitlines())
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="maintainer", author_association="OWNER",
+                          body=f"{quoted}\n\nDon't bother, handle it here instead."),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.completed_issues == {}
+    assert orchestrator.state.assignments["sandbox-0"].issue == 5
+
+
+def test_a_comment_grain_posted_itself_does_not_answer_its_own_question():
+    """Same confusion, the other comment-triggered redispatch: an issue
+    parked on `awaiting_reply_label` must not be picked back up because
+    the automation said something on the thread afterwards.
+    """
+    state = AutomationState()
+    state.record_pending_question(5, question_comment_id=100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        comment_json_for(101, user="grain-agent-bot", author_association="OWNER",
+                          body=signed("I can't start this task yet: no /repo.")),
+    ]).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "5" in orchestrator.state.pending_questions
+    assert orchestrator.state.assignments == {}
+
+
+def test_a_directive_in_grains_own_comment_is_not_read_as_an_instruction():
+    """A directive is an instruction *from* a human. grain quotes a task's
+    own text back at it, so without this filter its own comment could
+    redirect the task it is describing.
+
+    `_resolve_target` is called directly rather than through `run_once`:
+    the shared transport serves one `default` body to every call, so a
+    comment thread scripted through it cannot be aimed at the dispatch's
+    own `list_comments` read specifically -- and a test that only *looked*
+    like it was exercising the filter would be worse than none.
+    """
+    orchestrator, _ = make_orchestrator()
+    issue = Issue(number=5, title="t", body="do the thing",
+                   html_url="https://github.com/o/r/issues/5", labels=[], state="open")
+    grain_said = Comment(id=101, user="grain-agent-bot", author_association="OWNER",
+                          body=signed("/repo o/elsewhere"))
+
+    task = orchestrator._resolve_target(issue, [grain_said])
+
+    assert (task.repo.owner, task.repo.name) == ("o", "r"), (
+        "grain's own comment redirected the task it was describing"
+    )
+
+
+def test_a_directive_in_a_maintainers_comment_is_still_read():
+    """The control for the test above: the filter must subtract only
+    grain's own voice, not every trusted comment -- repairing a task with
+    a reply is the whole point of reading comments for directives.
+    """
+    orchestrator, _ = make_orchestrator(allowed=("o/r", "o/elsewhere"))
+    issue = Issue(number=5, title="t", body="do the thing",
+                   html_url="https://github.com/o/r/issues/5", labels=[], state="open")
+    human_said = Comment(id=101, user="maintainer", author_association="OWNER",
+                          body="/repo o/elsewhere")
+
+    task = orchestrator._resolve_target(issue, [human_said])
+
+    assert (task.repo.owner, task.repo.name) == ("o", "elsewhere")
+
+
+def test_the_marker_is_only_recognised_on_a_line_of_its_own():
+    assert core_module._is_automation_comment(signed("filed a fix"))
+    assert core_module._is_automation_comment(f"Closes o/r#5.\n\n{SIGNATURE}")
+    assert not core_module._is_automation_comment(f"> {SIGNATURE}")
+    assert not core_module._is_automation_comment(None)
+    assert not core_module._is_automation_comment("")
+    assert not core_module._is_automation_comment("please redo this")
+    # Mentioned inside a sentence, not posted as one: still a human talking.
+    assert not core_module._is_automation_comment(f"your footer ({SIGNATURE}) is wrong")
