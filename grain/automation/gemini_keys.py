@@ -68,45 +68,44 @@ just returned (both take either the bare key id or, as used here, the full
 `projects/.../locations/global/keys/<id>` resource name `create` returns,
 so nothing here has to parse an id out of it by hand).
 
-**`create` can hand back an operation, not the key, and that needs a third
-call.** `api-keys create` starts a long-running operation; on this
-deployment's `gcloud`, `--format=value(name)` on it is observed to print
-the *operation's* id (`operations/akmf.p7-<...>`) rather than waiting and
-printing the created key's own `projects/.../locations/global/keys/<id>`
-name (bwsalmon/agents#100). Feeding that operation id straight into
-`get-key-string` -- as this module did before #100 -- 404s every single
-time, no matter how long the caller waits first: it isn't a not-ready-yet
-race, it's the wrong kind of resource id entirely, one `get-key-string`
-can never resolve. `_await_operation` below polls
-`services operations describe` (bwsalmon/agents#104: not `services
-api-keys operations describe` -- that subcommand does not exist on this
-`gcloud`, api-keys' long-running operations are described through the
-plain `services operations` group, one level up, the same place `gcloud
-services enable`'s operations live) until Google reports the operation
-`done`, then reads the created key's resource name back out of its
-`response` payload, and only *then* calls `get-key-string`. A `name` that
-already looks like a key (doesn't start with `operations/`) skips polling
-entirely, so this stays a no-op against a `gcloud` whose `create` already
-waits and returns the key directly.
+**`create` can hand back an operation, not the key, so the key is looked
+up rather than read off `create`.** `api-keys create` starts a
+long-running operation; on this deployment's `gcloud`,
+`--format=value(name)` on it is observed to print the *operation's* id
+(`operations/akmf.p7-<...>`) rather than the created key's own
+`projects/.../locations/global/keys/<id>` name (bwsalmon/agents#100).
+Feeding that operation id into `get-key-string` 404s every time -- it is
+the wrong kind of resource id entirely, not a not-ready-yet race.
+
+Two attempts to resolve it by polling the operation both failed against
+real `gcloud`: `services api-keys operations describe` does not exist
+(#104), and the `services operations describe` it was changed to returns
+a JSON *array*, which crashed the poller with `'list' object has no
+attribute 'get'` -- taking the whole dispatch pass down with it, since
+`AttributeError` is not the `CommandError` `core.py` expects. Both were
+written against a `FakeRunner` that returns whatever stdout the test
+scripts, so neither the subcommand's existence nor its output shape was
+ever checked.
+
+So the operation is not consulted at all. `_find_key_by_display_name`
+below lists the project's keys -- `api-keys list --format=json`, an array
+of objects carrying `displayName`, `name` and `createTime` -- and picks
+the newest entry whose `displayName` matches the one `create` was given
+(`core.py` passes `grain-<sandbox>-issue-<n>`, deterministic per task).
+Newest, not the only match, because a task that failed part-way could
+have left an earlier key under the same display name behind. This uses
+only `create`, `list` and `get-key-string`: three subcommands this module
+already exercises against the real thing, and no new `gcloud` surface to
+be wrong about a third time.
 """
 
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..run import CommandError, Runner
-
-# How long to poll `api-keys operations describe` for before giving up --
-# an ordinary key-creation operation finishes in a couple of seconds, so
-# this is generous slack, not a tuned budget. Giving up raises the same
-# `CommandError` any other failure here would, so `core.py`'s existing
-# "log and move on, retry next cycle" handling around `create_gemini_key`
-# applies unchanged rather than hanging that cycle's whole dispatch pass.
-_OPERATION_POLL_INTERVAL_SECONDS = 2
-_OPERATION_POLL_TIMEOUT_SECONDS = 30
 
 # configure.py's GCP_SERVICE_ACCOUNT_KEY_PATH, restated here rather than
 # imported -- see this module's own docstring on why the two are kept in
@@ -157,31 +156,58 @@ def _activate(runner: Runner, config: GeminiKeyConfig) -> None:
     ])
 
 
-def _await_operation(runner: Runner, config: GeminiKeyConfig, operation_name: str) -> str:
-    """Polls a `services api-keys create` long-running operation until
-    Google reports it `done`, then returns the created key's own resource
-    name from the operation's `response` -- see this module's docstring on
-    why `get-key-string` cannot be called with `operation_name` itself.
+def _find_key_by_display_name(
+    runner: Runner, config: GeminiKeyConfig, display_name: str
+) -> str:
+    """The resource name of the newest key called `display_name`.
+
+    `api-keys list --format=json` returns an array of objects; the fields
+    used here are `displayName`, `name` and `createTime`. Newest wins:
+    a task whose earlier attempt died between `create` and this lookup can
+    leave a key behind under the same name, and the one just minted is the
+    one this call is about.
+
+    Raises `CommandError` -- never a bare `KeyError`/`AttributeError` --
+    when the payload is not the expected shape or nothing matches, so a
+    surprise from `gcloud` reaches `core.py`'s dispatch handler as a
+    failure for this one task instead of an exception that ends the whole
+    pass. The message carries `gcloud`'s own output, which is what the two
+    previous attempts at this code path were each missing.
     """
-    deadline = time.monotonic() + _OPERATION_POLL_TIMEOUT_SECONDS
-    while True:
-        describe_argv = [
-            "gcloud", "services", "operations", "describe",
-            operation_name, f"--project={config.project_id}", "--format=json",
-        ]
-        result = runner.run(describe_argv)
-        operation = json.loads(result.stdout)
-        if operation.get("done"):
-            if "error" in operation:
-                raise CommandError(describe_argv, 1, json.dumps(operation["error"]))
-            return operation["response"]["name"]
-        if time.monotonic() >= deadline:
-            raise CommandError(
-                describe_argv, 1,
-                f"operation {operation_name} did not finish within "
-                f"{_OPERATION_POLL_TIMEOUT_SECONDS}s",
-            )
-        time.sleep(_OPERATION_POLL_INTERVAL_SECONDS)
+    list_argv = [
+        "gcloud", "services", "api-keys", "list",
+        f"--project={config.project_id}", "--format=json",
+    ]
+    result = runner.run(list_argv)
+    try:
+        keys = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise CommandError(list_argv, 1, f"could not parse as JSON ({exc}): {result.stdout!r}")
+    if not isinstance(keys, list):
+        raise CommandError(
+            list_argv, 1,
+            f"expected a JSON array of keys, got {type(keys).__name__}: {result.stdout!r}",
+        )
+    matches = [
+        key for key in keys
+        if isinstance(key, dict) and key.get("displayName") == display_name
+    ]
+    if not matches:
+        raise CommandError(
+            list_argv, 1,
+            f"no API key named {display_name!r} in project {config.project_id} "
+            "after creating one",
+        )
+    # createTime is RFC 3339, so lexicographic order is chronological. A
+    # payload without it sorts first and simply loses to any entry that
+    # has one, rather than raising.
+    newest = max(matches, key=lambda key: key.get("createTime") or "")
+    name = newest.get("name")
+    if not name:
+        raise CommandError(
+            list_argv, 1, f"API key {display_name!r} has no resource name: {newest!r}"
+        )
+    return name
 
 
 def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) -> GeminiKey:
@@ -197,14 +223,48 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         f"--api-target=service={config.api_target_service}",
         "--format=value(name)", "--quiet",
     ])
-    name = create_result.stdout.strip()
-    if name.startswith("operations/"):
-        name = _await_operation(runner, config, name)
-    key_string_result = runner.run([
-        "gcloud", "services", "api-keys", "get-key-string", name,
-        f"--project={config.project_id}", "--format=value(keyString)",
-    ])
+    created = create_result.stdout.strip()
+
+    # Past this point a key exists in the project whether or not the rest
+    # of this function succeeds, and its name is knowable only here: the
+    # caller records a name to revoke later (`state.py`'s Assignment) only
+    # if this *returns*, so an exception on the way out used to strand a
+    # live Generative Language API key with nothing left holding its name.
+    # bwsalmon/agents#104 leaked one per retry, every cycle, for exactly
+    # that reason. So clean up after ourselves before re-raising.
+    name = created
+    try:
+        # `create` prints the operation's id rather than the key's on this
+        # gcloud (see the module docstring); anything that isn't already a
+        # key resource name gets resolved by lookup instead.
+        if not name or name.startswith("operations/"):
+            name = _find_key_by_display_name(runner, config, display_name)
+        key_string_result = runner.run([
+            "gcloud", "services", "api-keys", "get-key-string", name,
+            f"--project={config.project_id}", "--format=value(keyString)",
+        ])
+    except CommandError:
+        _revoke_orphan(runner, config, display_name, name if name != created else None)
+        raise
+
     return GeminiKey(name=name, key_string=key_string_result.stdout.strip())
+
+
+def _revoke_orphan(
+    runner: Runner, config: GeminiKeyConfig, display_name: str, name: str | None
+) -> None:
+    """Best-effort revocation of a key `create_key` made but could not
+    return. Never raises: the caller is already re-raising the failure
+    that got us here, and a cleanup error must not replace it with a less
+    informative one. If the name was never resolved, one lookup is worth
+    attempting -- that is the case where a key is most likely stranded.
+    """
+    try:
+        if name is None:
+            name = _find_key_by_display_name(runner, config, display_name)
+        delete_key(runner, config, name)
+    except CommandError:
+        pass
 
 
 def delete_key(runner: Runner, config: GeminiKeyConfig, name: str) -> None:
