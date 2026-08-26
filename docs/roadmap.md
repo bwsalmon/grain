@@ -1492,3 +1492,43 @@ there's no assignment left to say which one it was — so the very next
 already resting states with a human reply or a later poll expected to move
 them along, not silently orphaned work in the sense this closes the gap
 on.
+
+## 25. Add a review option
+
+- [x] Done
+
+bwsalmon/agents#154: every existing task either changes code (a fresh
+branch or a `/pr`-continuation) or answers a question (`comment_on_issue`)
+— there was no way to ask the agent set to just *read* a pull request and
+leave feedback, without either pushing a competing branch or dumping one
+long comment with no attachment to specific lines.
+
+`/review true` (`directives.py`), only honoured alongside `/pr N`
+(`core.py`'s `_resolve_target` refuses it otherwise — a review has nothing
+to check out or post against without a PR number in hand), is a third
+dispatch shape alongside a fresh issue and a `/pr`-continuation:
+`dispatch.py`'s `dispatch_review` checks out the PR's own branch exactly
+`dispatch_pr` does, but `_review_prompt` tells the agent this is read-only
+— no `git push` instructions at all — and to use a new MCP tool,
+`add_review_comment`, instead. That tool (`mcp_server.py`) appends one
+piece of feedback at a time (a `path`/`line` pair to attach it to a
+specific line of the diff, or neither for a general remark) to a fixed
+per-unit JSON file, the same "only ever writes locally, `core.py` posts
+the human-facing half" shape `ask_question`/`comment_on_issue` already
+have — just accumulating instead of overwriting, since a review is
+naturally many small points rather than one.
+
+A new `TriggerKind.REVIEW` (`state.py`) carries the target PR's own number
+through to sweep time (`Assignment.pr_number`/`Outcome.pr_number`, next to
+the branch a PR assignment already carries), and `core.py`'s
+`_finish_succeeded_review` reads back whatever the agent left and posts it
+as one **draft** review (`GitHubClient.create_review`, bwsalmon/agents#154's
+addition to `github.py`) — the request carries no `event` key at all,
+which is what keeps GitHub from ever submitting it: an agent reviewing its
+own (or anyone's) code is never the one who gets to approve it, request
+changes on it, or even publish a plain comment review of it. The draft
+sits `PENDING`, visible only to the credential that created it, until a
+human opens it on github.com and submits it themselves. An agent that
+looked and found nothing worth flagging leaves the file unwritten, and
+`_finish_succeeded_review` posts no review at all rather than an empty one
+nobody asked for.

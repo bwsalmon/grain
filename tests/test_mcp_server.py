@@ -6,8 +6,8 @@ import sys
 import pytest
 
 from grain.automation.mcp_server import (
-    TOOLS, McpServer, ask_question, check_grain_health, comment_on_issue, edit_file,
-    main, reboot_controller, reboot_sandbox, read_automation_audit_log, read_file,
+    TOOLS, McpServer, add_review_comment, ask_question, check_grain_health, comment_on_issue,
+    edit_file, main, reboot_controller, reboot_sandbox, read_automation_audit_log, read_file,
     read_grain_config, read_grain_logs, reformat_sandbox, restart_grain_service,
     run_command, serve, write_file,
 )
@@ -191,6 +191,87 @@ def test_comment_on_issue_overwrites_a_prior_comment_in_the_same_dispatch(tmp_pa
     comment_on_issue(str(path), "first comment")
     comment_on_issue(str(path), "second comment")
     assert path.read_text() == "second comment"
+
+
+def test_add_review_comment_writes_the_comment_to_the_fixed_path_not_the_sandbox(tmp_path):
+    """Same shape as `ask_question`/`comment_on_issue` -- never touches a
+    `Runner` at all, since the comment is for a human via GitHub, not the
+    sandbox.
+    """
+    path = tmp_path / "review.json"
+    result = add_review_comment(str(path), "nit: typo", path=None, line=None)
+    assert json.loads(path.read_text()) == [{"body": "nit: typo", "path": None, "line": None}]
+    assert not result.is_error
+    assert "recorded" in result.text.lower()
+
+
+def test_add_review_comment_accumulates_across_calls(tmp_path):
+    path = tmp_path / "review.json"
+    add_review_comment(str(path), "first remark")
+    add_review_comment(str(path), "second remark", path="src/thing.py", line=12)
+    comments = json.loads(path.read_text())
+    assert comments == [
+        {"body": "first remark", "path": None, "line": None},
+        {"body": "second remark", "path": "src/thing.py", "line": 12},
+    ]
+
+
+def test_add_review_comment_reports_the_running_count(tmp_path):
+    path = tmp_path / "review.json"
+    add_review_comment(str(path), "first")
+    result = add_review_comment(str(path), "second")
+    assert "2" in result.text
+
+
+def test_add_review_comment_rejects_a_line_with_no_path(tmp_path):
+    path = tmp_path / "review.json"
+    result = add_review_comment(str(path), "body", path=None, line=12)
+    assert result.is_error
+    assert not path.exists()
+
+
+def test_add_review_comment_rejects_a_path_with_no_line(tmp_path):
+    path = tmp_path / "review.json"
+    result = add_review_comment(str(path), "body", path="src/thing.py", line=None)
+    assert result.is_error
+    assert not path.exists()
+
+
+def test_add_review_comment_tolerates_a_missing_file_as_an_empty_start(tmp_path):
+    path = tmp_path / "does-not-exist" / "review.json"
+    with pytest.raises(OSError):
+        # The parent directory not existing is a real error (unlike
+        # ask_question/comment_on_issue's plain files, dispatch.py always
+        # creates the unit directory first) -- covered here only to
+        # document the boundary of "absence is just empty," which applies
+        # to the *file*, not a missing directory.
+        add_review_comment(str(path), "x")
+
+
+def test_tools_call_add_review_comment_is_refused_when_not_configured():
+    server = McpServer(FakeRunner(), WORKSPACE)
+    resp = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "add_review_comment", "arguments": {"body": "x"}},
+    })
+    assert resp["result"]["isError"] is True
+
+
+def test_tools_call_routes_add_review_comment_to_the_configured_path(tmp_path):
+    path = tmp_path / "review.json"
+    server = McpServer(FakeRunner(), WORKSPACE, review_path=str(path))
+    resp = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "add_review_comment",
+                   "arguments": {"body": "nit", "path": "a.py", "line": 3}},
+    })
+    assert resp["result"]["isError"] is False
+    assert json.loads(path.read_text()) == [{"body": "nit", "path": "a.py", "line": 3}]
+
+
+def test_tools_list_includes_add_review_comment():
+    names = {t["name"] for t in TOOLS}
+    assert "add_review_comment" in names
 
 
 # --- read_grain_logs (bwsalmon/agents#62) -----------------------------------
@@ -665,13 +746,13 @@ def test_notifications_initialized_produces_no_response():
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
-def test_tools_list_returns_exactly_the_six_tools():
+def test_tools_list_returns_exactly_the_seven_tools():
     server = McpServer(FakeRunner(), WORKSPACE)
     response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in response["result"]["tools"]}
     assert names == {
         "run_command", "read_file", "edit_file", "write_file", "ask_question",
-        "comment_on_issue",
+        "comment_on_issue", "add_review_comment",
     }
     assert response["result"]["tools"] == TOOLS
 
@@ -838,11 +919,12 @@ def test_serve_writes_nothing_for_a_notification():
 def test_main_wires_cli_args_into_serve(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug,
-                   self_repair, task_unit):
+    def fake_serve(runner, workspace, *, question_path, comment_path, review_path,
+                   self_debug, self_repair, task_unit):
         captured.update(
             runner=runner, workspace=workspace, question_path=question_path,
-            comment_path=comment_path, self_debug=self_debug, self_repair=self_repair,
+            comment_path=comment_path, review_path=review_path,
+            self_debug=self_debug, self_repair=self_repair,
             task_unit=task_unit,
         )
 
@@ -851,12 +933,14 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
+        "--review-path", "/tmp/r.json",
         "--self-debug", "--self-repair", "--task-unit", "grain-task-sandbox-0",
     ])
     main()
     assert captured["workspace"] == WORKSPACE
     assert captured["question_path"] == "/tmp/q.txt"
     assert captured["comment_path"] == "/tmp/a.txt"
+    assert captured["review_path"] == "/tmp/r.json"
     assert captured["self_debug"] is True
     assert captured["self_repair"] is True
     assert captured["task_unit"] == "grain-task-sandbox-0"
@@ -866,8 +950,8 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
 def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug,
-                   self_repair, task_unit):
+    def fake_serve(runner, workspace, *, question_path, comment_path, review_path,
+                   self_debug, self_repair, task_unit):
         captured["self_debug"] = self_debug
         captured["self_repair"] = self_repair
 
@@ -876,6 +960,7 @@ def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
+        "--review-path", "/tmp/r.json",
     ])
     main()
     assert captured["self_debug"] is False
@@ -885,8 +970,8 @@ def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
 def test_main_task_unit_defaults_to_none(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug,
-                   self_repair, task_unit):
+    def fake_serve(runner, workspace, *, question_path, comment_path, review_path,
+                   self_debug, self_repair, task_unit):
         captured["task_unit"] = task_unit
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
@@ -894,6 +979,7 @@ def test_main_task_unit_defaults_to_none(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
+        "--review-path", "/tmp/r.json",
     ])
     main()
     assert captured["task_unit"] is None

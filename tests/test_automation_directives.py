@@ -43,6 +43,20 @@ def test_auto_merge_is_sticky_across_texts():
     assert d.auto_merge is True
 
 
+def test_review_directive_is_read():
+    d = parse_directives(["/repo acme/widgets\n/pr 42\n/review true\n"])
+    assert d.review is True
+
+
+def test_review_defaults_to_false():
+    assert parse_directives(["/repo acme/widgets\n/pr 42\n"]).review is False
+
+
+def test_review_is_sticky_across_texts():
+    d = parse_directives(["/review true", "just a reply, no directives"])
+    assert d.review is True
+
+
 def test_a_pr_directive_tolerates_a_leading_hash():
     assert parse_directives(["/pr #42"]).pr == 42
 

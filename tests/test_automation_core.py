@@ -2261,6 +2261,178 @@ def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
                                # failed/stranded run takes
 
 
+# --- review dispatch (bwsalmon/agents#154) ----------------------------------
+
+def test_a_review_directive_dispatches_to_the_prs_own_existing_branch_read_only():
+    """A task issue carrying `/pr N` plus `/review true` reads that PR's
+    branch instead of continuing work on it -- the review-mode counterpart
+    to `test_a_pr_directive_dispatches_to_the_prs_own_existing_branch`.
+    """
+    body = "please review this\n/repo o/r\n/pr 7\n/review true"
+    orchestrator, transport = make_orchestrator(issues=[issue_json(3, body=body)])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(3, body=body)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                            # list_comments
+        ApiResponse(200, {}, json.dumps(
+            pr_detail_json(7, head_ref="feature-x")).encode()),                 # get_pull_request
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert assignment.issue == 3
+    assert assignment.kind is TriggerKind.REVIEW
+    assert assignment.branch == "feature-x"
+    assert assignment.pr_number == 7
+    runner = orchestrator.base_runner
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert any("checkout -f -B feature-x origin/feature-x" in c[2] for c in clone_calls)
+    prompt = next(
+        stdin for argv, stdin in runner.calls
+        if argv[:1] == ["sudo"] and any("prompt.md" in a for a in argv)
+    )
+    assert "add_review_comment" in prompt
+    assert "git push" not in prompt
+    # No inline-review-comment or top-level-conversation fetch: a review
+    # dispatch reads the PR fresh, unlike a `/pr`-continuation dispatch.
+    assert not any(c["path"] == "/repos/o/r/pulls/7/comments" for c in transport.calls)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("dispatched to o/r (review of PR #7)" in o for o in outcomes)
+
+
+def test_a_review_directive_without_a_pr_is_parked_not_dispatched():
+    body = "/repo o/r\n/review true"
+    orchestrator, transport = make_orchestrator(issues=[issue_json(4, body=body)])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(4, body=body)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                            # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),                 # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "/pr" in json.loads(comment["body"])["body"]
+
+
+def test_a_review_triggered_success_posts_a_draft_review_with_inline_and_general_comments(
+    monkeypatch, tmp_path,
+):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    review_file = tmp_path / "review.json"
+    review_file.write_text(json.dumps([
+        {"body": "looks fine overall", "path": None, "line": None},
+        {"body": "consider a docstring here", "path": "src/thing.py", "line": 12},
+    ]))
+    monkeypatch.setattr(core_module, "review_path", lambda unit: str(review_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),                              # branch_exists: true
+        ApiResponse(200, {}, json.dumps({"id": 555}).encode()),   # create_review
+        ApiResponse(200, {}, b"{}"),                              # add_label: completed
+        ApiResponse(200, {}, b"{}"),                              # remove_label: in-progress off
+        ApiResponse(200, {}, b"{}"),                              # remove_label: agent label off
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    review_call = next(c for c in transport.calls if c["method"] == "POST"
+                        and c["path"] == "/repos/o/r/pulls/7/reviews")
+    sent = json.loads(review_call["body"])
+    assert "event" not in sent  # never auto-submitted -- see github.py's create_review
+    assert "looks fine overall" in sent["body"]
+    assert "Posted automatically by grain-agent" in sent["body"]
+    assert sent["comments"] == [
+        {"path": "src/thing.py", "line": 12, "body": "consider a docstring here"}
+    ]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("posted a draft review on o/r#7 (1 inline comment(s))" in o for o in outcomes)
+
+
+def test_a_review_triggered_success_with_no_comments_posts_no_review(monkeypatch, tmp_path):
+    """The agent looking and finding nothing worth flagging is a normal
+    outcome, not a reason to post an empty draft review nobody asked for.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    # Never written -- the agent never called add_review_comment.
+    monkeypatch.setattr(core_module, "review_path",
+                         lambda unit: str(tmp_path / "review.json"))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),   # branch_exists: true
+        ApiResponse(200, {}, b"{}"),   # add_label: completed
+        ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
+        ApiResponse(200, {}, b"{}"),   # remove_label: agent label off
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    assert not any(c["path"] == "/repos/o/r/pulls/7/reviews" for c in transport.calls)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("left no review comments" in o for o in outcomes)
+
+
+def test_a_review_triggered_run_with_no_branch_is_requeued_not_dropped():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b"not found"))  # branch_exists: false
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("does not exist" in o for o in outcomes)
+    assert not any(c["path"] == "/repos/o/r/pulls/7/reviews" for c in transport.calls)
+
+
+def test_a_review_triggered_success_that_asked_a_question_also_posts_a_comment(
+    monkeypatch, tmp_path,
+):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    question_file = tmp_path / "question.txt"
+    question_file.write_text("should I flag style nits too?")
+    monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
+        ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+        ApiResponse(200, {}, b"{}"),  # add_label (awaiting-reply on)
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    comment_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
+    )
+    assert "should I flag style nits too?" in json.loads(comment_call["body"])["body"]
+    assert not any(c["path"] == "/repos/o/r/pulls/7/reviews" for c in transport.calls)
+
+
 # --- session history wiring (docs/roadmap.md item 10) -----------------------
 
 def test_orchestrator_defaults_to_a_null_session_history():

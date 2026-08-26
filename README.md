@@ -669,6 +669,20 @@ comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
 
+**Add `/review true` alongside `/pr 42`** to have an agent *read* that
+pull request instead of continuing the work on it. The workspace lands on
+the same branch `/pr` alone would use, but the agent is told not to push
+anything — it leaves feedback with a dedicated tool instead, optionally
+attached to a specific file and line. Once the run finishes, everything it
+left is posted as a single **draft** review on the pull request: GitHub
+leaves a review with no `event` in the request `PENDING`, visible only to
+the credential that created it, until a human opens it on github.com and
+submits it themselves — an agent never approves, requests changes on, or
+even plain-comments its own (or anyone else's) code. `/review` with no
+`/pr` alongside it is refused and the task is parked, the same way an
+unlisted `/repo` is: a review needs a pull request to know which branch to
+read and which PR to post its draft against.
+
 **A completed task's PR is watched, too** (bwsalmon/agents#83): each
 `run-once` pass checks every still-open PR against a definite conflict
 (GitHub's own `mergeable` field reading `false`) or a definite failing

@@ -122,6 +122,7 @@ regardless of what triggered it. What that leaves:
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -134,7 +135,7 @@ from .config import AutomationConfig
 from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, UnitState, branch_name, comment_path,
-    dispatch, dispatch_pr, question_path, unit_name,
+    dispatch, dispatch_pr, dispatch_review, question_path, review_path, unit_name,
 )
 from .gcp_keys import GcpKeyConfig
 from .gcp_keys import create_key as create_gcp_key
@@ -144,7 +145,9 @@ from .gemini_keys import GeminiKeyConfig
 from .gemini_keys import create_key as create_gemini_key
 from .gemini_keys import delete_expired_keys as delete_expired_gemini_keys
 from .gemini_keys import delete_key as delete_gemini_key
-from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
+from .github import (
+    Comment, GitHubClient, GitHubError, Issue, NewReviewComment, PullRequestDetail,
+)
 from .history import NullSessionHistory, SessionHistory
 from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
@@ -302,6 +305,21 @@ def _pending_comment(sandbox: str) -> str | None:
     return text or None
 
 
+def _pending_review_comments(sandbox: str) -> list[dict]:
+    """Reads back every `add_review_comment` call the agent made this run
+    (bwsalmon/agents#154) -- the same file-based handoff `_pending_question`/
+    `_pending_comment` already use, but a list rather than a single value:
+    `mcp_server.py`'s tool appends, this reads the whole thing back at once.
+    Absence (never written, or an empty/corrupt file) reads as "no
+    comments," never an exception -- a review dispatch that genuinely found
+    nothing to say is a normal outcome, not a broken one.
+    """
+    try:
+        return json.loads(Path(review_path(unit_name(sandbox))).read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 @dataclass(frozen=True)
 class ResolvedTask:
     """What one task issue resolved to: the target repo, the PR being
@@ -343,6 +361,12 @@ class ResolvedTask:
     # since honouring it costs this deployment nothing it doesn't already
     # have (the same GitHub credential that opens a PR can merge one).
     auto_merge: bool = False
+    # bwsalmon/agents#154: whether the task issue carried `/review`. Unlike
+    # `auto_merge`, `_resolve_target` *does* refuse this one -- without a
+    # `/pr` alongside it there is no branch to check out or PR to post the
+    # draft review against, so `pr` above is always set whenever this is
+    # true.
+    review: bool = False
 
 
 @dataclass
@@ -812,7 +836,9 @@ class Orchestrator:
             )
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
-        if outcome.kind is TriggerKind.PR:
+        if outcome.kind is TriggerKind.REVIEW:
+            self._finish_succeeded_review(outcome)
+        elif outcome.kind is TriggerKind.PR:
             self._finish_succeeded_pr(outcome)
         else:
             self._finish_succeeded_issue(outcome)
@@ -970,6 +996,70 @@ class Orchestrator:
             sandbox=outcome.sandbox, issue=outcome.issue,
             outcome=f"pushed additional commits to {target} ({branch!r})",
         )
+
+    def _finish_succeeded_review(self, outcome: Outcome) -> None:
+        """A `/review`-directed dispatch (bwsalmon/agents#154): posts
+        whatever the agent left via `add_review_comment` as one draft
+        review on the PR it was pointed at, then finishes the task the
+        same "just stop marking it in-progress" way `_finish_succeeded_pr`
+        does -- there is no PR of this task's own to open or track, the
+        target PR already existed before this task ever ran.
+        """
+        question = _pending_question(outcome.sandbox)
+        if question is not None:
+            self._finish_question(outcome, question)
+            return
+        # A REVIEW assignment always carries its branch and PR number
+        # (recorded at dispatch time -- see state.py's Assignment
+        # docstring); sweeper.py always fills both in from the assignment
+        # it just freed, so neither is ever actually None in practice.
+        branch = outcome.branch
+        assert branch is not None, "a REVIEW outcome must carry the branch it was assigned"
+        assert outcome.pr_number is not None, \
+            "a REVIEW outcome must carry the PR it was assigned to review"
+        target = self._target_of(outcome)
+        if not self.github.branch_exists(target.owner, target.name, branch):
+            # Same "verify, don't trust" bar every other finish path here
+            # already holds to: the unit exiting zero isn't proof the
+            # branch it was asked to read is still there to have read.
+            self._requeue(outcome, f"succeeded but branch {branch!r} does not exist")
+            return
+
+        comments = _pending_review_comments(outcome.sandbox)
+        general = [c["body"] for c in comments if c.get("path") is None]
+        inline = [
+            NewReviewComment(path=c["path"], line=c["line"], body=c["body"])
+            for c in comments if c.get("path") is not None
+        ]
+        if not comments:
+            # The agent looked and genuinely had nothing to say -- a normal
+            # outcome for a review (`_review_prompt` explicitly allows it),
+            # not a reason to post an empty draft review nobody asked for.
+            outcome_text = "left no review comments"
+        else:
+            body = "\n\n".join(general + [_AUTOMATION_SIGNATURE])
+            self.github.create_review(
+                target.owner, target.name, outcome.pr_number,
+                body=body, comments=inline,
+            )
+            outcome_text = (f"posted a draft review on {target}#{outcome.pr_number} "
+                             f"({len(inline)} inline comment(s))")
+
+        self.github.add_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.completed_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, agent_label(outcome.sandbox),
+        )
+        self.state.record_completed_issue(outcome.issue)
+        self._save_state()
+        self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue, outcome=outcome_text)
 
     def _finish_question(self, outcome: Outcome, question: str) -> None:
         """The agent called `ask_question` instead of finishing the task
@@ -1729,6 +1819,18 @@ class Orchestrator:
                 "against it. An operator adds it to "
                 "`/data/config/repo-allowlist.json` on the controller."
             )
+        if directives.review and directives.pr is None:
+            # bwsalmon/agents#154: checked before the GitHub calls below,
+            # same "an unusable request parks the task without spending a
+            # call on it" discipline the gemini_key check above already
+            # follows -- there is no branch to check out or PR to post a
+            # draft review against without one.
+            raise DirectiveError(
+                "this task carries `/review` but no `/pr` -- a review "
+                "needs a pull request number to know which branch to read "
+                "and which PR to post its draft review against. Add a "
+                "`/pr <number>` line alongside it."
+            )
         pr: PullRequestDetail | None = None
         try:
             if directives.pr is not None:
@@ -1752,7 +1854,8 @@ class Orchestrator:
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
                             gemini_key=gemini_key, self_debug=self_debug,
                             self_repair=self_repair,
-                            github_key=github_key, auto_merge=directives.auto_merge)
+                            github_key=github_key, auto_merge=directives.auto_merge,
+                            review=directives.review)
 
     def _resolve_github_key(self, issue: Issue) -> str | None:
         """The named credential a `grain-github-<name>` label on `issue`
@@ -2004,7 +2107,20 @@ class Orchestrator:
                         gcp_key_json, gcp_key_id = minted_gcp.key_json, minted_gcp.key_id
                     except CommandError as exc:
                         gcp_key_mint_error = str(exc)
-                if task.pr is not None:
+                if task.review:
+                    # `_resolve_target` never returns `review=True` without
+                    # `pr` also set -- it refuses that combination outright
+                    # (bwsalmon/agents#154).
+                    unit = dispatch_review(
+                        sandbox_runner, self.base_runner, sandbox, sandbox_target,
+                        task.pr,
+                        remote_url=self._remote_url(task.repo), token=token,
+                        task_repo=str(self._task), target_repo=str(task.repo),
+                        task_issue=number,
+                        gemini_key=gemini_key_string, gcp_key=gcp_key_json,
+                        self_debug=task.self_debug, self_repair=task.self_repair,
+                    )
+                elif task.pr is not None:
                     review_comments = self.github.list_review_comments(
                         task.repo.owner, task.repo.name, task.pr.number
                     )
@@ -2059,7 +2175,16 @@ class Orchestrator:
                                    outcome=f"dispatch failed: {exc}")
                 continue
 
-            if task.pr is not None:
+            if task.review:
+                self.state.assign(sandbox, number, unit, now,
+                                   kind=TriggerKind.REVIEW, branch=task.pr.head_ref,
+                                   pr_number=task.pr.number,
+                                   target_owner=task.repo.owner,
+                                   target_repo=task.repo.name, base=task.base,
+                                   gemini_key_name=gemini_key_name,
+                                   gcp_key_id=gcp_key_id,
+                                   auto_merge=task.auto_merge)
+            elif task.pr is not None:
                 self.state.assign(sandbox, number, unit, now,
                                    kind=TriggerKind.PR, branch=task.pr.head_ref,
                                    target_owner=task.repo.owner,
@@ -2110,7 +2235,8 @@ class Orchestrator:
             self.audit.record(
                 sandbox=sandbox, issue=number,
                 outcome=(f"dispatched to {task.repo}"
-                          + (f" (PR #{task.pr.number})" if task.pr else "")
+                          + (f" (review of PR #{task.pr.number})" if task.review
+                             else f" (PR #{task.pr.number})" if task.pr else "")
                           + (f" (degraded: GCP service-account key mint "
                              f"failed, dispatched without one: "
                              f"{gcp_key_mint_error})" if gcp_key_mint_error else "")),
