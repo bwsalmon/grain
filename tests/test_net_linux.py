@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from grain.adapter.base import EgressMode
 from grain.adapter.net_linux import (
+    BOOT_UNIT_NAME,
+    BOOT_UNIT_PATH,
     LinuxNetwork,
+    render_boot_unit,
     render_host_input_rules,
     render_ruleset,
 )
@@ -198,3 +203,42 @@ def test_up_does_not_recreate_an_existing_bridge(cluster: Cluster):
     runner.expect("ip -j link show br-grain", stdout="[{}]", returncode=0)
     LinuxNetwork(cluster, runner).up()
     assert not runner.ran("ip link add")
+
+
+# --- surviving a host reboot (bwsalmon/agents#111) -------------------------
+#
+# The bridge and the nftables policy `up()` just applied live only in the
+# running kernel; nothing before this reapplied either across a reboot,
+# while libvirt's own autostart brings the sandboxes back regardless --
+# found live as sandbox-to-sandbox isolation and the metadata anycast DNAT
+# both silently gone while everything else (SSH, a direct connection to the
+# controller) kept working, with nothing anywhere flagging it.
+
+def test_up_does_not_install_a_boot_unit_by_default(cluster: Cluster):
+    runner = FakeRunner()
+    LinuxNetwork(cluster, runner).up()
+    assert not any(BOOT_UNIT_NAME in argv for argv, _ in runner.calls)
+    assert not any("systemctl" in argv for argv, _ in runner.calls)
+
+
+def test_render_boot_unit_reruns_host_up_with_the_given_egress_mode():
+    unit = render_boot_unit(Path("/opt/grain"), EgressMode.ALLOWLIST)
+    assert "WorkingDirectory=/opt/grain" in unit
+    assert "ExecStart=/usr/bin/python3 -m grain.cli host up --egress allowlist" in unit
+    # Ordering: the policy must exist before libvirt starts routing traffic
+    # for the sandboxes it autostarts, not at some unordered later point.
+    assert "Before=libvirtd.service" in unit
+
+
+def test_install_boot_unit_writes_and_enables_it(cluster: Cluster):
+    runner = FakeRunner()
+    LinuxNetwork(cluster, runner).install_boot_unit(Path("/opt/grain"), EgressMode.OPEN)
+    tee_calls = [
+        (argv, stdin) for argv, stdin in runner.calls if argv[:1] == ["tee"]
+    ]
+    assert len(tee_calls) == 1
+    argv, stdin = tee_calls[0]
+    assert argv == ["tee", BOOT_UNIT_PATH]
+    assert stdin == render_boot_unit(Path("/opt/grain"), EgressMode.OPEN)
+    assert runner.ran("systemctl daemon-reload")
+    assert runner.ran(f"systemctl enable {BOOT_UNIT_NAME}")
