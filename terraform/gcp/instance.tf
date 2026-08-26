@@ -17,6 +17,12 @@ locals {
   # never passes --gemini-project-id and the feature stays off.
   gemini_project_id = var.enable_gemini_key ? var.project_id : ""
 
+  # bwsalmon/agents#113: 0 (falsy on the shell side, same "empty/zero is
+  # the off switch" idiom gemini_project_id above already uses) when
+  # enable_janitor is false, so deploy.sh never passes --janitor-ttl-hours
+  # and the feature stays off.
+  janitor_ttl_hours = var.enable_janitor ? var.janitor_ttl_hours : 0
+
   # Everything the on-VM deploy script needs, and nothing it does not: no
   # secret values here either -- the runtime credentials arrive separately,
   # pushed straight into instance metadata by the deploy workflow after
@@ -35,6 +41,8 @@ locals {
     gemini_project_id             = local.gemini_project_id
     deploy_timeout_secs           = var.deploy_timeout_minutes * 60
     bootstrap_ssh_timeout_seconds = var.bootstrap_ssh_timeout_seconds
+    name_prefix                   = var.name_prefix
+    janitor_ttl_hours             = local.janitor_ttl_hours
   }
 }
 

@@ -1375,3 +1375,44 @@ issue never asked for that safety net to go away. `_finish_analysis`
 branch or not) is now `_finish_no_changes`, only ever reached once the
 branch check has already ruled out a PR — its own docstring covers what
 was renamed and why.
+
+## 22. A janitor for what agents leave behind in GCP
+
+- [x] Done
+
+item 16 tells every dispatched agent to fold its own id into any
+infrastructure it creates, but that is a prompt sentence, never enforced or
+persisted anywhere `core.py` can check — nothing named what an agent
+created, and nothing ever went back to delete it. A crashed run, or a task
+that just forgot, left a GCE instance, a disk, or (for a task that used
+`grain-gemini-key`) a stranded API key sitting in the project indefinitely.
+`gemini_keys.py`'s own docstring already documents two of the narrower
+leak paths this closes: a mint that fails partway (bwsalmon/agents#104) and
+`sweeper.py`'s `_revoke_gemini_key`, which deliberately "leaves for an
+operator to clean up by hand" a key minted before `gemini_key_config` was
+removed mid-flight.
+
+`grain/automation/janitor.py`'s `run_janitor` is a new, optional pass —
+`core.py`'s `_janitor`, run from `run_once` alongside the stranded-work
+sweeper — that lists GCE instances, disks, and Gemini API keys in the
+configured project over `gcloud` (same "shell out, don't hand-roll the
+OAuth2 exchange" reasoning `gemini_keys.py`'s own docstring already gives,
+authenticated with the exact same primary service-account key) and deletes
+whichever are older than a configured TTL (default 24h). Since nothing
+actually marks a resource as agent-created, this is an exclusion list, not
+an inclusion list: it deletes anything past the TTL *except* what it can
+positively identify as grain's own core infrastructure — the host VM and
+its data disk, by the exact names Terraform gives them, and anything
+carrying this deployment's own Terraform labels (default
+`managed-by=terraform`) — never raising on a single listing or deletion
+failure, the same discipline `sweeper.py`'s own health/credential warnings
+already hold to.
+
+Off by default (`/data/config/janitor.json`'s presence is the switch, same
+shape as `gemini-key.json`); `grain controller configure --janitor-ttl-hours`
+sets it up by hand, and a Terraform-managed deployment can turn it on
+declaratively with `enable_janitor`/`janitor_ttl_hours` in `grain.tfvars`
+instead — see `terraform/gcp/variables.tf` and docs/runbook.md's "Enabling
+the janitor". It only has anything to clean up once the agent account
+already has the roles `agent_can_manage_compute_instances`/
+`enable_gemini_key` grant it — turning it on alone is a harmless no-op.

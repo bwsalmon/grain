@@ -30,12 +30,13 @@ from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
     configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_named_github_key, configure_repo,
-    credential_repos,
+    configure_github_credential, configure_janitor, configure_named_github_key,
+    configure_repo, credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
 from .automation.gemini_keys import GeminiKeyConfig
+from .automation.janitor import JanitorConfig
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
 from .automation.history import FileSessionHistory
@@ -144,6 +145,15 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         build_launcher(data_dir, cluster, runner)
         if metadata_config_path.exists() else None
     )
+    # bwsalmon/agents#113: same "absence is the off switch" shape as
+    # gemini_key_config/metadata_launcher above -- a deployment that never
+    # ran `grain controller configure --janitor-ttl-hours ...` gets no
+    # janitor pass, not a crash.
+    janitor_config_path = data_dir / "config" / "janitor.json"
+    janitor_config = (
+        JanitorConfig.load(janitor_config_path)
+        if janitor_config_path.exists() else None
+    )
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
@@ -152,7 +162,7 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         audit=audit, history=history, gemini_key_config=gemini_key_config,
-        metadata_launcher=metadata_launcher,
+        metadata_launcher=metadata_launcher, janitor_config=janitor_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
         # mid-`run_once`, rather than only once at the very end (see
@@ -589,6 +599,13 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
         # credential step, only the project id that turns the
         # grain-gemini-key task label on.
         configure_gemini_key(ssh, args.gemini_project_id)
+    if args.janitor_ttl_hours is not None:
+        # Same reuse as --gemini-project-id above (bwsalmon/agents#113) --
+        # the janitor authenticates with the same primary key.
+        if not args.gcp_project_id:
+            raise SystemExit("--janitor-ttl-hours requires --gcp-project-id")
+        configure_janitor(ssh, args.gcp_project_id, args.janitor_ttl_hours,
+                           name_prefix=args.janitor_name_prefix)
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
 
@@ -627,6 +644,8 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         gcp_project_id=args.gcp_project_id,
         gcp_numeric_project_id=args.gcp_numeric_project_id,
         gemini_project_id=args.gemini_project_id,
+        janitor_ttl_hours=args.janitor_ttl_hours,
+        janitor_name_prefix=args.janitor_name_prefix,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
@@ -902,6 +921,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "GCP project a short-lived Gemini API key is minted in for a task "
                          "that carries it. Reuses the key --gcp-service-account-key-file "
                          "already placed -- pass that too")
+    p.add_argument("--janitor-ttl-hours", type=int,
+                    help="enables the GCP janitor (bwsalmon/agents#113): deletes GCE "
+                         "instances, their unattached disks, and grain-minted Gemini API "
+                         "keys older than this many hours, skipping the grain host VM, its "
+                         "data disk, and anything labelled managed-by=terraform. Reuses the "
+                         "key --gcp-service-account-key-file already placed -- requires "
+                         "--gcp-project-id too")
+    p.add_argument("--janitor-name-prefix", default="grain",
+                    help="must match this deployment's Terraform name_prefix (default: "
+                         "grain) -- names the host/data-disk resources the janitor must "
+                         "never delete")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
@@ -1034,6 +1064,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "GCP project a short-lived Gemini API key is minted in for a task "
                          "that carries it. Reuses the key --gcp-service-account-key-file "
                          "already placed -- run that first")
+    p.add_argument("--janitor-ttl-hours", type=int,
+                    help="enables the GCP janitor (bwsalmon/agents#113): deletes GCE "
+                         "instances, their unattached disks, and grain-minted Gemini API "
+                         "keys older than this many hours, skipping the grain host VM, its "
+                         "data disk, and anything labelled managed-by=terraform. Reuses the "
+                         "key --gcp-service-account-key-file already placed -- requires "
+                         "--gcp-project-id too")
+    p.add_argument("--janitor-name-prefix", default="grain",
+                    help="must match this deployment's Terraform name_prefix (default: "
+                         "grain) -- names the host/data-disk resources the janitor must "
+                         "never delete")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")

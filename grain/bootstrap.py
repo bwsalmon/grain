@@ -35,8 +35,8 @@ from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_claude_token, configure_cluster, configure_gcp_service_account,
-    configure_gemini_key, configure_github_credential, configure_repo,
-    credential_repos, ensure_sandbox_tokens,
+    configure_gemini_key, configure_github_credential, configure_janitor,
+    configure_repo, credential_repos, ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -75,6 +75,16 @@ class BootstrapConfig:
     # gcp_service_account_key above -- see configure_gemini_key's own
     # docstring -- so this is only meaningful alongside it.
     gemini_project_id: str | None = None
+    # bwsalmon/agents#113: turns on the GCP janitor. `None` (the default)
+    # leaves it off; a Terraform-managed deployment sets this from
+    # enable_janitor/janitor_ttl_hours (deploy.sh). Reuses
+    # gcp_service_account_key above the same way gemini_project_id does --
+    # bootstrap() raises if this is set without gcp_project_id, since the
+    # janitor has no project to scan otherwise. name_prefix must match the
+    # deployment's own Terraform name_prefix -- see configure_janitor's own
+    # docstring for why.
+    janitor_ttl_hours: int | None = None
+    janitor_name_prefix: str = "grain"
     github_host: str = "api.github.com"
     git_forward_host: str = "github.com"
     github_use_tls: bool = True
@@ -314,6 +324,11 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         )
     if config.gemini_project_id:
         configure_gemini_key(admin_ssh, config.gemini_project_id)
+    if config.janitor_ttl_hours is not None:
+        if not config.gcp_project_id:
+            raise ValueError("janitor_ttl_hours requires gcp_project_id")
+        configure_janitor(admin_ssh, config.gcp_project_id, config.janitor_ttl_hours,
+                           name_prefix=config.janitor_name_prefix)
 
     # Stage 9: sandboxes.
     log("stage 9/11: sandboxes")
