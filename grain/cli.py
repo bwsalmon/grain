@@ -301,7 +301,18 @@ def cmd_rules(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     cluster = build_cluster(args)
     runner = _runner(args)
-    LinuxNetwork(cluster, runner).up(EgressMode(args.egress))
+    egress = EgressMode(args.egress)
+    LinuxNetwork(cluster, runner).up(egress)
+    if args.persist:
+        # bwsalmon/agents#111: without this, the bridge/nftables policy
+        # `up()` just applied lives only in the running kernel and vanishes
+        # on the host's next reboot -- see `render_boot_unit`'s own
+        # docstring for what that silently breaks. `Path.cwd()`, not a
+        # fixed path: unlike the controller (always deployed to
+        # `/opt/grain` by `grain host deploy`), this repo has no canonical
+        # checkout location on the host -- wherever this command is being
+        # run from is where the boot unit re-invokes it from too.
+        LinuxNetwork(cluster, runner).install_boot_unit(Path.cwd(), egress)
     return 0
 
 
@@ -790,6 +801,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = host.add_parser("up", help="create the private network and apply the policy")
     p.add_argument("--egress", choices=[m.value for m in EgressMode], default="open")
+    p.add_argument(
+        "--persist", action="store_true",
+        help="also install a systemd unit that reruns this at every boot "
+             "(bwsalmon/agents#111: otherwise the bridge/nftables policy "
+             "does not survive a host reboot)",
+    )
     p.set_defaults(func=cmd_up)
 
     p = host.add_parser("egress", help="switch the egress policy")
