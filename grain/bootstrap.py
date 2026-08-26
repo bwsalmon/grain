@@ -223,9 +223,12 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         adapter.admin_public_key_path, config.admin_private_key_path, base_runner, log,
     )
 
-    # Stage 3: network.
+    # Stage 3: network. Persisted, not just applied live -- see
+    # `HostAdapter.network_up`'s own docstring for why a one-command
+    # bootstrap must leave the same reboot protection behind that the
+    # manual runbook gets from `host up --persist`.
     log("stage 3/11: network")
-    adapter.network_up()
+    adapter.network_up(_REPO_ROOT)
 
     # Stage 4: controller.
     log("stage 4/11: controller")

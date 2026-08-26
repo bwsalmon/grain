@@ -141,7 +141,7 @@ The interface is deliberately small:
 ```python
 create(spec, provision_script=None)   start(name)   stop(name)
 destroy(name)   state(name)   list_vms()   address(name)
-network_up()   egress_policy(mode)
+network_up(repo_dir)   egress_policy(mode)
 ```
 
 `state` and `list_vms` are additions to the seven operations the design
