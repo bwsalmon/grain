@@ -24,12 +24,15 @@
 #                             --github-key` wants
 #   GRAIN_CLAUDE_CODE_OAUTH_TOKEN
 #   AGENT_SERVICE_ACCOUNT     email of the agent account, when configured
+#   HOST_SERVICE_ACCOUNT      email of the host account -- the identity the
+#                             controller mints agent keys as (agents#131)
 set -euo pipefail
 
 project="${PROJECT:?PROJECT is not set: the terraform project_id output}"
 instance="${INSTANCE:?INSTANCE is not set: the terraform instance_name output}"
 zone="${ZONE:?ZONE is not set: the terraform zone output}"
 agent_service_account="${AGENT_SERVICE_ACCOUNT:-}"
+host_service_account="${HOST_SERVICE_ACCOUNT:-}"
 
 push_secret() {
   local key="$1" value="$2" tmp
@@ -92,5 +95,36 @@ if [ -n "$agent_service_account" ]; then
         gcloud iam service-accounts keys delete "$old_key_id" \
           --iam-account="$agent_service_account" --quiet
         echo "invalidated previous key: $old_key_id"
+      done
+fi
+
+# bwsalmon/agents#131: the credential grain/automation/gcp_keys.py
+# authenticates as to mint the per-dispatch agent keys. It was written
+# assuming the controller could use the host account's *native* GCE
+# identity -- true of the host, false of the controller, which is a nested
+# libvirt guest with no attached service account and no route to the
+# metadata server. So the host account travels as a key file instead.
+#
+# Deliberately the host account and not the agent account: the agent must
+# not be able to mint its own replacement, which is the entire premise of
+# the 24-hour expiry (iam.tf grants the host serviceAccountKeyAdmin on the
+# agent account, and not the reverse). Rotated on the same two-generation
+# schedule and for the same reason as the agent key above.
+if [ -n "$host_service_account" ] && [ -n "$agent_service_account" ]; then
+  umask 077
+  minter_file="$(mktemp)"
+  minter_key_id="$(gcloud iam service-accounts keys create "$minter_file" \
+    --iam-account="$host_service_account" --format='value(name.basename())')"
+  push_secret "grain-key-minter-key" "$(cat "$minter_file")"
+  shred -u "$minter_file" 2>/dev/null || rm -f "$minter_file"
+  echo "minted minter key: $minter_key_id"
+
+  gcloud iam service-accounts keys list --iam-account="$host_service_account" \
+    --managed-by=user --sort-by='~validAfterTime' --format='value(name.basename())' \
+    | tail -n +3 \
+    | while read -r old_key_id; do
+        gcloud iam service-accounts keys delete "$old_key_id" \
+          --iam-account="$host_service_account" --quiet
+        echo "invalidated previous minter key: $old_key_id"
       done
 fi

@@ -306,6 +306,9 @@ def test_configure_agent_gcp_key_writes_the_config():
         "service_account_email": "grain-agent@acme.iam.gserviceaccount.com",
         "project_id": "acme",
         "max_key_age_hours": 24,
+        # bwsalmon/agents#131: names the minter credential gcp_keys.py
+        # authenticates as. Not the agent key -- a different account.
+        "key_path": "/data/secrets/gcp-key-minter.json",
     }
     assert any(
         "sudo chmod 644 /data/config/gcp-key.json" in c for c in inner.commands

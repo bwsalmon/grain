@@ -87,19 +87,35 @@ resource "google_service_account_iam_member" "deployer_manages_agent_keys" {
   member             = "serviceAccount:${var.name_prefix}-deployer@${var.project_id}.iam.gserviceaccount.com"
 }
 
-# bwsalmon/agents#126: lets the controller (which runs *as* google_service_
-# account.host, via its own real, native GCE metadata server -- a
-# completely different thing from the fake per-sandbox one this same
-# change removed) mint and revoke the agent account's per-dispatch keys
-# itself, at runtime, with no static credential of its own -- see
-# grain/automation/gcp_keys.py's own docstring for the full design and why
-# this must be a *different* account from the one being minted for (a
-# leaked agent key must never be able to mint itself a fresh one).
+# bwsalmon/agents#126: lets the host account mint and revoke the agent
+# account's per-dispatch keys -- and it must be a *different* account from
+# the one being minted for, or a leaked agent key could mint itself a
+# fresh one and defeat the 24-hour expiry entirely.
+#
+# bwsalmon/agents#131: this grant was written for a controller that would
+# use the host account's *native* GCE identity, with no static credential.
+# That premise was false -- the controller is a nested libvirt guest, not a
+# GCE VM, so `gcloud` there had no account at all. The grant itself is
+# still exactly right; what changed is that the host account now reaches
+# the controller as a key file (deployer_manages_host_keys below mints it,
+# ci/push-host-secrets.sh pushes it, gcp_keys.py activates it).
 resource "google_service_account_iam_member" "host_manages_agent_keys" {
   count              = local.agent_account_needed ? 1 : 0
   service_account_id = google_service_account.agent[0].name
   role               = "roles/iam.serviceAccountKeyAdmin"
   member             = "serviceAccount:${google_service_account.host.email}"
+}
+
+# bwsalmon/agents#131: lets CI mint the host-account key it pushes to the
+# instance as `grain-key-minter-key`, on the same rotate-every-run schedule
+# as the agent key. Scoped to the host account alone, the same instinct
+# deployer_manages_agent_keys above applies to the agent account rather
+# than granting key management project-wide in bootstrap-gcp.sh.
+resource "google_service_account_iam_member" "deployer_manages_host_keys" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.host.name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = "serviceAccount:${var.name_prefix}-deployer@${var.project_id}.iam.gserviceaccount.com"
 }
 
 # Compute instance lifecycle and SSH, everywhere in this project except

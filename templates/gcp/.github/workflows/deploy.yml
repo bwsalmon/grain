@@ -158,6 +158,7 @@ jobs:
           GRAIN_GITHUB_KEYS: ${{ secrets.GRAIN_GITHUB_KEYS }}
           GRAIN_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.GRAIN_CLAUDE_CODE_OAUTH_TOKEN }}
           AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}
+          HOST_SERVICE_ACCOUNT: ${{ steps.tf.outputs.host_service_account }}
         run: grain-src/ci/push-host-secrets.sh
 
       # The host reports progress through guest attributes, so CI fails

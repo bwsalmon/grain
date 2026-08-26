@@ -18,26 +18,47 @@ worth it against a design that instead leans on the same three mitigations
 revoke promptly. See `sweeper.py`'s `_revoke_gcp_key` for the "promptly"
 half, and `max_key_age_hours` below for the "short-lived" half.
 
-**Authentication: the controller's own attached identity, never a static
-file.** Unlike `gemini_keys.py` (which activates the same primary key the
-old metadata broker held, at `/data/secrets/gcp-service-account.json`),
-nothing here calls `gcloud auth activate-service-account` at all. Minting a
-*new* agent-account key has to be done by some identity other than the
-agent account itself -- a sandbox holding a leaked agent key must not be
-able to mint itself a fresh one and defeat the whole "expires" premise this
-module exists for. bwsalmon/agents#126 asks for exactly that separation:
-"the automation / host service account should have permission to mint new
-keys for the agent service account." The controller VM already runs
-*as* that host service account (`terraform/gcp/instance.tf`'s
-`google_compute_instance.host.service_account`, `scopes = ["cloud-platform"]`)
-via the real GCE metadata server -- a completely different thing from the
-fake per-sandbox one this change removes -- so `gcloud` on the controller
-is already authenticated as the host account with no file to place or
-rotate, as long as `terraform/gcp/iam.tf` grants that account
-`roles/iam.serviceAccountKeyAdmin` on the agent account (this change adds
-that grant). This is also *safer* than a static file: the host account
-already holds no credential at rest (docs/design.md, "The host holds no
-system credentials"), and this stays true.
+**Authentication: a minter key file, activated before every call.**
+Minting a *new* agent-account key has to be done by some identity other
+than the agent account itself -- a sandbox holding a leaked agent key must
+not be able to mint itself a fresh one and defeat the whole "expires"
+premise this module exists for. bwsalmon/agents#126 asks for exactly that
+separation: "the automation / host service account should have permission
+to mint new keys for the agent service account."
+
+This module originally tried to get that identity for free, reasoning that
+the controller "already runs *as* the host service account via the real GCE
+metadata server" and so needed no credential of its own. That is true of
+the **host** and false of the **controller**, which is where this code
+actually runs (bwsalmon/agents#131): `terraform/gcp/` declares exactly one
+`google_compute_instance`, the host. The controller is a nested libvirt
+guest on grain's private subnet (`inventory.py`, offset `.2`) -- not a GCE
+VM, with no attached service account, and no route to `169.254.169.254`
+(the metadata anycast DNAT is installed per *sandbox*, and pointed at the
+fake broker this change removed). So `gcloud` on the controller had no
+credentials at all, and every mint and every reap failed with "You do not
+currently have an active account selected" -- silently, since `core.py`'s
+`_dispatch` treats a `CommandError` as one task's failure and moves on.
+
+So the minter identity travels as a key file, exactly like
+`gemini_keys.py`'s: `GcpKeyConfig.key_path` (default
+`/data/secrets/gcp-key-minter.json`, placed by
+`configure.py`'s `configure_gcp_key_minter`) holds a key for the *host*
+service account, which `terraform/gcp/iam.tf` already grants
+`roles/iam.serviceAccountKeyAdmin` on the agent account. Deliberately a
+second, separate file from the agent key at
+`/data/secrets/gcp-service-account.json` that `gemini_keys.py` and
+`janitor.py` still authenticate with: that one *is* the agent account, so
+using it here would be the agent minting for itself -- the exact thing the
+separation above exists to prevent (and it would fail anyway, since the
+agent account holds no `serviceAccountKeyAdmin` grant).
+
+`_activate` runs immediately before *every* `gcloud` invocation below
+rather than once at import, for the same reason `gemini_keys.py` does it:
+`gcloud auth activate-service-account` sets the active account globally for
+the invoking user, so two modules on one controller authenticating as two
+different accounts would otherwise race, and whichever ran last would
+silently win. Cheap and idempotent, not a real per-call cost.
 
 **"24-hour expiry" is enforced by grain, not GCP.** User-managed IAM
 service-account keys have no native TTL -- `iam.serviceAccountKeys.create`
@@ -80,6 +101,12 @@ from ..run import CommandError, Runner
 
 DEFAULT_MAX_KEY_AGE_HOURS = 24
 
+# configure.py's GCP_KEY_MINTER_KEY_PATH, restated here rather than
+# imported -- see this module's docstring, and the identical precedent
+# gemini_keys.py's own _DEFAULT_KEY_PATH sets against
+# configure.py's GCP_SERVICE_ACCOUNT_KEY_PATH.
+_DEFAULT_MINTER_KEY_PATH = Path("/data/secrets/gcp-key-minter.json")
+
 
 @dataclass(frozen=True)
 class GcpKeyConfig:
@@ -95,10 +122,18 @@ class GcpKeyConfig:
     service_account_email: str
     project_id: str
     max_key_age_hours: int = DEFAULT_MAX_KEY_AGE_HOURS
+    # The *minter's* credential, never the agent account's own -- see this
+    # module's docstring. Kept in sync with configure.py's
+    # GCP_KEY_MINTER_KEY_PATH by hand, the same precedent
+    # gemini_keys.py's own _DEFAULT_KEY_PATH already set.
+    key_path: Path = _DEFAULT_MINTER_KEY_PATH
 
     @classmethod
     def load(cls, path: Path) -> "GcpKeyConfig":
-        return cls(**json.loads(path.read_text()))
+        raw = json.loads(path.read_text())
+        if "key_path" in raw:
+            raw["key_path"] = Path(raw["key_path"])
+        return cls(**raw)
 
 
 @dataclass(frozen=True)
@@ -113,6 +148,15 @@ class GcpKey:
     # type, project_id, private_key, client_email, ...) -- what actually
     # gets pushed into the sandbox (`dispatch.py`'s `configure_gcp_key`).
     key_json: str
+
+
+def _activate(runner: Runner, config: GcpKeyConfig) -> None:
+    """Authenticate `gcloud` as the minter. Called before every command
+    below -- see this module's docstring on why not once at startup."""
+    runner.run([
+        "gcloud", "auth", "activate-service-account",
+        f"--key-file={config.key_path}", "--quiet",
+    ])
 
 
 def _keys_create_argv(tmp_path: str, config: GcpKeyConfig) -> list[str]:
@@ -138,6 +182,7 @@ def create_key(runner: Runner, config: GcpKeyConfig) -> GcpKey:
     project, actually-run) use of the identical command already relies on.
     """
     tmp_path = f"/tmp/grain-agent-gcp-key-{secrets_module.token_hex(8)}.json"
+    _activate(runner, config)
     create_argv = _keys_create_argv(tmp_path, config)
     create_result = runner.run(create_argv)
     key_id = create_result.stdout.strip()
@@ -189,6 +234,7 @@ def delete_key(runner: Runner, config: GcpKeyConfig, key_id: str) -> None:
     `gemini_keys.delete_key`) -- a sandbox's slot must still free even if
     Google's API is unreachable this cycle.
     """
+    _activate(runner, config)
     runner.run([
         "gcloud", "iam", "service-accounts", "keys", "delete", key_id,
         f"--iam-account={config.service_account_email}", "--quiet",
@@ -208,6 +254,7 @@ def _list_keys(runner: Runner, config: GcpKeyConfig) -> list[dict]:
     this stays one task's failure" bar `gemini_keys.py`'s own
     `_find_key_by_display_name` holds to.
     """
+    _activate(runner, config)
     list_argv = [
         "gcloud", "iam", "service-accounts", "keys", "list",
         f"--iam-account={config.service_account_email}",

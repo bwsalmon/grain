@@ -30,6 +30,11 @@ readonly CLAUDE_TOKEN_ATTR="grain-claude-token"
 # there is no wait budget worth calling "required": if
 # agent_service_account_email is unset, one will just never arrive.
 readonly GCP_KEY_ATTR="grain-agent-service-account-key"
+# bwsalmon/agents#131: the host-account key the controller mints the
+# per-dispatch agent keys *as*. A different account from GCP_KEY_ATTR
+# above -- see grain/automation/gcp_keys.py on why the minter must not
+# be the account being minted for.
+readonly MINTER_KEY_ATTR="grain-key-minter-key"
 # What a storage-permission failure looks like in grain's output, as
 # opposed to any other reason a bootstrap can exit non-zero. Deliberately
 # not a bare "Permission denied": SSH's own "Permission denied (publickey)"
@@ -395,6 +400,13 @@ run_bootstrap() {
   # separately. Empty email means agent_service_account_roles was never
   # set -- no key will ever arrive, so there is nothing to wait for.
   if [ -n "$AGENT_SERVICE_ACCOUNT_EMAIL" ]; then
+    minter_key_file="$RUNDIR/gcp-key-minter.json"
+    if fetch_secret_to_file "$MINTER_KEY_ATTR" "$minter_key_file" "$SECRET_WAIT_OPTIONAL"; then
+      args+=(--gcp-key-minter-key-file "$minter_key_file")
+    else
+      log "WARNING: no minter key in instance metadata; the controller cannot mint"
+      log "         per-dispatch GCP keys and every dispatch will fail (agents#131)."
+    fi
     if fetch_secret_to_file "$GCP_KEY_ATTR" "$gcp_key_file" "$SECRET_WAIT_OPTIONAL"; then
       args+=(--gcp-service-account-key-file "$gcp_key_file"
               --gcp-agent-service-account-email "$AGENT_SERVICE_ACCOUNT_EMAIL"

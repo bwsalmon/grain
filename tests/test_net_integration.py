@@ -80,7 +80,11 @@ def test_applying_twice_is_idempotent(applied):
     # against a ruleset that grows every time the network comes up.
     assert listed.count("169.254.169.254") == 0  # that rule lives in the nat table
     nat = _nft(["list", "table", "ip", NAT_TABLE]).stdout
-    assert nat.count("169.254.169.254") == cluster.sandbox_count
+    # bwsalmon/agents#126 removed the per-sandbox metadata broker, and with
+    # it the anycast DNAT that pointed at it -- a sandbox now gets a minted
+    # key file pushed in instead (gcp_keys.py). These two assertions still
+    # expected the old rule and have been failing on main since.
+    assert nat.count("169.254.169.254") == 0
 
 
 def test_switching_egress_mode_removes_the_masquerade(applied):
@@ -90,5 +94,5 @@ def test_switching_egress_mode_removes_the_masquerade(applied):
     assert result.returncode == 0, result.stderr
     nat = _nft(["list", "table", "ip", NAT_TABLE]).stdout
     assert "masquerade" not in nat
-    # ...but each sandbox keeps its own metadata route.
-    assert nat.count("dnat to") == cluster.sandbox_count
+    # No metadata route left to keep: see the note in the idempotency test.
+    assert nat.count("dnat to") == 0

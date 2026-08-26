@@ -29,7 +29,8 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_agent_gcp_key, configure_claude_token, configure_gcp_service_account,
+    configure_agent_gcp_key, configure_claude_token, configure_gcp_key_minter,
+    configure_gcp_service_account,
     configure_gemini_key, configure_github_credential, configure_janitor,
     configure_named_github_key, configure_repo, credential_repos,
 )
@@ -559,6 +560,12 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             project_id=args.gcp_project_id,
             max_key_age_hours=args.gcp_key_max_age_hours,
         )
+    if args.gcp_key_minter_key_file:
+        # bwsalmon/agents#131: the identity gcp_keys.py mints *as*. A
+        # different account from --gcp-service-account-key-file above,
+        # which is the agent account's own key -- see gcp_keys.py's
+        # docstring on why the minter must not be the minted.
+        configure_gcp_key_minter(ssh, Path(args.gcp_key_minter_key_file).read_text())
     if args.gemini_project_id:
         # Reuses the primary key --gcp-service-account-key-file already
         # placed (bwsalmon/agents#47, gemini_keys.py) -- no separate
@@ -600,6 +607,9 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
             sys.stdin.read() if args.gcp_service_account_key_file == "-"
             else Path(args.gcp_service_account_key_file).read_text()
         )
+    gcp_key_minter_key = None
+    if args.gcp_key_minter_key_file:
+        gcp_key_minter_key = Path(args.gcp_key_minter_key_file).read_text()
     task_repo, targets, default_target = _repo_args(args)
     config = BootstrapConfig(
         task_repo=task_repo, targets=tuple(targets),
@@ -611,6 +621,7 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         gcp_agent_service_account_email=args.gcp_agent_service_account_email,
         gcp_project_id=args.gcp_project_id,
         gcp_key_max_age_hours=args.gcp_key_max_age_hours,
+        gcp_key_minter_key=gcp_key_minter_key,
         gemini_project_id=args.gemini_project_id,
         janitor_ttl_hours=args.janitor_ttl_hours,
         janitor_name_prefix=args.janitor_name_prefix,
@@ -890,6 +901,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "--gcp-service-account-key-file")
     p.add_argument("--gcp-project-id",
                     help="GCP project id -- required with --gcp-agent-service-account-email")
+    p.add_argument("--gcp-key-minter-key-file",
+                    help="JSON key for the account that mints the agent account's "
+                         "per-dispatch keys (the host service account) -- never the "
+                         "agent account's own key")
     p.add_argument("--gcp-key-max-age-hours", type=int, default=24,
                     help="reap any --gcp-agent-service-account-email key older than this, "
                          "independent of whether its task session ever ended cleanly "
@@ -1016,6 +1031,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "--gcp-service-account-key-file")
     p.add_argument("--gcp-project-id",
                     help="GCP project id -- required with --gcp-agent-service-account-email")
+    p.add_argument("--gcp-key-minter-key-file",
+                    help="JSON key for the account that mints the agent account's "
+                         "per-dispatch keys (the host service account) -- never the "
+                         "agent account's own key")
     p.add_argument("--gcp-key-max-age-hours", type=int, default=24,
                     help="reap any --gcp-agent-service-account-email key older than this, "
                          "independent of whether its task session ever ended cleanly "
