@@ -167,28 +167,6 @@ def _activate(runner: Runner, config: GeminiKeyConfig) -> None:
     ])
 
 
-def _impersonated(config) -> list[str]:
-    """The impersonation flag every gcloud call here carries, or nothing.
-
-    bwsalmon/agents#131: the controller authenticates as the *host* account
-    (the one credential it holds), then acts as the agent account for the
-    duration of each call. That keeps this code's effective permissions
-    exactly the agent's -- unchanged from when it held a long-lived agent
-    key file -- while removing that key from the controller entirely. The
-    flag is per-command rather than `gcloud config set
-    auth/impersonate_service_account`, which would be process-global and so
-    would silently apply to `gcp_keys.py` too, whose whole point is to act
-    as the host and *not* the agent.
-
-    Empty when unset, so a deployment configured before this change (or a
-    test) still behaves exactly as it did.
-    """
-    target = getattr(config, "impersonate_service_account", None)
-    if not target:
-        return []
-    return [f"--impersonate-service-account={target}"]
-
-
 def _find_key_by_display_name(
     runner: Runner, config: GeminiKeyConfig, display_name: str
 ) -> str:
@@ -210,7 +188,6 @@ def _find_key_by_display_name(
     list_argv = [
         "gcloud", "services", "api-keys", "list",
         f"--project={config.project_id}", "--format=json",
-        *_impersonated(config),
     ]
     result = runner.run(list_argv)
     try:
@@ -256,7 +233,6 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         f"--display-name={display_name}",
         f"--api-target=service={config.api_target_service}",
         "--format=value(name)", "--quiet",
-        *_impersonated(config),
     ])
     created = create_result.stdout.strip()
 
@@ -277,8 +253,7 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         key_string_result = runner.run([
             "gcloud", "services", "api-keys", "get-key-string", name,
             f"--project={config.project_id}", "--format=value(keyString)",
-            *_impersonated(config),
-        ])
+            ])
     except CommandError:
         _revoke_orphan(runner, config, display_name, name if name != created else None)
         raise
@@ -313,5 +288,4 @@ def delete_key(runner: Runner, config: GeminiKeyConfig, name: str) -> None:
     runner.run([
         "gcloud", "services", "api-keys", "delete", name,
         f"--project={config.project_id}", "--quiet",
-        *_impersonated(config),
     ])

@@ -587,13 +587,34 @@ def test_gemini_key_iam_is_gated_on_enable_gemini_key():
     assert "disable_on_destroy = false" in api.group(0)
 
     role = re.search(
-        r'resource "google_project_iam_member" "agent_gemini_keys" \{.*?\n\}',
+        r'resource "google_project_iam_member" "host_gemini_keys" \{.*?\n\}',
         source, re.S,
     )
-    assert role, "google_project_iam_member.agent_gemini_keys not found"
+    assert role, "google_project_iam_member.host_gemini_keys not found"
     assert "var.enable_gemini_key" in role.group(0)
     assert "roles/serviceusage.apiKeysAdmin" in role.group(0)
-    assert "google_service_account.agent[0].email" in role.group(0)
+    # bwsalmon/agents#131: the *host*, not the agent. Granted to the agent,
+    # a sandbox holding a per-dispatch agent key could mint Gemini API keys
+    # of its own without limit, and revoke the one grain minted for it --
+    # which is the whole thing gemini_keys.py exists to control.
+    assert "google_service_account.host.email" in role.group(0)
+    assert "google_service_account.agent" not in role.group(0)
+
+
+def test_a_sandbox_cannot_mint_its_own_gemini_keys():
+    """The agent account is what a sandbox's credentials belong to, so any
+    project-wide apiKeysAdmin grant to it hands every sandbox unbounded
+    minting. Minting is the controller's job (as the host); a sandbox only
+    ever receives the one key minted for its task.
+    """
+    source = _tf_source()
+    for block in re.findall(r'resource "google_project_iam_member" "[^"]+" \{.*?\n\}',
+                            source, re.S):
+        if "roles/serviceusage.apiKeysAdmin" in block:
+            assert "google_service_account.agent" not in block, (
+                "apiKeysAdmin granted to the agent account: a sandbox could "
+                "mint Gemini API keys of its own"
+            )
 
 
 def test_grain_config_publishes_janitor_settings():
