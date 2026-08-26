@@ -795,3 +795,56 @@ def test_dispatch_pr_with_no_self_debug_never_adds_the_flag():
                 remote_url=REMOTE_URL, token=TOKEN)
     assert "--self-debug" not in _mcp_config_args(runner)
     assert "grain-self-debug" not in _prompt_stdin(runner)
+
+
+# --- Self-repair (bwsalmon/agents#99) ---------------------------------------
+
+def test_dispatch_with_no_self_repair_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-repair" not in _mcp_config_args(runner)
+    assert "grain-self-repair" not in _prompt_stdin(runner)
+
+
+def test_dispatch_with_self_repair_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, self_repair=True)
+    assert "--self-repair" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-repair" in prompt_stdin
+    assert "restart_grain_service" in prompt_stdin
+    assert "reboot_sandbox" in prompt_stdin
+    assert "reformat_sandbox" in prompt_stdin
+    assert "reboot_controller" in prompt_stdin
+
+
+def test_dispatch_self_debug_and_self_repair_are_independent_flags():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, self_debug=True)
+    assert "--self-debug" in _mcp_config_args(runner)
+    assert "--self-repair" not in _mcp_config_args(runner)
+    assert "grain-self-repair" not in _prompt_stdin(runner)
+
+
+def test_dispatch_pr_with_self_repair_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, self_repair=True)
+    assert "--self-repair" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-repair" in prompt_stdin
+    assert "restart_grain_service" in prompt_stdin
+    assert "reboot_sandbox" in prompt_stdin
+    assert "reformat_sandbox" in prompt_stdin
+    assert "reboot_controller" in prompt_stdin
+
+
+def test_dispatch_pr_with_no_self_repair_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-repair" not in _mcp_config_args(runner)
+    assert "grain-self-repair" not in _prompt_stdin(runner)

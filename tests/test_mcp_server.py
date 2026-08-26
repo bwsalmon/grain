@@ -3,9 +3,12 @@ import json
 import shlex
 import sys
 
+import pytest
+
 from grain.automation.mcp_server import (
     TOOLS, McpServer, ask_question, check_grain_health, comment_on_issue, edit_file,
-    main, read_automation_audit_log, read_file, read_grain_config, read_grain_logs,
+    main, reboot_controller, reboot_sandbox, read_automation_audit_log, read_file,
+    read_grain_config, read_grain_logs, reformat_sandbox, restart_grain_service,
     run_command, serve, write_file,
 )
 from grain.automation.ssh import SshRunner
@@ -438,6 +441,177 @@ def test_tools_call_routes_read_grain_logs_to_the_local_runner_not_the_sandbox_r
     assert sandbox_runner.calls == []
 
 
+# --- Self-repair (bwsalmon/agents#99) ---------------------------------------
+
+def test_restart_grain_service_restarts_an_allowed_unit():
+    runner = FakeRunner()
+    runner.expect("sudo systemctl restart grain-automation.service", stdout="")
+    result = restart_grain_service(runner, "grain-automation")
+    assert not result.is_error
+    assert runner.calls[0][0] == ["sudo", "systemctl", "restart", "grain-automation.service"]
+
+
+def test_restart_grain_service_rejects_an_unknown_unit_without_running_anything():
+    runner = FakeRunner()
+    result = restart_grain_service(runner, "grain-agent-nope")
+    assert result.is_error
+    assert "Unknown unit" in result.text
+    assert runner.calls == []
+
+
+def test_restart_grain_service_surfaces_a_nonzero_exit_without_raising():
+    runner = FakeRunner()
+    runner.expect("sudo systemctl restart grain-git-proxy.service", returncode=1, stderr="failed")
+    result = restart_grain_service(runner, "grain-git-proxy")
+    assert result.is_error
+    assert "failed" in result.text
+
+
+def test_reboot_sandbox_runs_sudo_reboot():
+    runner = FakeRunner()
+    result = reboot_sandbox(runner)
+    assert runner.calls[0][0] == ["sudo", "reboot"]
+    assert not result.is_error
+
+
+def test_reboot_sandbox_does_not_treat_a_dropped_connection_as_an_error():
+    """A reboot cuts the SSH session that issued it -- a nonzero exit here
+    is the expected shape of success, not a failure to surface."""
+    runner = FakeRunner()
+    runner.expect("sudo reboot", returncode=255, stderr="client_loop: send disconnect")
+    result = reboot_sandbox(runner)
+    assert not result.is_error
+    assert "Reboot triggered" in result.text
+
+
+def test_reformat_sandbox_runs_the_cleanup_steps():
+    runner = FakeRunner()
+    runner.expect("kind delete clusters --all", stdout="deleted\n")
+    runner.expect("docker system prune -af --volumes", stdout="pruned\n")
+    result = reformat_sandbox(runner)
+    assert not result.is_error
+    assert "status=ok" in result.text
+    assert runner.calls[0][0] == ["kind", "delete", "clusters", "--all"]
+    assert runner.calls[1][0] == ["docker", "system", "prune", "-af", "--volumes"]
+
+
+def test_reformat_sandbox_reports_a_failed_step_as_an_error():
+    runner = FakeRunner()
+    runner.expect("kind delete clusters --all", returncode=1, stderr="no kind here")
+    runner.expect("docker system prune -af --volumes", stdout="pruned\n")
+    result = reformat_sandbox(runner)
+    assert result.is_error
+    assert "status=FAIL" in result.text
+
+
+def test_reboot_controller_runs_systemctl_reboot():
+    runner = FakeRunner()
+    result = reboot_controller(runner)
+    assert runner.calls[0][0] == ["sudo", "systemctl", "reboot"]
+    assert not result.is_error
+    assert "Controller reboot triggered" in result.text
+
+
+def test_tools_list_excludes_self_repair_tools_by_default():
+    server = McpServer(FakeRunner(), WORKSPACE)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in response["result"]["tools"]}
+    assert not names & {
+        "restart_grain_service", "reboot_sandbox", "reformat_sandbox", "reboot_controller",
+    }
+    assert response["result"]["tools"] == TOOLS
+
+
+def test_tools_list_includes_all_four_self_repair_tools_when_enabled():
+    server = McpServer(FakeRunner(), WORKSPACE, self_repair=True)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in response["result"]["tools"]}
+    assert {
+        "restart_grain_service", "reboot_sandbox", "reformat_sandbox", "reboot_controller",
+    } <= names
+
+
+def test_tools_list_self_debug_and_self_repair_are_independent():
+    """The two labels/flags gate two disjoint tool sets -- enabling one
+    must not enable the other."""
+    server = McpServer(FakeRunner(), WORKSPACE, self_debug=True)
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in response["result"]["tools"]}
+    assert "read_grain_logs" in names
+    assert "reboot_controller" not in names
+
+
+@pytest.mark.parametrize("name,arguments", [
+    ("restart_grain_service", {"unit": "grain-automation"}),
+    ("reboot_sandbox", {}),
+    ("reformat_sandbox", {}),
+    ("reboot_controller", {}),
+])
+def test_tools_call_self_repair_tools_are_refused_when_disabled(name, arguments):
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    server = McpServer(sandbox_runner, WORKSPACE, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    })
+    assert response["result"]["isError"] is True
+    assert sandbox_runner.calls == []
+    assert local_runner.calls == []
+
+
+def test_tools_call_routes_restart_grain_service_to_the_local_runner():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    local_runner.expect("sudo systemctl restart grain-automation.service", stdout="")
+    server = McpServer(sandbox_runner, WORKSPACE, self_repair=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "restart_grain_service", "arguments": {"unit": "grain-automation"}},
+    })
+    assert response["result"]["isError"] is False
+    assert sandbox_runner.calls == []
+
+
+def test_tools_call_routes_reboot_sandbox_to_the_sandbox_runner_not_the_local_one():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    server = McpServer(sandbox_runner, WORKSPACE, self_repair=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "reboot_sandbox", "arguments": {}},
+    })
+    assert response["result"]["isError"] is False
+    assert sandbox_runner.calls[0][0] == ["sudo", "reboot"]
+    assert local_runner.calls == []
+
+
+def test_tools_call_routes_reformat_sandbox_to_the_sandbox_runner_not_the_local_one():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    server = McpServer(sandbox_runner, WORKSPACE, self_repair=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "reformat_sandbox", "arguments": {}},
+    })
+    assert response["result"]["isError"] is False
+    assert sandbox_runner.calls[0][0] == ["kind", "delete", "clusters", "--all"]
+    assert local_runner.calls == []
+
+
+def test_tools_call_routes_reboot_controller_to_the_local_runner_not_the_sandbox_one():
+    sandbox_runner = FakeRunner()
+    local_runner = FakeRunner()
+    server = McpServer(sandbox_runner, WORKSPACE, self_repair=True, local_runner=local_runner)
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "reboot_controller", "arguments": {}},
+    })
+    assert response["result"]["isError"] is False
+    assert local_runner.calls[0][0] == ["sudo", "systemctl", "reboot"]
+    assert sandbox_runner.calls == []
+
+
 # --- McpServer JSON-RPC dispatch -------------------------------------------
 
 def test_initialize_reports_protocol_and_server_info():
@@ -624,10 +798,10 @@ def test_serve_writes_nothing_for_a_notification():
 def test_main_wires_cli_args_into_serve(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug):
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug, self_repair):
         captured.update(
             runner=runner, workspace=workspace, question_path=question_path,
-            comment_path=comment_path, self_debug=self_debug,
+            comment_path=comment_path, self_debug=self_debug, self_repair=self_repair,
         )
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
@@ -635,21 +809,23 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
-        "--self-debug",
+        "--self-debug", "--self-repair",
     ])
     main()
     assert captured["workspace"] == WORKSPACE
     assert captured["question_path"] == "/tmp/q.txt"
     assert captured["comment_path"] == "/tmp/a.txt"
     assert captured["self_debug"] is True
+    assert captured["self_repair"] is True
     assert isinstance(captured["runner"], SshRunner)
 
 
-def test_main_self_debug_defaults_to_off(monkeypatch):
+def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
     captured = {}
 
-    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug):
+    def fake_serve(runner, workspace, *, question_path, comment_path, self_debug, self_repair):
         captured["self_debug"] = self_debug
+        captured["self_repair"] = self_repair
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
     monkeypatch.setattr(sys, "argv", [
@@ -659,3 +835,4 @@ def test_main_self_debug_defaults_to_off(monkeypatch):
     ])
     main()
     assert captured["self_debug"] is False
+    assert captured["self_repair"] is False

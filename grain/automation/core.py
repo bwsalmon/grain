@@ -276,6 +276,12 @@ class ResolvedTask:
     # refusing -- no per-deployment config gates it -- so `_resolve_target`
     # sets it straight from `issue.labels`, unconditionally.
     self_debug: bool = False
+    # bwsalmon/agents#99: whether the task issue carried
+    # `config.self_repair_label` — the mutating counterpart to `self_debug`
+    # above, and set the same unconditional way (no deployment config can
+    # refuse it; the sudo grant it relies on, `provision/controller.sh`, is
+    # unconditional on every deployment).
+    self_repair: bool = False
     # The named credential a `grain-github-<name>` label asked for
     # (bwsalmon/agents#52), or `None` for the overwhelming common case of no
     # such label. `_resolve_target` already refuses a name this deployment
@@ -1221,6 +1227,10 @@ class Orchestrator:
         # unconditional, so there is no "not configured" case to park a
         # task for.
         self_debug = self.config.self_debug_label in issue.labels
+        # bwsalmon/agents#99: same unconditional label read as self_debug
+        # above -- there is nothing to refuse it for, see
+        # `ResolvedTask.self_repair`'s own docstring.
+        self_repair = self.config.self_repair_label in issue.labels
         github_key = self._resolve_github_key(issue)
         target = directives.target
         if target is None:
@@ -1262,6 +1272,7 @@ class Orchestrator:
             ) from exc
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
                             gemini_key=gemini_key, self_debug=self_debug,
+                            self_repair=self_repair,
                             github_key=github_key, auto_merge=directives.auto_merge)
 
     def _resolve_github_key(self, issue: Issue) -> str | None:
@@ -1525,6 +1536,7 @@ class Orchestrator:
                         thread_comments=prompt_comments, task_repo=str(self._task),
                         target_repo=str(task.repo), task_issue=number,
                         gemini_key=gemini_key_string, self_debug=task.self_debug,
+                        self_repair=task.self_repair,
                     )
                 else:
                     unit = dispatch(
@@ -1534,6 +1546,7 @@ class Orchestrator:
                         base=task.base, comments=prompt_comments,
                         task_repo=str(self._task), target_repo=str(task.repo),
                         gemini_key=gemini_key_string, self_debug=task.self_debug,
+                        self_repair=task.self_repair,
                     )
             except CommandError as exc:
                 if gemini_key_name is not None:

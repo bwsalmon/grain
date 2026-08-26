@@ -105,6 +105,16 @@ class AutomationConfig:
     # the controller-side group grant (provision/controller.sh) is
     # unconditional, so the label alone is enough.
     self_debug_label: str = "grain-self-debug"
+    # bwsalmon/agents#99: the mutating counterpart to `self_debug_label`,
+    # deliberately a second label rather than folded into it -- gates
+    # `restart_grain_service`/`reboot_sandbox`/`reformat_sandbox`/
+    # `reboot_controller` (`mcp_server.py`'s self-repair roster) via the
+    # `--self-repair` flag `dispatch.py` only ever passes when a task's
+    # issue carries this label. Like `self_debug_label`, this never needs
+    # refusing for lack of deployment config -- the sudo grant that makes
+    # it work (`provision/controller.sh`) is unconditional, same as the
+    # `systemd-journal` group membership `self_debug_label` relies on.
+    self_repair_label: str = "grain-self-repair"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60
