@@ -28,18 +28,6 @@ def test_interface_names_are_unique_and_within_the_kernel_limit():
     assert all(len(i) <= 15 for i in ifaces)
 
 
-def test_metadata_ports_are_unique_per_sandbox():
-    c = Cluster(sandbox_count=4)
-    ports = [c.metadata_port(n) for n in c.sandbox_names]
-    assert len(set(ports)) == len(ports)
-
-
-def test_controller_has_no_metadata_server_of_its_own():
-    c = Cluster()
-    with pytest.raises(ValueError):
-        c.metadata_port("controller")
-
-
 def test_specs_carry_the_right_role_and_sizing():
     c = Cluster()
     controller = c.spec_of("controller")
@@ -48,6 +36,11 @@ def test_specs_carry_the_right_role_and_sizing():
     assert sandbox.role is Role.SANDBOX
     # A sandbox has to hold a kind control plane plus a build.
     assert sandbox.mem_mb > controller.mem_mb
+
+
+def test_specs_lists_one_spec_per_name_in_the_same_order():
+    c = Cluster(sandbox_count=2)
+    assert [s.name for s in c.specs] == c.names
 
 
 def test_unknown_names_are_rejected_rather_than_guessed():

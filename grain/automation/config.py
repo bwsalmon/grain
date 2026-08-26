@@ -73,6 +73,55 @@ class AutomationConfig:
     # a human wrote on a PR rather than filed as a task directly. A human
     # swaps this for trigger_label (or closes the issue) to decide.
     triage_label: str = "triage needed"
+    # Applied once a task's work is done from the agent's own side --
+    # a PR opened (or continued) for a fresh-branch/PR-continuation task, or
+    # an analysis posted -- regardless of whether the task issue itself
+    # closes automatically (bwsalmon/agents#54: an analysis never does; a
+    # fresh-branch task now waits for its PR to close, see
+    # `state.py`'s `OpenPullRequest`). Never removed once applied -- unlike
+    # the other labels above, this one isn't part of the dispatch queue
+    # state machine, just a visible marker of "the agent's part is done."
+    completed_label: str = "grain-agent-completed"
+    # bwsalmon/agents#83: applied instead of `trigger_label` to a fix task
+    # `core.py`'s `_suggest_fix` files for a task whose PR has conflicts
+    # with its base or a failing check -- so it sits in the queue visibly,
+    # but `_dispatch`'s own poll (which only ever lists `trigger_label`)
+    # never picks it up on its own. A human applies `trigger_label` to it
+    # once they're satisfied the fix is worth attempting, the same action
+    # that starts every other task -- or, equivalently, comments `/lgtm`
+    # on it (bwsalmon/agents#136, `core.py`'s `_promote_lgtm_comments`);
+    # `_dispatch` then strips this label off on the same cycle it
+    # dispatches, the same "exactly one state at a time" invariant
+    # `labels.py`'s own docstring holds every other state label to.
+    needs_approval_label: str = "grain-agent-needs-approval"
+    # Asks for a short-lived Gemini API key for the task it's applied to
+    # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once
+    # the task's slot frees. A label, not a body directive
+    # (bwsalmon/agents#49, `directives.py`'s own docstring on why) -- the
+    # same "a human decided this" trust tier the trigger label carries,
+    # checked directly against `issue.labels` in `core.py`'s
+    # `_resolve_target` rather than parsed out of untrusted issue text.
+    gemini_key_label: str = "grain-gemini-key"
+    # bwsalmon/agents#62: read-only access to grain's own controller logs
+    # (grain-automation.service, grain-git-proxy.service), via the
+    # `read_grain_logs` MCP tool -- for triaging a bug in grain itself,
+    # not the target repo's code. The same "a human decided this" label
+    # tier `gemini_key_label` already carries, checked directly against
+    # `issue.labels` in `core.py`'s `_resolve_target`. Unlike
+    # `gemini_key_label` this needs no per-deployment config to turn on:
+    # the controller-side group grant (provision/controller.sh) is
+    # unconditional, so the label alone is enough.
+    self_debug_label: str = "grain-self-debug"
+    # bwsalmon/agents#99: the mutating counterpart to `self_debug_label`,
+    # deliberately a second label rather than folded into it -- gates
+    # `restart_grain_service`/`reboot_sandbox`/`reformat_sandbox`/
+    # `reboot_controller` (`mcp_server.py`'s self-repair roster) via the
+    # `--self-repair` flag `dispatch.py` only ever passes when a task's
+    # issue carries this label. Like `self_debug_label`, this never needs
+    # refusing for lack of deployment config -- the sudo grant that makes
+    # it work (`provision/controller.sh`) is unconditional, same as the
+    # `systemd-journal` group membership `self_debug_label` relies on.
+    self_repair_label: str = "grain-self-repair"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

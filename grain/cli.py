@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .adapter.base import EgressMode, VmState
 from .adapter.deploy import DEFAULT_DEST, deploy_tree
+from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.net_linux import LinuxNetwork, render_host_input_rules, render_ruleset
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
@@ -28,26 +29,26 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_claude_token, configure_github_credential, configure_repo,
-    credential_repos,
+    configure_agent_gcp_key, configure_claude_token, configure_gcp_key_minter,
+    configure_gemini_key, configure_github_credential, configure_janitor,
+    configure_named_github_key, configure_repo, credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
+from .automation.gcp_keys import GcpKeyConfig
+from .automation.gemini_keys import GeminiKeyConfig
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
 from .automation.history import FileSessionHistory
+from .automation.janitor import JanitorConfig
 from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
 from .automation import tui as sessions_tui
 from .bootstrap import BootstrapConfig, bootstrap
 from .inventory import Cluster
-from .metadata.audit import FileAuditLog as MetadataFileAuditLog
-from .metadata.audit import sync as metadata_sync
-from .metadata.config import instance_paths
-from .metadata.launcher import MetadataLauncher, build_launcher
 from .proxy.allowlist import Allowlist
 from .proxy.credentials import CredentialSet
-from .proxy.tokens import SandboxTokenStore
+from .proxy.tokens import SandboxCredentialStore, SandboxTokenStore
 from .run import DryRunRunner, RealRunner, Runner
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -111,7 +112,41 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     state_path = data_dir / "state" / "automation" / "state.json"
     audit = FileAuditLog(data_dir / "state" / "automation" / "audit.log")
     token_store = SandboxTokenStore(data_dir / "secrets" / "sandbox-tokens.json")
+    # bwsalmon/agents#52: the write side of the same file
+    # `grain/proxy/server.py`'s `build_proxy` reads for a `grain-github-
+    # <name>` label's override -- see `SandboxCredentialStore`'s own
+    # docstring for why it lives under config/, not secrets/.
+    credential_store = SandboxCredentialStore(data_dir / "config" / "sandbox-github-key.json")
     history = FileSessionHistory(data_dir / "state" / "automation" / "sessions")
+    # Absence is the off switch (bwsalmon/agents#47): a deployment that
+    # never ran `grain controller configure --gemini-project-id ...` has no
+    # such file, and `Orchestrator._resolve_target` refuses a task carrying
+    # `gemini_key_label` with an explanation rather than guessing at a
+    # project.
+    gemini_key_config_path = data_dir / "config" / "gemini-key.json"
+    gemini_key_config = (
+        GeminiKeyConfig.load(gemini_key_config_path)
+        if gemini_key_config_path.exists() else None
+    )
+    # bwsalmon/agents#126: same "absence is the off switch" shape as
+    # gemini_key_config above -- a deployment that never wrote
+    # gcp-key.json (`grain controller configure
+    # --gcp-agent-service-account-email ...`) gets no GCP access in its
+    # sandboxes, not a crash.
+    gcp_key_config_path = data_dir / "config" / "gcp-key.json"
+    gcp_key_config = (
+        GcpKeyConfig.load(gcp_key_config_path)
+        if gcp_key_config_path.exists() else None
+    )
+    # bwsalmon/agents#113: same "absence is the off switch" shape as
+    # gemini_key_config/gcp_key_config above -- a deployment that never
+    # ran `grain controller configure --janitor-ttl-hours ...` gets no
+    # janitor pass, not a crash.
+    janitor_config_path = data_dir / "config" / "janitor.json"
+    janitor_config = (
+        JanitorConfig.load(janitor_config_path)
+        if janitor_config_path.exists() else None
+    )
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
@@ -119,7 +154,16 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # The same file the git proxy enforces (`build_proxy`), read from
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
-        audit=audit, history=history,
+        audit=audit, history=history, gemini_key_config=gemini_key_config,
+        gcp_key_config=gcp_key_config, janitor_config=janitor_config,
+        credentials=credentials, credential_store=credential_store,
+        # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
+        # mid-`run_once`, rather than only once at the very end (see
+        # `state_path`'s own docstring on `Orchestrator` for why that matters
+        # across a controller VM restart). `None` under `--dry-run`, same as
+        # `cmd_automation_run_once`'s existing final save already being
+        # skipped there -- a dry run must never write real state to disk.
+        state_path=None if args.dry_run else state_path,
     )
     return orchestrator, state_path
 
@@ -182,48 +226,6 @@ def cmd_sessions_browse(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_metadata_launcher(cluster: Cluster, runner: Runner,
-                             args: argparse.Namespace) -> MetadataLauncher:
-    return build_launcher(Path(args.data_dir), cluster, runner)
-
-
-def cmd_metadata_start(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    launcher = build_metadata_launcher(cluster, _runner(args), args)
-    for name in _sandbox_targets(cluster, args.name):
-        launcher.start(name)
-    return 0
-
-
-def cmd_metadata_stop(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    launcher = build_metadata_launcher(cluster, _runner(args), args)
-    for name in _sandbox_targets(cluster, args.name):
-        launcher.stop(name)
-    return 0
-
-
-def cmd_metadata_status(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    launcher = build_metadata_launcher(cluster, _runner(args), args)
-    for name in _sandbox_targets(cluster, args.name):
-        print(f"{name:<12} {launcher.status(name).value}")
-    return 0
-
-
-def cmd_metadata_sync_audit(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    data_dir = Path(args.data_dir)
-    audit = MetadataFileAuditLog(data_dir / "state" / "metadata-server" / "audit.log")
-    total = 0
-    for name in _sandbox_targets(cluster, args.name):
-        paths = instance_paths(data_dir, name)
-        state_path = data_dir / "state" / "metadata-server" / f"{name}.audit-offset.json"
-        total += metadata_sync(paths.log_path, state_path, name, audit)
-    print(f"forwarded {total} event(s)")
-    return 0
-
-
 def cmd_github_audit(args: argparse.Namespace) -> int:
     secrets_dir = Path(args.data_dir) / "secrets" / "github"
     results = audit_secrets_dir(RealTransport(), secrets_dir)
@@ -250,7 +252,18 @@ def cmd_rules(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     cluster = build_cluster(args)
     runner = _runner(args)
-    LinuxNetwork(cluster, runner).up(EgressMode(args.egress))
+    egress = EgressMode(args.egress)
+    LinuxNetwork(cluster, runner).up(egress)
+    if args.persist:
+        # bwsalmon/agents#111: without this, the bridge/nftables policy
+        # `up()` just applied lives only in the running kernel and vanishes
+        # on the host's next reboot -- see `render_boot_unit`'s own
+        # docstring for what that silently breaks. `Path.cwd()`, not a
+        # fixed path: unlike the controller (always deployed to
+        # `/opt/grain` by `grain host deploy`), this repo has no canonical
+        # checkout location on the host -- wherever this command is being
+        # run from is where the boot unit re-invokes it from too.
+        LinuxNetwork(cluster, runner).install_boot_unit(Path.cwd(), egress)
     return 0
 
 
@@ -427,12 +440,24 @@ def cmd_host_wait(args: argparse.Namespace) -> int:
     """
     cluster = build_cluster(args)
     base_runner = _runner(args)
+    adapter = build_adapter(cluster, base_runner, args)
     for name in _targets(cluster, args.name):
         ssh = build_ssh_runner(cluster, base_runner, name, args)
-        print(f"{name:<12} waiting for SSH ...")
-        wait_for_ssh(ssh, timeout=args.timeout)
+        print(f"{name:<12} waiting for SSH (up to {args.timeout:.0f}s) ...")
+        # Same diagnostics `host bootstrap`'s stage 5 prints, for the same
+        # reason -- this command is the manual half of that stage, and a
+        # bare TimeoutError is just as unreadable run by hand.
+        try:
+            wait_for_ssh(ssh, timeout=args.timeout)
+        except TimeoutError:
+            dump_host_diagnostics(adapter, name)
+            raise
         print(f"{name:<12} waiting for cloud-init ...")
-        wait_for_provisioning(ssh)
+        try:
+            wait_for_provisioning(ssh)
+        except (RuntimeError, TimeoutError):
+            dump_guest_diagnostics(ssh)
+            raise
         print(f"{name:<12} ready")
     return 0
 
@@ -455,6 +480,23 @@ def cmd_host_deploy(args: argparse.Namespace) -> int:
         key_path=Path(args.ssh_key), dest=args.dest,
     )
     return 0
+
+
+def _read_named_github_keys(entries: list[str]) -> dict[str, str]:
+    """Parses repeated `--github-key NAME=FILE` entries into `{name: token}`,
+    shared by `controller configure` and `host bootstrap` (bwsalmon/
+    agents#134 added the latter so a named key can be threaded through a
+    deployment repo's own bootstrap, not just set by hand afterward).
+    """
+    keys: dict[str, str] = {}
+    for entry in entries:
+        name, sep, path = entry.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--github-key must be NAME=FILE, got {entry!r}")
+        if name == "anonymous":
+            raise SystemExit("--github-key name 'anonymous' is reserved")
+        keys[name] = sys.stdin.read() if path == "-" else Path(path).read_text()
+    return keys
 
 
 def cmd_controller_configure(args: argparse.Namespace) -> int:
@@ -495,8 +537,43 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             ssh, credential_repos(task_repo, targets), token,
             credential_name=args.credential_name,
         )
+    for name, token in _read_named_github_keys(args.github_key).items():
+        configure_named_github_key(ssh, token, name=name)
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
+    if args.gcp_agent_service_account_email and args.gcp_project_id:
+        # bwsalmon/agents#126: plain, non-secret config, so no
+        # all-or-nothing SystemExit when only part of it is given (a
+        # deployment naming just one just doesn't turn this feature on,
+        # the same latitude every other optional step here already has).
+        configure_agent_gcp_key(
+            ssh, service_account_email=args.gcp_agent_service_account_email,
+            project_id=args.gcp_project_id,
+            max_key_age_hours=args.gcp_key_max_age_hours,
+        )
+    if args.gcp_key_minter_key_file:
+        # bwsalmon/agents#131: the controller's one GCP credential -- the
+        # host account, which mints the agent's per-dispatch keys and is
+        # impersonated *as* the agent for janitor/Gemini work. The minter
+        # must not be the account being minted for; see gcp_keys.py.
+        configure_gcp_key_minter(ssh, Path(args.gcp_key_minter_key_file).read_text())
+    if args.gemini_project_id:
+        # Uses the minter key already placed, impersonating the agent
+        # account (bwsalmon/agents#47, #131) -- no separate credential
+        # step, only the project id that turns the grain-gemini-key task
+        # label on.
+        configure_gemini_key(
+            ssh, args.gemini_project_id,
+            impersonate_service_account=args.gcp_agent_service_account_email,
+        )
+    if args.janitor_ttl_hours is not None:
+        # Same reuse as --gemini-project-id above (bwsalmon/agents#113) --
+        # the janitor authenticates with the same primary key.
+        if not args.gcp_project_id:
+            raise SystemExit("--janitor-ttl-hours requires --gcp-project-id")
+        configure_janitor(ssh, args.gcp_project_id, args.janitor_ttl_hours,
+                           impersonate_service_account=args.gcp_agent_service_account_email,
+                           name_prefix=args.janitor_name_prefix)
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
 
@@ -519,11 +596,23 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         Path(args.claude_token_file).read_text()
         if args.claude_token_file else None
     )
+    gcp_key_minter_key = None
+    if args.gcp_key_minter_key_file:
+        gcp_key_minter_key = Path(args.gcp_key_minter_key_file).read_text()
     task_repo, targets, default_target = _repo_args(args)
     config = BootstrapConfig(
         task_repo=task_repo, targets=tuple(targets),
         default_target_repo=default_target, github_token=github_token,
-        credential_name=args.credential_name, claude_token=claude_token,
+        credential_name=args.credential_name,
+        github_keys=_read_named_github_keys(args.github_key),
+        claude_token=claude_token,
+        gcp_agent_service_account_email=args.gcp_agent_service_account_email,
+        gcp_project_id=args.gcp_project_id,
+        gcp_key_max_age_hours=args.gcp_key_max_age_hours,
+        gcp_key_minter_key=gcp_key_minter_key,
+        gemini_project_id=args.gemini_project_id,
+        janitor_ttl_hours=args.janitor_ttl_hours,
+        janitor_name_prefix=args.janitor_name_prefix,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
@@ -613,10 +702,9 @@ def _targets(cluster: Cluster, name: str) -> list[str]:
 
 
 def _sandbox_targets(cluster: Cluster, name: str) -> list[str]:
-    # Metadata servers exist only for sandboxes -- there is no controller
-    # instance (Cluster.metadata_port raises for the controller's own
-    # name), so this is the same shape as _targets minus "all" meaning
-    # "including the controller."
+    # cleanup/health apply only to sandboxes -- there is no controller
+    # instance to clean up or health-check the same way, so this is the
+    # same shape as _targets minus "all" meaning "including the controller."
     if name in ("all", "sandboxes"):
         return cluster.sandbox_names
     if name not in cluster.sandbox_names:
@@ -679,6 +767,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = host.add_parser("up", help="create the private network and apply the policy")
     p.add_argument("--egress", choices=[m.value for m in EgressMode], default="open")
+    p.add_argument(
+        "--persist", action="store_true",
+        help="also install a systemd unit that reruns this at every boot "
+             "(bwsalmon/agents#111: otherwise the bridge/nftables policy "
+             "does not survive a host reboot)",
+    )
     p.set_defaults(func=cmd_up)
 
     p = host.add_parser("egress", help="switch the egress policy")
@@ -772,10 +866,48 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
                     help="credentials.json entry name for --github-token-file (default: bot)")
+    p.add_argument("--github-key", action="append", default=[], metavar="NAME=FILE",
+                    help="write an additional named GitHub credential (bwsalmon/agents#52), "
+                         "same shape as controller configure's flag of the same name: a task "
+                         "labelled `grain-github-NAME` uses it for every git push instead of "
+                         "the default credential -- for a scope (e.g. `workflow`) the default "
+                         "deliberately withholds. FILE holds the token, or '-' for stdin. "
+                         "Repeatable; never becomes any repo's default credential")
     p.add_argument("--claude-token-file",
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller and inject into the "
                          "grain-agent account's environment at dispatch time")
+    p.add_argument("--gcp-agent-service-account-email",
+                    help="email of the narrow GCP service account grain mints a fresh, "
+                         "short-lived key for on every dispatched sandbox (bwsalmon/"
+                         "agents#126) -- requires --gcp-project-id and "
+                         "--gcp-key-minter-key-file")
+    p.add_argument("--gcp-project-id",
+                    help="GCP project id -- required with --gcp-agent-service-account-email")
+    p.add_argument("--gcp-key-minter-key-file",
+                    help="JSON key for the account that mints the agent account's "
+                         "per-dispatch keys (the host service account) -- never the "
+                         "agent account's own key")
+    p.add_argument("--gcp-key-max-age-hours", type=int, default=24,
+                    help="reap any --gcp-agent-service-account-email key older than this, "
+                         "independent of whether its task session ever ended cleanly "
+                         "(default: 24)")
+    p.add_argument("--gemini-project-id",
+                    help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
+                         "GCP project a short-lived Gemini API key is minted in for a task "
+                         "that carries it. Uses the minter key --gcp-key-minter-key-file, "
+                         "impersonating the agent account -- pass that too")
+    p.add_argument("--janitor-ttl-hours", type=int,
+                    help="enables the GCP janitor (bwsalmon/agents#113): deletes GCE "
+                         "instances, their unattached disks, and grain-minted Gemini API "
+                         "keys older than this many hours, skipping the grain host VM, its "
+                         "data disk, and anything labelled managed-by=terraform. Uses the "
+                         "minter key --gcp-key-minter-key-file, impersonating the agent -- requires "
+                         "--gcp-project-id too")
+    p.add_argument("--janitor-name-prefix", default="grain",
+                    help="must match this deployment's Terraform name_prefix (default: "
+                         "grain) -- names the host/data-disk resources the janitor must "
+                         "never delete")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
@@ -824,28 +956,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_sessions_browse)
 
-    metadata = sub.add_parser(
-        "metadata", help="per-sandbox gce_metadata_server instances"
-    ).add_subparsers(dest="command", required=True)
-
-    for name, fn, help_text in (
-        ("start", cmd_metadata_start, "start metadata server instance(s)"),
-        ("stop", cmd_metadata_stop, "stop metadata server instance(s)"),
-        ("status", cmd_metadata_status, "show instance unit states"),
-    ):
-        p = metadata.add_parser(name, help=help_text)
-        p.add_argument("name", nargs="?", default="sandboxes",
-                        help="sandbox name, or 'sandboxes' for all (default)")
-        p.set_defaults(func=fn)
-
-    p = metadata.add_parser(
-        "sync-audit",
-        help="forward new per-mint log lines into the audit log",
-    )
-    p.add_argument("name", nargs="?", default="sandboxes",
-                    help="sandbox name, or 'sandboxes' for all (default)")
-    p.set_defaults(func=cmd_metadata_sync_audit)
-
     github = sub.add_parser(
         "github", help="GitHub credential hardening"
     ).add_subparsers(dest="command", required=True)
@@ -883,9 +993,46 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
                     help="credentials.json entry name for --github-token-file (default: bot)")
+    p.add_argument("--github-key", action="append", default=[], metavar="NAME=FILE",
+                    help="write an additional named GitHub credential (bwsalmon/agents#52): "
+                         "a task labelled `grain-github-NAME` uses it for every git push "
+                         "instead of the default credential -- for a scope (e.g. `workflow`) "
+                         "the default deliberately withholds. FILE holds the token, or '-' "
+                         "for stdin. Repeatable; never becomes any repo's default credential")
     p.add_argument("--claude-token-file",
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller")
+    p.add_argument("--gcp-agent-service-account-email",
+                    help="email of the narrow GCP service account grain mints a fresh, "
+                         "short-lived key for on every dispatched sandbox (bwsalmon/"
+                         "agents#126) -- requires --gcp-project-id and "
+                         "--gcp-key-minter-key-file")
+    p.add_argument("--gcp-project-id",
+                    help="GCP project id -- required with --gcp-agent-service-account-email")
+    p.add_argument("--gcp-key-minter-key-file",
+                    help="JSON key for the account that mints the agent account's "
+                         "per-dispatch keys (the host service account) -- never the "
+                         "agent account's own key")
+    p.add_argument("--gcp-key-max-age-hours", type=int, default=24,
+                    help="reap any --gcp-agent-service-account-email key older than this, "
+                         "independent of whether its task session ever ended cleanly "
+                         "(default: 24)")
+    p.add_argument("--gemini-project-id",
+                    help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
+                         "GCP project a short-lived Gemini API key is minted in for a task "
+                         "that carries it. Reuses the key --gcp-service-account-key-file "
+                         "already placed -- run that first")
+    p.add_argument("--janitor-ttl-hours", type=int,
+                    help="enables the GCP janitor (bwsalmon/agents#113): deletes GCE "
+                         "instances, their unattached disks, and grain-minted Gemini API "
+                         "keys older than this many hours, skipping the grain host VM, its "
+                         "data disk, and anything labelled managed-by=terraform. Uses the "
+                         "minter key --gcp-key-minter-key-file, impersonating the agent -- requires "
+                         "--gcp-project-id too")
+    p.add_argument("--janitor-name-prefix", default="grain",
+                    help="must match this deployment's Terraform name_prefix (default: "
+                         "grain) -- names the host/data-disk resources the janitor must "
+                         "never delete")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")

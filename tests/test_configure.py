@@ -4,10 +4,12 @@ import shlex
 from pathlib import Path
 
 from grain.automation.configure import (
-    configure_claude_token, configure_github_credential, configure_repo,
-    ensure_sandbox_tokens,
+    configure_agent_gcp_key, configure_claude_token, configure_cluster,
+    configure_gcp_key_minter, configure_gemini_key, configure_github_credential,
+    configure_named_github_key, configure_repo, ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
+from grain.inventory import Cluster
 from grain.run import FakeRunner
 
 SSH_PREFIX = (
@@ -81,6 +83,44 @@ def test_configure_repo_uses_sudo_and_chmod_644_for_config():
     )
 
 
+def test_configure_cluster_writes_sandbox_count_and_subnet():
+    ssh, inner = make_ssh()
+    configure_cluster(ssh, Cluster(sandbox_count=4))
+    written = stdin_for(inner, "/data/config/cluster.toml")
+    assert written == 'sandbox_count = 4\nsubnet = "10.100.0.0/24"\n'
+
+
+def test_configure_cluster_honours_a_non_default_subnet():
+    ssh, inner = make_ssh()
+    configure_cluster(ssh, Cluster(sandbox_count=2, subnet=ipaddress.IPv4Network("10.200.0.0/24")))
+    written = stdin_for(inner, "/data/config/cluster.toml")
+    assert written == 'sandbox_count = 2\nsubnet = "10.200.0.0/24"\n'
+
+
+def test_configure_cluster_uses_sudo_and_chmod_644():
+    ssh, inner = make_ssh()
+    configure_cluster(ssh, Cluster())
+    assert any(
+        c.startswith("ssh") and "sudo chmod 644 /data/config/cluster.toml" in c
+        for c in inner.commands
+    )
+
+
+def test_configure_cluster_round_trips_through_cluster_load(tmp_path):
+    """The whole point: a controller pointed at this file with
+    `--cluster-file` has to derive the same `sandbox_names` the host's own
+    `Cluster` does.
+    """
+    ssh, inner = make_ssh()
+    original = Cluster(sandbox_count=4)
+    configure_cluster(ssh, original)
+    written = stdin_for(inner, "/data/config/cluster.toml")
+    cluster_file = tmp_path / "cluster.toml"
+    cluster_file.write_text(written)
+    reloaded = Cluster.load(cluster_file)
+    assert reloaded.sandbox_names == original.sandbox_names
+
+
 def test_configure_github_credential_writes_token_and_credentials_json():
     ssh, inner = make_ssh()
     configure_github_credential(ssh, ["acme/widgets"], "  ghp_secrettoken  \n")
@@ -116,6 +156,38 @@ def test_configure_github_credential_sets_mode_600_on_the_token():
     assert any(
         "sudo chmod 600 /data/secrets/github/bot.token" in c for c in inner.commands
     )
+
+
+def test_configure_named_github_key_writes_only_the_token_file():
+    """Unlike configure_github_credential, this must never touch
+    credentials.json (bwsalmon/agents#52) -- a grain-github-<name> label
+    selects it directly, and writing a mapping entry would make it that
+    repo's *default* credential too, defeating the whole point of a named
+    override carrying a scope the default deliberately withholds.
+    """
+    ssh, inner = make_ssh()
+    configure_named_github_key(ssh, "  ghp_workflowtoken  \n", name="workflow")
+    token = stdin_for(inner, "/data/secrets/github/workflow.token")
+    assert token == "ghp_workflowtoken\n"  # stripped, then a single trailing newline
+    assert not any(
+        "credentials.json" in c for c in inner.commands
+    )
+
+
+def test_configure_named_github_key_sets_mode_600_on_the_token():
+    ssh, inner = make_ssh()
+    configure_named_github_key(ssh, "tok", name="workflow")
+    assert any(
+        "sudo chmod 600 /data/secrets/github/workflow.token" in c for c in inner.commands
+    )
+
+
+def test_named_github_key_is_never_in_argv():
+    ssh, inner = make_ssh()
+    secret = "ghp_supersecretworkflowvalue"
+    configure_named_github_key(ssh, secret, name="workflow")
+    for argv, _ in inner.calls:
+        assert all(secret not in arg for arg in argv)
 
 
 def test_ensure_sandbox_tokens_mints_one_per_sandbox_when_the_file_is_absent():
@@ -192,3 +264,71 @@ def test_configure_claude_token_is_never_in_argv():
     configure_claude_token(ssh, secret)
     for argv, _ in inner.calls:
         assert all(secret not in arg for arg in argv)
+
+
+def test_configure_gcp_key_minter_writes_the_key_mode_600():
+    ssh, inner = make_ssh()
+    configure_gcp_key_minter(ssh, '{"type": "service_account"}\n')
+    content = stdin_for(inner, "/data/secrets/gcp-key-minter.json")
+    assert content == '{"type": "service_account"}\n'  # stripped, single trailing newline
+    assert any(
+        "sudo chmod 600 /data/secrets/gcp-key-minter.json" in c for c in inner.commands
+    )
+
+
+def test_configure_gcp_key_minter_never_chowns_the_shared_secrets_dir():
+    """/data/secrets is shared with the GitHub and Claude credentials,
+    which must stay root-owned -- this must never chown anything, since
+    grain-automation.service (its only reader) already runs as root.
+    """
+    ssh, inner = make_ssh()
+    configure_gcp_key_minter(ssh, "{}")
+    assert not [argv for argv, _ in inner.calls if "chown" in argv[-1]]
+
+
+def test_configure_gcp_key_minter_key_is_never_in_argv():
+    ssh, inner = make_ssh()
+    secret = '{"private_key": "supersecretvalue"}'
+    configure_gcp_key_minter(ssh, secret)
+    for argv, _ in inner.calls:
+        assert all(secret not in arg for arg in argv)
+
+
+def test_configure_agent_gcp_key_writes_the_config():
+    ssh, inner = make_ssh()
+    configure_agent_gcp_key(
+        ssh, service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme",
+    )
+    config = json.loads(stdin_for(inner, "/data/config/gcp-key.json"))
+    assert config == {
+        "service_account_email": "grain-agent@acme.iam.gserviceaccount.com",
+        "project_id": "acme",
+        "max_key_age_hours": 24,
+        # bwsalmon/agents#131: names the minter credential gcp_keys.py
+        # authenticates as. Not the agent key -- a different account.
+        "key_path": "/data/secrets/gcp-key-minter.json",
+    }
+    assert any(
+        "sudo chmod 644 /data/config/gcp-key.json" in c for c in inner.commands
+    )
+
+
+def test_configure_agent_gcp_key_honours_a_custom_max_age():
+    ssh, inner = make_ssh()
+    configure_agent_gcp_key(
+        ssh, service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        project_id="acme", max_key_age_hours=6,
+    )
+    config = json.loads(stdin_for(inner, "/data/config/gcp-key.json"))
+    assert config["max_key_age_hours"] == 6
+
+
+def test_configure_gemini_key_writes_the_project_id():
+    ssh, inner = make_ssh()
+    configure_gemini_key(ssh, "acme")
+    config = json.loads(stdin_for(inner, "/data/config/gemini-key.json"))
+    assert config == {"project_id": "acme"}
+    assert any(
+        "sudo chmod 644 /data/config/gemini-key.json" in c for c in inner.commands
+    )

@@ -237,9 +237,9 @@ inventory.
 |---|---|---|---|
 | 1 | Preflight | `/dev/kvm`, required binaries, base image present → else fetch | 1, 3 |
 | 2 | Admin key | key file absent → generate | — |
-| 3 | Network | `network_up()`, already idempotent | 2 |
+| 3 | Network | `network_up(repo_dir)`, already idempotent, persists across a reboot the same as `host up --persist` | 2 |
 | 4 | Controller | `ABSENT` → create + start; `STOPPED` → start; `RUNNING` → skip | 4 |
-| 5 | Wait | SSH answers, then `cloud-init status --wait` | — |
+| 5 | Wait | SSH answers, then `cloud-init status --wait` (bounded; see "When the wait fails") | — |
 | 6 | Controller key | read back over SSH; write if changed | **5** |
 | 7 | Deploy | push the tree to `/opt/grain` (unconditional; it is a sync) | **7** |
 | 8 | Configure | write `/data` config; token only if one was supplied | 8, 9, 11 |
@@ -262,6 +262,37 @@ appends the new key to each sandbox's `authorized_keys` over the **admin**
 key rather than recreating anything. That repair is only possible because
 of Phase 1: today there is no second way in. See [Deferred](#deferred) for
 the deeper fix.
+
+**When the wait fails.** Stage 5 is the stage with the least to say for
+itself: the one channel that could explain why the controller is not
+answering is the controller. Reported live as *"it fails on wait for
+controller (5/11)"* and, on GCP, followed only by `deploy.sh`'s
+storage-ownership dump — facts about a different failure, printed because
+that dump ran on any non-zero exit at all.
+
+`grain/adapter/diagnostics.py` prints the facts that separate the causes,
+to stdout — which needs no SSH or IAP path to the host to read, and on GCP
+is already tailed into Cloud Logging:
+
+- **Never answered SSH** → host-side: domain state, the host bridge,
+  whether the guest ever ARPed or answered a ping on its assigned address,
+  and the tail of its serial console log. Nothing in the console log means
+  it never booted; a full console log with an empty neighbour table means
+  it booted but never got its address; a ping that answers while SSH does
+  not means it is up and refusing the admin key.
+- **Answered SSH, cloud-init ended in `error`** → guest-side: `cloud-init
+  status --long`, the tail of `/var/log/cloud-init-output.log` (where
+  `provision/controller.sh`'s own `set -eux` output lands — an apt or
+  egress failure shows up here and nowhere else), and any failed units.
+
+Two related properties of the same stage: `cloud-init status --wait` runs
+under `timeout`, because it otherwise blocks for as long as cloud-init runs
+and a wedged guest hangs the whole bootstrap until something further out
+kills it; and an *already running* VM is checked too, as a warning rather
+than a failure. That second one is what a re-run after a failed provision
+used to skip — `fresh` is false the second time — leaving stage 6 to fail
+with `cat: /data/secrets/controller-ssh.pub: No such file or directory`
+instead of the real reason.
 
 **Legibility.** `grain --dry-run host bootstrap …` prints every command and
 runs none. The flag is already global, and it is what keeps a one-command

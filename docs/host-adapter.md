@@ -98,8 +98,8 @@ with no files left behind.
 
 - Lima's `list --json` field names and status strings — moot on Linux now,
   but relevant again if `lima.py` becomes the macOS driver.
-- The controller VM and the metadata servers: only a sandbox-shaped VM has
-  been booted so far, not the controller image or its services.
+- The controller VM: only a sandbox-shaped VM has been booted so far, not
+  the controller image or its services.
 
 ## Using it
 
@@ -141,7 +141,7 @@ The interface is deliberately small:
 ```python
 create(spec, provision_script=None)   start(name)   stop(name)
 destroy(name)   state(name)   list_vms()   address(name)
-network_up()   egress_policy(mode)
+network_up(repo_dir)   egress_policy(mode)
 ```
 
 `state` and `list_vms` are additions to the seven operations the design

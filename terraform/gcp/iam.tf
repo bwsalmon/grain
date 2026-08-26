@@ -1,0 +1,267 @@
+# The host's identity. Everything the VM is allowed to do in GCP is this
+# account's roles -- edit vm_service_account_roles in config/grain.tfvars
+# and the change arrives as a reviewable diff. It needs no Secret Manager
+# grant: the two runtime credentials arrive as instance metadata, pushed
+# there directly by the deploy workflow, and the host reads its own
+# metadata with no GCP credential at all.
+
+resource "google_service_account" "host" {
+  account_id   = "${var.name_prefix}-host"
+  display_name = "grain host VM (${var.name_prefix})"
+  description  = "Attached to the grain host instance. Holds no secret grant; its two deploy credentials arrive as instance metadata instead."
+}
+
+resource "google_project_iam_member" "host" {
+  for_each = toset(var.vm_service_account_roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.host.email}"
+}
+
+# The narrow account a sandbox's own credentials belong to: the controller
+# mints a fresh, short-lived key for this account on every dispatch
+# (bwsalmon/agents#126, grain/automation/gcp_keys.py) and pushes it into
+# the sandbox for the duration of that one task, revoking it once the
+# task's slot frees (or, failing that, once it turns 24 hours old -- see
+# gcp_keys.py's own docstring). It's also what the janitor's Gemini-key
+# and compute-instance cleanup (bwsalmon/agents#113) run as. Created when
+# you ask for it by listing roles, by turning on
+# agent_can_manage_compute_instances, enable_gemini_key, or
+# enable_janitor, in any combination -- each alone is a real, supported
+# configuration, so the account's own existence can't gate on
+# agent_service_account_roles specifically.
+
+locals {
+  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key || var.enable_janitor || var.agent_can_manage_gke
+
+  # Unconditioned, unlike agent_conditioned_compute_roles below -- see
+  # variables.tf's agent_can_manage_gke for why there is no equivalent
+  # "the grain host's own cluster" to exclude here.
+  agent_gke_roles = var.agent_can_manage_gke ? [
+    "roles/container.admin",        # create/resize/delete clusters and node pools, plus the Kubernetes API objects on them
+    "roles/artifactregistry.admin", # create/delete repositories, push/pull images
+  ] : []
+
+  # Only compute.instanceAdmin.v1 and compute.osLogin -- see
+  # variables.tf's agent_can_manage_compute_instances for why
+  # iap.tunnelResourceAccessor is granted separately, unconditioned.
+  agent_conditioned_compute_roles = var.agent_can_manage_compute_instances ? [
+    "roles/compute.instanceAdmin.v1", # create, delete, start, stop, list, get, setMetadata (SSH keys)
+    "roles/compute.osLogin",          # SSH: OS Login provisions the POSIX account
+  ] : []
+
+  # Matches google_compute_instance.host's own name/zone (instance.tf).
+  # Kept here, not cross-referenced, so the exclusion this guards is
+  # legible without following it to another resource.
+  grain_host_resource = "projects/${var.project_id}/zones/${var.zone}/instances/${var.name_prefix}-host"
+}
+
+resource "google_service_account" "agent" {
+  count        = local.agent_account_needed ? 1 : 0
+  account_id   = "${var.name_prefix}-agent"
+  display_name = "grain sandboxed agents (${var.name_prefix})"
+  description  = "The controller mints a fresh, short-lived key for this account on every dispatch and pushes it into the sandbox; this is what a sandboxed agent's GCP credentials belong to."
+}
+
+resource "google_project_iam_member" "agent" {
+  for_each = toset(var.agent_service_account_roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.agent[0].email}"
+}
+
+# Lets the deploy workflow mint (and invalidate) the agent account's own
+# key -- the primary credential grain/automation/gemini_keys.py's own
+# gcloud calls authenticate with (see grain's docs/design.md, "GCP
+# credentials"), unrelated to the per-dispatch keys host_manages_agent_keys
+# below lets the controller mint. bootstrap-gcp.sh, next to this file,
+# grants the deployer project-wide serviceAccountAdmin/serviceAccountUser,
+# but neither of those covers key management (iam.serviceAccountKeys.*) --
+# that needs its own role, and scoping it to just this one account rather
+# than granting it project-wide is the whole point of doing it here
+# instead of in bootstrap-gcp.sh.
+resource "google_service_account_iam_member" "deployer_manages_agent_keys" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = "serviceAccount:${var.name_prefix}-deployer@${var.project_id}.iam.gserviceaccount.com"
+}
+
+# bwsalmon/agents#126: lets the host account mint and revoke the agent
+# account's per-dispatch keys -- and it must be a *different* account from
+# the one being minted for, or a leaked agent key could mint itself a
+# fresh one and defeat the 24-hour expiry entirely.
+#
+# bwsalmon/agents#131: this grant was written for a controller that would
+# use the host account's *native* GCE identity, with no static credential.
+# That premise was false -- the controller is a nested libvirt guest, not a
+# GCE VM, so `gcloud` there had no account at all. The grant itself is
+# still exactly right; what changed is that the host account now reaches
+# the controller as a key file (deployer_manages_host_keys below mints it,
+# ci/push-host-secrets.sh pushes it, gcp_keys.py activates it).
+resource "google_service_account_iam_member" "host_manages_agent_keys" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = "serviceAccount:${google_service_account.host.email}"
+}
+
+# bwsalmon/agents#131: lets the controller *act as* the agent account
+# without holding its key. The controller authenticates as the host
+# account (its one credential) and passes
+# --impersonate-service-account=<agent> on every gcloud call that should
+# run with the agent's permissions -- grain/automation/janitor.py and
+# gemini_keys.py.
+#
+# This is what removes the long-lived agent key from the controller
+# entirely. It matters most for the janitor, which is an exclusion-list
+# deleter ("everything older than the TTL except what it can identify as
+# grain's own"), so the agent account's own roles are its containment
+# boundary -- see janitor.py's docstring. Impersonation keeps that bound
+# exactly where it was while the credential at rest becomes the host's.
+#
+# It also makes core.py's periodic reap of expired agent keys correct by
+# construction: with no long-lived agent key on the controller, every
+# user-managed key under the agent account genuinely is a per-dispatch
+# key, so deleting the old ones can no longer take out the controller's
+# own credential.
+resource "google_service_account_iam_member" "host_impersonates_agent" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.host.email}"
+}
+
+# bwsalmon/agents#131: lets CI mint the host-account key it pushes to the
+# instance as `grain-key-minter-key`, on the same rotate-every-run schedule
+# as the agent key. Scoped to the host account alone, the same instinct
+# deployer_manages_agent_keys above applies to the agent account rather
+# than granting key management project-wide in bootstrap-gcp.sh.
+resource "google_service_account_iam_member" "deployer_manages_host_keys" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.host.name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = "serviceAccount:${var.name_prefix}-deployer@${var.project_id}.iam.gserviceaccount.com"
+}
+
+# Compute instance lifecycle and SSH, everywhere in this project except
+# the grain host VM itself -- see variables.tf's
+# agent_can_manage_compute_instances for the full reasoning, including
+# why iap.tunnelResourceAccessor (below, separately) is not conditioned
+# the same way.
+resource "google_project_iam_member" "agent_compute" {
+  for_each = toset(local.agent_conditioned_compute_roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.agent[0].email}"
+
+  condition {
+    title       = "exclude-grain-host"
+    description = "Instance management and SSH everywhere in this project except the grain host VM itself."
+    expression  = "resource.type != \"compute.googleapis.com/Instance\" || resource.name != \"${local.grain_host_resource}\""
+  }
+}
+
+# Network-tunnel reachability only -- see variables.tf for why this one
+# role can't be conditioned to exclude the host the way the two above
+# are, and why that's still safe: this grants no authentication
+# capability by itself.
+resource "google_project_iam_member" "agent_iap_tunnel" {
+  count   = var.agent_can_manage_compute_instances ? 1 : 0
+  project = var.project_id
+  role    = "roles/iap.tunnelResourceAccessor"
+  member  = "serviceAccount:${google_service_account.agent[0].email}"
+}
+
+# The Generative Language API itself -- grain/automation/gemini_keys.py's
+# `apikeys.googleapis.com` calls fail with API-not-enabled until this
+# exists, same as any other GCP API. disable_on_destroy is false: a
+# `terraform destroy` (or turning enable_gemini_key back off) must not
+# reach into the project and disable an API something else in it might
+# also depend on -- the same "don't touch shared project state" instinct
+# bootstrap-gcp.sh's own comments apply elsewhere.
+resource "google_project_service" "generativelanguage" {
+  count              = var.enable_gemini_key ? 1 : 0
+  project            = var.project_id
+  service            = "generativelanguage.googleapis.com"
+  disable_on_destroy = false
+}
+
+# Lets the agent account mint and revoke Gemini API keys
+# (grain/automation/gemini_keys.py) -- project-wide, since
+# `gcloud services api-keys create/delete` operate at the project level,
+# not against a single resource. The narrower alternative
+# (apikeys.keys.create/.delete/.get without the rest of
+# serviceusage.apiKeysAdmin) has no predefined role in GCP as of this
+# writing, so a custom role would be the only way to shave this down
+# further -- left for an operator who wants it, not the default here.
+#
+# bwsalmon/agents#131: granted to the *host* account, not the agent. It
+# used to be the agent's, which meant a sandbox -- holding a per-dispatch
+# agent key -- could mint Gemini API keys of its own, unbounded, and
+# revoke the one grain minted for it. That defeats the point of
+# gemini_keys.py minting exactly one narrow, short-lived key per task.
+# Minting now happens as the host (gemini_keys.py), and the janitor makes
+# its api-keys calls as the host too while keeping its compute deletions
+# agent-scoped. A sandbox can use the key it is given and cannot make more.
+resource "google_project_iam_member" "host_gemini_keys" {
+  count   = var.enable_gemini_key ? 1 : 0
+  project = var.project_id
+  role    = "roles/serviceusage.apiKeysAdmin"
+  member  = "serviceAccount:${google_service_account.host.email}"
+}
+
+# GKE and Artifact Registry APIs -- disable_on_destroy is false for the
+# same reason as generativelanguage above: a `terraform destroy` (or
+# flipping agent_can_manage_gke back off) must not reach into the project
+# and disable an API something else in it might also depend on.
+resource "google_project_service" "container" {
+  count              = var.agent_can_manage_gke ? 1 : 0
+  project            = var.project_id
+  service            = "container.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "artifactregistry" {
+  count              = var.agent_can_manage_gke ? 1 : 0
+  project            = var.project_id
+  service            = "artifactregistry.googleapis.com"
+  disable_on_destroy = false
+}
+
+# GKE cluster and Artifact Registry repository lifecycle, project-wide --
+# see variables.tf's agent_can_manage_gke for why this is unconditioned,
+# unlike agent_compute above.
+resource "google_project_iam_member" "agent_gke" {
+  for_each = toset(local.agent_gke_roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.agent[0].email}"
+
+  depends_on = [google_project_service.container, google_project_service.artifactregistry]
+}
+
+# bwsalmon/agents#146: container.admin alone cannot create a cluster.
+# Every GKE node pool runs as some service account, and GCP refuses to
+# attach one unless the caller separately holds iam.serviceAccountUser on
+# it -- confirmed live, against a real project, with this grant absent:
+# `gcloud container clusters create` failed with a 400
+# ("does not have access to service account ... Ask a project owner to
+# grant you the iam.serviceAccountUser role") both for the project's
+# default Compute Engine service account (the implicit choice when
+# --service-account is omitted) and for the agent account's own email
+# passed explicitly. Granting it here, on the agent account acting as
+# itself, is what makes `--service-account=<agent email>` work -- and is
+# the one node identity worth using: the default Compute Engine SA often
+# carries broader legacy project roles than this agent has, so pointing
+# node pools at it would be a privilege escalation for anything that ends
+# up running as a pod, where using the agent's own (already fully known,
+# already the boundary agent_gke_roles above sets) identity is not, since
+# roles/container.admin already gives it full access to whatever runs on
+# a cluster it can reach either way.
+resource "google_service_account_iam_member" "agent_acts_as_self_for_gke_nodes" {
+  count              = var.agent_can_manage_gke ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.agent[0].email}"
+}

@@ -1,12 +1,20 @@
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import grain.automation.capture as capture_module
 from grain.automation.config import AutomationConfig
 from grain.automation.dispatch import unit_name
+from grain.automation.gcp_keys import GcpKeyConfig
+from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.history import RecordingSessionHistory
 from grain.automation.state import AutomationState, TriggerKind
 from grain.automation.sweeper import Outcome, sweep
+from grain.proxy.tokens import SandboxCredentialOverrides, SandboxCredentialStore
 from grain.run import FakeRunner
+
+GEMINI_KEY_NAME = "projects/1/locations/global/keys/abc"
+EMAIL = "grain-agent@proj.iam.gserviceaccount.com"
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -113,6 +121,61 @@ def test_a_run_within_a_custom_max_runtime_stays_active():
     result = sweep(state, lambda name: runner, runner, config(max_runtime_minutes=120), NOW)
     assert result.stranded == []
     assert "sandbox-0" in state.assignments
+
+
+# --- cancel-on-close (bwsalmon/agents#82) -----------------------------------
+
+def test_a_still_active_run_whose_issue_closed_is_cancelled_and_reaped():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    is_issue_closed=lambda number: number == 1)
+    assert result.cancelled == [Outcome("sandbox-0", 1)]
+    assert result.succeeded == result.failed == result.stranded == []
+    assert "sandbox-0" not in state.assignments
+    assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
+
+
+def test_a_still_active_run_whose_issue_is_still_open_is_left_alone():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    is_issue_closed=lambda number: False)
+    assert result.cancelled == []
+    assert "sandbox-0" in state.assignments
+    assert not runner.ran("sudo systemctl stop")
+
+
+def test_a_still_active_run_is_left_alone_with_no_is_issue_closed_hook():
+    # Every caller that predates bwsalmon/agents#82 leaves this unset --
+    # must behave exactly as before, with no cancel-on-close check at all.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert result.cancelled == []
+    assert "sandbox-0" in state.assignments
+
+
+def test_a_cancelled_runs_slot_gets_the_same_cleanup_hook_as_any_other_release():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("active")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          is_issue_closed=lambda number: True)
+    assert runner.ran("kind delete clusters --all")
+    assert runner.ran("docker system prune -af --volumes")
+
+
+def test_a_unit_that_already_finished_is_not_reported_cancelled_even_if_closed():
+    # is_issue_closed is only ever consulted for a unit that would
+    # otherwise be left running untouched -- a run that already exited is
+    # reported succeeded/failed as usual, not cancelled, regardless of the
+    # issue's state by sweep time.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    is_issue_closed=lambda number: True)
+    assert result.succeeded == [Outcome("sandbox-0", 1)]
+    assert result.cancelled == []
 
 
 def test_sweep_uses_the_per_sandbox_runner_factory():
@@ -319,3 +382,266 @@ def test_a_still_active_run_within_budget_captures_nothing():
     history = RecordingSessionHistory()
     sweep(state, lambda name: runner, runner, config(), NOW, history=history)
     assert history.calls == []
+
+
+# --- Gemini API key revocation on release (bwsalmon/agents#47) -------------
+
+def state_with_gemini_key(sandbox: str, issue: int, started_at) -> AutomationState:
+    state = AutomationState()
+    state.assign(sandbox, issue, unit=f"grain-task-{sandbox}", now=started_at,
+                 gemini_key_name=GEMINI_KEY_NAME)
+    return state
+
+
+def test_a_task_with_no_gemini_key_never_calls_gcloud_on_release():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert not runner.ran("gcloud")
+
+
+def test_a_successful_release_revokes_the_minted_gemini_key():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    delete_call = next(c for c in runner.commands if "api-keys delete" in c)
+    assert GEMINI_KEY_NAME in delete_call
+    assert "--project=proj" in delete_call
+    assert result.credential_warnings == []
+
+
+def test_a_failed_release_still_revokes_the_minted_gemini_key():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("failed", "exit-code")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_a_stranded_release_still_revokes_the_minted_gemini_key():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", returncode=1)
+    for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
+        runner.expect(prefix, stdout=stdout, returncode=returncode)
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_gemini_key_revocation_happens_before_the_slot_is_freed_in_state():
+    # The assignment (carrying gemini_key_name) must still be on hand when
+    # revocation runs -- checked indirectly by asserting revocation
+    # actually happened at all, since state.release() would otherwise have
+    # already dropped it by the time _revoke_gemini_key ran.
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert "sandbox-0" not in state.assignments
+    assert any("api-keys delete" in c for c in runner.commands)
+
+
+def test_gemini_key_revocation_with_no_config_is_skipped_not_crashed():
+    # A key was minted (an assignment carrying gemini_key_name) but this
+    # sweep call was never given a GeminiKeyConfig -- must not raise, and
+    # must not guess at a project id.
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert not any("api-keys delete" in c for c in runner.commands)
+    assert result.credential_warnings == []
+
+
+def test_gemini_key_revocation_failure_is_a_credential_warning_not_a_crash():
+    state = state_with_gemini_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    runner.expect("gcloud auth activate-service-account", returncode=0)
+    runner.expect("gcloud services api-keys delete", returncode=1,
+                   stderr="PERMISSION_DENIED")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gemini_key_config=GeminiKeyConfig(project_id="proj"))
+    assert len(result.credential_warnings) == 1
+    assert result.credential_warnings[0].sandbox == "sandbox-0"
+    assert "PERMISSION_DENIED" in result.credential_warnings[0].detail
+    # The slot still frees even though revocation failed.
+    assert "sandbox-0" not in state.assignments
+    assert result.succeeded == [Outcome("sandbox-0", 1)]
+
+
+def test_credential_warnings_default_to_empty_for_every_existing_caller():
+    # Every caller of sweep() written before this feature doesn't pass
+    # gemini_key_config at all -- must keep working exactly as before.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert result.credential_warnings == []
+
+
+# --- GCP service-account key revocation on release (bwsalmon/agents#126) ---
+
+GCP_KEY_ID = "abc123def456"
+
+
+def state_with_gcp_key(sandbox: str, issue: int, started_at) -> AutomationState:
+    state = AutomationState()
+    state.assign(sandbox, issue, unit=f"grain-task-{sandbox}", now=started_at,
+                 gcp_key_id=GCP_KEY_ID)
+    return state
+
+
+def test_a_task_with_no_gcp_key_never_calls_gcloud_on_release():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    assert not runner.ran("gcloud")
+
+
+def test_a_successful_release_revokes_the_minted_gcp_key():
+    state = state_with_gcp_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    delete_call = next(c for c in runner.commands if "keys delete" in c)
+    assert GCP_KEY_ID in delete_call
+    assert f"--iam-account={EMAIL}" in delete_call
+    assert result.credential_warnings == []
+
+
+def test_a_failed_release_still_revokes_the_minted_gcp_key():
+    state = state_with_gcp_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("failed", "exit-code")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    assert any("keys delete" in c for c in runner.commands)
+
+
+def test_a_stranded_release_still_revokes_the_minted_gcp_key():
+    state = state_with_gcp_key("sandbox-0", issue=1, started_at=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", returncode=1)
+    for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
+        runner.expect(prefix, stdout=stdout, returncode=returncode)
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    assert any("keys delete" in c for c in runner.commands)
+
+
+def test_gcp_key_revocation_happens_before_the_slot_is_freed_in_state():
+    state = state_with_gcp_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW,
+          gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    assert "sandbox-0" not in state.assignments
+    assert any("keys delete" in c for c in runner.commands)
+
+
+def test_gcp_key_revocation_with_no_config_is_skipped_not_crashed():
+    # A key was minted (an assignment carrying gcp_key_id) but this sweep
+    # call was never given a GcpKeyConfig -- must not raise, and must not
+    # guess at a service account.
+    state = state_with_gcp_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW)
+    assert not any("keys delete" in c for c in runner.commands)
+    assert result.credential_warnings == []
+
+
+def test_gcp_key_revocation_failure_is_a_credential_warning_not_a_crash():
+    state = state_with_gcp_key("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    runner.expect("gcloud iam service-accounts keys delete", returncode=1,
+                  stderr="PERMISSION_DENIED")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    assert len(result.credential_warnings) == 1
+    assert result.credential_warnings[0].sandbox == "sandbox-0"
+    assert "PERMISSION_DENIED" in result.credential_warnings[0].detail
+    # The slot still frees even though revocation failed.
+    assert "sandbox-0" not in state.assignments
+    assert result.succeeded == [Outcome("sandbox-0", 1)]
+
+
+def test_a_release_revokes_both_a_gemini_key_and_a_gcp_key_when_both_were_minted():
+    state = AutomationState()
+    state.assign("sandbox-0", 1, unit="grain-task-sandbox-0", now=NOW,
+                 gemini_key_name=GEMINI_KEY_NAME, gcp_key_id=GCP_KEY_ID)
+    runner = runner_reporting("inactive", "success")
+    result = sweep(state, lambda name: runner, runner, config(), NOW,
+                    gemini_key_config=GeminiKeyConfig(project_id="proj"),
+                    gcp_key_config=GcpKeyConfig(service_account_email=EMAIL, project_id="proj"))
+    assert any("api-keys delete" in c for c in runner.commands)
+    assert any("iam service-accounts keys delete" in c for c in runner.commands)
+    assert result.credential_warnings == []
+
+
+# --- credential_store.clear() on release (bwsalmon/agents#52) ---------------
+
+def test_a_successful_release_clears_any_credential_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    assert SandboxCredentialOverrides(store._path).for_sandbox("sandbox-0") is None
+
+
+def test_a_failed_release_also_clears_any_credential_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("failed", "exit-code")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    assert SandboxCredentialOverrides(store._path).for_sandbox("sandbox-0") is None
+
+
+def test_a_stranded_release_also_clears_any_credential_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", returncode=1)
+    for prefix, (stdout, returncode) in _HEALTHY_EXTRAS.items():
+        runner.expect(prefix, stdout=stdout, returncode=returncode)
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    assert SandboxCredentialOverrides(store._path).for_sandbox("sandbox-0") is None
+
+
+def test_release_with_no_override_set_does_not_crash():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)  # must not raise
+
+
+def test_release_with_no_credential_store_does_not_crash():
+    # Every caller of sweep() written before this feature doesn't pass
+    # credential_store at all -- must keep working exactly as before.
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    sweep(state, lambda name: runner, runner, config(), NOW)  # must not raise
+    assert "sandbox-0" not in state.assignments
+
+
+def test_a_release_clears_only_this_sandboxs_override():
+    state = state_with("sandbox-0", issue=1, started_at=NOW)
+    runner = runner_reporting("inactive", "success")
+    store = SandboxCredentialStore(Path(tempfile.mkdtemp()) / "sandbox-github-key.json")
+    store.set("sandbox-0", "workflow")
+    store.set("sandbox-1", "release")
+
+    sweep(state, lambda name: runner, runner, config(), NOW, credential_store=store)
+
+    overrides = SandboxCredentialOverrides(store._path)
+    assert overrides.for_sandbox("sandbox-0") is None
+    assert overrides.for_sandbox("sandbox-1") == "release"

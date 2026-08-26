@@ -10,7 +10,7 @@ KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553
 apt-get update
 apt-get install -y --no-install-recommends \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
-  pipx tmux unzip ca-certificates bubblewrap
+  pipx tmux unzip ca-certificates bubblewrap gnupg
 
 # Docker, from the official repo — the documented path on Debian, no
 # kernel-config question at all.
@@ -47,6 +47,33 @@ sysctl --system
 # discard it otherwise.
 docker pull "${KIND_NODE_IMAGE}"
 
+# --- gcloud and terraform (bwsalmon/agents#117): a task whose deployment
+# has `Orchestrator.gcp_key_config` set gets a freshly minted, short-lived
+# GCP service-account key pushed into its sandbox at dispatch time
+# (bwsalmon/agents#126, `grain/automation/gcp_keys.py`/`dispatch.py`'s
+# `configure_gcp_key`, revoked again once the task's slot frees) -- but
+# until now had neither CLI installed to actually drive them with, so there
+# was nothing for an agent to run `terraform apply`/`gcloud compute ...`
+# with even once it had the key. Nothing here bakes any credential into the
+# image itself: the key only ever arrives per-dispatch, over the same
+# stdin-not-argv channel the git-proxy token already uses. gcloud via apt,
+# the exact repo/keyring `provision/controller.sh` already uses (see that
+# script's own comment on why gcloud and not a hand-rolled OAuth2
+# exchange); terraform via HashiCorp's own apt repo, since Debian's
+# archives don't carry it -- same signed-repo shape as the Docker install
+# above, no bare `apt-key add`.
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+  gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  > /etc/apt/sources.list.d/google-cloud-sdk.list
+curl -fsSL https://apt.releases.hashicorp.com/gpg | \
+  gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
+echo \
+  "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+  > /etc/apt/sources.list.d/hashicorp.list
+apt-get update
+apt-get install -y --no-install-recommends google-cloud-cli terraform
+
 # Claude Code no longer runs on the sandbox at all (docs/roadmap.md item
 # 8's "Update"). It used to, with a real login credential here, and this
 # script used to carry a substantial section hardening that: kernel.yama.
@@ -74,7 +101,13 @@ This sandbox is part of a grain deployment.
 
 - git pushes go through a proxy automatically; GitHub API calls are not
   available from here.
-- GCP credentials work through ADC with no setup.
+- If this deployment mints one, a GCP service-account key for this task
+  arrives at ~/.gcp-service-account.json (readable only by you, revoked
+  automatically once the task ends) -- run `gcloud auth
+  activate-service-account --key-file=~/.gcp-service-account.json` or
+  export GOOGLE_APPLICATION_CREDENTIALS to that path to use it. gcloud and
+  terraform are both installed to actually drive it (e.g. against
+  terraform/gcp/).
 - The sandbox is shared across tasks and cleaned between them, so do not
   leave long-running services behind.
 DOC

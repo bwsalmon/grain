@@ -21,35 +21,37 @@
 #     there's an obvious place to put it).
 set -eux
 
-GCE_METADATA_SERVER_VERSION="4.2.5"
-# Matches Cluster().controller_ip for the default subnet (10.100.0.0/24) —
-# see grain/inventory.py. Edit this if the deployment uses a non-default
-# subnet (there is no --subnet flag on `grain` yet; it's a Cluster()
-# constructor argument today).
-CONTROLLER_IP="10.100.0.2"
+# Substituted for this cluster's actual controller address when the adapter
+# bakes this script into the controller's user-data (grain/inventory.py's
+# CONTROLLER_IP_PLACEHOLDER, grain/adapter/libvirt.py's `render_user_data`)
+# — correct on any subnet a deployment configures, not only the default
+# 10.100.0.0/24.
+CONTROLLER_IP="__GRAIN_CONTROLLER_IP__"
 
 apt-get update
 apt-get install -y --no-install-recommends \
-  python3 git openssh-client curl ca-certificates
+  python3 git openssh-client curl ca-certificates gnupg
 
-# --- gce_metadata_server: one static binary, installed (not built from
-# source) — see docs/design.md, "GCP credentials", and docs/roadmap.md item
-# 4 for how this was verified against a real instance of it. ----------------
-curl -fsSL -o /usr/local/bin/gce_metadata_server \
-  "https://github.com/salrashid123/gce_metadata_server/releases/download/v${GCE_METADATA_SERVER_VERSION}/gce_metadata_server_${GCE_METADATA_SERVER_VERSION}_linux_amd64"
-chmod +x /usr/local/bin/gce_metadata_server
-
-# The system user each gce_metadata_server instance runs as
-# (grain/metadata/config.py's `metadata_user` default) — a narrow account
-# with no login shell, so a compromised instance is not a compromised shell.
-id -u grain-metadata >/dev/null 2>&1 || \
-  useradd --system --no-create-home --shell /usr/sbin/nologin grain-metadata
+# --- gcloud: the controller-only dependency bwsalmon/agents#47 accepted so
+# grain/automation/gemini_keys.py can mint/revoke a task's Gemini API key,
+# and bwsalmon/agents#126 relies on again for grain/automation/gcp_keys.py
+# to mint/revoke a task's GCP service-account key -- see gcp_keys.py's own
+# docstring for why `gcloud` and not a hand-rolled OAuth2 exchange (this
+# repo's sandbox side stays stdlib-only; the controller already isn't,
+# carrying git/openssh-client above). Via apt, like every other package in
+# this script. ---------------------------------------------------------
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+  gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  > /etc/apt/sources.list.d/google-cloud-sdk.list
+apt-get update
+apt-get install -y --no-install-recommends google-cloud-cli
 
 # The dedicated, unprivileged account `claude -p` (and the MCP server it
 # spawns as a child — grain/automation/mcp_server.py) runs as, per dispatch
-# (docs/roadmap.md item 8's "Update"). Unlike grain-metadata this one needs
-# a real home directory: `claude`'s own installer targets ~/.local/bin, and
-# its own OAuth token lives at ~/.claude-oauth-token (placed by
+# (docs/roadmap.md item 8's "Update"). Needs a real home directory:
+# `claude`'s own installer targets ~/.local/bin, and its own OAuth token
+# lives at ~/.claude-oauth-token (placed by
 # `configure_claude_token`, grain/automation/configure.py) — a bare `claude
 # setup-token` value, deliberately kept separate from any operator's own
 # `claude login` session, read into `CLAUDE_CODE_OAUTH_TOKEN` at runtime by
@@ -69,6 +71,40 @@ sudo -u grain-agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
 # the installer's target directory, ~/.local/bin, on PATH.
 ln -sf /home/grain-agent/.local/bin/claude /usr/local/bin/claude
 
+# Read-only access to this VM's own systemd journal (bwsalmon/agents#62),
+# so a dispatched agent's `read_grain_logs` MCP tool
+# (grain/automation/mcp_server.py) can `journalctl -u grain-automation
+# .service`/`grain-git-proxy.service` to triage a bug in grain itself --
+# gated per-task on the `grain-self-debug` label (`dispatch.py` only passes
+# `--self-debug` then), not on this group grant, which is unconditional.
+# `systemd-journal` membership grants read of the journal and nothing
+# else -- no write, no sudo, no capability beyond what any admin can
+# already get with a plain `journalctl -u ...` themselves.
+usermod -aG systemd-journal grain-agent
+
+# The mutating counterpart to the read-only journal grant above
+# (bwsalmon/agents#99, "self-repair"): grain-agent otherwise has no sudo at
+# all, and restarting a controller service or rebooting the box needs
+# root. Exactly three command lines, matched verbatim by sudoers -- never
+# a blanket grant, and never a wildcard -- so this grant can restart
+# grain-automation.service, restart grain-git-proxy.service, or reboot,
+# and nothing else. Gated per-task on the grain-self-repair label the same
+# way read_grain_logs is gated on grain-self-debug
+# (grain/automation/mcp_server.py's `restart_grain_service`/
+# `reboot_controller`, `dispatch.py` only ever passes `--self-repair`
+# then); this file is unconditional on every deployment, the same
+# "software gate, not infra gate" split the systemd-journal group grant
+# above already uses. `visudo -cf` validates the file before it can ever
+# be loaded -- a syntax error here must not silently disable sudo
+# deployment-wide.
+cat > /etc/sudoers.d/grain-agent-self-repair <<'SUDOERS'
+grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-automation.service
+grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-git-proxy.service
+grain-agent ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+SUDOERS
+chmod 0440 /etc/sudoers.d/grain-agent-self-repair
+visudo -cf /etc/sudoers.d/grain-agent-self-repair
+
 # --- /data: the disk that outlives a controller rebuild (docs/design.md,
 # "Secrets on /data"). On GCP this is expected to be a separate persistent
 # disk, attached before this script runs; nothing here formats or mounts
@@ -77,7 +113,7 @@ ln -sf /home/grain-agent/.local/bin/claude /usr/local/bin/claude
 # a directory on the controller's one disk. Fix the adapter, not this
 # script, if that gap needs closing. ----------------------------------------
 install -d -m0755 /data
-install -d -m0711 /data/secrets   # traverse-only by default; see below
+install -d -m0711 /data/secrets   # traverse-only by default
 install -d -m0700 /data/secrets/github
 install -d -m0755 /data/config
 install -d -m0755 /data/state
@@ -90,18 +126,9 @@ install -d -m0755 /data/state/automation
 # through the audit trail), so 0755 root-owned is fine — same as the parent.
 install -d -m0755 /data/state/automation/units
 install -d -m0755 /data/state/git-proxy
-install -d -m0755 /data/state/metadata-server
-# /data/secrets is 0711 (traverse, not list) rather than 0700 so that
-# `grain-metadata` can open /data/secrets/gcp-service-account.json by its
-# exact path once an operator places it there — opening a file by absolute
-# path only needs execute (search) permission on each ancestor directory,
-# never read. When you place that file (docs/runbook.md, first-time setup),
-# also run:
-#   chown grain-metadata:grain-metadata /data/secrets/gcp-service-account.json
-#   chmod 0640 /data/secrets/gcp-service-account.json
-# /data/secrets/github stays 0700, root-only: grain-metadata has no business
-# reaching GitHub credentials, and the git proxy (which does) runs as root
-# today, same as the automation loop — see the systemd units below.
+# /data/secrets/github stays 0700, root-only, same as every other secret
+# under /data/secrets — the git proxy (which reads it) runs as root today,
+# same as the automation loop — see the systemd units below.
 
 # --- The controller SSH keypair. `dispatch()`/`SshRunner`
 # (grain/automation/ssh.py) use the private half to reach sandboxes;
@@ -150,6 +177,14 @@ install -m0600 -o grain-agent -g grain-agent \
 # over `sudo -i`) lands cleanly here with no extra chown step. -------------
 install -d -m0755 /opt/grain
 
+# `grain` on PATH (bwsalmon/agents#137): a plain symlink to the wrapper at
+# `/opt/grain/bin/grain`, so `grain automation status` works instead of
+# `cd /opt/grain && python3 -m grain.cli automation status`. Dangling until
+# the manual deploy step above lands `bin/grain` there -- that's fine, this
+# script never deploys code itself (see this file's header), and a dangling
+# symlink on a controller that hasn't been deployed to yet is accurate.
+ln -sf /opt/grain/bin/grain /usr/local/bin/grain
+
 # --- systemd units, installed but not enabled: enabling grain-automation
 # before /opt/grain holds real code and /data/secrets/config hold real
 # credentials would just fail (or worse, run against nothing). Matches
@@ -165,16 +200,16 @@ Description=grain automation run-once
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/grain
-ExecStart=/usr/bin/python3 -m grain.cli --data-dir /data automation run-once
+ExecStart=/usr/bin/python3 -m grain.cli --data-dir /data --cluster-file /data/config/cluster.toml automation run-once
 UNIT
 
 cat > /etc/systemd/system/grain-automation.timer <<'UNIT'
 [Unit]
-Description=Run grain automation every 1 minute
+Description=Run grain automation every 2 minutes
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
+OnBootSec=2min
+OnUnitActiveSec=2min
 
 [Install]
 WantedBy=timers.target
@@ -198,15 +233,51 @@ UNIT
 
 systemctl daemon-reload
 
+# --- Forward the controller's own journal to its serial console
+# (bwsalmon/agents#58). grain-automation.service and grain-git-proxy.service
+# above set no StandardOutput=, so their output already lands in the
+# journal; ForwardToConsole just gives it a second destination. That
+# destination matters because the serial console is the one place a
+# process *outside* this VM can see: `LibvirtAdapter`'s domain XML
+# (grain/adapter/libvirt.py's render_domain_xml) points the console's
+# `<log file=.../>` at a plain file on the host, which is what makes the
+# controller's logs reachable without `virsh console`ing in -- readable
+# with a plain `tail -f` on the host, and what the host-side ops-agent
+# config (terraform/gcp/files/deploy.sh) tails into Cloud Logging on GCP.
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/forward-to-console.conf <<'UNIT'
+[Journal]
+ForwardToConsole=yes
+UNIT
+# `reload` is not a job type journald accepts -- found live, in the very
+# deployment this block was written for: "Failed to reload
+# systemd-journald.service: Job type reload is not applicable for unit
+# systemd-journald.service". journald reads journald.conf at start, so
+# `restart` is what applies the drop-in above (and it is socket-activated,
+# so nothing logged across the restart is lost).
+#
+# And never fatally. Everything in this block is a *diagnostic* convenience,
+# but under `set -eux` that one failing line aborted the whole provisioning
+# script: cloud-init recorded the run as failed, and `grain host bootstrap`
+# stopped at "stage 5/11: wait for the controller" with "cloud-init did not
+# finish cleanly" as its entire account of it -- on a controller that was in
+# fact fully built, keys and units and all, by the lines above. A controller
+# that fails to build because its logging did is not a trade worth making.
+systemctl restart systemd-journald || echo \
+  "WARNING: could not restart systemd-journald; this VM's journal will not reach its serial console"
+
 mkdir -p /etc/grain-tools
 cat > /etc/grain-tools/README <<'DOC'
 This is a grain controller. It holds every credential in the system
 (docs/design.md, "Secrets on /data") — nothing else in the deployment does.
 
 Set up by provision/controller.sh:
-- python3, git, openssh-client, ca-certificates
-- gce_metadata_server, at /usr/local/bin, and the grain-metadata system user
-  it runs each per-sandbox instance as
+- python3, git, openssh-client, ca-certificates, gnupg
+- google-cloud-cli (`gcloud`), via apt -- the one controller-only runtime
+  dependency, for grain/automation/gemini_keys.py to mint/revoke a task's
+  Gemini API key (bwsalmon/agents#47) and grain/automation/gcp_keys.py to
+  mint/revoke a task's GCP service-account key (bwsalmon/agents#126); see
+  those modules' own docstrings
 - claude (Claude Code CLI), at /usr/local/bin, and the grain-agent system
   user it runs as — `claude -p` runs HERE now, not on the sandboxes
   (docs/roadmap.md item 8's "Update"); grain-agent has its own 0600 copy of
@@ -214,19 +285,38 @@ Set up by provision/controller.sh:
   group-readable one, found live) so its MCP server
   (grain/automation/mcp_server.py) can reach the sandbox it was dispatched
   against, and nothing else under /data/secrets
-- the /data/{secrets,config,state} layout grain/automation, grain/proxy and
-  grain/metadata already expect, including /data/state/automation/units
-  where each dispatch's prompt/MCP-config/transcript now live
+- grain-agent's read-only membership in the systemd-journal group
+  (bwsalmon/agents#62), so its MCP server can `journalctl` grain's own
+  services when a task carries the grain-self-debug label
+- grain-agent's narrow sudo grant (bwsalmon/agents#99),
+  /etc/sudoers.d/grain-agent-self-repair -- exactly `systemctl restart
+  grain-automation.service`, `systemctl restart grain-git-proxy.service`,
+  and `systemctl reboot`, nothing else -- so its MCP server can restart a
+  wedged service or reboot the controller itself when a task carries the
+  grain-self-repair label
+- the /data/{secrets,config,state} layout grain/automation and grain/proxy
+  already expect, including /data/state/automation/units where each
+  dispatch's prompt/MCP-config/transcript now live
 - the controller SSH keypair, /data/secrets/controller-ssh{,.pub}, plus
   grain-agent's own copy at /home/grain-agent/.ssh/controller-ssh
 - /opt/grain, empty, where this repo's code is deployed by hand
 - grain-automation.{service,timer} and grain-git-proxy.service, installed
   but not enabled
+- journald forwarding this VM's own journal to its serial console
+  (/etc/systemd/journald.conf.d/forward-to-console.conf), so the host-side
+  console log libvirt captures (grain/adapter/libvirt.py) carries it too
 
 Still manual, per docs/runbook.md's first-time setup checklist:
 - deploying this repo's code to /opt/grain
 - every file under /data/secrets/github, /data/secrets/sandbox-tokens.json,
-  /data/secrets/gcp-service-account.json (if used), /data/config
+  /data/secrets/gcp-service-account.json (if used), /data/config, including
+  /data/config/gemini-key.json (optional -- `grain controller configure
+  --gemini-project-id ...`, only meaningful once gcp-service-account.json
+  is placed too, since gemini_keys.py authenticates with that same key) and
+  /data/config/gcp-key.json (optional -- `grain controller configure
+  --gcp-agent-service-account-email ... --gcp-project-id ...`, bwsalmon/
+  agents#126, unrelated to gcp-service-account.json: plain non-secret
+  config, no key file needed)
 - copying /data/secrets/controller-ssh.pub to the host, for
   LibvirtAdapter.ssh_public_key_path to embed into sandboxes it creates
 - enabling grain-git-proxy.service and grain-automation.timer

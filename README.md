@@ -13,9 +13,12 @@ the assigned sandbox over SSH; the fifth (`ask_question`) reaches a human
 instead, by posting to the GitHub issue/PR thread. The sandbox is where the
 work actually happens
 — the checkout, the builds, the `kind` clusters — and it holds no GitHub
-token, no GCP key, and no Claude credential. Its only routes out are a git
-proxy and a metadata server, both on the controller, both allowlist-checked
-and audit-logged.
+token and no Claude credential. Its only route out to GitHub is a git
+proxy on the controller, allowlist-checked and audit-logged. It *can* hold
+a GCP credential, if the deployment mints one: a real, short-lived
+service-account key, minted fresh per dispatch and revoked once the task
+ends (or after 24 hours regardless) — never anything capable of minting
+another.
 
 The host holds no *system* credential — no GitHub token, no GCP key, no
 Claude login; every one of those lives on the controller's `/data`. It
@@ -25,12 +28,13 @@ to the controller and every sandbox.
 ```
 host (Debian, KVM — admin SSH key only, no system credentials)
 ├── controller VM   automation loop · claude -p (as grain-agent) · git proxy
-│                   · one metadata server per sandbox · /data (every credential)
+│                   · mints/revokes a GCP key per dispatch · /data (every credential)
 │                       │
 │                       │  SSH, five MCP tools, nothing else
 │                       ▼
-├── sandbox-0       docker · kind · the workspace checkout — no credentials
-└── sandbox-1       docker · kind · the workspace checkout — no credentials
+├── sandbox-0       docker · kind · the workspace checkout — no GitHub/Claude
+│                   credential; a short-lived GCP key only if one was minted
+└── sandbox-1       (same)
 ```
 
 ## Where the agent runs, and why it moved
@@ -53,15 +57,16 @@ dedicated unprivileged `grain-agent` account, with:
   a roster filter); both flags together do, and the advertised tool list in
   the `system/init` event shrinks to exactly what is named.
 - `--mcp-config <per-dispatch file> --strict-mcp-config` — pointing at
-  `grain/automation/mcp_server.py`, which exposes exactly five tools:
+  `grain/automation/mcp_server.py`, which exposes exactly six tools:
   `run_command`, `read_file`, `edit_file`, `write_file` all resolve against
   the *assigned* sandbox's workspace, over SSH — the sandbox's address,
   user, and key are baked into the MCP server's argv at dispatch time,
-  never into a tool call's own arguments. `ask_question` is different: it
-  never touches the sandbox at all, and only ever writes to a local file on
-  the controller for the orchestrator to relay as a GitHub comment (see
-  "Asking the human a question" below) — the agent still gets no GitHub API
-  access of its own.
+  never into a tool call's own arguments. `ask_question` and
+  `comment_on_issue` are different: neither ever touches the sandbox at
+  all, and both only ever write to a local file on the controller for the
+  orchestrator to relay as a GitHub comment (see "Asking the human a
+  question" and "Analysis-only tasks" below) — the agent still gets no
+  GitHub API access of its own.
 - `TodoWrite` and `Task` also allowed — a `Task`-spawned subagent inherits
   the same empty roster (confirmed live by an explicit system denial, not
   self-report), so delegation is safe to leave on.
@@ -103,6 +108,27 @@ label by hand still works too, as a fallback.
 The agent still never gets GitHub API access of its own — `core.py` is the
 only thing that posts the comment, and only from this one path
 (docs/roadmap.md items 12–13).
+
+## Analysis-only tasks
+
+Not every task is a code change. One filed only as a question, an
+investigation, or a request for a recommendation can end with a call to the
+`comment_on_issue` MCP tool instead of a `git push` (bwsalmon/agents#50,
+reworked by bwsalmon/agents#89). That works like `ask_question`'s file
+handoff — `dispatch.py` resets a fixed per-unit file before every dispatch,
+the tool call writes the comment there, and once the unit finishes,
+`core.py`'s sweep reads it back — but what happens with it depends on the
+branch, which is always checked first: if the agent never pushed anything,
+the comment is posted as a `🤖`-signed comment on the task issue instead of
+a pull request, and the task is tagged `grain-agent-completed` without the
+issue itself being closed. If the agent *did* push commits, a pull request
+opens for them exactly as it would without any comment at all — calling
+`comment_on_issue` never suppresses a pull request the branch actually
+earned, which is what `complete_analysis` (its predecessor) used to get
+wrong: it skipped the branch check outright whenever the agent called it,
+so an agent confused about which tool to call at the end of a task could
+push real commits and still lose the PR. Nothing is left pending
+afterwards, unlike a question — there is no reply to wait for.
 
 ## Documentation
 
@@ -185,19 +211,25 @@ need cloud access.
 ## Install
 
 There is no package and no entry point — `grain` is invoked as
-`python3 -m grain.cli`. Clone it wherever you run it:
+`python3 -m grain.cli`, wrapped by `bin/grain` (`exec python3 -m grain.cli
+"$@"`, resolved against its own real path so it works from anywhere it's
+symlinked onto `PATH`, not just from inside the checkout). Clone it
+wherever you run it, then put that wrapper on `PATH`:
 
 ```sh
 git clone https://github.com/bwsalmon/grain
 cd grain
-alias grain='python3 -m grain.cli'      # the rest of this file assumes it
+sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain   # the rest of this file assumes it
 ```
 
 The same tree is deployed twice: **on the host**, where `grain host …`
 drives the hypervisor, and **on the controller** at `/opt/grain`, where
 everything else runs. Which machine a command belongs on is not
 cosmetic — the controller is the only one with `/data` and the
-credentials.
+credentials. `bin/grain` is symlinked onto the controller's `PATH`
+automatically (`provision/controller.sh`, and `terraform/gcp/files/deploy.sh`
+for the GCP host that plays the same role there) — this manual step is only
+needed for a host you set up yourself.
 
 | Command group | Runs on |
 |---|---|
@@ -262,13 +294,19 @@ doing a step by hand.
 
 ### On GCP, from a config repo
 
-[`config-repo-template/`](config-repo-template/) is a repository template
-that does everything above on GCP with nobody SSHing anywhere. Terraform
-creates the host — nested virtualization on, a persistent disk for
-`/var/lib/grain`, and a service account whose roles are one committed list
-— GitHub Actions applies it on every push to `main`, and a small service on
-the host watches instance metadata and re-runs `host bootstrap` whenever
-the config changes.
+[`templates/gcp/`](templates/gcp/) is a repository template
+that does everything above on GCP with nobody SSHing anywhere. Fork it and
+it holds only the deployment's configuration and its two workflows — the
+Terraform module and the scripts it ships into instance metadata live in
+this repo's own [`terraform/gcp/`](terraform/gcp/), and the deploy steps
+themselves in [`ci/`](ci/), so the workflow a fork owns is wiring rather
+than logic. All of it is pulled fresh by both workflows, pinned to the
+same `grain_ref` the deployment already uses to fetch grain onto the host,
+so a fork never carries a copy of any of it that could drift. Terraform creates the host — nested
+virtualization on, a persistent disk for `/var/lib/grain`, and a service
+account whose roles are one committed list — GitHub Actions applies it on
+every push to `main`, and a small service on the host watches instance
+metadata and re-runs `host bootstrap` whenever the config changes.
 
 That repo is also the task repo: an issue filed there and labelled
 `grain-agent` is what the agents pick up, so the queue and the deployment
@@ -291,9 +329,9 @@ sudo python3 -m grain.cli host up
 ```
 
 Creates the `br-grain` bridge and applies the nftables policy: sandboxes
-reach the git proxy and their own metadata server and nothing else,
-sandbox↔sandbox is dropped, anti-spoofing rules pin each tap to its
-assigned address. Idempotent — re-run it after any inventory change.
+reach the git proxy and nothing else, sandbox↔sandbox is dropped,
+anti-spoofing rules pin each tap to its assigned address. Idempotent —
+re-run it after any inventory change.
 
 Egress from sandboxes is **open by default**, because agents need the
 internet for dependencies. `grain host egress allowlist` is the opt-in
@@ -316,11 +354,11 @@ Use the `controller` target specifically — `create`/`recreate` refuse
 `--provision` with `all`, since the controller and sandboxes take
 different scripts.
 
-`provision/controller.sh` installs Python, `gce_metadata_server`, the
-Claude Code CLI, two system users (`grain-metadata` for the metadata
-servers, `grain-agent` for `claude -p` and the MCP server it spawns), the
-`/data/{secrets,config,state}` layout, and the `grain-automation.timer` /
-`grain-git-proxy.service` units (**installed but left disabled**). It also
+`provision/controller.sh` installs Python, `gcloud` (for
+`gemini_keys.py`/`gcp_keys.py`'s own gcloud calls), the Claude Code CLI, a
+system user (`grain-agent`, for `claude -p` and the MCP server it spawns),
+the `/data/{secrets,config,state}` layout, and the `grain-automation.timer`
+/ `grain-git-proxy.service` units (**installed but left disabled**). It also
 generates the controller's own SSH keypair at
 `/data/secrets/controller-ssh{,.pub}`, idempotently — group-readable by
 `grain-agent`, which needs it to reach the sandbox it was dispatched
@@ -416,19 +454,20 @@ re-run.
     controller-ssh, controller-ssh.pub   # generated by provision/controller.sh
     claude-credentials.json              # the pool's one Claude Code login
     sandbox-tokens.json                  # sandbox name -> git-proxy bearer token
-    gcp-service-account.json             # optional; 0640, grain-metadata:grain-metadata
+    gcp-service-account.json             # optional; 0600 -- gemini_keys.py's own primary key
     github/
       credentials.json                   # repo pattern -> credential name
       <name>.token                       # one 0600 file per name above
   config/
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
     automation.json                      # AutomationConfig
+    gcp-key.json                         # optional; agent SA email + project id (bwsalmon/agents#126)
+    sandbox-github-key.json              # sandbox name -> named credential override, if any
   state/
     automation/state.json, audit.log, sessions/
     automation/units/grain-task-<sandbox>/
       prompt.md, mcp-config.json, transcript.jsonl   # one dir per dispatch
     git-proxy/audit.log
-    metadata-server/audit.log
 ```
 
 **The Claude credential.** One login for the whole pool, on the controller
@@ -456,7 +495,11 @@ scope.** The `workflow` one is the non-obvious privilege escalation: an
 agent that can edit `.github/workflows/**` can make CI run code of its
 choosing with whatever secrets that workflow holds. Withholding the scope
 makes *GitHub* reject the push, which is a control your bugs cannot
-bypass. `grain github audit` checks this — see [Operate](#operate).
+bypass. `grain github audit` checks this — see [Operate](#operate). A task
+that genuinely needs such a scope names a separate, narrowly-provisioned
+credential instead of widening the default one — see "Label an issue
+`grain-github-<name>`" below; `grain github audit` will (correctly) flag
+that credential too, since the scope really is there, deliberately.
 
 **Repo allowlist**, `/data/config/repo-allowlist.json` — the *target*
 repos this deployment may work in. Enforced twice against one file: by the
@@ -508,6 +551,7 @@ at all — which is what `grain controller configure --task-repo X` with no
 The defaults worth knowing: `trigger_label: "grain-agent"`,
 `in_progress_label: "grain-agent-in-progress"`,
 `awaiting_reply_label: "grain-agent-awaiting-reply"`,
+`gemini_key_label: "grain-gemini-key"`,
 `ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
 `runs_per_hour: 60`, `max_runtime_minutes: 120`. Also
 `github_host: "api.github.com"`, `git_forward_host: "github.com"`, and
@@ -533,20 +577,22 @@ sudo systemctl enable --now grain-automation.timer     # two-minute cadence
 `systemctl cat grain-automation.timer` shows the exact unit; edit
 `/etc/systemd/system/*` and `daemon-reload` for a different cadence.
 
-**GCP (optional).** Place the key at
-`/data/secrets/gcp-service-account.json`, `chown` it to
-`grain-metadata`, `chmod 0640`, and start the per-sandbox instances:
+**GCP (optional, bwsalmon/agents#126).** No key file to place by hand for
+this one — the controller mints its own, on demand, as the host's own
+attached identity:
 
 ```sh
-grain metadata start          # one gce_metadata_server per sandbox
-grain metadata status
-grain metadata sync-audit     # pull each instance's audit log into /data
+grain controller configure \
+  --gcp-agent-service-account-email grain-agent@my-project.iam.gserviceaccount.com \
+  --gcp-project-id my-project
 ```
 
-Each instance is bound to one sandbox's address and impersonates a
-narrow second service account. Nothing is needed on the sandbox side:
-ADC finds `169.254.169.254`, traffic is DNAT'd to that sandbox's own
-instance, and every Google SDK just works.
+This writes `/data/config/gcp-key.json`. From the next dispatch on, every
+sandbox gets a freshly minted, short-lived key for that account pushed
+into it at `~/.gcp-service-account.json`, revoked once the task's slot
+frees (or after 24 hours regardless — see `grain/automation/gcp_keys.py`).
+The agent's own prompt tells it the path and how to use it; nothing is
+baked into the sandbox image.
 
 **Verify before trusting it:**
 
@@ -585,8 +631,13 @@ comments saying exactly what is wrong, swaps the trigger label for
 replies. Nothing dispatches on a guess about which repo was meant.
 
 The next `run-once` pass picks a labelled task up, moves the label to
-`grain-agent-in-progress`, and claims a free sandbox. Dispatch is
-two-sided:
+`grain-agent-in-progress`, and claims a free sandbox. It also applies a
+second label naming *which* sandbox took it — `grain-agent-working-0`,
+`grain-agent-working-1`, and so on — re-applied every `run-once` cycle for
+as long as the task stays in progress and removed the moment it stops,
+however it stops (bwsalmon/agents#95, bwsalmon/agents#101), so it never
+sits stale once the work has moved on or a human has knocked it off by
+hand. Dispatch is two-sided:
 
 - On the **sandbox**: the workspace at `/home/debian/workspace` is cloned
   (first task) or fetched-and-reset (every task after) through the git
@@ -617,6 +668,138 @@ branch with its existing history, the prompt carries the PR's review
 comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
+
+**Add `/review true` alongside `/pr 42`** to have an agent *read* that
+pull request instead of continuing the work on it. The workspace lands on
+the same branch `/pr` alone would use, but the agent is told not to push
+anything — it leaves feedback with a dedicated tool instead, optionally
+attached to a specific file and line. Once the run finishes, everything it
+left is posted as a single **draft** review on the pull request: GitHub
+leaves a review with no `event` in the request `PENDING`, visible only to
+the credential that created it, until a human opens it on github.com and
+submits it themselves — an agent never approves, requests changes on, or
+even plain-comments its own (or anyone else's) code. `/review` with no
+`/pr` alongside it is refused and the task is parked, the same way an
+unlisted `/repo` is: a review needs a pull request to know which branch to
+read and which PR to post its draft against.
+
+**A completed task's PR is watched, too** (bwsalmon/agents#83): each
+`run-once` pass checks every still-open PR against a definite conflict
+(GitHub's own `mergeable` field reading `false`) or a definite failing
+check, and the first time either shows up for a given PR, grain files a
+*new* task suggesting the fix — never a second one for the same PR. That
+task is filed with `grain-agent-needs-approval`, not the trigger label, so
+it sits visibly in the queue without being picked up on its own; a comment
+on the original task links to it. Apply the trigger label to it, the same
+action that starts every other task, or comment `/lgtm` on it
+(bwsalmon/agents#136) — either one lets the agent set attempt the fix on
+a fresh branch built on top of the original PR's own branch — a PR stacked
+on that PR, not a second one against the target repo's default branch.
+That new task also carries `/auto-merge`, so once its own PR reads clean
+(no conflict, no pending or failing check) grain merges it straight into
+the original PR's branch itself — no second round of human review for the
+fix. A stuck fix (one that itself ends up with a conflict or a failing
+check) is left open rather than chained into another suggestion.
+
+**Label a task `grain-gemini-key`** to have a short-lived Gemini API key
+minted for that task, placed in its sandbox (the prompt tells the agent
+exactly where), and revoked automatically once the task's slot frees —
+success, failure, or stranded, whichever comes first. A label, not a body
+directive (bwsalmon/agents#49): the same "a human decided this" trust
+tier the trigger label itself carries, applied at any point before or
+during the run rather than parsed out of the issue's own untrusted text.
+Off by default: a deployment enables it once with `grain controller
+configure --gemini-project-id <project>` (see `docs/runbook.md`, "Enabling
+`grain-gemini-key`"); a task carrying the label before that's done is
+parked with a comment, the same as an unlisted `/repo`. The raw key never
+rides in the prompt file, only its path in the sandbox — see
+`grain/automation/gemini_keys.py` for why this is minted on the
+controller's own account rather than the sandbox-facing metadata broker.
+
+**Label a task `grain-self-debug`** (bwsalmon/agents#62, #86) to give the
+agent four extra tools, all strictly read-only, for triaging a bug in
+grain itself rather than the target repo's own code:
+
+- `read_grain_logs`: recent `journalctl` entries for grain's own
+  controller services, `grain-automation.service` and
+  `grain-git-proxy.service` — or, via a third `unit` value `grain-task`,
+  this dispatch's own controller-side `claude -p` unit. `claude -p`'s
+  stdout is redirected to the transcript file `capture.py` reads, but its
+  stderr never is, so `grain-task` is the only way to see why a run
+  crashed before writing anything (bwsalmon/agents#97).
+- `check_grain_health`: the same ssh/systemd/docker/disk checks `grain
+  host health` reports to an operator, against either the task's assigned
+  sandbox or the controller itself.
+- `read_grain_config`: one of grain's own non-secret config files under
+  `/data/config` on the controller (`automation.json`,
+  `repo-allowlist.json`, `gemini-key.json`, `gcp-key.json`,
+  `sandbox-github-key.json`) — every credential and token this deployment
+  holds lives under `/data/secrets` instead, which none of these tools can
+  reach.
+- `read_automation_audit_log`: recent entries from the dispatch/sweep
+  audit log — one line per state-machine decision the orchestrator made
+  (a task dispatched, skipped, succeeded, failed, or stranded, and why).
+
+Same trust tier as the other two labels above, and on unconditionally at
+the account level (`provision/controller.sh` grants `grain-agent`
+read-only `systemd-journal` group membership regardless of whether any
+task ever uses it), so unlike `grain-gemini-key` there is no separate
+`controller configure` step — the label alone turns these tools on for
+that task. Strictly read-only throughout: `read_grain_logs` can only read
+the journal for one of those three fixed units, `check_grain_health` never
+mutates anything it checks, `read_grain_config` is checked against a
+fixed allowlist of non-secret file names rather than a raw path, and
+`read_automation_audit_log` only ever reads the one audit log file — none
+of the four can write to anything or reach any other file, unit, or
+credential on the controller.
+
+**Label a task `grain-self-repair`** (bwsalmon/agents#99) to give the
+agent four more tools — the mutating counterpart to `grain-self-debug`
+above, kept behind its own label since none of these are read-only:
+
+- `restart_grain_service`: `systemctl restart` on
+  `grain-automation.service` or `grain-git-proxy.service`, for a wedged
+  service short of rebooting the whole controller.
+- `reboot_sandbox`: reboot the task's own assigned sandbox VM.
+- `reformat_sandbox`: run the same between-task hygiene (`kind delete
+  clusters --all`, `docker system prune -af --volumes`) grain already
+  runs automatically once a task finishes, callable mid-task instead of
+  only between tasks.
+- `reboot_controller`: reboot the controller VM this task's own session is
+  running on — a last resort that ends the task's turn immediately and
+  interrupts any other task running concurrently on the same controller,
+  recovered automatically by grain's own stranded-work sweep once the
+  controller is back.
+
+Same "on unconditionally, no separate `controller configure` step" shape
+as `grain-self-debug` — `provision/controller.sh` grants `grain-agent` a
+narrow, unconditional sudo rule covering exactly the command lines
+`restart_grain_service`/`reboot_controller` need, nothing else. **What it
+deliberately doesn't cover**: rebuilding a sandbox from scratch or
+re-running `grain host bootstrap`, both `HostAdapter` operations against
+the *host* machine's hypervisor that this deployment's controller has no
+credential or network path to reach at all (see `docs/runbook.md`,
+"Enabling `grain-self-repair`," for the gap spelled out in full) — a
+genuinely bad VM still needs an operator's `grain host recreate`.
+
+**Label an issue `grain-github-<name>`** to have that task's git pushes use
+a named credential instead of the deployment's default one — for a task
+that genuinely needs a scope the default deliberately withholds (the
+`workflow` scope, most notably: see "Withhold `workflow`..." above). An
+operator provisions the credential first with `grain controller configure
+--github-key <name>=PATH` (or `grain host bootstrap --github-key
+<name>=PATH` on a first-time deploy — see `docs/runbook.md`, "Adding a
+named GitHub key," which also covers threading one through a Terraform/GCP
+deployment's own config repo via `GRAIN_GITHUB_KEYS`). Either way, it
+writes only `/data/secrets/github/<name>.token` — deliberately not a
+`credentials.json` entry, so it never becomes any repo's *default*
+credential, only a task-selected override. A label naming a credential
+that was never provisioned parks the task with a comment, same as an
+unlisted `/repo`; more than one `grain-github-*` label on the same issue
+does too, since which one applies would otherwise be a guess. The override
+applies for exactly that task's lifetime — set right before dispatch,
+cleared the moment its sandbox's slot frees — and, like the trigger label
+itself, only someone who can apply a label can ask for it.
 
 **Requiring a human to apply the label is the prompt-injection gate.**
 Anyone who can file an issue can put text in front of the agent; the
@@ -725,7 +908,7 @@ deployment.
 python3 -m pytest              # unit tests: no hypervisor, no network, no root
 ```
 
-536 unit tests pass on a bare machine; the live suites skip themselves
+705 unit tests pass on a bare machine; the live suites skip themselves
 cleanly there, so the command above is safe anywhere. They come in when the
 machine can run them:
 
@@ -736,6 +919,14 @@ machine can run them:
 | `test_controller_integration.py` | the same, but the base image must already be cached |
 | `test_bootstrap_integration.py` | the same — the two-key sandbox and the deploy/configure verbs |
 | `test_live_issue_to_pr.py` | the same — a full issue→PR run against a mocked GitHub |
+
+`.github/workflows/tests.yml` runs that same unscoped `python3 -m pytest`
+on every pull request and every push to `main`, against Python 3.11 and
+3.13 — the floor `pyproject.toml` declares and the stock interpreter on
+the Debian the host runs. A hosted runner has no `/dev/kvm` and no
+netfilter, so the live suites skip there exactly as they do on a bare
+machine, and the job holds no credential of any kind: it runs PR-branch
+code before a human has read it.
 
 ```sh
 python3 -m tests.loadtest      # boot the real pool and measure it under kind + build load
@@ -768,9 +959,12 @@ grain/
   automation/         poll, dispatch, sweep, capture, session history
     dispatch.py       starts claude -p on the controller, per sandbox
     mcp_server.py     the four tools that are the agent's only reach
+    gcp_keys.py       mints/revokes a GCP service-account key per dispatch
   proxy/              the git proxy: allowlist, tokens, credentials, audit
-  metadata/           per-sandbox gce_metadata_server instances
 provision/            controller.sh, sandbox.sh — cloud-init user-data
+ci/                   the deploy steps a config repo's own CI runs
+terraform/gcp/        the GCP module, and the scripts it ships to the host
+templates/gcp/        the config-repo template: configuration and workflows
 tests/
   loadtest.py         the harness behind the resource-budget numbers
   test_*.py           unit suites, plus the live suites in the table above

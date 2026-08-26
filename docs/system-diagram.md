@@ -37,8 +37,7 @@ flowchart TB
         subgraph ctl["controller VM — 10.100.0.2 — 1 vCPU · 4 GB · 40 GB"]
             auto["grain-automation.timer → run-once<br/>poll · dispatch · sweep · capture<br/>the only GitHub API caller"]
             proxy["grain-git-proxy.service<br/>:8080 — allowlist · tokens · credential ladder · audit"]
-            mds0["grain-metadata-sandbox-0<br/>:9000"]
-            mds1["grain-metadata-sandbox-1<br/>:9001"]
+            gcpk["gcp_keys.py<br/>mints/revokes a key per dispatch,<br/>as the controller's own host identity"]
             data[("/data<br/>secrets · config · state<br/>survives sandbox recreate")]
         end
 
@@ -57,20 +56,17 @@ flowchart TB
 
     sb0 -->|"git smart-HTTP :8080<br/>bearer token"| proxy
     sb1 -->|"git smart-HTTP :8080"| proxy
-    sb0 -->|"ADC → 169.254.169.254:80<br/>DNAT per source"| mds0
-    sb1 -->|"ADC → 169.254.169.254:80"| mds1
+    gcpk -.->|"pushes a short-lived key<br/>at dispatch (SSH, not a listener)"| sb0
+    gcpk -.->|"pushes a short-lived key<br/>at dispatch (SSH, not a listener)"| sb1
 
     sb0 -.->|"open egress (default)"| anth
     sb1 -.->|"open egress (default)"| anth
 
     proxy -->|"HTTPS, injected GitHub token"| gh
     auto -->|"HTTPS REST, same token set"| gh
-    mds0 -->|"impersonate narrow SA"| gcp
-    mds1 --> gcp
+    gcpk -->|"mint/revoke a key,<br/>as the host's own identity"| gcp
 
     proxy -.-> data
-    mds0 -.-> data
-    mds1 -.-> data
     auto -.-> data
     adapter --- ctl
     adapter --- sbs
@@ -80,9 +76,11 @@ Read the diagram for three properties:
 
 1. **No arrow from the host into a secret.** The host owns the hypervisor
    and the firewall; every credential is inside the controller VM.
-2. **No arrow from a sandbox to GitHub or GCP.** A sandbox's only two
-   routes into the system are `:8080` on the controller and its own
-   metadata instance. Both are allowlist-checked and audit-logged.
+2. **No arrow from a sandbox to GitHub or GCP directly.** A sandbox's only
+   network route into the controller is `:8080`, allowlist-checked and
+   audit-logged; its GCP credential (if any) arrives as a direct push at
+   dispatch time over the controller's own SSH connection, not a listener
+   a sandbox reaches on its own.
 3. **No arrow between sandboxes.** Rule 5 of the ruleset drops it.
 
 The dotted `sandbox → Anthropic API` arrows are the honest exception:
@@ -121,9 +119,9 @@ which is the seam a macOS port replaces. See `docs/host-adapter.md`.
 
 | Component | Unit / entry point | Listens | Runs as | Reads |
 |---|---|---|---|---|
-| Automation loop | `grain-automation.timer` → `.service`, every 1 min | — (outbound only) | root | `/data/config/automation.json`, `/data/secrets/github/*`, `/data/secrets/sandbox-tokens.json`, `/data/secrets/controller-ssh` |
+| Automation loop | `grain-automation.timer` → `.service`, every 2 min | — (outbound only) | root | `/data/config/automation.json`, `/data/secrets/github/*`, `/data/secrets/sandbox-tokens.json`, `/data/secrets/controller-ssh` |
 | Git proxy | `grain-git-proxy.service` (`python3 -m grain.proxy.server`) | `10.100.0.2:8080` | root | `/data/config/repo-allowlist.json` (hot-reloaded), `/data/secrets/github/*`, `/data/secrets/sandbox-tokens.json` |
-| Metadata servers | transient `grain-metadata-<sandbox>`, one per sandbox | `10.100.0.2:9000+i` | `grain-metadata` | `/data/secrets/gcp-service-account.json` |
+| GCP key minting | `grain/automation/gcp_keys.py`, called from `core.py`'s dispatch/sweep | — (outbound only, `gcloud`) | root, as the host's own attached identity | `/data/config/gcp-key.json` |
 | Session browser | `grain sessions list/browse` | — | operator | `/data/state/automation/sessions/` |
 | Credential audit | `grain github audit` | — (outbound) | operator | `/data/secrets/github/*` |
 | Sandbox ops | `grain host health/cleanup` | — | operator, over SSH | `/data/secrets/controller-ssh` |
@@ -148,7 +146,10 @@ rejections), `audit.py`, `server.py`.
 | Docker + kind | official apt repo; kind node image pre-pulled | `inotify` limits raised; `kernel.yama.ptrace_scope = 2` |
 | Claude sandbox policy | `/home/debian/.claude/settings.json` | denies the agent's own Bash tool access to `~/.claude/.credentials.json` |
 
-No GitHub API client, no `gh`, no GCP key, no `/data`.
+No GitHub API client, no `gh`, no `/data`. A sandbox *can* hold a GCP
+service-account key at `~/.gcp-service-account.json`, `0600`, if this
+deployment mints one — short-lived, revoked once the task ends (or after
+24 hours regardless), and never anything capable of minting another.
 
 ## Addresses, interfaces, ports
 
@@ -158,21 +159,16 @@ the VMs derive from the same numbers so they cannot drift.
 | Name | Address | Host tap | Listens on | Reaches |
 |---|---|---|---|---|
 | host | `10.100.0.1` | `br-grain` | `:22` (external) | everything |
-| `controller` | `10.100.0.2` | `gr-ctl` | `:8080` git proxy, `:9000` mds-for-sandbox-0, `:9001` mds-for-sandbox-1, `:22` | every sandbox, GitHub, GCP |
-| `sandbox-0` | `10.100.0.10` | `gr-sb0` | `:22` (from controller only) | `10.100.0.2:8080`, `10.100.0.2:9000`, open egress |
-| `sandbox-1` | `10.100.0.11` | `gr-sb1` | `:22` (from controller only) | `10.100.0.2:8080`, `10.100.0.2:9001`, open egress |
+| `controller` | `10.100.0.2` | `gr-ctl` | `:8080` git proxy, `:22` | every sandbox, GitHub, GCP |
+| `sandbox-0` | `10.100.0.10` | `gr-sb0` | `:22` (from controller only) | `10.100.0.2:8080`, open egress |
+| `sandbox-1` | `10.100.0.11` | `gr-sb1` | `:22` (from controller only) | `10.100.0.2:8080`, open egress |
 
-Plus one address that exists only as a DNAT target:
-
-```
-sandbox-i → 169.254.169.254:80   (what every Google SDK probes)
-          → DNAT → 10.100.0.2:(9000 + i)
-```
-
-That rewrite is the whole reason there is **one metadata server per
-sandbox**: a metadata server authenticates by network position, and Google's
-client libraries will not attach a bearer token — so network position has to
-be made per-VM by construction.
+Before bwsalmon/agents#126, a sandbox's own default route also carried
+its ADC probe to `169.254.169.254:80`, DNAT'd per source to a per-sandbox
+`gce_metadata_server` instance on the controller. That rule is gone: GCP
+access now arrives as a direct key push over the controller's own SSH
+connection at dispatch time, not a network path a sandbox reaches on its
+own at all.
 
 ## Network policy
 
@@ -188,8 +184,6 @@ flowchart LR
     net["the internet"]
 
     sb -->|"tcp/8080 ✅"| ctl
-    sb -->|"tcp/9000+i ✅"| ctl
-    sb -->|"tcp/9000+j ❌ drop"| ctl
     sb -->|"❌ drop"| other
     sb -->|"✅ open (default)<br/>❌ under egress allowlist"| net
     ctl -->|"any port ✅"| sb
@@ -202,7 +196,7 @@ Evaluation order, from `net_linux.py`:
 | 1 | accept `ct state established,related` | replies need no rule of their own |
 | 2 | per-tap anti-spoofing: `iifname "gr-sbN" ip saddr != <addr> drop` | makes the source address a fact, not a claim — the layer that keeps a stolen token from being usable elsewhere |
 | 3 | controller → whole subnet: accept | the controller drives the sandboxes over SSH |
-| 4 | sandbox → controller on `:8080` and on **its own** metadata port only | the two narrow endpoints, and nothing else |
+| 4 | sandbox → controller on `:8080` only | the one narrow endpoint, and nothing else |
 | 5 | anything else subnet→subnet: drop | this is what stops sandbox↔sandbox |
 | 6 | subnet → off-bridge: accept + masquerade, **open mode only** | agents need dependencies; `grain host egress allowlist` removes it |
 
@@ -229,18 +223,20 @@ flowchart TB
         ssh["controller-ssh (0600)<br/>→ SSH to every sandbox"]
         tok["sandbox-tokens.json<br/>→ sandbox name ⇢ bearer token"]
         ghc["github/credentials.json<br/>+ <name>.token (0600 each)"]
-        gcpk["gcp-service-account.json (0640)<br/>grain-metadata:grain-metadata"]
+        gcpk["gcp-service-account.json (0600)<br/>gemini_keys.py's own primary key"]
     end
 
-    subgraph sbsec["sandbox — two, both narrow"]
+    subgraph sbsec["sandbox — three, all narrow, all per-task"]
         gitcred["~/.git-credentials (0600)<br/>proxy token only"]
         claudecred["~/.claude/.credentials.json<br/>Claude Code login — the known exception"]
+        gcpsec["~/.gcp-service-account.json (0600)<br/>if this deployment mints one; revoked at task end"]
     end
 
     ssh --> gitcred
     tok --> gitcred
     ghc -->|"injected by the proxy,<br/>never sent to a sandbox"| ghout["GitHub"]
-    gcpk -->|"impersonates a narrow SA;<br/>only minted tokens leave"| gcpout["GCP"]
+    gcpk -->|"authenticates gemini_keys.py's<br/>own gcloud calls"| gcpout["GCP"]
+    gcpsec -.->|"minted per dispatch by the<br/>controller's own host identity"| gcpout
 ```
 
 ### Inventory
@@ -251,9 +247,10 @@ flowchart TB
 | Sandbox bearer tokens | `/data/secrets/sandbox-tokens.json` | root | git proxy (verify), automation (`ensure_token` mints one on a sandbox's first dispatch, then injects it) | replace file, restart proxy; **not** rotated by `recreate` today |
 | GitHub credential set | `/data/secrets/github/<name>.token` | `0600` root | git proxy, automation loop | replace file, restart proxy and let the timer re-run |
 | GitHub credential map | `/data/secrets/github/credentials.json` | `0600` root | as above | same — read once at construction, not watched |
-| GCP service-account key | `/data/secrets/gcp-service-account.json` | `0640` `grain-metadata` | metadata servers only | replace file, `grain metadata stop && start` |
+| GCP primary service-account key | `/data/secrets/gcp-service-account.json` | `0600` root | `gemini_keys.py`'s own gcloud calls | replace file, next `automation run-once` picks it up |
 | Sandbox proxy token | `/home/debian/.git-credentials` on each sandbox | `0600` `debian` | `git` via the `store` helper | re-injected on every dispatch |
 | Claude Code login | `~/.claude/.credentials.json` on each sandbox | `debian` | the `claude` process | re-authenticate on sandbox recreate |
+| Sandbox GCP key | `~/.gcp-service-account.json` on each sandbox | `0600` `debian` | `gcloud`/client libraries, if the agent activates it | minted fresh per dispatch, revoked at task end (or after 24h regardless) — `grain/automation/gcp_keys.py` |
 | Public key (not a secret) | `/var/lib/grain/controller-ssh.pub` on the **host** | `0644` | `LibvirtAdapter`, at sandbox create | — |
 
 Rules that hold across all of them:
@@ -267,9 +264,8 @@ Rules that hold across all of them:
 - **The token never reaches an argv.** Both the prompt and the sandbox token
   travel to a sandbox over SSH **stdin**, so neither lands in `ps` output or
   in this project's own command logging.
-- **`/data/secrets` is `0711`** — traverse, not list — so `grain-metadata`
-  can open the one file it owns by path without being able to enumerate the
-  directory. `secrets/github/` stays `0700`, root-only.
+- **`/data/secrets` is `0711`** — traverse, not list. `secrets/github/`
+  stays `0700`, root-only.
 
 ### The credential ladder
 
@@ -306,10 +302,9 @@ protection, not by parsing pack files — a control our bugs cannot bypass.
 | internet → host | operator SSH only | provider firewall / host SSH config |
 | host → VMs | hypervisor | none — a host compromise owns everything below it |
 | sandbox → controller `:8080` | git smart-HTTP | path shape + `git/*` UA, repo allowlist (default-deny), sandbox bearer token, source address pinned by nftables |
-| sandbox → controller `:9000+i` | ADC metadata probe | network position alone — the DNAT rule *is* the check |
 | controller → sandbox | SSH as `debian` with the controller key | no host-key pinning by design (a sandbox gets a new key each recreate); identity comes from the fixed address on a firewalled bridge |
 | controller → GitHub | REST, and the proxy's forwarded git | credential ladder + GitHub-side scoping |
-| controller → GCP | impersonation | narrow second service account; every mint audit-logged |
+| controller → GCP | `gcloud`, as the controller's own attached host identity | `roles/iam.serviceAccountKeyAdmin`, scoped to the one narrow agent account; mint/revoke only, never impersonation |
 | issue text → agent prompt | the automation loop | **a human applying the label is the gate**; nothing the agent then says is trusted as input to a GitHub write |
 | issue text → which repo the work lands in | the automation loop + `repo-allowlist.json` | a task's `/repo` directive only selects from the operator's allowlist — the same file the git proxy enforces; anything else is parked with a comment, never dispatched |
 
@@ -330,7 +325,7 @@ sequenceDiagram
     participant P as Git proxy (controller)
 
     H->>GH: label issue `grain-agent`
-    Note over A: systemd timer, every 1 min
+    Note over A: systemd timer, every 2 min
     A->>A: sweep first — finished / failed / stranded units
     A->>GH: list task-repo issues with the trigger label
     A->>A: rate limit (runs_per_hour), free-sandbox check
@@ -369,13 +364,13 @@ instead of the controller opening anything.
   config/
     repo-allowlist.json             # hot-reloaded, default-deny
     automation.json                 # task repo, default target, labels, limits
+    gcp-key.json                    # agent SA email + project id, if GCP access is on
   state/
     automation/
-      state.json                    # sandbox ⇢ issue/PR assignment
-      audit.log                     # one JSON object per decision
+      state.json                    # sandbox ⇢ issue/PR assignment (carries the minted GCP key id, if any)
+      audit.log                     # one JSON object per decision, including key mint/revoke/reap
       sessions/                     # captured trajectories, per dispatch
     git-proxy/audit.log             # sandbox · repo · op · credential
-    metadata-server/audit.log       # every token mint
 ```
 
 Backup is a snapshot of `/data`, and nothing else. Because intake is
@@ -399,7 +394,7 @@ document that quietly claims more than the code does:
   changes what a compromised sandbox can exfiltrate.
 - **`recreate` does not rotate `sandbox-tokens.json`** today, despite the
   design describing rotation as folded into it. Rotate as a separate step.
-- **The GCP path has never minted a token against a real project**, and the
+- **The GCP path has never minted a key against a real project**, and the
   full pipeline has run end to end only against a mocked GitHub.
 - **The host adapter has two implementations in tree** (libvirt, lima) but
   only the libvirt one is exercised; the macOS column of the topology —

@@ -11,9 +11,11 @@ end.
 
 All commands below assume you're running as the repo's `python3 -m
 grain.cli ...` (shortened to `grain ...` below — there is no installed
-entry point yet, so substitute the full invocation, or `alias grain='python3
--m grain.cli'`). Unless noted, run these **on the controller VM**, not the
-host — the controller is where `/data` and every credential live.
+entry point, so substitute the full invocation, or symlink `bin/grain` onto
+`PATH`: `sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain`, done for you
+already on the controller and on a GCP host — see README.md's "Install").
+Unless noted, run these **on the controller VM**, not the host — the
+controller is where `/data` and every credential live.
 
 ## System map
 
@@ -74,6 +76,15 @@ don't pass one (add them with `grain controller configure` later, or a
 second `host bootstrap` run), and log in to Claude Code for you — see
 "Claude Code credential" below, still the one genuinely manual step.
 
+**If it stops at "stage 5/11: wait for the controller"**: the stage prints
+its own diagnostics before it raises — the domain's state, whether the guest
+ever ARPed or answered a ping, and the tail of its serial console log
+(`/var/lib/grain/instances/controller-console.log`) when it never answered
+SSH; `cloud-init status --long` and the tail of the guest's
+`/var/log/cloud-init-output.log` when it answered but provisioning failed.
+On GCP all of that is in Cloud Logging with the rest of the deploy output.
+See docs/bootstrap.md, "When the wait fails".
+
 **Verify**: `grain --data-dir /data automation status` should list every
 sandbox as `free`, `grain --data-dir /data github audit` should print no
 `flagged` verdicts, and `grain host health` should report every sandbox
@@ -110,6 +121,25 @@ informally reachable through whoever holds the controller's own dispatch
 key. Holding the admin *private* key is what gates this, the same way
 holding any other SSH key gates any other login.
 
+No SSH access at all (a VM that fails to boot, or a controller whose own
+git proxy/automation loop is wedged)? The controller's serial console is
+also captured to a plain file on the **host**, `virsh console` needs no
+active session for:
+
+```sh
+sudo tail -f /var/lib/grain/instances/controller-console.log
+```
+
+`provision/controller.sh` forwards the controller's own journal
+(`grain-automation.service`, `grain-git-proxy.service`) to that console;
+`LibvirtAdapter`'s domain XML (`grain/adapter/libvirt.py`) is what gives
+the console a `<log file=...>` sink on the host in the first place. On GCP
+this same file is tailed into Cloud Logging by the host's ops-agent,
+configured by `terraform/gcp/files/deploy.sh` (not `startup.sh` -- deploy.sh
+is what re-converges on every config-repo push, so a change here reaches an
+already-running host without a reboot), so it's also readable from the
+Cloud Console without SSH/IAP access to the host at all.
+
 ### Claude Code credential
 
 `claude -p` runs on the controller now, as a dedicated `grain-agent`
@@ -138,11 +168,21 @@ short of giving the host a GitHub/Claude credential — see
    present. Confirm with `ls /dev/kvm`.
 2. **Bring the host network up**:
    ```sh
-   sudo python3 -m grain.cli host rules          # read the policy first
-   sudo python3 -m grain.cli host up
+   sudo python3 -m grain.cli host rules            # read the policy first
+   sudo python3 -m grain.cli host up --persist
    ```
    This creates the `br-grain` bridge and applies the default-open-egress
    nftables policy. Idempotent — safe to re-run after any inventory change.
+   `--persist` also installs and enables `grain-network.service`, a oneshot
+   unit that reruns this exact command at every boot: without it, a host
+   reboot leaves the sandboxes (which come back on their own via libvirt's
+   autostart) running with *no* firewall at all — sandbox-to-sandbox
+   isolation and the metadata anycast DNAT both silently gone, while SSH
+   and a direct connection to the controller keep working, so nothing looks
+   wrong until something inside a sandbox tries to reach
+   `169.254.169.254` (bwsalmon/agents#111). Re-run `host up --persist`
+   after any change to `--egress` too — the unit bakes in whichever mode
+   was active when it was last installed, not whatever is current.
 3. **Fetch a base image**, shared by the controller and every sandbox, and
    point `--image` at it (or set it in `--cluster-file`'s TOML — see
    `docs/bootstrap.md` Phase 2):
@@ -166,11 +206,12 @@ short of giving the host a GitHub/Claude credential — see
    Use the `controller` target specifically, not `all` — `grain host
    create`/`recreate` now refuses `--provision` combined with `all`, since
    the controller and the sandboxes need different scripts. The script
-   installs Python 3.11+, `gce_metadata_server`, the `grain-metadata`
-   system user, the `/data/{secrets,config,state}` layout every module in
-   `grain/automation`, `grain/proxy` and `grain/metadata` expects, the
-   systemd units for the automation timer and the git proxy (installed but
-   not enabled), and **generates the controller's own SSH keypair**,
+   installs Python 3.11+ and `gcloud` (for `grain/automation/gemini_keys.py`
+   and `grain/automation/gcp_keys.py`'s own gcloud calls), the
+   `/data/{secrets,config,state}` layout every module in `grain/automation`
+   and `grain/proxy` expects, the systemd units for the automation timer
+   and the git proxy (installed but not enabled), and **generates the
+   controller's own SSH keypair**,
    `/data/secrets/controller-ssh{,.pub}`, idempotently, on the controller
    itself. It does not deploy this repo's own code, and it does not enable
    any service; both need real data that a provisioning script has no
@@ -384,12 +425,17 @@ session record itself is still kept, just without transcript content.
   secrets/
     controller-ssh, controller-ssh.pub   # controller -> sandbox SSH identity
     sandbox-tokens.json                  # sandbox name -> bearer token (git proxy auth)
+    gcp-service-account.json             # primary GCP key gemini_keys.py authenticates with (optional)
     github/
       credentials.json                   # owner/repo pattern -> credential name
       <name>.token                       # one file per credential named in credentials.json
   config/
     repo-allowlist.json                  # ["owner/repo", ...], default-deny
     automation.json                      # AutomationConfig
+    cluster.toml                         # sandbox_count, subnet -- the controller's own copy; see below
+    gemini-key.json                      # GeminiKeyConfig (optional, see below)
+    gcp-key.json                         # GcpKeyConfig (optional, bwsalmon/agents#126, see below)
+    sandbox-github-key.json              # sandbox name -> named credential override, if any (bwsalmon/agents#52)
   state/
     automation/state.json, audit.log
     automation/sessions/<key>.json, <key>.jsonl   # session history + captured trajectories
@@ -400,14 +446,18 @@ Rotation is uniformly **"replace the file, restart the one service that
 reads it"** (`docs/design.md`, "Operations") — nothing here watches
 `secrets/` for changes the way the allowlist watches `config/`:
 
-- **A GitHub credential** (`bot.token`, `personal.token`, ...): overwrite
-  the file with the new token, `chmod 0600` it, restart the git proxy
-  (`python3 -m grain.proxy.server`) and, if `automation.json`'s `owner`/
-  `repo` resolve to that credential, the process invoking `automation
-  run-once` too — `CredentialSet` and `build_orchestrator` both load once at
-  construction (`grain/proxy/credentials.py`'s own docstring is explicit
-  about this), so a running process keeps using the old token until
-  restarted.
+- **A GitHub credential** (`bot.token`, `personal.token`, a named
+  `grain-github-<name>` key, ...): overwrite the file with the new token,
+  `chmod 0600` it, restart the git proxy (`python3 -m grain.proxy.server`)
+  and, if `automation.json`'s `owner`/`repo` resolve to that credential,
+  the process invoking `automation run-once` too — `CredentialSet` and
+  `build_orchestrator` both load once at construction
+  (`grain/proxy/credentials.py`'s own docstring is explicit about this), so
+  a running process keeps using the old token until restarted. (The
+  *selection* of which sandbox uses which named key,
+  `/data/config/sandbox-github-key.json`, is a different file, lives under
+  `config/` rather than `secrets/`, and *is* hot-reloaded — see "Adding a
+  named GitHub key" below.)
 - **A sandbox token**: generate a new one, update its entry in
   `sandbox-tokens.json`, restart the git proxy. **The old token stays valid
   everywhere else that reads the same file until the proxy restarts** —
@@ -416,6 +466,19 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   all, despite `docs/design.md` describing rotation as "folded into
   recreate" — today that's aspirational, not implemented. Recreating a
   sandbox does *not* rotate its token; do that as a separate, manual step.
+- **`cluster.toml`**: written by `configure_cluster`
+  (`grain/automation/configure.py`) on every `grain host bootstrap` run, not
+  just the first — the host's own `--cluster-file` never leaves the host,
+  so without this copy `grain-automation.service`'s `--cluster-file
+  /data/config/cluster.toml` (`provision/controller.sh`) would resolve to
+  nothing and `Cluster.load` would silently fall back to its bare defaults
+  (`sandbox_count=2`) forever, regardless of what the real deployment's
+  `cluster.toml`/`cluster_overrides` said. Only `sandbox_count` and
+  `subnet` are written — the only two fields `sandbox_names`/`address_of`
+  depend on; everything else in `Cluster` (VM sizing, image, bridge) is a
+  host-side-only concern. Takes effect on the next `automation run-once`
+  tick (every 2 min); no restart needed, since it's a oneshot invoked fresh
+  each time, not a long-lived process holding a stale copy in memory.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing
   `/data/secrets/controller-ssh`). `grain host recreate controller
@@ -566,6 +629,265 @@ this procedure.
    repo isn't `flagged`.
 5. If using the machine-account pattern, invite `grain-agent-bot` (or
    whatever account the token belongs to) as a collaborator on the repo.
+
+## Enabling `grain-gemini-key` (optional, bwsalmon/agents#47, #49)
+
+A task issue carrying the `grain-gemini-key` label gets a short-lived
+Gemini API key minted for it, placed in its sandbox, and revoked once the
+task's slot frees (success, failure, or stranded — see
+`grain/automation/sweeper.py`'s docstring). A label, not a body directive
+— `grain/automation/directives.py`'s module docstring has the reasoning.
+Off by default; nothing above requires it. Terraform-managed deployments
+(`terraform/gcp/`) can turn the IAM side of this on declaratively with
+`enable_gemini_key = true` in `grain.tfvars` instead of steps 1-2 below —
+see `terraform/gcp/variables.tf`.
+
+1. Complete step 8's GCP service account setup first
+   (`--gcp-service-account-key-file`/`--gcp-agent-service-account-email`/
+   `--gcp-project-id`) — `grain/automation/gemini_keys.py` authenticates
+   `gcloud` with that same primary key rather than asking for a second one.
+2. Grant that service account `roles/serviceusage.apiKeysAdmin` (or an
+   equivalent narrower role covering `apikeys.keys.create`/`.delete`/
+   `.get`) on the project, and make sure the Generative Language API
+   (`generativelanguage.googleapis.com`) is enabled there.
+3. Run `grain controller configure --gemini-project-id <project>` (any
+   other `controller configure` flags in the same invocation still apply
+   normally — this one is additive). This writes
+   `/data/config/gemini-key.json`, read fresh on every `automation
+   run-once` invocation, same as `repo-allowlist.json`. A Terraform-managed
+   deployment does this automatically as part of `host bootstrap` instead
+   — see `terraform/gcp/files/deploy.sh`.
+4. A task now enables it by carrying the `grain-gemini-key` label — see
+   the README's directives section. Until step 3 is done, that label parks
+   the task with a comment explaining why, the same as an unlisted
+   `/repo`.
+
+To disable it again: delete `/data/config/gemini-key.json`. Any key already
+minted for a task still in flight is unaffected (it still gets revoked
+normally when that task's slot frees) — this only stops new ones from
+being minted.
+
+## Enabling GCP access in sandboxes (optional, bwsalmon/agents#126)
+
+Every dispatched sandbox gets a freshly minted, short-lived GCP service-
+account key pushed into it, revoked once the task's slot frees (success,
+failure, or stranded — same checkpoint as the Gemini key above), or after
+24 hours regardless, whichever comes first (see
+`grain/automation/gcp_keys.py`'s docstring for why GCP itself enforces no
+such expiry and grain has to). Unlike the Gemini key, this is *not* gated
+on a task label — it mirrors the old per-sandbox metadata-server broker's
+"every sandbox, every dispatch" behaviour. Off by default; nothing above
+requires it. Terraform-managed deployments (`terraform/gcp/`) wire the IAM
+side of this up automatically whenever `agent_service_account_roles` (or
+`agent_can_manage_compute_instances`) creates the agent account at all —
+see `terraform/gcp/iam.tf`'s `host_manages_agent_keys`.
+
+1. Have an agent service account (`agent_service_account_roles` or
+   `agent_can_manage_compute_instances` in `grain.tfvars`, or one created
+   by hand) that the host account has `roles/iam.serviceAccountKeyAdmin`
+   on — Terraform-managed deployments get this automatically; by hand,
+   grant it yourself.
+2. Run `grain controller configure --gcp-agent-service-account-email
+   <email> --gcp-project-id <project>` (any other `controller configure`
+   flags in the same invocation still apply normally — this one is
+   additive, and needs neither `--gcp-service-account-key-file` nor a
+   Gemini key setup, unrelated features that happen to share this same
+   command). This writes `/data/config/gcp-key.json`, read fresh on every
+   `automation run-once` invocation. A Terraform-managed deployment does
+   this automatically as part of `host bootstrap` instead — see
+   `terraform/gcp/files/deploy.sh`.
+3. Every dispatch from here on mints a key and places it in the sandbox at
+   `~/.gcp-service-account.json`; the agent's own prompt tells it the path
+   and how to use it (`gcloud auth activate-service-account --key-file=...`,
+   or `export GOOGLE_APPLICATION_CREDENTIALS=...` for client libraries).
+
+To disable it again: delete `/data/config/gcp-key.json`. Any key already
+minted for a task still in flight is unaffected (it still gets revoked
+normally when that task's slot frees, or reaped at 24 hours) — this only
+stops new ones from being minted.
+
+## Enabling the janitor (optional, bwsalmon/agents#113)
+
+`grain automation run-once` can also run a periodic janitor that deletes
+GCE instances, their unattached disks, and grain-minted Gemini API keys
+older than a configured TTL — cleanup for whatever a dispatched agent
+creates in GCP as part of a task and never tears down itself (docs/roadmap.md
+item 16 already tells every agent to fold its own id into anything it
+names, but nothing enforces that it also cleans up after itself). It
+always skips the grain host VM, its data disk, and anything carrying this
+deployment's own Terraform labels (default `managed-by=terraform`) — see
+`grain/automation/janitor.py`'s own docstring for the full safety model.
+Off by default; nothing above requires it. Terraform-managed deployments
+can turn this on declaratively with `enable_janitor = true` (and, if you
+want something other than the 24-hour default, `janitor_ttl_hours = <n>`)
+in `grain.tfvars` instead of the steps below — see `terraform/gcp/variables.tf`.
+
+The janitor only has anything to clean up once the agent account it
+authenticates as already has the roles to list and delete something: turn
+on `agent_can_manage_compute_instances` for the instance/disk half, and/or
+`enable_gemini_key` for the API-key half (both above). Enabling the janitor
+alone, with neither of those, is a harmless no-op that just logs a listing
+failure for each resource kind every cycle.
+
+1. Complete step 8's GCP service account setup first, same as
+   `grain-gemini-key` above — `grain/automation/janitor.py` authenticates
+   `gcloud` with that same primary key rather than asking for a second one.
+2. Run `grain controller configure --janitor-ttl-hours <n> --janitor-name-prefix <prefix>`
+   (any other `controller configure` flags in the same invocation still
+   apply normally — this one is additive). `--janitor-name-prefix` must
+   match this deployment's own resource naming (`name_prefix` in
+   `grain.tfvars`, default `grain`) — it's what tells the janitor which
+   exact instance/disk names are this deployment's own host and must never
+   be deleted. This writes `/data/config/janitor.json`, read fresh on every
+   `automation run-once` invocation, same as `repo-allowlist.json`. A
+   Terraform-managed deployment does this automatically as part of `host
+   bootstrap` instead — see `terraform/gcp/files/deploy.sh`.
+
+To disable it again: delete `/data/config/janitor.json`.
+
+## Enabling `grain-self-debug` (bwsalmon/agents#62, #86)
+
+A task issue carrying the `grain-self-debug` label gets four extra MCP
+tools, all strictly read-only, for triaging a bug in grain itself rather
+than the target repo's own code:
+
+- `read_grain_logs`: recent `journalctl` entries for grain's own
+  controller services, `grain-automation.service` and
+  `grain-git-proxy.service` — or, via `unit: grain-task`
+  (bwsalmon/agents#97), this dispatch's own controller-side `claude -p`
+  unit. That unit's stdout is what `capture.py` redirects into the
+  transcript file, but its stderr never is, so `grain-task` is the only
+  way to see why a run crashed before writing anything to it.
+- `check_grain_health`: `health.py`'s ssh/systemd/docker/disk checks —
+  the same ones `grain host health` reports — against either the task's
+  assigned sandbox or the controller itself.
+- `read_grain_config`: one of the deployment's own non-secret config
+  files under `/data/config` (`automation.json`, `repo-allowlist.json`,
+  `gemini-key.json`, `gcp-key.json`, `sandbox-github-key.json`),
+  checked against a fixed allowlist of those five names — never a raw
+  path, and never anything under `/data/secrets`.
+- `read_automation_audit_log`: recent lines of `audit.py`'s own
+  `FileAuditLog` output (`/data/state/automation/audit.log`) — one JSON
+  line per dispatch/sweep decision the state machine in `core.py` made.
+
+The exact opposite of `grain-gemini-key` in one way: nothing here needs a
+`controller configure` step or an operator decision to turn on.
+`provision/controller.sh` grants `grain-agent` read-only
+`systemd-journal` group membership unconditionally (for `read_grain_logs`
+specifically), and every file the other three tools read is already
+either world-readable by construction (`/data/config`'s contents,
+`/data/state/automation/audit.log`) or reachable over the same SSH path
+`grain-agent`'s MCP server already has to the sandbox — so any deployment
+provisioned from this repo already has everything these tools need. The
+label on a task issue is the only thing that decides whether that
+particular task's agent gets them at all.
+
+There is nothing to disable here short of not applying the label — there
+is no config file gating it the way `gemini-key.json` gates
+`grain-gemini-key`.
+
+## Enabling `grain-self-repair` (bwsalmon/agents#99)
+
+A task issue carrying the `grain-self-repair` label gets four more MCP
+tools — the mutating counterpart to `grain-self-debug` above, kept behind
+a deliberately separate label since every self-debug tool is read-only and
+these are not:
+
+- `restart_grain_service`: `systemctl restart` on
+  `grain-automation.service` or `grain-git-proxy.service`, for a wedged
+  service short of rebooting the whole controller.
+- `reboot_sandbox`: reboot the task's own assigned sandbox VM.
+- `reformat_sandbox`: run the same between-task hygiene
+  (`kind delete clusters --all`, `docker system prune -af --volumes`)
+  the sweeper already runs automatically once a task finishes, callable
+  mid-task instead of only between tasks.
+- `reboot_controller`: reboot the controller VM the task's own `claude -p`
+  session is running on — the drastic, last-resort one. This ends the
+  task's turn immediately (the process making the call is about to be
+  killed) and interrupts every other task running concurrently on the same
+  controller, which grain's own stranded-work sweep recovers automatically
+  once the controller is back — the same incremental-state-persistence
+  path `docs/next-session.md` describes existing specifically so "the
+  controller VM can be restarted or recreated at any moment" without
+  losing a task.
+
+Same "no per-deployment config to turn on" shape as `grain-self-debug`:
+`provision/controller.sh` grants `grain-agent` a narrow, unconditional
+NOPASSWD sudo rule (`/etc/sudoers.d/grain-agent-self-repair`) covering
+exactly the three command lines `restart_grain_service`/`reboot_controller`
+need and nothing else; `reboot_sandbox`/`reformat_sandbox` need no new
+grant at all, since the sandbox's own cloud-init default user already
+carries passwordless sudo (docker group membership already covers
+`reformat_sandbox`'s two commands). The label on a task issue is what
+decides whether that task's agent actually gets any of the four.
+
+**What this deliberately does not do.** The issue that asked for this
+(bwsalmon/agents#99) named two more operations — recreating a sandbox
+from scratch, and re-running `grain host bootstrap` to reconverge the
+whole deployment — that are not exposed here, because they cannot be from
+where these tools run. Both are `HostAdapter` operations
+(`grain/adapter/base.py`) against the *host* machine's hypervisor, and the
+controller has no credential or network path to that machine at all in
+this design (`docs/design.md`, "One host machine runs everything";
+`provision/controller.sh` notes plainly that "the public half does NOT
+reach the host by anything this script can do" — admin access goes the
+other direction, host to controller). Closing that gap for real would mean
+building a new host-reachable channel (a host-side listener the controller
+authenticates to, or, on GCP, granting the controller's own service
+account IAM over the host instance it's itself running inside of, which
+`terraform/gcp/iam.tf`'s `agent_conditioned_compute_roles` deliberately
+excludes today) — a real design decision with its own blast-radius
+tradeoffs, not something to wire up silently as a side effect of this
+label. `reboot_sandbox`/`reformat_sandbox`/`reboot_controller` above cover
+the recovery ground reachable without it; a genuinely bad VM (corrupted
+disk, bad base image) still needs an operator's `grain host recreate`.
+
+## Adding a named GitHub key (bwsalmon/agents#52)
+
+A task labelled `grain-github-<name>` pushes through the git proxy using
+the named credential `<name>` for that task only, instead of the
+deployment's default (`credentials.json`-selected) one — for a task that
+genuinely needs a scope the default deliberately withholds, `workflow`
+being the case this was built for (`docs/design.md`, "Scopes to
+withhold"). Provisioning one is a single step, and there is no on/off
+switch to flip first:
+
+1. Run `grain controller configure --repo owner/name --github-key
+   <name>=PATH` (any other `controller configure` flags in the same
+   invocation still apply normally — this one is additive, and repeatable
+   for more than one named key). This writes only
+   `/data/secrets/github/<name>.token` — deliberately **not** a
+   `credentials.json` entry, so `<name>` never becomes any repo's default
+   credential, only a label-selected override. `grain host bootstrap`
+   takes the same `--github-key <name>=PATH` flag (bwsalmon/agents#134),
+   for a first-time deploy that wants a named key provisioned in the same
+   run rather than as a separate step afterward. A Terraform/GCP
+   deployment (`templates/gcp/`) can set this from its own config repo
+   instead of running either command by hand: the optional
+   `GRAIN_GITHUB_KEYS` Actions secret (one `NAME=TOKEN` pair per line) is
+   threaded through `deploy.sh` into `grain host bootstrap --github-key`
+   on every deploy — see that template's README, "Optional fifth secret."
+2. A task now asks for it by carrying a `grain-github-<name>` label — a
+   real GitHub label, applied by a human, the same trust tier as the
+   trigger label itself; not a `/directive` line in the issue body. Until
+   step 1 is done for that name, the label parks the task with a comment
+   explaining why, the same as an unlisted `/repo`. Two different
+   `grain-github-*` labels on the same issue park it too — which one
+   applies would otherwise be a guess.
+3. Run `grain github audit` and expect `<name>` to come back **`flagged`**
+   if it carries `workflow` (or another withheld scope) — that is correct,
+   not a bug: the scope really is there, deliberately, for this one
+   credential. `bot`/`personal` (or whatever covers `credentials.json`'s
+   `*` fallback) should still come back clean.
+
+The override applies only for the lifetime of the task that asked for
+it — written to `/data/config/sandbox-github-key.json` right before
+dispatch (hot-reloaded, no proxy restart needed, the same as
+`repo-allowlist.json`) and cleared the moment that sandbox's slot frees,
+whether the task succeeded, failed, or was stranded. There is nothing to
+disable deployment-wide: simply stop applying the label, or delete the
+`<name>.token` file (a label still naming it then parks the task, same as
+step 1 never having run).
 
 ## Gaps: what this runbook can't yet tell you to automate
 

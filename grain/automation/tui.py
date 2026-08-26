@@ -49,6 +49,7 @@ class KindFilter(Enum):
     ALL = "all"
     ISSUE = "issue"
     PR = "pr"
+    REVIEW = "review"
 
     def next(self) -> "KindFilter":
         order = list(KindFilter)
@@ -84,6 +85,8 @@ class SessionListState:
             rows = [r for r in rows if r.kind is TriggerKind.ISSUE]
         elif self.kind_filter is KindFilter.PR:
             rows = [r for r in rows if r.kind is TriggerKind.PR]
+        elif self.kind_filter is KindFilter.REVIEW:
+            rows = [r for r in rows if r.kind is TriggerKind.REVIEW]
         if self.outcome_filter is not OutcomeFilter.ALL:
             rows = [r for r in rows if r.outcome == self.outcome_filter.value]
         return rows

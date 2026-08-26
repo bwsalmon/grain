@@ -10,8 +10,9 @@ of docs/roadmap.md item 3's verification; `test_provision_controller.py`
 covers the script's content and syntax without paying a VM's boot cost.
 
 What this does NOT verify: the running services actually working
-end-to-end (the git proxy serving traffic, `gce_metadata_server` minting a
-real token, `grain automation run-once` against a real GitHub repo) -- all
+end-to-end (the git proxy serving traffic, `gcloud` minting a real GCP
+service-account key, `grain automation run-once` against a real GitHub
+repo) -- all
 of that needs credentials this environment doesn't have, the same caveat
 `test_vm_integration.py` and docs/runbook.md's "Gaps" section already carry
 for the sandbox side. This checks that the *provisioning* left the guest in
@@ -39,7 +40,6 @@ from grain.adapter.libvirt import LIBVIRT_URI, LibvirtAdapter
 from grain.adapter.net_linux import LinuxNetwork
 from grain.automation.config import AutomationConfig
 from grain.inventory import Cluster
-from grain.metadata.config import MetadataConfig
 from grain.run import RealRunner
 
 BRIDGE = "br-grain"
@@ -59,6 +59,11 @@ def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
             argv, returncode=124, stdout=exc.stdout or "",
             stderr=(exc.stderr or "") + f"\n[timed out after {kwargs['timeout']}s]",
         )
+    except FileNotFoundError as exc:
+        # Not installed. A hosted CI runner has /dev/kvm but no `virsh`, so
+        # it reaches this call: a missing tool has to mean "host not ready"
+        # rather than an exception out of `_host_ready` at collection time.
+        return subprocess.CompletedProcess(argv, returncode=127, stdout="", stderr=f"{exc}\n")
 
 
 def _host_ready() -> bool:
@@ -195,28 +200,18 @@ def test_the_controller_ssh_keypair_was_generated_on_the_guest(booted_controller
 
 def test_the_data_layout_exists_with_the_paths_automation_expects(booted_controller: Controller):
     for path in ("/data/secrets", "/data/secrets/github", "/data/config",
-                 "/data/state/automation", "/data/state/git-proxy",
-                 "/data/state/metadata-server"):
+                 "/data/state/automation", "/data/state/git-proxy"):
         result = _sh(booted_controller, "sudo", "test", "-d", path)
         assert result.returncode == 0, f"{path} missing on the guest"
 
 
-def test_gce_metadata_server_binary_runs(booted_controller: Controller):
-    result = _sh(booted_controller, "/usr/local/bin/gce_metadata_server", "-h")
-    # The binary prints usage and exits non-zero for -h, but must actually
-    # execute (not "not found" / permission denied) -- confirmed by stderr
-    # containing its own usage banner rather than a shell error.
-    assert "gce_metadata_server" in (result.stdout + result.stderr)
-
-
-def test_grain_metadata_system_user_exists(booted_controller: Controller):
-    config = MetadataConfig(service_account_email="x@y.iam.gserviceaccount.com",
-                             project_id="proj")
-    result = _sh(booted_controller, "id", "-u", config.metadata_user)
+def test_gcloud_binary_runs(booted_controller: Controller):
+    # bwsalmon/agents#126 removed the per-sandbox gce_metadata_server
+    # broker (and its grain-metadata system user) entirely -- gcloud
+    # itself is the only controller-side GCP dependency left, for
+    # gemini_keys.py/gcp_keys.py's own gcloud calls.
+    result = _sh(booted_controller, "gcloud", "--version")
     assert result.returncode == 0, result.stderr
-    # No login shell for this account.
-    result = _sh(booted_controller, "getent", "passwd", config.metadata_user)
-    assert "nologin" in result.stdout or "false" in result.stdout
 
 
 def test_opt_grain_exists_for_the_manual_deploy_step(booted_controller: Controller):

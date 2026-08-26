@@ -25,16 +25,19 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .adapter.base import VmState
 from .adapter.deploy import deploy_tree
+from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
-    configure_claude_token, configure_github_credential, configure_repo,
-    credential_repos,
+    configure_agent_gcp_key, configure_claude_token, configure_cluster,
+    configure_gcp_key_minter, configure_gemini_key,
+    configure_github_credential,
+    configure_janitor, configure_named_github_key, configure_repo, credential_repos,
     ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
@@ -58,7 +61,48 @@ class BootstrapConfig:
     default_target_repo: str | None = None
     github_token: str | None = None
     credential_name: str = "bot"
+    # bwsalmon/agents#134: additional named credentials (`{name: token}`),
+    # same shape and purpose `controller configure --github-key` already
+    # has -- a task labelled `grain-github-<name>` uses one instead of the
+    # default, for a scope (e.g. `workflow`) the default deliberately
+    # withholds. Threading this through bootstrap() too (not just
+    # `controller configure`) is what lets a Terraform deployment set one
+    # from its own config repo (terraform/gcp/files/deploy.sh), rather than
+    # requiring a separate manual step against the controller afterward.
+    # Never written to credentials.json -- see configure_named_github_key.
+    github_keys: dict[str, str] = field(default_factory=dict)
     claude_token: str | None = None
+    # bwsalmon/agents#126: the narrow "agent" service account grain mints
+    # a fresh, short-lived key for on every dispatched sandbox -- plain,
+    # non-secret config (see configure_agent_gcp_key). Required together
+    # with gcp_project_id and gcp_key_minter_key for bootstrap() to write
+    # /data/config/gcp-key.json; any one alone leaves a deployment's
+    # sandboxes with no GCP access, which is not an error.
+    gcp_agent_service_account_email: str | None = None
+    gcp_project_id: str | None = None
+    gcp_key_max_age_hours: int = 24
+    # bwsalmon/agents#131: a key for the *host* service account, which
+    # gcp_keys.py authenticates as to mint the agent account's per-dispatch
+    # keys, and that janitor.py/gemini_keys.py impersonate the agent from.
+    # The controller's one GCP credential (bwsalmon/agents#131): it must
+    # not be the agent account's own key, or the agent could mint its own
+    # replacement. Absent, none of those three can authenticate at all.
+    gcp_key_minter_key: str | None = None
+    # Turns on the grain-gemini-key task label (bwsalmon/agents#47, #49):
+    # the GCP project a short-lived Gemini API key is minted in. Uses
+    # gcp_key_minter_key above, impersonating the agent account -- see
+    # configure_gemini_key -- so it is only meaningful alongside it.
+    gemini_project_id: str | None = None
+    # bwsalmon/agents#113: turns on the GCP janitor. `None` (the default)
+    # leaves it off; a Terraform-managed deployment sets this from
+    # enable_janitor/janitor_ttl_hours (deploy.sh). Uses
+    # gcp_key_minter_key the same way gemini_project_id does --
+    # bootstrap() raises if this is set without gcp_project_id, since the
+    # janitor has no project to scan otherwise. name_prefix must match the
+    # deployment's own Terraform name_prefix -- see configure_janitor's own
+    # docstring for why.
+    janitor_ttl_hours: int | None = None
+    janitor_name_prefix: str = "grain"
     github_host: str = "api.github.com"
     git_forward_host: str = "github.com"
     github_use_tls: bool = True
@@ -111,6 +155,51 @@ def _ensure_started(adapter: LibvirtAdapter, name: str, spec: VmSpec,
     return False
 
 
+def _wait_until_ready(adapter: LibvirtAdapter, name: str, ssh: SshRunner, *,
+                       fresh: bool, timeout: float, log: Logger) -> None:
+    """Both boot waits for one VM, each followed by the diagnostics its own
+    failure needs.
+
+    Reported live as "it fails on wait for the controller (5/11)" and
+    nothing else: neither wait says anything about *why* on its own -- one
+    carries a line of `ssh` stderr, the other cloud-init's bare
+    `status: error` -- and on GCP the only thing printed after either was
+    deploy.sh's storage-ownership dump, which is about a different failure
+    entirely. `grain/adapter/diagnostics.py` prints the facts that actually
+    separate the causes, down the one channel (stdout, tailed into Cloud
+    Logging) that needs no SSH path to the host to read.
+
+    `fresh` decides only how hard an unfinished cloud-init is treated, not
+    whether it is checked. A VM this run created has to be provisioned or
+    nothing downstream works, so that is fatal. A VM that was already
+    running might have been provisioned by any earlier run, so the same
+    check is a warning: it is the previous run's failure resurfacing at the
+    top of this one, where it is readable, instead of stage 6's `cat:
+    /data/secrets/controller-ssh.pub: No such file or directory` -- which is
+    what a re-run after a failed provision used to fail with, `fresh` being
+    false the second time around and the check skipped entirely.
+    """
+    try:
+        wait_for_ssh(ssh, timeout=timeout)
+    except TimeoutError:
+        dump_host_diagnostics(adapter, name, log)
+        raise
+    try:
+        wait_for_provisioning(ssh)
+    except (RuntimeError, TimeoutError) as exc:
+        dump_guest_diagnostics(ssh, log)
+        if fresh:
+            # The console log can hold what the guest never got far enough
+            # to write to /var/log -- worth the second dump on a first boot.
+            dump_host_diagnostics(adapter, name, log)
+            raise
+        log(f"WARNING: {exc}")
+        log(f"WARNING: continuing anyway -- {name} was already running before "
+            f"this run, so this is an earlier run's provisioning failure; the "
+            f"first stage that needs what it should have created will fail on "
+            f"its own")
+
+
 def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
               config: BootstrapConfig, log: Logger = _default_log) -> None:
     # Stage 1: preflight. Deliberately thin -- /dev/kvm, required binaries,
@@ -126,9 +215,12 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         adapter.admin_public_key_path, config.admin_private_key_path, base_runner, log,
     )
 
-    # Stage 3: network.
+    # Stage 3: network. Persisted, not just applied live -- see
+    # `HostAdapter.network_up`'s own docstring for why a one-command
+    # bootstrap must leave the same reboot protection behind that the
+    # manual runbook gets from `host up --persist`.
     log("stage 3/11: network")
-    adapter.network_up()
+    adapter.network_up(_REPO_ROOT)
 
     # Stage 4: controller.
     log("stage 4/11: controller")
@@ -139,15 +231,16 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
     )
 
     # Stage 5: wait.
-    log("stage 5/11: wait for the controller")
+    log(f"stage 5/11: wait for the controller at "
+        f"{cluster.address_of(controller_name)} "
+        f"(up to {config.ssh_timeout:.0f}s for SSH)")
     admin_ssh = SshRunner(
         inner=base_runner, user=config.ssh_user,
         address=cluster.address_of(controller_name),
         key_path=config.admin_private_key_path,
     )
-    wait_for_ssh(admin_ssh, timeout=config.ssh_timeout)
-    if controller_fresh:
-        wait_for_provisioning(admin_ssh)
+    _wait_until_ready(adapter, controller_name, admin_ssh, fresh=controller_fresh,
+                       timeout=config.ssh_timeout, log=log)
 
     # Stage 6: controller key. Only reachable now because stage 2's admin
     # key is trusted by the controller too (docs/bootstrap.md's "key roles"
@@ -191,13 +284,53 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                     default_target_repo=default_target,
                     github_host=config.github_host, git_forward_host=config.git_forward_host,
                     github_use_tls=config.github_use_tls)
+    configure_cluster(admin_ssh, cluster)
     if config.github_token:
         configure_github_credential(
             admin_ssh, credential_repos(config.task_repo, targets), config.github_token,
             credential_name=config.credential_name,
         )
+    for name, token in config.github_keys.items():
+        configure_named_github_key(admin_ssh, token, name=name)
     if config.claude_token:
         configure_claude_token(admin_ssh, config.claude_token)
+    if config.gcp_key_minter_key:
+        configure_gcp_key_minter(admin_ssh, config.gcp_key_minter_key)
+    if (config.gcp_agent_service_account_email and config.gcp_project_id
+            and config.gcp_key_minter_key):
+        # bwsalmon/agents#126: plain, non-secret config rather than a
+        # credential-provisioning step, so bootstrap() does not raise when
+        # only part of it is set (a deployment that names the email but not
+        # the project, or vice versa, just doesn't get this feature turned
+        # on, the same "unusable config parks/skips" latitude every other
+        # optional step in this module already has).
+        #
+        # It is gated on the minter key as well, though, because writing
+        # this file is what *turns the feature on*: `cli.py`'s
+        # `build_orchestrator` reads /data/config/gcp-key.json and, if it
+        # exists, has `_dispatch` mint and `_sweep` reap. Both authenticate
+        # as the key this file names, so writing it without having placed
+        # that key leaves every cycle failing on "Cannot find key file"
+        # instead of quietly not using a feature that isn't ready. Found
+        # live: the minter key's own fetch is best-effort (deploy.sh's
+        # SECRET_WAIT_OPTIONAL), so a rollout that races ahead of CI's push
+        # step hits exactly that.
+        configure_agent_gcp_key(
+            admin_ssh, service_account_email=config.gcp_agent_service_account_email,
+            project_id=config.gcp_project_id,
+            max_key_age_hours=config.gcp_key_max_age_hours,
+        )
+    if config.gemini_project_id:
+        configure_gemini_key(
+            admin_ssh, config.gemini_project_id,
+            impersonate_service_account=config.gcp_agent_service_account_email,
+        )
+    if config.janitor_ttl_hours is not None:
+        if not config.gcp_project_id:
+            raise ValueError("janitor_ttl_hours requires gcp_project_id")
+        configure_janitor(admin_ssh, config.gcp_project_id, config.janitor_ttl_hours,
+                           impersonate_service_account=config.gcp_agent_service_account_email,
+                           name_prefix=config.janitor_name_prefix)
 
     # Stage 9: sandboxes.
     log("stage 9/11: sandboxes")
@@ -208,10 +341,9 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
             inner=base_runner, user=config.ssh_user,
             address=cluster.address_of(name), key_path=config.admin_private_key_path,
         )
-        wait_for_ssh(sandbox_ssh, timeout=config.ssh_timeout)
-        if sandbox_fresh:
-            wait_for_provisioning(sandbox_ssh)
-        elif controller_key_changed:
+        _wait_until_ready(adapter, name, sandbox_ssh, fresh=sandbox_fresh,
+                           timeout=config.ssh_timeout, log=log)
+        if not sandbox_fresh and controller_key_changed:
             # Repair over the admin key, the only second way in
             # (docs/bootstrap.md's Phase 1 fix) -- append rather than
             # recreate, since recreating would also throw away everything

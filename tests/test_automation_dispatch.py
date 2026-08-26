@@ -1,9 +1,11 @@
 import json
 
 from grain.automation.dispatch import (
-    CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, SandboxTarget, UnitState,
-    branch_name, configure_git_credentials, dispatch, dispatch_pr, ensure_workspace,
-    reap, transcript_path, unit_name, unit_status,
+    CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, GCP_KEY_PATH, GEMINI_KEY_PATH,
+    SandboxTarget, UnitState, agent_id, branch_name, configure_gcp_key,
+    configure_gemini_key, configure_git_credentials,
+    dispatch, dispatch_pr, dispatch_review, ensure_workspace, reap, transcript_path,
+    unit_name, unit_status,
 )
 from grain.automation.github import Comment, Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
@@ -15,6 +17,8 @@ UNIT_DIR = "/data/state/automation/units/grain-task-sandbox-0"
 PROMPT_PATH = f"{UNIT_DIR}/prompt.md"
 MCP_CONFIG_PATH = f"{UNIT_DIR}/mcp-config.json"
 QUESTION_PATH = f"{UNIT_DIR}/question.txt"
+COMMENT_PATH = f"{UNIT_DIR}/comment.txt"
+REVIEW_PATH = f"{UNIT_DIR}/review.json"
 
 
 def make_issue(number=1) -> Issue:
@@ -56,6 +60,14 @@ def test_branch_name_is_a_pure_function_of_the_issue_number():
     assert branch_name(7) == "grain/issue-7"
     assert branch_name(7) == branch_name(7)
     assert branch_name(7) != branch_name(8)
+
+
+def test_agent_id_is_short_and_random():
+    a = agent_id()
+    b = agent_id()
+    assert a != b
+    assert len(a) == 8
+    int(a, 16)  # hex
 
 
 def test_configure_git_credentials_sets_the_store_helper():
@@ -139,6 +151,38 @@ def test_dispatch_tells_the_agent_the_exact_branch_to_push():
     assert "grain/issue-7" in prompt_stdin
 
 
+def test_dispatch_prompt_gives_the_agent_a_unique_id_to_label_infrastructure_with():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "Your agent id is " in prompt_stdin
+    assert "collid" in prompt_stdin.lower()
+
+
+def test_dispatch_mints_a_fresh_agent_id_each_call():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    first_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    runner2 = FakeRunner()
+    dispatch(runner2, runner2, "sandbox-0", make_target(), make_issue(),
+              remote_url=REMOTE_URL, token=TOKEN)
+    second_stdin = next(
+        stdin for argv, stdin in runner2.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    first_id = first_stdin.split("Your agent id is ")[1].split(".")[0]
+    second_id = second_stdin.split("Your agent id is ")[1].split(".")[0]
+    assert first_id != second_id
+
+
 def test_dispatch_writes_an_mcp_config_naming_the_assigned_sandbox():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(address="10.100.0.42"),
@@ -177,6 +221,54 @@ def test_dispatch_resets_the_question_file_before_every_dispatch():
     assert runner.ran(f"sudo rm -f {QUESTION_PATH}")
 
 
+def test_dispatch_writes_an_mcp_config_naming_the_comment_path():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    mcp_config = json.loads(mcp_stdin)
+    server = mcp_config["mcpServers"]["grain-sandbox"]
+    assert server["args"][server["args"].index("--comment-path") + 1] == COMMENT_PATH
+
+
+def test_dispatch_resets_the_comment_file_before_every_dispatch():
+    """Same reset discipline as the question file, for the same reason
+    (bwsalmon/agents#50): a leftover comment from an earlier, unrelated
+    task must never survive into this one.
+    """
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert runner.ran(f"sudo rm -f {COMMENT_PATH}")
+
+
+def test_dispatch_writes_an_mcp_config_naming_the_review_path():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    mcp_config = json.loads(mcp_stdin)
+    server = mcp_config["mcpServers"]["grain-sandbox"]
+    assert server["args"][server["args"].index("--review-path") + 1] == REVIEW_PATH
+
+
+def test_dispatch_resets_the_review_file_before_every_dispatch():
+    """Same reset discipline as the question/comment files, for the same
+    reason (bwsalmon/agents#154): leftover review comments from an
+    earlier, unrelated task must never be posted as part of this one.
+    """
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert runner.ran(f"sudo rm -f {REVIEW_PATH}")
+
+
 def test_dispatch_includes_the_issue_conversation_in_the_prompt():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
@@ -208,6 +300,17 @@ def test_dispatch_prompt_points_a_blocked_agent_at_ask_question():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "ask_question" in prompt_stdin
+
+
+def test_dispatch_prompt_points_an_agent_at_comment_on_issue():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "comment_on_issue" in prompt_stdin
 
 
 def test_dispatch_prepares_credentials_and_workspace_before_the_prompt():
@@ -248,6 +351,8 @@ def test_dispatch_runs_claude_from_opt_grain_with_only_mcp_and_native_exceptions
     assert "mcp__grain-sandbox__run_command" in unit_call
     assert "mcp__grain-sandbox__edit_file" in unit_call
     assert "mcp__grain-sandbox__ask_question" in unit_call
+    assert "mcp__grain-sandbox__comment_on_issue" in unit_call
+    assert "mcp__grain-sandbox__add_review_comment" in unit_call
     assert "--allowedTools" in unit_call and "Task" in unit_call
     assert "--no-session-persistence" in unit_call
     # The permission-mode flag existed only to auto-approve the native
@@ -337,6 +442,18 @@ def test_unit_status_done_success_defensive_fallback_without_remain_after_exit()
     runner = FakeRunner()
     runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
     assert unit_status(runner, "grain-task-sandbox-0") is UnitState.DONE_SUCCESS
+
+
+def test_unit_status_done_failed_defensive_fallback_without_remain_after_exit():
+    # Same defensive fallback as the DONE_SUCCESS case above (reachable
+    # only for a unit started without RemainAfterExit=yes, not the path
+    # start_unit itself takes) -- but with a non-success Result.
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=inactive\nResult=exit-code\n",
+    )
+    assert unit_status(runner, "grain-task-sandbox-0") is UnitState.DONE_FAILED
 
 
 def test_unit_status_done_failed_via_active_state():
@@ -540,6 +657,55 @@ def test_dispatch_pr_prompt_handles_no_conversation_yet():
     assert "(no comments yet)" in prompt_stdin
 
 
+def test_dispatch_review_checks_out_the_prs_branch_read_only():
+    runner = FakeRunner()
+    dispatch_review(runner, runner, "sandbox-0", make_target(), make_pr(head_ref="feature-x"),
+                     remote_url=REMOTE_URL, token=TOKEN)
+    script = next(
+        argv[2] for argv, _ in runner.calls
+        if argv[0] == "bash" and argv[1] == "-c"
+    )
+    assert "checkout -f --detach origin/feature-x" in script or "feature-x" in script
+
+
+def test_dispatch_review_prompt_describes_a_review_not_a_fix():
+    runner = FakeRunner()
+    dispatch_review(runner, runner, "sandbox-0", make_target(), make_pr(),
+                     remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "a distinctive PR title" in prompt_stdin
+    assert "REVIEW" in prompt_stdin
+    assert "add_review_comment" in prompt_stdin
+    assert "Do not push any commits" in prompt_stdin
+    assert "git push" not in prompt_stdin
+
+
+def test_dispatch_review_prompt_names_the_task_issue_when_given():
+    runner = FakeRunner()
+    dispatch_review(runner, runner, "sandbox-0", make_target(), make_pr(),
+                     remote_url=REMOTE_URL, token=TOKEN,
+                     task_repo="o/tasks", task_issue=9)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "o/tasks#9" in prompt_stdin
+
+
+def test_dispatch_pr_prompt_gives_the_agent_a_unique_id_to_label_infrastructure_with():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "Your agent id is " in prompt_stdin
+
+
 def test_dispatch_pr_starts_a_systemd_unit_named_for_the_sandbox():
     runner = FakeRunner()
     unit = dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(),
@@ -556,3 +722,374 @@ def test_dispatch_pr_configures_credentials_before_the_workspace():
     credential_index = next(i for i, c in enumerate(commands) if c.startswith("git config"))
     clone_index = next(i for i, c in enumerate(commands) if c.startswith("bash -c"))
     assert credential_index < clone_index
+
+
+# --- Gemini API key (bwsalmon/agents#47) ------------------------------------
+
+GEMINI_KEY = "AIzaSecretValue"
+
+
+def test_configure_gemini_key_writes_the_key_over_stdin_not_argv():
+    runner = FakeRunner()
+    configure_gemini_key(runner, GEMINI_KEY)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    assert len(dd_calls) == 1
+    dd_argv, dd_stdin = dd_calls[0]
+    assert dd_argv == ["dd", f"of={GEMINI_KEY_PATH}", "status=none"]
+    assert dd_stdin == GEMINI_KEY
+    for argv, _ in runner.calls:
+        assert not any(GEMINI_KEY in a for a in argv)
+
+
+def test_configure_gemini_key_restricts_the_file_mode():
+    runner = FakeRunner()
+    configure_gemini_key(runner, GEMINI_KEY)
+    assert runner.ran(f"chmod 600 {GEMINI_KEY_PATH}")
+
+
+def test_dispatch_with_no_gemini_key_never_writes_one():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert not any(argv[0] == "dd" and argv[1] == f"of={GEMINI_KEY_PATH}" for argv, _ in runner.calls)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "Gemini" not in prompt_stdin
+
+
+def test_dispatch_with_a_gemini_key_writes_it_to_the_sandbox():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gemini_key=GEMINI_KEY)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GEMINI_KEY_PATH}")
+    assert key_call[1] == GEMINI_KEY
+
+
+def test_dispatch_with_a_gemini_key_tells_the_agent_where_it_is():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gemini_key=GEMINI_KEY)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert GEMINI_KEY_PATH in prompt_stdin
+    assert "Gemini" in prompt_stdin
+    # The raw key value is never written into the prompt file itself.
+    assert GEMINI_KEY not in prompt_stdin
+
+
+def test_dispatch_never_lets_the_gemini_key_appear_as_a_literal_argv_element():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gemini_key=GEMINI_KEY)
+    for argv, _ in runner.calls:
+        assert not any(GEMINI_KEY in a for a in argv)
+
+
+def test_dispatch_pr_with_a_gemini_key_writes_it_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, gemini_key=GEMINI_KEY)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GEMINI_KEY_PATH}")
+    assert key_call[1] == GEMINI_KEY
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert GEMINI_KEY_PATH in prompt_stdin
+
+
+# --- GCP service-account key (bwsalmon/agents#126) --------------------------
+
+GCP_KEY_JSON = '{"type": "service_account", "private_key": "fake"}'
+
+
+def test_configure_gcp_key_writes_the_key_over_stdin_not_argv():
+    runner = FakeRunner()
+    configure_gcp_key(runner, GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    assert len(dd_calls) == 1
+    dd_argv, dd_stdin = dd_calls[0]
+    assert dd_argv == ["dd", f"of={GCP_KEY_PATH}", "status=none"]
+    assert dd_stdin == GCP_KEY_JSON
+    for argv, _ in runner.calls:
+        assert not any(GCP_KEY_JSON in a for a in argv)
+
+
+def test_configure_gcp_key_restricts_the_file_mode():
+    runner = FakeRunner()
+    configure_gcp_key(runner, GCP_KEY_JSON)
+    assert runner.ran(f"chmod 600 {GCP_KEY_PATH}")
+
+
+def test_dispatch_with_no_gcp_key_never_writes_one():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert not any(argv[0] == "dd" and argv[1] == f"of={GCP_KEY_PATH}" for argv, _ in runner.calls)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "GCP" not in prompt_stdin
+
+
+def test_dispatch_with_a_gcp_key_writes_it_to_the_sandbox():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GCP_KEY_PATH}")
+    assert key_call[1] == GCP_KEY_JSON
+
+
+def test_dispatch_with_a_gcp_key_tells_the_agent_where_it_is():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert GCP_KEY_PATH in prompt_stdin
+    assert "GCP" in prompt_stdin
+    # The raw key material is never written into the prompt file itself.
+    assert GCP_KEY_JSON not in prompt_stdin
+
+
+def test_dispatch_never_lets_the_gcp_key_appear_as_a_literal_argv_element():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    for argv, _ in runner.calls:
+        assert not any(GCP_KEY_JSON in a for a in argv)
+
+
+def test_dispatch_pr_with_a_gcp_key_writes_it_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GCP_KEY_PATH}")
+    assert key_call[1] == GCP_KEY_JSON
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert GCP_KEY_PATH in prompt_stdin
+
+
+def test_dispatch_with_both_a_gemini_and_gcp_key_writes_both():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gemini_key=GEMINI_KEY,
+             gcp_key=GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    assert any(c[0][1] == f"of={GEMINI_KEY_PATH}" for c in dd_calls)
+    assert any(c[0][1] == f"of={GCP_KEY_PATH}" for c in dd_calls)
+
+
+# --- Self-debug (bwsalmon/agents#62) ----------------------------------------
+
+def _mcp_config_args(runner) -> list[str]:
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    return json.loads(mcp_stdin)["mcpServers"]["grain-sandbox"]["args"]
+
+
+def _prompt_stdin(runner) -> str:
+    return next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+
+
+def test_dispatch_with_no_self_debug_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-debug" not in _mcp_config_args(runner)
+    assert "grain-self-debug" not in _prompt_stdin(runner)
+
+
+def test_dispatch_with_self_debug_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, self_debug=True)
+    assert "--self-debug" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-debug" in prompt_stdin
+    assert "read_grain_logs" in prompt_stdin
+    assert "check_grain_health" in prompt_stdin
+    assert "read_grain_config" in prompt_stdin
+    assert "read_automation_audit_log" in prompt_stdin
+
+
+def test_dispatch_pr_with_self_debug_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, self_debug=True)
+    assert "--self-debug" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-debug" in prompt_stdin
+    assert "read_grain_logs" in prompt_stdin
+    assert "check_grain_health" in prompt_stdin
+    assert "read_grain_config" in prompt_stdin
+    assert "read_automation_audit_log" in prompt_stdin
+
+
+def test_dispatch_pr_with_no_self_debug_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-debug" not in _mcp_config_args(runner)
+    assert "grain-self-debug" not in _prompt_stdin(runner)
+
+
+# --- Self-repair (bwsalmon/agents#99) ---------------------------------------
+
+def test_dispatch_with_no_self_repair_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-repair" not in _mcp_config_args(runner)
+    assert "grain-self-repair" not in _prompt_stdin(runner)
+
+
+def test_dispatch_with_self_repair_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, self_repair=True)
+    assert "--self-repair" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-repair" in prompt_stdin
+    assert "restart_grain_service" in prompt_stdin
+    assert "reboot_sandbox" in prompt_stdin
+    assert "reformat_sandbox" in prompt_stdin
+    assert "reboot_controller" in prompt_stdin
+
+
+def test_dispatch_self_debug_and_self_repair_are_independent_flags():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, self_debug=True)
+    assert "--self-debug" in _mcp_config_args(runner)
+    assert "--self-repair" not in _mcp_config_args(runner)
+    assert "grain-self-repair" not in _prompt_stdin(runner)
+
+
+def test_dispatch_pr_with_self_repair_adds_the_flag_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, self_repair=True)
+    assert "--self-repair" in _mcp_config_args(runner)
+    prompt_stdin = _prompt_stdin(runner)
+    assert "grain-self-repair" in prompt_stdin
+    assert "restart_grain_service" in prompt_stdin
+    assert "reboot_sandbox" in prompt_stdin
+    assert "reformat_sandbox" in prompt_stdin
+    assert "reboot_controller" in prompt_stdin
+
+
+def test_dispatch_pr_with_no_self_repair_never_adds_the_flag():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN)
+    assert "--self-repair" not in _mcp_config_args(runner)
+    assert "grain-self-repair" not in _prompt_stdin(runner)
+
+
+def test_dispatch_always_passes_this_dispatchs_own_task_unit():
+    # bwsalmon/agents#97: unlike --self-debug, --task-unit is passed
+    # regardless of whether the task issue carried self_debug_label --
+    # read_grain_logs's grain-task case is what gates on self-debug, not
+    # whether mcp_server.py knows its own unit name.
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    args = _mcp_config_args(runner)
+    assert args[args.index("--task-unit") + 1] == "grain-task-sandbox-0"
+
+
+# --- a workspace the sandbox user cannot clean ----------------------------
+
+def _generated_workspace_script(**kwargs) -> str:
+    runner = FakeRunner()
+    runner.expect("bash", stdout="")
+    ensure_workspace(runner, "https://git.example/repo.git", **kwargs)
+    return runner.calls[0][0][2]
+
+
+def _run_workspace_script(tmp_path, *, clean_exit: int) -> tuple[list[str], int]:
+    """Runs the real generated script with stand-in `git` and `sudo`, so
+    the control flow is exercised rather than pattern-matched. `git clean`
+    exits `clean_exit`; every other git subcommand succeeds.
+    """
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    (bin_dir / "git").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "git $*" >> {log}\n'
+        f'for a in "$@"; do [ "$a" = clean ] && exit {clean_exit}; done\n'
+        "exit 0\n"
+    )
+    (bin_dir / "sudo").write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "sudo $*" >> {log}\n'
+        'exit 0\n'
+    )
+    for name in ("git", "sudo"):
+        (bin_dir / name).chmod(0o755)
+
+    workspace = tmp_path / "workspace"
+    (workspace / ".git").mkdir(parents=True)
+    script = _generated_workspace_script(path=str(workspace))
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-c", script], env=env,
+                            capture_output=True, text=True)
+    calls = log.read_text().splitlines() if log.exists() else []
+    return calls, result.returncode
+
+
+def test_a_clean_that_succeeds_never_reclones(tmp_path):
+    calls, code = _run_workspace_script(tmp_path, clean_exit=0)
+    assert code == 0
+    assert not [c for c in calls if c.startswith("sudo ")], calls
+    assert not [c for c in calls if "clone" in c], calls
+
+
+def test_an_unremovable_workspace_is_recloned_rather_than_failing(tmp_path):
+    """Found live: a previous task left a root-owned __pycache__, so
+    `git clean -fdx` exited 1. The script is `set -eu`, so that failed
+    ensure_workspace itself and every later dispatch to that sandbox died
+    at its first step -- the state that breaks the reset being exactly the
+    state the reset exists to remove.
+    """
+    calls, code = _run_workspace_script(tmp_path, clean_exit=1)
+    assert code == 0, "a workspace that cannot be cleaned must not fail the dispatch"
+    assert any(c.startswith("sudo rm -rf") for c in calls), calls
+    assert any("clone" in c for c in calls), calls
+    # and the checkout still runs afterwards, on the fresh clone
+    assert any("checkout" in c for c in calls), calls
+
+
+def test_the_reset_does_not_reclone_when_fetch_fails(tmp_path):
+    """Scoped deliberately: a failing fetch is usually the network or the
+    proxy, and re-cloning over that same network turns a retryable blip
+    into a slower one. It must still fail loudly."""
+    script = _generated_workspace_script()
+    fetch_line = next(l for l in script.splitlines() if "fetch --prune" in l)
+    assert not fetch_line.strip().startswith("if !"), (
+        "fetch failure must still abort under set -eu, not trigger a re-clone"
+    )

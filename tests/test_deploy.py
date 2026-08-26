@@ -48,6 +48,24 @@ def test_deploy_extracts_with_sudo_to_the_default_dest():
     assert "sudo tar -xzf - -C /opt/grain" in script
 
 
+def test_deploy_makes_dest_readable_to_the_unprivileged_agent_user():
+    """Found live: the host's checkout was 0700/0600, tar restored those
+    modes onto /opt/grain, and every task unit -- which runs as
+    dispatch.py's CONTROLLER_AGENT_USER and does `cd /opt/grain` -- died on
+    "Permission denied" before claude -p started. The extract must not
+    leave the deployed tree at whatever the source tree happened to be."""
+    runner = FakeRunner()
+    deploy_tree(
+        runner, Path("/repo"), user="debian",
+        address=ipaddress.IPv4Address("10.100.0.2"),
+        key_path=Path("/var/lib/grain/admin-ssh"),
+    )
+    script = runner.calls[0][0][2]
+    assert "sudo chmod -R u=rwX,go=rX /opt/grain" in script
+    # After the extract, not before -- tar would otherwise overwrite it.
+    assert script.index("sudo tar -xzf -") < script.index("sudo chmod -R")
+
+
 def test_deploy_dest_is_overridable():
     runner = FakeRunner()
     deploy_tree(

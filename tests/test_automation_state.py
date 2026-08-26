@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from grain.automation.state import AutomationState, TriggerKind
+from grain.automation.state import AutomationState, CompletedIssue, OpenPullRequest, TriggerKind
 
 
 def test_free_sandbox_skips_assigned_ones():
@@ -59,6 +59,97 @@ def test_save_and_load_round_trip(tmp_path: Path):
     assert loaded.run_timestamps == [now]
 
 
+# --- Gemini API key (bwsalmon/agents#47) ------------------------------------
+
+def test_assign_defaults_to_no_gemini_key():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now)
+    assert state.assignments["sandbox-0"].gemini_key_name is None
+
+
+def test_assign_records_a_gemini_key_name():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now,
+                 gemini_key_name="projects/1/locations/global/keys/abc")
+    assert state.assignments["sandbox-0"].gemini_key_name == (
+        "projects/1/locations/global/keys/abc"
+    )
+
+
+def test_save_and_load_round_trips_the_gemini_key_name(tmp_path: Path):
+    state = AutomationState()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0", now=now,
+                 gemini_key_name="projects/1/locations/global/keys/abc")
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gemini_key_name == (
+        "projects/1/locations/global/keys/abc"
+    )
+
+
+def test_load_of_a_pre_gemini_key_state_file_defaults_to_no_key(tmp_path: Path):
+    # An assignment written before bwsalmon/agents#47 has no such field at
+    # all -- must load as None, not KeyError.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "assignments": {
+            "sandbox-0": {
+                "issue": 1, "unit": "u0", "started_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    }))
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gemini_key_name is None
+
+
+# --- GCP service-account key (bwsalmon/agents#126) --------------------------
+
+def test_assign_defaults_to_no_gcp_key():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now)
+    assert state.assignments["sandbox-0"].gcp_key_id is None
+
+
+def test_assign_records_a_gcp_key_id():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now, gcp_key_id="abc123")
+    assert state.assignments["sandbox-0"].gcp_key_id == "abc123"
+
+
+def test_save_and_load_round_trips_the_gcp_key_id(tmp_path: Path):
+    state = AutomationState()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0", now=now,
+                 gcp_key_id="abc123")
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gcp_key_id == "abc123"
+
+
+def test_load_of_a_pre_gcp_key_state_file_defaults_to_no_key(tmp_path: Path):
+    # An assignment written before bwsalmon/agents#126 has no such field at
+    # all -- must load as None, not KeyError.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "assignments": {
+            "sandbox-0": {
+                "issue": 1, "unit": "u0", "started_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    }))
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gcp_key_id is None
+
+
 def test_load_of_a_missing_file_is_an_empty_state(tmp_path: Path):
     state = AutomationState.load(tmp_path / "does-not-exist.json")
     assert state.assignments == {}
@@ -90,6 +181,39 @@ def test_assign_records_pr_kind_and_branch():
     assignment = state.assignments["sandbox-0"]
     assert assignment.kind is TriggerKind.PR
     assert assignment.branch == "feature-x"
+
+
+def test_assign_defaults_to_no_pr_number():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now)
+    assert state.assignments["sandbox-0"].pr_number is None
+
+
+def test_assign_records_review_kind_and_pr_number():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=9, unit="u0", now=now,
+                 kind=TriggerKind.REVIEW, branch="feature-x", pr_number=42)
+    assignment = state.assignments["sandbox-0"]
+    assert assignment.kind is TriggerKind.REVIEW
+    assert assignment.branch == "feature-x"
+    assert assignment.pr_number == 42
+
+
+def test_save_and_load_round_trips_review_kind_and_pr_number(tmp_path: Path):
+    state = AutomationState()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0", now=now,
+                 kind=TriggerKind.REVIEW, branch="feature-x", pr_number=42)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assignment = loaded.assignments["sandbox-0"]
+    assert assignment.kind is TriggerKind.REVIEW
+    assert assignment.branch == "feature-x"
+    assert assignment.pr_number == 42
 
 
 def test_in_progress_issues_includes_pr_numbers_too():
@@ -245,6 +369,117 @@ def test_load_of_a_pre_item_24_state_file_has_no_tracked_prs(tmp_path: Path):
     path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
     loaded = AutomationState.load(path)
     assert loaded.tracked_prs == {}
+
+
+# --- open PRs awaiting a close (bwsalmon/agents#54) -----------------------
+
+def test_record_open_pr_records_target_and_pr_number():
+    state = AutomationState()
+    state.record_open_pr(5, "other", "service", 42)
+    open_pr = state.open_pull_requests["5"]
+    assert open_pr.issue == 5
+    assert open_pr.target_owner == "other"
+    assert open_pr.target_repo == "service"
+    assert open_pr.pr_number == 42
+
+
+def test_clear_open_pr_removes_it():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.clear_open_pr(5)
+    assert state.open_pull_requests == {}
+
+
+def test_clear_open_pr_on_an_absent_issue_is_a_no_op():
+    state = AutomationState()
+    state.clear_open_pr(5)  # must not raise
+    assert state.open_pull_requests == {}
+
+
+def test_save_and_load_round_trips_open_pull_requests(tmp_path: Path):
+    state = AutomationState()
+    state.record_open_pr(5, "other", "service", 42)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    open_pr = loaded.open_pull_requests["5"]
+    assert open_pr == OpenPullRequest(
+        issue=5, target_owner="other", target_repo="service", pr_number=42,
+    )
+
+
+def test_load_of_a_pre_54_state_file_has_no_open_pull_requests(tmp_path: Path):
+    # A state file written before bwsalmon/agents#54 existed has no
+    # "open_pull_requests" key at all -- loading it must default to empty
+    # rather than KeyError, the same tolerance `pending_questions` already
+    # has for a state file written before item 13.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.open_pull_requests == {}
+
+
+# --- restart on comment after completion (bwsalmon/agents#135) -----------
+
+def test_record_completed_issue_starts_with_no_baseline():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    completed = state.completed_issues["5"]
+    assert completed.issue == 5
+    assert completed.baseline_comment_id is None
+
+
+def test_prime_completed_baseline_fills_it_in():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    assert state.completed_issues["5"] == CompletedIssue(issue=5, baseline_comment_id=100)
+
+
+def test_clear_completed_issue_removes_it():
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.clear_completed_issue(5)
+    assert state.completed_issues == {}
+
+
+def test_clear_completed_issue_on_an_absent_issue_is_a_no_op():
+    state = AutomationState()
+    state.clear_completed_issue(5)  # must not raise
+    assert state.completed_issues == {}
+
+
+def test_save_and_load_round_trips_completed_issues(tmp_path: Path):
+    state = AutomationState()
+    state.record_completed_issue(5)
+    state.prime_completed_baseline(5, 100)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.completed_issues["5"] == CompletedIssue(issue=5, baseline_comment_id=100)
+
+
+def test_save_and_load_round_trips_an_unprimed_completed_issue(tmp_path: Path):
+    state = AutomationState()
+    state.record_completed_issue(5)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.completed_issues["5"] == CompletedIssue(issue=5, baseline_comment_id=None)
+
+
+def test_load_of_a_pre_135_state_file_has_no_completed_issues(tmp_path: Path):
+    # A state file written before bwsalmon/agents#135 existed has no
+    # "completed_issues" key at all -- loading it must default to empty
+    # rather than KeyError, the same tolerance every other addition here
+    # already has for a state file written before it existed.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.completed_issues == {}
 
 
 def test_load_of_a_pre_item_9_state_file_defaults_to_issue_kind(tmp_path: Path):

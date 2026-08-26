@@ -63,6 +63,11 @@ def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
             argv, returncode=124, stdout=exc.stdout or "",
             stderr=(exc.stderr or "") + f"\n[timed out after {kwargs['timeout']}s]",
         )
+    except FileNotFoundError as exc:
+        # Not installed. A hosted CI runner has /dev/kvm but no `virsh`, so
+        # it reaches this call: a missing tool has to mean "host not ready"
+        # rather than an exception out of `_host_ready` at collection time.
+        return subprocess.CompletedProcess(argv, returncode=127, stdout="", stderr=f"{exc}\n")
 
 
 def _host_ready() -> bool:

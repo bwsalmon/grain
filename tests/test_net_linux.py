@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from grain.adapter.base import EgressMode
 from grain.adapter.net_linux import (
+    BOOT_UNIT_NAME,
+    BOOT_UNIT_PATH,
     LinuxNetwork,
+    render_boot_unit,
     render_host_input_rules,
     render_ruleset,
 )
@@ -81,16 +86,6 @@ def test_sandbox_may_reach_the_git_proxy(cluster: Cluster, ruleset: str):
         )
 
 
-def test_sandbox_may_reach_only_its_own_metadata_server(cluster: Cluster, ruleset: str):
-    a, b = cluster.sandbox_names
-    addr_a = cluster.address_of(a)
-    port_a = cluster.metadata_port(a)
-    port_b = cluster.metadata_port(b)
-    assert f"ip saddr {addr_a} ip daddr {cluster.controller_ip} tcp dport {port_a} accept" in ruleset
-    # The crucial negative: sandbox-0 must not be permitted sandbox-1's port.
-    assert f"ip saddr {addr_a} ip daddr {cluster.controller_ip} tcp dport {port_b} accept" not in ruleset
-
-
 def test_sandbox_to_sandbox_is_dropped(cluster: Cluster, ruleset: str):
     assert f"ip saddr {cluster.subnet} ip daddr {cluster.subnet} drop" in ruleset
 
@@ -120,25 +115,19 @@ def test_no_rule_permits_a_sandbox_to_reach_another_sandbox(cluster: Cluster, ru
         )
 
 
-# --- metadata DNAT: per-VM network position -------------------------------
+# --- no metadata DNAT (bwsalmon/agents#126) --------------------------------
+#
+# The per-sandbox gce_metadata_server broker this ruleset used to DNAT a
+# sandbox's metadata-anycast traffic into is gone -- GCP access now arrives
+# as a real key pushed directly into the sandbox (grain/automation/
+# gcp_keys.py), which needs no DNAT rule at all.
 
-def test_each_sandbox_gets_its_own_metadata_dnat(cluster: Cluster, ruleset: str):
-    for name in cluster.sandbox_names:
-        addr = cluster.address_of(name)
-        port = cluster.metadata_port(name)
-        assert (
-            f"ip saddr {addr} ip daddr 169.254.169.254 tcp dport 80 "
-            f"dnat to {cluster.controller_ip}:{port}" in ruleset
-        )
+def test_the_nat_table_carries_no_dnat_rule(ruleset: str):
+    assert "dnat to" not in ruleset
 
 
-def test_dnat_targets_are_distinct_per_sandbox(cluster: Cluster, ruleset: str):
-    targets = [
-        line.split("dnat to ")[1].strip()
-        for line in ruleset.splitlines()
-        if "dnat to" in line
-    ]
-    assert len(set(targets)) == len(targets) == cluster.sandbox_count
+def test_the_nat_table_has_no_prerouting_chain(ruleset: str):
+    assert "chain prerouting" not in ruleset
 
 
 # --- egress ---------------------------------------------------------------
@@ -161,7 +150,6 @@ def test_rules_scale_with_sandbox_count():
     for count in (1, 2, 5):
         c = Cluster(sandbox_count=count)
         out = render_ruleset(c, EgressMode.OPEN)
-        assert out.count("dnat to") == count
         # one anti-spoof rule per VM, controller included
         assert out.count("ip saddr != ") == count + 1
 
@@ -198,3 +186,42 @@ def test_up_does_not_recreate_an_existing_bridge(cluster: Cluster):
     runner.expect("ip -j link show br-grain", stdout="[{}]", returncode=0)
     LinuxNetwork(cluster, runner).up()
     assert not runner.ran("ip link add")
+
+
+# --- surviving a host reboot (bwsalmon/agents#111) -------------------------
+#
+# The bridge and the nftables policy `up()` just applied live only in the
+# running kernel; nothing before this reapplied either across a reboot,
+# while libvirt's own autostart brings the sandboxes back regardless --
+# found live as sandbox-to-sandbox isolation silently gone while everything
+# else (SSH, a direct connection to the controller) kept working, with
+# nothing anywhere flagging it.
+
+def test_up_does_not_install_a_boot_unit_by_default(cluster: Cluster):
+    runner = FakeRunner()
+    LinuxNetwork(cluster, runner).up()
+    assert not any(BOOT_UNIT_NAME in argv for argv, _ in runner.calls)
+    assert not any("systemctl" in argv for argv, _ in runner.calls)
+
+
+def test_render_boot_unit_reruns_host_up_with_the_given_egress_mode():
+    unit = render_boot_unit(Path("/opt/grain"), EgressMode.ALLOWLIST)
+    assert "WorkingDirectory=/opt/grain" in unit
+    assert "ExecStart=/usr/bin/python3 -m grain.cli host up --egress allowlist" in unit
+    # Ordering: the policy must exist before libvirt starts routing traffic
+    # for the sandboxes it autostarts, not at some unordered later point.
+    assert "Before=libvirtd.service" in unit
+
+
+def test_install_boot_unit_writes_and_enables_it(cluster: Cluster):
+    runner = FakeRunner()
+    LinuxNetwork(cluster, runner).install_boot_unit(Path("/opt/grain"), EgressMode.OPEN)
+    tee_calls = [
+        (argv, stdin) for argv, stdin in runner.calls if argv[:1] == ["tee"]
+    ]
+    assert len(tee_calls) == 1
+    argv, stdin = tee_calls[0]
+    assert argv == ["tee", BOOT_UNIT_PATH]
+    assert stdin == render_boot_unit(Path("/opt/grain"), EgressMode.OPEN)
+    assert runner.ran("systemctl daemon-reload")
+    assert runner.ran(f"systemctl enable {BOOT_UNIT_NAME}")

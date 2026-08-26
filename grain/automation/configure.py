@@ -20,12 +20,35 @@ import secrets
 from pathlib import PurePosixPath
 
 from .dispatch import CONTROLLER_AGENT_TOKEN_PATH
+from ..inventory import Cluster
 from ..run import Runner
 
 DATA_CONFIG = "/data/config"
+CLUSTER_CONFIG_PATH = "/data/config/cluster.toml"
 DATA_SECRETS_GITHUB = "/data/secrets/github"
 CLAUDE_TOKEN_PATH = "/data/secrets/claude-oauth-token"
 SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
+# Must match grain/automation/gemini_keys.py's `GeminiKeyConfig.key_path`
+# default -- this module and that one are never imported into each other
+# (SSH-remote writes here, local file I/O there), so the path can only be
+# kept in sync by hand; a rename on one side and not the other is silent
+# until `gemini_keys.py`'s own `gcloud auth activate-service-account` fails
+# to find the file.
+# bwsalmon/agents#131: the *minter* identity gcp_keys.py authenticates
+# as -- a key for the host service account, deliberately a different
+# file (and a different account) from the agent key above.
+GCP_KEY_MINTER_KEY_PATH = "/data/secrets/gcp-key-minter.json"
+# Must match grain/automation/gemini_keys.py's `GeminiKeyConfig` load path
+# -- same "kept in sync by hand" caveat as the pair above; see this
+# constant's own use in `configure_gemini_key`.
+GEMINI_KEY_CONFIG_PATH = "/data/config/gemini-key.json"
+# Must match grain/automation/gcp_keys.py's `GcpKeyConfig` load path -- same
+# "kept in sync by hand" caveat as the pair above; see this constant's own
+# use in `configure_agent_gcp_key`.
+GCP_KEY_CONFIG_PATH = "/data/config/gcp-key.json"
+# Must match grain/automation/janitor.py's `JanitorConfig` load path --
+# same caveat, see this constant's own use in `configure_janitor`.
+JANITOR_CONFIG_PATH = "/data/config/janitor.json"
 
 
 def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
@@ -81,6 +104,35 @@ def configure_repo(runner: Runner, task_repo: str, targets: list[str], *,
     _write_remote_file(runner, f"{DATA_CONFIG}/repo-allowlist.json", allowlist_json, mode="644")
 
 
+def configure_cluster(runner: Runner, cluster: Cluster) -> None:
+    """Writes `/data/config/cluster.toml` with the two `Cluster` fields the
+    controller-side automation service actually needs -- `sandbox_count`
+    and `subnet`, which is everything `sandbox_names`/`address_of`/
+    `controller_ip` derive from (`grain/inventory.py`). Every other
+    `Cluster` field (VM sizing, image, bridge name) only matters to `grain
+    host bootstrap` itself, which already reads the host's own
+    `--cluster-file`.
+
+    The controller has no `cluster.toml` of its own otherwise -- the host's
+    copy (`grain/bootstrap.py`'s `build_cluster`/`--cluster-file`) never
+    left the host -- so `grain-automation.service`'s `automation run-once`
+    silently ran with `Cluster()`'s bare defaults (always two sandboxes),
+    no matter what the real deployment's `sandbox_count` said. This file,
+    and `provision/controller.sh` pointing that service's `--cluster-file`
+    at it, is what closes that gap.
+
+    Written unconditionally on every bootstrap run, the same as
+    `configure_repo` above: a sync, not a create, so raising `sandbox_count`
+    after the first bootstrap reaches the controller on the very next one
+    rather than requiring the controller itself to be recreated.
+    """
+    cluster_toml = (
+        f"sandbox_count = {cluster.sandbox_count}\n"
+        f'subnet = "{cluster.subnet}"\n'
+    )
+    _write_remote_file(runner, CLUSTER_CONFIG_PATH, cluster_toml, mode="644")
+
+
 def credential_repos(task_repo: str, targets: list[str]) -> list[str]:
     """Every repo the orchestrator's own credential has to cover: the task
     repo (read issues, move labels, comment) plus each target repo (check a
@@ -118,6 +170,23 @@ def configure_github_credential(runner: Runner, repos: list[str], token: str,
     )
 
 
+def configure_named_github_key(runner: Runner, token: str, *, name: str) -> None:
+    """Writes an additional named credential's token file only --
+    bwsalmon/agents#52's `grain-github-<name>` label, which selects it
+    directly (`CredentialSet.get`, `grain/proxy/core.py`) rather than
+    through the `credentials.json` owner/repo ladder `configure_github_
+    credential` maintains. Deliberately does not touch `credentials.json`:
+    unlike that function, this one must never make `name` any repo's
+    *default* credential too, since the whole point is a scope (e.g.
+    `workflow`) the default deliberately withholds -- see docs/design.md,
+    "Scopes to withhold".
+    """
+    _write_remote_file(
+        runner, f"{DATA_SECRETS_GITHUB}/{name}.token",
+        token.strip() + "\n", mode="600",
+    )
+
+
 def configure_claude_token(runner: Runner, token: str) -> None:
     """Places a Claude Code OAuth token on the controller -- one token
     placed once, not one per sandbox (docs/bootstrap.md, "The Claude
@@ -146,6 +215,106 @@ def configure_claude_token(runner: Runner, token: str) -> None:
     _write_remote_file(runner, CLAUDE_TOKEN_PATH, stripped, mode="600")
     _write_remote_file(runner, CONTROLLER_AGENT_TOKEN_PATH, stripped, mode="600",
                         owner="grain-agent")
+
+
+def configure_agent_gcp_key(runner: Runner, *, service_account_email: str,
+                             project_id: str, max_key_age_hours: int = 24,
+                             key_path: str = GCP_KEY_MINTER_KEY_PATH) -> None:
+    """Writes `/data/config/gcp-key.json` (bwsalmon/agents#126), the
+    on/off switch `Orchestrator.gcp_key_config` (`cli.py`'s
+    `build_orchestrator`) checks before minting a GCP service-account key
+    for every dispatched sandbox -- absent, a deployment's sandboxes get
+    no GCP access at all, the same "unusable feature parks/skips, doesn't
+    guess" shape `configure_gemini_key` already has for its own label.
+
+    Places no credential of its own -- this is plain, non-secret
+    configuration (`service_account_email` and `project_id` are already
+    published as non-secret deploy config, `terraform/gcp/instance.tf`'s
+    `grain-config`), unlike the minter key `configure_gcp_key_minter`
+    places. It only *names* the minter credential;
+    `configure_gcp_key_minter` below is what actually places it.
+
+    bwsalmon/agents#131: `gcp_keys.py` used to need no credential at all,
+    on the (false) premise that the controller runs as the host service
+    account via a native GCE metadata server. The controller is a nested
+    libvirt guest, not a GCE VM, so `gcloud` there had no account at all
+    and every mint and reap failed -- see that module's docstring.
+    """
+    gcp_key_json = json.dumps({
+        "service_account_email": service_account_email,
+        "project_id": project_id,
+        "max_key_age_hours": max_key_age_hours,
+        "key_path": key_path,
+    }, indent=2) + "\n"
+    _write_remote_file(runner, GCP_KEY_CONFIG_PATH, gcp_key_json, mode="644")
+
+
+def configure_gcp_key_minter(runner: Runner, key: str) -> None:
+    """Places the minter credential `gcp_keys.py` authenticates as
+    (bwsalmon/agents#131), at `GCP_KEY_MINTER_KEY_PATH`.
+
+    A key for the *host* service account, which `terraform/gcp/iam.tf`
+    grants `roles/iam.serviceAccountKeyAdmin` on the agent account. Never
+    the agent account's own key: minting has to be done by an identity the
+    agent itself does not hold, or a leaked agent key can mint its own
+    replacement and the whole expiry premise collapses.
+
+    Read by the automation running as root, so it stays `600` and
+    root-owned -- nothing else on the controller has any business
+    reading it. This is the controller's only GCP credential.
+    """
+    _write_remote_file(runner, GCP_KEY_MINTER_KEY_PATH, key.strip() + "\n", mode="600")
+
+
+def configure_gemini_key(runner: Runner, project_id: str, *,
+                          impersonate_service_account: str | None = None) -> None:
+    """Writes `/data/config/gemini-key.json` (bwsalmon/agents#47), the
+    on/off switch `core.py`'s `_resolve_target` checks before honouring a
+    task issue's `gemini_key_label` -- absent, the label is refused with
+    an explanation, the same "unusable request parks the task" shape an
+    unlisted `/repo` already gets.
+
+    Places no credential of its own: `gemini_keys.py` authenticates with the
+    minter key `configure_gcp_key_minter` writes (the host account's), and
+    acts as the agent account by impersonating it -- `impersonate_service_account`
+    below, bwsalmon/agents#131. The controller holds no agent key at all.
+    """
+    payload = {"project_id": project_id}
+    if impersonate_service_account:
+        payload["impersonate_service_account"] = impersonate_service_account
+    gemini_key_json = json.dumps(payload, indent=2) + "\n"
+    _write_remote_file(runner, GEMINI_KEY_CONFIG_PATH, gemini_key_json, mode="644")
+
+
+def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
+                       name_prefix: str = "grain",
+                       impersonate_service_account: str | None = None) -> None:
+    """Writes `/data/config/janitor.json` (bwsalmon/agents#113), the
+    on/off switch `core.py`'s `_janitor` checks before scanning the
+    project for GCE instances, disks, and Gemini API keys past
+    `ttl_hours` old -- absent, `_janitor` is a no-op, the same "unusable
+    request parks the task" shape `configure_gemini_key` already gets, just
+    with nothing to park since this isn't tied to any one task.
+
+    Places no credential of its own: `janitor.py` authenticates with the
+    minter key `configure_gcp_key_minter` writes (the host account's), and
+    acts as the agent account by impersonating it -- `impersonate_service_account`
+    below, bwsalmon/agents#131. The controller holds no agent key at all.
+
+    `name_prefix` must match the Terraform deployment's own `name_prefix`
+    (default `"grain"`) -- it names the exact host/data-disk resources the
+    janitor must never delete regardless of age. A deployment that
+    customises `name_prefix` and skips this argument would have the
+    janitor protecting the wrong names, so a Terraform-managed deployment
+    always passes its own `var.name_prefix` through (`deploy.sh`).
+    """
+    payload = {
+        "project_id": project_id, "ttl_hours": ttl_hours, "name_prefix": name_prefix,
+    }
+    if impersonate_service_account:
+        payload["impersonate_service_account"] = impersonate_service_account
+    janitor_json = json.dumps(payload, indent=2) + "\n"
+    _write_remote_file(runner, JANITOR_CONFIG_PATH, janitor_json, mode="644")
 
 
 def ensure_sandbox_tokens(runner: Runner, sandbox_names: list[str]) -> None:

@@ -124,7 +124,11 @@ assumptions.
 
 ## 4. GCP metadata server
 
-- [x] Done
+- [x] Done, later superseded — bwsalmon/agents#126 removed this whole
+  broker in favour of a real, short-lived service-account key minted per
+  dispatch. Left unedited below as the historical record of what was
+  actually built and verified at the time; see `docs/design.md`'s "GCP
+  credentials" section, "Superseded" subsection, for the current design.
 
 `docs/design.md` step 7: one `gce_metadata_server` instance per sandbox,
 serving impersonated tokens for a narrow second service account.
@@ -1146,7 +1150,390 @@ becomes the sole allow-listed target *and* `default_target_repo`, which is
 precisely the single-repo deployment every deployment was before this item
 — it keeps working with no directive written anywhere.
 
-## 16. Turn PR feedback into a candidate, triage-labelled task
+## 16. Give each agent a unique id
+
+- [x] Done
+
+A task can involve the agent creating infrastructure of its own — a
+container, a cloud resource, a scratch database — as part of the work, not
+just editing files in its checkout. Nothing named that infrastructure for
+it, and nothing stopped two concurrently-dispatched agents (this deployment
+already runs more than one sandbox at once, see item 3's live concurrency
+test) from picking the same obvious name and colliding.
+
+`agent_id()` (`grain/automation/dispatch.py`) mints an 8-hex-character
+`secrets.token_hex(4)` value fresh for every dispatch — no need to be a
+pure function of anything the way `branch_name()`/`transcript_path()` are,
+since nothing on the controller side ever has to recompute it to agree.
+`dispatch()`/`dispatch_pr()` generate one and thread it into `_prompt()`/
+`_pr_prompt()` as `agent_id_value`, which render it as a plain sentence
+telling the agent its id and inviting it to fold that id into any
+infrastructure name it picks, so two agents' infrastructure can never
+collide on name alone. Purely a prompt addition — no new MCP tool, no new
+state to persist, nothing for `core.py` to verify, since unlike the branch
+name nothing downstream ever needs to check what the agent actually did
+with it.
+
+## 17. Close a task issue when its PR closes, not when the agent finishes
+
+- [x] Done
+
+`_finish_succeeded_issue` used to close the task issue the instant it
+opened a PR for it — before anyone had reviewed anything. Opening a PR only
+proves the agent's own part is done; the task itself isn't, until a human
+has merged (or decided to close without merging) that PR. bwsalmon/agents#54
+asked for the issue to track the PR's own close instead.
+
+**No webhook, so a poll.** docs/design.md's cron-not-webhooks stance
+(item 8) still holds, and the PR lives in the *target* repo (item 15's
+task/target split) while every label and close this deployment writes
+lives on the task issue in the *task* repo — so there's no label move to
+piggyback on either. `_finish_succeeded_issue` now records the PR against
+the issue (`state.py`'s `OpenPullRequest`: issue number, target owner/repo,
+PR number) instead of closing anything itself, and a new pass,
+`_close_finished_prs` (run between `_promote_answered_questions` and
+`_dispatch` in `run_once`, the same slot item 13's own polling pass
+occupies), checks every such record each cycle and closes the task issue
+once `GitHubClient.get_pull_request` reports that PR's own `state` as
+`"closed"` — merged or closed without merging both read that way, and
+count the same here: either means nobody is pushing more commits to it.
+`PullRequestDetail` gained the `state` field this needs, defaulted to
+`"open"` so no existing caller (none of which cared about it before this)
+needed updating.
+
+A 404 from `get_pull_request` (the target repo or the PR itself is gone —
+an operator narrowed the allowlist, or the PR was deleted outright) or from
+`close_issue` (the task issue itself is gone) is the same "stale record,
+not a reason to crash the cycle" tolerance `_requeue`/`_finish_question`
+already have; either just drops the record and logs.
+
+**A visible marker regardless of when (or whether) the issue closes.**
+bwsalmon/agents#54 also asked for a label on every task the agent
+considers its own part done with, `completed_label`
+(`AutomationConfig.completed_label`, default `"grain-agent-completed"`).
+It goes on immediately in every finishing path — `_finish_succeeded_issue`
+(the moment the PR opens), `_finish_succeeded_pr` (a PR-continuation task
+pushing more commits to a PR that already existed before the task, whose
+own lifecycle this deployment was never closing anyway), and
+`_finish_analysis` — independent of whether the issue itself ever
+auto-closes. An analysis (item 12's sibling, bwsalmon/agents#50) still
+never auto-closes at all: there is no PR whose merge or close is a natural
+"done" signal to wait on, only a summary a human should actually read
+first, so `_finish_analysis` drops `close_issue` entirely rather than
+switching it to poll anything.
+
+## 18. Give every generated PR a real description
+
+- [x] Done
+
+bwsalmon/agents#79: `_finish_succeeded_issue`'s PR body was built entirely
+from metadata it already had on hand — which task, which sandbox, a
+`Closes` line — and never said anything about what the change actually
+did, so a number of generated PRs read as description-free.
+
+**The pushed branch's own head commit message is the fix, not a new
+signal.** The agent already writes a commit message to explain its diff;
+the only gap was that nothing carried it into the PR. `GitHubClient` gains
+`get_branch_head` (`BranchHead`: `sha`, `message`), reading the same GET
+`branch_exists` already made against `/repos/{owner}/{repo}/branches/{branch}`
+— GitHub's own branch response nests the tip commit's message at
+`commit.commit.message`, so this costs no extra call over what "verify,
+don't trust" (item 2) already paid for. `_finish_succeeded_issue` calls
+this in place of `branch_exists` and leads the PR body with `head.message`,
+the `Closes <task>#<n>` line and the automation signature (item 14) kept
+below it as a `---`-separated footer rather than the whole story.
+`branch_exists` itself is untouched, still used as-is by the
+PR-continuation path (`_finish_succeeded_pr`), which opens no new PR and
+so has no body to seed.
+
+**The prompt has to ask for it.** `dispatch.py`'s `_prompt` (the
+fresh-issue dispatch; `_pr_prompt`'s PR-continuation path never triggers a
+new `create_pull_request` call, so it's unchanged) now tells the agent
+plainly that its final commit message becomes the PR description verbatim,
+and asks for a summary line plus a paragraph of explanation — the same
+shape a human would write for a reviewer, not a `git log`-only note.
+
+## 19. Auto-suggest a fix for a completed task's conflicting or failing PR
+
+- [x] Done
+
+Item 17's own poll, `_close_finished_prs`, only ever watched an open PR
+for one thing: has it closed. bwsalmon/agents#83 asked for a second thing
+to watch for while it's still open — a conflict with its base branch, or a
+failing check — and for grain to do something about it rather than leave
+it for a human to notice by hand.
+
+**Read, don't guess.** `PullRequestDetail` gained `mergeable`
+(`GitHubClient.get_pull_request` already reads the whole object; the field
+was simply never carried through before). GitHub computes it
+asynchronously, so it is `None` for a cycle or two after a push —
+`_pr_health`'s `_PrHealth.has_conflict`/`.is_broken`/`.is_clean` all treat
+`None` as "don't know yet," never as either a conflict or a clean merge. A
+new `GitHubClient.list_check_runs` (paginated the same `Link`-header way
+every other list call here is, but the one endpoint whose body is
+`{"total_count", "check_runs"}` rather than a bare array) supplies the
+other half: any completed check with conclusion `failure`/`timed_out`/
+`action_required` counts as broken; anything still `queued`/`in_progress`
+counts as pending, not broken -- a check that hasn't finished yet may
+still pass.
+
+**Suggest, don't act — the issue's own words: "needing user approval."**
+`_suggest_fix` files a *new* task issue (`GitHubClient.create_issue`, also
+new) the moment `_pr_health` reads a definite conflict or failing check,
+carrying `/repo`, `/base <the open PR's own head ref>` and `/auto-merge`
+(directives.py's new fourth directive). It's filed with
+`needs_approval_label` (`AutomationConfig.needs_approval_label`, default
+`"grain-agent-needs-approval"`) instead of `trigger_label` — a new state
+label, styled the same dark tier `awaiting_reply_label` is in
+`labels.py`, for the same reason: it's a task nobody has approved to run
+yet. `_dispatch` strips it the moment a human's `trigger_label`
+(re-)approves the task and it actually dispatches — the same "exactly one
+state label at a time" invariant every other state transition here
+already holds to. `state.open_pull_requests` gained `fix_issue` so this
+only ever happens once per PR — a second failing check on the same PR
+after a fix has already been suggested doesn't file a second one.
+
+**The stacked branch needs no new dispatch machinery at all.** A task's
+`/base` already builds its fresh branch on top of *any* named branch, not
+just a target repo's default (item 15) — so `/base <original PR's head
+ref>` already *is* a stacked PR: `_resolve_target`/`dispatch()` need no
+changes whatsoever to produce one.
+
+**Auto-merge closes the loop the issue asked for: "If approved, auto-merge
+the stacked PR with the original."** `/auto-merge` (`Directives.auto_merge`,
+threaded through `Assignment`/`Outcome` the same way `target_owner`/`base`
+already are) marks the PR `_finish_succeeded_issue` opens for that task as
+`OpenPullRequest.auto_merge`. `_close_finished_prs` merges it itself
+(`GitHubClient.merge_pull_request`, a third new client method) the moment
+`_pr_health` reads it clean — mergeable, no pending or failing check —
+instead of only ever waiting on a human to close it the way an ordinary
+task's PR does. A 405/409 (the PR went stale between the read and the
+merge attempt) is logged and retried next cycle, not raised. Deliberately
+excluded from ever getting a fix suggested for it in turn — a fix for a
+fix risks an unbounded chain — so a fix whose own PR goes wrong is left
+open, visibly, rather than escalated.
+
+## 20. Closing an issue should cancel the underlying agent
+
+- [x] Done
+
+Nothing stopped a dispatched unit from running to completion (or sitting
+until `max_runtime_minutes`) after a human closed its task issue by
+hand — bwsalmon/agents#82 asked for that work to actually stop.
+
+**No webhook, so a poll, same as item 17.** `sweeper.py`'s own docstring
+still holds ("this module knows nothing about GitHub"), so `sweep()`
+gained an optional `is_issue_closed: Callable[[int], bool] | None` hook
+instead of a `GitHubClient` of its own. It's consulted only for an
+assignment `sweep()` would otherwise leave running untouched — still
+`ACTIVE` and within budget, not one this same pass already found
+`DONE_SUCCESS`/`DONE_FAILED`/`ABSENT`/stranded, which already have a
+terminal outcome to report. That keeps the check to at most one extra
+GitHub call per still-active assignment per cycle, not one per in-progress
+issue regardless of status, and means every pre-existing caller (`None`,
+the default) sees no behaviour change and pays no extra call at all. A
+cancelled unit is reaped the same reap-then-release way a run past its
+runtime budget already is, reported through a new `SweepResult.cancelled`
+list distinct from `stranded` — `core.py`'s `_is_issue_closed` (`get_issue`
+against the task repo, `Issue` now carrying GitHub's own `state` field)
+is the hook `_sweep` wires in, and `_finish_cancelled` handles the result:
+`in_progress_label` comes off so a closed issue doesn't sit looking
+mid-flight forever, but unlike `_requeue`'s failed/stranded handling the
+trigger label never goes back on — a closed issue must not come back for
+redispatch.
+
+## 21. Stop letting an agent's own signal decide whether a PR opens
+
+- [x] Done
+
+bwsalmon/agents#89: `complete_analysis` (item 12's sibling, bwsalmon/agents#50)
+was checked *before* the branch in `_finish_succeeded_issue` and, if the
+agent had called it at all, skipped the branch check outright. That made
+the tool call and the branch two signals that could disagree, and in
+practice they did — an agent that pushed real commits and then also
+(mistakenly, the common failure mode the issue was filed over) called
+`complete_analysis` at the end had `core.py` silently drop the PR those
+commits earned, since the file-based signal won regardless of what was
+actually on the branch.
+
+**The fix is to stop trusting a self-report for something already
+verifiable.** The branch is now checked first, unconditionally, in every
+case — exactly the "verify, don't trust" bar item 2 already set for
+whether a branch exists at all, just applied one step further to whether
+the *no-PR* outcome is legitimate too. The tool (renamed `comment_on_issue`
+to match: it no longer marks a task as an analysis, it just leaves a
+comment) still records its argument to the same kind of fixed per-unit
+file `ask_question` already uses, and `core.py`'s sweep still reads it
+back, but only ever *after* `get_branch_head` has already come back empty
+— a comment can request the no-PR outcome, but only when the branch
+actually is empty; it can never override a branch that has real commits on
+it. A comment left with real commits on the branch is simply not consulted
+at all: the PR opens exactly as it would if the agent had never called the
+tool, since a pushed branch has never needed anything to explain it.
+
+An empty branch with *no* comment still requeues exactly as before item 12
+ever added an analysis path at all: "the agent said nothing and pushed
+nothing" is still a run worth retrying, not a silent success, and this
+issue never asked for that safety net to go away. `_finish_analysis`
+(the handler that used to run whenever `complete_analysis` had been called,
+branch or not) is now `_finish_no_changes`, only ever reached once the
+branch check has already ruled out a PR — its own docstring covers what
+was renamed and why.
+
+## 22. A janitor for what agents leave behind in GCP
+
+- [x] Done
+
+item 16 tells every dispatched agent to fold its own id into any
+infrastructure it creates, but that is a prompt sentence, never enforced or
+persisted anywhere `core.py` can check — nothing named what an agent
+created, and nothing ever went back to delete it. A crashed run, or a task
+that just forgot, left a GCE instance, a disk, or (for a task that used
+`grain-gemini-key`) a stranded API key sitting in the project indefinitely.
+`gemini_keys.py`'s own docstring already documents two of the narrower
+leak paths this closes: a mint that fails partway (bwsalmon/agents#104) and
+`sweeper.py`'s `_revoke_gemini_key`, which deliberately "leaves for an
+operator to clean up by hand" a key minted before `gemini_key_config` was
+removed mid-flight.
+
+`grain/automation/janitor.py`'s `run_janitor` is a new, optional pass —
+`core.py`'s `_janitor`, run from `run_once` alongside the stranded-work
+sweeper — that lists GCE instances, disks, and Gemini API keys in the
+configured project over `gcloud` (same "shell out, don't hand-roll the
+OAuth2 exchange" reasoning `gemini_keys.py`'s own docstring already gives,
+authenticated with the exact same primary service-account key) and deletes
+whichever are older than a configured TTL (default 24h). Since nothing
+actually marks a resource as agent-created, this is an exclusion list, not
+an inclusion list: it deletes anything past the TTL *except* what it can
+positively identify as grain's own core infrastructure — the host VM and
+its data disk, by the exact names Terraform gives them, and anything
+carrying this deployment's own Terraform labels (default
+`managed-by=terraform`) — never raising on a single listing or deletion
+failure, the same discipline `sweeper.py`'s own health/credential warnings
+already hold to.
+
+Off by default (`/data/config/janitor.json`'s presence is the switch, same
+shape as `gemini-key.json`); `grain controller configure --janitor-ttl-hours`
+sets it up by hand, and a Terraform-managed deployment can turn it on
+declaratively with `enable_janitor`/`janitor_ttl_hours` in `grain.tfvars`
+instead — see `terraform/gcp/variables.tf` and docs/runbook.md's "Enabling
+the janitor". It only has anything to clean up once the agent account
+already has the roles `agent_can_manage_compute_instances`/
+`enable_gemini_key` grant it — turning it on alone is a harmless no-op.
+
+## 23. A comment on a completed issue should restart it
+
+- [x] Done
+
+bwsalmon/agents#135: once a task issue carries `completed_label` (any of
+the three finish paths — a fresh PR opened, more commits pushed to an
+existing PR, or a no-branch "here's the answer" comment), it just sits
+there. A human reviewing that work who wants more done had no way to say
+so short of re-applying `trigger_label` by hand — a comment alone, even a
+maintainer's, did nothing.
+
+`core.py`'s `_restart_commented_completions` closes that gap with the same
+"poll, don't trust a webhook" shape `_promote_answered_questions` already
+uses for a reply to a question: `state.py`'s new `CompletedIssue` record
+tracks one completed issue's `list_comments` baseline, and a `run_once`
+pass diffs the current thread against it every cycle. A comment newer than
+the baseline from a `_TRUSTED_REPLY_ASSOCIATIONS` author — the same trust
+tier every other comment-triggered redispatch here already requires, so a
+random public commenter still can't restart the agent set on a whim —
+reopens the issue (`GitHubClient.reopen_issue`, the mirror image of
+`close_issue`, needed because bwsalmon/agents#54's `_close_finished_prs`
+may already have closed it once its PR closed), swaps `completed_label`
+back for `trigger_label`, and drops any `open_pull_requests` record still
+tracking that issue's old PR — otherwise a later `_close_finished_prs`
+would close the freshly reopened issue again the moment that stale PR
+itself closed, with no new work behind it.
+
+`CompletedIssue.baseline_comment_id` starts `None` rather than being
+filled in at completion time the way `PendingQuestion.question_comment_id`
+is: two of the three finish paths that apply `completed_label` never post
+a comment of their own, so there's no id finish time can hand back as "the
+highest comment on this issue right now." The first poll after completion
+primes the field from a fresh `list_comments` read instead of ever
+restarting on it — comparing on that very first read would risk treating
+either a comment already on the issue before the run even started, or (the
+third finish path's own `comment_on_issue` reply) the automation comment
+that finish path just posted, as a "new" one and restarting a task nobody
+actually asked to restart.
+
+## 24. Restart in-progress jobs that survived a lost state
+
+- [x] Done
+
+bwsalmon/agents#139: item 8's "Update" (bwsalmon/agents#51) already made
+sure a controller crash or VM restart *mid-`run_once`* can never lose an
+in-progress task, by saving `AutomationState` incrementally rather than
+once at the end — but that whole recovery path assumes the state file
+itself survives the restart. A restart that also loses `/data` (a fresh
+volume, a wiped or corrupted `state.json`, a from-scratch redeploy — what
+the issue title calls grain being "restarted or reformatted") comes back
+up with `AutomationState.assignments` empty. Every task issue still
+carrying `in_progress_label` from before that happened is now invisible to
+every existing poll: `_dispatch` only ever lists `trigger_label`, and the
+sweeper only ever looks at assignments *on disk* — so with neither in
+play, such an issue would sit `in_progress` forever with no agent actually
+working it, indistinguishable from the queue's point of view from a task
+that's simply taking a long time.
+
+`core.py`'s `_restart_orphaned_in_progress` closes that gap by treating
+GitHub's own labels as the fallback source of truth, the same "poll, don't
+trust a cache" bar every other reconciliation pass here already holds to:
+every `run_once`, it lists every issue still carrying `in_progress_label`
+and, for any one this process's own state has no assignment for, gives it
+exactly the treatment `_requeue` gives a stranded run — `in_progress_label`
+off, `trigger_label` back on, every sandbox's `agent_label` stripped since
+there's no assignment left to say which one it was — so the very next
+`_dispatch` in the same cycle picks it back up. Deliberately scoped to
+`in_progress_label` alone: `awaiting_reply_label`/`completed_label` are
+already resting states with a human reply or a later poll expected to move
+them along, not silently orphaned work in the sense this closes the gap
+on.
+
+## 25. Add a review option
+
+- [x] Done
+
+bwsalmon/agents#154: every existing task either changes code (a fresh
+branch or a `/pr`-continuation) or answers a question (`comment_on_issue`)
+— there was no way to ask the agent set to just *read* a pull request and
+leave feedback, without either pushing a competing branch or dumping one
+long comment with no attachment to specific lines.
+
+`/review true` (`directives.py`), only honoured alongside `/pr N`
+(`core.py`'s `_resolve_target` refuses it otherwise — a review has nothing
+to check out or post against without a PR number in hand), is a third
+dispatch shape alongside a fresh issue and a `/pr`-continuation:
+`dispatch.py`'s `dispatch_review` checks out the PR's own branch exactly
+`dispatch_pr` does, but `_review_prompt` tells the agent this is read-only
+— no `git push` instructions at all — and to use a new MCP tool,
+`add_review_comment`, instead. That tool (`mcp_server.py`) appends one
+piece of feedback at a time (a `path`/`line` pair to attach it to a
+specific line of the diff, or neither for a general remark) to a fixed
+per-unit JSON file, the same "only ever writes locally, `core.py` posts
+the human-facing half" shape `ask_question`/`comment_on_issue` already
+have — just accumulating instead of overwriting, since a review is
+naturally many small points rather than one.
+
+A new `TriggerKind.REVIEW` (`state.py`) carries the target PR's own number
+through to sweep time (`Assignment.pr_number`/`Outcome.pr_number`, next to
+the branch a PR assignment already carries), and `core.py`'s
+`_finish_succeeded_review` reads back whatever the agent left and posts it
+as one **draft** review (`GitHubClient.create_review`, bwsalmon/agents#154's
+addition to `github.py`) — the request carries no `event` key at all,
+which is what keeps GitHub from ever submitting it: an agent reviewing its
+own (or anyone's) code is never the one who gets to approve it, request
+changes on it, or even publish a plain comment review of it. The draft
+sits `PENDING`, visible only to the credential that created it, until a
+human opens it on github.com and submits it themselves. An agent that
+looked and found nothing worth flagging leaves the file unwritten, and
+`_finish_succeeded_review` posts no review at all rather than an empty one
+nobody asked for.
+
+## 26. Turn PR feedback into a candidate, triage-labelled task
 
 - [x] Done
 

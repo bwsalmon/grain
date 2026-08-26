@@ -8,7 +8,7 @@ from grain.proxy.audit import RecordingAuditLog
 from grain.proxy.core import GitProxy
 from grain.proxy.credentials import CredentialSet
 from grain.proxy.forward import FakeForwarder, UpstreamResponse
-from grain.proxy.tokens import SandboxTokens
+from grain.proxy.tokens import SandboxCredentialOverrides, SandboxTokens
 
 
 def _basic(token: str) -> str:
@@ -124,3 +124,94 @@ def test_no_configured_credential_is_500_not_forwarded(tmp_path):
                      query="service=git-upload-pack", headers=headers, body=None)
     assert resp.status == 500
     assert forwarder.calls == []
+
+
+# --- credential_overrides (bwsalmon/agents#52: grain-github-<name> label) -------
+
+@pytest.fixture
+def proxy_with_workflow_key(tmp_path):
+    (tmp_path / "repo-allowlist.json").write_text(json.dumps(["owner/repo"]))
+    (tmp_path / "credentials.json").write_text(json.dumps({"*": "bot"}))
+    (tmp_path / "bot.token").write_text("bot-token")
+    (tmp_path / "workflow.token").write_text("workflow-token")
+    (tmp_path / "sandbox-tokens.json").write_text(json.dumps({"sandbox-0": "tok0"}))
+    overrides_path = tmp_path / "sandbox-github-key.json"
+
+    forwarder = FakeForwarder(response=UpstreamResponse(200, {"Content-Type": "x"}, b"ok"))
+    audit = RecordingAuditLog()
+    p = GitProxy(
+        allowlist=Allowlist(tmp_path / "repo-allowlist.json"),
+        credentials=CredentialSet(tmp_path),
+        tokens=SandboxTokens(tmp_path / "sandbox-tokens.json"),
+        forwarder=forwarder,
+        audit=audit,
+        credential_overrides=SandboxCredentialOverrides(overrides_path),
+    )
+    return p, forwarder, audit, overrides_path
+
+
+def test_no_override_on_file_uses_the_normal_ladder(proxy_with_workflow_key):
+    p, forwarder, audit, _overrides_path = proxy_with_workflow_key
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 200
+    assert forwarder.calls[0]["token"] == "bot-token"
+    assert audit.entries[0]["credential"] == "bot"
+
+
+def test_an_override_for_this_sandbox_wins_over_the_ladder(proxy_with_workflow_key):
+    p, forwarder, audit, overrides_path = proxy_with_workflow_key
+    overrides_path.write_text(json.dumps({"sandbox-0": "workflow"}))
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 200
+    assert forwarder.calls[0]["token"] == "workflow-token"
+    assert audit.entries[0]["credential"] == "workflow"
+
+
+def test_an_override_for_a_different_sandbox_does_not_apply(proxy_with_workflow_key):
+    p, forwarder, audit, overrides_path = proxy_with_workflow_key
+    overrides_path.write_text(json.dumps({"sandbox-1": "workflow"}))
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 200
+    assert forwarder.calls[0]["token"] == "bot-token"
+
+
+def test_an_override_naming_an_unconfigured_credential_is_500_not_forwarded(
+    proxy_with_workflow_key,
+):
+    p, forwarder, audit, overrides_path = proxy_with_workflow_key
+    overrides_path.write_text(json.dumps({"sandbox-0": "nonexistent"}))
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 500
+    assert forwarder.calls == []
+    assert audit.entries[0]["outcome"] == "error: no credential named 'nonexistent' configured"
+
+
+def test_override_still_respects_the_allowlist(proxy_with_workflow_key):
+    p, forwarder, audit, overrides_path = proxy_with_workflow_key
+    overrides_path.write_text(json.dumps({"sandbox-0": "workflow"}))
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/unlisted-repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 403
+    assert forwarder.calls == []
+
+
+def test_override_is_re_read_on_every_request_no_restart_needed(proxy_with_workflow_key):
+    p, forwarder, audit, overrides_path = proxy_with_workflow_key
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    p.handle(method="GET", path="/owner/repo.git/info/refs",
+              query="service=git-upload-pack", headers=headers, body=None)
+    assert forwarder.calls[0]["token"] == "bot-token"
+
+    overrides_path.write_text(json.dumps({"sandbox-0": "workflow"}))
+    p.handle(method="GET", path="/owner/repo.git/info/refs",
+              query="service=git-upload-pack", headers=headers, body=None)
+    assert forwarder.calls[1]["token"] == "workflow-token"

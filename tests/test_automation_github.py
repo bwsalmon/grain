@@ -1,11 +1,68 @@
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from grain.automation.github import (
-    ApiResponse, Comment, DryRunGitHubClient, FakeTransport, GitHubClient, GitHubError,
-    PullRequest, PullRequestDetail, ReviewComment,
+    ApiResponse, BranchHead, CheckRun, Comment, DryRunGitHubClient, FakeTransport,
+    GitHubClient, GitHubError, Issue, NewReviewComment, PullRequest, PullRequestDetail,
+    RealTransport, ReviewComment,
 )
+
+
+# --- RealTransport (the one piece of `github.py` that makes a real
+# network call) -- exercised here against a real local HTTP server rather
+# than mocked, since the whole point is to check that `http.client` is
+# driven correctly (method/path/headers/body out, status/headers/body
+# back). `use_tls=False` is a real, documented configuration -- the
+# mocked-GitHub live-test seam (docs/roadmap.md item 8) -- so this is not
+# testing a code path production never takes.
+
+class _EchoHandler(BaseHTTPRequestHandler):
+    def _handle(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        _EchoHandler.last_request = {
+            "method": self.command, "path": self.path,
+            "headers": dict(self.headers), "body": body,
+        }
+        self.send_response(200)
+        self.send_header("X-Reply", "yes")
+        self.send_header("Content-Length", "5")
+        self.end_headers()
+        self.wfile.write(b"hello")
+
+    def do_GET(self):
+        self._handle()
+
+    def do_POST(self):
+        self._handle()
+
+    def log_message(self, format, *args):
+        pass
+
+
+def test_real_transport_sends_the_request_and_parses_the_response():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EchoHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        transport = RealTransport(f"127.0.0.1:{port}", use_tls=False)
+        resp = transport.request(
+            method="POST", path="/repos/acme/widgets/issues",
+            headers={"Accept": "application/vnd.github+json"}, body=b"payload",
+        )
+        assert resp.status == 200
+        assert resp.body == b"hello"
+        assert resp.headers["X-Reply"] == "yes"
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert _EchoHandler.last_request["method"] == "POST"
+    assert _EchoHandler.last_request["path"] == "/repos/acme/widgets/issues"
+    assert _EchoHandler.last_request["body"] == b"payload"
+    assert _EchoHandler.last_request["headers"]["Accept"] == "application/vnd.github+json"
 
 
 def issue_json(number: int, *, is_pr: bool = False, labels=("grain-agent",)) -> dict:
@@ -57,6 +114,23 @@ def test_list_issues_follows_link_header_pagination():
     assert transport.calls[1]["path"] == "/repos/o/r/issues?page=2"
 
 
+def test_next_page_path_returns_none_when_the_link_header_has_no_next_rel():
+    from grain.automation.github import _next_page_path
+
+    header = '<https://api.github.com/repos/o/r/issues?page=1>; rel="prev"'
+    assert _next_page_path(header) is None
+
+
+def test_next_page_path_skips_earlier_segments_to_find_next():
+    from grain.automation.github import _next_page_path
+
+    header = (
+        '<https://api.github.com/repos/o/r/issues?page=1>; rel="prev", '
+        '<https://api.github.com/repos/o/r/issues?page=3>; rel="next"'
+    )
+    assert _next_page_path(header) == "/repos/o/r/issues?page=3"
+
+
 def test_list_issues_raises_on_a_non_200():
     transport = FakeTransport(responses=[ApiResponse(403, {}, b"nope")])
     client = GitHubClient(transport, token="t")
@@ -99,6 +173,36 @@ def test_remove_label_raises_on_other_errors():
         GitHubClient(transport, token="t").remove_label("o", "r", 1, "grain-agent")
 
 
+def test_close_issue_patches_the_issue_closed():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b"{}")])
+    GitHubClient(transport, token="t").close_issue("o", "r", 1)
+    call = transport.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["path"] == "/repos/o/r/issues/1"
+    assert json.loads(call["body"]) == {"state": "closed"}
+
+
+def test_close_issue_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").close_issue("o", "r", 1)
+
+
+def test_reopen_issue_patches_the_issue_open():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b"{}")])
+    GitHubClient(transport, token="t").reopen_issue("o", "r", 1)
+    call = transport.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["path"] == "/repos/o/r/issues/1"
+    assert json.loads(call["body"]) == {"state": "open"}
+
+
+def test_reopen_issue_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").reopen_issue("o", "r", 1)
+
+
 def test_anonymous_client_sends_no_authorization_header():
     transport = FakeTransport(responses=[ApiResponse(200, {}, b"[]")])
     GitHubClient(transport, token=None).list_issues("o", "r", "grain-agent")
@@ -127,6 +231,37 @@ def test_branch_exists_raises_on_other_errors():
         GitHubClient(transport, token="t").branch_exists("o", "r", "grain/issue-1")
 
 
+def test_get_branch_head_returns_the_sha_and_message_on_200():
+    body = json.dumps(
+        {"commit": {"sha": "abc123", "commit": {"message": "Fix the thing\n\nDetails."}}}
+    ).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    head = GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1")
+    assert head == BranchHead(sha="abc123", message="Fix the thing\n\nDetails.")
+
+
+def test_get_branch_head_returns_none_on_404():
+    transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
+    assert GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1") is None
+
+
+def test_get_branch_head_raises_on_other_errors():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").get_branch_head("o", "r", "grain/issue-1")
+
+
+def test_dry_run_client_passes_get_branch_head_through():
+    body = json.dumps(
+        {"commit": {"sha": "abc123", "commit": {"message": "Fix the thing"}}}
+    ).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+    assert dry.get_branch_head("o", "r", "grain/issue-1") == BranchHead(
+        sha="abc123", message="Fix the thing"
+    )
+
+
 def test_create_pull_request_posts_head_base_and_title():
     body = json.dumps({"number": 42, "html_url": "https://github.com/o/r/pull/42"}).encode()
     transport = FakeTransport(responses=[ApiResponse(201, {}, body)])
@@ -151,6 +286,120 @@ def test_create_pull_request_raises_on_a_non_201():
         )
 
 
+def test_create_issue_posts_title_body_and_labels():
+    body = json.dumps(issue_json(9)).encode()
+    transport = FakeTransport(responses=[ApiResponse(201, {}, body)])
+    issue = GitHubClient(transport, token="t").create_issue(
+        "o", "r", title="issue 9", body="do the thing",
+        labels=["grain-agent-needs-approval"],
+    )
+    assert issue == Issue(
+        number=9, title="issue 9", body="do the thing",
+        html_url="https://github.com/o/r/issues/9",
+        labels=frozenset({"grain-agent"}),
+    )
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/r/issues"
+    sent = json.loads(call["body"])
+    assert sent["title"] == "issue 9"
+    assert sent["body"] == "do the thing"
+    assert sent["labels"] == ["grain-agent-needs-approval"]
+
+
+def test_create_issue_omits_labels_key_when_none_given():
+    transport = FakeTransport(
+        responses=[ApiResponse(201, {}, json.dumps(issue_json(9)).encode())]
+    )
+    GitHubClient(transport, token="t").create_issue("o", "r", title="issue 9")
+    assert "labels" not in json.loads(transport.calls[0]["body"])
+
+
+def test_create_issue_raises_on_a_non_201():
+    transport = FakeTransport(responses=[ApiResponse(422, {}, b"nope")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").create_issue("o", "r", title="x")
+
+
+def test_merge_pull_request_puts_to_the_merge_endpoint():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b'{"merged": true}')])
+    GitHubClient(transport, token="t").merge_pull_request("o", "r", 5)
+    call = transport.calls[0]
+    assert call["method"] == "PUT"
+    assert call["path"] == "/repos/o/r/pulls/5/merge"
+
+
+def test_merge_pull_request_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(405, {}, b"not mergeable")])
+    with pytest.raises(GitHubError) as exc:
+        GitHubClient(transport, token="t").merge_pull_request("o", "r", 5)
+    assert exc.value.status == 405
+
+
+def check_runs_json(*runs: tuple[str, str, str | None]) -> dict:
+    return {
+        "total_count": len(runs),
+        "check_runs": [
+            {"name": name, "status": status, "conclusion": conclusion}
+            for name, status, conclusion in runs
+        ],
+    }
+
+
+def test_list_check_runs_reads_the_check_run_shape():
+    transport = FakeTransport(responses=[ApiResponse(
+        200, {}, json.dumps(check_runs_json(("build", "completed", "failure"))).encode(),
+    )])
+    runs = GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+    assert runs == [CheckRun(name="build", status="completed", conclusion="failure")]
+    assert transport.calls[0]["path"] == "/repos/o/r/commits/feature-x/check-runs?per_page=100"
+
+
+def test_list_check_runs_tolerates_a_still_running_check_with_no_conclusion():
+    transport = FakeTransport(responses=[ApiResponse(
+        200, {}, json.dumps(check_runs_json(("build", "in_progress", None))).encode(),
+    )])
+    runs = GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+    assert runs == [CheckRun(name="build", status="in_progress", conclusion=None)]
+
+
+def test_list_check_runs_follows_link_header_pagination():
+    transport = FakeTransport(responses=[
+        ApiResponse(
+            200,
+            {"Link": '<https://api.github.com/repos/o/r/commits/feature-x/check-runs?page=2>; rel="next"'},
+            json.dumps(check_runs_json(("a", "completed", "success"))).encode(),
+        ),
+        ApiResponse(200, {}, json.dumps(check_runs_json(("b", "completed", "success"))).encode()),
+    ])
+    runs = GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+    assert [r.name for r in runs] == ["a", "b"]
+
+
+def test_list_check_runs_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").list_check_runs("o", "r", "feature-x")
+
+
+def test_get_pull_request_reads_mergeable():
+    body = pr_json(5)
+    body["mergeable"] = False
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(body).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.mergeable is False
+
+
+def test_get_pull_request_defaults_mergeable_to_none_when_absent():
+    """`None` is GitHub's own "still computing" answer, and also what a
+    fixture missing the key entirely should read as -- never guessed at as
+    either clean or conflicted.
+    """
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(pr_json(5)).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.mergeable is None
+
+
 # --- PR read path (docs/roadmap.md item 9) --------------------------------
 
 def pr_json(number: int, *, head_ref: str = "feature-branch", base_ref: str = "main") -> dict:
@@ -169,8 +418,31 @@ def test_get_pull_request_reads_head_and_base_ref():
         number=5, title="pr 5", body="please review",
         html_url="https://github.com/o/r/pull/5",
         head_ref="feature-branch", base_ref="main",
+        state="open",
     )
     assert transport.calls[0]["path"] == "/repos/o/r/pulls/5"
+
+
+def test_get_pull_request_reads_a_closed_state():
+    """`state` (bwsalmon/agents#54) is what `core.py`'s `_close_finished_prs`
+    polls to decide whether a task issue's PR is done -- "closed" covers
+    both merged and closed-without-merging, both read this way by GitHub.
+    """
+    body = pr_json(5)
+    body["state"] = "closed"
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(body).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.state == "closed"
+
+
+def test_get_pull_request_defaults_state_to_open_when_absent():
+    # A fixture (or, in principle, a very old cached response) missing the
+    # "state" key entirely must not KeyError -- every real GitHub response
+    # for this endpoint has always included it, but there's no reason to
+    # make that a hard requirement when a safe default exists.
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps(pr_json(5)).encode())])
+    pr = GitHubClient(transport, token="t").get_pull_request("o", "r", 5)
+    assert pr.state == "open"
 
 
 def test_get_pull_request_raises_on_a_non_200():
@@ -344,7 +616,10 @@ def test_create_comment_raises_on_a_non_201():
         GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question")
 
 
-def test_create_issue_posts_title_body_and_labels():
+def test_create_issue_posts_the_feedback_triage_shape():
+    # bwsalmon/agents#24: `_file_feedback_task` always passes an explicit
+    # body and a single triage_label -- distinct from bwsalmon/agents#83's
+    # own create_issue call, covered above, which uses needs_approval_label.
     transport = FakeTransport(responses=[ApiResponse(201, {}, json.dumps({
         "number": 12, "title": "Feedback on o/code#5: rename this",
         "body": "/repo o/code\n/pr 5\n\n...", "html_url": "https://github.com/o/tasks/issues/12",
@@ -365,12 +640,44 @@ def test_create_issue_posts_title_body_and_labels():
     }
 
 
-def test_create_issue_raises_on_a_non_201():
-    transport = FakeTransport(responses=[ApiResponse(422, {}, b"nope")])
+def test_create_review_posts_a_draft_with_no_event_key():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps({"id": 321}).encode())])
+    review_id = GitHubClient(transport, token="t").create_review(
+        "o", "r", 5, body="looks good overall",
+        comments=[NewReviewComment(path="src/thing.py", line=12, body="nit: typo")],
+    )
+    assert review_id == 321
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/r/pulls/5/reviews"
+    payload = json.loads(call["body"])
+    assert "event" not in payload
+    assert payload["body"] == "looks good overall"
+    assert payload["comments"] == [
+        {"path": "src/thing.py", "line": 12, "body": "nit: typo"}
+    ]
+
+
+def test_create_review_with_no_inline_comments_posts_an_empty_list():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps({"id": 1}).encode())])
+    GitHubClient(transport, token="t").create_review("o", "r", 5, body="LGTM")
+    assert json.loads(transport.calls[0]["body"])["comments"] == []
+
+
+def test_create_review_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(422, {}, b"unprocessable")])
     with pytest.raises(GitHubError):
-        GitHubClient(transport, token="t").create_issue(
-            "o", "tasks", title="x", body="y", labels=["triage needed"],
-        )
+        GitHubClient(transport, token="t").create_review("o", "r", 5, body="x")
+
+
+def test_dry_run_client_prints_the_review_instead_of_posting_it(capsys):
+    inner = GitHubClient(FakeTransport(), token="t")
+    review_id = DryRunGitHubClient(inner).create_review(
+        "o", "r", 5, body="looks good",
+        comments=[NewReviewComment(path="a.py", line=1, body="nit")],
+    )
+    assert review_id == 0
+    assert "draft review on o/r#5" in capsys.readouterr().out
 
 
 def test_dry_run_client_passes_pr_reads_through(capsys):
@@ -406,16 +713,40 @@ def test_dry_run_client_passes_reads_through_but_prints_mutations(capsys):
 
     dry.add_label("o", "r", 1, "grain-agent-in-progress")
     dry.remove_label("o", "r", 1, "grain-agent")
+    dry.close_issue("o", "r", 1)
+    dry.reopen_issue("o", "r", 1)
     pr = dry.create_pull_request("o", "r", head="grain/issue-1", base="main", title="x")
     out = capsys.readouterr().out
     assert "add label" in out
     assert "remove label" in out
+    assert "close issue" in out
+    assert "reopen issue" in out
     assert "open PR" in out
     assert isinstance(pr, PullRequest)
     # Only the three reads (list_issues, get_issue, branch_exists) actually
-    # reached the transport — every mutation, including PR creation, only
-    # printed.
+    # reached the transport — every mutation, including PR creation,
+    # closing and reopening the issue, only printed.
     assert len(transport.calls) == 3
+
+
+def test_dry_run_client_passes_check_runs_through_but_prints_issue_and_merge(capsys):
+    transport = FakeTransport(responses=[
+        ApiResponse(200, {}, json.dumps(check_runs_json(("build", "completed", "success"))).encode()),
+    ])
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+
+    runs = dry.list_check_runs("o", "r", "feature-x")
+    assert [r.name for r in runs] == ["build"]
+
+    issue = dry.create_issue("o", "r", title="fix it", labels=["grain-agent-needs-approval"])
+    dry.merge_pull_request("o", "r", 5)
+    out = capsys.readouterr().out
+    assert "file issue" in out
+    assert "merge PR" in out
+    assert isinstance(issue, Issue)
+    # Only the check-runs read reached the transport -- both mutations only
+    # printed.
+    assert len(transport.calls) == 1
 
 
 def test_dry_run_client_passes_list_comments_through_but_prints_create_comment(capsys):

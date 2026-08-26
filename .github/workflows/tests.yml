@@ -1,0 +1,67 @@
+# The unit suite, on every pull request and every push to main.
+#
+# Runs the whole of `tests/` unscoped, which is safe here and only here:
+# the live suites gate themselves on `/dev/kvm`, `qemu:///system`, a
+# `br-grain` bridge and a reachable netfilter, none of which a hosted
+# runner has, so they skip rather than run. The README's warning that an
+# unscoped `pytest` will destroy a running cluster is about a host that
+# has one up -- a fresh runner has nothing to destroy. Scoping the run to
+# a hand-maintained file list instead would just mean a new unit suite
+# silently going untested the day someone forgets to add it.
+#
+# Nothing here holds a credential: `contents: read`, no secrets, no
+# environment. That is deliberate rather than incidental. `pull_request`
+# runs code from the PR's own branch before any human has read it, so
+# this job is only safe to trigger that way for as long as it has nothing
+# worth stealing -- the same argument the config repo's plan.yml makes for
+# never authenticating a plan-on-PR job.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Superseded runs on a branch are dead weight; a merge to main is the
+# record of what shipped, so let those finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pytest:
+    name: unit tests (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One version failing is a fact worth having about the other.
+      fail-fast: false
+      matrix:
+        # The floor `pyproject.toml` declares and the current release --
+        # the stock interpreters on Debian 12 and 13, which is what the
+        # host this deploys to actually is.
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # grain declares no dependencies and means it -- stdlib only, so it
+      # runs on a stock Debian host with nothing installed. pytest is the
+      # single build-time exception, and pinning the major line keeps a
+      # future release's collection changes from turning CI red on a
+      # commit that touched nothing.
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
+
+      # `python -m pytest`, not `pytest`: the module form puts the
+      # repository root on `sys.path`, which is how `import grain`
+      # resolves without installing the package first. The bare console
+      # script does not, and every test module fails to collect.
+      - name: Run the unit suite
+        run: python -m pytest

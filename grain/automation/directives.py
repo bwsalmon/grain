@@ -12,11 +12,36 @@ request is opened. This module is the parser for how a task says so.
                          instead of starting a fresh branch
     /base develop        optional: PR base override, instead of the target
                          repo's own default branch
+    /auto-merge true     optional: once this task's own PR is opened, merge
+                         it straight into `base` instead of leaving it for a
+                         human to review -- see `core.py`'s `_suggest_fix`
+                         (bwsalmon/agents#83), the only thing that writes
+                         this directive today, for why a task would ever
+                         want that
+  /review true         optional: instead of continuing the work on `/pr`'s
+                         branch, read it and leave inline feedback -- see
+                         `core.py`'s `ResolvedTask.review` (bwsalmon/agents#154)
+                         for what this changes about the dispatch. Requires
+                         `/pr` on the same task: a review has nothing to
+                         attach comments to without one, and "which branch"
+                         is exactly what a bare `/review` (with no PR to
+                         name it) would leave ambiguous.
 
 A body line, not a label: a `repo:owner/name` label would have to exist in
 the task repo before it could be applied, is awkward to create once per
 target, and could not carry a PR number or a base branch besides. One
 mechanism covers all three.
+
+A short-lived Gemini API key (bwsalmon/agents#47) is *not* one of these:
+it is asked for with the `grain-gemini-key` label on the task issue, not a
+body line -- `core.py`'s `_resolve_target` reads `issue.labels` directly,
+the same way it already reads the trigger label itself, rather than a
+directive parsed out of the text here. See bwsalmon/agents#49 for why: a
+label is the same "a human decided this, not the issue's own untrusted
+text" gate the trigger label already is, so it needs no `/gemini-key`
+directive to carry that trust across a reply the way `/repo`/`/pr`/`/base`
+still do -- unlike them, it carries no *value* a label couldn't equally
+well carry.
 
 **Where directives are read from.** The issue body, plus the bodies of
 comments from *trusted* authors (`core.py`'s `_TRUSTED_REPLY_ASSOCIATIONS`
@@ -47,11 +72,11 @@ from typing import Sequence
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # A directive line: `/name value`, optionally indented, nothing after the
-# value. Only the three names below are directives — any other `/...` line
-# is left alone (a prose line starting with an absolute path, a Markdown
-# list of shell commands), which is why the name is matched from a fixed
-# set here rather than by shape.
-_DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base)\s+(\S+)\s*$")
+# value. Only the names below are directives — any other `/...` line is
+# left alone (a prose line starting with an absolute path, a Markdown list
+# of shell commands), which is why the name is matched from a fixed set
+# here rather than by shape.
+_DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base|auto-merge|review)\s+(\S+)\s*$")
 
 
 @dataclass(frozen=True)
@@ -89,6 +114,17 @@ class Directives:
     target: RepoRef | None = None
     pr: int | None = None
     base: str | None = None
+    # Presence-only, so any value on the line counts -- there is no way to
+    # write a directive line that unsets a flag once it's on, the same
+    # "sticky" shape a label would have. `_apply` therefore ORs across
+    # texts rather than letting a later one override to False.
+    auto_merge: bool = False
+    # bwsalmon/agents#154: the identical presence-only, sticky shape as
+    # `auto_merge` above, for `/review`. `core.py`'s `_resolve_target` is
+    # what actually refuses this without a `/pr` alongside it -- this
+    # parser has no concept of "requires another directive," only of what
+    # was written.
+    review: bool = False
 
 
 class DirectiveError(ValueError):
@@ -145,6 +181,8 @@ def _parse_one(text: str) -> Directives:
         target=RepoRef.parse(found["repo"], what="`/repo`") if "repo" in found else None,
         pr=_parse_pr(found["pr"]) if "pr" in found else None,
         base=found["base"] if "base" in found else None,
+        auto_merge="auto-merge" in found,
+        review="review" in found,
     )
 
 
@@ -163,4 +201,6 @@ def _apply(base: Directives, override: Directives) -> Directives:
         target=override.target if override.target is not None else base.target,
         pr=override.pr if override.pr is not None else base.pr,
         base=override.base if override.base is not None else base.base,
+        auto_merge=override.auto_merge or base.auto_merge,
+        review=override.review or base.review,
     )

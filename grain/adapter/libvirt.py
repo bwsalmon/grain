@@ -33,7 +33,7 @@ import ipaddress
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..inventory import Cluster, Role, VmSpec
+from ..inventory import CONTROLLER_IP_PLACEHOLDER, Cluster, Role, VmSpec
 from ..run import Runner
 from .base import HostAdapter, Network, VmInfo, VmState
 
@@ -66,12 +66,21 @@ def mac_for(address: ipaddress.IPv4Address) -> str:
 
 
 def render_domain_xml(cluster: Cluster, spec: VmSpec, disk_path: Path,
-                       seed_path: Path) -> str:
+                       seed_path: Path, console_log_path: Path) -> str:
     """Render the libvirt domain XML for one VM. Pure; no side effects.
 
     Written as an f-string rather than via a library, for the same reason
     `lima.py` rendered YAML by hand: the adapter has no dependencies beyond
     the standard library.
+
+    `console_log_path` gives the guest's serial console a `<log>` sink on
+    the *host* (bwsalmon/agents#58) — without it, the `pty` console is only
+    reachable interactively via `virsh console`, so nothing the guest ever
+    prints to it (in the controller's case, its journal, once
+    provision/controller.sh turns on `ForwardToConsole`) survives past that
+    one session. `append='on'` matches how this repo's own audit logs
+    behave (grain/automation/audit.py's `FileAuditLog`) — content
+    accumulates rather than resetting on every VM start.
     """
     address = cluster.address_of(spec.name)
     iface = cluster.interface_of(spec.name)
@@ -118,6 +127,7 @@ def render_domain_xml(cluster: Cluster, spec: VmSpec, disk_path: Path,
     </interface>
     <console type='pty'>
       <target type='serial' port='0'/>
+      <log file='{console_log_path}' append='on'/>
     </console>
   </devices>
 </domain>
@@ -150,16 +160,22 @@ def render_meta_data(name: str, ssh_public_keys: Sequence[str] = ()) -> str:
     return meta
 
 
-def render_user_data(provision_script: str | None) -> str:
+def render_user_data(provision_script: str | None, cluster: Cluster) -> str:
     """A raw shebang script is a valid NoCloud user-data payload as-is —
     cloud-init's scripts-user module runs it directly at first boot, the
     same shape `docs/design.md` already used for the Lima provisioning
     stanza. With nothing to run, an empty cloud-config is still a valid
     NoCloud user-data file.
+
+    Substitutes `CONTROLLER_IP_PLACEHOLDER` for this cluster's actual
+    controller address, so a script like provision/controller.sh binds to
+    the right address on any subnet, not only the default.
     """
-    if provision_script:
-        return provision_script
-    return "#cloud-config\n{}\n"
+    if not provision_script:
+        return "#cloud-config\n{}\n"
+    return provision_script.replace(
+        CONTROLLER_IP_PLACEHOLDER, str(cluster.controller_ip)
+    )
 
 
 def render_network_config(cluster: Cluster, spec: VmSpec) -> str:
@@ -188,10 +204,33 @@ class LibvirtAdapter(HostAdapter):
     def __init__(self, cluster: Cluster, runner: Runner, network: Network,
                  config_dir: Path | None = None,
                  admin_public_key_path: Path | None = None,
-                 controller_public_key_path: Path | None = None) -> None:
+                 controller_public_key_path: Path | None = None,
+                 apparmor_rules_path: Path | None = None,
+                 selinux_marker_path: Path | None = None) -> None:
         super().__init__(cluster, network)
         self.runner = runner
         self.config_dir = config_dir or Path("/var/lib/grain/instances")
+        # Debian's libvirt-daemon-system ships an AppArmor profile for qemu
+        # that only allows the default /var/lib/libvirt/images/ path (plus
+        # a couple of others) -- found live: a VM whose disk lived at
+        # config_dir's own default, a custom path, failed to start with
+        # "Cannot access storage file ... Permission denied", not an
+        # ownership problem (dynamic_ownership had already corrected that)
+        # but AppArmor denying the open() before permissions are even
+        # checked. This is the extension point Debian/Ubuntu ship
+        # specifically so a package upgrade doesn't clobber admin-added
+        # rules. Injectable for the same reason config_dir/the key paths
+        # are: a test points it at a tmp_path instead of a real system file.
+        self.apparmor_rules_path = (
+            apparmor_rules_path
+            or Path("/etc/apparmor.d/local/abstractions/libvirt-qemu")
+        )
+        # Existence, not content, is the whole check -- a real SELinux
+        # enforce/permissive system always has this kernel-exposed
+        # directory; a system with SELinux not built in doesn't. Injectable
+        # for the same reason apparmor_rules_path is: a test shouldn't
+        # depend on whether the machine actually running it has SELinux.
+        self.selinux_marker_path = selinux_marker_path or Path("/sys/fs/selinux")
         # Both host-local, deliberately not /data/secrets/... — /data lives
         # on the *controller* VM, and this adapter runs on the *host*, a
         # different machine (docs/design.md, "One host machine runs
@@ -219,12 +258,89 @@ class LibvirtAdapter(HostAdapter):
             controller_public_key_path or Path("/var/lib/grain/controller-ssh.pub")
         )
 
+    def _ensure_apparmor_allows(self, *dirs: Path) -> None:
+        """No-op if AppArmor's local-abstractions directory doesn't exist at
+        all -- not every host runs AppArmor. Idempotent otherwise: skips
+        whichever of `dirs` is already allowlisted, so a normal three-VM
+        bootstrap (controller, two sandboxes) does at most one real write.
+        """
+        if not self.apparmor_rules_path.parent.is_dir():
+            return
+        existing = (
+            self.apparmor_rules_path.read_text()
+            if self.apparmor_rules_path.exists() else ""
+        )
+        missing = [d for d in dirs if str(d) not in existing]
+        if not missing:
+            return
+        addition = "".join(f"  {d}/*.qcow2 rwk,\n  {d}/*.iso rk,\n" for d in missing)
+        self.runner.run(["tee", "-a", str(self.apparmor_rules_path)],
+                         stdin=addition, check=True)
+        self.runner.run(["systemctl", "reload", "apparmor"], check=False)
+
+    def _confinement_dirs_for(self, spec: VmSpec) -> tuple[Path, ...]:
+        # spec.image is normally a real absolute path (the README: "name
+        # the real path... via --image or cluster.toml"), but Cluster's own
+        # bare-string default ("debian-12") resolves to a meaningless "."
+        # -- not worth allowlisting, and neither AppArmor rules nor SELinux
+        # file contexts apply to relative paths anyway.
+        image_dir = Path(spec.image).parent
+        return (self.config_dir, image_dir) if image_dir.is_absolute() else (self.config_dir,)
+
+    def _ensure_selinux_allows(self, *dirs: Path) -> None:
+        """Found live: the actual confining layer on a real deployment
+        turned out to be SELinux, not AppArmor -- confirmed two ways in
+        the same failure: the journal entry carried
+        `_SELINUX_CONTEXT: "libvirtd (enforce)"`, and the per-VM AppArmor
+        profile itself was reported as `profile="unconfined"` (a real,
+        valid AppArmor state meaning no AppArmor restriction applies at
+        all). The AppArmor allowlist above was correctly implemented and
+        genuinely executed -- reloading confirmed in the log -- it was
+        just fixing an inactive layer.
+
+        sVirt (libvirt's SELinux integration) auto-assigns each VM's qemu
+        process a dynamic MCS category at start time, the same way
+        dynamic_ownership auto-chowns -- but only for files already
+        carrying the base `virt_image_t` type, which the packaged policy
+        only pre-labels for the default /var/lib/libvirt/images. A custom
+        path needs that base type set by hand. No-op if SELinux isn't
+        active at all (checked at the kernel level, not by looking for
+        userland tools -- those are already installed if enforce mode is
+        active in the first place, since something had to have set it up).
+        """
+        if not self.selinux_marker_path.is_dir():
+            return
+        for d in dirs:
+            self.runner.run(["chcon", "-R", "-t", "virt_image_t", str(d)], check=True)
+
+    def _ensure_dac_allows(self, *dirs: Path) -> None:
+        """Found live: libvirt's own `dynamic_ownership` is supposed to
+        auto-chown a domain's disk/seed files to the uid:gid qemu actually
+        runs as -- an unprivileged account (uid:gid 64055 in the failing
+        deploy, almost certainly "libvirt-qemu"; qemu.conf never named it
+        explicitly, so libvirt resolved it on its own) -- but empirically
+        never did. Real diagnostics from that deploy showed config_dir
+        still root:root 0700 and every file in it still root:root 0600,
+        right through a failed `virsh start`. Three straight MAC fixes
+        (AppArmor, then SELinux) never touched this error because it was
+        never a MAC problem -- plain Unix permissions were the actual
+        blocker the whole time, unconditionally on every POSIX host, so
+        unlike the two calls above this one has no "is the subsystem even
+        present" guard to skip. Stop relying on libvirt's own relabeling
+        for this the same way those two stopped relying on it for MAC:
+        grant access directly, ourselves.
+        """
+        for d in dirs:
+            self.runner.run(["chmod", "-R", "o+rwX", str(d)], check=True)
+
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
         if self.state(spec.name) is not VmState.ABSENT:
             raise RuntimeError(
                 f"{spec.name} already exists; use recreate() to replace it"
             )
+        dirs = self._confinement_dirs_for(spec)
+        self._ensure_apparmor_allows(*dirs)
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
         disk_path = self.config_dir / f"{spec.name}.qcow2"
@@ -232,6 +348,11 @@ class LibvirtAdapter(HostAdapter):
             ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
              "-b", spec.image, str(disk_path), f"{spec.disk_gb}G"]
         )
+        # After config_dir exists and disk_path is a real file, not before
+        # -- chcon -R on a directory that doesn't exist yet silently does
+        # nothing (start()'s own call still covers it either way, but no
+        # reason to rely on that as the only path).
+        self._ensure_selinux_allows(*dirs)
 
         meta_data_path = self.config_dir / f"{spec.name}-meta-data"
         user_data_path = self.config_dir / f"{spec.name}-user-data"
@@ -250,7 +371,7 @@ class LibvirtAdapter(HostAdapter):
         # for automation dispatch. See __init__'s docstring.
         keys = [admin_key] if spec.role is Role.CONTROLLER else [admin_key, controller_key]
         meta_data_path.write_text(render_meta_data(spec.name, keys))
-        user_data_path.write_text(render_user_data(provision_script))
+        user_data_path.write_text(render_user_data(provision_script, self.cluster))
         network_config_path.write_text(render_network_config(self.cluster, spec))
 
         seed_path = self.config_dir / f"{spec.name}-seed.iso"
@@ -259,11 +380,30 @@ class LibvirtAdapter(HostAdapter):
              str(seed_path), str(user_data_path), str(meta_data_path)]
         )
 
+        console_log_path = self.config_dir / f"{spec.name}-console.log"
         xml_path = self.config_dir / f"{spec.name}.xml"
-        xml_path.write_text(render_domain_xml(self.cluster, spec, disk_path, seed_path))
+        xml_path.write_text(
+            render_domain_xml(self.cluster, spec, disk_path, seed_path, console_log_path)
+        )
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "define", str(xml_path)])
 
+        # After every file this VM needs exists -- unlike the SELinux call
+        # above (which only has to reach the qcow2 file, created earlier),
+        # this has to cover the seed ISO too, or a start right after
+        # create() would just fail on that file instead.
+        self._ensure_dac_allows(*dirs)
+
     def start(self, name: str) -> None:
+        # Found live: create()'s own allowlisting isn't enough on its own --
+        # a VM already defined from an earlier attempt (predating this
+        # fix, or from a previous deploy generation) skips create()
+        # entirely and comes straight here, so the same checks have to run
+        # wherever a VM can actually be started, not just where it can be
+        # created. Cheap and idempotent either way.
+        dirs = self._confinement_dirs_for(self.cluster.spec_of(name))
+        self._ensure_apparmor_allows(*dirs)
+        self._ensure_selinux_allows(*dirs)
+        self._ensure_dac_allows(*dirs)
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "start", name])
 
     def stop(self, name: str) -> None:
@@ -279,7 +419,7 @@ class LibvirtAdapter(HostAdapter):
         # remove them ourselves (verified: it leaves them behind otherwise).
         self.runner.run(["virsh", "-c", LIBVIRT_URI, "undefine", name, "--nvram"], check=False)
         for suffix in (".qcow2", "-seed.iso", "-meta-data", "-user-data",
-                       "-network-config", ".xml"):
+                       "-network-config", ".xml", "-console.log"):
             (self.config_dir / f"{name}{suffix}").unlink(missing_ok=True)
 
     def state(self, name: str) -> VmState:
