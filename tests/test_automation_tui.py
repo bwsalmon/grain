@@ -24,7 +24,8 @@ def record(issue=1, kind=TriggerKind.ISSUE, sandbox="sandbox-0", outcome="succee
 def test_kind_filter_cycles_through_all_values():
     assert KindFilter.ALL.next() is KindFilter.ISSUE
     assert KindFilter.ISSUE.next() is KindFilter.PR
-    assert KindFilter.PR.next() is KindFilter.ALL
+    assert KindFilter.PR.next() is KindFilter.REVIEW
+    assert KindFilter.REVIEW.next() is KindFilter.ALL
 
 
 def test_outcome_filter_cycles_through_all_values():
@@ -52,6 +53,15 @@ def test_visible_filters_by_kind():
         record(issue=2, kind=TriggerKind.PR),
     ])
     state.kind_filter = KindFilter.PR
+    assert [r.issue for r in state.visible()] == [2]
+
+
+def test_visible_filters_by_review_kind():
+    state = SessionListState(records=[
+        record(issue=1, kind=TriggerKind.PR),
+        record(issue=2, kind=TriggerKind.REVIEW),
+    ])
+    state.kind_filter = KindFilter.REVIEW
     assert [r.issue for r in state.visible()] == [2]
 
 

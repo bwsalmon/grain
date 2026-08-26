@@ -314,6 +314,17 @@ def comment_path(unit: str) -> str:
     return f"{_unit_dir(unit)}/comment.txt"
 
 
+def review_path(unit: str) -> str:
+    """The fixed path `mcp_server.py`'s `add_review_comment` tool appends
+    to, and `core.py`'s sweep reads back after a unit finishes
+    (bwsalmon/agents#154) -- the same "compute once, share" shape
+    `question_path`/`comment_path` already use, and reset the same way at
+    the start of every dispatch to this sandbox so review comments from an
+    earlier, unrelated task can never be misread as belonging to this one.
+    """
+    return f"{_unit_dir(unit)}/review.json"
+
+
 def branch_name(issue: int) -> str:
     """The exact branch a dispatch for this issue must push to.
 
@@ -627,6 +638,62 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
     )
 
 
+def _review_prompt(pr: PullRequestDetail, workspace: str, *, task_repo: str = "",
+                    target_repo: str = "", task_issue: int | None = None,
+                    agent_id_value: str = "", gemini_key: bool = False,
+                    gcp_key: bool = False, self_debug: bool = False,
+                    self_repair: bool = False) -> str:
+    """A `/review`-directed dispatch (bwsalmon/agents#154): unlike
+    `_pr_prompt`, the job is to *read* the PR's branch and leave feedback,
+    never to push commits to it -- so this omits every "commit and push"
+    instruction `_prompt`/`_pr_prompt` end on, and tells the agent about
+    `add_review_comment` instead. `task_issue`/`agent_id_value`/
+    `gemini_key`/`gcp_key`/`self_debug`/`self_repair` are all `_pr_prompt`'s
+    own parameters of the same names, unchanged.
+    """
+    task_line = (
+        f"This review was requested by {task_repo}#{task_issue}, the task "
+        f"queue entry for it — a different repository from the one you are "
+        f"reading, and where any conversation with a human happens.\n\n"
+        if task_issue is not None else ""
+    )
+    gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
+    gcp_key_section = f"{_gcp_key_line()}\n\n" if gcp_key else ""
+    self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
+    self_repair_section = f"{_self_repair_line()}\n\n" if self_repair else ""
+    return (
+        f"You are reviewing pull request {target_repo}#{pr.number}: {pr.title}\n\n"
+        f"{pr.body}\n\n"
+        f"PR URL: {pr.html_url}\n\n"
+        f"{task_line}"
+        f"A clone of {target_repo} is already checked out at {workspace} in "
+        f"your assigned sandbox, on the PR's branch ({pr.head_ref!r}), with "
+        f"its git remote already configured. This is a REVIEW task, not a "
+        f"fix -- read the changes this PR makes against its base branch "
+        f"({pr.base_ref!r}; `git diff origin/{pr.base_ref}...HEAD` from the "
+        "workspace shows exactly what it changes) and form an opinion of "
+        "them. Do not push any commits, and do not modify the checkout as "
+        "a way of demonstrating a fix -- if you see something worth "
+        "changing, describe it as review feedback instead.\n\n"
+        f"{_agent_id_line(agent_id_value)}\n\n"
+        f"{gemini_key_section}"
+        f"{gcp_key_section}"
+        f"{self_debug_section}"
+        f"{self_repair_section}"
+        "Use the add_review_comment tool to leave feedback -- once per "
+        "point: give path and line to attach a comment to a specific line "
+        "of a specific file in the diff, or omit both for a general "
+        "remark. Call it as many times as you have things to say, "
+        "including zero times if you looked and genuinely have no "
+        "feedback to leave. Everything you leave this way is collected "
+        "into a single draft review on the pull request once you finish -- "
+        "nothing is posted immediately, and nothing is visible to anyone "
+        "until a human opens the draft and submits it themselves. You have "
+        "no GitHub API access from here, so do not attempt to comment on "
+        "or review the PR directly."
+    )
+
+
 def _credential_line(remote_url: str, token: str) -> str:
     """One `git-credential-store` line covering the proxy's origin.
 
@@ -799,7 +866,7 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
 
 
 def _mcp_config_json(target: SandboxTarget, question_path_value: str,
-                      comment_path_value: str, task_unit: str, *,
+                      comment_path_value: str, review_path_value: str, task_unit: str, *,
                       self_debug: bool = False,
                       self_repair: bool = False) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
@@ -813,6 +880,8 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
     the question text; where it lands is decided here, not by the tool
     call. `comment_path_value` is the identical treatment for
     `comment_on_issue` (bwsalmon/agents#50, bwsalmon/agents#89).
+    `review_path_value` is the same again for `add_review_comment`
+    (bwsalmon/agents#154).
     `self_debug` (bwsalmon/agents#62) is `dispatch()`'s own record of
     whether this task's issue carried `self_debug_label` -- true only then
     does `mcp_server.py` get `--self-debug`, which is what makes it
@@ -832,6 +901,7 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
         "--workspace", target.workspace,
         "--question-path", question_path_value,
         "--comment-path", comment_path_value,
+        "--review-path", review_path_value,
         "--task-unit", task_unit,
     ]
     if self_debug:
@@ -870,6 +940,7 @@ _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
     "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__comment_on_issue,"
+    "mcp__grain-sandbox__add_review_comment,"
     # bwsalmon/agents#62/#86: pre-approved unconditionally, same as every
     # other tool name here -- harmless on a task that never turns any of
     # these on, since `mcp_server.py` only advertises (and answers) this
@@ -957,10 +1028,15 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     # (bwsalmon/agents#50): a leftover comment from an earlier dispatch to
     # this sandbox must never be misread as belonging to this one.
     controller_runner.run(["sudo", "rm", "-f", c_path])
+    r_path = review_path(unit)
+    # Same reset discipline again, for the same reason (bwsalmon/agents#154):
+    # leftover review comments from an earlier dispatch to this sandbox must
+    # never be posted as part of this one's review.
+    controller_runner.run(["sudo", "rm", "-f", r_path])
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path, c_path, unit,
+        stdin=_mcp_config_json(target, q_path, c_path, r_path, unit,
                                 self_debug=self_debug,
                                 self_repair=self_repair),
     )
@@ -1094,6 +1170,37 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                    task_issue=task_issue, agent_id_value=agent_id(),
                    gemini_key=gemini_key is not None, gcp_key=gcp_key is not None,
                    self_debug=self_debug, self_repair=self_repair),
+        remote_url=remote_url, token=token, branch=pr.head_ref, gemini_key=gemini_key,
+        gcp_key=gcp_key, self_debug=self_debug, self_repair=self_repair,
+    )
+
+
+def dispatch_review(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
+                     target: SandboxTarget, pr: PullRequestDetail, *, remote_url: str,
+                     token: str, task_repo: str = "", target_repo: str = "",
+                     task_issue: int | None = None, gemini_key: str | None = None,
+                     gcp_key: str | None = None, self_debug: bool = False,
+                     self_repair: bool = False) -> str:
+    """Starts a `/review`-directed dispatch (bwsalmon/agents#154): the same
+    mechanism `dispatch_pr()` is, on the same branch (`pr.head_ref`), but
+    with `_review_prompt` instead of `_pr_prompt` -- the agent is asked to
+    read the PR and leave feedback via `add_review_comment`, never to push
+    to it. Unlike `dispatch_pr`, this takes no inline review comments or
+    thread comments to render into the prompt: a review dispatch reads the
+    PR fresh rather than responding to feedback already on it, so there is
+    no prior conversation to show it here (`task_repo`/`task_issue` are
+    still passed through, for the one line of context naming which task
+    asked for this review).
+
+    Every other parameter is `dispatch_pr()`'s own parameter of the same
+    name, unchanged.
+    """
+    return _start_task(
+        sandbox_runner, controller_runner, sandbox, target,
+        _review_prompt(pr, target.workspace, task_repo=task_repo, target_repo=target_repo,
+                        task_issue=task_issue, agent_id_value=agent_id(),
+                        gemini_key=gemini_key is not None, gcp_key=gcp_key is not None,
+                        self_debug=self_debug, self_repair=self_repair),
         remote_url=remote_url, token=token, branch=pr.head_ref, gemini_key=gemini_key,
         gcp_key=gcp_key, self_debug=self_debug, self_repair=self_repair,
     )

@@ -121,6 +121,12 @@ class Outcome:
     # instant `_release` below calls `state.release`.
     kind: TriggerKind = TriggerKind.ISSUE
     branch: str | None = None
+    # bwsalmon/agents#154: carried straight from the freed Assignment, same
+    # reason `branch` is -- `core.py`'s `_finish_succeeded_review` needs
+    # the PR number to post a draft review against, and the assignment is
+    # gone the instant `_release` frees the slot. `None` for every kind but
+    # REVIEW.
+    pr_number: int | None = None
     # Which repo the work was actually happening in, and what base a PR
     # from it targets — carried through from the Assignment for the same
     # reason `kind`/`branch` are: `core.py`'s finish handling needs them
@@ -322,6 +328,7 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
         unit = unit_name(sandbox)
         outcome = Outcome(sandbox=sandbox, issue=assignment.issue,
                            kind=assignment.kind, branch=assignment.branch,
+                           pr_number=assignment.pr_number,
                            target_owner=assignment.target_owner,
                            target_repo=assignment.target_repo,
                            base=assignment.base, auto_merge=assignment.auto_merge)
