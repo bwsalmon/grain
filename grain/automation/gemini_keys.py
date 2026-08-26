@@ -67,15 +67,42 @@ a separate `api-keys get-key-string` call against the resource `create`
 just returned (both take either the bare key id or, as used here, the full
 `projects/.../locations/global/keys/<id>` resource name `create` returns,
 so nothing here has to parse an id out of it by hand).
+
+**`create` can hand back an operation, not the key, and that needs a third
+call.** `api-keys create` starts a long-running operation; on this
+deployment's `gcloud`, `--format=value(name)` on it is observed to print
+the *operation's* id (`operations/akmf.p7-<...>`) rather than waiting and
+printing the created key's own `projects/.../locations/global/keys/<id>`
+name (bwsalmon/agents#100). Feeding that operation id straight into
+`get-key-string` -- as this module did before #100 -- 404s every single
+time, no matter how long the caller waits first: it isn't a not-ready-yet
+race, it's the wrong kind of resource id entirely, one `get-key-string`
+can never resolve. `_await_operation` below polls
+`api-keys operations describe` until Google reports the operation `done`,
+then reads the created key's resource name back out of its `response`
+payload, and only *then* calls `get-key-string`. A `name` that already
+looks like a key (doesn't start with `operations/`) skips polling
+entirely, so this stays a no-op against a `gcloud` whose `create` already
+waits and returns the key directly.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..run import Runner
+from ..run import CommandError, Runner
+
+# How long to poll `api-keys operations describe` for before giving up --
+# an ordinary key-creation operation finishes in a couple of seconds, so
+# this is generous slack, not a tuned budget. Giving up raises the same
+# `CommandError` any other failure here would, so `core.py`'s existing
+# "log and move on, retry next cycle" handling around `create_gemini_key`
+# applies unchanged rather than hanging that cycle's whole dispatch pass.
+_OPERATION_POLL_INTERVAL_SECONDS = 2
+_OPERATION_POLL_TIMEOUT_SECONDS = 30
 
 # configure.py's GCP_SERVICE_ACCOUNT_KEY_PATH, restated here rather than
 # imported -- see this module's own docstring on why the two are kept in
@@ -126,6 +153,33 @@ def _activate(runner: Runner, config: GeminiKeyConfig) -> None:
     ])
 
 
+def _await_operation(runner: Runner, config: GeminiKeyConfig, operation_name: str) -> str:
+    """Polls a `services api-keys create` long-running operation until
+    Google reports it `done`, then returns the created key's own resource
+    name from the operation's `response` -- see this module's docstring on
+    why `get-key-string` cannot be called with `operation_name` itself.
+    """
+    deadline = time.monotonic() + _OPERATION_POLL_TIMEOUT_SECONDS
+    while True:
+        describe_argv = [
+            "gcloud", "services", "api-keys", "operations", "describe",
+            operation_name, f"--project={config.project_id}", "--format=json",
+        ]
+        result = runner.run(describe_argv)
+        operation = json.loads(result.stdout)
+        if operation.get("done"):
+            if "error" in operation:
+                raise CommandError(describe_argv, 1, json.dumps(operation["error"]))
+            return operation["response"]["name"]
+        if time.monotonic() >= deadline:
+            raise CommandError(
+                describe_argv, 1,
+                f"operation {operation_name} did not finish within "
+                f"{_OPERATION_POLL_TIMEOUT_SECONDS}s",
+            )
+        time.sleep(_OPERATION_POLL_INTERVAL_SECONDS)
+
+
 def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) -> GeminiKey:
     """Mints a fresh API key scoped to `config.api_target_service`, and
     reads its value back. `runner` is always the controller's own account,
@@ -140,6 +194,8 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         "--format=value(name)", "--quiet",
     ])
     name = create_result.stdout.strip()
+    if name.startswith("operations/"):
+        name = _await_operation(runner, config, name)
     key_string_result = runner.run([
         "gcloud", "services", "api-keys", "get-key-string", name,
         f"--project={config.project_id}", "--format=value(keyString)",

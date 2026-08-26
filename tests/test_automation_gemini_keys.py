@@ -1,13 +1,18 @@
 import json
+import shlex
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from grain.automation import gemini_keys as gemini_keys_module
 from grain.automation.gemini_keys import (
     GeminiKey, GeminiKeyConfig, create_key, delete_key,
 )
-from grain.run import FakeRunner
+from grain.run import CommandError, FakeRunner, Result
 
 KEY_NAME = "projects/123/locations/global/keys/abc-def"
+OPERATION_NAME = "operations/akmf.p7-123-abc"
 
 
 def config(**overrides) -> GeminiKeyConfig:
@@ -78,6 +83,90 @@ def test_create_key_scopes_the_project():
     for call in runner.commands:
         if "api-keys" in call:
             assert "--project=my-proj" in call
+
+
+def test_create_key_resolves_an_operation_returned_by_create():
+    # bwsalmon/agents#100: `api-keys create` can hand back the id of its
+    # own long-running operation instead of the created key's resource
+    # name; `get-key-string` 404s unconditionally if called with that.
+    runner = FakeRunner()
+    runner.expect("gcloud services api-keys create", stdout=f"{OPERATION_NAME}\n")
+    runner.expect(
+        f"gcloud services api-keys operations describe {OPERATION_NAME}",
+        stdout=json.dumps({"done": True, "response": {"name": KEY_NAME}}),
+    )
+    runner.expect("gcloud services api-keys get-key-string", stdout="secret-value\n")
+    key = create_key(runner, config(), display_name="d")
+    assert key == GeminiKey(name=KEY_NAME, key_string="secret-value")
+    get_call = next(c for c in runner.commands if "get-key-string" in c)
+    assert KEY_NAME in get_call
+    assert OPERATION_NAME not in get_call
+
+
+def test_create_key_raises_when_the_operation_reports_an_error():
+    runner = FakeRunner()
+    runner.expect("gcloud services api-keys create", stdout=f"{OPERATION_NAME}\n")
+    runner.expect(
+        f"gcloud services api-keys operations describe {OPERATION_NAME}",
+        stdout=json.dumps({"done": True, "error": {"message": "quota exceeded"}}),
+    )
+    with pytest.raises(CommandError):
+        create_key(runner, config(), display_name="d")
+
+
+class _SequencedDescribeRunner:
+    """A minimal `Runner` that reports an operation as not-yet-done on its
+    first `operations describe` call and done on its second, to exercise
+    `_await_operation`'s polling loop -- `FakeRunner` scripts one fixed
+    response per command prefix, so it can't express a response that
+    changes across repeated calls to the same command.
+    """
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+        self._describe_calls = 0
+
+    def run(self, argv: list[str], *, stdin: str | None = None,
+            check: bool = True) -> Result:
+        rendered = shlex.join(argv)
+        self.commands.append(rendered)
+        if "api-keys create" in rendered:
+            return Result(argv, 0, f"{OPERATION_NAME}\n", "")
+        if "operations describe" in rendered:
+            self._describe_calls += 1
+            done = self._describe_calls >= 2
+            body = {"done": done}
+            if done:
+                body["response"] = {"name": KEY_NAME}
+            return Result(argv, 0, json.dumps(body), "")
+        if "get-key-string" in rendered:
+            return Result(argv, 0, "secret-value\n", "")
+        return Result(argv, 0, "", "")
+
+
+def test_create_key_polls_the_operation_until_it_finishes(monkeypatch):
+    slept = []
+    monkeypatch.setattr(gemini_keys_module.time, "sleep", slept.append)
+    runner = _SequencedDescribeRunner()
+    key = create_key(runner, config(), display_name="d")
+    assert key.name == KEY_NAME
+    assert slept  # polled at least once before the operation was done
+    describe_calls = [c for c in runner.commands if "operations describe" in c]
+    assert len(describe_calls) == 2
+
+
+def test_create_key_gives_up_on_an_operation_that_never_finishes(monkeypatch):
+    monkeypatch.setattr(gemini_keys_module.time, "sleep", lambda seconds: None)
+    ticks = iter([0, 1000])  # first check < deadline, second is past it
+    monkeypatch.setattr(gemini_keys_module.time, "monotonic", lambda: next(ticks))
+    runner = FakeRunner()
+    runner.expect("gcloud services api-keys create", stdout=f"{OPERATION_NAME}\n")
+    runner.expect(
+        f"gcloud services api-keys operations describe {OPERATION_NAME}",
+        stdout=json.dumps({"done": False}),
+    )
+    with pytest.raises(CommandError):
+        create_key(runner, config(), display_name="d")
 
 
 def test_delete_key_activates_then_deletes_by_resource_name():
