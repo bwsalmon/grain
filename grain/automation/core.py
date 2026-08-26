@@ -169,6 +169,38 @@ _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # account otherwise look identical in a thread).
 _AUTOMATION_SIGNATURE = "🤖 _Posted automatically by grain-agent — not a human._"
 
+
+def _is_automation_comment(body: str | None) -> bool:
+    """Whether `body` is something grain-agent posted itself, by the
+    `_AUTOMATION_SIGNATURE` marker it stamps on every comment it writes.
+
+    grain posts to the task thread as the same credential a maintainer
+    would (that is the whole point of `_AUTOMATION_SIGNATURE`'s own
+    "regardless of which credential actually posted it"), so GitHub
+    reports its comments with `author_association` "OWNER" -- squarely
+    inside `_TRUSTED_REPLY_ASSOCIATIONS`. Every place that reads "a
+    trusted human said something new" therefore has to subtract grain's
+    own voice first, or the automation answers its own questions and
+    restarts its own finished tasks. Found live: `_suggest_fix` comments
+    on a *completed* issue to announce the follow-up task it just filed,
+    and `_restart_commented_completions` read that as a maintainer's
+    follow-up and put `trigger_label` back on -- a task reopening itself
+    with nobody having asked.
+
+    The marker is checked per line, and lines quoted with ">" do not
+    count: GitHub's own "Quote reply" button copies the comment being
+    replied to, signature and all, into the new comment's body, and a
+    maintainer using it is exactly the human reply these callers exist to
+    notice. grain always writes the signature as a line of its own, so an
+    exact match on a stripped, unquoted line is both sufficient and the
+    tightest test available.
+    """
+    return any(
+        stripped == _AUTOMATION_SIGNATURE
+        for stripped in (line.strip() for line in (body or "").splitlines())
+        if not stripped.startswith(">")
+    )
+
 # bwsalmon/agents#52: a task labelled `grain-github-<name>` uses the named
 # credential `<name>` (`CredentialSet.get`) for every git push, in place of
 # the owner/repo default -- for a task that needs a scope the default
@@ -1005,7 +1037,8 @@ class Orchestrator:
             reply = next(
                 (c for c in comments
                  if c.id > pending.question_comment_id
-                 and c.author_association in _TRUSTED_REPLY_ASSOCIATIONS),
+                 and c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
+                 and not _is_automation_comment(c.body)),
                 None,
             )
             if reply is None:
@@ -1051,6 +1084,17 @@ class Orchestrator:
         restart the agent set on a whim, the exact prompt-injection gate
         the trigger label exists to close in the first place.
 
+        Gated equally to comments grain did not write itself
+        (`_is_automation_comment`), which the trust tier alone cannot do:
+        grain posts as a maintainer's own credential, so its comments come
+        back "OWNER" like any other. `_suggest_fix` comments on precisely
+        the issues tracked here -- a completed task whose PR went stale --
+        to announce the follow-up task it filed, and without this that
+        announcement read as a maintainer's follow-up and restarted the
+        very task it was reporting on, with nobody having asked. Priming
+        the baseline covers only the one comment a finish path posts on
+        its way out; anything the automation says *later* needs this.
+
         A 404 from `list_comments` means the same "stale record" thing it
         means in `_promote_answered_questions`: the issue is gone from the
         currently configured repo. A 404 from `reopen_issue` once a
@@ -1085,7 +1129,8 @@ class Orchestrator:
             reply = next(
                 (c for c in comments
                  if c.id > completed.baseline_comment_id
-                 and c.author_association in _TRUSTED_REPLY_ASSOCIATIONS),
+                 and c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
+                 and not _is_automation_comment(c.body)),
                 None,
             )
             if reply is None:
@@ -1427,14 +1472,27 @@ class Orchestrator:
 
         Reads directives from the issue body plus every *trusted* comment
         on it (`_TRUSTED_REPLY_ASSOCIATIONS`, the same "could have applied
-        the label" tier the trigger gate itself relies on), later texts
-        overriding earlier — so repairing a task is a reply, not an edit
+        the label" tier the trigger gate itself relies on) that grain did
+        not write itself (`_is_automation_comment`) -- the trust tier
+        alone cannot tell those apart, since grain posts as a maintainer's
+        own credential and so comes back "OWNER" like any other. A
+        directive is an instruction *from* a human, and grain's comments
+        quote a task's own text back at it (`_park` names the `/repo` line
+        it could not use, `_suggest_fix` describes the follow-up task it
+        filed); none of them puts a directive at the start of a line
+        today, which is the only shape `_DIRECTIVE_RE` matches, so this is
+        a guard against grain instructing itself rather than a fix for a
+        failure already seen. `issue.body` is deliberately not filtered:
+        grain files tasks itself (`_suggest_fix`), and the directives in
+        those bodies are exactly what is meant to apply. Later texts
+        override earlier — so repairing a task is a reply, not an edit
         plus a reply. Raises `DirectiveError` for anything unusable; every
         message is written to be posted verbatim by `_park`.
         """
         texts = [issue.body] + [
             c.body for c in comments
             if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
+            and not _is_automation_comment(c.body)
         ]
         directives = parse_directives(texts)
         # bwsalmon/agents#49: a label, not a `/gemini-key` directive --
