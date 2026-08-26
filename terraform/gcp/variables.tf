@@ -196,13 +196,17 @@ variable "vm_service_account_roles" {
 variable "agent_service_account_roles" {
   type        = list(string)
   description = <<-EOT
-    Project roles for a second, narrow service account that sandboxed
-    agents get tokens for, via the controller's metadata server
-    impersonating it (docs/design.md, "GCP credentials"). Leave empty and
-    no such account is created (unless agent_can_manage_compute_instances
-    is true -- see below). Non-empty and the host account is granted
-    roles/iam.serviceAccountTokenCreator on it -- but see the README:
-    pointing grain's metadata server at it still needs one manual step.
+    Project roles for a second, narrow service account that a sandboxed
+    agent's own GCP credentials belong to: the controller mints a
+    fresh, short-lived key for it on every dispatch and pushes it into
+    the sandbox, revoking it once the task ends (docs/design.md, "GCP
+    credentials"; bwsalmon/agents#126). Leave empty and no such account is
+    created (unless agent_can_manage_compute_instances is true -- see
+    below). Non-empty and the host account is granted
+    roles/iam.serviceAccountKeyAdmin on it, so the controller can mint and
+    revoke those keys itself -- but see the README: turning this feature
+    on for a deployed host still needs one manual step (`grain controller
+    configure --gcp-agent-service-account-email ... --gcp-project-id ...`).
   EOT
   default     = []
 }

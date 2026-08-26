@@ -28,18 +28,21 @@ CLUSTER_CONFIG_PATH = "/data/config/cluster.toml"
 DATA_SECRETS_GITHUB = "/data/secrets/github"
 CLAUDE_TOKEN_PATH = "/data/secrets/claude-oauth-token"
 SANDBOX_TOKENS_PATH = "/data/secrets/sandbox-tokens.json"
-# Must match grain/metadata/config.py's MetadataConfig.key_path default and
-# the "metadata-server.json" name build_launcher's build_launcher() loads --
-# this module and that one are never imported into each other (SSH-remote
-# writes here, local file I/O there), so the paths can only be kept in sync
-# by hand; a rename on one side and not the other is silent until a real
-# `grain metadata start` fails to find its config.
+# Must match grain/automation/gemini_keys.py's `GeminiKeyConfig.key_path`
+# default -- this module and that one are never imported into each other
+# (SSH-remote writes here, local file I/O there), so the path can only be
+# kept in sync by hand; a rename on one side and not the other is silent
+# until `gemini_keys.py`'s own `gcloud auth activate-service-account` fails
+# to find the file.
 GCP_SERVICE_ACCOUNT_KEY_PATH = "/data/secrets/gcp-service-account.json"
-METADATA_SERVER_CONFIG_PATH = "/data/config/metadata-server.json"
 # Must match grain/automation/gemini_keys.py's `GeminiKeyConfig` load path
 # -- same "kept in sync by hand" caveat as the pair above; see this
 # constant's own use in `configure_gemini_key`.
 GEMINI_KEY_CONFIG_PATH = "/data/config/gemini-key.json"
+# Must match grain/automation/gcp_keys.py's `GcpKeyConfig` load path -- same
+# "kept in sync by hand" caveat as the pair above; see this constant's own
+# use in `configure_agent_gcp_key`.
+GCP_KEY_CONFIG_PATH = "/data/config/gcp-key.json"
 # Must match grain/automation/janitor.py's `JanitorConfig` load path --
 # same caveat, see this constant's own use in `configure_janitor`.
 JANITOR_CONFIG_PATH = "/data/config/janitor.json"
@@ -211,39 +214,55 @@ def configure_claude_token(runner: Runner, token: str) -> None:
                         owner="grain-agent")
 
 
-def configure_gcp_service_account(runner: Runner, key: str, *, service_account_email: str,
-                                   project_id: str, numeric_project_id: int = 0,
-                                   metadata_user: str = "grain-metadata") -> None:
-    """Places the two files `grain metadata start` needs and nothing wrote
-    before this (docs/design.md's "GCP credentials", docs/roadmap.md item
-    4's remaining gap): the impersonation-source key, owned by
-    `metadata_user` so only the metadata service can read it, and
-    `MetadataConfig`'s own JSON file naming the narrow account every
-    instance impersonates.
+def configure_gcp_service_account(runner: Runner, key: str) -> None:
+    """Places the primary GCP service-account key `gemini_keys.py`
+    authenticates its `gcloud` calls with (docs/bootstrap.md Phase 3).
+    Before bwsalmon/agents#126 this file also fed the per-sandbox
+    `gce_metadata_server` broker (`grain/metadata/`, removed by that same
+    change) as its impersonation source -- that consumer is gone, but
+    `gemini_keys.py`'s own Gemini-API-key minting is unaffected and still
+    reads this same path (see its own docstring for why it deliberately
+    keeps doing so, unlike the GCP-key-per-dispatch mechanism
+    `configure_agent_gcp_key` below sets up, which authenticates as the
+    controller's own attached identity instead and needs no key file at
+    all).
 
     `key` is minted fresh per deploy and never lands in this repo or
     Actions secrets long-lived (the gcp config-repo template's deploy.yml creates
     it via the deployer's own WIF session and immediately invalidates the
     previous one) -- the short-lived-credential principle docs/design.md
-    argues for at the *sandbox* layer applied one layer up, to the source
-    key itself.
-
-    Deliberately does not pass `owner=` to `_write_remote_file`: that
-    helper also chowns the file's *parent*, which is correct for
-    `CONTROLLER_AGENT_TOKEN_PATH` (a private grain-agent home directory)
-    but wrong here -- `/data/secrets` is shared with the GitHub and
-    Claude credentials, which must stay root-owned. Only the file itself
-    is handed to `metadata_user`.
+    argues for at the *sandbox* layer applied one layer up, to this key
+    itself. Root-owned (no `owner=`, unlike `configure_claude_token`):
+    `/data/secrets` is shared with the GitHub and Claude credentials,
+    which must stay root-owned, and `grain-automation.service` (which
+    reads this on `gemini_keys.py`'s behalf) already runs as root.
     """
-    _write_remote_file(runner, GCP_SERVICE_ACCOUNT_KEY_PATH, key.strip() + "\n", mode="640")
-    runner.run(["sudo", "chown", f"{metadata_user}:{metadata_user}", GCP_SERVICE_ACCOUNT_KEY_PATH])
-    metadata_config = json.dumps({
+    _write_remote_file(runner, GCP_SERVICE_ACCOUNT_KEY_PATH, key.strip() + "\n", mode="600")
+
+
+def configure_agent_gcp_key(runner: Runner, *, service_account_email: str,
+                             project_id: str, max_key_age_hours: int = 24) -> None:
+    """Writes `/data/config/gcp-key.json` (bwsalmon/agents#126), the
+    on/off switch `Orchestrator.gcp_key_config` (`cli.py`'s
+    `build_orchestrator`) checks before minting a GCP service-account key
+    for every dispatched sandbox -- absent, a deployment's sandboxes get
+    no GCP access at all, the same "unusable feature parks/skips, doesn't
+    guess" shape `configure_gemini_key` already has for its own label.
+
+    Deliberately places no credential of its own: `gcp_keys.py` mints
+    keys as the controller's own attached (host) service account, never a
+    static file -- see that module's own docstring for why. This is
+    plain, non-secret configuration -- `service_account_email` and
+    `project_id` are already published as non-secret deploy config
+    (`terraform/gcp/instance.tf`'s `grain-config`), unlike
+    `configure_gcp_service_account`'s `key` argument above.
+    """
+    gcp_key_json = json.dumps({
         "service_account_email": service_account_email,
         "project_id": project_id,
-        "numeric_project_id": numeric_project_id,
-        "metadata_user": metadata_user,
+        "max_key_age_hours": max_key_age_hours,
     }, indent=2) + "\n"
-    _write_remote_file(runner, METADATA_SERVER_CONFIG_PATH, metadata_config, mode="644")
+    _write_remote_file(runner, GCP_KEY_CONFIG_PATH, gcp_key_json, mode="644")
 
 
 def configure_gemini_key(runner: Runner, project_id: str) -> None:

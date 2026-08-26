@@ -20,7 +20,7 @@ def test_rules_prints_without_applying(capsys):
 
 def test_rules_reflects_sandbox_count(capsys):
     out = run(["--sandboxes", "4", "host", "rules"], capsys)
-    assert out.count("dnat to") == 4
+    assert out.count("tcp dport 8080 accept") == 4
 
 
 def test_rules_allowlist_mode_drops_egress(capsys):
@@ -509,18 +509,34 @@ def test_dry_run_controller_configure_with_a_gcp_service_account_key_file(capsys
         capsys,
     )
     assert "dd of=/data/secrets/gcp-service-account.json" in out
-    assert "dd of=/data/config/metadata-server.json" in out
+    assert "dd of=/data/config/gcp-key.json" in out
     for line in out.splitlines():
         if line.startswith("+ ssh") and "dd of=" in line:
             assert "service_account" not in line
 
 
-def test_controller_configure_gcp_key_requires_email_and_project_id(tmp_path):
-    key_file = tmp_path / "gcp-key.json"
-    key_file.write_text("{}")
-    with pytest.raises(SystemExit):
-        main(["--dry-run", "controller", "configure", "--repo", "acme/widgets",
-              "--gcp-service-account-key-file", str(key_file)])
+def test_controller_configure_gcp_agent_key_alone_needs_no_service_account_key_file(capsys, tmp_path):
+    """bwsalmon/agents#126: unlike before, --gcp-agent-service-account-email
+    and --gcp-project-id are plain, non-secret config -- naming them
+    without --gcp-service-account-key-file at all is not an error, and
+    still writes gcp-key.json."""
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com",
+         "--gcp-project-id", "acme"],
+        capsys,
+    )
+    assert "dd of=/data/config/gcp-key.json" in out
+    assert "gcp-service-account.json" not in out
+
+
+def test_controller_configure_gcp_agent_email_without_project_id_writes_no_gcp_key_config(capsys):
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com"],
+        capsys,
+    )
+    assert "gcp-key.json" not in out
 
 
 def test_dry_run_controller_configure_with_a_gemini_project_id(capsys):
@@ -633,7 +649,7 @@ def test_dry_run_bootstrap_runs_every_stage_without_touching_a_real_vm(tmp_path,
     assert "grain-automation.timer" in out
 
 
-def test_dry_run_bootstrap_with_a_gcp_service_account_key_starts_the_metadata_server(
+def test_dry_run_bootstrap_with_a_gcp_service_account_key_and_agent_email(
     tmp_path, capsys,
 ):
     key_file = tmp_path / "gcp-key.json"
@@ -650,8 +666,9 @@ def test_dry_run_bootstrap_with_a_gcp_service_account_key_starts_the_metadata_se
         capsys,
     )
     assert "dd of=/data/secrets/gcp-service-account.json" in out
-    assert "dd of=/data/config/metadata-server.json" in out
-    assert "metadata start sandbox-0" in out
+    assert "dd of=/data/config/gcp-key.json" in out
+    # bwsalmon/agents#126: no per-sandbox metadata server to start anymore.
+    assert "metadata start" not in out
 
 
 def test_sandbox_login_dry_run_prints_the_ssh_command_and_does_not_exec(capsys):

@@ -34,9 +34,9 @@ from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
-    configure_claude_token, configure_cluster, configure_gcp_service_account,
-    configure_gemini_key, configure_github_credential, configure_janitor,
-    configure_repo, credential_repos, ensure_sandbox_tokens,
+    configure_agent_gcp_key, configure_claude_token, configure_cluster,
+    configure_gcp_service_account, configure_gemini_key, configure_github_credential,
+    configure_janitor, configure_repo, credential_repos, ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -60,16 +60,19 @@ class BootstrapConfig:
     github_token: str | None = None
     credential_name: str = "bot"
     claude_token: str | None = None
-    # The grain-agent service account's own key -- the impersonation
-    # *source* every sandbox's metadata server reads
-    # (docs/design.md, "GCP credentials"). Minted fresh per deploy, never
-    # a long-lived Actions secret -- see configure_gcp_service_account.
-    # email/project_id have no sensible default and are required together
-    # with the key; bootstrap() raises rather than guess at either.
+    # The primary GCP service-account key gemini_keys.py authenticates
+    # its own gcloud calls with -- see configure_gcp_service_account.
+    # Minted fresh per deploy, never a long-lived Actions secret.
     gcp_service_account_key: str | None = None
+    # bwsalmon/agents#126: the narrow "agent" service account grain mints
+    # a fresh, short-lived key for on every dispatched sandbox -- plain,
+    # non-secret config (see configure_agent_gcp_key), unrelated to
+    # gcp_service_account_key above. Both are required together for
+    # bootstrap() to write /data/config/gcp-key.json; either alone leaves
+    # a deployment's sandboxes with no GCP access, not an error.
     gcp_agent_service_account_email: str | None = None
     gcp_project_id: str | None = None
-    gcp_numeric_project_id: int = 0
+    gcp_key_max_age_hours: int = 24
     # Turns on the grain-gemini-key task label (bwsalmon/agents#47, #49):
     # the GCP project a short-lived Gemini API key is minted in. Reuses
     # gcp_service_account_key above -- see configure_gemini_key's own
@@ -119,42 +122,6 @@ def _ensure_admin_key(admin_public_key_path: Path, admin_private_key_path: Path,
     log(f"generated a new admin keypair at {admin_private_key_path}"
         f"{{,.pub}} -- back this up, it is the only way in if the "
         f"controller's own key is ever lost")
-
-
-def _ensure_metadata_server_started(admin_ssh: SshRunner, name: str,
-                                     sandbox_count: int) -> None:
-    """`grain metadata start` runs as a transient systemd unit
-    (`grain/metadata/launcher.py`) and its own docstring says calling
-    `start()` again for an already-running instance fails loudly rather
-    than silently doubling up -- `systemd-run` refuses to reuse a unit
-    name still active. A re-run of `grain host bootstrap` has to check
-    first, the same way `_ensure_started` already does for the VM itself.
-
-    Invoked over SSH (`python3 -m grain.cli`, mirroring the
-    `ExecStart=`/`WorkingDirectory=/opt/grain` shape
-    `provision/controller.sh` already uses for the other two systemd
-    units) rather than by importing `MetadataLauncher` directly:
-    `MetadataLauncher.start()` writes its instance config via plain
-    Python file I/O, not through a `Runner`, so it only works called
-    locally on the controller -- exactly what running it as a remote
-    command over `admin_ssh` gets for free, with no second implementation
-    of what it already does.
-
-    `--sandboxes` has to be passed explicitly: this `grain.cli` invocation
-    runs on the controller, which has no `--cluster-file` of its own (that
-    file only ever exists on the host, per `build_cluster`'s default) --
-    without it, `Cluster.load` silently falls back to the two-sandbox
-    default and rejects any sandbox beyond `sandbox-1` as unknown.
-    """
-    result = admin_ssh.run(["sudo", "systemctl", "is-active", f"grain-metadata-{name}"],
-                            check=False)
-    if result.stdout.strip() == "active":
-        return
-    admin_ssh.run([
-        "sudo", "bash", "-c",
-        f"cd /opt/grain && python3 -m grain.cli --data-dir /data "
-        f"--sandboxes {sandbox_count} metadata start {shlex.quote(name)}",
-    ])
 
 
 def _ensure_started(adapter: LibvirtAdapter, name: str, spec: VmSpec,
@@ -311,16 +278,19 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
     if config.claude_token:
         configure_claude_token(admin_ssh, config.claude_token)
     if config.gcp_service_account_key:
-        if not (config.gcp_agent_service_account_email and config.gcp_project_id):
-            raise ValueError(
-                "gcp_service_account_key requires gcp_agent_service_account_email "
-                "and gcp_project_id"
-            )
-        configure_gcp_service_account(
-            admin_ssh, config.gcp_service_account_key,
-            service_account_email=config.gcp_agent_service_account_email,
+        configure_gcp_service_account(admin_ssh, config.gcp_service_account_key)
+    if config.gcp_agent_service_account_email and config.gcp_project_id:
+        # bwsalmon/agents#126: independent of gcp_service_account_key
+        # above -- plain, non-secret config, not a credential-provisioning
+        # step, so it needs neither that key nor bootstrap() raising when
+        # only one of the pair is set (a deployment that names the email
+        # but not the project, or vice versa, just doesn't get this
+        # feature turned on, the same "unusable config parks/skips"
+        # latitude every other optional step in this module already has).
+        configure_agent_gcp_key(
+            admin_ssh, service_account_email=config.gcp_agent_service_account_email,
             project_id=config.gcp_project_id,
-            numeric_project_id=config.gcp_numeric_project_id,
+            max_key_age_hours=config.gcp_key_max_age_hours,
         )
     if config.gemini_project_id:
         configure_gemini_key(admin_ssh, config.gemini_project_id)
@@ -353,8 +323,6 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                 f"grep -qxF {shlex.quote(trimmed)} ~/.ssh/authorized_keys "
                 f"2>/dev/null || echo {shlex.quote(trimmed)} >> ~/.ssh/authorized_keys",
             ])
-        if config.gcp_service_account_key:
-            _ensure_metadata_server_started(admin_ssh, name, cluster.sandbox_count)
         # No Claude credential is ever placed on a sandbox (docs/roadmap.md
         # item 8's "Update") -- `claude -p` runs on the controller now, and
         # stage 8's `configure_claude_token` call already places both the

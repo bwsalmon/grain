@@ -29,26 +29,23 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_janitor, configure_named_github_key,
-    configure_repo, credential_repos,
+    configure_agent_gcp_key, configure_claude_token, configure_gcp_service_account,
+    configure_gemini_key, configure_github_credential, configure_janitor,
+    configure_named_github_key, configure_repo, credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
+from .automation.gcp_keys import GcpKeyConfig
 from .automation.gemini_keys import GeminiKeyConfig
-from .automation.janitor import JanitorConfig
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
 from .automation.history import FileSessionHistory
+from .automation.janitor import JanitorConfig
 from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
 from .automation import tui as sessions_tui
 from .bootstrap import BootstrapConfig, bootstrap
 from .inventory import Cluster
-from .metadata.audit import FileAuditLog as MetadataFileAuditLog
-from .metadata.audit import sync as metadata_sync
-from .metadata.config import instance_paths
-from .metadata.launcher import MetadataLauncher, build_launcher
 from .proxy.allowlist import Allowlist
 from .proxy.credentials import CredentialSet
 from .proxy.tokens import SandboxCredentialStore, SandboxTokenStore
@@ -131,22 +128,18 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         GeminiKeyConfig.load(gemini_key_config_path)
         if gemini_key_config_path.exists() else None
     )
-    # bwsalmon/agents#98: same "absence is the off switch" shape as
+    # bwsalmon/agents#126: same "absence is the off switch" shape as
     # gemini_key_config above -- a deployment that never wrote
-    # metadata-server.json (`provision/controller.sh`'s setup, or `grain
-    # controller configure --gcp-agent-service-account-email ...`) gets no
-    # `_ensure_metadata_server` support, not a crash. When it *is* present,
-    # this is the same `runner` (the controller's own, not a per-sandbox
-    # one) `build_metadata_launcher` already uses for the standalone `grain
-    # metadata start` command -- `MetadataLauncher.start` always runs on the
-    # controller as `metadata_user`, never on the sandbox itself.
-    metadata_config_path = data_dir / "config" / "metadata-server.json"
-    metadata_launcher = (
-        build_launcher(data_dir, cluster, runner)
-        if metadata_config_path.exists() else None
+    # gcp-key.json (`grain controller configure
+    # --gcp-agent-service-account-email ...`) gets no GCP access in its
+    # sandboxes, not a crash.
+    gcp_key_config_path = data_dir / "config" / "gcp-key.json"
+    gcp_key_config = (
+        GcpKeyConfig.load(gcp_key_config_path)
+        if gcp_key_config_path.exists() else None
     )
     # bwsalmon/agents#113: same "absence is the off switch" shape as
-    # gemini_key_config/metadata_launcher above -- a deployment that never
+    # gemini_key_config/gcp_key_config above -- a deployment that never
     # ran `grain controller configure --janitor-ttl-hours ...` gets no
     # janitor pass, not a crash.
     janitor_config_path = data_dir / "config" / "janitor.json"
@@ -162,7 +155,7 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         # the same place -- see `Orchestrator.allowlist`.
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         audit=audit, history=history, gemini_key_config=gemini_key_config,
-        metadata_launcher=metadata_launcher, janitor_config=janitor_config,
+        gcp_key_config=gcp_key_config, janitor_config=janitor_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
         # mid-`run_once`, rather than only once at the very end (see
@@ -230,48 +223,6 @@ def cmd_sessions_list(args: argparse.Namespace) -> int:
 def cmd_sessions_browse(args: argparse.Namespace) -> int:
     history = build_session_history(args)
     sessions_tui.run(history)
-    return 0
-
-
-def build_metadata_launcher(cluster: Cluster, runner: Runner,
-                             args: argparse.Namespace) -> MetadataLauncher:
-    return build_launcher(Path(args.data_dir), cluster, runner)
-
-
-def cmd_metadata_start(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    launcher = build_metadata_launcher(cluster, _runner(args), args)
-    for name in _sandbox_targets(cluster, args.name):
-        launcher.start(name)
-    return 0
-
-
-def cmd_metadata_stop(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    launcher = build_metadata_launcher(cluster, _runner(args), args)
-    for name in _sandbox_targets(cluster, args.name):
-        launcher.stop(name)
-    return 0
-
-
-def cmd_metadata_status(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    launcher = build_metadata_launcher(cluster, _runner(args), args)
-    for name in _sandbox_targets(cluster, args.name):
-        print(f"{name:<12} {launcher.status(name).value}")
-    return 0
-
-
-def cmd_metadata_sync_audit(args: argparse.Namespace) -> int:
-    cluster = build_cluster(args)
-    data_dir = Path(args.data_dir)
-    audit = MetadataFileAuditLog(data_dir / "state" / "metadata-server" / "audit.log")
-    total = 0
-    for name in _sandbox_targets(cluster, args.name):
-        paths = instance_paths(data_dir, name)
-        state_path = data_dir / "state" / "metadata-server" / f"{name}.audit-offset.json"
-        total += metadata_sync(paths.log_path, state_path, name, audit)
-    print(f"forwarded {total} event(s)")
     return 0
 
 
@@ -580,18 +531,22 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
     if args.gcp_service_account_key_file:
-        if not (args.gcp_agent_service_account_email and args.gcp_project_id):
-            raise SystemExit(
-                "--gcp-service-account-key-file requires --gcp-agent-service-account-email "
-                "and --gcp-project-id"
-            )
         key = (
             sys.stdin.read() if args.gcp_service_account_key_file == "-"
             else Path(args.gcp_service_account_key_file).read_text()
         )
-        configure_gcp_service_account(
-            ssh, key, service_account_email=args.gcp_agent_service_account_email,
-            project_id=args.gcp_project_id, numeric_project_id=args.gcp_numeric_project_id,
+        configure_gcp_service_account(ssh, key)
+    if args.gcp_agent_service_account_email and args.gcp_project_id:
+        # bwsalmon/agents#126: independent of --gcp-service-account-key-file
+        # above -- plain, non-secret config, so it needs neither that key
+        # nor an all-or-nothing SystemExit when only one of the pair is
+        # given (a deployment naming just one just doesn't turn this
+        # feature on, the same latitude every other optional step here
+        # already has).
+        configure_agent_gcp_key(
+            ssh, service_account_email=args.gcp_agent_service_account_email,
+            project_id=args.gcp_project_id,
+            max_key_age_hours=args.gcp_key_max_age_hours,
         )
     if args.gemini_project_id:
         # Reuses the primary key --gcp-service-account-key-file already
@@ -642,7 +597,7 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         gcp_service_account_key=gcp_service_account_key,
         gcp_agent_service_account_email=args.gcp_agent_service_account_email,
         gcp_project_id=args.gcp_project_id,
-        gcp_numeric_project_id=args.gcp_numeric_project_id,
+        gcp_key_max_age_hours=args.gcp_key_max_age_hours,
         gemini_project_id=args.gemini_project_id,
         janitor_ttl_hours=args.janitor_ttl_hours,
         janitor_name_prefix=args.janitor_name_prefix,
@@ -735,10 +690,9 @@ def _targets(cluster: Cluster, name: str) -> list[str]:
 
 
 def _sandbox_targets(cluster: Cluster, name: str) -> list[str]:
-    # Metadata servers exist only for sandboxes -- there is no controller
-    # instance (Cluster.metadata_port raises for the controller's own
-    # name), so this is the same shape as _targets minus "all" meaning
-    # "including the controller."
+    # cleanup/health apply only to sandboxes -- there is no controller
+    # instance to clean up or health-check the same way, so this is the
+    # same shape as _targets minus "all" meaning "including the controller."
     if name in ("all", "sandboxes"):
         return cluster.sandbox_names
     if name not in cluster.sandbox_names:
@@ -905,17 +859,21 @@ def build_parser() -> argparse.ArgumentParser:
                          "setup-token`) to place on the controller and inject into the "
                          "grain-agent account's environment at dispatch time")
     p.add_argument("--gcp-service-account-key-file",
-                    help="path to a file holding the grain-agent GCP service account's JSON "
-                         "key, or '-' for stdin -- the impersonation source every sandbox's "
-                         "metadata server reads; requires --gcp-agent-service-account-email "
-                         "and --gcp-project-id")
+                    help="path to a file holding a GCP service account's JSON key, or '-' for "
+                         "stdin -- the primary credential gemini_keys.py's own gcloud calls "
+                         "authenticate with (unrelated to --gcp-agent-service-account-email "
+                         "below)")
     p.add_argument("--gcp-agent-service-account-email",
-                    help="email of the narrow GCP service account grain's metadata servers "
-                         "impersonate -- required with --gcp-service-account-key-file")
+                    help="email of the narrow GCP service account grain mints a fresh, "
+                         "short-lived key for on every dispatched sandbox (bwsalmon/"
+                         "agents#126) -- requires --gcp-project-id, but not "
+                         "--gcp-service-account-key-file")
     p.add_argument("--gcp-project-id",
-                    help="GCP project id -- required with --gcp-service-account-key-file")
-    p.add_argument("--gcp-numeric-project-id", type=int, default=0,
-                    help="GCP numeric project id (default: 0, i.e. omitted)")
+                    help="GCP project id -- required with --gcp-agent-service-account-email")
+    p.add_argument("--gcp-key-max-age-hours", type=int, default=24,
+                    help="reap any --gcp-agent-service-account-email key older than this, "
+                         "independent of whether its task session ever ended cleanly "
+                         "(default: 24)")
     p.add_argument("--gemini-project-id",
                     help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
                          "GCP project a short-lived Gemini API key is minted in for a task "
@@ -980,28 +938,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_sessions_browse)
 
-    metadata = sub.add_parser(
-        "metadata", help="per-sandbox gce_metadata_server instances"
-    ).add_subparsers(dest="command", required=True)
-
-    for name, fn, help_text in (
-        ("start", cmd_metadata_start, "start metadata server instance(s)"),
-        ("stop", cmd_metadata_stop, "stop metadata server instance(s)"),
-        ("status", cmd_metadata_status, "show instance unit states"),
-    ):
-        p = metadata.add_parser(name, help=help_text)
-        p.add_argument("name", nargs="?", default="sandboxes",
-                        help="sandbox name, or 'sandboxes' for all (default)")
-        p.set_defaults(func=fn)
-
-    p = metadata.add_parser(
-        "sync-audit",
-        help="forward new per-mint log lines into the audit log",
-    )
-    p.add_argument("name", nargs="?", default="sandboxes",
-                    help="sandbox name, or 'sandboxes' for all (default)")
-    p.set_defaults(func=cmd_metadata_sync_audit)
-
     github = sub.add_parser(
         "github", help="GitHub credential hardening"
     ).add_subparsers(dest="command", required=True)
@@ -1049,16 +985,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller")
     p.add_argument("--gcp-service-account-key-file",
-                    help="path to a file holding the grain-agent GCP service account's JSON "
-                         "key, or '-' for stdin -- requires --gcp-agent-service-account-email "
-                         "and --gcp-project-id")
+                    help="path to a file holding a GCP service account's JSON key, or '-' for "
+                         "stdin -- the primary credential gemini_keys.py's own gcloud calls "
+                         "authenticate with (unrelated to --gcp-agent-service-account-email "
+                         "below)")
     p.add_argument("--gcp-agent-service-account-email",
-                    help="email of the narrow GCP service account grain's metadata servers "
-                         "impersonate -- required with --gcp-service-account-key-file")
+                    help="email of the narrow GCP service account grain mints a fresh, "
+                         "short-lived key for on every dispatched sandbox (bwsalmon/"
+                         "agents#126) -- requires --gcp-project-id, but not "
+                         "--gcp-service-account-key-file")
     p.add_argument("--gcp-project-id",
-                    help="GCP project id -- required with --gcp-service-account-key-file")
-    p.add_argument("--gcp-numeric-project-id", type=int, default=0,
-                    help="GCP numeric project id (default: 0, i.e. omitted)")
+                    help="GCP project id -- required with --gcp-agent-service-account-email")
+    p.add_argument("--gcp-key-max-age-hours", type=int, default=24,
+                    help="reap any --gcp-agent-service-account-email key older than this, "
+                         "independent of whether its task session ever ended cleanly "
+                         "(default: 24)")
     p.add_argument("--gemini-project-id",
                     help="enables the grain-gemini-key task label (bwsalmon/agents#47): the "
                          "GCP project a short-lived Gemini API key is minted in for a task "

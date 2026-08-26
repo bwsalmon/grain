@@ -98,8 +98,8 @@ with no files left behind.
 
 - Lima's `list --json` field names and status strings — moot on Linux now,
   but relevant again if `lima.py` becomes the macOS driver.
-- The controller VM and the metadata servers: only a sandbox-shaped VM has
-  been booted so far, not the controller image or its services.
+- The controller VM: only a sandbox-shaped VM has been booted so far, not
+  the controller image or its services.
 
 ## Using it
 

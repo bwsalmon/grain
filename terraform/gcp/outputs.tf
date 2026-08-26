@@ -20,7 +20,7 @@ output "host_service_account" {
 
 output "agent_service_account" {
   value       = local.agent_account_needed ? google_service_account.agent[0].email : null
-  description = "The narrow identity sandboxed agents are meant to impersonate, when configured."
+  description = "The narrow identity a sandboxed agent's own GCP credentials belong to, when configured -- the controller mints a fresh key for it per dispatch."
 }
 
 output "ssh_command" {

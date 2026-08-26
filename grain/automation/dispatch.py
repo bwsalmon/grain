@@ -172,6 +172,12 @@ _GIT_IDENTITY_EMAIL = "grain-agent@localhost"
 # command could sweep up and commit.
 GEMINI_KEY_PATH = "/home/debian/.gemini-api-key"
 
+# Where a minted GCP service-account key (bwsalmon/agents#126, `gcp_keys.py`)
+# lands in the sandbox -- same "outside WORKSPACE_PATH" reasoning as
+# GEMINI_KEY_PATH above, so it can never be swept up by a task's own
+# `git add -A`-style command.
+GCP_KEY_PATH = "/home/debian/.gcp-service-account.json"
+
 # The unprivileged, dedicated controller-side account `claude -p` (and the
 # MCP server it spawns as a child) runs as — never root, never the account
 # `grain-automation.service` itself runs as. See provision/controller.sh.
@@ -382,6 +388,29 @@ def _gemini_key_line() -> str:
     )
 
 
+def _gcp_key_line() -> str:
+    """Told to the agent only when this deployment mints a GCP service-
+    account key for every dispatch (bwsalmon/agents#126, `core.py`'s
+    `_dispatch`, gated on `Orchestrator.gcp_key_config` rather than a task
+    label -- see `gcp_keys.py`'s own docstring for why this runs
+    unconditionally, unlike the Gemini key above) -- the path, never the
+    key material itself, for the same reason `_gemini_key_line` only ever
+    names `GEMINI_KEY_PATH`.
+    """
+    return (
+        f"A GCP service-account key has been minted for this task and "
+        f"placed in your sandbox at {GCP_KEY_PATH} (readable only by "
+        "you). It will be revoked automatically once this task finishes, "
+        "so it is only good for the duration of this session. To use it "
+        "with the gcloud CLI, run:\n"
+        f"    gcloud auth activate-service-account --key-file={GCP_KEY_PATH}\n"
+        "To use it with a Google client library instead, export it as "
+        "application default credentials:\n"
+        f"    export GOOGLE_APPLICATION_CREDENTIALS=\"{GCP_KEY_PATH}\"\n"
+        "Do not print its contents, log it, or commit it anywhere."
+    )
+
+
 def _self_debug_line() -> str:
     """Told to the agent only when this task's issue carried
     `self_debug_label` (bwsalmon/agents#62, `core.py`'s `_resolve_target`)
@@ -405,7 +434,7 @@ def _self_debug_line() -> str:
         "sandbox or the controller itself.\n"
         "- read_grain_config: one of grain's own non-secret config files "
         "under /data/config on the controller (automation.json, "
-        "repo-allowlist.json, gemini-key.json, metadata-server.json, "
+        "repo-allowlist.json, gemini-key.json, gcp-key.json, "
         "sandbox-github-key.json) -- no credential or token is ever "
         "reachable through it.\n"
         "- read_automation_audit_log: recent entries from the dispatch/"
@@ -449,7 +478,7 @@ def _self_repair_line() -> str:
 
 def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] = (),
             *, task_repo: str = "", target_repo: str = "", agent_id_value: str = "",
-            gemini_key: bool = False, self_debug: bool = False,
+            gemini_key: bool = False, gcp_key: bool = False, self_debug: bool = False,
             self_repair: bool = False) -> str:
     """`task_repo` is where the issue itself lives (the agent set's queue);
     `target_repo` is where the code is. Two different repos in the general
@@ -472,7 +501,12 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     never called. `self_debug` (bwsalmon/agents#62) is the same
     "true only once the label was actually seen" record, for
     `self_debug_label` -- `core.py`'s `_resolve_target` sets it straight
-    from `issue.labels`, no minting step required.
+    from `issue.labels`, no minting step required. `gcp_key`
+    (bwsalmon/agents#126) is the identical "true only once it actually
+    landed" record for a GCP service-account key -- unlike `gemini_key`,
+    never gated on a task label at all (see `gcp_keys.py`'s own docstring
+    for why), so this is `core.py`'s record of whether
+    `Orchestrator.gcp_key_config` was configured for this dispatch.
 
     bwsalmon/agents#79: the closing instructions ask for a real commit
     message because `core.py`'s `_finish_succeeded_issue` now builds the
@@ -482,6 +516,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
     left a number of generated PRs reading as description-free.
     """
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
+    gcp_key_section = f"{_gcp_key_line()}\n\n" if gcp_key else ""
     self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
     self_repair_section = f"{_self_repair_line()}\n\n" if self_repair else ""
     return (
@@ -499,6 +534,7 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         "you.\n\n"
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
+        f"{gcp_key_section}"
         f"{self_debug_section}"
         f"{self_repair_section}"
         "When you are done, commit your changes with a clear, descriptive "
@@ -533,7 +569,8 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
                thread_comments: list[Comment] = (), *, task_repo: str = "",
                target_repo: str = "", task_issue: int | None = None,
                agent_id_value: str = "", gemini_key: bool = False,
-               self_debug: bool = False, self_repair: bool = False) -> str:
+               gcp_key: bool = False, self_debug: bool = False,
+               self_repair: bool = False) -> str:
     """A PR-continuation dispatch. The PR lives in `target_repo`; the task
     that asked for the work — and the conversation a human is having about
     it — lives in `task_repo`, as issue `task_issue` (a `/pr` directive on
@@ -541,8 +578,8 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
     `directives.py`).
 
     `agent_id_value` is `_prompt`'s own parameter of the same name — see its
-    docstring. `gemini_key` and `self_debug` are likewise `_prompt`'s own
-    parameters of the same names, unchanged.
+    docstring. `gemini_key`, `gcp_key`, and `self_debug` are likewise
+    `_prompt`'s own parameters of the same names, unchanged.
     """
     feedback = (
         "\n\n".join(_format_review_comment(c) for c in comments)
@@ -555,6 +592,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         if task_issue is not None else ""
     )
     gemini_key_section = f"{_gemini_key_line()}\n\n" if gemini_key else ""
+    gcp_key_section = f"{_gcp_key_line()}\n\n" if gcp_key else ""
     self_debug_section = f"{_self_debug_line()}\n\n" if self_debug else ""
     self_repair_section = f"{_self_repair_line()}\n\n" if self_repair else ""
     return (
@@ -572,6 +610,7 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         "start over or open a competing branch.\n\n"
         f"{_agent_id_line(agent_id_value)}\n\n"
         f"{gemini_key_section}"
+        f"{gcp_key_section}"
         f"{self_debug_section}"
         f"{self_repair_section}"
         "Review feedback on this pull request so far:\n\n"
@@ -640,6 +679,19 @@ def configure_gemini_key(runner: Runner, key: str) -> None:
     """
     runner.run(["dd", f"of={GEMINI_KEY_PATH}", "status=none"], stdin=key)
     runner.run(["chmod", "600", GEMINI_KEY_PATH])
+
+
+def configure_gcp_key(runner: Runner, key_json: str) -> None:
+    """Writes a freshly minted GCP service-account key (`core.py`'s
+    `_dispatch`, via `gcp_keys.create_key`) to the sandbox at
+    `GCP_KEY_PATH`, over the same stdin-not-argv channel
+    `configure_gemini_key` already uses -- the raw key material never
+    becomes a shell-interpolated argument anywhere in this path, and never
+    appears in the prompt file either (`_gcp_key_line` only ever names the
+    *path*, not the key itself).
+    """
+    runner.run(["dd", f"of={GCP_KEY_PATH}", "status=none"], stdin=key_json)
+    runner.run(["chmod", "600", GCP_KEY_PATH])
 
 
 def ensure_workspace(runner: Runner, remote_url: str, path: str = WORKSPACE_PATH,
@@ -816,6 +868,7 @@ _ALLOWED_TOOLS = (
 def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  target: SandboxTarget, prompt: str, *, remote_url: str, token: str,
                  branch: str | None = None, gemini_key: str | None = None,
+                 gcp_key: str | None = None,
                  self_debug: bool = False, self_repair: bool = False) -> str:
     """The common tail of both `dispatch()` and `dispatch_pr()`. Two
     runners now, not one (docs/roadmap.md item 8's "Update"): `sandbox_runner`
@@ -831,7 +884,11 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     `gemini_key` (bwsalmon/agents#47) is the raw key string `core.py`'s
     `_dispatch` already minted via `gemini_keys.create_key`, or `None` for
     every task that didn't ask for one — this function never mints or
-    revokes a key itself, only places one that already exists. `self_debug`
+    revokes a key itself, only places one that already exists. `gcp_key`
+    (bwsalmon/agents#126) is the identical shape for a GCP service-account
+    key, the raw JSON key file content `core.py`'s `_dispatch` already
+    minted via `gcp_keys.create_key`, or `None` for a deployment that
+    never configured `Orchestrator.gcp_key_config`. `self_debug`
     (bwsalmon/agents#62) is `dispatch()`'s own record of whether the task
     issue carried `self_debug_label` — threaded straight through to
     `_mcp_config_json`, the only place it has any effect.
@@ -840,6 +897,8 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     ensure_workspace(sandbox_runner, remote_url, target.workspace, branch=branch)
     if gemini_key is not None:
         configure_gemini_key(sandbox_runner, gemini_key)
+    if gcp_key is not None:
+        configure_gcp_key(sandbox_runner, gcp_key)
 
     unit = unit_name(sandbox)
     unit_dir = _unit_dir(unit)
@@ -901,6 +960,7 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
              target: SandboxTarget, issue: Issue, *, remote_url: str, token: str,
              base: str | None = None, comments: list[Comment] = (), task_repo: str = "",
              target_repo: str = "", gemini_key: str | None = None,
+             gcp_key: str | None = None,
              self_debug: bool = False, self_repair: bool = False) -> str:
     """Starts an issue-triggered task. `sandbox_runner` prepares the
     workspace on the sandbox `target` describes; `controller_runner` starts
@@ -938,11 +998,15 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     `_dispatch` minted for this task, or `None` for the common case of no
     `gemini_key_label` on the task issue — threaded through to both
     `_start_task` (which places it in the sandbox) and the prompt (which
-    tells the agent it's there, only when it actually is). `self_debug`
-    (bwsalmon/agents#62) is `core.py`'s own record of whether the task
-    issue carried `self_debug_label` — threaded through to `_start_task`
-    (which turns on `mcp_server.py`'s `read_grain_logs` tool) and the
-    prompt (which tells the agent about it, only when it's on).
+    tells the agent it's there, only when it actually is). `gcp_key`
+    (bwsalmon/agents#126) is the identical shape for a GCP service-account
+    key, minted unconditionally (no task label involved) whenever
+    `core.py`'s `Orchestrator.gcp_key_config` is set — `None` for a
+    deployment that never configured it. `self_debug` (bwsalmon/agents#62)
+    is `core.py`'s own record of whether the task issue carried
+    `self_debug_label` — threaded through to `_start_task` (which turns on
+    `mcp_server.py`'s `read_grain_logs` tool) and the prompt (which tells
+    the agent about it, only when it's on).
     `self_repair` (bwsalmon/agents#99) is the identical treatment for
     `self_repair_label` — a separate label/flag from `self_debug`, turning
     on the mutating `restart_grain_service`/`reboot_sandbox`/
@@ -955,9 +1019,10 @@ def dispatch(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
         _prompt(issue, push_branch, target.workspace, comments,
                 task_repo=task_repo, target_repo=target_repo,
                 agent_id_value=agent_id(), gemini_key=gemini_key is not None,
+                gcp_key=gcp_key is not None,
                 self_debug=self_debug, self_repair=self_repair),
         remote_url=remote_url, token=token, branch=base, gemini_key=gemini_key,
-        self_debug=self_debug, self_repair=self_repair,
+        gcp_key=gcp_key, self_debug=self_debug, self_repair=self_repair,
     )
 
 
@@ -966,8 +1031,8 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                  comments: list[ReviewComment], *, remote_url: str, token: str,
                  thread_comments: list[Comment] = (), task_repo: str = "",
                  target_repo: str = "", task_issue: int | None = None,
-                 gemini_key: str | None = None, self_debug: bool = False,
-                 self_repair: bool = False) -> str:
+                 gemini_key: str | None = None, gcp_key: str | None = None,
+                 self_debug: bool = False, self_repair: bool = False) -> str:
     """Starts a PR-triggered task (docs/roadmap.md item 9): same mechanism as
     `dispatch()`, but the workspace lands on the PR's *own* existing branch
     (`pr.head_ref`) instead of the default branch, and the prompt carries the
@@ -987,20 +1052,22 @@ def dispatch_pr(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
 
     `gemini_key` (bwsalmon/agents#47) is `dispatch()`'s own parameter of the
     same name — see its docstring; `gemini_key_label` on the task issue
-    works identically for a PR-continuation dispatch. `self_debug`
-    (bwsalmon/agents#62) is likewise `dispatch()`'s own parameter of the
-    same name, unchanged. `self_repair` (bwsalmon/agents#99) is likewise
-    `dispatch()`'s own parameter of the same name, unchanged.
+    works identically for a PR-continuation dispatch. `gcp_key`
+    (bwsalmon/agents#126) is likewise `dispatch()`'s own parameter of the
+    same name, unchanged. `self_debug` (bwsalmon/agents#62) is likewise
+    `dispatch()`'s own parameter of the same name, unchanged. `self_repair`
+    (bwsalmon/agents#99) is likewise `dispatch()`'s own parameter of the
+    same name, unchanged.
     """
     return _start_task(
         sandbox_runner, controller_runner, sandbox, target,
         _pr_prompt(pr, comments, target.workspace, thread_comments,
                    task_repo=task_repo, target_repo=target_repo,
                    task_issue=task_issue, agent_id_value=agent_id(),
-                   gemini_key=gemini_key is not None, self_debug=self_debug,
-                   self_repair=self_repair),
+                   gemini_key=gemini_key is not None, gcp_key=gcp_key is not None,
+                   self_debug=self_debug, self_repair=self_repair),
         remote_url=remote_url, token=token, branch=pr.head_ref, gemini_key=gemini_key,
-        self_debug=self_debug, self_repair=self_repair,
+        gcp_key=gcp_key, self_debug=self_debug, self_repair=self_repair,
     )
 
 

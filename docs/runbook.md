@@ -204,11 +204,12 @@ short of giving the host a GitHub/Claude credential — see
    Use the `controller` target specifically, not `all` — `grain host
    create`/`recreate` now refuses `--provision` combined with `all`, since
    the controller and the sandboxes need different scripts. The script
-   installs Python 3.11+, `gce_metadata_server`, the `grain-metadata`
-   system user, the `/data/{secrets,config,state}` layout every module in
-   `grain/automation`, `grain/proxy` and `grain/metadata` expects, the
-   systemd units for the automation timer and the git proxy (installed but
-   not enabled), and **generates the controller's own SSH keypair**,
+   installs Python 3.11+ and `gcloud` (for `grain/automation/gemini_keys.py`
+   and `grain/automation/gcp_keys.py`'s own gcloud calls), the
+   `/data/{secrets,config,state}` layout every module in `grain/automation`
+   and `grain/proxy` expects, the systemd units for the automation timer
+   and the git proxy (installed but not enabled), and **generates the
+   controller's own SSH keypair**,
    `/data/secrets/controller-ssh{,.pub}`, idempotently, on the controller
    itself. It does not deploy this repo's own code, and it does not enable
    any service; both need real data that a provisioning script has no
@@ -422,6 +423,7 @@ session record itself is still kept, just without transcript content.
   secrets/
     controller-ssh, controller-ssh.pub   # controller -> sandbox SSH identity
     sandbox-tokens.json                  # sandbox name -> bearer token (git proxy auth)
+    gcp-service-account.json             # primary GCP key gemini_keys.py authenticates with (optional)
     github/
       credentials.json                   # owner/repo pattern -> credential name
       <name>.token                       # one file per credential named in credentials.json
@@ -430,6 +432,7 @@ session record itself is still kept, just without transcript content.
     automation.json                      # AutomationConfig
     cluster.toml                         # sandbox_count, subnet -- the controller's own copy; see below
     gemini-key.json                      # GeminiKeyConfig (optional, see below)
+    gcp-key.json                         # GcpKeyConfig (optional, bwsalmon/agents#126, see below)
     sandbox-github-key.json              # sandbox name -> named credential override, if any (bwsalmon/agents#52)
   state/
     automation/state.json, audit.log
@@ -662,6 +665,45 @@ minted for a task still in flight is unaffected (it still gets revoked
 normally when that task's slot frees) — this only stops new ones from
 being minted.
 
+## Enabling GCP access in sandboxes (optional, bwsalmon/agents#126)
+
+Every dispatched sandbox gets a freshly minted, short-lived GCP service-
+account key pushed into it, revoked once the task's slot frees (success,
+failure, or stranded — same checkpoint as the Gemini key above), or after
+24 hours regardless, whichever comes first (see
+`grain/automation/gcp_keys.py`'s docstring for why GCP itself enforces no
+such expiry and grain has to). Unlike the Gemini key, this is *not* gated
+on a task label — it mirrors the old per-sandbox metadata-server broker's
+"every sandbox, every dispatch" behaviour. Off by default; nothing above
+requires it. Terraform-managed deployments (`terraform/gcp/`) wire the IAM
+side of this up automatically whenever `agent_service_account_roles` (or
+`agent_can_manage_compute_instances`) creates the agent account at all —
+see `terraform/gcp/iam.tf`'s `host_manages_agent_keys`.
+
+1. Have an agent service account (`agent_service_account_roles` or
+   `agent_can_manage_compute_instances` in `grain.tfvars`, or one created
+   by hand) that the host account has `roles/iam.serviceAccountKeyAdmin`
+   on — Terraform-managed deployments get this automatically; by hand,
+   grant it yourself.
+2. Run `grain controller configure --gcp-agent-service-account-email
+   <email> --gcp-project-id <project>` (any other `controller configure`
+   flags in the same invocation still apply normally — this one is
+   additive, and needs neither `--gcp-service-account-key-file` nor a
+   Gemini key setup, unrelated features that happen to share this same
+   command). This writes `/data/config/gcp-key.json`, read fresh on every
+   `automation run-once` invocation. A Terraform-managed deployment does
+   this automatically as part of `host bootstrap` instead — see
+   `terraform/gcp/files/deploy.sh`.
+3. Every dispatch from here on mints a key and places it in the sandbox at
+   `~/.gcp-service-account.json`; the agent's own prompt tells it the path
+   and how to use it (`gcloud auth activate-service-account --key-file=...`,
+   or `export GOOGLE_APPLICATION_CREDENTIALS=...` for client libraries).
+
+To disable it again: delete `/data/config/gcp-key.json`. Any key already
+minted for a task still in flight is unaffected (it still gets revoked
+normally when that task's slot frees, or reaped at 24 hours) — this only
+stops new ones from being minted.
+
 ## Enabling the janitor (optional, bwsalmon/agents#113)
 
 `grain automation run-once` can also run a periodic janitor that deletes
@@ -719,7 +761,7 @@ than the target repo's own code:
   assigned sandbox or the controller itself.
 - `read_grain_config`: one of the deployment's own non-secret config
   files under `/data/config` (`automation.json`, `repo-allowlist.json`,
-  `gemini-key.json`, `metadata-server.json`, `sandbox-github-key.json`),
+  `gemini-key.json`, `gcp-key.json`, `sandbox-github-key.json`),
   checked against a fixed allowlist of those five names — never a raw
   path, and never anything under `/data/secrets`.
 - `read_automation_audit_log`: recent lines of `audit.py`'s own

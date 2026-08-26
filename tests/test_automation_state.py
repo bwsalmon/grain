@@ -107,6 +107,49 @@ def test_load_of_a_pre_gemini_key_state_file_defaults_to_no_key(tmp_path: Path):
     assert loaded.assignments["sandbox-0"].gemini_key_name is None
 
 
+# --- GCP service-account key (bwsalmon/agents#126) --------------------------
+
+def test_assign_defaults_to_no_gcp_key():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now)
+    assert state.assignments["sandbox-0"].gcp_key_id is None
+
+
+def test_assign_records_a_gcp_key_id():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now, gcp_key_id="abc123")
+    assert state.assignments["sandbox-0"].gcp_key_id == "abc123"
+
+
+def test_save_and_load_round_trips_the_gcp_key_id(tmp_path: Path):
+    state = AutomationState()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=7, unit="grain-task-sandbox-0", now=now,
+                 gcp_key_id="abc123")
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gcp_key_id == "abc123"
+
+
+def test_load_of_a_pre_gcp_key_state_file_defaults_to_no_key(tmp_path: Path):
+    # An assignment written before bwsalmon/agents#126 has no such field at
+    # all -- must load as None, not KeyError.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "assignments": {
+            "sandbox-0": {
+                "issue": 1, "unit": "u0", "started_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    }))
+    loaded = AutomationState.load(path)
+    assert loaded.assignments["sandbox-0"].gcp_key_id is None
+
+
 def test_load_of_a_missing_file_is_an_empty_state(tmp_path: Path):
     state = AutomationState.load(tmp_path / "does-not-exist.json")
     assert state.assignments == {}

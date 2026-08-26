@@ -57,7 +57,7 @@ these are stated with what was actually verified.
 |---|---|
 | Agent execution | **Claude Code** (`claude -p`) in the sandbox VM — [decided over `openhands-agent-server`/Agent Canvas](#agent-runtime-claude-code-not-openhands) to avoid that stack's version-pin matrix; the OpenHands research is kept, not deleted — [see why](#openhands-integration) |
 | Issue intake | **[`grain/automation/`](#issue-intake)** — this repo's own poll/dispatch/rate-limit/sweep loop, cron-invoked |
-| GCP credentials | **[`gce_metadata_server`](#gcp-credentials)** — ADC works with no client code |
+| GCP credentials | **[Per-dispatch service-account keys](#gcp-credentials)** — minted by the controller, pushed into the sandbox, revoked at session end |
 | VM lifecycle | **[Lima](#the-host-adapter)**, which runs on both Linux and macOS — libvirt is the Linux-native fallback |
 | Guest OS | **stock Debian**, provisioned by a script in this repo |
 | Git access control | **Custom** — small smart-HTTP proxy; [FINOS Git Proxy evaluated and rejected](#the-git-proxy-write-it) |
@@ -84,8 +84,8 @@ flowchart TB
         subgraph ctl["controller VM"]
             canvas["Agent Canvas + Automation<br/>(all GitHub API work)"]
             proxy["Git proxy<br/>(allowlist + creds + audit)"]
-            mds["gce_metadata_server<br/>(one per sandbox)"]
-            data[("/data — credential set,<br/>GCP key, allowlist<br/>survives sandbox recreate")]
+            gcpk["gcp_keys.py<br/>(mints/revokes a key per dispatch)"]
+            data[("/data — credential set,<br/>allowlist<br/>survives sandbox recreate")]
         end
 
         subgraph sbs["sandbox VMs (Debian)"]
@@ -99,14 +99,13 @@ flowchart TB
     canvas -->|"conversations"| sb1
     sb0 -->|"git only, token"| proxy
     sb1 -->|"git only, token"| proxy
-    sb0 -->|"ADC"| mds
-    sb1 -->|"ADC"| mds
+    gcpk -->|"pushes a short-lived key<br/>at dispatch, revokes at release"| sb0
+    gcpk -->|"pushes a short-lived key<br/>at dispatch, revokes at release"| sb1
 
     proxy --> gh
     canvas --> gh
-    mds --> gcp
+    gcpk --> gcp
     proxy -.-> data
-    mds -.-> data
     canvas -.-> data
 ```
 
@@ -125,8 +124,12 @@ Properties:
   hypervisor and writes every VM's cloud-init regardless — but the plain
   "no secrets" phrasing stopped being literally true once bootstrap could
   place one there.
-- Sandboxes never hold GitHub or GCP credentials, only two narrow endpoints
-  on the controller, allowlist-checked and audit-logged.
+- Sandboxes never hold a GitHub credential, only a narrow, allowlist-checked
+  and audit-logged endpoint on the controller. A sandbox *does* hold a real
+  GCP credential when a deployment mints one (bwsalmon/agents#126) — but
+  only a short-lived, per-task service-account key, never anything capable
+  of minting another, and it is revoked the moment the task's slot frees
+  (or after 24 hours regardless — see [GCP credentials](#gcp-credentials)).
 - Concurrent agents cannot reach each other: separate kernels, separate
   Docker daemons, separate port spaces.
 
@@ -209,10 +212,13 @@ A Debian VM running everything that holds a credential:
 - **Agent Canvas** and the **Automation Service** — all GitHub API work,
   issue intake, and dispatch to sandboxes.
 - **The git proxy** — the only path from a sandbox to GitHub.
-- **`gce_metadata_server`, one per sandbox** — see
-  [sandbox identity](#sandbox-identity) for why one each.
+- **`gcp_keys.py`** — mints a fresh GCP service-account key per dispatch
+  and revokes it at release (bwsalmon/agents#126; see
+  [GCP credentials](#gcp-credentials)) — superseded the per-sandbox
+  `gce_metadata_server` broker [sandbox identity](#sandbox-identity)
+  used to describe here.
 - **`/data`**, a disk that outlives sandbox recreates and holds the
-  credential set, the GCP key, and the repo allowlist.
+  credential set, the primary GCP key, and the repo allowlist.
 
 Revision 4 ran these natively on macOS to save a VM's worth of RAM. Moving
 them into a VM costs ~3–4 GB and buys three things: the host holds no
@@ -231,12 +237,12 @@ revision 4 lost.
 /data/
   secrets/
     github/            # credential set + credentials.json
-    gcp-service-account.json
+    gcp-service-account.json   # primary key gemini_keys.py authenticates with (optional)
   config/
     repo-allowlist.json
+    gcp-key.json       # agent service account + project id, bwsalmon/agents#126 (optional)
   state/
     git-proxy/audit.log
-    metadata-server/audit.log
 ```
 
 Mode `0600`, owned by the service users. On GCP, `/data` is a separate
@@ -352,8 +358,10 @@ the [adapter](#the-host-adapter) — a Linux bridge with a tap per VM now, a
 - **Controller services bind to the private network address only**, never
   `0.0.0.0`. Back it with a host filter rule denying those ports on the
   external interface, so a binding mistake fails closed.
-- **Sandbox → controller** is permitted to the git proxy and that
-  sandbox's metadata server, and nothing else.
+- **Sandbox → controller** is permitted to the git proxy, and nothing
+  else — a GCP service-account key (bwsalmon/agents#126) arrives by a
+  direct push at dispatch time, not a network path a sandbox reaches on
+  its own.
 - **Sandbox ↔ sandbox** is dropped. Agents cannot reach each other.
 - **Inbound** reaches only the host's SSH port.
 
@@ -395,13 +403,16 @@ Properties:
   [recreate](#recreating-a-sandbox) so it happens on some cadence rather
   than never.
 
-**The GCP path cannot use tokens at all**, which is easy to miss. A
-metadata server is authenticated *by network position* — that is what lets
-ADC work with no client configuration — and Google's client libraries will
-not attach a custom header to metadata requests. So run **one
-`gce_metadata_server` per sandbox**, each bound to that sandbox's address,
-making network position per-VM by construction. It costs a small process
-per sandbox and preserves attribution exactly, on both platforms.
+**The GCP path used to be the one exception** — a per-sandbox
+`gce_metadata_server` instance, authenticated by network position rather
+than a token, so ADC worked with no client configuration at all (Google's
+client libraries will not attach a custom header to metadata requests).
+bwsalmon/agents#126 replaced it with the same per-dispatch, per-sandbox
+credential shape everything else here uses: a real, short-lived GCP
+service-account key, minted fresh and pushed into the sandbox at dispatch
+time, revoked when the task ends — see [GCP credentials](#gcp-credentials)
+for the full mechanism and why the zero-client-config property was judged
+not worth the operational cost of keeping a second broker running.
 
 ## Sandbox lifecycle: long-lived, recreated on demand
 
@@ -841,45 +852,61 @@ first live issue-to-PR run (`docs/roadmap.md`).
 
 ## GCP credentials
 
-**Don't build a token service — emulate GCE's metadata server.**
-[`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
-serves the real metadata contract from a service-account file or
-**service-account impersonation**, which is the shape this needs.
+**Mint a real, narrow, short-lived key per dispatch — mirroring the Gemini
+key below rather than the metadata broker this superseded** (bwsalmon/
+agents#126). `grain/automation/gcp_keys.py` mints a fresh key for the
+narrow "agent" service account on every dispatch, `dispatch.py`'s
+`configure_gcp_key` pushes the raw JSON key file into the sandbox over the
+same stdin-not-argv channel the git-proxy token and the Gemini key already
+use, and `sweeper.py`'s `_release` revokes it the moment the sandbox's slot
+frees (success, failure, or stranded) — the identical checkpoint the
+Gemini key already uses (see "A Gemini API key doesn't fit this broker"
+below, now more precedent than exception).
 
-The payoff is that it eliminates the client side entirely. Every Google SDK
-finds credentials through ADC, which probes the metadata server
-automatically. Point a sandbox at its instance and GCP access just works —
-no wrapper script, no environment plumbing, nothing for the agent to get
-wrong.
-
-- The key lives at `/data/secrets/gcp-service-account.json`, `0600`,
-  readable only by the metadata service.
-- It is configured to **impersonate a second, minimally-privileged service
-  account** rather than serve the primary key's own tokens.
-- **One instance per sandbox**, each bound to that sandbox's address
-  — see [sandbox identity](#sandbox-identity) for why this
-  is what preserves per-caller attribution on macOS.
-- Every mint is audit-logged.
+- **Minted by the controller's own attached identity, never a static
+  file.** The controller already runs *as* `google_service_account.host`
+  via its own real GCE metadata server (a completely different thing from
+  the fake per-sandbox broker this replaced) with `cloud-platform` scope,
+  so granting that account `roles/iam.serviceAccountKeyAdmin` on the agent
+  account (`terraform/gcp/iam.tf`'s `host_manages_agent_keys`) is all
+  minting needs — no key file to place or rotate for this feature at all.
+  Deliberately a *different* identity from the account being minted for: a
+  sandbox holding a leaked agent key must never be able to mint itself a
+  fresh one, which self-impersonation (the old broker's shape) would have
+  allowed.
+- **Unconditional, like the broker it replaced — not gated on a task
+  label.** Every dispatch mints one whenever a deployment has
+  `Orchestrator.gcp_key_config` configured at all (`grain controller
+  configure --gcp-agent-service-account-email ... --gcp-project-id ...`),
+  the same "every sandbox, every dispatch" behaviour docs/design.md's own
+  Gemini-key section below explicitly contrasts itself against.
+- **24-hour expiry, enforced by grain, not GCP.** User-managed IAM
+  service-account keys have no native TTL — unlike an OAuth token, a key
+  minted today is valid until explicitly deleted. So the per-release
+  revocation above is the *primary* mechanism, and a periodic reap
+  (`core.py`'s `_sweep`, calling `gcp_keys.delete_expired_keys` once per
+  cycle) is the safety net for whatever it misses — a controller crash
+  between mint and the assignment being recorded, most notably.
 
 ### What a short lifetime actually buys
 
-A sandbox can re-mint the moment a token expires, indefinitely. Short
-lifetimes therefore do **not** limit what a compromised sandbox can do
-while compromised. What they buy:
+A sandbox can be handed a fresh key the moment its old one is revoked, for
+as long as its task keeps running. Short lifetimes therefore do **not**
+limit what a compromised sandbox can do *during* one task's session. What
+they buy:
 
-- **Revocability**: cut a sandbox off and its GCP access dies in minutes,
-  with no key to rotate.
-- **Leak containment**: a token in a log, an LLM context, or a PR diff is
-  worthless within minutes.
+- **Revocability**: cut a sandbox off and its GCP access dies with that
+  task, with no key surviving into the next one.
+- **Leak containment**: a key in a log, an LLM context, or a PR diff is
+  worthless once the task that minted it ends.
 
-Both real. Neither is "the agent only has five minutes of access." To
-reduce steady-state privilege you must downscope the token itself:
-impersonating a narrow second service account is the whole game, and costs
-one service account and one IAM binding. Optionally add a
-[Credential Access Boundary](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials)
-to restrict to specific resources.
+Both real. Neither is "the agent only has an hour of access." To reduce
+steady-state privilege you must downscope the key itself: granting the
+agent account only the roles a task genuinely needs
+(`agent_service_account_roles` in `terraform/gcp/variables.tf`) is the
+whole game.
 
-### A Gemini API key doesn't fit this broker (bwsalmon/agents#47)
+### A Gemini API key doesn't fit the same mechanism (bwsalmon/agents#47)
 
 A task can ask, by carrying the `grain-gemini-key` label
 (`AutomationConfig.gemini_key_label`, bwsalmon/agents#49), for a
@@ -892,38 +919,30 @@ trigger label itself already relies on, checked directly against
 the issue body or a trusted reply (`directives.py`'s own module docstring
 has the fuller reasoning for why the other three -- `/repo`, `/pr`,
 `/base` -- still need to be directives instead: they carry a *value*, and
-a value can't be a label). The mechanism deliberately sits *outside* the
-metadata broker above rather than reusing it, for two reasons:
+a value can't be a label). This mechanism predates, and deliberately stays
+separate from, `gcp_keys.py` above, for two reasons:
 
-- **A literal API key isn't a token the broker can hand out.** ADC-style
-  token-probing (what `gce_metadata_server` serves) works because every
-  Google SDK already knows how to ask the metadata server for a token on
-  demand. The Generative Language API is authenticated by a bearer key
-  string instead — something a caller mints once and holds — so there is
-  no token-shaped thing for a sandbox to probe for; the key itself has to
-  be minted, in full, before anything can use it.
-- **Reusing the broker's impersonation path buys nothing here.** Even
-  routed through impersonation, the *result* is still a raw key string
-  that has to be handed to a sandbox — the broker's whole value
-  ("nothing worth stealing sits in reach of untrusted code") doesn't
-  survive contact with a credential shape that's a bearer secret by
-  definition. So this mints the key from the **controller's own account**
-  (`grain-automation.service`, the same identity that already reads every
-  other file under `/data/secrets`) and only the resulting key *string* —
-  never anything capable of minting or revoking another one — ever reaches
-  a sandbox, over the same stdin-not-argv channel already used for the
-  git-proxy token (`dispatch.py`'s `configure_git_credentials`). It never
-  touches `grain-agent`, the unprivileged account `claude -p` itself runs
-  as (["Agent runtime"](#agent-runtime-claude-code-not-openhands)) — the
-  same "controller mints, sandbox only ever holds the narrow result" split
-  the git-proxy token already uses.
+- **Unlike a GCP service-account key, a Gemini API key is unconditional
+  nowhere** — the Generative Language API is authenticated by a bearer key
+  string a caller mints once and holds, and minting one for every dispatch
+  regardless of whether a task wants it would be pure waste (and a wider
+  blast radius than necessary) for a feature most tasks never touch.
+- **A different minting identity, on purpose.** `gemini_keys.py`
+  authenticates with the primary GCP service-account key placed at
+  `/data/secrets/gcp-service-account.json` (`configure_gcp_service_account`)
+  — the agent account's *own* key, minted by CI and rotated on every
+  deploy (`ci/push-host-secrets.sh`) — rather than the controller's
+  attached host identity `gcp_keys.py` uses. Reasonable either way for this
+  one feature (a Gemini key is a bearer secret regardless of who mints it,
+  so there is no equivalent "must not self-mint" hazard), and left
+  unchanged by bwsalmon/agents#126 rather than risking an unrelated,
+  already-working mechanism for a tidiness-only unification.
 
-Minting/revoking calls `apikeys.googleapis.com` via the `gcloud` CLI,
-authenticated with the same primary service-account key already placed at
-`/data/secrets/gcp-service-account.json` for the broker above — a second
-controller-only runtime dependency (`provision/controller.sh`), justified
-the same way `gce_metadata_server` already is: the sandbox side of this
-project stays stdlib-only Python, but the controller already isn't one.
+Minting/revoking calls `apikeys.googleapis.com` via the `gcloud` CLI — the
+controller-only runtime dependency (`provision/controller.sh`) `gcp_keys.py`
+above also now relies on for `iam.googleapis.com`'s service-account-keys
+API, justified the same way originally: the sandbox side of this project
+stays stdlib-only Python, but the controller already isn't one.
 Hand-rolling the OAuth2 JWT-bearer exchange in stdlib Python was considered
 and rejected — no crypto library is available to sign it, and `gcloud`
 already does this correctly. See `grain/automation/gemini_keys.py`'s own
@@ -931,12 +950,57 @@ docstring for the full tradeoff, including against adding the much heavier
 `gcloud` SDK tarball instead of the package-manager install this repo
 already uses for everything else on the controller.
 
-The key's lifetime is bounded by the *task*, not by a fixed TTL: revocation
-runs from the same "sandbox slot just freed" checkpoint
+The Gemini key's lifetime is bounded by the *task*, not by a fixed TTL:
+revocation runs from the same "sandbox slot just freed" checkpoint
 [between-task hygiene](#between-task-hygiene) already uses for cleanup and
 health, reached uniformly whether the task succeeded, failed, or was found
 stranded — so a key never outlives the sandbox session it was minted for,
-without needing Google-side expiry to enforce that.
+without needing Google-side expiry to enforce that. (The GCP service-
+account key above gets the identical treatment, plus the 24-hour reap as a
+second line of defense a Gemini key has never needed, since nothing has
+yet stranded one long enough in practice to justify it.)
+
+### Superseded: the `gce_metadata_server` broker (bwsalmon/agents#126)
+
+Revisions before this one ran a per-sandbox
+[`gce_metadata_server`](https://github.com/salrashid123/gce_metadata_server)
+instance on the controller, emulating GCE's real metadata contract via
+service-account impersonation, so ADC resolved with no client-side
+plumbing at all — ADC probes the metadata server automatically, and every
+Google SDK already knows how to ask it for a token on demand. That
+property is genuinely lost by the switch above: a sandbox now has to
+explicitly `gcloud auth activate-service-account --key-file=...` or export
+`GOOGLE_APPLICATION_CREDENTIALS` to use its key, the same one small step
+the Gemini key already asked of an agent. Kept here rather than deleted,
+per this document's own policy elsewhere of recording the reasoning
+because it's the expensive part (see "OpenHands integration" below for
+the same treatment of a different superseded design) — revisiting a
+broker-shaped approach later would need this research again:
+
+- The key lived at `/data/secrets/gcp-service-account.json`, `0600`,
+  readable only by the metadata service, configured to impersonate a
+  second, minimally-privileged service account rather than serve the
+  primary key's own tokens.
+- One instance per sandbox, each bound to that sandbox's address — see
+  [sandbox identity](#sandbox-identity) — with a matching per-sandbox
+  `net_linux.py` DNAT rule sending that sandbox's metadata-anycast traffic
+  (`169.254.169.254:80`) to its own instance, which is what made
+  "authenticated by network position" true per-VM.
+  Every mint was audit-logged (`grain/metadata/audit.py`).
+- Impersonating a narrow second service account, rather than serving the
+  primary key's tokens directly, was the actual privilege-reduction lever
+  — a short token lifetime alone does not limit what a compromised sandbox
+  can do while compromised (it can just re-mint), the same point the
+  section above makes about the key that replaced this.
+
+Why it was replaced rather than kept alongside the new mechanism: it was a
+second, non-stdlib runtime dependency and a per-sandbox systemd unit plus
+DNAT rule to operate, for a property (zero-config ADC) that the Gemini key
+had already shown wasn't load-bearing — that mechanism asked an agent to
+read a path and export a variable from day one, with no reported
+friction. bwsalmon/agents#126 filed the removal explicitly in those terms:
+use a service-account key, mirroring the Gemini key's own shape, rather
+than keep running a broker nothing else in this design still needed.
 
 That covers every key this deployment's own dispatch minted and knows
 about; it does not cover a key (or a GCE instance, or a disk) an agent
@@ -1418,11 +1482,11 @@ inputs regardless, which is the work, not the files.
    expiry, watch both refresh. Answer decides whether the interim login
    stays one-per-pool or goes back to one-per-sandbox until the LLM proxy
    lands.
-7. **Can `gce_metadata_server` impersonate using ADC** rather than a key
-   file? If so, GCP deployments need no service-account key at all — see
-   [where credentials should live](#where-credentials-should-live) — and
-   the adapter needs to forward the real metadata endpoint into the
-   controller VM.
+7. ~~Can `gce_metadata_server` impersonate using ADC~~ **Moot:
+   bwsalmon/agents#126 removed the broker entirely** — GCP access is now a
+   real, short-lived service-account key minted per dispatch by the
+   controller's own attached identity, no impersonation and no forwarded
+   metadata endpoint involved. See [GCP credentials](#gcp-credentials).
 
 ## Implementation plan
 
@@ -1487,6 +1551,13 @@ inputs regardless, which is the work, not the files.
    are now provisioned by `provision/controller.sh` (step 5) and confirmed
    live on a real controller VM. Not verified: an actual token mint, which
    needs a real GCP project and key. See `docs/roadmap.md` item 4.
+   **Superseded by bwsalmon/agents#126**: this whole broker (`grain/
+   metadata/`, the `grain-metadata` system user, the per-sandbox
+   `net_linux.py` DNAT rule) was removed in favour of a real, short-lived
+   service-account key minted per dispatch — see
+   [GCP credentials](#gcp-credentials)'s "Superseded" subsection for the
+   full reasoning; kept here unedited as the historical record of what was
+   actually built and verified at the time.
 8. **Lifecycle scripts**: `grain sandbox recreate`, the between-task
    cleanup hook, a health check, a disk watermark alarm.
 9. **Automation loop** — *mostly done*: `grain/automation/` implements

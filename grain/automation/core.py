@@ -132,6 +132,10 @@ from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, UnitState, branch_name, comment_path,
     dispatch, dispatch_pr, question_path, unit_name,
 )
+from .gcp_keys import GcpKeyConfig
+from .gcp_keys import create_key as create_gcp_key
+from .gcp_keys import delete_expired_keys as delete_expired_gcp_keys
+from .gcp_keys import delete_key as delete_gcp_key
 from .gemini_keys import GeminiKeyConfig
 from .gemini_keys import create_key as create_gemini_key
 from .gemini_keys import delete_key as delete_gemini_key
@@ -143,7 +147,6 @@ from .ssh import SshRunner
 from .state import AutomationState, OpenPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
 from ..inventory import GIT_PROXY_PORT, Cluster
-from ..metadata.launcher import MetadataLauncher
 from ..proxy.allowlist import Allowlist
 from ..proxy.credentials import CredentialSet
 from ..proxy.tokens import SandboxCredentialStore, SandboxTokenStore
@@ -351,25 +354,23 @@ class Orchestrator:
     # lifecycle. `None` alongside `credentials=None` above for the same
     # "feature not wired" reason.
     credential_store: SandboxCredentialStore | None = None
-    # bwsalmon/agents#98: the controller-side launcher for the per-sandbox
-    # `gce_metadata_server` instance docs/design.md's "GCP credentials"
-    # describes -- `_ensure_metadata_server` starts a sandbox's instance
-    # before a task begins on it, since nothing else in this dispatch path
-    # ever did (found live: `gcloud`/ADC inside a sandbox had no listener to
-    # reach even though the sandbox image and `net_linux.py`'s DNAT rule both
-    # assume one is running). `None` (production's default for a deployment
-    # that never ran `provision/controller.sh`'s metadata-server setup, or
-    # simply has no `/data/config/metadata-server.json` yet) makes
-    # `_ensure_metadata_server` a no-op, the same "feature not configured"
-    # shape `gemini_key_config`/`credentials` above already have -- a
-    # deployment with no metadata-server config gets no ADC support, not an
+    # bwsalmon/agents#126: the on/off switch for minting a GCP service-
+    # account key on every dispatch, replacing the old per-sandbox
+    # `gce_metadata_server` broker (`metadata_launcher`, removed by this
+    # same change) -- see `gcp_keys.py`'s own docstring for the full
+    # design. `None` (production's default for a deployment that never ran
+    # `grain controller configure --gcp-agent-service-account-email ...`,
+    # or simply has no `/data/config/gcp-key.json` yet) makes `_dispatch`
+    # skip minting one entirely, the same "feature not configured" shape
+    # `gemini_key_config`/`credentials` above already have -- a deployment
+    # with no GCP key config gets no GCP access in its sandboxes, not an
     # error.
-    metadata_launcher: MetadataLauncher | None = None
+    gcp_key_config: GcpKeyConfig | None = None
     # bwsalmon/agents#113: the on/off switch for the GCP janitor. `None`
     # (production's default for a deployment that never ran `grain
     # controller configure --janitor-ttl-hours ...`, or a test that doesn't
     # care) makes `_janitor` a no-op, the same "feature not configured"
-    # shape `gemini_key_config`/`metadata_launcher` above already have. See
+    # shape `gemini_key_config`/`gcp_key_config` above already have. See
     # `janitor.py`'s own docstring for what it deletes and how it avoids
     # grain's own core infrastructure.
     janitor_config: JanitorConfig | None = None
@@ -491,6 +492,7 @@ class Orchestrator:
         result = sweep(self.state, self._ssh_runner_for, self.base_runner,
                         self.config, now, history=self.history,
                         gemini_key_config=self.gemini_key_config,
+                        gcp_key_config=self.gcp_key_config,
                         credential_store=self.credential_store,
                         is_issue_closed=self._is_issue_closed)
         # `sweep()` already called `state.release()` in memory for every
@@ -524,6 +526,40 @@ class Orchestrator:
             # still be live and needs revoking by hand.
             self.audit.record(sandbox=warning.sandbox, issue=None,
                                outcome=f"credential warning: {warning.detail}")
+        self._reap_expired_gcp_keys(now)
+
+    def _reap_expired_gcp_keys(self, now: datetime) -> None:
+        """The safety-net half of bwsalmon/agents#126's "24-hour expiry":
+        `gcp_keys.py`'s own docstring explains why GCP itself enforces no
+        such thing for a user-managed service-account key, so this deletes
+        any key under `gcp_key_config.service_account_email` older than
+        `gcp_key_config.max_key_age_hours`, once per `run_once` cycle,
+        independent of `AutomationState` entirely -- it still catches an
+        orphaned key even if the assignment that minted it was lost (a
+        controller crash between mint and `state.assign`, most notably).
+
+        A no-op when `gcp_key_config` is unset, the same "feature not
+        configured" shape every other call site here already has.
+        Best-effort: a `CommandError` (Google's API unreachable) is a
+        visibility-only audit line, the same "surface it, don't gate on
+        it" treatment `_sweep`'s own health/credential warnings already
+        get -- there is no sandbox slot for this to block from freeing.
+        """
+        if self.gcp_key_config is None:
+            return
+        try:
+            deleted = delete_expired_gcp_keys(self.base_runner, self.gcp_key_config, now=now)
+        except CommandError as exc:
+            self.audit.record(
+                sandbox=None, issue=None,
+                outcome=f"GCP service-account key reap failed: {exc}",
+            )
+            return
+        for key_id in deleted:
+            self.audit.record(
+                sandbox=None, issue=None,
+                outcome=f"reaped expired GCP service-account key {key_id}",
+            )
 
     # --- janitor (bwsalmon/agents#113) ---------------------------------
     def _janitor(self, now: datetime) -> None:
@@ -1411,38 +1447,6 @@ class Orchestrator:
                            outcome=f"parked, awaiting reply: {reason}")
 
     # --- dispatch -------------------------------------------------------
-    def _ensure_metadata_server(self, sandbox: str) -> None:
-        """Makes sure `sandbox`'s `gce_metadata_server` instance is actually
-        running before a task starts on it (bwsalmon/agents#98). Nothing
-        else in this dispatch path ever started one -- `provision/sandbox.sh`
-        and `net_linux.py`'s DNAT rule both assume a listener is already
-        there, but only `grain metadata start` (`cli.py`'s standalone
-        command) ever called `MetadataLauncher.start`, and nothing calls
-        that automatically. The result, confirmed live: a fresh sandbox's
-        `gcloud`/ADC probe to `169.254.169.254` times out (nothing answers),
-        not merely "no credentialed account" -- there was never a metadata
-        server for it to reach in the first place.
-
-        `MetadataLauncher.start` is not itself safely repeatable (its own
-        docstring: `systemd-run` with a unit name already in use fails
-        loudly rather than double-binding the port) -- so this checks status
-        first. `ACTIVE` needs nothing. `DONE_FAILED` is reaped before
-        restarting, since the old unit name is still "in use" until then.
-        `ABSENT` and `DONE_SUCCESS` (a long-running server exiting 0 on its
-        own isn't expected, but treated the same as failed rather than
-        assumed impossible) both just start it. A no-op entirely when
-        `metadata_launcher` is unset -- see its own docstring on
-        `Orchestrator` for why that's "not configured", not an error.
-        """
-        if self.metadata_launcher is None:
-            return
-        state = self.metadata_launcher.status(sandbox)
-        if state is UnitState.ACTIVE:
-            return
-        if state is UnitState.DONE_FAILED:
-            self.metadata_launcher.stop(sandbox)
-        self.metadata_launcher.start(sandbox)
-
     def _dispatch(self, now: datetime) -> None:
         candidates = self.github.list_issues(
             self.config.task_owner, self.config.task_repo, self.config.trigger_label
@@ -1543,22 +1547,23 @@ class Orchestrator:
             # dispatch()/dispatch_pr()'s path -- ensure_workspace,
             # configure_git_credentials, starting the unit; gemini_keys
             # .create_key's own gcloud calls below (bwsalmon/agents#47); or
-            # `_ensure_metadata_server`'s systemd-run/systemctl calls on the
-            # controller (bwsalmon/agents#98)) must not take down every
-            # other candidate still queued this cycle. Found live
-            # (docs/next-session.md): a proxy-auth failure on one sandbox
-            # crashed `run_once` before it ever reached the next candidate.
-            # Neither the sandbox nor the issue's labels are touched below
-            # on failure -- the sandbox stays free and the issue keeps its
-            # trigger label, so both are simply retried on a later cycle,
-            # same "log and move on" discipline `_requeue`/`_finish_question`
-            # already apply to a GitHub-side 404. Only `CommandError`
-            # specifically: anything else is a real bug, not an expected
-            # failure mode, and should still surface immediately.
+            # gcp_keys.create_key's own gcloud calls (bwsalmon/agents#126))
+            # must not take down every other candidate still queued this
+            # cycle. Found live (docs/next-session.md): a proxy-auth
+            # failure on one sandbox crashed `run_once` before it ever
+            # reached the next candidate. Neither the sandbox nor the
+            # issue's labels are touched below on failure -- the sandbox
+            # stays free and the issue keeps its trigger label, so both are
+            # simply retried on a later cycle, same "log and move on"
+            # discipline `_requeue`/`_finish_question` already apply to a
+            # GitHub-side 404. Only `CommandError` specifically: anything
+            # else is a real bug, not an expected failure mode, and should
+            # still surface immediately.
             gemini_key_string: str | None = None
             gemini_key_name: str | None = None
+            gcp_key_json: str | None = None
+            gcp_key_id: str | None = None
             try:
-                self._ensure_metadata_server(sandbox)
                 if task.gemini_key:
                     # `_resolve_target` already refused this task outright
                     # if `self.gemini_key_config` were `None` -- guaranteed
@@ -1568,6 +1573,13 @@ class Orchestrator:
                         display_name=f"grain-{sandbox}-issue-{number}",
                     )
                     gemini_key_string, gemini_key_name = minted.key_string, minted.name
+                if self.gcp_key_config is not None:
+                    # bwsalmon/agents#126: unconditional, unlike the Gemini
+                    # key above -- see `gcp_keys.py`'s own docstring for why
+                    # this mirrors the old metadata broker's "every sandbox,
+                    # every dispatch" behaviour rather than a task label.
+                    minted_gcp = create_gcp_key(self.base_runner, self.gcp_key_config)
+                    gcp_key_json, gcp_key_id = minted_gcp.key_json, minted_gcp.key_id
                 if task.pr is not None:
                     review_comments = self.github.list_review_comments(
                         task.repo.owner, task.repo.name, task.pr.number
@@ -1578,8 +1590,8 @@ class Orchestrator:
                         remote_url=self._remote_url(task.repo), token=token,
                         thread_comments=prompt_comments, task_repo=str(self._task),
                         target_repo=str(task.repo), task_issue=number,
-                        gemini_key=gemini_key_string, self_debug=task.self_debug,
-                        self_repair=task.self_repair,
+                        gemini_key=gemini_key_string, gcp_key=gcp_key_json,
+                        self_debug=task.self_debug, self_repair=task.self_repair,
                     )
                 else:
                     unit = dispatch(
@@ -1588,10 +1600,11 @@ class Orchestrator:
                         remote_url=self._remote_url(task.repo), token=token,
                         base=task.base, comments=prompt_comments,
                         task_repo=str(self._task), target_repo=str(task.repo),
-                        gemini_key=gemini_key_string, self_debug=task.self_debug,
-                        self_repair=task.self_repair,
+                        gemini_key=gemini_key_string, gcp_key=gcp_key_json,
+                        self_debug=task.self_debug, self_repair=task.self_repair,
                     )
             except CommandError as exc:
+                cleanup_errors: list[str] = []
                 if gemini_key_name is not None:
                     # A key was minted but dispatch itself never reached the
                     # point of recording an Assignment for it to ride on --
@@ -1603,12 +1616,21 @@ class Orchestrator:
                     try:
                         delete_gemini_key(self.base_runner, self.gemini_key_config, gemini_key_name)
                     except CommandError as cleanup_exc:
-                        self.audit.record(
-                            sandbox=sandbox, issue=number,
-                            outcome=f"dispatch failed: {exc} (also failed to revoke the "
-                                    f"gemini API key it minted: {cleanup_exc})",
-                        )
-                        continue
+                        cleanup_errors.append(f"gemini API key: {cleanup_exc}")
+                if gcp_key_id is not None:
+                    # Same orphan-cleanup reasoning as the Gemini key above,
+                    # for the GCP key (bwsalmon/agents#126).
+                    try:
+                        delete_gcp_key(self.base_runner, self.gcp_key_config, gcp_key_id)
+                    except CommandError as cleanup_exc:
+                        cleanup_errors.append(f"GCP service-account key: {cleanup_exc}")
+                if cleanup_errors:
+                    self.audit.record(
+                        sandbox=sandbox, issue=number,
+                        outcome=f"dispatch failed: {exc} (also failed to revoke the "
+                                f"{'; '.join(cleanup_errors)})",
+                    )
+                    continue
                 self.audit.record(sandbox=sandbox, issue=number,
                                    outcome=f"dispatch failed: {exc}")
                 continue
@@ -1619,12 +1641,14 @@ class Orchestrator:
                                    target_owner=task.repo.owner,
                                    target_repo=task.repo.name, base=task.base,
                                    gemini_key_name=gemini_key_name,
+                                   gcp_key_id=gcp_key_id,
                                    auto_merge=task.auto_merge)
             else:
                 self.state.assign(sandbox, number, unit, now,
                                    target_owner=task.repo.owner,
                                    target_repo=task.repo.name, base=task.base,
                                    gemini_key_name=gemini_key_name,
+                                   gcp_key_id=gcp_key_id,
                                    auto_merge=task.auto_merge)
             self.state.record_run(now)
             # Persist the new assignment *before* the trigger label comes

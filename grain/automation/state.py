@@ -82,6 +82,13 @@ class Assignment:
     # know which key to revoke once this assignment is freed, and by then
     # the task's own labels are no longer read.
     gemini_key_name: str | None = None
+    # bwsalmon/agents#126: the bare id of a GCP service-account key minted
+    # for this task (`gcp_keys.create_key`), or `None` for a deployment
+    # that never configured `Orchestrator.gcp_key_config`. Recorded here
+    # for the same reason `gemini_key_name` above is: `sweeper.py`'s
+    # `_release` needs to know which key to revoke once this assignment is
+    # freed, and by then `core.py` no longer has it in hand.
+    gcp_key_id: str | None = None
     # bwsalmon/agents#83: whether the task's own `/auto-merge` directive
     # asked for its resulting PR to be merged automatically rather than
     # left for a human to review -- see `directives.py`'s own docstring.
@@ -182,6 +189,7 @@ class AutomationState:
                 target_repo=a.get("target_repo"),
                 base=a.get("base"),
                 gemini_key_name=a.get("gemini_key_name"),
+                gcp_key_id=a.get("gcp_key_id"),
                 auto_merge=a.get("auto_merge", False),
             )
             for name, a in raw.get("assignments", {}).items()
@@ -219,6 +227,7 @@ class AutomationState:
                     "kind": a.kind.value, "branch": a.branch,
                     "target_owner": a.target_owner, "target_repo": a.target_repo,
                     "base": a.base, "gemini_key_name": a.gemini_key_name,
+                    "gcp_key_id": a.gcp_key_id,
                     "auto_merge": a.auto_merge,
                 }
                 for name, a in self.assignments.items()
@@ -256,11 +265,12 @@ class AutomationState:
                kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None,
                target_owner: str | None = None, target_repo: str | None = None,
                base: str | None = None, gemini_key_name: str | None = None,
-               auto_merge: bool = False) -> None:
+               gcp_key_id: str | None = None, auto_merge: bool = False) -> None:
         self.assignments[sandbox] = Assignment(
             issue=issue, unit=unit, started_at=now, kind=kind, branch=branch,
             target_owner=target_owner, target_repo=target_repo, base=base,
-            gemini_key_name=gemini_key_name, auto_merge=auto_merge,
+            gemini_key_name=gemini_key_name, gcp_key_id=gcp_key_id,
+            auto_merge=auto_merge,
         )
 
     def release(self, sandbox: str) -> None:

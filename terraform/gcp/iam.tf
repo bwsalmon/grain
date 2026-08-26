@@ -18,9 +18,15 @@ resource "google_project_iam_member" "host" {
   member   = "serviceAccount:${google_service_account.host.email}"
 }
 
-# The narrow account agents get tokens for, minted by the controller's
-# metadata server. Created when you ask for it by listing roles, by
-# turning on agent_can_manage_compute_instances, enable_gemini_key, or
+# The narrow account a sandbox's own credentials belong to: the controller
+# mints a fresh, short-lived key for this account on every dispatch
+# (bwsalmon/agents#126, grain/automation/gcp_keys.py) and pushes it into
+# the sandbox for the duration of that one task, revoking it once the
+# task's slot frees (or, failing that, once it turns 24 hours old -- see
+# gcp_keys.py's own docstring). It's also what the janitor's Gemini-key
+# and compute-instance cleanup (bwsalmon/agents#113) run as. Created when
+# you ask for it by listing roles, by turning on
+# agent_can_manage_compute_instances, enable_gemini_key, or
 # enable_janitor, in any combination -- each alone is a real, supported
 # configuration, so the account's own existence can't gate on
 # agent_service_account_roles specifically.
@@ -54,7 +60,7 @@ resource "google_service_account" "agent" {
   count        = local.agent_account_needed ? 1 : 0
   account_id   = "${var.name_prefix}-agent"
   display_name = "grain sandboxed agents (${var.name_prefix})"
-  description  = "Impersonated by the controller's metadata server; this is what a sandboxed agent's ADC resolves to."
+  description  = "The controller mints a fresh, short-lived key for this account on every dispatch and pushes it into the sandbox; this is what a sandboxed agent's GCP credentials belong to."
 }
 
 resource "google_project_iam_member" "agent" {
@@ -64,26 +70,36 @@ resource "google_project_iam_member" "agent" {
   member   = "serviceAccount:${google_service_account.agent[0].email}"
 }
 
-resource "google_service_account_iam_member" "host_impersonates_agent" {
-  count              = local.agent_account_needed ? 1 : 0
-  service_account_id = google_service_account.agent[0].name
-  role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:${google_service_account.host.email}"
-}
-
 # Lets the deploy workflow mint (and invalidate) the agent account's own
-# key -- the impersonation *source* grain's metadata servers read, never
-# handed out directly (see grain's docs/design.md, "GCP credentials").
-# bootstrap-gcp.sh, next to this file, grants the deployer project-wide
-# serviceAccountAdmin/serviceAccountUser, but neither of those covers key
-# management (iam.serviceAccountKeys.*) -- that needs its own role, and
-# scoping it to just this one account rather than granting it project-wide
-# is the whole point of doing it here instead of in bootstrap-gcp.sh.
+# key -- the primary credential grain/automation/gemini_keys.py's own
+# gcloud calls authenticate with (see grain's docs/design.md, "GCP
+# credentials"), unrelated to the per-dispatch keys host_manages_agent_keys
+# below lets the controller mint. bootstrap-gcp.sh, next to this file,
+# grants the deployer project-wide serviceAccountAdmin/serviceAccountUser,
+# but neither of those covers key management (iam.serviceAccountKeys.*) --
+# that needs its own role, and scoping it to just this one account rather
+# than granting it project-wide is the whole point of doing it here
+# instead of in bootstrap-gcp.sh.
 resource "google_service_account_iam_member" "deployer_manages_agent_keys" {
   count              = local.agent_account_needed ? 1 : 0
   service_account_id = google_service_account.agent[0].name
   role               = "roles/iam.serviceAccountKeyAdmin"
   member             = "serviceAccount:${var.name_prefix}-deployer@${var.project_id}.iam.gserviceaccount.com"
+}
+
+# bwsalmon/agents#126: lets the controller (which runs *as* google_service_
+# account.host, via its own real, native GCE metadata server -- a
+# completely different thing from the fake per-sandbox one this same
+# change removed) mint and revoke the agent account's per-dispatch keys
+# itself, at runtime, with no static credential of its own -- see
+# grain/automation/gcp_keys.py's own docstring for the full design and why
+# this must be a *different* account from the one being minted for (a
+# leaked agent key must never be able to mint itself a fresh one).
+resource "google_service_account_iam_member" "host_manages_agent_keys" {
+  count              = local.agent_account_needed ? 1 : 0
+  service_account_id = google_service_account.agent[0].name
+  role               = "roles/iam.serviceAccountKeyAdmin"
+  member             = "serviceAccount:${google_service_account.host.email}"
 }
 
 # Compute instance lifecycle and SSH, everywhere in this project except
