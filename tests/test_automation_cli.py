@@ -181,10 +181,10 @@ def test_build_orchestrator_loads_gemini_key_config_when_present(tmp_path: Path)
     assert orchestrator.gemini_key_config.project_id == "acme-project"
 
 
-def test_build_orchestrator_loads_metadata_launcher_when_present(tmp_path: Path):
-    """bwsalmon/agents#98: mirrors the gemini_key_config test above --
-    `metadata_launcher` is `None` unless `/data/config/metadata-server.json`
-    exists, the same "absence is the off switch" shape.
+def test_build_orchestrator_loads_gcp_key_config_when_present(tmp_path: Path):
+    """bwsalmon/agents#126: mirrors the gemini_key_config test above --
+    `gcp_key_config` is `None` unless `/data/config/gcp-key.json` exists,
+    the same "absence is the off switch" shape.
     """
     import argparse
     import json as jsonlib
@@ -194,18 +194,18 @@ def test_build_orchestrator_loads_metadata_launcher_when_present(tmp_path: Path)
     from grain.run import FakeRunner
 
     _write_automation_json(tmp_path)
-    (tmp_path / "config" / "metadata-server.json").write_text(
+    (tmp_path / "config" / "gcp-key.json").write_text(
         jsonlib.dumps({"service_account_email": "narrow@p.iam.gserviceaccount.com",
                        "project_id": "acme-project"})
     )
     args = argparse.Namespace(data_dir=str(tmp_path), dry_run=False)
     orchestrator, _ = build_orchestrator(Cluster(sandbox_count=1), FakeRunner(), args)
 
-    assert orchestrator.metadata_launcher is not None
-    assert orchestrator.metadata_launcher.config.project_id == "acme-project"
+    assert orchestrator.gcp_key_config is not None
+    assert orchestrator.gcp_key_config.project_id == "acme-project"
 
 
-def test_build_orchestrator_leaves_metadata_launcher_unset_when_config_absent(tmp_path: Path):
+def test_build_orchestrator_leaves_gcp_key_config_unset_when_config_absent(tmp_path: Path):
     import argparse
 
     from grain.cli import build_orchestrator
@@ -216,7 +216,7 @@ def test_build_orchestrator_leaves_metadata_launcher_unset_when_config_absent(tm
     args = argparse.Namespace(data_dir=str(tmp_path), dry_run=False)
     orchestrator, _ = build_orchestrator(Cluster(sandbox_count=1), FakeRunner(), args)
 
-    assert orchestrator.metadata_launcher is None
+    assert orchestrator.gcp_key_config is None
 
 
 def test_run_once_saves_state_when_not_a_dry_run(monkeypatch):

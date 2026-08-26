@@ -504,11 +504,11 @@ def test_iap_tunnel_access_is_granted_project_wide_not_conditioned():
     assert "condition" not in resource.group(0)
 
 
-def test_agent_account_exists_for_compute_only_mode_with_no_metadata_server_roles():
+def test_agent_account_exists_for_compute_only_mode_with_no_extra_roles():
     """agent_can_manage_compute_instances alone (agent_service_account_roles
     left empty) must still create the agent account -- gating solely on
     agent_service_account_roles would make this feature a no-op for
-    anyone who wants compute access but no metadata-server role.
+    anyone who wants compute access but no other role.
     """
     source = _tf_source()
     local = re.search(r"agent_account_needed\s*=\s*(.+)", source)
@@ -621,6 +621,37 @@ def test_iam_grants_the_deployer_key_management_only_on_the_narrow_agent_account
         r'.*?service_account_id\s*=\s*google_service_account\.agent\[0\]\.name',
         source, re.S,
     ), "the deployer-manages-agent-keys binding must be scoped to the agent account"
+
+
+def test_host_can_mint_and_revoke_the_agents_own_keys():
+    """bwsalmon/agents#126: the controller (google_service_account.host)
+    needs roles/iam.serviceAccountKeyAdmin on the agent account so
+    grain/automation/gcp_keys.py can mint/revoke a fresh key per dispatch
+    at runtime, with no static credential of its own -- distinct from
+    deployer_manages_agent_keys above, which is CI's own one-time key
+    mint for gemini_keys.py's unrelated primary credential.
+    """
+    source = _tf_source()
+    resource = re.search(
+        r'resource "google_service_account_iam_member" "host_manages_agent_keys" \{.*?\n\}',
+        source, re.S,
+    )
+    assert resource, "host_manages_agent_keys resource not found"
+    body = resource.group(0)
+    assert "service_account_id" in body
+    assert "google_service_account.agent[0].name" in body
+    assert "roles/iam.serviceAccountKeyAdmin" in body
+    assert "google_service_account.host.email" in body
+
+
+def test_host_no_longer_impersonates_the_agent_account():
+    """bwsalmon/agents#126 replaced the per-sandbox metadata-server broker
+    (which impersonated the agent account for short-lived tokens) with
+    minting real keys directly -- the impersonation grant that broker
+    needed must not still be here."""
+    source = _tf_source()
+    assert "serviceAccountTokenCreator" not in source
+    assert "host_impersonates_agent" not in source
 
 
 def test_read_outputs_step_sets_every_steps_tf_output_used_elsewhere():

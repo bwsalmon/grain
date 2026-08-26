@@ -47,21 +47,21 @@ sysctl --system
 # discard it otherwise.
 docker pull "${KIND_NODE_IMAGE}"
 
-# --- gcloud and terraform (bwsalmon/agents#117): the sandbox already gets
-# GCP credentials with no setup -- ADC resolves through the metadata
-# anycast address, DNATed to this sandbox's own `gce_metadata_server`
-# instance on the controller (net_linux.py, docs/design.md's "GCP
-# credentials") -- but until now had neither CLI installed to actually
-# drive them, so there was nothing for an agent to run `terraform
-# apply`/`gcloud compute ...` with. No credential moves into the sandbox
-# to make this work: the key stays on the controller, and the sandbox only
-# ever sees a short-lived token through that same narrow, audited
-# endpoint, same as it already did before this. gcloud via apt, the exact
-# repo/keyring `provision/controller.sh` already uses (see that script's
-# own comment on why gcloud and not a hand-rolled OAuth2 exchange);
-# terraform via HashiCorp's own apt repo, since Debian's archives don't
-# carry it -- same signed-repo shape as the Docker install above, no bare
-# `apt-key add`.
+# --- gcloud and terraform (bwsalmon/agents#117): a task whose deployment
+# has `Orchestrator.gcp_key_config` set gets a freshly minted, short-lived
+# GCP service-account key pushed into its sandbox at dispatch time
+# (bwsalmon/agents#126, `grain/automation/gcp_keys.py`/`dispatch.py`'s
+# `configure_gcp_key`, revoked again once the task's slot frees) -- but
+# until now had neither CLI installed to actually drive them with, so there
+# was nothing for an agent to run `terraform apply`/`gcloud compute ...`
+# with even once it had the key. Nothing here bakes any credential into the
+# image itself: the key only ever arrives per-dispatch, over the same
+# stdin-not-argv channel the git-proxy token already uses. gcloud via apt,
+# the exact repo/keyring `provision/controller.sh` already uses (see that
+# script's own comment on why gcloud and not a hand-rolled OAuth2
+# exchange); terraform via HashiCorp's own apt repo, since Debian's
+# archives don't carry it -- same signed-repo shape as the Docker install
+# above, no bare `apt-key add`.
 curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
   gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
@@ -101,8 +101,13 @@ This sandbox is part of a grain deployment.
 
 - git pushes go through a proxy automatically; GitHub API calls are not
   available from here.
-- GCP credentials work through ADC with no setup; gcloud and terraform
-  are both installed to actually drive them (e.g. against terraform/gcp/).
+- If this deployment mints one, a GCP service-account key for this task
+  arrives at ~/.gcp-service-account.json (readable only by you, revoked
+  automatically once the task ends) -- run `gcloud auth
+  activate-service-account --key-file=~/.gcp-service-account.json` or
+  export GOOGLE_APPLICATION_CREDENTIALS to that path to use it. gcloud and
+  terraform are both installed to actually drive it (e.g. against
+  terraform/gcp/).
 - The sandbox is shared across tasks and cleaned between them, so do not
   leave long-running services behind.
 DOC

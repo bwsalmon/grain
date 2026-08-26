@@ -124,7 +124,7 @@ never a raw path from the model" discipline:
   mid-task.
 - `read_grain_config` reads one of the deployment's own config files under
   `/data/config` on the controller -- `automation.json`,
-  `repo-allowlist.json`, `gemini-key.json`, `metadata-server.json`,
+  `repo-allowlist.json`, `gemini-key.json`, `gcp-key.json`,
   `sandbox-github-key.json`. Every one of those is already non-secret by
   construction (`configure.py` never writes a token or key under
   `/data/config`; every credential lives under `/data/secrets` instead,
@@ -433,7 +433,7 @@ _SELF_DEBUG_CONFIG_FILES = {
     "automation": "automation.json",
     "repo-allowlist": "repo-allowlist.json",
     "gemini-key": "gemini-key.json",
-    "metadata-server": "metadata-server.json",
+    "gcp-key": "gcp-key.json",
     "sandbox-github-key": "sandbox-github-key.json",
 }
 
@@ -444,15 +444,15 @@ _READ_GRAIN_CONFIG_TOOL = {
     "description": (
         "Read one of grain's own non-secret configuration files from "
         "/data/config on the controller: automation.json, "
-        "repo-allowlist.json, gemini-key.json, metadata-server.json, or "
+        "repo-allowlist.json, gemini-key.json, gcp-key.json, or "
         "sandbox-github-key.json -- for triaging a bug in grain itself, "
         "not the target repo's own code. Every credential and token this "
         "deployment holds lives under /data/secrets instead, which this "
         "tool has no path to reach at all: only these five names are "
         "readable. Reports a file as unconfigured rather than erroring if "
-        "this deployment never wrote it (gemini-key.json and "
-        "sandbox-github-key.json are both optional). Only available on a "
-        "task whose issue carries the grain-self-debug label."
+        "this deployment never wrote it (gemini-key.json, gcp-key.json, "
+        "and sandbox-github-key.json are all optional). Only available on "
+        "a task whose issue carries the grain-self-debug label."
     ),
     "inputSchema": {
         "type": "object",

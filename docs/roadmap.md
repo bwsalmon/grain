@@ -124,7 +124,11 @@ assumptions.
 
 ## 4. GCP metadata server
 
-- [x] Done
+- [x] Done, later superseded — bwsalmon/agents#126 removed this whole
+  broker in favour of a real, short-lived service-account key minted per
+  dispatch. Left unedited below as the historical record of what was
+  actually built and verified at the time; see `docs/design.md`'s "GCP
+  credentials" section, "Superseded" subsection, for the current design.
 
 `docs/design.md` step 7: one `gce_metadata_server` instance per sandbox,
 serving impersonated tokens for a narrow second service account.

@@ -27,9 +27,10 @@ def test_script_is_executable_or_at_least_has_a_shebang():
 
 def test_installs_gcloud_and_terraform_for_gcp_host_adapter_testing():
     # bwsalmon/agents#117: an agent working in a sandbox needs the CLIs
-    # themselves to drive terraform/gcp/ -- the ADC credentials were
-    # already reachable with no sandbox-side setup (docs/design.md, "GCP
-    # credentials"), but there was nothing installed to use them with.
+    # themselves to drive terraform/gcp/ -- a task can get a real,
+    # short-lived GCP service-account key pushed into its sandbox at
+    # dispatch time (bwsalmon/agents#126, grain/automation/gcp_keys.py),
+    # but there was nothing installed to use it with.
     text = read()
     assert "google-cloud-cli" in text
     assert " terraform" in text
@@ -50,8 +51,8 @@ def test_gcloud_and_terraform_are_installed_via_their_own_signed_apt_repos():
 def test_never_writes_a_secret_value_only_paths():
     """docs/design.md's invariant: "no secret is ever baked into an image
     or a provisioning script." Adding gcloud/terraform must not change
-    that -- both authenticate via ADC through the metadata-server proxy,
-    never a key baked in here.
+    that -- a GCP service-account key only ever arrives per-dispatch
+    (bwsalmon/agents#126), never baked into this script.
     """
     text = read()
     for marker in ("ghp_", "github_pat_", "AIza", "-----BEGIN"):

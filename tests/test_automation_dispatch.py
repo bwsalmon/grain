@@ -1,8 +1,9 @@
 import json
 
 from grain.automation.dispatch import (
-    CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, GEMINI_KEY_PATH, SandboxTarget,
-    UnitState, agent_id, branch_name, configure_gemini_key, configure_git_credentials,
+    CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, GCP_KEY_PATH, GEMINI_KEY_PATH,
+    SandboxTarget, UnitState, agent_id, branch_name, configure_gcp_key,
+    configure_gemini_key, configure_git_credentials,
     dispatch, dispatch_pr, ensure_workspace, reap, transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Comment, Issue, PullRequestDetail, ReviewComment
@@ -736,6 +737,96 @@ def test_dispatch_pr_with_a_gemini_key_writes_it_and_tells_the_agent():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert GEMINI_KEY_PATH in prompt_stdin
+
+
+# --- GCP service-account key (bwsalmon/agents#126) --------------------------
+
+GCP_KEY_JSON = '{"type": "service_account", "private_key": "fake"}'
+
+
+def test_configure_gcp_key_writes_the_key_over_stdin_not_argv():
+    runner = FakeRunner()
+    configure_gcp_key(runner, GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    assert len(dd_calls) == 1
+    dd_argv, dd_stdin = dd_calls[0]
+    assert dd_argv == ["dd", f"of={GCP_KEY_PATH}", "status=none"]
+    assert dd_stdin == GCP_KEY_JSON
+    for argv, _ in runner.calls:
+        assert not any(GCP_KEY_JSON in a for a in argv)
+
+
+def test_configure_gcp_key_restricts_the_file_mode():
+    runner = FakeRunner()
+    configure_gcp_key(runner, GCP_KEY_JSON)
+    assert runner.ran(f"chmod 600 {GCP_KEY_PATH}")
+
+
+def test_dispatch_with_no_gcp_key_never_writes_one():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert not any(argv[0] == "dd" and argv[1] == f"of={GCP_KEY_PATH}" for argv, _ in runner.calls)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "GCP" not in prompt_stdin
+
+
+def test_dispatch_with_a_gcp_key_writes_it_to_the_sandbox():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GCP_KEY_PATH}")
+    assert key_call[1] == GCP_KEY_JSON
+
+
+def test_dispatch_with_a_gcp_key_tells_the_agent_where_it_is():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert GCP_KEY_PATH in prompt_stdin
+    assert "GCP" in prompt_stdin
+    # The raw key material is never written into the prompt file itself.
+    assert GCP_KEY_JSON not in prompt_stdin
+
+
+def test_dispatch_never_lets_the_gcp_key_appear_as_a_literal_argv_element():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    for argv, _ in runner.calls:
+        assert not any(GCP_KEY_JSON in a for a in argv)
+
+
+def test_dispatch_pr_with_a_gcp_key_writes_it_and_tells_the_agent():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(), make_comments(),
+                remote_url=REMOTE_URL, token=TOKEN, gcp_key=GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GCP_KEY_PATH}")
+    assert key_call[1] == GCP_KEY_JSON
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert GCP_KEY_PATH in prompt_stdin
+
+
+def test_dispatch_with_both_a_gemini_and_gcp_key_writes_both():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN, gemini_key=GEMINI_KEY,
+             gcp_key=GCP_KEY_JSON)
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    assert any(c[0][1] == f"of={GEMINI_KEY_PATH}" for c in dd_calls)
+    assert any(c[0][1] == f"of={GCP_KEY_PATH}" for c in dd_calls)
 
 
 # --- Self-debug (bwsalmon/agents#62) ----------------------------------------

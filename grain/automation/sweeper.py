@@ -63,6 +63,17 @@ turned into a warning rather than left to block the slot from freeing --
 the same "surface it, don't gate on it" treatment `check_health`'s own
 report already gets.
 
+**Every release also revokes the task's GCP service-account key, if the
+deployment mints one** (bwsalmon/agents#126, replacing the old per-sandbox
+`gce_metadata_server` broker). Same checkpoint, same best-effort treatment,
+same `controller_runner`-not-sandbox-`runner` split as the Gemini key
+above -- see `gcp_keys.py`'s own docstring for why the *minting* identity
+differs from the Gemini key's (the controller's own attached host identity,
+never a static file), and why this per-release revocation is only the
+primary mechanism, not the only one: `core.py`'s periodic reap of keys
+older than 24 hours is the safety net for whatever this call site misses
+(a crash between mint and this point, most notably).
+
 **docs/roadmap.md item 10: every release also captures the session's
 trajectory, before the slot is freed.** This is the same "guaranteed before
 slot reuse" argument that already governs cleanup/health here: a browse
@@ -89,7 +100,9 @@ from .capture import capture_trajectory
 from .cleanup import cleanup
 from .config import AutomationConfig
 from .dispatch import UnitState, reap, unit_name, unit_status
-from .gemini_keys import GeminiKeyConfig, delete_key
+from .gcp_keys import GcpKeyConfig
+from .gcp_keys import delete_key as delete_gcp_key
+from .gemini_keys import GeminiKeyConfig, delete_key as delete_gemini_key
 from .health import check_health
 from .history import NullSessionHistory, SessionHistory
 from .state import Assignment, AutomationState, TriggerKind
@@ -174,9 +187,28 @@ def _revoke_gemini_key(controller_runner: Runner, sandbox: str, assignment: Assi
     if assignment.gemini_key_name is None or gemini_key_config is None:
         return None
     try:
-        delete_key(controller_runner, gemini_key_config, assignment.gemini_key_name)
+        delete_gemini_key(controller_runner, gemini_key_config, assignment.gemini_key_name)
     except CommandError as exc:
         return HealthWarning(sandbox, f"gemini API key revocation failed: {exc}")
+    return None
+
+
+def _revoke_gcp_key(controller_runner: Runner, sandbox: str, assignment: Assignment,
+                     gcp_key_config: GcpKeyConfig | None) -> HealthWarning | None:
+    """Best-effort revocation of `assignment.gcp_key_id`, if this task's
+    dispatch minted one (bwsalmon/agents#126) -- the same shape as
+    `_revoke_gemini_key` above, just for the per-dispatch GCP service-
+    account key rather than a label-gated Gemini one. `None` for the
+    common case of a deployment that never configured `gcp_key_config` at
+    all, or (an edge case only reachable if a deployment disabled the
+    feature mid-flight) one that did at dispatch time but no longer does.
+    """
+    if assignment.gcp_key_id is None or gcp_key_config is None:
+        return None
+    try:
+        delete_gcp_key(controller_runner, gcp_key_config, assignment.gcp_key_id)
+    except CommandError as exc:
+        return HealthWarning(sandbox, f"GCP service-account key revocation failed: {exc}")
     return None
 
 
@@ -184,13 +216,17 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
              history: SessionHistory, assignment: Assignment, unit: str,
              outcome_label: str, now: datetime, controller_runner: Runner,
              gemini_key_config: GeminiKeyConfig | None,
-             credential_store: SandboxCredentialStore | None) -> tuple[HealthWarning | None, HealthWarning | None]:
+             gcp_key_config: GcpKeyConfig | None,
+             credential_store: SandboxCredentialStore | None) -> tuple[HealthWarning | None, list[HealthWarning]]:
     """Captures the session's trajectory, runs the between-task hook and a
     post-cleanup health check, revokes the task's Gemini API key if it
     minted one, clears any named-GitHub-key override it set
     (bwsalmon/agents#52), then frees the slot. Called from every branch
     below that frees a sandbox, so this behaviour is identical regardless
-    of why the slot is being freed. Returns `(health_warning, credential_warning)`.
+    of why the slot is being freed. Returns `(health_warning,
+    credential_warnings)` -- the second is a list since a single release
+    can carry both a Gemini key and a GCP service-account key (bwsalmon/
+    agents#126) to revoke, either, neither, or both.
 
     Capture runs first, before cleanup or the state release — `claude -p`
     now runs on the controller (docs/roadmap.md item 8's "Update"), so
@@ -216,9 +252,13 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
     )
     cleanup(runner)
     report = check_health(runner)
-    credential_warning = _revoke_gemini_key(
-        controller_runner, sandbox, assignment, gemini_key_config
-    )
+    credential_warnings = [
+        warning for warning in (
+            _revoke_gemini_key(controller_runner, sandbox, assignment, gemini_key_config),
+            _revoke_gcp_key(controller_runner, sandbox, assignment, gcp_key_config),
+        )
+        if warning is not None
+    ]
     if credential_store is not None:
         credential_store.clear(sandbox)
     state.release(sandbox)
@@ -226,13 +266,14 @@ def _release(state: AutomationState, runner: Runner, sandbox: str, *,
         HealthWarning(sandbox, f"{report.status.value}: {report.summary()}")
         if not report.ok else None
     )
-    return health_warning, credential_warning
+    return health_warning, credential_warnings
 
 
 def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
           controller_runner: Runner, config: AutomationConfig, now: datetime,
           history: SessionHistory | None = None,
           gemini_key_config: GeminiKeyConfig | None = None,
+          gcp_key_config: GcpKeyConfig | None = None,
           credential_store: SandboxCredentialStore | None = None,
           is_issue_closed: Callable[[int], bool] | None = None) -> SweepResult:
     """`is_issue_closed` (bwsalmon/agents#82): `core.py`'s hook onto
@@ -266,7 +307,11 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
     enabled the feature -- every task's `assignment.gemini_key_name` is
     then also `None` (`core.py`'s `_resolve_target` refuses the directive
     outright when this is unset), so `_revoke_gemini_key` is a no-op
-    throughout.
+    throughout. `gcp_key_config` (bwsalmon/agents#126) is the identical
+    "off switch" shape for a deployment that never configured
+    `Orchestrator.gcp_key_config` -- every `assignment.gcp_key_id` is then
+    also `None` (`core.py`'s `_dispatch` never mints one without it), so
+    `_revoke_gcp_key` is a no-op throughout.
     """
     if history is None:
         history = NullSessionHistory()
@@ -284,19 +329,21 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
 
         if status is UnitState.DONE_SUCCESS:
             reap(controller_runner, unit)
-            warning, credential_warning = _release(
+            warning, credential_warnings = _release(
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="succeeded", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                gcp_key_config=gcp_key_config,
                 credential_store=credential_store,
             )
             result.succeeded.append(outcome)
         elif status is UnitState.DONE_FAILED:
             reap(controller_runner, unit)
-            warning, credential_warning = _release(
+            warning, credential_warnings = _release(
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="failed", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                gcp_key_config=gcp_key_config,
                 credential_store=credential_store,
             )
             result.failed.append(outcome)
@@ -304,19 +351,21 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
             # Assigned in our state but the unit isn't there — never
             # started (a dispatch that failed partway) or the controller
             # unit was otherwise lost. Nothing to reap.
-            warning, credential_warning = _release(
+            warning, credential_warnings = _release(
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="stranded", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                gcp_key_config=gcp_key_config,
                 credential_store=credential_store,
             )
             result.stranded.append(outcome)
         elif now - assignment.started_at > max_runtime:
             reap(controller_runner, unit)
-            warning, credential_warning = _release(
+            warning, credential_warnings = _release(
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="stranded", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                gcp_key_config=gcp_key_config,
                 credential_store=credential_store,
             )
             result.stranded.append(outcome)
@@ -328,10 +377,11 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
             # runtime budget, just reported distinctly: this was not
             # abandoned, it was called off.
             reap(controller_runner, unit)
-            warning, credential_warning = _release(
+            warning, credential_warnings = _release(
                 state, runner, sandbox, history=history, assignment=assignment, unit=unit,
                 outcome_label="cancelled", now=now, controller_runner=controller_runner,
                 gemini_key_config=gemini_key_config,
+                gcp_key_config=gcp_key_config,
                 credential_store=credential_store,
             )
             result.cancelled.append(outcome)
@@ -342,6 +392,5 @@ def sweep(state: AutomationState, ssh_runner_for: Callable[[str], Runner],
             continue
         if warning is not None:
             result.health_warnings.append(warning)
-        if credential_warning is not None:
-            result.credential_warnings.append(credential_warning)
+        result.credential_warnings.extend(credential_warnings)
     return result

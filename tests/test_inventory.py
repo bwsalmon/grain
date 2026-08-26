@@ -28,18 +28,6 @@ def test_interface_names_are_unique_and_within_the_kernel_limit():
     assert all(len(i) <= 15 for i in ifaces)
 
 
-def test_metadata_ports_are_unique_per_sandbox():
-    c = Cluster(sandbox_count=4)
-    ports = [c.metadata_port(n) for n in c.sandbox_names]
-    assert len(set(ports)) == len(ports)
-
-
-def test_controller_has_no_metadata_server_of_its_own():
-    c = Cluster()
-    with pytest.raises(ValueError):
-        c.metadata_port("controller")
-
-
 def test_specs_carry_the_right_role_and_sizing():
     c = Cluster()
     controller = c.spec_of("controller")

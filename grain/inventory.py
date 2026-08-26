@@ -23,15 +23,6 @@ from pathlib import Path
 
 # Controller service ports, on the controller's private address.
 GIT_PROXY_PORT = 8080
-# Each sandbox gets its own metadata server instance; sandbox i talks to
-# METADATA_BASE_PORT + i. See Cluster.metadata_port.
-METADATA_BASE_PORT = 9000
-
-# Where Google client libraries look for the metadata server. Sandbox traffic
-# to this address is DNAT'd to that sandbox's own metadata instance, which is
-# what makes "authenticated by network position" true per-VM.
-METADATA_ANYCAST = ipaddress.IPv4Address("169.254.169.254")
-METADATA_PORT = 80
 
 # Offsets within the subnet. Host is .1, controller .2, sandboxes from .10.
 _HOST_OFFSET = 1
@@ -156,12 +147,6 @@ class Cluster:
         if name == self.controller_name:
             return "gr-ctl"
         return f"gr-sb{self._index_of(name)}"
-
-    def metadata_port(self, name: str) -> int:
-        """Port of the metadata server instance dedicated to this sandbox."""
-        if name == self.controller_name:
-            raise ValueError("the controller has no metadata server of its own")
-        return METADATA_BASE_PORT + self._index_of(name)
 
     # --- specs ------------------------------------------------------------
     def spec_of(self, name: str) -> VmSpec:

@@ -15,7 +15,6 @@ import subprocess
 from pathlib import Path
 
 from grain.automation.config import AutomationConfig
-from grain.metadata.config import MetadataConfig
 
 SCRIPT = Path(__file__).parent.parent / "provision" / "controller.sh"
 
@@ -53,48 +52,28 @@ def test_generates_the_controller_ssh_key_idempotently_at_the_configured_path():
 def test_creates_the_data_layout_automation_expects():
     text = read()
     for path in ("/data/secrets", "/data/secrets/github", "/data/config",
-                 "/data/state/automation", "/data/state/git-proxy",
-                 "/data/state/metadata-server"):
+                 "/data/state/automation", "/data/state/git-proxy"):
         assert path in text, f"{path} not created by provision/controller.sh"
 
 
-def test_metadata_server_state_dir_is_writable_by_the_metadata_user():
-    """Unlike git-proxy and automation next to it, this directory is
-    written by `gce_metadata_server` itself, running as the unprivileged
-    `grain-metadata` user (grain/metadata/launcher.py) -- root:root 0755
-    alone would leave every instance unable to create its own log file.
-    """
+def test_no_longer_installs_the_metadata_broker():
+    """bwsalmon/agents#126 removed the per-sandbox gce_metadata_server
+    broker entirely -- GCP access now arrives as a real key minted and
+    pushed per dispatch (grain/automation/gcp_keys.py), needing nothing
+    installed on the controller beyond gcloud itself."""
     text = read()
-    config = MetadataConfig(service_account_email="x@y.iam.gserviceaccount.com",
-                             project_id="proj")
-    assert f"chown {config.metadata_user}:{config.metadata_user} /data/state/metadata-server" in text
+    assert "gce_metadata_server" not in text
+    assert "grain-metadata" not in text
+    assert "/data/state/metadata-server" not in text
 
 
-def test_metadata_server_default_key_path_and_user_are_consistent():
-    text = read()
-    config = MetadataConfig(service_account_email="x@y.iam.gserviceaccount.com",
-                             project_id="proj")
-    assert str(config.key_path) in text
-    assert config.metadata_user in text
-    assert config.binary in text
-
-
-def test_installs_gce_metadata_server_binary():
-    text = read()
-    assert "gce_metadata_server" in text
-    assert "/usr/local/bin/gce_metadata_server" in text
-    assert "chmod +x /usr/local/bin/gce_metadata_server" in text
-
-
-def test_installs_gcloud_for_gemini_key_support():
-    # bwsalmon/agents#47: grain/automation/gemini_keys.py shells out to
-    # gcloud on the controller -- must actually be on the box.
+def test_installs_gcloud_for_gemini_and_gcp_key_support():
+    # bwsalmon/agents#47/#126: grain/automation/gemini_keys.py and
+    # grain/automation/gcp_keys.py both shell out to gcloud on the
+    # controller -- must actually be on the box.
     text = read()
     assert "google-cloud-cli" in text
     assert "gnupg" in text
-    # Installed via apt like the base packages, not a raw pinned binary
-    # download the way gce_metadata_server is -- see this script's own
-    # comment on why those two differ.
     assert "apt-get install" in text
 
 

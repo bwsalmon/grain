@@ -13,17 +13,18 @@ Policy, in the order the rules must be evaluated:
     claim, and it is why the design keeps addresses and rules derived from
     one inventory.
 3.  Controller may reach any sandbox — it drives the agent servers.
-4.  A sandbox may reach the controller on exactly two ports: the git proxy,
-    and *its own* metadata server instance. Not another sandbox's.
+4.  A sandbox may reach the controller on exactly one port: the git proxy.
 5.  Everything else inside the subnet is dropped, which is what stops
     sandbox-to-sandbox traffic.
 6.  Egress leaves the subnet only under the open policy.
 
-Traffic to the metadata anycast address is DNAT'd per source sandbox, so
-each sandbox reaches a different metadata instance at the same well-known
-address. That is what makes "authenticated by network position" true per-VM
-without any client configuration — the property tokens cannot provide,
-because Google's client libraries will not send a custom header.
+bwsalmon/agents#126 removed the per-sandbox `gce_metadata_server` broker
+this ruleset used to DNAT a sandbox's metadata-anycast traffic into (one
+instance per sandbox, "authenticated by network position"): GCP access now
+arrives as a real service-account key pushed directly into the sandbox
+(`grain/automation/gcp_keys.py`), which needs no network path of its own at
+all -- so the NAT table below only ever carries the open-egress
+masquerade rule, never a DNAT one.
 
 Note the host's own INPUT chain is deliberately *not* managed here. On a
 cloud host the provider firewall is the inbound control, and a generated
@@ -36,12 +37,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..inventory import (
-    METADATA_ANYCAST,
-    METADATA_PORT,
-    GIT_PROXY_PORT,
-    Cluster,
-)
+from ..inventory import GIT_PROXY_PORT, Cluster
 from ..run import Runner
 from .base import EgressMode
 
@@ -76,16 +72,12 @@ def render_ruleset(cluster: Cluster, egress: EgressMode) -> str:
     add("    # 3. controller drives the sandboxes")
     add(f"    ip saddr {cluster.controller_ip} ip daddr {cluster.subnet} accept")
     add("")
-    add("    # 4. each sandbox reaches the git proxy and its own metadata server")
+    add("    # 4. each sandbox reaches the git proxy")
     for name in cluster.sandbox_names:
         addr = cluster.address_of(name)
         add(
             f"    ip saddr {addr} ip daddr {cluster.controller_ip} "
             f"tcp dport {GIT_PROXY_PORT} accept"
-        )
-        add(
-            f"    ip saddr {addr} ip daddr {cluster.controller_ip} "
-            f"tcp dport {cluster.metadata_port(name)} accept"
         )
     add("")
     add("    # 5. anything else inside the subnet, including sandbox-to-sandbox")
@@ -100,17 +92,6 @@ def render_ruleset(cluster: Cluster, egress: EgressMode) -> str:
     add("}")
     add("")
     add(f"table ip {NAT_TABLE} {{")
-    add("  chain prerouting {")
-    add("    type nat hook prerouting priority dstnat; policy accept;")
-    add("    # each sandbox's metadata lookups go to its own instance")
-    for name in cluster.sandbox_names:
-        addr = cluster.address_of(name)
-        add(
-            f"    ip saddr {addr} ip daddr {METADATA_ANYCAST} "
-            f"tcp dport {METADATA_PORT} dnat to "
-            f"{cluster.controller_ip}:{cluster.metadata_port(name)}"
-        )
-    add("  }")
     add("  chain postrouting {")
     add("    type nat hook postrouting priority srcnat; policy accept;")
     if egress is EgressMode.OPEN:
@@ -160,12 +141,9 @@ def render_boot_unit(repo_dir: Path, egress: EgressMode) -> str:
     confirmed live: sandboxes keep running and stay reachable for anything
     that does not depend on the ruleset (SSH, the git proxy over a *direct*
     connection to the controller), while sandbox-to-sandbox isolation (rule
-    5, "anything else inside the subnet") and the metadata anycast DNAT
-    (rule 4's whole reason for existing) both silently vanish -- indistin-
+    5, "anything else inside the subnet") silently vanishes -- indistin-
     guishable from "healthy" by every existing check, since none of them
-    ever probed the *host's* own firewall state. `gcloud`/ADC inside a
-    sandbox then times out reaching `169.254.169.254` with no error anywhere
-    to explain why, because there is no DNAT rule left to answer it.
+    ever probed the *host's* own firewall state.
 
     `Before=libvirtd.service` is what closes the gap `docs/design.md`'s
     autostart already opens: the bridge and policy must exist before

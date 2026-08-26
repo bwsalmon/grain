@@ -21,7 +21,6 @@
 #     there's an obvious place to put it).
 set -eux
 
-GCE_METADATA_SERVER_VERSION="4.2.5"
 # Substituted for this cluster's actual controller address when the adapter
 # bakes this script into the controller's user-data (grain/inventory.py's
 # CONTROLLER_IP_PLACEHOLDER, grain/adapter/libvirt.py's `render_user_data`)
@@ -33,22 +32,14 @@ apt-get update
 apt-get install -y --no-install-recommends \
   python3 git openssh-client curl ca-certificates gnupg
 
-# --- gce_metadata_server: one static binary, installed (not built from
-# source) — see docs/design.md, "GCP credentials", and docs/roadmap.md item
-# 4 for how this was verified against a real instance of it. ----------------
-curl -fsSL -o /usr/local/bin/gce_metadata_server \
-  "https://github.com/salrashid123/gce_metadata_server/releases/download/v${GCE_METADATA_SERVER_VERSION}/gce_metadata_server_${GCE_METADATA_SERVER_VERSION}_linux_amd64"
-chmod +x /usr/local/bin/gce_metadata_server
-
 # --- gcloud: the controller-only dependency bwsalmon/agents#47 accepted so
-# grain/automation/gemini_keys.py can mint/revoke a task's Gemini API key --
-# see that module's own docstring for why `gcloud` and not a hand-rolled
-# OAuth2 exchange (this repo's sandbox side stays stdlib-only; the
-# controller already isn't, carrying git/openssh-client/gce_metadata_server
-# above). Via apt, like every other package in this script -- not pinned,
-# matching how python3/git/openssh-client/ca-certificates above aren't
-# either; gce_metadata_server is the one pinned download here because it's
-# a raw GitHub release binary outside apt's own update path. ---------------
+# grain/automation/gemini_keys.py can mint/revoke a task's Gemini API key,
+# and bwsalmon/agents#126 relies on again for grain/automation/gcp_keys.py
+# to mint/revoke a task's GCP service-account key -- see gcp_keys.py's own
+# docstring for why `gcloud` and not a hand-rolled OAuth2 exchange (this
+# repo's sandbox side stays stdlib-only; the controller already isn't,
+# carrying git/openssh-client above). Via apt, like every other package in
+# this script. ---------------------------------------------------------
 curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
   gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
 echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
@@ -56,17 +47,11 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
 apt-get update
 apt-get install -y --no-install-recommends google-cloud-cli
 
-# The system user each gce_metadata_server instance runs as
-# (grain/metadata/config.py's `metadata_user` default) — a narrow account
-# with no login shell, so a compromised instance is not a compromised shell.
-id -u grain-metadata >/dev/null 2>&1 || \
-  useradd --system --no-create-home --shell /usr/sbin/nologin grain-metadata
-
 # The dedicated, unprivileged account `claude -p` (and the MCP server it
 # spawns as a child — grain/automation/mcp_server.py) runs as, per dispatch
-# (docs/roadmap.md item 8's "Update"). Unlike grain-metadata this one needs
-# a real home directory: `claude`'s own installer targets ~/.local/bin, and
-# its own OAuth token lives at ~/.claude-oauth-token (placed by
+# (docs/roadmap.md item 8's "Update"). Needs a real home directory:
+# `claude`'s own installer targets ~/.local/bin, and its own OAuth token
+# lives at ~/.claude-oauth-token (placed by
 # `configure_claude_token`, grain/automation/configure.py) — a bare `claude
 # setup-token` value, deliberately kept separate from any operator's own
 # `claude login` session, read into `CLAUDE_CODE_OAUTH_TOKEN` at runtime by
@@ -128,7 +113,7 @@ visudo -cf /etc/sudoers.d/grain-agent-self-repair
 # a directory on the controller's one disk. Fix the adapter, not this
 # script, if that gap needs closing. ----------------------------------------
 install -d -m0755 /data
-install -d -m0711 /data/secrets   # traverse-only by default; see below
+install -d -m0711 /data/secrets   # traverse-only by default
 install -d -m0700 /data/secrets/github
 install -d -m0755 /data/config
 install -d -m0755 /data/state
@@ -141,30 +126,9 @@ install -d -m0755 /data/state/automation
 # through the audit trail), so 0755 root-owned is fine — same as the parent.
 install -d -m0755 /data/state/automation/units
 install -d -m0755 /data/state/git-proxy
-install -d -m0755 /data/state/metadata-server
-# Unlike its two siblings above -- git-proxy and automation, both written
-# only by processes that run as root -- this one is written by
-# `gce_metadata_server` itself, which `grain/metadata/launcher.py` starts
-# as the unprivileged `grain-metadata` user. `-logTarget` is a plain file
-# path the binary opens with O_CREAT|O_WRONLY (grain/metadata/config.py's
-# docstring), which needs write on the *directory*, not just the file --
-# root:root 0755 grants grain-metadata no such thing. Left root-owned like
-# its siblings, every instance would fail at startup on its first log
-# write, invisibly: `systemd-run` only confirms the unit was submitted,
-# never that the process it started kept running, so nothing here would
-# surface the failure -- the metadata port would simply never answer.
-chown grain-metadata:grain-metadata /data/state/metadata-server
-# /data/secrets is 0711 (traverse, not list) rather than 0700 so that
-# `grain-metadata` can open /data/secrets/gcp-service-account.json by its
-# exact path once an operator places it there — opening a file by absolute
-# path only needs execute (search) permission on each ancestor directory,
-# never read. When you place that file (docs/runbook.md, first-time setup),
-# also run:
-#   chown grain-metadata:grain-metadata /data/secrets/gcp-service-account.json
-#   chmod 0640 /data/secrets/gcp-service-account.json
-# /data/secrets/github stays 0700, root-only: grain-metadata has no business
-# reaching GitHub credentials, and the git proxy (which does) runs as root
-# today, same as the automation loop — see the systemd units below.
+# /data/secrets/github stays 0700, root-only, same as every other secret
+# under /data/secrets — the git proxy (which reads it) runs as root today,
+# same as the automation loop — see the systemd units below.
 
 # --- The controller SSH keypair. `dispatch()`/`SshRunner`
 # (grain/automation/ssh.py) use the private half to reach sandboxes;
@@ -303,9 +267,9 @@ Set up by provision/controller.sh:
 - python3, git, openssh-client, ca-certificates, gnupg
 - google-cloud-cli (`gcloud`), via apt -- the one controller-only runtime
   dependency, for grain/automation/gemini_keys.py to mint/revoke a task's
-  Gemini API key (bwsalmon/agents#47); see that module's own docstring
-- gce_metadata_server, at /usr/local/bin, and the grain-metadata system user
-  it runs each per-sandbox instance as
+  Gemini API key (bwsalmon/agents#47) and grain/automation/gcp_keys.py to
+  mint/revoke a task's GCP service-account key (bwsalmon/agents#126); see
+  those modules' own docstrings
 - claude (Claude Code CLI), at /usr/local/bin, and the grain-agent system
   user it runs as — `claude -p` runs HERE now, not on the sandboxes
   (docs/roadmap.md item 8's "Update"); grain-agent has its own 0600 copy of
@@ -322,9 +286,9 @@ Set up by provision/controller.sh:
   and `systemctl reboot`, nothing else -- so its MCP server can restart a
   wedged service or reboot the controller itself when a task carries the
   grain-self-repair label
-- the /data/{secrets,config,state} layout grain/automation, grain/proxy and
-  grain/metadata already expect, including /data/state/automation/units
-  where each dispatch's prompt/MCP-config/transcript now live
+- the /data/{secrets,config,state} layout grain/automation and grain/proxy
+  already expect, including /data/state/automation/units where each
+  dispatch's prompt/MCP-config/transcript now live
 - the controller SSH keypair, /data/secrets/controller-ssh{,.pub}, plus
   grain-agent's own copy at /home/grain-agent/.ssh/controller-ssh
 - /opt/grain, empty, where this repo's code is deployed by hand
@@ -340,7 +304,11 @@ Still manual, per docs/runbook.md's first-time setup checklist:
   /data/secrets/gcp-service-account.json (if used), /data/config, including
   /data/config/gemini-key.json (optional -- `grain controller configure
   --gemini-project-id ...`, only meaningful once gcp-service-account.json
-  is placed too, since gemini_keys.py authenticates with that same key)
+  is placed too, since gemini_keys.py authenticates with that same key) and
+  /data/config/gcp-key.json (optional -- `grain controller configure
+  --gcp-agent-service-account-email ... --gcp-project-id ...`, bwsalmon/
+  agents#126, unrelated to gcp-service-account.json: plain non-secret
+  config, no key file needed)
 - copying /data/secrets/controller-ssh.pub to the host, for
   LibvirtAdapter.ssh_public_key_path to embed into sandboxes it creates
 - enabling grain-git-proxy.service and grain-automation.timer

@@ -11,16 +11,16 @@ import grain.automation.core as core_module
 from grain.automation.audit import RecordingAuditLog
 from grain.automation.config import AutomationConfig
 from grain.automation.core import Orchestrator
-from grain.automation.dispatch import CONTROLLER_AGENT_SSH_KEY_PATH, GEMINI_KEY_PATH, unit_name
+from grain.automation.dispatch import (
+    CONTROLLER_AGENT_SSH_KEY_PATH, GCP_KEY_PATH, GEMINI_KEY_PATH, unit_name,
+)
+from grain.automation.gcp_keys import GcpKeyConfig
 from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import ApiResponse, FakeTransport, GitHubClient, GitHubError
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.ssh import SshRunner
 from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
-from grain.metadata.config import MetadataConfig
-from grain.metadata.launcher import MetadataLauncher
-from grain.metadata.launcher import unit_name as metadata_unit_name
 from grain.proxy.allowlist import Allowlist
 from grain.proxy.credentials import CredentialSet
 from grain.proxy.tokens import SandboxCredentialStore, SandboxTokenStore
@@ -192,7 +192,7 @@ def credentials_with(*names: str) -> CredentialSet:
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
                        credentials=None, credential_store=None, state_path=None,
-                       metadata_launcher=None):
+                       gcp_key_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -225,7 +225,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         # Orchestrator's own decisions against a plain FakeRunner.
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
-        metadata_launcher=metadata_launcher,
+        gcp_key_config=gcp_key_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -1518,74 +1518,112 @@ def test_dispatch_reuses_the_same_token_across_dispatches_to_one_sandbox(tmp_pat
 
 # --- GCP metadata server (bwsalmon/agents#98) --------------------------
 
-def make_metadata_launcher(tmp_path, runner) -> MetadataLauncher:
-    """Mirrors `tests/test_metadata_launcher.py`'s own `make_launcher` --
-    `sandbox_count=2` here to match `make_orchestrator`'s `Cluster`, since
-    `MetadataLauncher.status_all`/per-sandbox unit names have to agree with
-    whichever sandbox `_dispatch` actually assigns (`sandbox-0`, the only
-    free one in a fresh two-sandbox cluster).
-    """
-    config = MetadataConfig(
-        service_account_email="narrow@p.iam.gserviceaccount.com",
-        project_id="p", numeric_project_id=1,
-        key_path=tmp_path / "secrets" / "gcp-service-account.json",
-    )
-    return MetadataLauncher(
-        cluster=Cluster(sandbox_count=2), config=config, runner=runner, data_dir=tmp_path,
-    )
+GCP_KEY_EMAIL = "narrow@p.iam.gserviceaccount.com"
+GCP_KEY_JSON = '{"type": "service_account", "private_key": "fake"}'
 
 
-def test_dispatch_does_nothing_metadata_related_when_no_launcher_is_configured(tmp_path):
-    """The "not configured" default (bwsalmon/agents#98's `metadata_launcher
-    = None`) must not change a single existing dispatch's behaviour --
-    every test above this one runs with no metadata_launcher at all.
-    """
+def test_dispatch_does_nothing_gcp_key_related_when_none_is_configured():
+    """The "not configured" default (`gcp_key_config = None`) must not
+    change a single existing dispatch's behaviour -- every test above this
+    one runs with no gcp_key_config at all."""
     runner = FakeRunner()
     orchestrator, _ = make_orchestrator(issues=[issue_json(1)], runner=runner)
     orchestrator.run_once(NOW)
-    assert not any("grain-metadata" in c for c in runner.commands)
+    assert not runner.ran("gcloud iam service-accounts")
 
 
-def test_dispatch_starts_the_metadata_server_for_a_sandbox_that_has_none_running(tmp_path):
-    runner = FakeRunner()  # no "systemctl show" scripted -> UnitState.ABSENT
-    launcher = make_metadata_launcher(tmp_path, runner)
-    orchestrator, _ = make_orchestrator(
-        issues=[issue_json(1)], runner=runner, metadata_launcher=launcher,
-    )
-    orchestrator.run_once(NOW)
-    assert runner.ran(f"sudo systemd-run --unit={metadata_unit_name('sandbox-0')}")
-
-
-def test_dispatch_leaves_an_already_active_metadata_server_alone(tmp_path):
+def test_dispatch_mints_a_gcp_key_unconditionally_when_configured():
+    """Unlike the Gemini key, no task label is needed (bwsalmon/agents#126,
+    mirroring the old metadata broker's "every sandbox, every dispatch"
+    behaviour) -- a plain issue with no special label still gets one."""
     runner = FakeRunner()
-    unit = metadata_unit_name("sandbox-0")
-    runner.expect(
-        f"systemctl show {unit}",
-        stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
-    )
-    launcher = make_metadata_launcher(tmp_path, runner)
+    runner.expect("gcloud iam service-accounts keys create", stdout="abc123\n")
+    runner.expect("cat", stdout=GCP_KEY_JSON)
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(1)], runner=runner, metadata_launcher=launcher,
+        issues=[issue_json(1)], runner=runner,
+        gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
     )
     orchestrator.run_once(NOW)
-    assert not runner.ran(f"sudo systemd-run --unit={unit}")
+    create_call = next(c for c in runner.commands if "keys create" in c)
+    assert f"--iam-account={GCP_KEY_EMAIL}" in create_call
 
 
-def test_dispatch_reaps_and_restarts_a_failed_metadata_server(tmp_path):
+def test_dispatch_places_the_minted_gcp_key_in_the_sandbox():
     runner = FakeRunner()
-    unit = metadata_unit_name("sandbox-0")
-    runner.expect(
-        f"systemctl show {unit}",
-        stdout="LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\n",
-    )
-    launcher = make_metadata_launcher(tmp_path, runner)
+    runner.expect("gcloud iam service-accounts keys create", stdout="abc123\n")
+    runner.expect("cat", stdout=GCP_KEY_JSON)
     orchestrator, _ = make_orchestrator(
-        issues=[issue_json(1)], runner=runner, metadata_launcher=launcher,
+        issues=[issue_json(1)], runner=runner,
+        gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
     )
     orchestrator.run_once(NOW)
-    assert runner.ran(f"sudo systemctl stop {unit}")
-    assert runner.ran(f"sudo systemctl reset-failed {unit}")
-    assert runner.ran(f"sudo systemd-run --unit={unit}")
+    dd_calls = [(argv, stdin) for argv, stdin in runner.calls if argv[0] == "dd"]
+    key_call = next(c for c in dd_calls if c[0][1] == f"of={GCP_KEY_PATH}")
+    assert key_call[1] == GCP_KEY_JSON
+
+
+def test_gcp_key_is_recorded_on_the_assignment_for_later_revocation():
+    runner = FakeRunner()
+    runner.expect("gcloud iam service-accounts keys create", stdout="abc123\n")
+    runner.expect("cat", stdout=GCP_KEY_JSON)
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner,
+        gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
+    )
+    orchestrator.run_once(NOW)
+    assert orchestrator.state.assignments["sandbox-0"].gcp_key_id == "abc123"
+
+
+def test_gcp_key_mint_failure_does_not_crash_the_cycle():
+    runner = FakeRunner()
+    runner.expect("gcloud iam service-accounts keys create", returncode=1,
+                  stderr="PERMISSION_DENIED")
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner,
+        gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
+    )
+    orchestrator.run_once(NOW)
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [entry["outcome"] for entry in orchestrator.audit.entries]
+    assert any("dispatch failed" in o for o in outcomes)
+
+
+def test_a_dispatch_failure_after_minting_a_gcp_key_revokes_it():
+    """The key was minted but dispatch() never got far enough to record an
+    Assignment for sweeper.py to later revoke it through -- must not leak.
+    """
+    runner = FakeRunner()
+    runner.expect("gcloud iam service-accounts keys create", stdout="abc123\n")
+    runner.expect("cat", stdout=GCP_KEY_JSON)
+    runner.expect("bash -c", returncode=128, stderr="fatal: Authentication failed")
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner,
+        gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
+    )
+    orchestrator.run_once(NOW)  # must not raise
+    assert orchestrator.state.assignments == {}
+    delete_call = next(c for c in runner.commands if "keys delete" in c)
+    assert "abc123" in delete_call
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("dispatch failed" in o for o in outcomes)
+
+
+def test_a_dispatch_failure_whose_gcp_key_cleanup_also_fails_reports_both():
+    runner = FakeRunner()
+    runner.expect("gcloud iam service-accounts keys create", stdout="abc123\n")
+    runner.expect("cat", stdout=GCP_KEY_JSON)
+    runner.expect("bash -c", returncode=128, stderr="fatal: Authentication failed")
+    runner.expect("gcloud iam service-accounts keys delete", returncode=1,
+                  stderr="cleanup also failed")
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(1)], runner=runner,
+        gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
+    )
+    orchestrator.run_once(NOW)
+    outcomes = [entry["outcome"] for entry in orchestrator.audit.entries]
+    combined = next(o for o in outcomes if "dispatch failed" in o)
+    assert "Authentication failed" in combined
+    assert "cleanup also failed" in combined
 
 
 # --- PR-continuation dispatch (docs/roadmap.md item 9, via a `/pr` task) ---

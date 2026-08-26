@@ -119,14 +119,13 @@ def test_bootstrap_persists_the_network_policy_across_a_reboot(env):
     """Regression test for bwsalmon/agents#119.
 
     `host up --persist` installs `grain-network.service` so the bridge and
-    nftables policy (including the metadata anycast DNAT every sandbox's
-    `gcloud`/ADC needs) survive a host reboot -- but until now that
-    persistence only happened on the manual CLI path, never on `grain host
-    bootstrap`'s stage 3. A host set up purely by `host bootstrap` looked
-    fully healthy (SSH and a direct connection to the controller both kept
-    working) right up until it rebooted, at which point the DNAT rule
-    silently vanished and every sandbox lost the one credential path GKE
-    cluster management depends on, with no error anywhere to explain why.
+    nftables policy (sandbox-to-sandbox isolation included) survive a host
+    reboot -- but until now that persistence only happened on the manual
+    CLI path, never on `grain host bootstrap`'s stage 3. A host set up
+    purely by `host bootstrap` looked fully healthy (SSH and a direct
+    connection to the controller both kept working) right up until it
+    rebooted, at which point that isolation silently vanished, with no
+    error anywhere to explain why.
     """
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(runner, cluster, admin_private)
@@ -379,8 +378,7 @@ def test_claude_credentials_reach_the_controllers_grain_agent_account_not_any_sa
 
 def test_gcp_service_account_is_only_configured_when_supplied(env):
     """Mirrors test_github_token_is_only_configured_when_supplied -- a bare
-    re-run with no key must not try to place one or start any metadata
-    server.
+    re-run with no key must not try to place one.
     """
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
@@ -390,13 +388,13 @@ def test_gcp_service_account_is_only_configured_when_supplied(env):
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
     assert not any("gcp-service-account.json" in c for c in runner.commands)
-    assert not any("metadata start" in c for c in runner.commands)
 
 
-def test_gcp_key_reaches_the_controller_and_starts_each_sandboxs_metadata_server(env):
-    """Found live as docs/roadmap.md item 4's remaining gap: nothing in
-    `grain host bootstrap` ever placed the key or started `grain metadata
-    start` for a sandbox, even when Terraform-side wiring supplied one.
+def test_gcp_service_account_key_reaches_the_controller(env):
+    """`gcp_service_account_key` is the primary key gemini_keys.py's own
+    gcloud calls authenticate with (docs/bootstrap.md Phase 3) -- unlike
+    before bwsalmon/agents#126, it no longer starts anything per sandbox:
+    the metadata broker it used to feed is gone.
     """
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
@@ -407,8 +405,6 @@ def test_gcp_key_reaches_the_controller_and_starts_each_sandboxs_metadata_server
     config = BootstrapConfig(
         task_repo="acme/widgets",
         gcp_service_account_key='{"type": "service_account"}',
-        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
-        gcp_project_id="acme",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
@@ -418,10 +414,31 @@ def test_gcp_key_reaches_the_controller_and_starts_each_sandboxs_metadata_server
         c.startswith(controller_prefix) and "gcp-service-account.json" in c
         for c in runner.commands
     )
+    assert not any("metadata start" in c for c in runner.commands)
+
+
+def test_gcp_agent_key_config_reaches_the_controller(env):
+    """bwsalmon/agents#126: independent of gcp_service_account_key above
+    -- plain, non-secret config naming the agent account grain mints a
+    fresh key for on every dispatch, written to
+    /data/config/gcp-key.json."""
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets",
+        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        gcp_project_id="acme",
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
     assert any(
-        c.startswith(controller_prefix)
-        and "cd /opt/grain && python3 -m grain.cli --data-dir /data "
-            "--sandboxes 1 metadata start sandbox-0" in c
+        c.startswith(controller_prefix) and "gcp-key.json" in c
         for c in runner.commands
     )
 
@@ -466,46 +483,24 @@ def test_no_gemini_project_id_never_writes_gemini_key_config(env):
     assert not any("gemini-key.json" in c for c in runner.commands)
 
 
-def test_metadata_server_start_is_skipped_when_already_active(env):
-    """MetadataLauncher.start()'s own docstring: systemd-run refuses to
-    reuse a unit name still active, so a bootstrap re-run has to check
-    first -- the same idempotency contract _ensure_started already
-    guarantees for the VM itself.
-    """
+def test_bootstrap_skips_the_agent_gcp_key_config_when_only_the_email_is_given(env):
+    """Unlike before bwsalmon/agents#126, this is not a hard error: naming
+    only one of the pair just leaves the feature off, the same "unusable
+    config parks/skips" latitude every other optional bootstrap step
+    already has (see BootstrapConfig's own docstring comment)."""
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
         runner, cluster, admin_private,
         controller_state=("controller", "running"),
         sandbox_states=[("sandbox-0", "running")],
     )
-    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
-    runner.expect(
-        f"{controller_prefix} -- {shlex.quote('sudo systemctl is-active grain-metadata-sandbox-0')}",
-        stdout="active\n",
-    )
     config = BootstrapConfig(
-        task_repo="acme/widgets", gcp_service_account_key="{}",
+        task_repo="acme/widgets",
         gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
-        gcp_project_id="acme",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
-    assert not any("metadata start sandbox-0" in c for c in runner.commands)
-
-
-def test_bootstrap_raises_when_gcp_key_given_without_email_or_project_id(env):
-    adapter, runner, cluster, config, admin_private = env
-    prime_happy_path(
-        runner, cluster, admin_private,
-        controller_state=("controller", "running"),
-        sandbox_states=[("sandbox-0", "running")],
-    )
-    config = BootstrapConfig(
-        task_repo="acme/widgets", gcp_service_account_key="{}",
-        admin_private_key_path=admin_private,
-    )
-    with pytest.raises(ValueError):
-        bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not any("gcp-key.json" in c for c in runner.commands)
 
 
 # --- stage 5/9: what a failed boot wait actually tells the operator -------
