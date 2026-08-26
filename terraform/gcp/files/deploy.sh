@@ -19,6 +19,11 @@ readonly IMAGE_PATH="$IMAGE_DIR/debian-12.qcow2"
 readonly RUNDIR="/run/grain-deploy"
 readonly CLUSTER_FILE="$DATA_MNT/cluster.toml"
 readonly GITHUB_TOKEN_ATTR="grain-github-token"
+# Optional: additional named GitHub credentials (bwsalmon/agents#134), one
+# `NAME=TOKEN` pair per line -- the config repo's GRAIN_GITHUB_KEYS Actions
+# secret, pushed verbatim by push-host-secrets.sh. Absent unless that
+# secret is set, unlike GITHUB_TOKEN_ATTR above.
+readonly GITHUB_KEYS_ATTR="grain-github-keys"
 readonly CLAUDE_TOKEN_ATTR="grain-claude-token"
 # Minted fresh by the deploy workflow on every run that has an agent
 # service account to mint one for -- never a long-lived Actions secret, so
@@ -331,6 +336,7 @@ dump_storage_diagnostics() {
 run_bootstrap() {
   local bootstrap_log="$RUNDIR/bootstrap.log"
   local gh_file="$RUNDIR/github.token"
+  local keys_file="$RUNDIR/github-keys.blob"
   local claude_file="$RUNDIR/claude.token"
   local gcp_key_file="$RUNDIR/gcp-service-account.json"
   local args=(--cluster-file "$CLUSTER_FILE" host bootstrap --task-repo "$TASK_REPO")
@@ -353,6 +359,27 @@ run_bootstrap() {
     args+=(--credential-name "$CREDENTIAL_NAME")
   fi
   args+=(--github-token-file "$gh_file")
+
+  # Each line of the blob is one `NAME=TOKEN` pair (docs/runbook.md,
+  # "Adding a named GitHub key"). Split into one 0600 file per key rather
+  # than passing the blob straight through, since `grain host bootstrap
+  # --github-key` wants a file per name, same as it always has for
+  # `controller configure`. Named by index, not by `$name`, so a key name
+  # can never be read as a path component. `|| [ -n "$name" ]` picks up a
+  # final line with no trailing newline, the same guard load_config's own
+  # read loops don't need but this one -- a hand-edited Actions secret --
+  # plausibly hits.
+  if fetch_secret_to_file "$GITHUB_KEYS_ATTR" "$keys_file" "$SECRET_WAIT_OPTIONAL"; then
+    local name token key_file i=0
+    while IFS='=' read -r name token || [ -n "$name" ]; do
+      [ -z "$name" ] && continue
+      i=$((i + 1))
+      key_file="$RUNDIR/github-key-$i.token"
+      printf '%s' "$token" > "$key_file"
+      chmod 0600 "$key_file"
+      args+=(--github-key "$name=$key_file")
+    done < "$keys_file"
+  fi
 
   if fetch_secret_to_file "$CLAUDE_TOKEN_ATTR" "$claude_file" "$SECRET_WAIT_OPTIONAL"; then
     args+=(--claude-token-file "$claude_file")

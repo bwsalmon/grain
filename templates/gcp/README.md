@@ -17,7 +17,7 @@ issue filed here and labelled `grain-agent` is what the agents pick up.
         │
         ▼
   GitHub Actions ──▶ terraform apply       (the VM, its disks, its identity)
-        │        └─▶ instance metadata     (the two runtime credentials,
+        │        └─▶ instance metadata     (the runtime credentials,
         │                                   the new commit SHA)
         │                    │
         │                    ▼
@@ -68,6 +68,23 @@ and the state bucket. You do not have to name a task repo — this one is it.
 (If you cannot use workload identity, leave the first two unset and put a
 service account key in `GCP_CREDENTIALS_JSON` instead. It is strictly
 worse; the workflows support it so that "no WIF" is not a blocker.)
+
+**Optional fifth secret, for a task that needs a scope `GRAIN_GITHUB_TOKEN`
+deliberately withholds** (`workflow`, most notably — see grain's
+`docs/design.md`, "Scopes to withhold"): `GRAIN_GITHUB_KEYS`, one
+`NAME=TOKEN` pair per line, e.g.
+
+```
+workflow=ghp_...
+release=ghp_...
+```
+
+Each `NAME` becomes a credential a task can opt into by carrying the
+`grain-github-NAME` label instead of the default — grain's
+`docs/runbook.md`, "Adding a named GitHub key," covers how a task asks for
+one and what `grain github audit` should say about it afterward. Unlike
+`GRAIN_GITHUB_TOKEN`, this never becomes any repo's default credential, and
+leaving it unset (the default) provisions no named keys at all.
 
 **4. Push to `main`.** The `deploy` workflow runs, and its last step waits
 for the host to report that it converged — so a green check means the
@@ -172,16 +189,18 @@ from and go to, the network and who may SSH, and the IAM roles the VM
 holds. All of it reviewable in a pull request, all of it reverted by
 reverting a commit.
 
-**In Actions secrets, never in the repo:** two values that CI attaches
-directly to the VM and never uses again, plus the two identifiers that let
-CI authenticate to GCP at all.
+**In Actions secrets, never in the repo:** the required `GRAIN_GITHUB_TOKEN`
+and `GRAIN_CLAUDE_CODE_OAUTH_TOKEN`, the optional `GRAIN_GITHUB_KEYS`, all
+three of which CI attaches directly to the VM and never uses again, plus
+the two identifiers that let CI authenticate to GCP at all.
 
-**On the host:** nothing durable that CI put there. `deploy.sh` reads the
-two secrets from its own instance metadata — no GCP credential needed,
-just the local metadata server every GCE instance exposes to itself —
-writes them to `/run` (tmpfs, `0600`), lets `grain host bootstrap` place
-them on the controller's `/data`, and deletes them. Terraform never sees a
-secret value, so the state file does not contain one either.
+**On the host:** nothing durable that CI put there. `deploy.sh` reads
+whichever of those secrets are set from its own instance metadata — no GCP
+credential needed, just the local metadata server every GCE instance
+exposes to itself — writes them to `/run` (tmpfs, `0600`), lets `grain host
+bootstrap` place them on the controller's `/data`, and deletes them.
+Terraform never sees a secret value, so the state file does not contain one
+either.
 
 grain's own [`docs/design.md`](https://github.com/bwsalmon/grain/blob/main/docs/design.md)
 argues against keeping the *system's* credentials in Actions secrets, and
@@ -190,7 +209,7 @@ once, on their way straight into the instance's own metadata, which is the
 alternative that document recommends — it needs no Secret Manager grant at
 all, so nothing with broader access to this GCP project (a stray IAM
 binding, a misconfigured agent identity) has a role it could use to read
-these two credentials back out.
+these credentials back out.
 
 ## What the VM is allowed to do
 
@@ -262,10 +281,15 @@ was bootstrapped before this option existed — it needs
 role — by editing `config/grain.tfvars` in a pull request. CI plans it;
 merging applies it and redeploys.
 
-**Rotate a credential** by updating the Actions secret and running the
-`deploy` workflow manually (`workflow_dispatch`). The workflow pushes the
-new value to the host's instance metadata every run, and the manual run
-bumps the deploy generation so the host picks it up.
+**Rotate a credential** — including a named one in `GRAIN_GITHUB_KEYS` — by
+updating the Actions secret and running the `deploy` workflow manually
+(`workflow_dispatch`). The workflow pushes the new value to the host's
+instance metadata every run, and the manual run bumps the deploy generation
+so the host picks it up. Removing a `NAME=TOKEN` line from `GRAIN_GITHUB_KEYS`
+does not delete that key from the controller on the next deploy — `grain
+host bootstrap` only ever writes secrets it was given, never removes ones
+it wasn't; delete `/data/secrets/github/<name>.token` by hand (`grain
+sandbox login controller`) if a name should stop working entirely.
 
 **Deploy a new grain** by moving `grain_ref`. Pin it to a tag or SHA if you
 want deployments to be reproducible; leave it on `main` and uncomment the

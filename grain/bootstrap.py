@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .adapter.base import VmState
@@ -36,7 +36,8 @@ from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
     configure_gcp_service_account, configure_gemini_key, configure_github_credential,
-    configure_janitor, configure_repo, credential_repos, ensure_sandbox_tokens,
+    configure_janitor, configure_named_github_key, configure_repo, credential_repos,
+    ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -59,6 +60,16 @@ class BootstrapConfig:
     default_target_repo: str | None = None
     github_token: str | None = None
     credential_name: str = "bot"
+    # bwsalmon/agents#134: additional named credentials (`{name: token}`),
+    # same shape and purpose `controller configure --github-key` already
+    # has -- a task labelled `grain-github-<name>` uses one instead of the
+    # default, for a scope (e.g. `workflow`) the default deliberately
+    # withholds. Threading this through bootstrap() too (not just
+    # `controller configure`) is what lets a Terraform deployment set one
+    # from its own config repo (terraform/gcp/files/deploy.sh), rather than
+    # requiring a separate manual step against the controller afterward.
+    # Never written to credentials.json -- see configure_named_github_key.
+    github_keys: dict[str, str] = field(default_factory=dict)
     claude_token: str | None = None
     # The primary GCP service-account key gemini_keys.py authenticates
     # its own gcloud calls with -- see configure_gcp_service_account.
@@ -275,6 +286,8 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
             admin_ssh, credential_repos(config.task_repo, targets), config.github_token,
             credential_name=config.credential_name,
         )
+    for name, token in config.github_keys.items():
+        configure_named_github_key(admin_ssh, token, name=name)
     if config.claude_token:
         configure_claude_token(admin_ssh, config.claude_token)
     if config.gcp_service_account_key:

@@ -286,6 +286,45 @@ def test_github_token_is_only_configured_when_supplied(env):
     assert any("credentials.json" in c for c in runner2.commands)
 
 
+def test_named_github_keys_are_only_configured_when_supplied(env):
+    """Mirrors test_github_token_is_only_configured_when_supplied --
+    bwsalmon/agents#134 threads BootstrapConfig.github_keys through the
+    same stage 8, so a bare re-run with none must not write any, and a run
+    that supplies some must write each one's token file but never touch
+    credentials.json (configure_named_github_key's whole point).
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not any("workflow.token" in c for c in runner.commands)
+
+    runner2 = FakeRunner()
+    network2 = LinuxNetwork(cluster, runner2)
+    adapter2 = LibvirtAdapter(
+        cluster, runner2, network2, config_dir=adapter.config_dir,
+        admin_public_key_path=adapter.admin_public_key_path,
+        controller_public_key_path=adapter.controller_public_key_path,
+    )
+    prime_happy_path(
+        runner2, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config2 = BootstrapConfig(
+        task_repo="acme/widgets",
+        github_keys={"workflow": "ghp_workflow", "release": "ghp_release"},
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter2, base_runner=runner2, config=config2)
+    assert any("workflow.token" in c for c in runner2.commands)
+    assert any("release.token" in c for c in runner2.commands)
+    assert not any("credentials.json" in c for c in runner2.commands)
+
+
 def test_enable_runs_after_sandboxes_are_up(env):
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(runner, cluster, admin_private)
