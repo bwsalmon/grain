@@ -1,5 +1,7 @@
 import ipaddress
+import os
 import shlex
+import stat
 from pathlib import Path
 
 import pytest
@@ -475,6 +477,67 @@ def test_create_grants_world_access_to_config_dir_and_image_dir(cluster, tmp_pat
 
     assert runner.ran(f"chmod -R o+rwX {tmp_path}/instances")
     assert runner.ran(f"chmod -R o+rwX {tmp_path}/images")
+
+
+def test_create_skips_the_chmod_when_a_directory_is_already_world_accessible(
+    cluster, tmp_path,
+):
+    """Found live: `destroy()` always calls `virsh destroy` (a hard stop),
+    which skips libvirt's dynamic_ownership revert-on-clean-shutdown step,
+    so `image_dir` -- shared by every sandbox pointed at the same base
+    qcow2 -- is left owned by whatever uid qemu actually ran as (typically
+    `libvirt-qemu`) once the *first* sandbox that ever used it has been
+    started and torn down. A second sandbox's `create()`, run by the same
+    unprivileged operator as the first, no longer owns that directory --
+    `chmod` fails with EPERM even though the `o+rwX` bits it would set are
+    already there from the first `create()`'s own successful chmod.
+    Reproduced here without needing two real uids: `image_dir` is put in
+    the already-fixed state by hand, and the scripted chmod response is a
+    permission failure -- proving `create()` skips the call (and so never
+    even sees that failure) rather than merely tolerating it.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    image_path = image_dir / "debian-12.qcow2"
+    image_path.write_text("not a real qcow2, just needs to exist")
+    image_dir.chmod(0o755 | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH)
+    image_path.chmod(0o644 | stat.S_IROTH | stat.S_IWOTH)
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    a = LibvirtAdapter(sized_cluster, runner, network, config_dir=tmp_path / "instances")
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    runner.expect(f"chmod -R o+rwX {image_dir}", returncode=1,
+                  stderr="chmod: changing permissions: Operation not permitted")
+
+    a.create(sized_cluster.spec_of("sandbox-0"))  # must not raise
+
+    assert not runner.ran(f"chmod -R o+rwX {image_dir}")
+    # config_dir is freshly created by this same call and not yet
+    # world-accessible, so its own chmod still has to run as before.
+    assert runner.ran(f"chmod -R o+rwX {tmp_path}/instances")
+
+
+def test_create_raises_when_a_directory_is_neither_accessible_nor_fixable(
+    cluster, tmp_path,
+):
+    """The failure `_ensure_dac_allows` still has to surface: a directory
+    that is genuinely neither world-accessible already nor chmod-able (the
+    scripted response stands in for a real EPERM against a directory this
+    operator has never successfully fixed before) must not be silently
+    swallowed by the new skip-if-already-fine check above.
+    """
+    runner = FakeRunner()
+    network = LinuxNetwork(cluster, runner)
+    image_path = tmp_path / "images" / "debian-12.qcow2"
+    sized_cluster = Cluster(sandbox_count=2, image=str(image_path))
+    a = LibvirtAdapter(sized_cluster, runner, network, config_dir=tmp_path / "instances")
+    runner.expect("virsh -c qemu:///system list --all", stdout=virsh_list())
+    runner.expect(f"chmod -R o+rwX {tmp_path}/images", returncode=1,
+                  stderr="chmod: changing permissions: Operation not permitted")
+
+    with pytest.raises(Exception, match="Operation not permitted"):
+        a.create(sized_cluster.spec_of("sandbox-0"))
 
 
 def test_start_also_grants_dac_access_for_a_vm_that_skipped_create(cluster, tmp_path):

@@ -30,11 +30,13 @@ object at all — one less layer than Lima's own network abstraction required.
 from __future__ import annotations
 
 import ipaddress
+import os
+import stat
 from collections.abc import Sequence
 from pathlib import Path
 
 from ..inventory import CONTROLLER_IP_PLACEHOLDER, Cluster, Role, VmSpec
-from ..run import Runner
+from ..run import CommandError, Runner
 from .base import HostAdapter, Network, VmInfo, VmState
 
 LIBVIRT_URI = "qemu:///system"
@@ -329,9 +331,56 @@ class LibvirtAdapter(HostAdapter):
         present" guard to skip. Stop relying on libvirt's own relabeling
         for this the same way those two stopped relying on it for MAC:
         grant access directly, ourselves.
+
+        Found live in a second scenario, distinct from the one above: once
+        a `create()` for an *earlier* sandbox has already run this chmod
+        successfully, a shared directory like `image_dir` (every sandbox
+        normally points `spec.image` at the same base qcow2) is left
+        world-rwX -- but `destroy()` always calls `virsh destroy` (a hard
+        stop, never a graceful shutdown), which skips libvirt's
+        dynamic_ownership revert-on-clean-shutdown step, leaving
+        `image_dir`'s *owner* as whatever uid qemu actually ran as
+        (typically `libvirt-qemu`) instead of handing it back. Confirmed
+        live: `chmod` still demands ownership (or root) even when the mode
+        it would set already holds -- it does not special-case a no-op --
+        so an unconditional retry for a *second* sandbox's `create()`, run
+        by the same unprivileged operator as the first, fails with EPERM
+        on a directory that already grants everything that operator
+        needs. Skip the chmod entirely when the tree already carries the
+        needed bits, and only surface a failure when it doesn't.
         """
         for d in dirs:
-            self.runner.run(["chmod", "-R", "o+rwX", str(d)], check=True)
+            if self._world_accessible(d):
+                continue
+            argv = ["chmod", "-R", "o+rwX", str(d)]
+            result = self.runner.run(argv, check=False)
+            if result.returncode != 0 and not self._world_accessible(d):
+                raise CommandError(argv, result.returncode, result.stderr)
+
+    def _world_accessible(self, path: Path) -> bool:
+        """Whether `path` already carries the `o+rwX` bits `chmod -R
+        o+rwX` would set -- checked against the *other* permission class
+        specifically (not `os.access`, which resolves owner/group/other
+        against the calling process: this method runs as the operator, who
+        normally owns these files outright and would therefore always
+        pass such a check, defeating the point -- the actual target of
+        `o+rwX` is qemu's own unprivileged uid, a stranger to both the
+        owner and group here).
+        """
+        if not path.exists():
+            return False
+        needed_dir = stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
+        needed_file = stat.S_IROTH | stat.S_IWOTH
+        if os.stat(path).st_mode & needed_dir != needed_dir:
+            return False
+        for root, dirnames, filenames in os.walk(path):
+            for name in dirnames:
+                if os.stat(os.path.join(root, name)).st_mode & needed_dir != needed_dir:
+                    return False
+            for name in filenames:
+                if os.stat(os.path.join(root, name)).st_mode & needed_file != needed_file:
+                    return False
+        return True
 
     # --- lifecycle --------------------------------------------------------
     def create(self, spec: VmSpec, provision_script: str | None = None) -> None:
