@@ -302,14 +302,25 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         configure_gcp_key_minter(admin_ssh, config.gcp_key_minter_key)
     if config.gcp_service_account_key:
         configure_gcp_service_account(admin_ssh, config.gcp_service_account_key)
-    if config.gcp_agent_service_account_email and config.gcp_project_id:
-        # bwsalmon/agents#126: independent of gcp_service_account_key
-        # above -- plain, non-secret config, not a credential-provisioning
-        # step, so it needs neither that key nor bootstrap() raising when
-        # only one of the pair is set (a deployment that names the email
-        # but not the project, or vice versa, just doesn't get this
-        # feature turned on, the same "unusable config parks/skips"
-        # latitude every other optional step in this module already has).
+    if (config.gcp_agent_service_account_email and config.gcp_project_id
+            and config.gcp_key_minter_key):
+        # bwsalmon/agents#126: plain, non-secret config rather than a
+        # credential-provisioning step, so bootstrap() does not raise when
+        # only part of it is set (a deployment that names the email but not
+        # the project, or vice versa, just doesn't get this feature turned
+        # on, the same "unusable config parks/skips" latitude every other
+        # optional step in this module already has).
+        #
+        # It is gated on the minter key as well, though, because writing
+        # this file is what *turns the feature on*: `cli.py`'s
+        # `build_orchestrator` reads /data/config/gcp-key.json and, if it
+        # exists, has `_dispatch` mint and `_sweep` reap. Both authenticate
+        # as the key this file names, so writing it without having placed
+        # that key leaves every cycle failing on "Cannot find key file"
+        # instead of quietly not using a feature that isn't ready. Found
+        # live: the minter key's own fetch is best-effort (deploy.sh's
+        # SECRET_WAIT_OPTIONAL), so a rollout that races ahead of CI's push
+        # step hits exactly that.
         configure_agent_gcp_key(
             admin_ssh, service_account_email=config.gcp_agent_service_account_email,
             project_id=config.gcp_project_id,

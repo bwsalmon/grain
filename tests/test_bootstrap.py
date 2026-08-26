@@ -456,6 +456,32 @@ def test_gcp_service_account_key_reaches_the_controller(env):
     assert not any("metadata start" in c for c in runner.commands)
 
 
+def test_no_gcp_key_config_is_written_without_the_minter_credential(env):
+    """Found live (bwsalmon/agents#131): /data/config/gcp-key.json is the
+    on/off switch `build_orchestrator` reads, and both minting and reaping
+    authenticate as the key it names. deploy.sh's fetch of that key is
+    best-effort (SECRET_WAIT_OPTIONAL), so a rollout that raced ahead of
+    CI's push step used to write the switch with no credential behind it --
+    turning the feature on in a state where every cycle failed on a missing
+    key file, rather than leaving it off until the key arrived.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets",
+        gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
+        gcp_project_id="acme",
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not [c for c in runner.commands if "/data/config/gcp-key.json" in c], \
+        "turned minting on without placing the credential it authenticates as"
+
+
 def test_gcp_agent_key_config_reaches_the_controller(env):
     """bwsalmon/agents#126: independent of gcp_service_account_key above
     -- plain, non-secret config naming the agent account grain mints a
@@ -471,6 +497,10 @@ def test_gcp_agent_key_config_reaches_the_controller(env):
         task_repo="acme/widgets",
         gcp_agent_service_account_email="grain-agent@acme.iam.gserviceaccount.com",
         gcp_project_id="acme",
+        # bwsalmon/agents#131: writing gcp-key.json is what turns minting on,
+        # and minting authenticates as this key -- so the switch is only
+        # written once the credential it names has been placed.
+        gcp_key_minter_key='{"type": "service_account"}\n',
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)

@@ -683,11 +683,13 @@ def test_dry_run_bootstrap_with_a_gcp_service_account_key_and_agent_email(
          "host", "bootstrap", "--repo", "acme/widgets",
          "--admin-ssh-private-key", str(tmp_path / "admin-ssh"),
          "--gcp-service-account-key-file", str(key_file),
+         "--gcp-key-minter-key-file", str(key_file),
          "--gcp-agent-service-account-email", "grain-agent@acme.iam.gserviceaccount.com",
          "--gcp-project-id", "acme"],
         capsys,
     )
     assert "dd of=/data/secrets/gcp-service-account.json" in out
+    assert "dd of=/data/secrets/gcp-key-minter.json" in out
     assert "dd of=/data/config/gcp-key.json" in out
     # bwsalmon/agents#126: no per-sandbox metadata server to start anymore.
     assert "metadata start" not in out
