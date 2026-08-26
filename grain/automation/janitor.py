@@ -298,7 +298,6 @@ def _maybe_delete_gemini_key(runner: Runner, config: JanitorConfig, key: object,
     argv = [
         "gcloud", "services", "api-keys", "delete", name,
         f"--project={config.project_id}", "--quiet",
-        *_impersonated(config),
     ]
     try:
         runner.run(argv)
@@ -352,7 +351,6 @@ def run_janitor(runner: Runner, config: JanitorConfig, now: datetime, *,
     keys, error = _list_resources(runner, [
         "gcloud", "services", "api-keys", "list",
         f"--project={config.project_id}", "--format=json",
-        *_impersonated(config),
     ])
     if error is not None:
         result.warnings.append(JanitorWarning("gemini-key", "", f"could not list API keys: {error}"))

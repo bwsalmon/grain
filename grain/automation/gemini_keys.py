@@ -105,6 +105,7 @@ be wrong about a third time.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -118,6 +119,21 @@ from ..run import CommandError, Runner
 _DEFAULT_KEY_PATH = Path("/data/secrets/gcp-key-minter.json")
 
 DEFAULT_API_TARGET_SERVICE = "generativelanguage.googleapis.com"
+
+# Mirrors gcp_keys.py's DEFAULT_MAX_KEY_AGE_HOURS, for the same reason and
+# with the same caveat: neither a GCP API key nor a user-managed
+# service-account key has a native TTL, so "expires" is something grain
+# enforces. Keep AutomationConfig.max_runtime_minutes well under this, or
+# the reap can revoke a key out from under a task still using it -- the
+# tradeoff gcp_keys.py's own docstring already names and accepts.
+DEFAULT_MAX_KEY_AGE_HOURS = 24
+
+# Every key this module mints is named `grain-<sandbox>-issue-<n>` by
+# core.py. Unlike a service-account key, an API key is not scoped to an
+# account -- `api-keys list` returns every key in the *project* -- so this
+# prefix is the only thing separating grain's own keys from anyone else's,
+# and the reap below must never delete a key without it.
+MINTED_DISPLAY_NAME_PREFIX = "grain-"
 
 
 @dataclass(frozen=True)
@@ -141,6 +157,7 @@ class GeminiKeyConfig:
     # file is", which is how this behaved before impersonation.
     impersonate_service_account: str | None = None
     api_target_service: str = DEFAULT_API_TARGET_SERVICE
+    max_key_age_hours: int = DEFAULT_MAX_KEY_AGE_HOURS
 
     @classmethod
     def load(cls, path: Path) -> "GeminiKeyConfig":
@@ -167,50 +184,20 @@ def _activate(runner: Runner, config: GeminiKeyConfig) -> None:
     ])
 
 
-def _impersonated(config) -> list[str]:
-    """The impersonation flag every gcloud call here carries, or nothing.
-
-    bwsalmon/agents#131: the controller authenticates as the *host* account
-    (the one credential it holds), then acts as the agent account for the
-    duration of each call. That keeps this code's effective permissions
-    exactly the agent's -- unchanged from when it held a long-lived agent
-    key file -- while removing that key from the controller entirely. The
-    flag is per-command rather than `gcloud config set
-    auth/impersonate_service_account`, which would be process-global and so
-    would silently apply to `gcp_keys.py` too, whose whole point is to act
-    as the host and *not* the agent.
-
-    Empty when unset, so a deployment configured before this change (or a
-    test) still behaves exactly as it did.
-    """
-    target = getattr(config, "impersonate_service_account", None)
-    if not target:
-        return []
-    return [f"--impersonate-service-account={target}"]
-
-
-def _find_key_by_display_name(
-    runner: Runner, config: GeminiKeyConfig, display_name: str
-) -> str:
-    """The resource name of the newest key called `display_name`.
-
-    `api-keys list --format=json` returns an array of objects; the fields
-    used here are `displayName`, `name` and `createTime`. Newest wins:
-    a task whose earlier attempt died between `create` and this lookup can
-    leave a key behind under the same name, and the one just minted is the
-    one this call is about.
+def _list_keys(runner: Runner, config: GeminiKeyConfig) -> list[dict]:
+    """Every API key in the project, as gcloud's own JSON objects
+    (`displayName`, `name`, `createTime`, ...).
 
     Raises `CommandError` -- never a bare `KeyError`/`AttributeError` --
-    when the payload is not the expected shape or nothing matches, so a
-    surprise from `gcloud` reaches `core.py`'s dispatch handler as a
-    failure for this one task instead of an exception that ends the whole
-    pass. The message carries `gcloud`'s own output, which is what the two
-    previous attempts at this code path were each missing.
+    on an unexpected payload shape, so a surprise from `gcloud` reaches
+    `core.py` as one task's (or one reap's) failure rather than an
+    exception that ends the whole pass. Two earlier attempts at this code
+    path each died that way, on a payload nobody had looked at; the
+    message carries gcloud's own output for exactly that reason.
     """
     list_argv = [
         "gcloud", "services", "api-keys", "list",
         f"--project={config.project_id}", "--format=json",
-        *_impersonated(config),
     ]
     result = runner.run(list_argv)
     try:
@@ -222,13 +209,23 @@ def _find_key_by_display_name(
             list_argv, 1,
             f"expected a JSON array of keys, got {type(keys).__name__}: {result.stdout!r}",
         )
-    matches = [
-        key for key in keys
-        if isinstance(key, dict) and key.get("displayName") == display_name
-    ]
+    return [key for key in keys if isinstance(key, dict)]
+
+
+def _find_key_by_display_name(
+    runner: Runner, config: GeminiKeyConfig, display_name: str
+) -> str:
+    """The resource name of the newest key called `display_name`.
+
+    Newest wins: a task whose earlier attempt died between `create` and
+    this lookup can leave a key behind under the same name, and the one
+    just minted is the one this call is about.
+    """
+    matches = [key for key in _list_keys(runner, config)
+               if key.get("displayName") == display_name]
     if not matches:
         raise CommandError(
-            list_argv, 1,
+            ["gcloud", "services", "api-keys", "list"], 1,
             f"no API key named {display_name!r} in project {config.project_id} "
             "after creating one",
         )
@@ -239,7 +236,8 @@ def _find_key_by_display_name(
     name = newest.get("name")
     if not name:
         raise CommandError(
-            list_argv, 1, f"API key {display_name!r} has no resource name: {newest!r}"
+            ["gcloud", "services", "api-keys", "list"], 1,
+            f"API key {display_name!r} has no resource name: {newest!r}",
         )
     return name
 
@@ -256,7 +254,6 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         f"--display-name={display_name}",
         f"--api-target=service={config.api_target_service}",
         "--format=value(name)", "--quiet",
-        *_impersonated(config),
     ])
     created = create_result.stdout.strip()
 
@@ -277,8 +274,7 @@ def create_key(runner: Runner, config: GeminiKeyConfig, *, display_name: str) ->
         key_string_result = runner.run([
             "gcloud", "services", "api-keys", "get-key-string", name,
             f"--project={config.project_id}", "--format=value(keyString)",
-            *_impersonated(config),
-        ])
+            ])
     except CommandError:
         _revoke_orphan(runner, config, display_name, name if name != created else None)
         raise
@@ -313,5 +309,59 @@ def delete_key(runner: Runner, config: GeminiKeyConfig, name: str) -> None:
     runner.run([
         "gcloud", "services", "api-keys", "delete", name,
         f"--project={config.project_id}", "--quiet",
-        *_impersonated(config),
     ])
+
+
+def delete_expired_keys(runner: Runner, config: GeminiKeyConfig, *,
+                         now: datetime) -> list[str]:
+    """Deletes every grain-minted API key older than
+    `config.max_key_age_hours` -- the same safety net `gcp_keys.py`'s
+    function of this name is for the per-dispatch service-account keys,
+    and deliberately the same shape (bwsalmon/agents#131).
+
+    Until now the only thing expiring a stranded Gemini key was the
+    janitor, a *separate* opt-in feature (`enable_janitor`): a deployment
+    with `enable_gemini_key` on and the janitor off never cleaned one up
+    at all, while an agent key in the same situation always did. Expiry
+    now belongs to the feature that mints the key, on for anyone who has
+    minting on, exactly as it does for agent keys.
+
+    Run once per `core.py` cycle, independent of `AutomationState`, so it
+    still catches a key whose assignment was lost -- a controller crash
+    between mint and `state.assign`, most notably. `sweeper.py`'s revoke
+    when a slot frees remains the primary mechanism; this only catches
+    what that missed.
+
+    **Only keys this module minted.** An API key is not scoped to a
+    service account the way `gcp_keys.py`'s keys are -- `api-keys list`
+    returns every key in the *project* -- so the display-name prefix is
+    the only thing separating grain's from anyone else's, and a key
+    without it is left alone no matter how old. That is a real difference
+    from the agent-key reap, which gets its scoping from
+    `--iam-account` for free.
+
+    Best-effort per key, and a key with no `createTime` is left alone
+    rather than guessed at -- the same "surface it, don't gate on it" and
+    "absent data loses, doesn't crash" stances the agent-key reap takes.
+    """
+    cutoff = now - timedelta(hours=config.max_key_age_hours)
+    deleted: list[str] = []
+    for key in _list_keys(runner, config):
+        name = key.get("name")
+        created_at = key.get("createTime")
+        display_name = key.get("displayName") or ""
+        if not name or not created_at:
+            continue
+        if not display_name.startswith(MINTED_DISPLAY_NAME_PREFIX):
+            continue
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if created >= cutoff:
+            continue
+        try:
+            delete_key(runner, config, name)
+        except CommandError:
+            continue
+        deleted.append(name)
+    return deleted

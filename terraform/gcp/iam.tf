@@ -195,11 +195,20 @@ resource "google_project_service" "generativelanguage" {
 # serviceusage.apiKeysAdmin) has no predefined role in GCP as of this
 # writing, so a custom role would be the only way to shave this down
 # further -- left for an operator who wants it, not the default here.
-resource "google_project_iam_member" "agent_gemini_keys" {
+#
+# bwsalmon/agents#131: granted to the *host* account, not the agent. It
+# used to be the agent's, which meant a sandbox -- holding a per-dispatch
+# agent key -- could mint Gemini API keys of its own, unbounded, and
+# revoke the one grain minted for it. That defeats the point of
+# gemini_keys.py minting exactly one narrow, short-lived key per task.
+# Minting now happens as the host (gemini_keys.py), and the janitor makes
+# its api-keys calls as the host too while keeping its compute deletions
+# agent-scoped. A sandbox can use the key it is given and cannot make more.
+resource "google_project_iam_member" "host_gemini_keys" {
   count   = var.enable_gemini_key ? 1 : 0
   project = var.project_id
   role    = "roles/serviceusage.apiKeysAdmin"
-  member  = "serviceAccount:${google_service_account.agent[0].email}"
+  member  = "serviceAccount:${google_service_account.host.email}"
 }
 
 # GKE and Artifact Registry APIs -- disable_on_destroy is false for the

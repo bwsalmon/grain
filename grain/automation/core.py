@@ -138,6 +138,7 @@ from .gcp_keys import delete_expired_keys as delete_expired_gcp_keys
 from .gcp_keys import delete_key as delete_gcp_key
 from .gemini_keys import GeminiKeyConfig
 from .gemini_keys import create_key as create_gemini_key
+from .gemini_keys import delete_expired_keys as delete_expired_gemini_keys
 from .gemini_keys import delete_key as delete_gemini_key
 from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
 from .history import NullSessionHistory, SessionHistory
@@ -528,6 +529,7 @@ class Orchestrator:
             self.audit.record(sandbox=warning.sandbox, issue=None,
                                outcome=f"credential warning: {warning.detail}")
         self._reap_expired_gcp_keys(now)
+        self._reap_expired_gemini_keys(now)
 
     def _reap_expired_gcp_keys(self, now: datetime) -> None:
         """The safety-net half of bwsalmon/agents#126's "24-hour expiry":
@@ -560,6 +562,39 @@ class Orchestrator:
             self.audit.record(
                 sandbox=None, issue=None,
                 outcome=f"reaped expired GCP service-account key {key_id}",
+            )
+
+    def _reap_expired_gemini_keys(self, now: datetime) -> None:
+        """The same safety net `_reap_expired_gcp_keys` above is, for the
+        Gemini API keys `gemini_keys.py` mints (bwsalmon/agents#131).
+
+        These used to have no reap of their own: a stranded key was only
+        ever cleaned up by the janitor, a separate opt-in feature, so a
+        deployment running `enable_gemini_key` without `enable_janitor`
+        leaked them indefinitely -- while an agent key in the same
+        position was always reaped. Expiry now belongs to the feature
+        that mints the key, for both kinds.
+
+        Same no-op-when-unconfigured and visibility-only error handling as
+        its agent-key counterpart; `delete_expired_keys` itself is what
+        makes sure only grain-minted keys are ever in scope.
+        """
+        if self.gemini_key_config is None:
+            return
+        try:
+            deleted = delete_expired_gemini_keys(
+                self.base_runner, self.gemini_key_config, now=now,
+            )
+        except CommandError as exc:
+            self.audit.record(
+                sandbox=None, issue=None,
+                outcome=f"Gemini API key reap failed: {exc}",
+            )
+            return
+        for name in deleted:
+            self.audit.record(
+                sandbox=None, issue=None,
+                outcome=f"reaped expired Gemini API key {name}",
             )
 
     # --- janitor (bwsalmon/agents#113) ---------------------------------
