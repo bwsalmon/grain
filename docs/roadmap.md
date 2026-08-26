@@ -1459,3 +1459,36 @@ either a comment already on the issue before the run even started, or (the
 third finish path's own `comment_on_issue` reply) the automation comment
 that finish path just posted, as a "new" one and restarting a task nobody
 actually asked to restart.
+
+## 24. Restart in-progress jobs that survived a lost state
+
+- [x] Done
+
+bwsalmon/agents#139: item 8's "Update" (bwsalmon/agents#51) already made
+sure a controller crash or VM restart *mid-`run_once`* can never lose an
+in-progress task, by saving `AutomationState` incrementally rather than
+once at the end — but that whole recovery path assumes the state file
+itself survives the restart. A restart that also loses `/data` (a fresh
+volume, a wiped or corrupted `state.json`, a from-scratch redeploy — what
+the issue title calls grain being "restarted or reformatted") comes back
+up with `AutomationState.assignments` empty. Every task issue still
+carrying `in_progress_label` from before that happened is now invisible to
+every existing poll: `_dispatch` only ever lists `trigger_label`, and the
+sweeper only ever looks at assignments *on disk* — so with neither in
+play, such an issue would sit `in_progress` forever with no agent actually
+working it, indistinguishable from the queue's point of view from a task
+that's simply taking a long time.
+
+`core.py`'s `_restart_orphaned_in_progress` closes that gap by treating
+GitHub's own labels as the fallback source of truth, the same "poll, don't
+trust a cache" bar every other reconciliation pass here already holds to:
+every `run_once`, it lists every issue still carrying `in_progress_label`
+and, for any one this process's own state has no assignment for, gives it
+exactly the treatment `_requeue` gives a stranded run — `in_progress_label`
+off, `trigger_label` back on, every sandbox's `agent_label` stripped since
+there's no assignment left to say which one it was — so the very next
+`_dispatch` in the same cycle picks it back up. Deliberately scoped to
+`in_progress_label` alone: `awaiting_reply_label`/`completed_label` are
+already resting states with a human reply or a later poll expected to move
+them along, not silently orphaned work in the sense this closes the gap
+on.
