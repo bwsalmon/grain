@@ -482,6 +482,23 @@ def cmd_host_deploy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_named_github_keys(entries: list[str]) -> dict[str, str]:
+    """Parses repeated `--github-key NAME=FILE` entries into `{name: token}`,
+    shared by `controller configure` and `host bootstrap` (bwsalmon/
+    agents#134 added the latter so a named key can be threaded through a
+    deployment repo's own bootstrap, not just set by hand afterward).
+    """
+    keys: dict[str, str] = {}
+    for entry in entries:
+        name, sep, path = entry.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--github-key must be NAME=FILE, got {entry!r}")
+        if name == "anonymous":
+            raise SystemExit("--github-key name 'anonymous' is reserved")
+        keys[name] = sys.stdin.read() if path == "-" else Path(path).read_text()
+    return keys
+
+
 def cmd_controller_configure(args: argparse.Namespace) -> int:
     """`grain controller configure` -- docs/bootstrap.md Phase 3's third
     missing verb: writes `/data/config/automation.json`,
@@ -520,13 +537,7 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             ssh, credential_repos(task_repo, targets), token,
             credential_name=args.credential_name,
         )
-    for entry in args.github_key:
-        name, sep, path = entry.partition("=")
-        if not sep or not name or not path:
-            raise SystemExit(f"--github-key must be NAME=FILE, got {entry!r}")
-        if name == "anonymous":
-            raise SystemExit("--github-key name 'anonymous' is reserved")
-        token = sys.stdin.read() if path == "-" else Path(path).read_text()
+    for name, token in _read_named_github_keys(args.github_key).items():
         configure_named_github_key(ssh, token, name=name)
     if args.claude_token_file:
         configure_claude_token(ssh, Path(args.claude_token_file).read_text())
@@ -593,7 +604,9 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
     config = BootstrapConfig(
         task_repo=task_repo, targets=tuple(targets),
         default_target_repo=default_target, github_token=github_token,
-        credential_name=args.credential_name, claude_token=claude_token,
+        credential_name=args.credential_name,
+        github_keys=_read_named_github_keys(args.github_key),
+        claude_token=claude_token,
         gcp_service_account_key=gcp_service_account_key,
         gcp_agent_service_account_email=args.gcp_agent_service_account_email,
         gcp_project_id=args.gcp_project_id,
@@ -854,6 +867,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to a file holding the GitHub token, or '-' for stdin")
     p.add_argument("--credential-name", default="bot",
                     help="credentials.json entry name for --github-token-file (default: bot)")
+    p.add_argument("--github-key", action="append", default=[], metavar="NAME=FILE",
+                    help="write an additional named GitHub credential (bwsalmon/agents#52), "
+                         "same shape as controller configure's flag of the same name: a task "
+                         "labelled `grain-github-NAME` uses it for every git push instead of "
+                         "the default credential -- for a scope (e.g. `workflow`) the default "
+                         "deliberately withholds. FILE holds the token, or '-' for stdin. "
+                         "Repeatable; never becomes any repo's default credential")
     p.add_argument("--claude-token-file",
                     help="path to a file holding a Claude Code OAuth token (from `claude "
                          "setup-token`) to place on the controller and inject into the "

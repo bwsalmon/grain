@@ -155,6 +155,7 @@ jobs:
           INSTANCE: ${{ steps.tf.outputs.instance }}
           ZONE: ${{ steps.tf.outputs.zone }}
           GRAIN_GITHUB_TOKEN: ${{ secrets.GRAIN_GITHUB_TOKEN }}
+          GRAIN_GITHUB_KEYS: ${{ secrets.GRAIN_GITHUB_KEYS }}
           GRAIN_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.GRAIN_CLAUDE_CODE_OAUTH_TOKEN }}
           AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}
         run: grain-src/ci/push-host-secrets.sh

@@ -498,6 +498,28 @@ def test_controller_configure_rejects_the_reserved_anonymous_github_key_name(tmp
               "--github-key", f"anonymous={key_file}"])
 
 
+def test_host_bootstrap_also_accepts_github_key(tmp_path):
+    """bwsalmon/agents#134: --github-key isn't just controller configure's
+    flag -- host bootstrap takes the same NAME=FILE shape (and the same
+    validation, via the shared _read_named_github_keys), so a first-time
+    deploy (or a Terraform config repo's GRAIN_GITHUB_KEYS secret) can
+    provision a named credential in the same run rather than as a
+    separate manual step afterward. Both bad-input cases raise before
+    `bootstrap()` ever touches the network, so no VM/SSH fakes are needed
+    here -- only that the CLI plumbing rejects them the same way
+    controller configure does.
+    """
+    with pytest.raises(SystemExit, match="NAME=FILE"):
+        main(["--dry-run", "host", "bootstrap", "--task-repo", "acme/widgets",
+              "--github-key", "not-a-valid-entry"])
+
+    key_file = tmp_path / "token"
+    key_file.write_text("tok")
+    with pytest.raises(SystemExit, match="reserved"):
+        main(["--dry-run", "host", "bootstrap", "--task-repo", "acme/widgets",
+              "--github-key", f"anonymous={key_file}"])
+
+
 def test_dry_run_controller_configure_with_a_gcp_service_account_key_file(capsys, tmp_path):
     key_file = tmp_path / "gcp-key.json"
     key_file.write_text('{"type": "service_account"}\n')

@@ -17,6 +17,11 @@
 #   PROJECT, INSTANCE, ZONE   from the Terraform outputs
 # Optional env (empty leaves the host copy untouched):
 #   GRAIN_GITHUB_TOKEN
+#   GRAIN_GITHUB_KEYS         additional named credentials (bwsalmon/
+#                             agents#134), one "NAME=TOKEN" pair per line;
+#                             deploy.sh on the host splits these into the
+#                             per-name files `grain host bootstrap
+#                             --github-key` wants
 #   GRAIN_CLAUDE_CODE_OAUTH_TOKEN
 #   AGENT_SERVICE_ACCOUNT     email of the agent account, when configured
 set -euo pipefail
@@ -43,6 +48,7 @@ push_secret() {
 }
 
 push_secret "grain-github-token" "${GRAIN_GITHUB_TOKEN:-}"
+push_secret "grain-github-keys" "${GRAIN_GITHUB_KEYS:-}"
 push_secret "grain-claude-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 
 # Minted fresh every run, straight to instance metadata, never a repo

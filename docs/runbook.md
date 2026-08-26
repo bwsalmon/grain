@@ -856,7 +856,15 @@ switch to flip first:
    for more than one named key). This writes only
    `/data/secrets/github/<name>.token` — deliberately **not** a
    `credentials.json` entry, so `<name>` never becomes any repo's default
-   credential, only a label-selected override.
+   credential, only a label-selected override. `grain host bootstrap`
+   takes the same `--github-key <name>=PATH` flag (bwsalmon/agents#134),
+   for a first-time deploy that wants a named key provisioned in the same
+   run rather than as a separate step afterward. A Terraform/GCP
+   deployment (`templates/gcp/`) can set this from its own config repo
+   instead of running either command by hand: the optional
+   `GRAIN_GITHUB_KEYS` Actions secret (one `NAME=TOKEN` pair per line) is
+   threaded through `deploy.sh` into `grain host bootstrap --github-key`
+   on every deploy — see that template's README, "Optional fifth secret."
 2. A task now asks for it by carrying a `grain-github-<name>` label — a
    real GitHub label, applied by a human, the same trust tier as the
    trigger label itself; not a `/directive` line in the issue body. Until

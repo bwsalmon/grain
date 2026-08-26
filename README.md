@@ -766,8 +766,11 @@ a named credential instead of the deployment's default one — for a task
 that genuinely needs a scope the default deliberately withholds (the
 `workflow` scope, most notably: see "Withhold `workflow`..." above). An
 operator provisions the credential first with `grain controller configure
---github-key <name>=PATH` (see `docs/runbook.md`), which writes only
-`/data/secrets/github/<name>.token` — deliberately not a
+--github-key <name>=PATH` (or `grain host bootstrap --github-key
+<name>=PATH` on a first-time deploy — see `docs/runbook.md`, "Adding a
+named GitHub key," which also covers threading one through a Terraform/GCP
+deployment's own config repo via `GRAIN_GITHUB_KEYS`). Either way, it
+writes only `/data/secrets/github/<name>.token` — deliberately not a
 `credentials.json` entry, so it never becomes any repo's *default*
 credential, only a task-selected override. A label naming a credential
 that was never provisioned parks the task with a comment, same as an
