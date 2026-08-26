@@ -258,6 +258,42 @@ variable "agent_can_manage_compute_instances" {
   default     = false
 }
 
+variable "agent_can_manage_gke" {
+  type        = bool
+  description = <<-EOT
+    Grants the agent account (creating it even if agent_service_account_roles
+    is left empty) the ability to create, resize, and delete GKE clusters
+    and node pools, and to create, push to, and delete Artifact Registry
+    repositories -- roles/container.admin and roles/artifactregistry.admin,
+    both project-wide. Also enables the two APIs those roles need
+    (container.googleapis.com, artifactregistry.googleapis.com) --
+    otherwise the roles exist but every call fails with API-not-enabled,
+    the same trap enable_gemini_key already avoids for
+    generativelanguage.googleapis.com.
+
+    Unlike agent_can_manage_compute_instances, this grants no IAM
+    condition excluding the grain host: the host is a Compute Engine
+    instance, not a GKE cluster or an Artifact Registry repository, so
+    there is no equivalent "the deployment's own resource" for an agent
+    to be barred from touching here. A cluster an agent creates is a
+    project resource like any other Terraform-managed one, indistinguishable
+    from one a human made by hand -- keep that in mind when deciding
+    whether this project is one agents should be allowed to run
+    workloads in.
+
+    roles/container.admin includes full access to whatever Kubernetes API
+    objects run inside a cluster it can reach (not just cluster lifecycle),
+    since that is how GKE's own predefined roles are scoped -- there is no
+    narrower predefined role that covers create/resize/delete of clusters
+    without also covering what runs on them.
+
+    Applying this needs roles/serviceusage.serviceUsageAdmin on the
+    deployer running Terraform, to enable the two APIs -- bootstrap-gcp.sh
+    grants it.
+  EOT
+  default     = false
+}
+
 # ------------------------------------------------------------- lockdown ---
 
 variable "lock_down_project" {

@@ -95,6 +95,13 @@ agent_service_account_roles = [
 # grain's docs/runbook.md, "Enabling grain-gemini-key".
 enable_gemini_key = false
 
+# Grants the same agent account roles/container.admin and
+# roles/artifactregistry.admin, and enables the two APIs those need, so an
+# agent can create, resize, and delete GKE clusters and node pools and
+# manage Artifact Registry repositories. Project-wide, with no exclusion
+# for the grain host -- see variables.tf's agent_can_manage_gke.
+agent_can_manage_gke = false
+
 # -- Network ----------------------------------------------------------------
 
 create_network = true
