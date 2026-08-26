@@ -228,7 +228,7 @@ Description=grain automation run-once
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/grain
-ExecStart=/usr/bin/python3 -m grain.cli --data-dir /data automation run-once
+ExecStart=/usr/bin/python3 -m grain.cli --data-dir /data --cluster-file /data/config/cluster.toml automation run-once
 UNIT
 
 cat > /etc/systemd/system/grain-automation.timer <<'UNIT'

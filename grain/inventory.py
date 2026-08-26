@@ -75,13 +75,13 @@ class Cluster:
     bridge: str = "br-grain"
     image: str = "debian-12"
 
-    controller_cpus: int = 1
+    controller_cpus: int = 2
     controller_mem_mb: int = 4096
     controller_disk_gb: int = 40
 
     # Sized for a kind control plane plus a build; see docs/design.md.
-    sandbox_cpus: int = 2
-    sandbox_mem_mb: int = 8192
+    sandbox_cpus: int = 6
+    sandbox_mem_mb: int = 15360
     sandbox_disk_gb: int = 80
 
     @classmethod

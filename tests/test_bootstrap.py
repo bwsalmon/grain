@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from grain.adapter.libvirt import LibvirtAdapter
-from grain.adapter.net_linux import LinuxNetwork
+from grain.adapter.net_linux import BOOT_UNIT_NAME, BOOT_UNIT_PATH, LinuxNetwork
 from grain.bootstrap import BootstrapConfig, bootstrap
 from grain.inventory import Cluster
 from grain.run import CommandError, FakeRunner
@@ -113,6 +113,29 @@ def test_bootstrap_creates_the_controller_then_every_sandbox(env):
     defines = [c for c in runner.commands if "virsh -c qemu:///system define" in c]
     assert any("controller.xml" in c for c in defines)
     assert any("sandbox-0.xml" in c for c in defines)
+
+
+def test_bootstrap_persists_the_network_policy_across_a_reboot(env):
+    """Regression test for bwsalmon/agents#119.
+
+    `host up --persist` installs `grain-network.service` so the bridge and
+    nftables policy (including the metadata anycast DNAT every sandbox's
+    `gcloud`/ADC needs) survive a host reboot -- but until now that
+    persistence only happened on the manual CLI path, never on `grain host
+    bootstrap`'s stage 3. A host set up purely by `host bootstrap` looked
+    fully healthy (SSH and a direct connection to the controller both kept
+    working) right up until it rebooted, at which point the DNAT rule
+    silently vanished and every sandbox lost the one credential path GKE
+    cluster management depends on, with no error anywhere to explain why.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(runner, cluster, admin_private)
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert any(argv[:1] == ["tee"] and argv[1] == BOOT_UNIT_PATH for argv, _ in runner.calls), (
+        "bootstrap must install grain-network.service, or the network "
+        "policy it just applied vanishes on the host's next reboot"
+    )
+    assert runner.ran(f"systemctl enable {BOOT_UNIT_NAME}")
 
 
 def test_bootstrap_writes_the_controller_key_read_back_to_the_host_path(env):
@@ -215,6 +238,23 @@ def test_configure_writes_automation_json_for_the_given_repo(env):
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
     assert any("dd of=/data/config/automation.json" in c for c in runner.commands)
+
+
+def test_configure_writes_cluster_toml_reflecting_the_real_sandbox_count(env):
+    """The controller has no `--cluster-file` of its own otherwise
+    (`grain/automation/configure.py`'s `configure_cluster` docstring) --
+    without this, `grain-automation.service` would silently dispatch
+    against `Cluster()`'s bare default of two sandboxes forever, no matter
+    what this deployment's real `sandbox_count` is.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert any("dd of=/data/config/cluster.toml" in c for c in runner.commands)
 
 
 def test_github_token_is_only_configured_when_supplied(env):

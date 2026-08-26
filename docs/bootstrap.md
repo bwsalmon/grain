@@ -237,7 +237,7 @@ inventory.
 |---|---|---|---|
 | 1 | Preflight | `/dev/kvm`, required binaries, base image present → else fetch | 1, 3 |
 | 2 | Admin key | key file absent → generate | — |
-| 3 | Network | `network_up()`, already idempotent | 2 |
+| 3 | Network | `network_up(repo_dir)`, already idempotent, persists across a reboot the same as `host up --persist` | 2 |
 | 4 | Controller | `ABSENT` → create + start; `STOPPED` → start; `RUNNING` → skip | 4 |
 | 5 | Wait | SSH answers, then `cloud-init status --wait` (bounded; see "When the wait fails") | — |
 | 6 | Controller key | read back over SSH; write if changed | **5** |

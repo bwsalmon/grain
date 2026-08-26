@@ -34,9 +34,9 @@ from .adapter.diagnostics import dump_guest_diagnostics, dump_host_diagnostics
 from .adapter.libvirt import LibvirtAdapter
 from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
-    configure_claude_token, configure_gcp_service_account, configure_gemini_key,
-    configure_github_credential, configure_janitor, configure_repo, credential_repos,
-    ensure_sandbox_tokens,
+    configure_claude_token, configure_cluster, configure_gcp_service_account,
+    configure_gemini_key, configure_github_credential, configure_janitor,
+    configure_repo, credential_repos, ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -233,9 +233,12 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         adapter.admin_public_key_path, config.admin_private_key_path, base_runner, log,
     )
 
-    # Stage 3: network.
+    # Stage 3: network. Persisted, not just applied live -- see
+    # `HostAdapter.network_up`'s own docstring for why a one-command
+    # bootstrap must leave the same reboot protection behind that the
+    # manual runbook gets from `host up --persist`.
     log("stage 3/11: network")
-    adapter.network_up()
+    adapter.network_up(_REPO_ROOT)
 
     # Stage 4: controller.
     log("stage 4/11: controller")
@@ -299,6 +302,7 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                     default_target_repo=default_target,
                     github_host=config.github_host, git_forward_host=config.git_forward_host,
                     github_use_tls=config.github_use_tls)
+    configure_cluster(admin_ssh, cluster)
     if config.github_token:
         configure_github_credential(
             admin_ssh, credential_repos(config.task_repo, targets), config.github_token,
