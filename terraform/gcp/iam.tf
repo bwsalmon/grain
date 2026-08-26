@@ -25,7 +25,15 @@ resource "google_project_iam_member" "host" {
 # gate on agent_service_account_roles specifically.
 
 locals {
-  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key
+  agent_account_needed = length(var.agent_service_account_roles) > 0 || var.agent_can_manage_compute_instances || var.enable_gemini_key || var.agent_can_manage_gke
+
+  # Unconditioned, unlike agent_conditioned_compute_roles below -- see
+  # variables.tf's agent_can_manage_gke for why there is no equivalent
+  # "the grain host's own cluster" to exclude here.
+  agent_gke_roles = var.agent_can_manage_gke ? [
+    "roles/container.admin",        # create/resize/delete clusters and node pools, plus the Kubernetes API objects on them
+    "roles/artifactregistry.admin", # create/delete repositories, push/pull images
+  ] : []
 
   # Only compute.instanceAdmin.v1 and compute.osLogin -- see
   # variables.tf's agent_can_manage_compute_instances for why
@@ -133,4 +141,34 @@ resource "google_project_iam_member" "agent_gemini_keys" {
   project = var.project_id
   role    = "roles/serviceusage.apiKeysAdmin"
   member  = "serviceAccount:${google_service_account.agent[0].email}"
+}
+
+# GKE and Artifact Registry APIs -- disable_on_destroy is false for the
+# same reason as generativelanguage above: a `terraform destroy` (or
+# flipping agent_can_manage_gke back off) must not reach into the project
+# and disable an API something else in it might also depend on.
+resource "google_project_service" "container" {
+  count              = var.agent_can_manage_gke ? 1 : 0
+  project            = var.project_id
+  service            = "container.googleapis.com"
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "artifactregistry" {
+  count              = var.agent_can_manage_gke ? 1 : 0
+  project            = var.project_id
+  service            = "artifactregistry.googleapis.com"
+  disable_on_destroy = false
+}
+
+# GKE cluster and Artifact Registry repository lifecycle, project-wide --
+# see variables.tf's agent_can_manage_gke for why this is unconditioned,
+# unlike agent_compute above.
+resource "google_project_iam_member" "agent_gke" {
+  for_each = toset(local.agent_gke_roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.agent[0].email}"
+
+  depends_on = [google_project_service.container, google_project_service.artifactregistry]
 }
