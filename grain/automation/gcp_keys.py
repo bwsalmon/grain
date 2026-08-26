@@ -101,6 +101,11 @@ from ..run import CommandError, Runner
 
 DEFAULT_MAX_KEY_AGE_HOURS = 24
 
+# GCP's own hard cap on user-managed keys per service account. Not a knob:
+# exceeding it is what makes `keys create` fail, and the failure names
+# neither the limit nor the count -- see _explain_create_failure.
+MAX_USER_MANAGED_KEYS = 10
+
 # configure.py's GCP_KEY_MINTER_KEY_PATH, restated here rather than
 # imported -- see this module's docstring, and the identical precedent
 # gemini_keys.py's own _DEFAULT_KEY_PATH sets against
@@ -192,7 +197,14 @@ def create_key(runner: Runner, config: GcpKeyConfig) -> GcpKey:
     tmp_path = f"/tmp/grain-agent-gcp-key-{secrets_module.token_hex(8)}.json"
     _activate(runner, config)
     create_argv = _keys_create_argv(tmp_path, config)
-    create_result = runner.run(create_argv)
+    try:
+        create_result = runner.run(create_argv)
+    except CommandError as exc:
+        explanation = _explain_create_failure(runner, config, exc)
+        if explanation is None:
+            raise
+        raise CommandError(create_argv, exc.returncode,
+                            f"{exc.stderr.strip()}\n\n{explanation}") from None
     printed_id = create_result.stdout.strip()
 
     # A key now exists in the project whether or not the rest of this
@@ -226,6 +238,58 @@ def create_key(runner: Runner, config: GcpKeyConfig) -> GcpKey:
         runner.run(["rm", "-f", tmp_path], check=False)
 
     return GcpKey(key_id=key_id, key_json=key_json)
+
+
+def _explain_create_failure(
+    runner: Runner, config: GcpKeyConfig, exc: CommandError
+) -> str | None:
+    """A sentence saying what GCP actually meant, or `None` to let the
+    original error stand.
+
+    `keys create` answers both "this account already has the maximum ten
+    user-managed keys" and "an org policy forbids creating keys here" with
+    `FAILED_PRECONDITION: Precondition check failed.` -- and nothing else.
+    Diagnosing that from the raw text took a live deployment and a web
+    search (bwsalmon/agents#140, where a per-retry key leak filled the
+    account in minutes), so it is worth spending one extra listing call to
+    say which one it is.
+
+    Never raises: this runs while an exception is already propagating, and
+    a failure to explain must not replace the real error with a worse one.
+    """
+    detail = f"{exc.stderr}"
+    if "disableServiceAccountKeyCreation" in detail or "not allowed on this service" in detail:
+        return (
+            "An organization policy forbids creating service-account keys in this "
+            "project (constraints/iam.disableServiceAccountKeyCreation). Check it "
+            "with:\n"
+            f"  gcloud resource-manager org-policies describe "
+            f"constraints/iam.disableServiceAccountKeyCreation "
+            f"--project={config.project_id} --effective"
+        )
+    if "FAILED_PRECONDITION" not in detail and "Precondition check failed" not in detail:
+        return None
+
+    try:
+        live = len(_list_keys(runner, config))
+    except CommandError:
+        live = None
+    count = "unknown (the listing call also failed)" if live is None else str(live)
+    return (
+        f"GCP allows at most {MAX_USER_MANAGED_KEYS} user-managed keys per service "
+        f"account, and {config.service_account_email} currently has {count}. That is "
+        "what 'Precondition check failed' means here -- it is not about this "
+        "particular request.\n"
+        "grain revokes a key when its sandbox's slot frees, and reaps anything past "
+        "max_key_age_hours, so hitting the cap means keys are being created faster "
+        "than either runs -- most likely orphans from a mint that failed after the "
+        "key existed. List them with:\n"
+        f"  gcloud iam service-accounts keys list "
+        f"--iam-account={config.service_account_email} --managed-by=user "
+        "--format='table(name.basename(),validAfterTime)'\n"
+        "An org policy blocking key creation reports the same code; this message "
+        "means the key count is the cause."
+    )
 
 
 def _key_id_from_key_file(key_json: str) -> str | None:
