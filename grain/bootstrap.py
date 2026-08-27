@@ -36,8 +36,8 @@ from .adapter.wait import wait_for_provisioning, wait_for_ssh
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
     configure_gcp_key_minter, configure_gemini_key,
-    configure_github_credential, configure_github_key, configure_github_key_minter,
-    configure_janitor, configure_named_github_key, configure_repo, credential_repos,
+    configure_github_credential, configure_janitor, configure_named_github_key,
+    configure_repo, configure_scratch_repo, credential_repos,
     ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
@@ -103,20 +103,14 @@ class BootstrapConfig:
     # docstring for why.
     janitor_ttl_hours: int | None = None
     janitor_name_prefix: str = "grain"
-    # bwsalmon/agents#159: turns on the grain-scratch-repo task label --
-    # plain, non-secret config (see configure_github_key). Required
-    # together with github_key_installation_id, github_key_owner, and
-    # github_key_minter_key for bootstrap() to write
-    # /data/config/github-key.json; any one alone leaves the label
-    # refused, which is not an error.
-    github_key_app_id: str | None = None
-    github_key_installation_id: str | None = None
-    github_key_owner: str | None = None
-    github_key_repo_prefix: str = "grain-scratch"
-    # The GitHub App's own RS256 private key -- a different credential
-    # from every other one here, and the only one `github_keys.py`
-    # authenticates with (see that module's own docstring).
-    github_key_minter_key: str | None = None
+    # bwsalmon/agents#159/#186: turns on the grain-scratch-repo task label
+    # -- plain, non-secret config (see configure_scratch_repo). The
+    # credential that actually authenticates against the scratch repos is
+    # an ordinary named GitHub key (github_keys above, e.g.
+    # `github_keys={"scratch": "..."}`) plus a `credentials.json` pattern
+    # an operator adds by hand -- see `scratch_repo.py`'s own docstring.
+    scratch_repo_owner: str | None = None
+    scratch_repo_prefix: str = "grain-scratch"
     github_host: str = "api.github.com"
     git_forward_host: str = "github.com"
     github_use_tls: bool = True
@@ -345,19 +339,16 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         configure_janitor(admin_ssh, config.gcp_project_id, config.janitor_ttl_hours,
                            impersonate_service_account=config.gcp_agent_service_account_email,
                            name_prefix=config.janitor_name_prefix)
-    if config.github_key_minter_key:
-        configure_github_key_minter(admin_ssh, config.github_key_minter_key)
-    if (config.github_key_app_id and config.github_key_installation_id
-            and config.github_key_owner and config.github_key_minter_key):
-        # bwsalmon/agents#159: same "writing this file is what turns the
-        # feature on" gating as configure_agent_gcp_key above -- it must
-        # not happen without the minter key already placed, or every
-        # scratch-repo task starts failing on "no such file" instead of
-        # the label simply being refused.
-        configure_github_key(
-            admin_ssh, app_id=config.github_key_app_id,
-            installation_id=config.github_key_installation_id,
-            owner=config.github_key_owner, repo_prefix=config.github_key_repo_prefix,
+    if config.scratch_repo_owner:
+        # bwsalmon/agents#159/#186: plain, non-secret config -- the
+        # credential a scratch repo is actually reached with is an
+        # ordinary named GitHub key (`config.github_keys` above) plus a
+        # `credentials.json` pattern an operator adds by hand, not
+        # anything bootstrap() provisions on its own; see
+        # `scratch_repo.py`'s own docstring for why.
+        configure_scratch_repo(
+            admin_ssh, owner=config.scratch_repo_owner,
+            repo_prefix=config.scratch_repo_prefix,
         )
 
     # Stage 9: sandboxes.

@@ -24,8 +24,6 @@ from .credentials import Credential, CredentialSet
 from .forward import Forwarder
 from .protocol import err_pkt, is_valid_git_request, parse_path
 from .tokens import SandboxCredentialOverrides, SandboxTokens, extract_basic_auth_token
-from ..automation.github import GitHubError, TokenSource
-from ..run import CommandError
 
 
 @dataclass(frozen=True)
@@ -44,8 +42,7 @@ class GitProxy:
     def __init__(self, allowlist: Allowlist, credentials: CredentialSet,
                  tokens: SandboxTokens, forwarder: Forwarder,
                  audit: AuditLog | None = None,
-                 credential_overrides: SandboxCredentialOverrides | None = None,
-                 scratch_source: TokenSource | None = None) -> None:
+                 credential_overrides: SandboxCredentialOverrides | None = None) -> None:
         self.allowlist = allowlist
         self.credentials = credentials
         self.tokens = tokens
@@ -58,18 +55,6 @@ class GitProxy:
         # before, since `for_sandbox` would otherwise always answer None
         # anyway.
         self.credential_overrides = credential_overrides
-        # bwsalmon/agents#159: normally an
-        # `automation.github_keys.InstallationTokenSource`. Checked before
-        # `credential_overrides`/the ordinary ladder below, for the one
-        # narrow class of repo (`repo_for_sandbox`'s own naming) that a
-        # freshly-minted installation token, not a static file, is the
-        # right credential for -- see that module's own docstring for why
-        # this can't be a static `CredentialSet` entry the way every other
-        # credential here is. `None` for a deployment that never
-        # configured `github-key.json` (`build_proxy`), the same
-        # "feature not wired" shape `credential_overrides` above already
-        # has.
-        self.scratch_source = scratch_source
 
     def handle(self, *, method: str, path: str, query: str,
                headers: dict[str, str], body: bytes | None) -> ProxyResponse:
@@ -101,35 +86,11 @@ class GitProxy:
                 403, {}, err_pkt(f"{req.owner}/{req.repo} is not allow-listed")
             )
 
-        scratch_token = None
-        if self.scratch_source is not None:
-            try:
-                scratch_token = self.scratch_source.token_for(req.owner, req.repo)
-            except (GitHubError, CommandError) as exc:
-                # Minting happens inline, on this request -- a broken
-                # minter (a bad or rotated App key, GitHub unreachable)
-                # must come back as a legible 500, the same as any other
-                # "cannot resolve a credential" case below, rather than an
-                # unhandled exception aborting the connection.
-                self.audit.record(
-                    sandbox=sandbox, owner=req.owner, repo=req.repo,
-                    action=req.action, credential=None,
-                    outcome=f"error: could not mint a scratch-repo credential: {exc}",
-                )
-                return ProxyResponse(
-                    500, {}, err_pkt("could not mint a scratch-repo credential")
-                )
         override_name = (
             self.credential_overrides.for_sandbox(sandbox)
             if self.credential_overrides is not None else None
         )
-        if scratch_token is not None:
-            # bwsalmon/agents#159: takes priority over the named-override
-            # ladder below -- a repo shaped like `repo_for_sandbox`'s own
-            # naming is never meant to be reached any other way, so there
-            # is nothing to weigh this against.
-            credential = Credential(name="scratch", token=scratch_token)
-        elif override_name is not None:
+        if override_name is not None:
             # This task's `grain-github-<name>` label names a credential
             # explicitly -- it overrides the owner/repo ladder entirely
             # rather than narrowing it, since the whole point is a scope

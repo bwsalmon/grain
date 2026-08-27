@@ -602,14 +602,9 @@ def test_no_janitor_ttl_hours_never_writes_janitor_config(env):
     assert not any("janitor.json" in c for c in runner.commands)
 
 
-# --- github-key.json (bwsalmon/agents#159) --------------------------------
+# --- scratch-repo.json (bwsalmon/agents#159, #186) -------------------------
 
-def test_no_github_key_config_is_written_without_the_minter_credential(env):
-    """Mirrors test_no_gcp_key_config_is_written_without_the_minter_credential
-    -- writing github-key.json is what turns the grain-scratch-repo label
-    on, and it must not happen before the credential minting authenticates
-    as has actually been placed.
-    """
+def test_scratch_repo_config_reaches_the_controller(env):
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
         runner, cluster, admin_private,
@@ -618,43 +613,19 @@ def test_no_github_key_config_is_written_without_the_minter_credential(env):
     )
     config = BootstrapConfig(
         task_repo="acme/widgets",
-        github_key_app_id="123", github_key_installation_id="456",
-        github_key_owner="acme",
-        admin_private_key_path=admin_private,
-    )
-    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
-    assert not [c for c in runner.commands if "/data/config/github-key.json" in c], \
-        "turned the scratch-repo label on without placing the credential it mints from"
-
-
-def test_github_key_config_reaches_the_controller(env):
-    adapter, runner, cluster, config, admin_private = env
-    prime_happy_path(
-        runner, cluster, admin_private,
-        controller_state=("controller", "running"),
-        sandbox_states=[("sandbox-0", "running")],
-    )
-    config = BootstrapConfig(
-        task_repo="acme/widgets",
-        github_key_app_id="123", github_key_installation_id="456",
-        github_key_owner="acme",
-        github_key_minter_key="-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+        scratch_repo_owner="acme",
         admin_private_key_path=admin_private,
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
 
     controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
     assert any(
-        c.startswith(controller_prefix) and "github-key.json" in c
-        for c in runner.commands
-    )
-    assert any(
-        c.startswith(controller_prefix) and "github-key-minter.pem" in c
+        c.startswith(controller_prefix) and "scratch-repo.json" in c
         for c in runner.commands
     )
 
 
-def test_no_github_key_app_id_never_writes_github_key_config(env):
+def test_no_scratch_repo_owner_never_writes_scratch_repo_config(env):
     adapter, runner, cluster, config, admin_private = env
     prime_happy_path(
         runner, cluster, admin_private,
@@ -662,8 +633,7 @@ def test_no_github_key_app_id_never_writes_github_key_config(env):
         sandbox_states=[("sandbox-0", "running")],
     )
     bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
-    assert not any("github-key.json" in c or "github-key-minter.pem" in c
-                   for c in runner.commands)
+    assert not any("scratch-repo.json" in c for c in runner.commands)
 
 
 # --- stage 5/9: what a failed boot wait actually tells the operator -------

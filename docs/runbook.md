@@ -426,7 +426,6 @@ session record itself is still kept, just without transcript content.
     controller-ssh, controller-ssh.pub   # controller -> sandbox SSH identity
     sandbox-tokens.json                  # sandbox name -> bearer token (git proxy auth)
     gcp-service-account.json             # primary GCP key gemini_keys.py authenticates with (optional)
-    github-key-minter.pem                # GitHub App private key github_keys.py signs a JWT with (optional, bwsalmon/agents#159)
     github/
       credentials.json                   # owner/repo pattern -> credential name
       <name>.token                       # one file per credential named in credentials.json
@@ -436,7 +435,7 @@ session record itself is still kept, just without transcript content.
     cluster.toml                         # sandbox_count, subnet -- the controller's own copy; see below
     gemini-key.json                      # GeminiKeyConfig (optional, see below)
     gcp-key.json                         # GcpKeyConfig (optional, bwsalmon/agents#126, see below)
-    github-key.json                      # GitHubKeyConfig (optional, bwsalmon/agents#159, see below)
+    scratch-repo.json                    # ScratchRepoConfig (optional, bwsalmon/agents#159, see below)
     sandbox-github-key.json              # sandbox name -> named credential override, if any (bwsalmon/agents#52)
   state/
     automation/state.json, audit.log
@@ -468,13 +467,6 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   all, despite `docs/design.md` describing rotation as "folded into
   recreate" — today that's aspirational, not implemented. Recreating a
   sandbox does *not* rotate its token; do that as a separate, manual step.
-- **The GitHub App private key** (`github-key-minter.pem`, bwsalmon/agents#159):
-  overwrite the file with the new key, `chmod 0600` it, restart both
-  `grain-git-proxy.service` and (since it's a fresh process per cycle
-  anyway) simply wait for the next `automation run-once` tick — unlike a
-  plain GitHub credential, both services read this one, since both mint
-  their own scratch-repo tokens independently (see
-  `grain/automation/github_keys.py`).
 - **`cluster.toml`**: written by `configure_cluster`
   (`grain/automation/configure.py`) on every `grain host bootstrap` run, not
   just the first — the host's own `--cluster-file` never leaves the host,
@@ -720,9 +712,12 @@ stops new ones from being minted.
 A task issue carrying the `grain-scratch-repo` label dispatches into a
 repo dedicated to testing grain itself, one per sandbox slot
 (`owner/grain-scratch-<sandbox>`) — see the README's directives section
-and `grain/automation/github_keys.py`'s docstring for the full design.
-Off by default; nothing above requires it, and this feature has no
-Terraform-declarative equivalent (it involves a GitHub App, not GCP IAM).
+and `grain/automation/scratch_repo.py`'s docstring for the full design.
+Off by default; nothing above requires it.
+
+Authentication is nothing custom (bwsalmon/agents#186): a scratch repo is
+just another repo as far as `credentials.json` is concerned, reached the
+same "narrowest pattern covering it" way any other repo already is.
 
 1. Create a scratch GitHub account or organisation to own the repos, if
    this deployment doesn't already have one dedicated to grain's own
@@ -732,45 +727,48 @@ Terraform-declarative equivalent (it involves a GitHub App, not GCP IAM).
    for however many sandboxes this deployment runs. Small, disposable, and
    never holding anything real: a misbehaving test credential or a bug in
    an agent's push can only ever touch these.
-3. Create a GitHub App (github.com → Settings → Developer settings →
-   GitHub Apps → New GitHub App) with exactly four repository permissions:
-   Contents (read/write), Issues (read/write), Pull requests (read/write),
-   and Checks (read) — the full surface `grain/automation/github.py`
-   exercises, nothing more. Generate a private key for it (a `.pem`
-   download) and note its App id.
-4. Install the App on the account from step 1, selecting exactly the
-   repos from step 2. Note the installation id (the numeric id in the
-   installed-App's URL, `.../settings/installations/<id>`).
-5. Add each `owner/grain-scratch-<sandbox>` repo to
+3. Add each `owner/grain-scratch-<sandbox>` repo to
    `/data/config/repo-allowlist.json`, the same way any other target repo
    would be (see "Adding or reconfiguring a target repo" above) — the
    allowlist gates git transport regardless of which credential covers a
    repo.
-6. Run `grain controller configure --github-key-app-id <id>
-   --github-key-installation-id <id> --github-key-owner <owner>
-   --github-key-minter-key-file <path to the .pem from step 3>` (any other
-   `controller configure` flags in the same invocation still apply
+4. Create a personal access token with elevated permissions (Contents,
+   Issues, Pull requests, and Checks — the full surface
+   `grain/automation/github.py` exercises, nothing more) against the
+   account from step 1, and place it with `grain controller configure
+   --github-key scratch=PATH` (or `grain host bootstrap --github-key
+   scratch=PATH` for a first-time deploy) — the same named-credential
+   mechanism "Adding a named GitHub key" below uses, just named `scratch`
+   here. Writes only `/data/secrets/github/scratch.token`.
+5. Add `"<owner>/*": "scratch"` (or an exact `"<owner>/grain-scratch-
+   <sandbox>": "scratch"` entry per repo, if this deployment would rather
+   not grant the token blanket reach over the whole account) to
+   `/data/secrets/github/credentials.json` by hand, then restart
+   `grain-git-proxy.service` — the same "replace a file, restart the one
+   service that reads it" rotation every credential here gets (see
+   "Credential file layout and rotation" above), and the same "this
+   project doesn't guess at widening its own grant" reason
+   `configure_github_credential` never writes a wildcard pattern like this
+   on its own.
+6. Run `grain controller configure --scratch-repo-owner <owner>` (any
+   other `controller configure` flags in the same invocation still apply
    normally — this one is additive). This writes
-   `/data/config/github-key.json` and the App's private key to
-   `/data/secrets/github-key-minter.pem`, then restarts
-   `grain-git-proxy.service` (which, like `grain-automation.service`'s own
-   fresh-process-per-cycle reads, only needs to happen once — a running
-   proxy does not otherwise notice `github-key.json` changing). A
-   Terraform-managed deployment does this automatically as part of `host
-   bootstrap` instead, via the equivalent `github_key_*` `BootstrapConfig`
+   `/data/config/scratch-repo.json`, plain non-secret naming config
+   (`ScratchRepoConfig`) that only tells `core.py` which repo a given
+   sandbox's scratch task should land in — the credential from steps 4-5
+   is what actually authenticates it. A Terraform-managed deployment does
+   this automatically as part of `host bootstrap` instead, via the
+   equivalent `scratch_repo_owner`/`scratch_repo_prefix` `BootstrapConfig`
    fields.
 7. A task now enables it by carrying the `grain-scratch-repo` label — see
    the README's directives section. Until step 6 is done, that label
    parks the task with a comment explaining why, the same as an unlisted
    `/repo`.
 
-Nothing here is minted ahead of time or stored: both
-`grain-automation.service` (opening a PR, reading a branch) and
-`grain-git-proxy.service` (a sandbox's own push) mint a fresh, repo-scoped
-installation token from the App's private key the moment they actually
-need one, and let it expire on GitHub's own one-hour clock. To disable
-the feature again: delete `/data/config/github-key.json` (leaving the
-private key in place is harmless — nothing reads it without that file).
+To disable the feature again: delete `/data/config/scratch-repo.json`
+(leaving the token and its `credentials.json` pattern in place is
+harmless — nothing reaches them without that file, since the label
+itself is refused first).
 
 ## Enabling the janitor (optional, bwsalmon/agents#113)
 

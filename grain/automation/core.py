@@ -149,7 +149,7 @@ from .gemini_keys import delete_key as delete_gemini_key
 from .github import (
     Comment, GitHubClient, GitHubError, Issue, NewReviewComment, PullRequestDetail,
 )
-from .github_keys import GitHubKeyConfig, repo_for_sandbox
+from .scratch_repo import ScratchRepoConfig, repo_for_sandbox
 from .history import NullSessionHistory, SessionHistory
 from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
@@ -468,13 +468,14 @@ class Orchestrator:
     janitor_config: JanitorConfig | None = None
     # bwsalmon/agents#159: the on/off switch for `config.scratch_repo_label`.
     # `None` (production's default for a deployment that never ran `grain
-    # controller configure --github-key-app-id ...`) makes `_resolve_target`
+    # controller configure --scratch-repo-owner ...`) makes `_resolve_target`
     # refuse the label with an explanation, the same "unusable request
-    # parks the task" shape `gemini_key_config` already has. Minting
-    # itself never happens here -- see `github_keys.py`'s own docstring
-    # for why it's lazy, on demand, from `self.github`'s own token
-    # resolution and the git proxy's, not from `_dispatch`.
-    github_key_config: GitHubKeyConfig | None = None
+    # parks the task" shape `gemini_key_config` already has. Carries no
+    # credential of any kind -- bwsalmon/agents#186 moved scratch-repo auth
+    # onto the same `credentials`/`CredentialSet` ladder every other repo
+    # already uses, so there is nothing for `_dispatch` to mint here; see
+    # `scratch_repo.py`'s own docstring for the full reasoning.
+    scratch_repo_config: ScratchRepoConfig | None = None
     # bwsalmon/agents#51: where to persist `AutomationState` immediately
     # after each mutation, not just once at the very end of `run_once`
     # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
@@ -2018,15 +2019,15 @@ class Orchestrator:
         self_repair = self.config.self_repair_label in issue.labels
         github_key = self._resolve_github_key(issue)
         # bwsalmon/agents#159: same label tier as gemini_key above, refused
-        # the same way when this deployment has no `github_key_config` to
+        # the same way when this deployment has no `scratch_repo_config` to
         # honour it with.
         scratch_repo = self.config.scratch_repo_label in issue.labels
-        if scratch_repo and self.github_key_config is None:
+        if scratch_repo and self.scratch_repo_config is None:
             raise DirectiveError(
                 f"this task carries the `{self.config.scratch_repo_label}` "
                 "label, but this deployment has no scratch-repo support "
                 "configured. An operator enables it with `grain controller "
-                "configure --github-key-app-id ...` (see github_keys.py)."
+                "configure --scratch-repo-owner ...` (see scratch_repo.py)."
             )
         target = directives.target
         if scratch_repo:
@@ -2035,8 +2036,8 @@ class Orchestrator:
             # (`repo_for_sandbox`) -- which repo that is can't be known
             # until then, so this overrides any `/repo` directive entirely
             # rather than merely defaulting for a task that gave none.
-            target = RepoRef(owner=self.github_key_config.owner,
-                              name=repo_for_sandbox(self.github_key_config, sandbox))
+            target = RepoRef(owner=self.scratch_repo_config.owner,
+                              name=repo_for_sandbox(self.scratch_repo_config, sandbox))
         elif target is None:
             if not self.config.default_target_repo:
                 raise DirectiveError(
@@ -2232,21 +2233,6 @@ class Orchestrator:
                 # No sandbox consumed and no rate-limit slot spent: parking
                 # is bookkeeping on the task repo, not a run.
                 self._park(number, str(exc))
-                continue
-            except CommandError as exc:
-                # bwsalmon/agents#159: a scratch-repo task's target
-                # resolution can mint a GitHub App installation token just
-                # to ask GitHub about the repo's default branch
-                # (`self.github`'s own token resolution, `github_keys.py`'s
-                # `InstallationTokenSource`) -- a broken minter (a bad or
-                # rotated App key, most likely) must not take down every
-                # other candidate still queued this cycle, the same "log
-                # and move on" discipline `gcp_key_mint_error` already gets
-                # (bwsalmon/agents#138). Not parked: this is a
-                # deployment-side infra problem, not something a human
-                # fixing the task issue's own text could ever resolve.
-                self.audit.record(sandbox=None, issue=number,
-                                   outcome=f"target resolution failed: {exc}")
                 continue
 
             if task.depends:

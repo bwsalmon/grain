@@ -13,8 +13,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..automation.config import AutomationConfig
-from ..automation.github_keys import GitHubKeyConfig, InstallationTokenSource
-from ..run import RealRunner
 from .allowlist import Allowlist
 from .audit import FileAuditLog
 from .core import GitProxy
@@ -81,20 +79,14 @@ def build_proxy(data_dir: Path) -> GitProxy:
     if automation_path.exists():
         config = AutomationConfig.load(automation_path)
         forwarder = RealForwarder(config.git_forward_host, use_tls=config.github_use_tls)
-    # bwsalmon/agents#159: absence is the off switch, the same "feature
-    # not configured" shape every other optional step here already has --
-    # a deployment that never ran `grain controller configure
-    # --github-key-app-id ...` has no such file, and every scratch-repo
-    # push simply falls through to the ordinary credential ladder (which
-    # has nothing configured for `repo_for_sandbox`'s own repos either,
-    # so it 500s the same way an unconfigured repo always has).
-    github_key_config_path = data_dir / "config" / "github-key.json"
-    scratch_source = (
-        InstallationTokenSource(RealRunner(), GitHubKeyConfig.load(github_key_config_path))
-        if github_key_config_path.exists() else None
-    )
     return GitProxy(
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
+        # bwsalmon/agents#159/#186: a scratch repo (`repo_for_sandbox`'s
+        # own naming) is authenticated exactly like any other repo here --
+        # an `owner/*` (or narrower) pattern an operator adds to
+        # credentials.json by hand, resolved by the ordinary ladder below.
+        # See `scratch_repo.py`'s own docstring for why no scratch-repo-
+        # specific credential logic lives in this module any more.
         credentials=CredentialSet(data_dir / "secrets" / "github"),
         tokens=SandboxTokens(data_dir / "secrets" / "sandbox-tokens.json"),
         forwarder=forwarder,
@@ -105,7 +97,6 @@ def build_proxy(data_dir: Path) -> GitProxy:
         credential_overrides=SandboxCredentialOverrides(
             data_dir / "config" / "sandbox-github-key.json"
         ),
-        scratch_source=scratch_source,
     )
 
 
