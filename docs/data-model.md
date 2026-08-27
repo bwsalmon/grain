@@ -1700,12 +1700,14 @@ rather than a second copy of the data — removes the need to copy fields
 from one into the other at release time, which is what `sweeper._release`
 spends most of its length doing.
 
-It also makes something answerable that is not answerable today: **how
-many times has this task been attempted.** `_requeue` puts a task back in
-the queue on a timeout, a lost sandbox, or an orphaned in-progress
-label, and nothing counts. A task that has failed four times is almost
-certainly not going to succeed on the fifth, and today the only way to
-notice is for a human to read the issue's history.
+It also makes something *actionable* that is only latent today: **how
+many times has this task been attempted.** The attempts are already on
+disk — `history.py` keys each session file by `started_at`, explicitly so
+"a requeued issue gets redispatched under a fresh key each time, never
+overwriting an earlier attempt's record." What is missing is not the
+record but the count: nothing aggregates those files, so nothing can act
+on the fact that a task has failed four times and is unlikely to succeed
+on the fifth. `Run.attempt` is that count made first-class.
 
 **Decided: a run is bounded at 24 hours.** Not a new number — it is the
 outer bound the deployment already has, currently spread across two
@@ -1734,9 +1736,50 @@ is that compliant resources become positively identifiable, which is
 strictly more than the nothing it has now.
 
 So retention stops being a correctness question and becomes an ordinary
-cost one, alongside [how big the store
-gets](#open-questions) — how much run detail to keep, and for how long,
-with a run's identity outliving its detail if that turns out to matter.
+cost one.
+
+#### Decided: keep run records indefinitely; the transcripts are what age out
+
+**v1 keeps everything**, with no pruning path to build and nothing lost.
+That is free rather than merely tolerable, because the split it needs
+already exists and `history.py`'s docstring already argues for it: session
+records live one-file-per-session under `/data/state/automation/sessions/`
+precisely because "a session history is meant to accumulate indefinitely
+over a long-lived deployment, so a single JSON blob that grows without
+bound and gets fully rewritten every sweep is the wrong shape."
+
+**That is a constraint on stage 1, not just an observation.** Stage 1
+consolidates five dicts into one store, and the store is read-modify-write
+with incremental saves. A finished `Run` must not go in it. Live runs
+belong there — they are bounded by sandbox count, which is a handful —
+and finished ones append alongside the session records. Get that
+backwards and infinite retention becomes unbounded *write* cost on every
+cron cycle, which is a much worse problem than disk.
+
+**Records and transcripts have different retention profiles, and
+`history.py` already stores them as separate files** — `<key>.json` for
+the record, `<key>.jsonl` for the captured trajectory. That split is what
+makes a policy easy:
+
+- **The record is tiny and things derive from it.** `Run.attempt` is
+  computed from runs, so pruning records silently resets a still-open
+  task's attempt count — the kind of bug that looks like the retry limit
+  simply not working. Keep them.
+- **The transcript is the bulk, and nothing derives from it.** It is read
+  by a human browsing a past session and by nothing else. This is what a
+  month-long TTL should actually be pruning.
+
+So the recommendation for whenever infinite stops being comfortable is
+**not one policy but two**: records indefinitely, transcripts on a TTL of
+about a month. The expected steady state is small either way — runs are
+bounded at 24 hours and `max_runtime_minutes` defaults to 120, so one
+sandbox tops out around a dozen runs a day and a month of a few sandboxes
+is low thousands of records.
+
+Infinite retention also makes the janitor's id *resolvable* rather than
+merely [recognisable](#run--one-attempt) — "which task made this orphaned
+resource" becomes answerable, not just "an agent did." A bonus, not a
+reason: the safety property does not depend on it.
 
 ## Invariants
 
@@ -1854,7 +1897,10 @@ directive, or anything an operator sees.
    every later stage adds fields for free rather than paying the three
    edits `gemini_key_name` and `gcp_key_id` each paid. Four dicts
    consolidate; `proposed_task_issues` is deleted rather than migrated,
-   since [state is derived](#taskstate-is-derived-not-stored).
+   since [state is derived](#taskstate-is-derived-not-stored). Only
+   *live* runs enter the store — finished ones append alongside
+   `history.py`'s session records, or infinite retention becomes
+   unbounded write cost on every cron cycle.
 2. **The capability registry.** `Capability` rows, `Grant`, `Lease`.
    `_resolve_target`'s per-label branches become a loop; `_release`'s two
    revoke branches become one; the two reapers become one. Behaviour
@@ -1918,7 +1964,8 @@ Settled, with where each is argued and what would reopen it:
 | Sub-tasks get no auto-approval; every child costs an approval | [here](#sub-tasks-are-tasks) | decomposition turns out to be common enough that the friction bites |
 | Folder capabilities are **floors only** in v1 — no `permits`, no in-repo file | [here](#attaching-capabilities-to-repos-and-folders) | somebody wants a *stricter* subfolder inside a permissive parent — "except here" |
 | Directive grammar questions are artifacts of the issues interface, not model questions | [here](#direction-a-first-party-ui) | — |
-| A run is bounded at 24 hours; retention is a cost question, not a correctness one | [here](#run--one-attempt) | runs need to outlive a day |
+| A run is bounded at 24 hours | [here](#run--one-attempt) | runs need to outlive a day |
+| Run records are kept indefinitely; transcripts are what a TTL should prune | [here](#decided-keep-run-records-indefinitely-the-transcripts-are-what-age-out) | disk pressure arrives — expect ~1 month for transcripts |
 
 Two things are **assumed rather than decided**, and the document is
 written to survive either: the declaration
@@ -1952,17 +1999,18 @@ correctness question — each has a safe default or a natural place later.
 
 ### Deferred, measurable, or already answered by a default
 
-- **How much history is kept, and how big does the store get?** Purely a
-  [representation](#representation-is-not-the-model) question, which is
-  why it can wait: the store is rewritten whole on every save, which is
-  nothing at a few hundred tasks, and sub-tasks are the first feature
-  that could multiply the count by an order of magnitude. A UI adds a
-  second pressure — concurrent readers, and a "has anything changed"
-  question a whole-file read answers expensively. The atomic
-  temp-file-and-rename already gives a reader a consistent view (it sees
-  the old file or the new one, never a torn one), so this is cost and
-  change-detection, not correctness. Worth measuring before stage 4, not
-  before stage 1.
+- **How big does the live store get?** Narrower than it was, now that
+  [runs are kept outside it](#decided-keep-run-records-indefinitely-the-transcripts-are-what-age-out):
+  what remains is one record per task, rewritten whole on every save.
+  Nothing at a few hundred tasks; sub-tasks are the first feature that
+  could multiply the count by an order of magnitude. A UI adds a second
+  pressure — concurrent readers, and a "has anything changed" question a
+  whole-file read answers expensively. The atomic temp-file-and-rename
+  already gives a reader a consistent view (it sees the old file or the
+  new one, never a torn one), so this is cost and change-detection, not
+  correctness. Purely a
+  [representation](#representation-is-not-the-model) question. Worth
+  measuring before stage 4, not before stage 1.
 - **How does someone find out a task is waiting on them?** With a
   [first-party UI](#direction-a-first-party-ui), conversation can just be
   a thread on the task, which is what the three GitHub-surface options
