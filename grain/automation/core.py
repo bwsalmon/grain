@@ -368,6 +368,14 @@ class ResolvedTask:
     # draft review against, so `pr` above is always set whenever this is
     # true.
     review: bool = False
+    # bwsalmon/agents#164: the issue numbers a `/depends` line named (in
+    # the *task* repo), read straight off `Directives.depends`. Unlike
+    # every other field here, `_dispatch` -- not `_resolve_target` -- is
+    # what acts on this: whether the named issues are still open can
+    # change cycle to cycle with nothing about the task itself changing,
+    # so it isn't the kind of thing `_resolve_target` can resolve once and
+    # be done with the way a repo or PR number is.
+    depends: tuple[int, ...] = ()
 
 
 @dataclass
@@ -1791,6 +1799,18 @@ class Orchestrator:
             and not _is_automation_comment(c.body)
         ]
         directives = parse_directives(texts)
+        if issue.number in (directives.depends or ()):
+            # A task naming itself in its own `/depends` line could never
+            # close the loop -- unlike a dependency on a *different* issue
+            # that is merely slow to close, this is never going to resolve
+            # on its own, so it is refused outright the same as any other
+            # unusable directive, rather than left to block forever with
+            # only the audit log to explain why.
+            raise DirectiveError(
+                f"this task's `/depends` directive names itself (#{issue.number}) "
+                "-- an issue can't depend on its own completion. Remove it "
+                "from the `/depends` line."
+            )
         # bwsalmon/agents#49: a label, not a `/gemini-key` directive --
         # `directives.py`'s own docstring has the reasoning. `issue.labels`
         # is read directly, the same trust tier the trigger label itself
@@ -1891,7 +1911,7 @@ class Orchestrator:
                             gemini_key=gemini_key, self_debug=self_debug,
                             self_repair=self_repair,
                             github_key=github_key, auto_merge=directives.auto_merge,
-                            review=directives.review)
+                            review=directives.review, depends=directives.depends or ())
 
     def _resolve_github_key(self, issue: Issue) -> str | None:
         """The named credential a `grain-github-<name>` label on `issue`
@@ -2049,6 +2069,28 @@ class Orchestrator:
                 self.audit.record(sandbox=None, issue=number,
                                    outcome=f"target resolution failed: {exc}")
                 continue
+
+            if task.depends:
+                # bwsalmon/agents#164: checked fresh every cycle, the same
+                # "poll, don't trust a stale copy" discipline
+                # `_is_issue_closed` already holds to for the cancel-on-close
+                # poll (bwsalmon/agents#82) it's reused from here -- a
+                # dependency that was open last cycle may have closed since,
+                # with nothing about this task's own text having changed.
+                # Deliberately *not* `_park`: parking swaps the trigger
+                # label for the awaiting-reply one and waits on a human
+                # reply, but nothing here needs a human -- it needs the
+                # dependency issue to close, which happens on its own. A
+                # `continue`, not a `break`, since a blocked issue says
+                # nothing about whether the next one in the queue is also
+                # blocked -- unlike "no free sandbox"/"rate limit" above,
+                # which are true for every remaining candidate this cycle.
+                blocking = tuple(n for n in task.depends if not self._is_issue_closed(n))
+                if blocking:
+                    named = ", ".join(f"#{n}" for n in blocking)
+                    self.audit.record(sandbox=None, issue=number,
+                                       outcome=f"skipped: blocked on {named}")
+                    continue
 
             sandbox_runner = self._ssh_runner_for(sandbox)
             # The same address/user `_ssh_runner_for` just used to build
