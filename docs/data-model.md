@@ -1139,8 +1139,8 @@ class Capability:
     name: str                     # "gemini-key", "self-repair", ...
     label: str                    # the label that requests it
     source: GrantSource           # how it may be asked for
-    requires: str | None          # the deployment config it needs, if any
-    materializes: bool            # does honouring it mint something?
+    requires: str | None          # the credential or config it needs
+    provision: Provision          # MINT | SELECT | GRANT -- see below
     max_lease: timedelta | None   # revoke unconditionally after this
     auto_grantable: bool = False  # may a folder's `offers` grant it?
 
@@ -1169,6 +1169,11 @@ code follows by convention and could stop following by accident:
   trust with less machinery. `DIRECTIVE` is reserved for grants that
   carry a *value* a label cannot (`/base`, `/pr`), and those are read only
   from authors in `_TRUSTED_REPLY_ASSOCIATIONS`.
+- **Not every capability needs a credential.** `provision` says which of
+  three ways this one relates to one — mint a lease from a standing
+  credential, select which standing credential to use, or need none at
+  all. Two of grain's five need none. See
+  [credentials](#how-a-capability-relates-to-a-credential).
 - **Unhonourable means parked, never silently downgraded.** `requires`
   names the deployment config — `gemini_key_config`, `scratch_repo_config`,
   a `<name>.token` — whose absence parks the task with a comment saying
@@ -1196,9 +1201,14 @@ A `Lease` is what materialization produced:
 class Lease:
     capability: str          # which capability minted this
     resource: str            # gemini key name, gcp key id, ...
+    minted_by: CredentialRef # the standing credential it came from
     issued_at: datetime
     expires_at: datetime | None
 ```
+
+`minted_by` is what makes revocation and rotation data rather than
+control flow — see
+[credentials](#credentials-the-model-holds-names-never-material).
 
 `Assignment.gemini_key_name` and `Assignment.gcp_key_id` both become
 rows in `run.leases`. That single change collapses three pieces of
@@ -1209,6 +1219,146 @@ two reapers in `core.py` become one pass over leases with an
 revoked twice, or revoked for a resource already gone, is not an error —
 because the reaper and the release path can both reach the same lease and
 today already have to tolerate that.
+
+### Credentials: the model holds names, never material
+
+**The rule, and it is not negotiable under either direction.** The model
+holds a `CredentialRef` — a name — and resolves it to material only
+inside the controller, at the moment of use. Nothing else. Under the
+[repo direction](#direction-the-declaration-moves-into-a-repo) a
+declaration is a file in git, so a credential on a task would be a secret
+committed to a repository; under [a UI](#direction-a-first-party-ui) the
+page is a view, and a view that receives material is an exfiltration
+surface. `grain/proxy/credentials.py`'s `Credential` — the loaded form,
+carrying a token — is the *representation*, and it exists only on the
+controller.
+
+**Three lifecycles, and the principals sort them.** This is where the
+[principal model](#principals-three-actors-behind-one-github-identity)
+earns its keep: the design's central security property becomes a row in a
+table rather than a paragraph of prose.
+
+| Holder | Standing | Minted lease | Identity |
+|---|---|---|---|
+| **Automation** | GitHub PAT or App key, GCP host SA key, Claude token | — | — |
+| **Agent** | **none, ever** | Gemini key, per-task GCP SA key | the sandbox token |
+| **Human** | their own GitHub identity | — | an OAuth session |
+
+The agent row is the whole design. And its identity credential is subtler
+than the table can show: a sandbox token authenticates the *sandbox*, not
+the agent process, and `tokens.py` is explicit that git's credential
+helper supplies it as the password half of Basic auth so **the agent
+never sees it**. Even the agent's own identity is not something the agent
+holds.
+
+**Standing credentials are deployment facts, not task facts**, so none of
+them appears on `Task`. A task names a capability; the capability names
+what it requires; the controller resolves that at dispatch. The chain
+never passes through anything an agent or a declaration can write.
+
+#### How a capability relates to a credential
+
+Exactly three ways, which sharpens `Capability.requires` from "the
+deployment config it needs" into something with a shape:
+
+```python
+class Provision(Enum):
+    MINT   = "mint"    # mints a lease from a standing credential
+    SELECT = "select"  # names which standing credential to use
+    GRANT  = "grant"   # needs no credential at all
+```
+
+- **MINT** — `gcp-key` mints a per-task service-account key from the host
+  account's own key; `gemini-key` mints an API key. Both produce a
+  `Lease`, both need revoking when the slot frees.
+- **SELECT** — `grain-github-<name>` names a credential explicitly,
+  overriding the owner/repo ladder rather than narrowing it. Mints
+  nothing; it changes which standing credential the proxy reaches for.
+- **GRANT** — `self-debug` and `self-repair` need no credential of any
+  kind. They are OS-level: `systemd-journal` group membership and a sudo
+  rule, both provisioned unconditionally, which is exactly why
+  `_resolve_target` never has to refuse them for lack of configuration.
+
+That third row is worth naming because "capability" and "credential"
+otherwise read as synonyms, and two of grain's five capabilities involve
+no credential at all.
+
+#### A lease knows what minted it
+
+`Lease.minted_by` above turns two things from control flow into data.
+Revocation
+currently picks a client by which `Assignment` field happens to be set;
+with the minting credential recorded, releasing a lease is one path that
+asks the lease what to call. And rotating a standing credential becomes
+answerable — *which live leases came from the key I am about to
+replace?* — which nothing can answer today.
+
+#### Scope is a ladder, and `anonymous` is a real answer
+
+A credential covers a set of repos, and `CredentialSet.select` already
+resolves narrowest-first: exact `owner/repo`, then `owner/*`, then a
+global `*`. Two properties of that are model facts rather than
+implementation details, and both should survive any reshaping:
+
+- **Nothing covering the repo is fail-closed**, and is a distinct
+  condition from "not allow-listed." Two different refusals with two
+  different fixes.
+- **`anonymous` is a deliberate credential shape**, not an error — no
+  `Authorization` header at all, which is what a public repo wants. A
+  model that treats "no credential" and "no material" as the same thing
+  loses that.
+
+The operator convention around breadth is policy worth keeping stated:
+anything wider than one exact repo is a deliberate operator edit, never
+something grain widens on its own.
+
+#### Declared authority and verified authority are different
+
+`credential_audit.py` already ran into this and handled it correctly. A
+classic PAT reports its scopes on any authenticated response
+(`X-OAuth-Scopes`); a **fine-grained PAT or GitHub App token reports
+nothing** — there is no API to introspect a fine-grained PAT's
+permissions, and an App returns its `permissions` object only in the
+one-time response to minting an installation token. So the audit reports
+`UNVERIFIABLE` rather than faking a check.
+
+The model therefore carries two different things: the **declared** scope,
+which is the operator's statement of intent, and the **verified** scope,
+which grain may simply not be able to obtain. That is the same shape as
+[`PrHealth.UNKNOWN`](#pullrequestref-and-the-tracked-pr) and the same
+rule: the outside world owns the truth, and grain's copy of it can be
+legitimately absent rather than wrong.
+
+#### PAT or GitHub App — and grain has already run this experiment
+
+This is the [automation principal
+question](#open-questions) seen from the credential side; they are one
+decision, not two.
+
+An App's installation token is *itself* a minted, one-hour credential
+produced by signing a JWT with a private key. So choosing an App splits
+the standing GitHub credential into standing (the private key) plus lease
+(the installation token) — a shape this model already expresses, with no
+new concept required.
+
+What settles it is not the model but grain's own history, recorded in
+`scratch_repo.py`: bwsalmon/agents#159 built exactly that, minting
+per-scratch-repo installation tokens to keep each credential no broader
+than the repo it covered. bwsalmon/agents#186 **traded it back for a
+PAT** — a GitHub App, a JWT signed by shelling out to `openssl`, and two
+independent minting call sites each re-deriving a token on its own clock,
+all for scoping a single deployment did not need. The model should
+express both. The deployment has already chosen simplicity once, with
+reasons written down.
+
+#### What this deliberately does not add
+
+No secret store in the model, no material in the store or the UI, no
+credential field on a task, and no hot reload — `credentials.py` loads
+once at construction because rotation is "replace a file and restart the
+one service that reads it." That last one has an operational consequence
+worth surfacing rather than hiding: **a credential change has a restart
+in it**, which is exactly the kind of thing a UI should say out loud.
 
 ### `TaskLink` — relationships, including sub-tasks
 
@@ -1637,6 +1787,9 @@ the model:
     the GitHub API; automation speaks for it.
 18. An agent never writes the task repo, and automation never starts work
     a human did not approve. The two absolutes of the principal table.
+19. No credential material enters the model, the store, a declaration or
+    the UI — only names. An agent holds no standing credential of any
+    kind, and does not hold its own sandbox token either.
 
 ## What maps to what
 
@@ -1667,6 +1820,10 @@ the model:
 | `ScheduledJob.needs_approval` | standing approval in the job's declaration |
 | `audit.py`'s `sandbox` field | `Attribution` + `Run.id` (a slot is not an actor) |
 | `dispatch.agent_id()`, discarded | `Run.id`, persisted |
+| `/data/secrets/**`, `credentials.json` | `CredentialRef` + a scope ladder; material is representation |
+| `proxy.credentials.Credential` (carries a token) | controller-only loaded form, never in the model |
+| `sandbox-tokens.json` | the agent principal's identity credential |
+| `credential_audit`'s UNVERIFIABLE | declared scope vs verified scope |
 | `repo_for_sandbox`, `branch_name`, `agent_label` | unchanged, still derived |
 | `repo-allowlist.json` | unchanged; folders may only narrow it |
 | (nothing — one target repo) | `Task.target` + `Task.reads` |
@@ -1779,11 +1936,15 @@ correctness question — each has a safe default or a natural place later.
   is the recommended default because the failure mode of the automatic
   version is immediate and noisy. Whether the knob exists at all is
   separate.
-- **What is the automation principal, externally?** A machine account
-  behaves like a user everywhere and costs a seat; a GitHub App has its
-  own identity and renders as `app[bot]`, but has different rate limits
-  and cannot author commits the same way. Pure
-  [representation](#representation-is-not-the-model), but with teeth.
+- **What is the automation principal, externally — machine account or
+  GitHub App?** One decision, not two: the same choice seen from the
+  [credential side](#pat-or-github-app--and-grain-has-already-run-this-experiment)
+  is PAT versus App. A machine account behaves like a user everywhere and
+  costs a seat; an App has its own identity, renders as `app[bot]`, and
+  turns the standing credential into a private key plus a one-hour minted
+  token. Pure [representation](#representation-is-not-the-model), but
+  with teeth — and grain has already built the App version once and
+  traded it back for a PAT.
 - **Is a human principal a record or a reference?** Recommendation: a
   reference — a GitHub login, no stored user record — which keeps identity
   GitHub's, consistent with authenticating the UI by OAuth and deriving
