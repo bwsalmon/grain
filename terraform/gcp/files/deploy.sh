@@ -135,6 +135,23 @@ for key, value in sorted((cfg.get("cluster_overrides") or {}).items()):
         continue
     lines.append(f"{key} = {toml_value(value)}")
 open("/run/grain-deploy/cluster.toml", "w").write("\n".join(lines) + "\n")
+
+# scheduled_jobs (bwsalmon/agents#163): one template file per entry,
+# written out exactly as the config repo's own tfvars supplied it --
+# run_bootstrap below just passes each one straight to `grain host
+# bootstrap --scheduled-job NAME=FILE`, the same "one named file among
+# many" shape already used for --github-key. Name is a job's identity
+# (grain/automation/scheduled_jobs.py) and becomes a filename, so it is
+# validated here rather than trusting it as a path component.
+scheduled_jobs = cfg.get("scheduled_jobs") or {}
+if scheduled_jobs:
+    import os
+    sched_dir = "/run/grain-deploy/scheduled-jobs"
+    os.makedirs(sched_dir, exist_ok=True)
+    for name, template in scheduled_jobs.items():
+        if not name or "/" in name or name in (".", ".."):
+            raise SystemExit(f"invalid scheduled job name: {name!r}")
+        open(f"{sched_dir}/{name}.md", "w").write(template)
 PY
 
   # shellcheck source=/dev/null
@@ -438,6 +455,19 @@ run_bootstrap() {
       log "WARNING: agent_service_account_roles is set but no GCP service account key"
       log "         was found in instance metadata; sandboxed agents will have no GCP access."
     fi
+  fi
+
+  # scheduled_jobs (bwsalmon/agents#163): one --scheduled-job per file
+  # load_config's own python step wrote under $RUNDIR/scheduled-jobs/ --
+  # unconditional, unlike the GCP-backed features above, since filing an
+  # issue needs no service-account key at all.
+  local sched_dir="$RUNDIR/scheduled-jobs" job_file job_name
+  if [ -d "$sched_dir" ]; then
+    for job_file in "$sched_dir"/*.md; do
+      [ -e "$job_file" ] || continue
+      job_name="$(basename "$job_file" .md)"
+      args+=(--scheduled-job "$job_name=$job_file")
+    done
   fi
 
   # The token *paths* are fine to log; the files themselves are 0600 on tmpfs.

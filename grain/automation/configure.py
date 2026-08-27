@@ -49,6 +49,11 @@ GCP_KEY_CONFIG_PATH = "/data/config/gcp-key.json"
 # Must match grain/automation/janitor.py's `JanitorConfig` load path --
 # same caveat, see this constant's own use in `configure_janitor`.
 JANITOR_CONFIG_PATH = "/data/config/janitor.json"
+# bwsalmon/agents#163: must match grain/automation/scheduled_jobs.py's own
+# `/data/config/scheduled-jobs/` path -- the same "kept in sync by hand"
+# precedent every other path constant in this module already sets, since
+# this module writes over SSH and that one reads locally on the controller.
+SCHEDULED_JOBS_DIR = "/data/config/scheduled-jobs"
 # Must match grain/automation/github_keys.py's `GitHubKeyConfig.private_key_path`
 # default -- same "kept in sync by hand" caveat as the pair above.
 # bwsalmon/agents#159: the GitHub App's own credential -- deliberately a
@@ -326,6 +331,26 @@ def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
         payload["impersonate_service_account"] = impersonate_service_account
     janitor_json = json.dumps(payload, indent=2) + "\n"
     _write_remote_file(runner, JANITOR_CONFIG_PATH, janitor_json, mode="644")
+
+
+def configure_scheduled_job(runner: Runner, name: str, template: str) -> None:
+    """Writes one scheduled job's template file (bwsalmon/agents#163) at
+    `/data/config/scheduled-jobs/<name>.md` -- the same "one named file
+    among many" shape `configure_named_github_key` already has for a named
+    credential, callable once per job rather than needing every job passed
+    in a single call. `template` is written verbatim (the header lines, a
+    blank line, then the body) -- this function does no parsing of its
+    own; `scheduled_jobs.py`'s `ScheduledJobsConfig.load` is what
+    interprets it, on the controller side, the next `run_once`.
+
+    Removing a job is not handled here (this project's config commands
+    only ever add or replace, never delete -- the same latitude every
+    other `configure_*` step in this module already takes): an operator
+    drops the file with `ssh ... rm` by hand, or a Terraform-managed
+    deployment's `deploy.sh` reconciles the directory to exactly what the
+    repo currently holds (see docs/runbook.md's "Scheduled jobs").
+    """
+    _write_remote_file(runner, f"{SCHEDULED_JOBS_DIR}/{name}.md", template, mode="644")
 
 
 def configure_github_key(runner: Runner, *, app_id: str, installation_id: str,

@@ -520,6 +520,51 @@ def test_host_bootstrap_also_accepts_github_key(tmp_path):
               "--github-key", f"anonymous={key_file}"])
 
 
+def test_dry_run_controller_configure_with_a_scheduled_job(capsys, tmp_path):
+    job_file = tmp_path / "weekly-audit.md"
+    job_file.write_text("Title: Weekly audit\nInterval-Hours: 168\n\nAudit things.\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--scheduled-job", f"weekly-audit={job_file}"],
+        capsys,
+    )
+    assert "dd of=/data/config/scheduled-jobs/weekly-audit.md" in out
+
+
+def test_dry_run_controller_configure_with_multiple_scheduled_jobs(capsys, tmp_path):
+    weekly_file = tmp_path / "weekly-audit.md"
+    weekly_file.write_text("Title: Weekly audit\nInterval-Hours: 168\n\nAudit things.\n")
+    daily_file = tmp_path / "daily-report.md"
+    daily_file.write_text("Title: Daily report\nInterval-Hours: 24\n\nReport things.\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--scheduled-job", f"weekly-audit={weekly_file}",
+         "--scheduled-job", f"daily-report={daily_file}"],
+        capsys,
+    )
+    assert "dd of=/data/config/scheduled-jobs/weekly-audit.md" in out
+    assert "dd of=/data/config/scheduled-jobs/daily-report.md" in out
+
+
+def test_controller_configure_rejects_a_malformed_scheduled_job():
+    with pytest.raises(SystemExit, match="NAME=FILE"):
+        main(["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+              "--scheduled-job", "not-a-valid-entry"])
+
+
+def test_host_bootstrap_also_accepts_scheduled_job(tmp_path):
+    """bwsalmon/agents#163: mirrors --github-key's own precedent -- host
+    bootstrap takes the same NAME=FILE shape (and the same up-front
+    validation, via the shared _read_scheduled_jobs) so a first-time
+    deploy (or a Terraform config repo's own job templates) can provision
+    a scheduled job in the same run rather than as a separate manual step
+    afterward.
+    """
+    with pytest.raises(SystemExit, match="NAME=FILE"):
+        main(["--dry-run", "host", "bootstrap", "--task-repo", "acme/widgets",
+              "--scheduled-job", "not-a-valid-entry"])
+
+
 def test_dry_run_controller_configure_with_the_minter_key_file(capsys, tmp_path):
     """bwsalmon/agents#131: one GCP credential on the controller, the host
     account's. It replaced --gcp-service-account-key-file, which placed the

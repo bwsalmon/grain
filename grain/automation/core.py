@@ -125,7 +125,7 @@ import dataclasses
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -153,6 +153,7 @@ from .github_keys import GitHubKeyConfig, repo_for_sandbox
 from .history import NullSessionHistory, SessionHistory
 from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
+from .scheduled_jobs import ScheduledJobsConfig
 from .ssh import SshRunner
 from .state import AutomationState, OpenPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
@@ -466,6 +467,13 @@ class Orchestrator:
     # `janitor.py`'s own docstring for what it deletes and how it avoids
     # grain's own core infrastructure.
     janitor_config: JanitorConfig | None = None
+    # bwsalmon/agents#163: the on/off switch for scheduled jobs -- `None`
+    # (production's default for a deployment with no
+    # `/data/config/scheduled-jobs/` directory) makes `_scheduled_jobs` a
+    # no-op, the same "feature not configured" shape `janitor_config`
+    # above already has. See `scheduled_jobs.py`'s own docstring for how a
+    # job's own template file is authored and what it fires.
+    scheduled_jobs_config: ScheduledJobsConfig | None = None
     # bwsalmon/agents#159: the on/off switch for `config.scratch_repo_label`.
     # `None` (production's default for a deployment that never ran `grain
     # controller configure --github-key-app-id ...`) makes `_resolve_target`
@@ -563,6 +571,7 @@ class Orchestrator:
         self._restart_commented_completions()
         self._promote_lgtm_comments()
         self._close_finished_prs()
+        self._scheduled_jobs(now)
         self._dispatch(now)
 
     # --- sweep --------------------------------------------------------
@@ -730,6 +739,57 @@ class Orchestrator:
             self.audit.record(
                 sandbox=None, issue=None,
                 outcome=f"janitor warning ({warning.kind} {warning.name}): {warning.detail}",
+            )
+
+    # --- scheduled jobs (bwsalmon/agents#163) ---------------------------
+    def _scheduled_jobs(self, now: datetime) -> None:
+        """No-op when `scheduled_jobs_config` is unset. Run last in
+        `run_once`, right before `_dispatch`, so an issue this fires is
+        picked up the very same cycle rather than sitting idle for one
+        extra `run_once` tick -- the same "sweep before dispatch" ordering
+        every other phase above already follows.
+
+        For each job: skip it outright if `interval_hours` hasn't elapsed
+        since it last fired (`AutomationState.scheduled_job_last_fired`),
+        cheapest check first so a job nowhere near due costs nothing but a
+        dict lookup. Only once a job is otherwise due does this check
+        GitHub for an issue still carrying `job.marker_label` without
+        `completed_label` -- an earlier firing whose work isn't finished
+        yet -- and skips filing a second one if it finds one. That gate is
+        deliberately independent of `interval_hours`: a job whose issue
+        took longer than one interval to finish must not get a duplicate
+        the moment the interval elapses, and a job whose issue finished
+        early is still held to its own cadence rather than refiring
+        immediately.
+        """
+        if self.scheduled_jobs_config is None:
+            return
+        for job in self.scheduled_jobs_config.jobs:
+            last_fired = self.state.scheduled_job_last_fired.get(job.name)
+            if last_fired is not None and now - last_fired < timedelta(hours=job.interval_hours):
+                continue
+            open_issues = self.github.list_issues(
+                self.config.task_owner, self.config.task_repo, job.marker_label,
+            )
+            if any(
+                self.config.completed_label not in issue.labels
+                for issue in open_issues
+            ):
+                continue
+            label = (
+                self.config.needs_approval_label if job.needs_approval
+                else self.config.trigger_label
+            )
+            issue = self.github.create_issue(
+                self.config.task_owner, self.config.task_repo,
+                title=job.render_title(now), body=job.render_body(now),
+                labels=[label, job.marker_label],
+            )
+            self.state.record_scheduled_job_fired(job.name, now)
+            self._save_state()
+            self.audit.record(
+                sandbox=None, issue=issue.number,
+                outcome=f"scheduled job {job.name!r} filed issue #{issue.number}",
             )
 
     def _refresh_agent_labels(self) -> None:
