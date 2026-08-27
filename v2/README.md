@@ -1,49 +1,69 @@
 # v2
 
-The rewrite. `grain/` is v1 and still the thing that runs; nothing here is
-wired into it.
+The rewrite, in Go. `grain/` is v1 and still the thing that runs; nothing
+here is wired into it.
 
-## What is here
+```
+model/          the task model of ../docs/data-model.md
+model/dolt/     opening an embedded Dolt database — the only package that
+                imports Dolt
+```
 
-`model/` — the task model of [`docs/data-model.md`](../docs/data-model.md),
-with a Dolt-backed store. `tests/` covers it, and the one test that needs
-a real `dolt` binary skips without one.
+```sh
+cd v2 && go test ./...
+```
 
-## Why a separate tree rather than a package under `grain/`
+## Why Go
 
-Two reasons, and the second is the larger one.
+Every substrate this design chose is Go, and one of them decides it:
+**Dolt embeds only in Go.** A Python controller had to reach it by
+shelling out to the `dolt` CLI, and a CLI has no bind parameters — so the
+Python version carried a module whose whole job was rendering untrusted
+issue titles and comment bodies into statements safely, by hand, against
+MySQL escaping rules it could not test. That module does not exist here.
+`database/sql` has parameters, and writes are real transactions rather
+than a best-effort batch.
 
-The core is being rewritten rather than migrated, so v1 and v2 need to
-coexist while that happens — v1 keeps dispatching real work, and a
-half-migrated `grain/` would mean neither is trustworthy.
+The rest follows: Incus ships a Go client, so the host adapter becomes API
+calls rather than shelling to `virsh` and parsing output.
 
-And **v2 may not be Python.** Every substrate this design has chosen is
-Go: Dolt embeds only in Go, Incus ships a Go client, and beads is a Go
-binary. `model/sql.py` exists *entirely* because a Python process cannot
-embed Dolt — the hex-literal rendering, the stdin batching, the
-defensive JSON parsing and the unverifiable CLI flags are all workarounds
-for a language boundary, not for a design problem. A tree that might be
-replaced wholesale should not be a package inside a Python one.
+## What this actually verifies
 
-## The one edge back into v1
+The store's tests run against a **real embedded Dolt database** in a temp
+directory — not a fake, not a mock. They prove the DDL is valid, the
+views answer, the state machine walks every transition, a blocked task
+unblocks itself when its dependency closes, and a Dolt commit succeeds.
+The equivalent Python tests could only check the SQL grain *generated*,
+because there was no `dolt` binary to run it against.
 
-`model/dolt.py` imports `Runner` from `grain.run` — a ten-line Protocol
-and a test seam that already exists, borrowed rather than duplicated.
-That import is the boundary: it is where a rewrite in another language
-would start.
+## Two things the port corrected
 
-## What survives a language change, and what does not
+**Embedded Dolt needs cgo, and the binary is not static.** It pulls in
+`go-icu-regex` and `gozstd`; `CGO_ENABLED=0` does not build, and the
+result dynamically links `libicu`, `libstdc++` and `libgcc` at ~145 MB.
+An earlier claim in this project's notes — that Go would take the
+controller's package list to zero — was wrong. It shrinks (no `python3`,
+and the GCP Go SDK would retire the `gcloud` exception) but `libicu74`
+and the C++ runtime take their place.
 
-Worth knowing before more is built here.
+**Embedded Dolt serves one database per directory**, so naming it in the
+DSN before it exists fails with "database not found". `Open` therefore
+connects twice: once with no database selected purely to create it, then
+again for real. Not a `CREATE`-then-`USE` on one connection, which would
+be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
-| | If v2 becomes Go |
-|---|---|
-| `model/schema.py` | the DDL is reusable verbatim |
-| `model/types.py` | translates mechanically; it is enums and structs |
-| `tests/` | the semantics are the asset — the assertions port, the harness does not |
-| `model/sql.py` | **deleted** — bind parameters replace it entirely |
-| `model/dolt.py` | **mostly deleted** — embedded Dolt replaces the CLI, and transactions replace batching |
+## What this does not have yet
 
-That the two modules which would disappear are exactly the two that exist
-because of the language is the clearest argument this tree has for
-changing it.
+`TrackedPullRequest`, folders, the capability provider contract, and
+anything that reads or writes GitHub. The automation loop, the git proxy
+and the host adapter are all still v1 Python — 15,903 lines of it, with
+1,239 tests. Those tests are the asset in a rewrite; the assertions port,
+the harness does not.
+
+## Single writer
+
+Embedded Dolt permits one writer, which suits a cron-driven controller
+and does not suit a controller plus a UI plus a human at a CLI. When that
+becomes real the answer is a Dolt SQL server, `model/dolt` grows a second
+constructor, and nothing above it changes — which is why `Store` takes a
+`*sql.DB` and imports no driver.

@@ -226,7 +226,11 @@ the deciding factor.
 - Apache 2.0.
 
 And one constraint that shapes both options equally: **Dolt embeds only
-in Go.** grain's controller is Python. So either it shells out to the
+in Go.** grain's controller is Python. *(This is what v2 acts on — see
+[`v2/README.md`](../v2/README.md). Building against embedded Dolt also
+established two things this document could not: it requires cgo and
+`libicu`, so the resulting binary is not static, and it serves one
+database per directory.)* So either it shells out to the
 `dolt` CLI — which is exactly the idiom `gcloud` already established
 here, for reasons `gcp_keys.py` documents — or it runs `dolt sql-server`
 and adds a MySQL driver, meaning a new daemon *and* a non-stdlib

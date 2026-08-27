@@ -2559,15 +2559,16 @@ of `run_once`. A `version` field and the established
 
 ## Implementation status
 
-`v2/model/` holds the first of this: the model types, the schema, and
-a Dolt-backed store.
+`v2/` holds the first of this, in Go: the model types, the schema, and a
+Dolt-backed store. See [`v2/README.md`](../v2/README.md).
 
-| Module | What it is |
+| File | What it is |
 |---|---|
-| `types.py` | the entities, storage-agnostic — no SQL, no store import |
-| `schema.py` | the same model as DDL, with the derivations as **views** |
-| `sql.py` | literal rendering for a database reached without bind parameters |
-| `dolt.py` | the store, over the `dolt` CLI through the existing `Runner` |
+| `model/task.go` | the entities, storage-agnostic — no database import |
+| `model/state.go` | the derivations, for code holding a `Task` and no store |
+| `model/schema.go` | the same model as DDL, with the derivations as **views** |
+| `model/store.go` | the store, over any `*sql.DB` — parameterised, transactional |
+| `model/dolt/` | opening an embedded Dolt database; the only package importing it |
 
 Two decisions in this document are enforced by that code rather than
 restated by it. `TaskState` is a **view**, so there is no column any
@@ -2576,10 +2577,12 @@ tables**, which is what would let a declaration change land on a branch
 and be reviewed while observations keep being written.
 
 The state derivation exists twice on purpose — once in SQL for the store,
-once in Python for code holding a `Task` and no database — and
-`v2/tests/test_model_schema.py` holds the two to the same precedence, since
-two implementations of one rule is a drift risk worth paying for
-deliberately.
+once in Go for code holding a `Task` and no database — and
+`model/state_test.go` holds the two to the same precedence, since two
+implementations of one rule is a drift risk worth paying for
+deliberately. The store's own tests run against a real embedded Dolt
+database, so the DDL and the views are verified rather than only
+generated.
 
 Not yet built: `TrackedPullRequest`, folders, the capability provider
 contract, and anything that reads or writes GitHub. `core.py` is
