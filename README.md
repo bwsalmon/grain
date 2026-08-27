@@ -138,6 +138,11 @@ afterwards, unlike a question — there is no reply to wait for.
 - **[`docs/design.md`](docs/design.md)** — the reasoning: why a VM per
   agent, the credential ladder, the threat model, what earlier revisions
   traded away.
+- **[`docs/data-model.md`](docs/data-model.md)** — the task model: what a
+  task, a repo role, a folder, a capability, a pull request, a sub-task
+  and a run are, which of them GitHub owns and which grain does, how a
+  task reads more repos than it writes, and how review threads become
+  tasks. A design; no code implements it yet.
 - **[`docs/bootstrap.md`](docs/bootstrap.md)** — the design behind
   `grain host bootstrap`, which collapses the old fourteen-step setup into
   one command.
@@ -146,6 +151,10 @@ afterwards, unlike a question — there is no reply to wait for.
   the known gaps.
 - **[`docs/host-adapter.md`](docs/host-adapter.md)** — the one
   platform-specific module, and what a macOS port would have to replace.
+- **[`docs/beads-incus-feasibility.md`](docs/beads-incus-feasibility.md)** —
+  whether to rebuild on incus (a third host-adapter driver) and beads (a
+  graph issue tracker): what each buys, what incus costs the macOS plan,
+  and why beads' source of truth decides it.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
 - **[`docs/next-session.md`](docs/next-session.md)** — what is left before
   a first real run, in the order worth doing it. Start here.
