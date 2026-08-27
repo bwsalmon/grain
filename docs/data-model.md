@@ -2094,6 +2094,22 @@ correctness question — each has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
+- **Does `materialize` get a runner, or return a placement?** The
+  [provider contract](#capabilities-are-an-extension-point-not-a-table)
+  hands a provider a `Runner` for the task's sandbox, which is what
+  placing a key file needs and is also the broadest thing in the context.
+  The alternative is declarative: a provider returns material plus *where
+  it goes* — path, mode, owner — and the dispatcher does the writing.
+
+  Recommendation: **declarative.** It is testable with no sandbox at all,
+  every placement becomes loggable in one place, and it narrows what a
+  provider can do to the thing providers actually do. It covers
+  everything that exists today — the two `MINT` capabilities each write
+  one file, and the two `GRANT` ones place nothing. The risk is a future
+  capability that needs to *run* something (install a package, start a
+  service) and cannot say so declaratively; the escape hatch is to widen
+  the placement vocabulary rather than hand back the runner.
+
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
   version is immediate and noisy. Whether the knob exists at all is
