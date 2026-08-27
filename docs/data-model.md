@@ -1296,6 +1296,149 @@ being re-litigated per capability:**
 - **Revocation is idempotent and must tolerate a vanished resource.**
   Release and the expiry reaper can both reach the same lease.
 
+#### What writing a new capability looks like
+
+The context first, because the narrowing is one *absent* field:
+
+```python
+@dataclass(frozen=True)
+class CapabilityContext:
+    task: Task
+    run: Run
+    config: Deployment              # incl. this capability's own config
+    credentials: CredentialResolver # by name; never enumerable
+    controller: Runner              # for minting. There is no sandbox runner.
+    now: datetime
+```
+
+**Minting stays imperative; placement becomes declarative.** Writing the
+interface out is what makes the line obvious. `gemini_keys.create_key`
+shells to `gcloud` on the controller, and minting is genuinely varied —
+an API key, a service-account key, a JWT signed for a GitHub App — with
+no small vocabulary to reduce it to. Placement is the opposite: two
+capabilities, one shape, already written twice. So a provider keeps a
+**controller** runner and never gets a **sandbox** one, and the boundary
+the disciplines guard is exactly the boundary the provider cannot reach
+across.
+
+A base class carries the defaults, so a provider writes only what applies
+to it:
+
+```python
+class Capability:
+    spec: CapabilitySpec
+
+    def resolve(self, ctx) -> Resolution:        return Honoured()
+    def materialize(self, ctx) -> Materialization: return Materialization(lease=None)
+    def prompt_section(self, ctx) -> str | None: return None
+    def revoke(self, lease, ctx) -> None:        pass
+```
+
+**A `MINT` capability — `gemini-key`, ported whole:**
+
+```python
+# grain/automation/capabilities/gemini_key.py
+KEY_PATH = "/home/debian/.gemini-api-key"
+
+class GeminiKey(Capability):
+    spec = CapabilitySpec(
+        name="gemini-key", label="grain-gemini-key", colour="d4c5f9",
+        description="Mint a short-lived Gemini API key for this task",
+        source=GrantSource.LABEL, provision=Provision.MINT,
+        max_lease=timedelta(hours=24),
+    )
+
+    def resolve(self, ctx):
+        if ctx.config.gemini_key is None:
+            return Refused(
+                "this issue is labelled `grain-gemini-key`, asking for a "
+                "Gemini key this deployment isn't configured for. An "
+                "operator runs `grain controller configure "
+                "--gemini-project-id <project>`."
+            )
+        return Honoured()
+
+    def materialize(self, ctx):
+        key = gemini_keys.create_key(
+            ctx.controller, ctx.config.gemini_key,
+            display_name=f"grain-{ctx.run.id}",
+        )
+        return Materialization(
+            lease=Lease(
+                capability=self.spec.name, resource=key.name,
+                minted_by=CredentialRef("gcp-host-service-account"),
+                issued_at=ctx.now, expires_at=ctx.now + self.spec.max_lease,
+            ),
+            placements=(Placement(Side.SANDBOX, KEY_PATH, key.value),),
+        )
+
+    def prompt_section(self, ctx):
+        return (f"A Gemini API key is at {KEY_PATH}, readable only by you:\n\n"
+                f'    export GEMINI_API_KEY="$(cat {KEY_PATH})"\n')
+
+    def revoke(self, lease, ctx):
+        gemini_keys.delete_key(ctx.controller, ctx.config.gemini_key, lease.resource)
+```
+
+`display_name=f"grain-{ctx.run.id}"` is the janitor's positive signal
+falling out of ordinary use rather than being a separate feature: the
+minted resource carries the run that made it.
+
+**A `GRANT` capability is most of a file shorter**, because the base
+class already says "mints nothing, revokes nothing":
+
+```python
+class SelfDebug(Capability):
+    spec = CapabilitySpec(
+        name="self-debug", label="grain-self-debug", colour="c5def5",
+        description="Let this task read grain's own controller logs",
+        source=GrantSource.LABEL, provision=Provision.GRANT, max_lease=None,
+    )
+
+    def prompt_section(self, ctx):
+        return "You can read grain's own controller logs with ..."
+```
+
+`resolve` is not overridden because the group grant in
+`provision/controller.sh` is unconditional — which is exactly why
+`_resolve_target` never has to refuse this one today.
+
+**Registration is one line**, in `capabilities/__init__.py`:
+
+```python
+REGISTRY = register(GeminiKey(), GcpKey(), SelfDebug(), SelfRepair(), ScratchRepo())
+```
+
+**What the author does not write** — every one of these is an edit that
+`gemini-key` and `gcp-key` each paid for by hand:
+
+| | Now comes from |
+|---|---|
+| an `AutomationConfig` field | `ctx.config`, keyed by capability name |
+| a `labels._STYLES` row | `spec.label`, `spec.colour`, `spec.description` |
+| a `_resolve_target` branch | `resolve()`, called in a loop |
+| a `ResolvedTask` field | the `Grant` set |
+| an `Assignment` field + `load`/`save` | `Lease`, through the serialization boundary |
+| a `dispatch.py` path constant | `Placement.path` |
+| a `_..._line()` renderer | `prompt_section()` |
+| a bool on three prompt builders | one list of sections |
+| a `_release` revoke branch | `revoke()`, called in a loop |
+| an expiry reaper | one pass over leases with `expires_at` |
+
+**And the test needs no sandbox and no cloud:**
+
+```python
+def test_gemini_key_places_the_key_outside_the_workspace():
+    result = GeminiKey().materialize(ctx(controller=FakeRunner(...)))
+    (placement,) = result.placements
+    assert placement.side is Side.SANDBOX
+    assert placement.mode == "600"
+    assert not placement.path.startswith(WORKSPACE_PATH)
+```
+
+That last assertion is one the conformance test can make over *every*
+provider, rather than each author remembering it.
+
 #### Placement: what `materialize` returns
 
 The one open piece of the contract, and worth working through because the
@@ -2206,12 +2349,15 @@ correctness question — each has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
-- **Does `materialize` get a runner, or return a placement?** Worked
-  through under [placement](#placement-what-materialize-returns), with a
-  recommendation of declarative: it turns three conventions into
-  structural guarantees, and gives un-placement an owner it does not have
-  today. What is left to decide is whether the placement vocabulary is
-  worth the constraint before a capability exists that strains it.
+- **Does `materialize` get a sandbox runner, or return a placement?**
+  Worked through under [placement](#placement-what-materialize-returns),
+  with a recommendation of declarative: it turns three conventions into
+  structural guarantees and gives un-placement an owner it does not have
+  today. Minting stays imperative either way — [a provider keeps a
+  controller runner](#what-writing-a-new-capability-looks-like), since
+  minting has no small vocabulary to reduce to. What is left to decide is
+  whether the placement vocabulary is worth the constraint before a
+  capability exists that strains it.
 
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
