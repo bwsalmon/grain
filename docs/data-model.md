@@ -11,9 +11,10 @@ shippable on its own and none of them changes what an operator sees on
 GitHub.
 
 The model covers **tasks and everything hanging off one**: the repos a
-task names, the capabilities it is granted, the pull requests it produces
-or continues, the sub-tasks it spawns, and the runs it takes to get
-there. It deliberately does not cover the VM layer (`grain/adapter/`),
+task reads and writes, the folder tree whose policy it inherits, the
+capabilities it is granted, the pull requests it produces or continues,
+the review threads it answers, the sub-tasks it spawns, and the runs it
+takes to get there. It deliberately does not cover the VM layer (`grain/adapter/`),
 the git proxy, or the credential files — those have their own designs and
 no task ever names one directly.
 
@@ -125,23 +126,30 @@ blocked after its blocker closed. Pinned-at-dispatch is the default;
 
 ```mermaid
 erDiagram
+    FOLDER ||--o{ FOLDER : "contains"
+    FOLDER ||--o{ REPO : "contains"
+    FOLDER ||--o{ CAPABILITY : "permits and offers"
     REPO ||--o{ TASK : "task repo (the queue)"
-    REPO ||--o{ TASK : "target repo (where work lands)"
+    REPO ||--o| TASK : "write target"
+    REPO }o--o{ TASK : "read targets"
+    FOLDER ||--o{ TASK : "policy inherited by"
     TASK ||--o{ TASK_LINK : "has"
-    TASK_LINK }o--|| TASK : "points at"
+    TASK_LINK }o--o| TASK : "points at"
+    TASK_LINK }o--o| REVIEW_THREAD : "points at"
     TASK ||--o{ GRANT : "was granted"
     GRANT }o--|| CAPABILITY : "of"
     TASK ||--o{ RUN : "attempted by"
     RUN }o--|| SANDBOX : "occupied"
     RUN ||--o{ LEASE : "minted"
     LEASE }o--|| CAPABILITY : "materializes"
-    TASK ||--o{ PULL_REQUEST : "produced or continues"
+    TASK ||--o| PULL_REQUEST : "produced or continues"
+    PULL_REQUEST ||--o{ REVIEW_THREAD : "carries"
     PULL_REQUEST }o--|| REPO : "in"
 ```
 
-Seven things. Four of them exist today under other names; three
-(`TaskLink`, `Grant`, `Lease`) are the ones that turn repeated special
-cases into rows.
+Nine things. Four of them exist today under other names; the rest
+(`Folder`, `TaskLink`, `Grant`, `Lease`, `ReviewThread`) are the ones
+that turn repeated special cases into rows.
 
 ### `RepoRef` and repo roles
 
@@ -182,6 +190,163 @@ The allowlist is unchanged and stays where it is
 git-transport sides). It is a property of the deployment, not of a task,
 and the model has no business copying it.
 
+### `Folder` — one containment tree, around and inside repos
+
+A repo is not the right granularity for everything a deployment wants to
+say. "Every task in the payments area may mint a GCP key" is about a
+group of repos; "tasks under `services/billing/` need the deploy
+credential" is about a path inside one. Both are the same shape — a node
+in a containment tree that carries policy its descendants inherit — so
+both are the same entity:
+
+```
+deployment                                  (root; the implicit folder)
+└── folder  "payments"                      around: a group of repos
+    ├── repo    owner/payments-api
+    │   ├── folder  "services/billing"      inside: a path in that repo
+    │   └── folder  "services/ledger"
+    └── repo    owner/payments-web
+```
+
+```python
+@dataclass(frozen=True)
+class FolderRef:
+    path: tuple[str, ...]     # ("payments", "owner/payments-api",
+                              #  "services/billing")
+
+@dataclass(frozen=True)
+class Folder:
+    ref: FolderRef
+    repos: tuple[RepoRef, ...]        # for an "around" folder
+    permits: frozenset[str] | None    # ceiling: capabilities allowed here
+    offers: frozenset[str]            # floor: capabilities granted here
+    base: str | None                  # default base branch for tasks here
+    preamble: str | None              # prompt text every task here carries
+    max_concurrent: int | None        # cap on simultaneous runs here
+```
+
+The tree is **operator config**, hot-reloaded from `/data/config` the way
+the allowlist already is, and it is not a persisted entity — a task
+records the `FolderRef` it resolved to, never a copy of the folder's
+contents.
+
+Capabilities are the first use and the one this document works through,
+but the entity is deliberately general: `base`, `preamble`, and
+`max_concurrent` are the obvious next three, and each of them is
+currently either a global or a per-task directive with no middle ground.
+
+### Attaching capabilities to repos and folders
+
+Yes — with one asymmetry that is the whole of the safety argument.
+A node can say two different things, and they are not mirror images:
+
+- **`permits` is a ceiling.** "No task under this node may use anything
+  outside this set." Purely reducing.
+- **`offers` is a floor.** "Every task under this node gets these without
+  asking." Widening.
+
+They compose down the tree in opposite directions:
+
+```
+permitted(node) = ∩ permits(n) for n in ancestors(node) + [node]
+offered(node)   = ∪ offers(n)  for n in ancestors(node) + [node]
+
+effective(task) = (requested(task) ∪ offered(folder)) ∩ permitted(folder)
+```
+
+Intersection for ceilings means a deeper folder can only ever narrow what
+its parent allows, so reading the tree top-down never has a surprise in
+it. Union for floors means a deeper folder can add a convenience its
+parent did not. The intersection is applied last, so a ceiling always
+beats a floor: a node cannot offer what an ancestor does not permit, and
+a misconfigured pair fails closed.
+
+**Ceilings are safe; floors need a guard.** A ceiling cannot grant
+anything, so it is worth having unconditionally and worth having first.
+A floor is a real escalation surface, because a task chooses its own
+target repo through `/repo` — text in an issue body. If `owner/deploy`
+offers `gcp-key`, then getting a task pointed at `owner/deploy` is
+equivalent to being granted a GCP key. Three rules keep that bounded:
+
+1. **A capability is floor-grantable only if its registry row says so.**
+   `Capability.auto_grantable` is false by default and stays false for
+   the mutating ones — `self-repair` and named GitHub credentials are
+   requested per task, by a human, or not at all.
+2. **A floor grant is recorded and visible.** It is pinned onto the task
+   at dispatch like every other resolved value, written into the audit
+   line, and applied to the issue as a label grain adds itself — the same
+   self-healing "grain applies this one, not a human" pattern
+   `waiting_on_dependency_label` already established. A capability nobody
+   can see on the issue is a capability nobody reviews.
+3. **`/repo` is still trusted text.** It is read only from authors who
+   could have applied the trigger label, and the target must still be
+   allow-listed. Floors do not widen that gate; they ride on it.
+
+**Where the tree lives, and why not in the repo.** A `.grain/` file in
+the target repo is the tempting design — it is how `CODEOWNERS` works,
+and it puts the policy next to the code it governs. It is also exactly
+the file a task with write access to that repo can edit. A task that
+could widen its own folder's `offers` would convert one human grant into
+a permanent one on the next run.
+
+So the tree is operator config, with one exception that is safe by
+construction: **an in-repo file may narrow, never widen.** A
+`.grain/folder.toml` that sets `permits` is honoured; one that sets
+`offers` is ignored with a warning. The worst an agent can do by writing
+that file is take capabilities away from itself and from later tasks,
+which is visible in the diff, caught by the human PR review the threat
+model already relies on, and takes effect only after a merge.
+
+**Why this is not a second allowlist.** `config.py` argues against two
+lists that can disagree, and the argument holds. It is answered by
+direction rather than by merging the files: `repo-allowlist.json` stays
+exactly as it is — flat, default-deny, the one thing the git proxy reads
+on every operation, and deliberately simple because it is in the path of
+every fetch and push. The folder tree can only narrow what the allowlist
+already permits. Two files, one direction of authority, and no way for
+them to disagree in the direction that grants something.
+
+One thing the allowlist genuinely lacks and folders could supply: it has
+**no read/write axis**. `grain/proxy/core.py` checks `allows()` before
+`git-upload-pack` and `git-receive-pack` identically, so allow-listing a
+repo for reading also allow-lists it for pushing. A `permits` set
+containing a `push` capability is the natural place to fix that, and it
+is the strongest argument for building the ceiling half first.
+
+### One write target, many read targets
+
+A task frequently needs to *read* a second repo to change the first — a
+shared library's source, an API schema, a sibling service's client. That
+is a different problem from a change that *spans* repos, and conflating
+them is what makes multi-repo support look hard. Three cases:
+
+| | Shape | Answer |
+|---|---|---|
+| Read-many, write-one | change A, needs to read B | `/reads`, below |
+| Write-many, coordinated | A and B must land together | a merge group |
+| Sequential | change A, then change B after it merges | `/depends`, today |
+
+**Read-many is cheap, and the transport already allows it.** A `/reads
+owner/name` directive (repeatable) adds a repo to `Task.reads`; those
+repos are cloned read-only into the sandbox alongside the target. This
+needs nothing new below the orchestrator: the proxy's allowlist check
+does not distinguish fetch from push, so a repo that is allow-listed at
+all is already fetchable by any sandbox that can authenticate. The whole
+feature is a directive, an allowlist check per named repo, and a clone
+line in the dispatch script.
+
+**A read target grants nothing.** The folder capabilities a task inherits
+come from its *write* target's chain only. Without that rule, `/reads
+owner/deploy` becomes a capability-laundering channel: name a
+capability-offering repo as a read dependency, inherit its grants, do the
+work somewhere else entirely. This is the single most important rule in
+this subsection and it needs to be a test, not a convention.
+
+**So: exactly one write target per task, any number of read targets.**
+That invariant is what keeps the rest of the model intact, and the next
+subsection is what happens when a change genuinely does not fit inside
+it.
+
 ### `TaskRef` — identity
 
 ```python
@@ -211,9 +376,13 @@ class Task:
     state: TaskState
     origin: TaskOrigin
 
-    target: RepoRef | None          # None until a SCRATCH binding resolves
+    target: RepoRef | None          # the one *write* target; None until a
+                                    # SCRATCH binding resolves
     binding: RepoBinding
-    base: str | None                # /base, else the target's default
+    base: str | None                # /base, else the folder's, else the
+                                    # target's own default branch
+    folder: FolderRef | None        # the node whose policy this inherits
+    reads: tuple[RepoRef, ...]      # read-only clones. Grant nothing.
 
     grants: frozenset[Grant]
     links: tuple[TaskLink, ...]
@@ -292,6 +461,7 @@ class TaskOrigin(Enum):
     HUMAN = "human"          # somebody filed and labelled an issue
     SCHEDULED = "scheduled"  # scheduled_jobs.py filed it from a template
     FIX = "fix"              # _suggest_fix filed it for a broken PR
+    REVIEW = "review"        # human review threads on a PR asked for it
     PROPOSED = "proposed"    # propose_task, or a parent decomposing
 ```
 
@@ -301,6 +471,11 @@ and `PROPOSED` tasks land `PROPOSED` and wait for a human to apply
 `trigger_label` or comment `/lgtm`. That is precisely the rule
 `_suggest_fix` and `_file_proposed_tasks` each implement separately
 today, and stating it once means a fifth origin cannot forget it.
+`REVIEW` is `FIX`'s sibling and shares its machinery: both mean *a pull
+request needs more work*, both produce a `CONTINUE` task on that PR's own
+branch, and both land `PROPOSED`. See
+[tasks from review comments](#tasks-from-review-comments).
+
 `SCHEDULED` is the one origin that chooses per instance —
 `ScheduledJob.needs_approval` already decides whether a firing lands
 queued or waiting — which the model keeps as an override on the origin's
@@ -331,17 +506,30 @@ Gemini key travels all four with code written for it at each step:
 class GrantSource(Enum):
     LABEL = "label"          # a human applied it. The trust gate.
     DIRECTIVE = "directive"  # a trusted author wrote it in the body
+    FOLDER = "folder"        # a folder's `offers` granted it automatically
     GRAIN = "grain"          # grain applies it to itself (blocked marker)
 
 @dataclass(frozen=True)
 class Capability:
     name: str                     # "gemini-key", "self-repair", ...
     label: str                    # the label that requests it
-    source: GrantSource
+    source: GrantSource           # how it may be asked for
     requires: str | None          # the deployment config it needs, if any
     materializes: bool            # does honouring it mint something?
     max_lease: timedelta | None   # revoke unconditionally after this
+    auto_grantable: bool = False  # may a folder's `offers` grant it?
+
+@dataclass(frozen=True)
+class Grant:
+    capability: str
+    via: GrantSource              # how *this* task actually got it
+    folder: FolderRef | None      # which node, when `via` is FOLDER
 ```
+
+`Grant.via` records how this particular task came by the capability,
+which `Capability.source` cannot: the same capability can be requested by
+label on one task and inherited from a folder on another, and an audit
+line that cannot tell those apart is not much of an audit line.
 
 The registry replaces both `labels._STYLES`'s capability tier and the
 per-capability branches in `_resolve_target`. Four properties are worth
@@ -366,7 +554,15 @@ code follows by convention and could stop following by accident:
   modifier from out-shouting the state pill, and `Grant` being a separate
   field from `state` is that same separation in the type.
 - **Capabilities do not travel down.** A sub-task inherits its parent's
-  *repo*, never its grants. See [sub-tasks](#sub-tasks-are-tasks).
+  *repo*, never its grants. See [sub-tasks](#sub-tasks-are-tasks). The
+  one exception is not an exception: a child sitting in the same folder
+  as its parent inherits that *folder's* offers, because they are the
+  folder's to give and would have applied to a task filed there by hand.
+- **`auto_grantable` is the floor's guard.** False by default, and false
+  for anything mutating, so
+  [a folder's `offers`](#attaching-capabilities-to-repos-and-folders)
+  cannot hand out `self-repair` or a named GitHub credential however it
+  is configured.
 
 A `Lease` is what materialization produced:
 
@@ -396,14 +592,21 @@ class LinkKind(Enum):
     DEPENDS_ON = "depends-on"    # /depends. Blocks. Evaluated every cycle.
     CHILD_OF = "child-of"        # decomposition. Blocks the parent.
     FIXES = "fixes"              # -> a PullRequestRef, not a task
+    MERGE_WITH = "merge-with"    # symmetric. Blocks the *merge*, not the run.
+    ADDRESSES = "addresses"      # -> a ReviewThreadRef
     PROPOSED_BY = "proposed-by"  # provenance only. Never blocks.
 
 @dataclass(frozen=True)
 class TaskLink:
     kind: LinkKind
-    target: TaskRef | PullRequestRef
+    target: TaskRef | PullRequestRef | ReviewThreadRef
     blocks: bool          # derived from kind; stored for the projection
 ```
+
+`MERGE_WITH` is the one link that blocks something other than dispatch —
+see [coordinated changes](#coordinated-changes-across-repos). `ADDRESSES`
+points at a review thread rather than a task or a PR, which is why
+`TaskLink.target` is a union of three reference types rather than two.
 
 `DEPENDS_ON` is `/depends` with its existing semantics, including the
 deliberate exception to pinning: it is evaluated fresh every cycle so a
@@ -471,6 +674,65 @@ something opens its own PR against the same base. Serializing children
 onto one branch would make them undispatchable in parallel, which is the
 entire reason to decompose in the first place.
 
+### Coordinated changes across repos
+
+The case the one-write-target rule does not cover: a change that must
+land in two repos *together* — rename an endpoint and update its two
+callers, bump a schema and the services that read it.
+
+**This is not one task with several pull requests.** A task with two
+write targets breaks nearly every invariant the model has: `branch_name`
+derives one branch from one issue number, `Task.base` is one base,
+`auto_merge` is one decision, `TrackedPullRequest` tracks one PR, and
+"did the branch appear" is one question with one answer. Widening all of
+them to lists would double the surface of every finish path to serve a
+minority of tasks.
+
+It is also the wrong shape for a deeper reason: GitHub has no atomic
+cross-repo merge, so grain would be building distributed-transaction
+machinery — two-phase commit over pull requests, with rollback — for a
+problem human teams solve by merging the library first. That is a large
+amount of machinery to get subtly wrong.
+
+**A coordinated change is a parent task with one child per repo**, which
+is the sub-task model already, plus one new link:
+
+```
+#500  "Rename /v1/charge to /v2/charge"   parent, ANALYZE, opens no PR
+ ├── #501  payments-api    CHILD_OF #500, MERGE_WITH #502, #503
+ ├── #502  payments-web    CHILD_OF #500, MERGE_WITH #501, #503
+ └── #503  billing-worker  CHILD_OF #500, MERGE_WITH #501, #502
+```
+
+Each child keeps exactly one write target, one branch, one PR, and every
+invariant it already had. What the group adds is a **merge gate**: no
+member of a `MERGE_WITH` group merges until every member is clean.
+`_close_finished_prs` already reads each PR's health and already knows
+about `auto_merge`; the change is that a PR in a group asks about its
+siblings before merging rather than only about itself.
+
+Two properties follow, and both are wanted:
+
+- **The children dispatch in parallel.** `MERGE_WITH` blocks the merge,
+  not the run — that is the whole reason it is a distinct kind rather
+  than a `DEPENDS_ON`. Three repos are worked simultaneously in three
+  sandboxes.
+- **Ordering, where it matters, is still expressible.** If the library
+  genuinely must merge first, that is a `DEPENDS_ON` between the
+  children, which already exists and already means what it says.
+
+Grain does not attempt to make the merges atomic. It makes them *ready*
+together and then merges them in dependency order, which is what a human
+would do and what is actually achievable. If one member goes red after
+its siblings merged, that is an ordinary broken PR and the existing
+`_suggest_fix` path handles it.
+
+**Why a parent at all.** The group needs somewhere to hold the intent, an
+issue a human can close to cancel the whole thing, and a single thing to
+report status on. An `ANALYZE`-intent parent that opens no PR of its own
+is exactly that, and it is already blocked until its children close by
+the parent-blocked-by-children rule above.
+
 ### `PullRequestRef` and the tracked PR
 
 ```python
@@ -517,6 +779,103 @@ task can have — produced one, continues one (`/pr`), reviews one
 the fourth thing: a PR grain opened and is still watching, so it can
 close the task when the PR closes, merge it if `auto_merge`, or file a
 fix task when it goes red.
+
+### Tasks from review comments
+
+Review runs in two directions, and only one of them exists. Grain can
+already be told to *author* a review — `/review` on a task with a `/pr`
+dispatches an agent to read the diff and leave inline comments, which
+`_finish_succeeded_review` posts as one draft review
+(bwsalmon/agents#154). What does not exist is the other direction:
+**human review comments becoming tasks.** That is what this section
+designs.
+
+#### The unit is a thread, and the task is a `CONTINUE`
+
+```python
+@dataclass(frozen=True)
+class ReviewThreadRef:
+    pr: PullRequestRef
+    thread_id: int        # the root comment's id
+```
+
+A thread, not a comment: a thread is what a human resolves, so thread
+resolution is the natural completion signal, and a reply inside one is
+part of the same request rather than a second one.
+
+`github.py` already has most of what this needs — `ReviewComment` is the
+read shape and `list_review_comments` already fetches them, since the
+`/review` dispatch shows an agent what has already been said. One
+widening is required: `ReviewComment` carries no thread linkage today, so
+it needs GitHub's `in_reply_to_id` (and the review id) to group comments
+into threads at all.
+
+**The resulting task is a `CONTINUE` task on the PR's own branch**, and
+this is forced rather than chosen. Every thread on a PR points at the
+same branch, so review-derived work cannot be parallelised across
+children the way a decomposition can — two sandboxes pushing to one
+branch is a race. One task, one dispatch, one push, addressing every
+selected thread, with the threads listed as a checklist in its body.
+
+That means the feature reuses machinery that already works: `CONTINUE` is
+today's `TriggerKind.PR`, `_finish_succeeded_pr` already means "new
+commits landed on the branch it was pointed at," and `_suggest_fix`
+already files exactly this shape of task for a PR that has gone red.
+`TaskOrigin.REVIEW` and the `ADDRESSES` links are the only genuinely new
+parts.
+
+#### Three gates, and why each is needed
+
+**Trust.** Review comments are text from whoever can comment on the PR.
+On a public repo that is anyone, and treating a comment as a work order
+would reopen precisely the prompt-injection hole the trigger label
+exists to close. So: only threads whose author is in
+`_TRUSTED_REPLY_ASSOCIATIONS` — owner, member, collaborator — are
+eligible, the same tier that already gates `/lgtm` and directive-bearing
+replies. Everyone else's comments are still shown to the agent as
+context; they just cannot start anything.
+
+**Grain's own comments never qualify.** Grain posts as a credential
+GitHub reports as `OWNER`, which is inside the trusted tier — a hazard
+`_is_automation_comment` already exists to handle. Without subtracting
+grain's own threads here, a `/review` dispatch would review a PR, task
+itself from its own review, push, review again, forever. The
+`_AUTOMATION_SIGNATURE` check closes it, and this is the second place
+that check earns its keep.
+
+**Explicit opt-in, not every comment.** A thirty-comment review should
+not produce thirty issues — nor one unrequested issue for a review that
+was just discussion. So a thread becomes work only when a trusted author
+says so, either per thread (a `/fix` reply in the thread) or for the
+whole PR at once (a label on the PR meaning *turn every unresolved
+trusted thread into a task*). The affirmative act is the point: it is the
+same gate as applying the trigger label, expressed where the reviewer is
+already typing.
+
+A deployment that wants the automatic version can have it as a knob, but
+it should not be the default. The failure mode is immediate, noisy, and
+lands in the queue.
+
+#### Completion, and not looping
+
+The task is done when it has pushed. It then **replies** in each
+addressed thread — a `🤖`-signed "addressed in `<sha>`", posted by
+`core.py` like every other comment, since the agent has no GitHub API
+access of its own. It does **not** resolve the threads: resolution is the
+reviewer's judgement that the reply is adequate, and grain marking its
+own work resolved would remove the one checkpoint the whole review is
+for.
+
+Two bounds keep the cycle from running away, since addressing review
+comments produces a push, which invites another review:
+
+- A thread already named by an `ADDRESSES` link on an open or completed
+  task is never tasked again. The links are the record; the same
+  "reconcile against what we already know" shape that stops
+  `_suggest_fix` filing a second fix task for the same PR.
+- A per-PR cap on review-sourced tasks. Reviews converging is normal;
+  four rounds without the health signal improving is a conversation for a
+  human, not a fifth dispatch.
 
 ### `Run` — one attempt
 
@@ -569,6 +928,15 @@ the model:
 8. A capability this deployment cannot honour parks the task with an
    explanation. It never runs the task without the capability.
 9. A grain-filed task lands in `PROPOSED`, whatever filed it.
+10. A task has exactly one write target and any number of read targets.
+11. Folder capabilities are inherited from the **write** target's chain
+    only. A read target grants nothing.
+12. Ceilings intersect down the folder tree, floors union down it, and
+    the intersection is applied last — a node can never offer what an
+    ancestor does not permit.
+13. An in-repo folder file may narrow, never widen.
+14. Only a trusted, non-automation review thread can source a task, and
+    only one already carrying an explicit request.
 
 ## What maps to what
 
@@ -594,6 +962,12 @@ the model:
 | `labels._STYLES` state rows | `TaskState`'s projection |
 | `ScheduledJob.marker_label` | `Task.tags` — neither tier |
 | `repo_for_sandbox`, `branch_name`, `agent_label` | unchanged, still derived |
+| `repo-allowlist.json` | unchanged; folders may only narrow it |
+| (nothing — one target repo) | `Task.target` + `Task.reads` |
+| (nothing — no cross-repo grouping) | `MERGE_WITH` links |
+| (nothing — no folder concept) | the `Folder` tree, operator config |
+| `ReviewComment` (post-only shape) | widened with thread linkage |
+| (nothing — reviews are authored, not read) | `ADDRESSES` links, `TaskOrigin.REVIEW` |
 
 The five state dicts become one store keyed by `TaskRef`, with the
 existing durability discipline unchanged: atomic temp-file-and-rename,
@@ -623,6 +997,21 @@ directive, or anything an operator sees.
    parent-blocked-by-children rule, and `Run` replacing the
    assignment/history split with an attempt count.
 
+Three features then sit on top of those four, in the order their
+dependencies allow:
+
+5. **Read targets** (`/reads`). Independent of everything above and the
+   cheapest thing here — a directive, an allowlist check per repo, and a
+   clone line. Worth doing early precisely because it needs none of the
+   rest.
+6. **Folders.** The tree, then ceilings, then floors, in that order:
+   ceilings cannot grant anything, so they are safe to ship before the
+   `auto_grantable` machinery that makes floors safe. Needs stage 2's
+   capability registry to have anything to attach to.
+7. **Review-sourced tasks and merge groups.** Both need stage 3's links.
+   Review-sourced tasks additionally need `ReviewComment` widened with
+   thread linkage; merge groups need stage 4's sub-tasks.
+
 ## What this does not change
 
 - **Labels stay the human interface.** Every state and grant is still
@@ -630,7 +1019,9 @@ directive, or anything an operator sees.
   colours and the same meanings.
 - **GitHub stays the system of record.** No task exists without an issue.
 - **No new service, no database.** One JSON file under `/data/state`,
-  written the same atomic way.
+  written the same atomic way. The folder tree is one more operator-owned
+  file under `/data/config`, read the same hot-reloaded way as the
+  allowlist it can only narrow.
 - **The trust gate is untouched.** A task runs because a human labelled
   it. Directives are read only from authors who could have applied that
   label. Agents get no GitHub API access.
@@ -651,6 +1042,26 @@ directive, or anything an operator sees.
   above is no by default, with an opt-in for children that request no
   capabilities and inherit their parent's repo. If decomposition turns
   out to be common, this is the first knob to revisit.
+- **How does a task name a folder inside a repo?** A path has to come
+  from somewhere, and there are three candidates: an extension to
+  `/repo owner/name:services/billing`, a separate `/folder` directive, or
+  inference from the paths the task's own diff touches. The third is the
+  most convenient and the least usable, because a folder's capabilities
+  must be resolved *before* dispatch and the diff does not exist yet. A
+  separate directive is the recommendation; the extended `/repo` form is
+  terser but overloads a directive that is already load-bearing.
+- **Does a merge group need a merge order, or is dependency order
+  enough?** The recommendation above says `DEPENDS_ON` between children
+  covers it. The case that would force something more is a genuine cycle
+  — A's tests need B merged and B's tests need A — which is a sign the
+  change should be one repo, not three, and is probably worth refusing
+  rather than supporting.
+- **One task per review, or per thread?** The recommendation is per
+  review, forced by the shared branch. The case it serves badly is a
+  review whose threads are genuinely independent and large enough to want
+  separate PRs — which is really a decomposition, and is better expressed
+  as a parent with children targeting fresh branches than as N tasks
+  racing on one.
 - **Does `ANALYZE` need to be declarable, or is a fourth intent enough
   inferred?** Declaring it resolves roadmap item 21's ambiguity from the
   task's end; inferring it is what happens today and costs nothing new.
