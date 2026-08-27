@@ -384,13 +384,23 @@ failure moves from runtime to authoring time**, and the parked-task path
 shrinks to the cases that are genuinely dynamic — a dependency that has
 not closed, a credential removed after the task was written.
 
-The text grammar does not go away. Task files are hand-editable, and
-`_suggest_fix` and `propose_task` author tasks programmatically. What
-changes is that it stops being the *primary* interface, which lowers the
-stakes on questions like [how a task names a
-folder](#open-questions) considerably: a picker writes whatever the
-schema says, and the grammar is a fallback rather than the thing every
-author types.
+**Every question of the form "how is this spelled in an issue body" goes
+with it.** Directive grammar is an artifact of the issues interface, not
+of the model: `/repo owner/name:path` versus a separate `/folder`,
+whether `/reads` repeats or takes a comma-separated list, how a review
+thread asks to be fixed. Under a schema and a form, each of those is a
+field with a type, and the design question evaporates. What survives in
+every case is the part that was never about spelling — what the value
+*means*, when it has to be known, and what it grants. The folder question
+is the worked example: the grammar is moot, and the two rules underneath
+it ([declared, not derived, and exactly
+one](#folder--one-containment-tree-around-and-inside-repos)) are not.
+
+The text form itself does not disappear, since task files stay
+hand-editable and `_suggest_fix` and `propose_task` author tasks
+programmatically. But a hand-edited file writes a schema field, not a
+directive, so even the fallback is not the directive grammar this
+document describes.
 
 **The one rule that matters: the UI is not a fourth record.** This
 document opened with five parallel dicts that could disagree about one
@@ -546,6 +556,29 @@ The tree is **operator config**, hot-reloaded from `/data/config` the way
 the allowlist already is, and it is not a persisted entity — a task
 records the `FolderRef` it resolved to, never a copy of the folder's
 contents.
+
+**A task is in exactly one folder, and it is declared, not derived.**
+Both halves matter:
+
+*Declared* — because a folder's capabilities have to resolve before
+dispatch, and the obvious alternative (infer the folder from the paths
+the task's diff touches) needs a diff that does not exist yet. This is
+the same ordering constraint that makes `SCRATCH` a distinct
+`RepoBinding`, and it is a property of the model rather than of any
+interface: no way of spelling a folder reference gets around it.
+
+*Exactly one* — the same shape as one write target, and for the same
+reason. A task that genuinely needs two policy domains is a
+decomposition: one child per folder, each with exactly its own folder's
+grants. That is the sub-task model doing what it is for.
+
+If spanning is ever supported, the effective permit set must be the
+**intersection of the folders spanned** — never their common ancestor's.
+Rising to the ancestor looks like the natural move and is a widening: if
+`services/billing` permits `{A}` and `services/ledger` permits `{B}`,
+their shared parent may well permit `{A, B, C}`, so a task placed there
+would hold more than either folder allows. Ceilings intersect *down* the
+tree, so going up is always a grant.
 
 Capabilities are the first use and the one this document works through,
 but the entity is deliberately general: `base`, `preamble`, and
@@ -1380,14 +1413,6 @@ dependencies allow:
   above is no by default, with an opt-in for children that request no
   capabilities and inherit their parent's repo. If decomposition turns
   out to be common, this is the first knob to revisit.
-- **How does a task name a folder inside a repo?** Lower stakes than it
-  was: a UI's folder picker writes whatever the schema says, so the text
-  grammar is a fallback for hand-edited files rather than the thing every
-  author types. A separate `/folder` directive is still the
-  recommendation over extending `/repo owner/name:services/billing`,
-  which overloads a directive that is already load-bearing. Inference
-  from the diff remains unusable at any stakes — a folder's capabilities
-  resolve before dispatch, and the diff does not exist yet.
 - **Does a merge group need a merge order, or is dependency order
   enough?** The recommendation above says `DEPENDS_ON` between children
   covers it. The case that would force something more is a genuine cycle
