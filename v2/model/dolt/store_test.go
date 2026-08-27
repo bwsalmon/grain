@@ -338,6 +338,67 @@ func TestAttemptsCountsRuns(t *testing.T) {
 	}
 }
 
+func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
+	store, ctx := open(t)
+	tk := task("a1b2", true) // Target: owner/payments-api
+	tk.Reads = []model.RepoRef{{Owner: "owner", Name: "shared-lib"}}
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	target, reads, err := store.GitScope(ctx, "sandbox-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target == nil || target.String() != "owner/payments-api" {
+		t.Errorf("target = %+v", target)
+	}
+	if len(reads) != 1 || reads[0].String() != "owner/shared-lib" {
+		t.Errorf("reads = %+v", reads)
+	}
+}
+
+func TestGitScopeIsEmptyWithNoLiveRunOnTheSandbox(t *testing.T) {
+	store, ctx := open(t)
+	target, reads, err := store.GitScope(ctx, "sandbox-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != nil || len(reads) != 0 {
+		t.Errorf("expected no scope for an idle sandbox, got target=%+v reads=%+v", target, reads)
+	}
+}
+
+func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
+	store, ctx := open(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded"); err != nil {
+		t.Fatal(err)
+	}
+
+	target, _, err := store.GitScope(ctx, "sandbox-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != nil {
+		t.Errorf("a finished run should no longer scope its sandbox, got %+v", target)
+	}
+}
+
 func TestObservationBaselinesRoundTrip(t *testing.T) {
 	store, ctx := open(t)
 	id := int64(12345)
