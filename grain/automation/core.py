@@ -2309,27 +2309,51 @@ class Orchestrator:
                                    outcome=f"target resolution failed: {exc}")
                 continue
 
-            if task.depends:
-                # bwsalmon/agents#164: checked fresh every cycle, the same
-                # "poll, don't trust a stale copy" discipline
-                # `_is_issue_closed` already holds to for the cancel-on-close
-                # poll (bwsalmon/agents#82) it's reused from here -- a
-                # dependency that was open last cycle may have closed since,
-                # with nothing about this task's own text having changed.
-                # Deliberately *not* `_park`: parking swaps the trigger
-                # label for the awaiting-reply one and waits on a human
-                # reply, but nothing here needs a human -- it needs the
-                # dependency issue to close, which happens on its own. A
-                # `continue`, not a `break`, since a blocked issue says
+            # bwsalmon/agents#164: checked fresh every cycle, the same
+            # "poll, don't trust a stale copy" discipline `_is_issue_closed`
+            # already holds to for the cancel-on-close poll
+            # (bwsalmon/agents#82) it's reused from here -- a dependency
+            # that was open last cycle may have closed since, with nothing
+            # about this task's own text having changed. `()` when
+            # `task.depends` is empty, which matters below: it's what makes
+            # the label-clearing branch fire equally for "never blocked"
+            # and "no longer names any dependency at all".
+            blocking = (
+                tuple(n for n in task.depends if not self._is_issue_closed(n))
+                if task.depends else ()
+            )
+            if blocking:
+                # bwsalmon/agents#194: visible on the issue itself, not just
+                # the audit log -- reapplied every cycle the block still
+                # holds (a no-op once it's already on, per
+                # `GitHubClient.add_label`) rather than tracked in
+                # `AutomationState`, so a controller restart mid-block has
+                # nothing to lose. Deliberately *not* `_park`: parking swaps
+                # the trigger label for the awaiting-reply one and waits on
+                # a human reply, but nothing here needs a human -- it needs
+                # the dependency issue to close, which happens on its own.
+                # A `continue`, not a `break`, since a blocked issue says
                 # nothing about whether the next one in the queue is also
                 # blocked -- unlike "no free sandbox"/"rate limit" above,
                 # which are true for every remaining candidate this cycle.
-                blocking = tuple(n for n in task.depends if not self._is_issue_closed(n))
-                if blocking:
-                    named = ", ".join(f"#{n}" for n in blocking)
-                    self.audit.record(sandbox=None, issue=number,
-                                       outcome=f"skipped: blocked on {named}")
-                    continue
+                if self.config.waiting_on_dependency_label not in issue.labels:
+                    self.github.add_label(
+                        self.config.task_owner, self.config.task_repo,
+                        number, self.config.waiting_on_dependency_label,
+                    )
+                named = ", ".join(f"#{n}" for n in blocking)
+                self.audit.record(sandbox=None, issue=number,
+                                   outcome=f"skipped: blocked on {named}")
+                continue
+            if self.config.waiting_on_dependency_label in issue.labels:
+                # The block just cleared (or the `/depends` line that
+                # caused it is gone) -- strip the label on this same cycle
+                # rather than leaving a stale "blocked" pill on an issue
+                # that's about to dispatch.
+                self.github.remove_label(
+                    self.config.task_owner, self.config.task_repo,
+                    number, self.config.waiting_on_dependency_label,
+                )
 
             sandbox_runner = self._ssh_runner_for(sandbox)
             # The same address/user `_ssh_runner_for` just used to build

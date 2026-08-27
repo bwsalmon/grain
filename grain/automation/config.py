@@ -131,6 +131,15 @@ class AutomationConfig:
     # same way when this deployment has no `github_key_config` (`grain
     # controller configure --github-key-app-id ...`) to honour it with.
     scratch_repo_label: str = "grain-scratch-repo"
+    # bwsalmon/agents#194: applied by `_dispatch` (core.py) the moment a
+    # task's `/depends` line names an issue that is still open, so the
+    # block is visible on the task issue itself rather than only in the
+    # audit log -- unlike every label above, a human never applies this
+    # one; grain adds and removes it itself as the dependency's state
+    # changes, the same self-healing "reapply every cycle, it's a no-op
+    # once it's already there" discipline `_refresh_agent_labels` already
+    # uses for `agent_label`.
+    waiting_on_dependency_label: str = "grain-waiting-on-dependency"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

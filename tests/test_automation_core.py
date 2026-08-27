@@ -2932,6 +2932,34 @@ def test_a_task_with_an_open_dependency_is_skipped_not_dispatched():
     assert "1" not in orchestrator.state.pending_questions
     assert not any(c["method"] == "POST" and c["path"].endswith("/comments")
                     for c in transport.calls)
+    # bwsalmon/agents#194: the block is visible on the issue itself too,
+    # not just that audit line.
+    label_call = next(c for c in transport.calls if c["method"] == "POST"
+                       and c["path"] == "/repos/o/r/issues/1/labels")
+    assert json.loads(label_call["body"]) == {"labels": ["grain-waiting-on-dependency"]}
+
+
+def test_an_already_labelled_blocked_dependency_is_not_relabelled():
+    """`GitHubClient.add_label` is a no-op against a label an issue already
+    carries, so this is free either way -- but a fresh POST every cycle
+    would still be one wasted call each time nothing changed, the same
+    reasoning `_refresh_agent_labels` docstring makes for `agent_label`.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(
+            1, body="/depends 2",
+            labels=("grain-agent", "grain-waiting-on-dependency"),
+        )]).encode()),                                            # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),        # get_issue(2): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] == "POST" and c["path"] == "/repos/o/r/issues/1/labels"
+                    for c in transport.calls)
 
 
 def test_a_task_with_a_closed_dependency_dispatches_normally():
@@ -3042,7 +3070,11 @@ def test_a_blocked_dependency_does_not_stop_the_next_candidate_dispatching():
 def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
     """No `_park` happened while blocked (previous tests) -- so nothing
     needs a human reply for this to resume; the very next cycle just
-    checks the dependency issue's state again and finds it closed.
+    checks the dependency issue's state again and finds it closed. The
+    label cycle 1 put on the issue (bwsalmon/agents#194) is expected to
+    still be there in cycle 2's fetched issue, the same way `trigger_label`
+    would be -- these fixtures don't model GitHub state persisting between
+    `run_once` calls, so it's set by hand on the cycle-2 `issue_json` here.
     """
     orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
     transport.responses.extend([
@@ -3054,10 +3086,15 @@ def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
     ])
     orchestrator.run_once(NOW)
     assert orchestrator.state.assignments == {}
+    label_call = next(c for c in transport.calls if c["method"] == "POST"
+                       and c["path"] == "/repos/o/r/issues/1/labels")
+    assert json.loads(label_call["body"]) == {"labels": ["grain-waiting-on-dependency"]}
 
     transport.responses.extend([
-        ApiResponse(200, {}, json.dumps(
-            [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 2
+        ApiResponse(200, {}, json.dumps([issue_json(
+            1, body="/depends 2",
+            labels=("grain-agent", "grain-waiting-on-dependency"),
+        )]).encode()),                                            # list_issues, cycle 2
         ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 2
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): now closed
@@ -3065,6 +3102,11 @@ def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
     orchestrator.run_once(NOW + timedelta(minutes=5))
 
     assert orchestrator.state.assignments["sandbox-0"].issue == 1
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/1/labels/grain-waiting-on-dependency"
+        for c in transport.calls
+    )
 
 
 def test_a_nonexistent_target_repo_is_parked_rather_than_crashing_the_cycle():

@@ -1562,9 +1562,20 @@ issue closes. So a still-open dependency instead just logs `skipped:
 blocked on #N` to the audit trail and `continue`s the dispatch loop (a
 `break`, unlike "no free sandbox"/"rate limit" above it, would wrongly
 treat one task's block as true of every other candidate still queued this
-cycle). The trigger label, and everything else about the issue, is left
-exactly as a human set it — the very next cycle checks again, with no
-state of its own to track in between.
+cycle). The trigger label is left exactly as a human set it — the very
+next cycle checks again, with no state of its own to persist in between.
+
+bwsalmon/agents#194: that log line is the only place a block used to show
+up, which meant seeing that a queued task was actually stuck meant
+reading the audit log, not the issue. `_dispatch` now also applies
+`waiting_on_dependency_label` (`grain-waiting-on-dependency`,
+`labels.py`) to a still-blocked issue, alongside the untouched trigger
+label, and strips it the moment `blocking` comes back empty — whether
+that's because the named issue closed or because the `/depends` line
+itself is gone. Applied and cleared fresh every cycle from `issue.labels`
+(the same list already fetched for `_resolve_target`), not tracked in
+`AutomationState`, so a controller restart mid-block loses nothing: the
+label is exactly a projection of `blocking`, recomputed from scratch.
 
 The one case that *is* routed through `_park`: a task naming itself in
 its own `/depends` line, which can never close the loop and would
