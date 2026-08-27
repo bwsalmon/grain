@@ -201,8 +201,8 @@ def test_token_source_caches_within_the_tokens_lifetime():
         expires_at=(NOW + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     source = InstallationTokenSource(_hex_sign_runner(), config(), transport)
-    first = source.token_for("acme", "grain-scratch-sandbox-0")
-    second = source.token_for("acme", "grain-scratch-sandbox-0")
+    first = source.token_for("acme", "grain-scratch-sandbox-0", now=NOW)
+    second = source.token_for("acme", "grain-scratch-sandbox-0", now=NOW)
     assert first == second == "ghs_first"
     assert len(transport.calls) == 1
 

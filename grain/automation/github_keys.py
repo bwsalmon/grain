@@ -220,10 +220,10 @@ class InstallationTokenSource:
     transport: Transport | None = None
     _cache: dict[str, GitHubKey] = field(default_factory=dict)
 
-    def token_for(self, owner: str, repo: str) -> str | None:
+    def token_for(self, owner: str, repo: str, *, now: datetime | None = None) -> str | None:
         if owner != self.config.owner or not repo.startswith(f"{self.config.repo_prefix}-"):
             return None
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         cached = self._cache.get(repo)
         if cached is None or cached.expires_at - now < _TOKEN_RENEW_MARGIN:
             cached = create_installation_token(
