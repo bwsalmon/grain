@@ -898,9 +898,9 @@ class Orchestrator:
                 self._finish_no_changes(outcome, comment)
             return
 
-        # PR first, in-progress label off second: if create_pull_request
-        # fails partway (a 422 from a stale PR, a transient 5xx), the issue
-        # stays visibly in-progress rather than looking finished with
+        # PR first, in-progress label off second: if the PR step fails
+        # partway (a transient 5xx, a 422 this can't account for), the
+        # issue stays visibly in-progress rather than looking finished with
         # nothing to show for it.
         # `Closes <task repo>#<n>`, fully qualified: still worth the
         # cross-repo link/mention on the issue even though (bwsalmon/agents#23)
@@ -925,13 +925,45 @@ class Orchestrator:
         # tip commit message -- `dispatch.py`'s `_prompt` now tells the
         # agent that message becomes the PR body verbatim, so it's the one
         # place an agent can put a real account of its own change.
-        pr = self.github.create_pull_request(
-            target.owner, target.name,
-            head=branch, base=base,
-            title=f"🤖 grain: {task}#{outcome.issue}: {issue.title}",
-            body=f"{head.message.strip()}\n\n---\n"
-                 f"Closes {task}#{outcome.issue}.\n\n{_AUTOMATION_SIGNATURE}",
-        )
+        try:
+            pr = self.github.create_pull_request(
+                target.owner, target.name,
+                head=branch, base=base,
+                title=f"🤖 grain: {task}#{outcome.issue}: {issue.title}",
+                body=f"{head.message.strip()}\n\n---\n"
+                     f"Closes {task}#{outcome.issue}.\n\n{_AUTOMATION_SIGNATURE}",
+            )
+            reused = False
+        except GitHubError as exc:
+            # A second run of the same task is routine -- a human
+            # re-applies `trigger_label` to ask for another round, or
+            # `_restart_commented_completions` does it for them -- and
+            # `branch_name` is a pure function of the issue number, so that
+            # run pushes to the very branch the first run already opened a
+            # PR from. GitHub allows one open PR per head branch and
+            # answers the second `create_pull_request` with a 422.
+            #
+            # That 422 is not a failure of this task: a PR tracks its
+            # branch, so the commits this run just pushed are already in
+            # the existing PR. Treating it as an error left the issue
+            # stuck in-progress with its work sitting in a PR nobody was
+            # told about -- and, because `_requeue` never ran either, it
+            # stayed that way.
+            #
+            # Only when an open PR for this head actually exists, though.
+            # 422 is also what GitHub returns for "No commits between
+            # `base` and `head`", which is a real problem with a message
+            # worth keeping, so anything this lookup can't explain is
+            # re-raised untouched.
+            if exc.status != 422:
+                raise
+            existing = self.github.find_open_pull_request_for_branch(
+                target.owner, target.name, branch
+            )
+            if existing is None:
+                raise
+            pr = existing
+            reused = True
         # The task issue itself isn't closed here -- see `_close_finished_prs`
         # (bwsalmon/agents#54) for why that waits on the PR's own state
         # instead. `completed_label` goes on now regardless: it marks the
@@ -961,8 +993,12 @@ class Orchestrator:
         # can crash on top of it -- the same ordering `_finish_question`
         # already uses for its own pending-state record.
         self._save_state()
-        self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue,
-                           outcome=f"opened PR {target}#{pr.number}: {pr.html_url}")
+        self.audit.record(
+            sandbox=outcome.sandbox, issue=outcome.issue,
+            outcome=(f"pushed to the branch of existing PR {target}#{pr.number}: "
+                     f"{pr.html_url}") if reused else
+                    f"opened PR {target}#{pr.number}: {pr.html_url}",
+        )
 
     def _finish_succeeded_pr(self, outcome: Outcome) -> None:
         question = _pending_question(outcome.sandbox)

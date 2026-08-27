@@ -286,6 +286,53 @@ def test_create_pull_request_raises_on_a_non_201():
         )
 
 
+def test_finding_the_open_pr_for_a_branch_filters_by_a_qualified_head():
+    body = json.dumps([
+        {"number": 42, "html_url": "https://github.com/o/r/pull/42"},
+    ]).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+
+    pr = GitHubClient(transport, token="t").find_open_pull_request_for_branch(
+        "o", "r", "grain/issue-1",
+    )
+
+    assert pr == PullRequest(number=42, html_url="https://github.com/o/r/pull/42")
+    call = transport.calls[0]
+    assert call["method"] == "GET"
+    # `head` must be qualified `owner:branch` and percent-encoded -- GitHub
+    # ignores an unqualified head filter and would then answer with every
+    # open PR in the repo, whose first entry is some unrelated PR.
+    assert call["path"] == "/repos/o/r/pulls?state=open&head=o%3Agrain%2Fissue-1"
+
+
+def test_finding_the_open_pr_for_a_branch_returns_none_when_there_is_none():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, b"[]")])
+    assert GitHubClient(transport, token="t").find_open_pull_request_for_branch(
+        "o", "r", "grain/issue-1",
+    ) is None
+
+
+def test_finding_the_open_pr_for_a_branch_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(500, {}, b"boom")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").find_open_pull_request_for_branch(
+            "o", "r", "grain/issue-1",
+        )
+
+
+def test_the_dry_run_client_passes_the_open_pr_lookup_through():
+    """A read, so it must reach the transport rather than print -- a dry
+    run that answered "no existing PR" without asking would report a
+    second PR being opened where the real run reuses the first.
+    """
+    body = json.dumps([{"number": 42, "html_url": "https://github.com/o/r/pull/42"}]).encode()
+    transport = FakeTransport(responses=[ApiResponse(200, {}, body)])
+    dry = DryRunGitHubClient(GitHubClient(transport, token="t"))
+
+    assert dry.find_open_pull_request_for_branch("o", "r", "grain/issue-1").number == 42
+    assert len(transport.calls) == 1
+
+
 def test_create_issue_posts_title_body_and_labels():
     body = json.dumps(issue_json(9)).encode()
     transport = FakeTransport(responses=[ApiResponse(201, {}, body)])
