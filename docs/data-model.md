@@ -3,7 +3,13 @@
 ## Status
 
 A design, not an implementation. Nothing in `grain/` changes with this
-document; it names the entities the automation loop already manipulates,
+document. One question is
+[decided](#decided-the-store-is-authoritative) — grain's store wins over
+GitHub's labels — and one
+[direction](#direction-the-declaration-moves-into-a-repo) is stated but
+not settled: the declared half of the model moving out of issues and into
+a repo. Everything below is written for tasks-as-issues and stays correct
+for that; it names the entities the automation loop already manipulates,
 states the invariants it already relies on, and proposes a shape that
 makes the next few features cost less than the last few did. The
 [migration](#migration) at the end is staged so that each stage is
@@ -121,6 +127,126 @@ Whether a dependency is still open changes with nothing about the task
 itself changing, so pinning it at dispatch would mean a task stayed
 blocked after its blocker closed. Pinned-at-dispatch is the default;
 "evaluated fresh" is a property some relationships have.
+
+### Decided: the store is authoritative
+
+Where grain's own store and GitHub's labels disagree, **the store wins**.
+Labels are a projection, reconciled every cycle by reasserting what the
+store believes — the self-healing shape `_refresh_agent_labels` already
+uses, where a label knocked off by hand comes back on the next pass
+rather than staying wrong.
+
+The trigger label is the one exception, and it is not really an
+exception: a human applying it is an *input*, not a claim about state, so
+the store follows it. Every other label is an output.
+
+### Direction: the declaration moves into a repo
+
+**A stated direction, not yet a decision.** Everything below in this
+document is written for tasks-as-issues and stays correct for that. This
+section is what changes when the model moves into a repo instead, so
+that the decisions still open are made with it in view.
+
+The change is narrower than it sounds, because it splits one thing the
+current model conflates:
+
+- **The declaration** — what this task is: intent, target, reads, folder,
+  capabilities requested, links, base. Written by a human (or proposed by
+  grain), changed rarely, and worth reviewing when it changes.
+- **The observation** — what is true about it right now: which sandbox
+  holds it, what leases are outstanding, which PR it opened, how many
+  attempts it has taken. Written by grain, changed many times an hour,
+  and worth reviewing never.
+
+Today both live half in GitHub and half in the store. The direction puts
+the declaration in a git repo as files and leaves the observation in the
+store — which is the same line rules 1 and 2 already draw, sharpened
+from "what a human touches" to "what a human *authors*."
+
+Answering "the store is authoritative" and moving the declaration into a
+repo are the same decision arriving from two directions. Once labels stop
+being an input, there is nothing left to reconcile: the repo is
+authoritative for declaration, the store for observation, and the two
+never describe the same fact.
+
+**What gets simpler.** Five things this document currently works around:
+
+- **`TaskLink` stops needing prose.** `_file_proposed_tasks` writes
+  "Proposed by `owner/repo#N`" into an issue body as English because a
+  body is the only place it has. In a file it is a field.
+- **Approval becomes code review.** `needs_approval_label` exists so
+  grain can suggest work without starting it. If grain proposes a task by
+  opening a *pull request* against the task repo, approval is merging it
+  — reviewed, attributable, revertible, with a diff. The whole
+  `PROPOSED` state and the `/lgtm` promotion path collapse into
+  machinery GitHub already has.
+- **The folder tree comes home.** This document puts it in
+  `/data/config` and then spends a subsection on why an in-repo
+  `.grain/` file may narrow but never widen. That rule exists because
+  agents can write *target* repo content. A folder tree in the *task*
+  repo, which no agent can write, needs no such rule — it is just a file
+  next to the tasks it governs. There is precedent: a deployment already
+  has an operator-owned config repo forked from `templates/gcp/`, and
+  `labels.py` already treats it as the place deployment-wide decisions
+  live.
+- **A task changes atomically.** Retargeting a task today means editing a
+  body and moving a label, with a window where they disagree. In a repo
+  it is one commit.
+- **Reading the queue stops being an API call.** A `git pull` gives the
+  whole declared state, offline, with no pagination and no rate limit.
+  `runs_per_hour` does not disappear — PRs, review threads and merges are
+  still API work — but the polling pressure moves off the critical path.
+
+**The trust gate gets stronger, with one hard requirement.** Today the
+gate is "a human applied a label." It becomes "a human merged a commit to
+the task repo," which is better in every way that matters: reviewed
+rather than clicked, attributable to a commit author, and revertible.
+
+It holds only if **no agent can write to the task repo, ever.** Not
+through the git proxy's allowlist, not through a named credential, not
+through a `/repo` directive naming it. A task repo an agent can push to
+is a task repo an agent can grant itself capabilities in, which is the
+whole gate in one commit. That is one allowlist entry to never add and
+one invariant to test, but it is absolute — and it argues for the task
+repo being a repo that appears nowhere in `repo-allowlist.json` at all.
+
+**What gets harder: conversation.** Issues are good at the thing files
+are worst at. `ask_question` posts a comment and waits for a trusted
+reply; `_finish_no_changes` posts an analysis; a parked task explains
+itself in a comment a human answers. None of that has a home in a file.
+
+Three ways out, none obviously right:
+
+1. **Hybrid** — files are the declaration, an issue is opened per task
+   purely as its conversation thread. Keeps everything that works today
+   and pays for it with two objects per task that can drift.
+2. **PR threads** — a task's conversation is the review thread on the PR
+   that introduced or last amended its file. Elegant for proposal and
+   approval; awkward for a question asked days into a running task whose
+   file has long since merged.
+3. **Conversation moves to the target PR** — questions and analyses land
+   on the work's own pull request rather than on the task. Right for a
+   question about the code; wrong for a task parked before it ever
+   produced a PR to ask on.
+
+This is the question the direction actually turns on, and it is worth
+answering before anything is built rather than discovering it in the
+middle.
+
+**Identity changes shape.** `TaskRef(repo, number)` borrows GitHub's
+issue numbering. Files need their own — a slug, a path, or a monotonic id
+assigned at creation — and `branch_name()` derives from the number, so it
+follows. This is a small change but it touches rule 3: whatever replaces
+the number must still make a branch name *derivable*, not self-reported.
+
+**Consequences for the migration.** Stage 1 becomes more valuable, not
+less: if the store holds the whole of runtime state, getting its identity
+and shape right is the foundation rather than a cleanup. Stage 2 is
+unaffected — a capability registry is a registry wherever grants are
+declared. Stage 6's folder work gets cheaper by roughly the whole
+narrow-never-widen subsection. Nothing in stages 1–4 is wasted work if
+the direction is taken, which is the main reason it is safe to keep
+building while this stays open.
 
 ## Entities
 
@@ -1017,7 +1143,11 @@ dependencies allow:
 - **Labels stay the human interface.** Every state and grant is still
   visible on the issue, in the same two-tier palette, with the same
   colours and the same meanings.
-- **GitHub stays the system of record.** No task exists without an issue.
+- **GitHub stays the system of record** for as long as tasks are issues.
+  If the [declaration moves into a
+  repo](#direction-the-declaration-moves-into-a-repo), GitHub stays the
+  record for pull requests, review threads and target repos — the queue
+  is what moves, and nothing else does.
 - **No new service, no database.** One JSON file under `/data/state`,
   written the same atomic way. The folder tree is one more operator-owned
   file under `/data/config`, read the same hot-reloaded way as the
@@ -1032,12 +1162,11 @@ dependencies allow:
   on every save. At a few hundred tasks that is nothing; sub-tasks are
   the first feature that could multiply the count by an order of
   magnitude. Worth measuring before stage 4, not before stage 1.
-- **Who wins when the store and the labels disagree?** Recommendation:
-  the store is authoritative and the labels are a projection reconciled
-  every cycle — `_refresh_agent_labels`'s existing self-healing loop
-  ("reapply every cycle; it is a no-op once it is already there") is the
-  precedent and it works. The exception is the trigger label itself,
-  where a human's action is the input and the store must follow.
+- **Where does conversation live once the declaration is in a repo?**
+  The one that the [repo direction](#direction-the-declaration-moves-into-a-repo)
+  turns on — a per-task issue kept purely as a thread, the task file's own
+  PR review thread, or the target PR. Worth answering before building,
+  not during.
 - **Should an approved parent auto-approve its children?** Recommendation
   above is no by default, with an opt-in for children that request no
   capabilities and inherit their parent's repo. If decomposition turns
