@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -175,6 +177,37 @@ func TestRunCommandRunsInsideSandboxRoot(t *testing.T) {
 	want := "exit=0\nstdout:\n" + realRoot + "\n\nstderr:\n"
 	if res.Text() != want {
 		t.Errorf("run_command pwd output = %q, want %q", res.Text(), want)
+	}
+}
+
+func TestRunCommandSeesGitCredentialsConfiguredForItsSandboxRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	if err := ConfigureGitCredentials(root, "http://proxy.example:8080/owner/repo.git", "sandbox-token"); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(t, root)
+	ctx := context.Background()
+
+	// run_command sets HOME=root (sandbox_tools.go), so git here reads
+	// root/.gitconfig and root/.git-credentials exactly as it would in a
+	// real sandbox reading its own home directory -- proving the two
+	// pieces (ConfigureGitCredentials' files, run_command's HOME scoping)
+	// actually agree with each other rather than merely compiling.
+	res, err := client.CallTool(ctx, "run_command", map[string]any{
+		"command": "git config --get credential.helper && " +
+			"git credential fill <<<'protocol=http\nhost=proxy.example:8080\n' | grep ^password=",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("run_command failed: %s", res.Text())
+	}
+	if !strings.Contains(res.Text(), "password=sandbox-token") {
+		t.Errorf("git did not resolve the configured credential: %s", res.Text())
 	}
 }
 

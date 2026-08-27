@@ -18,6 +18,14 @@ mcp/cmd/mcpserver/  the server as a standalone stdio binary
 agent/          the Framework interface an agent driver implements
 agent/gemini/   Framework via the Gemini API, talking to its own in-process
                 mcp/ server
+gitproxy/       a port of grain/proxy: the only path from a sandbox to
+                GitHub. Authorizes by asking model.Store what the calling
+                sandbox's live task may touch (its Target and Reads)
+                instead of a hand-edited allowlist file; credential
+                selection and sandbox identity are still the same
+                file-based ladders grain/proxy uses. live_test.go proves
+                the whole thing end to end against a local git server —
+                see "What this actually verifies" below.
 ```
 
 ```sh
@@ -47,6 +55,16 @@ unblocks itself when its dependency closes, and a Dolt commit succeeds.
 The equivalent Python tests could only check the SQL grain *generated*,
 because there was no `dolt` binary to run it against.
 
+`gitproxy`'s `live_test.go` is the same discipline applied one layer up:
+a real bare git repo, served over real smart-HTTP by a real `git
+http-backend` process standing in for GitHub, behind a real `GitProxy`
+whose `Authorizer` reads a real embedded Dolt-backed `model.Store`, driven
+by a scripted (not live-API) `gemini.Framework.Run` calling `run_command`
+the same way an agent would. It proves a task's `Target`/`Reads` are
+enough on their own to let a sandboxed `git clone`/`commit`/`push` reach
+the right repo and nothing else — no allowlist file exists anywhere in
+that test.
+
 ## Two things the port corrected
 
 **Embedded Dolt needs cgo, and the binary is not static.** It pulls in
@@ -66,22 +84,37 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 ## What this does not have yet
 
 `TrackedPullRequest`, folders, the capability provider contract, and
-anything that reads or writes GitHub. `loop.Cycle` decides which task
-takes which slot and calls `StartRun`, and nothing past that: no sandbox
-gets created, no agent runs, no GitHub is touched. Actually dispatching —
-along with the git proxy and the host adapter — is all still v1 Python —
-15,903 lines of it, with 1,239 tests. Those tests are the asset in a
-rewrite; the assertions port, the harness does not.
+anything that reads or writes GitHub's REST API. `loop.Cycle` decides
+which task takes which slot and calls `StartRun`, and nothing past that:
+no sandbox gets created, no agent runs. Actually dispatching, and the
+host adapter, are still v1 Python — 15,903 lines of it, with 1,239 tests.
+Those tests are the asset in a rewrite; the assertions port, the harness
+does not.
+
+The git proxy has moved, though (`gitproxy/`, above) — it is the one
+piece of "actually dispatching" v2 now owns outright, credential ladder
+and sandbox-token identity included. What it does *not* yet do that
+`grain/proxy` does: `SandboxCredentialOverrides` (bwsalmon/agents#52's
+per-task `grain-github-<name>` label) has no v2 equivalent, so every
+request still resolves through the ordinary owner/repo credential ladder
+with no override path. `loop.Cycle` also mints no leases yet — a run's
+`Leases` field exists in the schema and `gitproxy` never reads it; the
+git proxy authorizes straight off `Task.Target`/`Reads` instead, which
+serves the same fail-closed purpose without depending on that field being
+populated first.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
-it just has nothing to call it yet. There is no host adapter to hand it a
-real sandbox directory, so `mcp/`'s `run_command`/`read_file`/`edit_file`/
-`write_file` are confined to a local directory rather than the remote VM
-v1's versions of them SSH into, and there is no GitHub client, so
-`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
-record what they were asked to do (`mcp.MockSink`) instead of doing it.
-Wiring either of those up for real, and calling `agent.Framework.Run` from
-`loop.Cycle`, is follow-on work once v2 has a host adapter of its own.
+it just has nothing to call it yet outside a test. There is no host
+adapter to hand it a real sandbox directory, so `mcp/`'s `run_command`/
+`read_file`/`edit_file`/`write_file` are confined to a local directory
+rather than the remote VM v1's versions of them SSH into (`mcp.
+ConfigureGitCredentials` now sets that local directory's git credentials
+up the same way v1's `configure_git_credentials` sets a real sandbox's
+up), and there is no GitHub client, so `ask_question`/`comment_on_issue`/
+`propose_task`/`add_review_comment` record what they were asked to do
+(`mcp.MockSink`) instead of doing it. Wiring either of those up for real,
+and calling `agent.Framework.Run` from `loop.Cycle`, is follow-on work
+once v2 has a host adapter of its own.
 
 ## Single writer
 

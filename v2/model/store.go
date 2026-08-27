@@ -433,6 +433,51 @@ func (s *Store) OccupiedSlots(ctx context.Context) ([]string, error) {
 	return out, err
 }
 
+// GitScope is what a sandbox's currently live run may touch through the
+// git proxy: the write target of the task it is running, and its
+// read-only repos. Nil target and an empty slice mean the sandbox has no
+// live run right now, which the proxy must treat as "touch nothing" --
+// the same fail-closed default a static allowlist gave it, except this
+// one can never drift from what a task actually declares, because it
+// isn't a second copy of that declaration.
+func (s *Store) GitScope(ctx context.Context, sandbox string) (target *RepoRef, reads []RepoRef, err error) {
+	var taskID string
+	err = s.db.QueryRowContext(ctx,
+		"SELECT `task_id` FROM `task_run` WHERE `sandbox` = ? AND `finished_at` IS NULL "+
+			"ORDER BY `started_at` DESC LIMIT 1", sandbox).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("finding the live run on %s: %w", sandbox, err)
+	}
+
+	row := s.db.QueryRowContext(ctx,
+		"SELECT `target_owner`, `target_name` FROM `task` WHERE `id` = ?", taskID)
+	var tOwner, tName sql.NullString
+	if err = row.Scan(&tOwner, &tName); err != nil {
+		return nil, nil, fmt.Errorf("reading target of task %s: %w", taskID, err)
+	}
+	if tOwner.Valid {
+		target = &RepoRef{Owner: tOwner.String, Name: tName.String}
+	}
+
+	err = each(ctx, s.db,
+		"SELECT `owner`,`name` FROM `task_read` WHERE `task_id` = ? ORDER BY `owner`,`name`",
+		taskID, func(rows *sql.Rows) error {
+			var r RepoRef
+			if err := rows.Scan(&r.Owner, &r.Name); err != nil {
+				return err
+			}
+			reads = append(reads, r)
+			return nil
+		})
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading reads of task %s: %w", taskID, err)
+	}
+	return target, reads, nil
+}
+
 // OpenBlockers is how many unclosed tasks stand in front of this one.
 func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 	var n int

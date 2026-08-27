@@ -90,6 +90,12 @@ func runCommandTool(root string) Tool {
 
 			cmd := exec.CommandContext(ctx, "bash", "-c", command)
 			cmd.Dir = root
+			// HOME=root, not whatever this process's own HOME is, so that
+			// anything a command reads or writes there -- notably
+			// ~/.gitconfig and ~/.git-credentials (see
+			// ConfigureGitCredentials) -- is confined to this sandbox
+			// stand-in the same way its working directory already is.
+			cmd.Env = append(os.Environ(), "HOME="+root)
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
