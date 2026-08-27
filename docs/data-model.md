@@ -1005,12 +1005,36 @@ child is an unresolved blocking link, which is exactly what `/depends`
 already knows how to evaluate every cycle, so the parent simply stays
 blocked and unblocks itself when the last child closes.
 
-**Children land in `PROPOSED`, like every other grain-filed task.**
-`TaskOrigin.PROPOSED`, `needs_approval_label`, promoted by a human or a
-`/lgtm`. A deployment that finds this too slow can opt into
-auto-approving children that request no capabilities and target the same
-repo as their parent — but the safe default is the one that already
-exists, and it should stay the default.
+**Decided: children land in `PROPOSED`, like every other grain-filed
+task.** `TaskOrigin.PROPOSED`, `needs_approval_label`, promoted by a
+human or a `/lgtm`. No auto-approval, and every child costs an approval
+even when its parent already has one.
+
+Adding auto-approval later is additive, and that is not luck — the model
+already routes landing state through `TaskOrigin`, so the change is
+turning a constant into a predicate, and both conditions worth gating on
+are computable from fields that already exist: `grants` being empty, and
+`binding == RepoBinding.INHERITED`. The two guards that make it safe are
+already here too. The conditions bound an auto-approved child to doing
+nothing its parent could not, and the depth and fan-out limits below stop
+one human approval from yielding an unbounded self-approved tree —
+without them, auto-approval at depth *n* is a hole in the trust gate
+rather than a convenience.
+
+Two notes for whoever adds it:
+
+- **`Folder` is where the policy belongs**, not `AutomationConfig`. It
+  already carries `permits`, `offers`, `base`, `preamble` and
+  `max_concurrent`; `auto_approve_children` is one more row of exactly
+  that kind, and per-area is the granularity anyone actually wants —
+  loose in a scratch area, strict where deploys live.
+- **Auditing it needs no new field.** "Was this run approved by a human
+  or by policy?" is not recoverable from `Task` alone, since `state_since`
+  is one timestamp rather than a history. It does not need to be:
+  `audit.py` already records every dispatch, and that is the right place
+  for it. Adding provenance to the task — a `via` on the approval, the
+  shape `Grant.via` already uses — is worth doing only if the audit log
+  turns out to be the wrong place to answer it from.
 
 **Depth and fan-out are bounded.** A child of a child of a child is
 almost always an agent looping, and the cheapest place to discover that
@@ -1409,10 +1433,6 @@ dependencies allow:
   version of the question is whether that is a notifier grain builds, a
   mirror of the thread onto a GitHub object purely for its notifications,
   or an accepted cost for a team that watches the queue anyway.
-- **Should an approved parent auto-approve its children?** Recommendation
-  above is no by default, with an opt-in for children that request no
-  capabilities and inherit their parent's repo. If decomposition turns
-  out to be common, this is the first knob to revisit.
 - **Does a merge group need a merge order, or is dependency order
   enough?** The recommendation above says `DEPENDS_ON` between children
   covers it. The case that would force something more is a genuine cycle
