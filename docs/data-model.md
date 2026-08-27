@@ -1592,6 +1592,68 @@ dependencies allow:
 
 ## Open questions
 
+Grouped by what each holds up. Only the first touches stage 1; everything
+else has a safe default or a natural place later.
+
+### Touches the foundation
+
+- **Is `TaskState` declaration or grain's own record?** It straddles them,
+  and the [three-record split](#decided-whoever-writes-it-owns-it) did not
+  resolve it. `PROPOSED` → `QUEUED` is a human approving; `RUNNING`,
+  `AWAITING_REPLY` and `COMPLETED` are grain's own observations of itself.
+  Putting the whole enum in either record is wrong in one direction or the
+  other.
+
+  Recommendation: **approval is declaration, state is grain's record
+  derived from it.** The declaration carries an `approved` fact (a human's
+  intent to run this); `TaskState` is computed from that plus grain's
+  observations, and is never written by hand. It falls out cleanly —
+  `QUEUED` is *approved and not running*, and `PROPOSED` is *not yet
+  approved* — and it answers cancellation under the repo direction, which
+  otherwise has no obvious mechanism: cancelling is withdrawing approval,
+  which is a commit, reviewable like any other declaration change.
+
+  Worth settling before stage 1, since it decides what the store holds
+  versus what it derives.
+
+- **How long does a `Run` live?** The janitor case needs an agent
+  principal resolvable *after* its run ends, potentially days later, since
+  orphaned cloud infrastructure outlives the task that made it. That makes
+  `Run` the second thing in the model with an unbounded growth story, and
+  the first whose retention has a correctness consequence rather than just
+  a cost. A run's *identity* probably has to be kept longer than its
+  detail.
+
+### Decisions with safe defaults, worth making deliberately
+
+- **Do folder floors ship at all?** The
+  [recommendation](#attaching-capabilities-to-repos-and-folders) is
+  ceilings first, since a ceiling cannot grant anything and needs no
+  `auto_grantable` machinery to be safe. Whether `offers` is ever built
+  depends on whether the convenience turns out to be missed. Shipping only
+  ceilings is a coherent end state, not a half-measure.
+- **Does `permits` gain a `push` capability?** The allowlist has no
+  read/write axis — `proxy/core.py` checks `allows()` identically before
+  `git-upload-pack` and `git-receive-pack`, so allow-listing a repo for
+  reading also allow-lists pushing to it. This is the most concrete
+  security improvement in this document and currently only a suggestion in
+  passing.
+- **Does review-sourced tasking get an automatic mode?** Explicit opt-in
+  is the recommended default because the failure mode of the automatic
+  version is immediate and noisy. Whether the knob exists at all is
+  separate.
+- **What is the automation principal, externally?** A machine account
+  behaves like a user everywhere and costs a seat; a GitHub App has its
+  own identity and renders as `app[bot]`, but has different rate limits
+  and cannot author commits the same way. Pure
+  [representation](#representation-is-not-the-model), but with teeth.
+- **Is a human principal a record or a reference?** Recommendation: a
+  reference — a GitHub login, no stored user record — which keeps identity
+  GitHub's, consistent with authenticating the UI by OAuth and deriving
+  permission from repo access.
+
+### Deferred, measurable, or already answered by a default
+
 - **When does one JSON file stop working?** Purely a
   [representation](#representation-is-not-the-model) question, which is
   why it can wait: the store is rewritten whole on every save, which is
