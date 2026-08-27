@@ -37,8 +37,8 @@ from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
     configure_gcp_key_minter, configure_gemini_key,
     configure_github_credential, configure_github_key, configure_github_key_minter,
-    configure_janitor, configure_named_github_key, configure_repo, credential_repos,
-    ensure_sandbox_tokens,
+    configure_janitor, configure_named_github_key, configure_repo,
+    configure_scheduled_job, credential_repos, ensure_sandbox_tokens,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -103,6 +103,15 @@ class BootstrapConfig:
     # docstring for why.
     janitor_ttl_hours: int | None = None
     janitor_name_prefix: str = "grain"
+    # bwsalmon/agents#163: one scheduled job's whole template file per
+    # entry (`{name: template_text}`), same "map threaded from deploy.sh"
+    # shape `github_keys` above already has -- a Terraform-managed
+    # deployment sets this from the repo's own `config/scheduled-jobs/*.md`
+    # files (deploy.sh), rather than requiring a separate manual step
+    # against the controller afterward. Empty leaves scheduled jobs off,
+    # the same "absence is the off switch" latitude every other optional
+    # step here already has.
+    scheduled_jobs: dict[str, str] = field(default_factory=dict)
     # bwsalmon/agents#159: turns on the grain-scratch-repo task label --
     # plain, non-secret config (see configure_github_key). Required
     # together with github_key_installation_id, github_key_owner, and
@@ -345,6 +354,8 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
         configure_janitor(admin_ssh, config.gcp_project_id, config.janitor_ttl_hours,
                            impersonate_service_account=config.gcp_agent_service_account_email,
                            name_prefix=config.janitor_name_prefix)
+    for name, template in config.scheduled_jobs.items():
+        configure_scheduled_job(admin_ssh, name, template)
     if config.github_key_minter_key:
         configure_github_key_minter(admin_ssh, config.github_key_minter_key)
     if (config.github_key_app_id and config.github_key_installation_id

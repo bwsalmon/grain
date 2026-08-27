@@ -602,6 +602,53 @@ def test_no_janitor_ttl_hours_never_writes_janitor_config(env):
     assert not any("janitor.json" in c for c in runner.commands)
 
 
+# --- scheduled-jobs (bwsalmon/agents#163) ----------------------------------
+
+def test_scheduled_jobs_writes_each_job_template_on_the_controller(env):
+    """A Terraform-managed deployment threads `config/scheduled-jobs/*.md`
+    files from the repo through `deploy.sh` into `host bootstrap`, the
+    same map-of-named-files shape `github_keys` already has -- must place
+    one `/data/config/scheduled-jobs/<name>.md` per entry, the same way
+    `grain controller configure --scheduled-job` already does by hand.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/widgets",
+        scheduled_jobs={
+            "weekly-audit": "Title: Weekly audit\nInterval-Hours: 168\n\nAudit things.",
+            "daily-report": "Title: Daily report\nInterval-Hours: 24\n\nReport things.",
+        },
+        admin_private_key_path=admin_private,
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+
+    controller_prefix = ssh_prefix("debian", str(cluster.controller_ip), admin_private)
+    assert any(
+        c.startswith(controller_prefix) and "scheduled-jobs/weekly-audit.md" in c
+        for c in runner.commands
+    )
+    assert any(
+        c.startswith(controller_prefix) and "scheduled-jobs/daily-report.md" in c
+        for c in runner.commands
+    )
+
+
+def test_no_scheduled_jobs_never_writes_the_scheduled_jobs_directory(env):
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+    assert not any("scheduled-jobs" in c for c in runner.commands)
+
+
 # --- github-key.json (bwsalmon/agents#159) --------------------------------
 
 def test_no_github_key_config_is_written_without_the_minter_credential(env):
