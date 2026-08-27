@@ -1568,6 +1568,93 @@ def test_gemini_key_places_the_key_outside_the_workspace():
 That last assertion is one the conformance test can make over *every*
 provider, rather than each author remembering it.
 
+#### Capabilities as containers
+
+The contract above assumes a provider is Python in the grain package.
+Running each one as a container instead is a bigger change than it looks,
+and it argues for itself better than the reasons usually given for it.
+
+**What it buys.** Two of these are the obvious ones; the third is larger.
+
+- **Its own code and dependencies.** The controller is deliberately thin
+  — `python3 git openssh-client curl ca-certificates gnupg`, plus
+  `google-cloud-cli` as a noted exception. A capability needing a
+  different SDK, CLI, or runtime cannot have one today without adding it
+  to that list for every deployment.
+- **Session-scoped local state**, as a volume mounted per run — the same
+  lifetime as `ctx.workdir`, owned by the executor rather than the
+  provider.
+- **It converts a rule into a boundary.** This document says providers
+  "are repo code" and admits the context "shapes the easy path; it does
+  not enforce a wall" — a provider is Python with `import` available and
+  could reach anything the controller can. A container is the one thing
+  that makes that an actual boundary: no `/data/secrets`, no other
+  capability's scratch, no ambient network. It is the honest answer to a
+  weakness stated plainly above and not otherwise fixable.
+- And a fourth, further out: **capabilities become shippable by people
+  who do not commit to this repo.**
+
+**The crux is credential delivery, and it splits by `Provision`.**
+Containerising a capability whose job is *handling a credential* forces a
+choice:
+
+- **Mount the standing credential in.** The container is then isolated
+  from other capabilities but holds the crown jewel, which is a real gain
+  and a narrower one than it sounds.
+- **Broker it.** The controller keeps material and hands the container
+  only a scoped, short-lived delegation. `gcp_keys.py` already
+  impersonates the agent account from the host key, so issuing a
+  short-lived impersonated token instead of the key is a small step
+  rather than a new mechanism. The cost is that the broker must know each
+  credential *kind*, which puts the varied part back on the controller
+  and partly undercuts "the capability brings its own code."
+
+So containerisation is easy exactly where credentials are not involved
+and hard exactly where they are: `GRANT` and `SELECT` capabilities can be
+containers today with nothing to solve, and `MINT` is where the design
+work is. Brokering is right wherever the credential kind supports scoped
+delegation — GCP does; a GitHub PAT does not, since it cannot be narrowed
+at runtime.
+
+**The cost to weigh.** A container runtime on the controller is a new
+dependency on the VM that holds every credential, in a design whose
+stated goals include "no clustering, no cloud orchestration" and whose
+package list is short on purpose. Running the capability in the *sandbox*
+instead is worse, not better — minting credentials inside the untrusted
+side inverts the whole arrangement. A third VM role for capability
+execution would be genuinely isolated and is a larger change than this
+document should decide.
+
+**What does not change: the contract.** The same four verbs work over
+`docker run <image> resolve|materialize|prompt|revoke` with JSON on
+stdin and stdout. `Resolution` and `Materialization` — lease, placements,
+credential override — already serialise cleanly. So this is not an
+either/or: in-process providers ship now, and a container-backed provider
+is a second implementation of one protocol, with no redesign and no
+migration of what exists.
+
+**What does change: a container cannot hold a `Runner`.** An in-process
+provider is handed `controller` and `sandbox` runners; a container cannot
+be. So a containerised provider must *return* what it wants done —
+placements, and setup commands for the executor to run — rather than
+doing it.
+
+That is the placement vocabulary, and this is what makes it load-bearing
+rather than a convention: **a containerised provider cannot move material
+except declaratively, because it has no other route.** The two tiers fall
+out of the same contract —
+
+| | In-process provider | Containerised provider |
+|---|---|---|
+| Trust | repo code, reviewed | isolated, may be third-party |
+| Material | *should* use `Placement` | *can only* use `Placement` |
+| Setup | may use the sandbox runner | returns commands to execute |
+| Dependencies | the controller's | its own |
+
+— which means the honest earlier concession, that the material rule is a
+convention once a runner exists, is a statement about the in-process tier
+only. The tier that most needs a real boundary is the tier that gets one.
+
 #### Placement: what `materialize` returns
 
 The one open piece of the contract, and worth working through because the
@@ -2518,7 +2605,11 @@ dependencies allow:
    floor-grantable list that bounds them. No ceilings in v1, so no
    `permits` field and no in-repo file. Needs stage 2's capability
    registry to have anything to attach to.
-7. **Review-sourced tasks and merge groups.** Both need stage 3's links.
+7. **Containerised capabilities.** A second transport for stage 2's
+   contract — `docker run` with JSON over stdio — plus the credential
+   broker for `MINT`. Nothing built before it is rewritten, which is the
+   point of settling the contract first.
+8. **Review-sourced tasks and merge groups.** Both need stage 3's links.
    Review-sourced tasks additionally need `ReviewComment` widened with
    thread linkage; merge groups need stage 4's sub-tasks.
 
@@ -2553,6 +2644,7 @@ Settled, with where each is argued and what would reopen it:
 |---|---|---|
 | Capabilities are a provider contract, not a table — one file plus one line to add | [here](#capabilities-are-an-extension-point-not-a-table) | — |
 | A provider runs code on both sides; material crosses via `Placement`, never a runner | [here](#what-writing-a-new-capability-looks-like) | — |
+| One contract, two transports — in-process now, containers when a capability needs its own code or a real boundary | [here](#capabilities-as-containers) | — |
 | Three records, sorted by who writes them — grain's store wins for grain's own acts, GitHub for facts it owns | [here](#decided-whoever-writes-it-owns-it) | — |
 | Representation is separate from the model; the dataclasses are the model, storage and label and directive shapes are not | [here](#representation-is-not-the-model) | — |
 | Landing state is decided by the creating actor, never the reason | [here](#task--the-aggregate) | — |
@@ -2578,6 +2670,18 @@ correctness question — each has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
+- **How does a containerised `MINT` capability get its credential?** The
+  crux of [capabilities as
+  containers](#capabilities-as-containers), and the only part of it that
+  is not already answered: mount the standing credential in, or broker a
+  scoped short-lived delegation. Brokering is right wherever the
+  credential kind supports it — GCP already impersonates, so it is a
+  small step there; a GitHub PAT cannot be narrowed at runtime, so it is
+  not. `GRANT` and `SELECT` capabilities need no answer at all.
+- **Is a container runtime on the controller acceptable?** It is the cost
+  of the above, on the VM that holds every credential, in a design whose
+  package list is short deliberately. Weighing it is a `docs/design.md`
+  decision rather than a data-model one.
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
   version is immediate and noisy. Whether the knob exists at all is
