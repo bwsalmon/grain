@@ -1557,6 +1557,37 @@ label, and nothing counts. A task that has failed four times is almost
 certainly not going to succeed on the fifth, and today the only way to
 notice is for a human to read the issue's history.
 
+**Decided: a run is bounded at 24 hours.** Not a new number — it is the
+outer bound the deployment already has, currently spread across two
+configs that happen to agree. `AutomationConfig.max_runtime_minutes`
+defaults to 120, the normal cap; `gcp_keys.DEFAULT_MAX_KEY_AGE_HOURS` is
+24, the backstop that revokes a lease regardless of what the sweep
+thinks. Stating it once as a property of `Run` makes a live run older
+than the bound **definitionally stranded** rather than merely suspicious,
+which is what the sweep already treats it as.
+
+**It also resolves run retention, for a reason worth stating: the janitor
+needs the run id to be *recognizable*, not *resolvable*.** An earlier
+draft made retention a foundation-level question, on the grounds that
+orphaned cloud infrastructure outlives the task that made it by days, so
+an agent principal must stay resolvable that long. That overstated it.
+The janitor is not asking "which task made this?" — it is asking "did an
+agent make this at all?", and a run id embedded in a resource name
+answers that by *pattern*, with no record to look up. The signal it
+lacks today needs the id persisted and conventionally shaped; it does not
+need it retained.
+
+The honest limit: an inclusion signal only covers resources whose agent
+followed the convention. One that ignored it stays invisible, so
+`janitor.py`'s exclusion list has to remain the backstop. The improvement
+is that compliant resources become positively identifiable, which is
+strictly more than the nothing it has now.
+
+So retention stops being a correctness question and becomes an ordinary
+cost one, alongside [how big the store
+gets](#open-questions) — how much run detail to keep, and for how long,
+with a run's identity outliving its detail if that turns out to matter.
+
 ## Invariants
 
 Each of these is a rule the current code follows, and each is a test in
@@ -1730,6 +1761,7 @@ Settled, with where each is argued and what would reopen it:
 | Sub-tasks get no auto-approval; every child costs an approval | [here](#sub-tasks-are-tasks) | decomposition turns out to be common enough that the friction bites |
 | Folder capabilities are **floors only** in v1 — no `permits`, no in-repo file | [here](#attaching-capabilities-to-repos-and-folders) | somebody wants a *stricter* subfolder inside a permissive parent — "except here" |
 | Directive grammar questions are artifacts of the issues interface, not model questions | [here](#direction-a-first-party-ui) | — |
+| A run is bounded at 24 hours; retention is a cost question, not a correctness one | [here](#run--one-attempt) | runs need to outlive a day |
 
 Two things are **assumed rather than decided**, and the document is
 written to survive either: the declaration
@@ -1738,18 +1770,8 @@ written to survive either: the declaration
 
 ## Open questions
 
-Grouped by what each holds up. None now blocks stage 1; each has a safe
-default or a natural place later.
-
-### Touches the foundation
-
-- **How long does a `Run` live?** The janitor case needs an agent
-  principal resolvable *after* its run ends, potentially days later, since
-  orphaned cloud infrastructure outlives the task that made it. That makes
-  `Run` the second thing in the model with an unbounded growth story, and
-  the first whose retention has a correctness consequence rather than just
-  a cost. A run's *identity* probably has to be kept longer than its
-  detail.
+Grouped by what each holds up. None blocks stage 1, and none is a
+correctness question — each has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
@@ -1769,7 +1791,7 @@ default or a natural place later.
 
 ### Deferred, measurable, or already answered by a default
 
-- **When does one JSON file stop working?** Purely a
+- **How much history is kept, and how big does the store get?** Purely a
   [representation](#representation-is-not-the-model) question, which is
   why it can wait: the store is rewritten whole on every save, which is
   nothing at a few hundred tasks, and sub-tasks are the first feature
