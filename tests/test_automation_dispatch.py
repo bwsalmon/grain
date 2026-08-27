@@ -19,6 +19,7 @@ MCP_CONFIG_PATH = f"{UNIT_DIR}/mcp-config.json"
 QUESTION_PATH = f"{UNIT_DIR}/question.txt"
 COMMENT_PATH = f"{UNIT_DIR}/comment.txt"
 REVIEW_PATH = f"{UNIT_DIR}/review.json"
+TASKS_PATH = f"{UNIT_DIR}/proposed-tasks.json"
 
 
 def make_issue(number=1) -> Issue:
@@ -267,6 +268,30 @@ def test_dispatch_resets_the_review_file_before_every_dispatch():
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
              remote_url=REMOTE_URL, token=TOKEN)
     assert runner.ran(f"sudo rm -f {REVIEW_PATH}")
+
+
+def test_dispatch_writes_an_mcp_config_naming_the_tasks_path():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    mcp_config = json.loads(mcp_stdin)
+    server = mcp_config["mcpServers"]["grain-sandbox"]
+    assert server["args"][server["args"].index("--tasks-path") + 1] == TASKS_PATH
+
+
+def test_dispatch_resets_the_tasks_file_before_every_dispatch():
+    """Same reset discipline as the question/comment/review files, for the
+    same reason (bwsalmon/agents#175): leftover proposed tasks from an
+    earlier, unrelated task must never be filed as part of this one.
+    """
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert runner.ran(f"sudo rm -f {TASKS_PATH}")
 
 
 def test_dispatch_includes_the_issue_conversation_in_the_prompt():

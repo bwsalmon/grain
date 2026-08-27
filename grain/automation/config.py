@@ -87,6 +87,10 @@ class AutomationConfig:
     # `_dispatch` then strips this label off on the same cycle it
     # dispatches, the same "exactly one state at a time" invariant
     # `labels.py`'s own docstring holds every other state label to.
+    # bwsalmon/agents#175: a task an agent itself proposed via the
+    # `propose_task` tool (`core.py`'s `_file_proposed_tasks`) carries this
+    # same label for the same reason -- grain suggesting the work is not
+    # the same as a human wanting it attempted.
     needs_approval_label: str = "grain-agent-needs-approval"
     # Asks for a short-lived Gemini API key for the task it's applied to
     # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once

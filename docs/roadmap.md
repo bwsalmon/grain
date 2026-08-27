@@ -1575,3 +1575,61 @@ simply show as blocked on the other, indefinitely, in the audit log for a
 human to notice and fix; chasing full cycle detection through directives
 on issues this hasn't even fetched yet was judged not worth the extra
 GitHub calls for a misconfiguration a human filed and a human can unfile.
+
+## 27. Let an agent propose new tasks that need approval
+
+- [x] Done
+
+bwsalmon/agents#175: an agent working a task often notices real follow-up
+work along the way — splitting a large task into smaller ones, or
+flagging something out of scope for what it was asked to do — with no way
+to act on that beyond writing it into a closing `comment_on_issue` for a
+human to read and file by hand. The ask was to let an agent add to the
+task queue directly, including wiring up dependencies between the tasks it
+adds, without that new work ever starting on its own.
+
+The gate this needed already existed: `needs_approval_label`
+(bwsalmon/agents#83's `_suggest_fix`, item 26's neighbour) is exactly "a
+task grain itself suggested, sitting out of `_dispatch`'s own
+`trigger_label` poll until a human applies `trigger_label` by hand or
+comments `/lgtm`" (bwsalmon/agents#136's `_promote_lgtm_comments`). A new
+MCP tool, `propose_task` (`mcp_server.py`), is the same "write to a fixed
+per-unit file, `core.py` reads it back at finish time" shape
+`add_review_comment` already is — each call appends one proposed task
+(`title`, `body`, an optional `id`, and `depends_on`) to a JSON list —
+and `core.py`'s new `_file_proposed_tasks` reads the whole list back for
+every successful outcome (issue, PR-continuation, or review alike — it
+runs first, unconditionally, ahead of whatever kind-specific finish
+handling follows) and files each one as a fresh task-repo issue carrying
+`needs_approval_label`, reusing the exact label and lgtm-promotion path
+`_suggest_fix` already gets for free.
+
+`depends_on` is where "managing dependencies" landed: each entry is either
+a bare issue number (an existing task) or an `id` an *earlier* proposal in
+the same batch gave itself, resolved into a `/depends` line
+(`directives.py`, item 26) against the real issue numbers `create_issue`
+just handed back — letting one run propose a small dependent chain
+without knowing any real numbers up front. Deliberately one-directional:
+an `id` is only ever looked up *backward* through the batch, never
+forward, so there's no cycle to detect and no recursion to get wrong — a
+`depends_on` naming an id not yet filed (a forward reference, a typo, or a
+proposal naming itself) simply can't resolve, and is dropped with a note
+in the filed issue's own body rather than losing the whole proposal over
+one bad reference. This does mean an agent has to propose foundational
+tasks before the ones that depend on them; `propose_task`'s own tool
+description says so.
+
+`state.py` gained `proposed_task_issues`, a plain set of issue numbers,
+for the same reason `OpenPullRequest.fix_issue` exists: so
+`_promote_lgtm_comments`'s own guard (skip the `list_issues` call entirely
+unless something is actually outstanding) has something to check without
+paying a GitHub call on every cycle of a deployment that never uses this
+feature. Unlike `fix_issue`, which is never cleared once set,
+`proposed_task_issues` *is* dropped the moment `_promote_lgtm_comments`
+promotes an entry via `/lgtm` — there's no "the original PR closed"
+event downstream for a proposed task to lean on the way a suggested fix
+has, so leaving it live forever would have permanently defeated the guard
+after this feature's first ever use. An entry approved by hand instead
+(a human applying `trigger_label` directly, bypassing `/lgtm`) still
+lingers un-cleared, the same accepted minor cost `fix_issue` already
+carries in that same case.

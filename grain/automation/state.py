@@ -213,6 +213,16 @@ class AutomationState:
     # Same string-keying reason again -- bwsalmon/agents#135, one task issue
     # is never completed twice at once.
     completed_issues: dict[str, CompletedIssue] = field(default_factory=dict)
+    # bwsalmon/agents#175: task issues `core.py`'s `_file_proposed_tasks`
+    # filed from an agent's own `propose_task` calls, each carrying
+    # `needs_approval_label` the same way a `_suggest_fix` task already
+    # does -- tracked here for the identical reason `OpenPullRequest.fix_issue`
+    # is: so `_promote_lgtm_comments`'s own guard knows there is something
+    # worth polling `needs_approval_label` for, without paying that GitHub
+    # call on every cycle of a deployment that never uses this feature. A
+    # plain set of ints, not keyed like the dicts above -- nothing here is
+    # ever looked up by issue number, only iterated or tested for emptiness.
+    proposed_task_issues: set[int] = field(default_factory=set)
 
     @classmethod
     def load(cls, path: Path) -> "AutomationState":
@@ -265,10 +275,12 @@ class AutomationState:
             )
             for key, c in raw.get("completed_issues", {}).items()
         }
+        proposed_task_issues = set(raw.get("proposed_task_issues", []))
         return cls(assignments=assignments, run_timestamps=run_timestamps,
                     pending_questions=pending_questions,
                     open_pull_requests=open_pull_requests,
-                    completed_issues=completed_issues)
+                    completed_issues=completed_issues,
+                    proposed_task_issues=proposed_task_issues)
 
     def save(self, path: Path) -> None:
         data = {
@@ -305,6 +317,9 @@ class AutomationState:
                 key: {"issue": c.issue, "baseline_comment_id": c.baseline_comment_id}
                 for key, c in self.completed_issues.items()
             },
+            # Sorted, purely so a diff of the state file across runs is
+            # stable -- a set has no order of its own to preserve.
+            "proposed_task_issues": sorted(self.proposed_task_issues),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -389,6 +404,13 @@ class AutomationState:
 
     def clear_completed_issue(self, issue: int) -> None:
         self.completed_issues.pop(str(issue), None)
+
+    # --- proposed tasks awaiting approval (bwsalmon/agents#175) ----------
+    def record_proposed_task(self, issue: int) -> None:
+        self.proposed_task_issues.add(issue)
+
+    def clear_proposed_task(self, issue: int) -> None:
+        self.proposed_task_issues.discard(issue)
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:

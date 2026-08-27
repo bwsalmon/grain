@@ -325,6 +325,17 @@ def review_path(unit: str) -> str:
     return f"{_unit_dir(unit)}/review.json"
 
 
+def proposed_tasks_path(unit: str) -> str:
+    """The fixed path `mcp_server.py`'s `propose_task` tool appends to,
+    and `core.py`'s `_file_proposed_tasks` reads back after a unit finishes
+    (bwsalmon/agents#175) -- the same "compute once, share" shape
+    `review_path` already uses, and reset the same way at the start of
+    every dispatch to this sandbox so a proposal from an earlier, unrelated
+    task can never be misread as belonging to this one.
+    """
+    return f"{_unit_dir(unit)}/proposed-tasks.json"
+
+
 def branch_name(issue: int) -> str:
     """The exact branch a dispatch for this issue must push to.
 
@@ -567,7 +578,12 @@ def _prompt(issue: Issue, branch: str, workspace: str, comments: list[Comment] =
         "prevents a pull request from opening on its own; it only stands "
         "in for one when you never pushed anything.\n\n"
         "If you are genuinely blocked and need the human's input, use the "
-        "ask_question tool instead."
+        "ask_question tool instead.\n\n"
+        "If you notice follow-up work that's out of scope for this task, "
+        "or want to split part of it out, use the propose_task tool to add "
+        "it to the queue -- it is filed as a new issue but requires a "
+        "human's approval before the agent set will attempt it, so "
+        "proposing it does not start it."
     )
 
 
@@ -634,7 +650,11 @@ def _pr_prompt(pr: PullRequestDetail, comments: list[ReviewComment], workspace: 
         f"    git push origin HEAD:{pr.head_ref}\n"
         "The controller is already tracking this pull request — you have no "
         "GitHub API access from here, so do not attempt to comment on or "
-        "modify the PR directly."
+        "modify the PR directly.\n\n"
+        "If you notice follow-up work that's out of scope for this task, "
+        "use the propose_task tool to add it to the queue -- it requires a "
+        "human's approval before the agent set will attempt it, so "
+        "proposing it does not start it."
     )
 
 
@@ -690,7 +710,11 @@ def _review_prompt(pr: PullRequestDetail, workspace: str, *, task_repo: str = ""
         "nothing is posted immediately, and nothing is visible to anyone "
         "until a human opens the draft and submits it themselves. You have "
         "no GitHub API access from here, so do not attempt to comment on "
-        "or review the PR directly."
+        "or review the PR directly.\n\n"
+        "If reviewing this turns up follow-up work that's out of scope for "
+        "the PR itself, use the propose_task tool to add it to the queue -- "
+        "it requires a human's approval before the agent set will attempt "
+        "it, so proposing it does not start it."
     )
 
 
@@ -866,7 +890,8 @@ def start_unit(runner: Runner, unit: str, command: str, *, uid: str = "debian") 
 
 
 def _mcp_config_json(target: SandboxTarget, question_path_value: str,
-                      comment_path_value: str, review_path_value: str, task_unit: str, *,
+                      comment_path_value: str, review_path_value: str,
+                      tasks_path_value: str, task_unit: str, *,
                       self_debug: bool = False,
                       self_repair: bool = False) -> str:
     """The `--mcp-config` file `claude -p` loads on the controller —
@@ -881,7 +906,8 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
     call. `comment_path_value` is the identical treatment for
     `comment_on_issue` (bwsalmon/agents#50, bwsalmon/agents#89).
     `review_path_value` is the same again for `add_review_comment`
-    (bwsalmon/agents#154).
+    (bwsalmon/agents#154). `tasks_path_value` is the same again for
+    `propose_task` (bwsalmon/agents#175).
     `self_debug` (bwsalmon/agents#62) is `dispatch()`'s own record of
     whether this task's issue carried `self_debug_label` -- true only then
     does `mcp_server.py` get `--self-debug`, which is what makes it
@@ -902,6 +928,7 @@ def _mcp_config_json(target: SandboxTarget, question_path_value: str,
         "--question-path", question_path_value,
         "--comment-path", comment_path_value,
         "--review-path", review_path_value,
+        "--tasks-path", tasks_path_value,
         "--task-unit", task_unit,
     ]
     if self_debug:
@@ -940,7 +967,7 @@ _ALLOWED_TOOLS = (
     "mcp__grain-sandbox__run_command,mcp__grain-sandbox__read_file,"
     "mcp__grain-sandbox__edit_file,mcp__grain-sandbox__write_file,"
     "mcp__grain-sandbox__ask_question,mcp__grain-sandbox__comment_on_issue,"
-    "mcp__grain-sandbox__add_review_comment,"
+    "mcp__grain-sandbox__add_review_comment,mcp__grain-sandbox__propose_task,"
     # bwsalmon/agents#62/#86: pre-approved unconditionally, same as every
     # other tool name here -- harmless on a task that never turns any of
     # these on, since `mcp_server.py` only advertises (and answers) this
@@ -1033,10 +1060,15 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
     # leftover review comments from an earlier dispatch to this sandbox must
     # never be posted as part of this one's review.
     controller_runner.run(["sudo", "rm", "-f", r_path])
+    t_path = proposed_tasks_path(unit)
+    # Same reset discipline again, for the same reason (bwsalmon/agents#175):
+    # leftover proposed tasks from an earlier dispatch to this sandbox must
+    # never be filed as part of this one's run.
+    controller_runner.run(["sudo", "rm", "-f", t_path])
     m_path = _mcp_config_path(unit)
     controller_runner.run(
         ["sudo", "dd", f"of={m_path}", "status=none"],
-        stdin=_mcp_config_json(target, q_path, c_path, r_path, unit,
+        stdin=_mcp_config_json(target, q_path, c_path, r_path, t_path, unit,
                                 self_debug=self_debug,
                                 self_repair=self_repair),
     )
