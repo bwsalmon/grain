@@ -230,6 +230,69 @@ about what is true. Grain should not fight it: the PR merging is an
 observation like any other, and `_close_finished_prs` already handles a
 merged PR correctly. Nothing should try to turn it back off.
 
+### Representation is not the model
+
+The entities below are the model. Every storage and wire detail this
+document mentions is **representation**, and each can change without the
+model changing:
+
+| Model | Representation, today |
+|---|---|
+| a task has a stable identity | a GitHub issue number in a repo |
+| `TaskState` | a label, in a particular hex colour |
+| `Grant` of a capability | a label named `grain-<capability>` |
+| a task's declared fields | slash directives in an issue body |
+| the store | one JSON file, rewritten whole |
+| `PrHealth` | GitHub's `mergeable: true/false/null` |
+| `Folder` | a JSON file under `/data/config` |
+
+Reading the table top to bottom is also a list of the places this
+document has had to argue about a representation as if it were a design
+question — the label palette, the directive grammar, whether a folder
+name extends `/repo`. Naming the split once is what makes those
+recognisable as the smaller questions they are.
+
+**The three records want three different representations, and should not
+share one.** This is the most useful thing the split buys, and it is
+easy to miss:
+
+- **Declaration** is reviewed in pull requests, so it must be diffable,
+  human-readable text. Its pressure is legibility in a diff.
+- **Grain's own record** is written many times an hour and read by both
+  the loop and a UI. Its pressure is cheap read-modify-write with atomic
+  durability — which is what a whole-file JSON rewrite is already
+  straining against.
+- **Observed facts** are a cache of something GitHub owns. Their pressure
+  is freshness, and their durability requirement is the weakest of the
+  three: losing them costs an API refetch, not correctness.
+
+That last point is a real freedom rather than a technicality. The
+observed record does not need to live in the durable store at all — it
+can be in memory, or in a file that is safe to delete. The one caveat is
+baselines: losing `CompletedIssue.baseline_comment_id` or
+`PendingQuestion.question_comment_id` degrades rather than corrupts, and
+`CompletedIssue` already re-primes from a fresh read by design for
+exactly this reason, but a lost question baseline can cost a redispatch
+nobody asked for. Rebuildable, not free.
+
+**The anti-pattern to avoid is already in the codebase.**
+`AutomationState.load`/`save` are hand-written per field, so every new
+field costs three edits — the dataclass, the loader, the writer — and
+`gemini_key_name` and `gcp_key_id` each paid it. That is representation
+leaking into the model: the model gained a field, and the cost was
+serialization boilerplate. One serialization boundary, generic over the
+dataclasses, makes the model free to gain fields, which is most of why
+the five-dicts consolidation in stage 1 is worth doing at all.
+
+**Identity is where the split needs stating carefully**, because it is
+the one place a representation detail has leaked into behaviour. The
+model requires an identity that is stable, opaque, and **makes a branch
+name derivable** (rule 3). A GitHub issue number satisfies all three, and
+`branch_name(issue)` uses it. A slug or a monotonic id would satisfy them
+equally. Nothing in the model may assume the identity is an integer, is
+assigned by GitHub, or is comparable — a task filed later having a higher
+number is a property of the representation, not a fact to sort by.
+
 ### Direction: the declaration moves into a repo
 
 **A stated direction, not yet a decision.** Everything below in this
@@ -1366,6 +1429,11 @@ directive, or anything an operator sees.
    names so no call site moves. Load migrates an old file in place. This
    is the stage that pays for itself immediately — it retires the
    404-catching workaround and makes every later stage a local change.
+   It is also where the
+   [serialization boundary](#representation-is-not-the-model) goes:
+   generic over the dataclasses rather than hand-written per field, so
+   every later stage adds fields for free rather than paying the three
+   edits `gemini_key_name` and `gcp_key_id` each paid.
 2. **The capability registry.** `Capability` rows, `Grant`, `Lease`.
    `_resolve_target`'s per-label branches become a loop; `_release`'s two
    revoke branches become one; the two reapers become one. Behaviour
@@ -1409,22 +1477,26 @@ dependencies allow:
 - **No new service, no database.** One JSON file under `/data/state`,
   written the same atomic way. The folder tree is one more operator-owned
   file under `/data/config`, read the same hot-reloaded way as the
-  allowlist it can only narrow.
+  allowlist it can only narrow. Both are
+  [representation](#representation-is-not-the-model) — the model does not
+  require either, and neither is where the model would break first.
 - **The trust gate is untouched.** A task runs because a human labelled
   it. Directives are read only from authors who could have applied that
   label. Agents get no GitHub API access.
 
 ## Open questions
 
-- **When does one JSON file stop working?** The store is rewritten whole
-  on every save. At a few hundred tasks that is nothing; sub-tasks are
-  the first feature that could multiply the count by an order of
-  magnitude. A UI adds a second pressure — concurrent readers, and a
-  "has anything changed" question a whole-file read answers expensively.
-  The atomic temp-file-and-rename already gives a reader a consistent
-  view (it sees the old file or the new one, never a torn one), so the
-  question is cost and change-detection rather than correctness. Worth
-  measuring before stage 4, not before stage 1.
+- **When does one JSON file stop working?** Purely a
+  [representation](#representation-is-not-the-model) question, which is
+  why it can wait: the store is rewritten whole on every save, which is
+  nothing at a few hundred tasks, and sub-tasks are the first feature
+  that could multiply the count by an order of magnitude. A UI adds a
+  second pressure — concurrent readers, and a "has anything changed"
+  question a whole-file read answers expensively. The atomic
+  temp-file-and-rename already gives a reader a consistent view (it sees
+  the old file or the new one, never a torn one), so this is cost and
+  change-detection, not correctness. Worth measuring before stage 4, not
+  before stage 1.
 - **How does someone find out a task is waiting on them?** With a
   [first-party UI](#direction-a-first-party-ui), conversation can just be
   a thread on the task, which is what the three GitHub-surface options
