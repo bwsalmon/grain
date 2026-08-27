@@ -2917,6 +2917,7 @@ def test_a_task_with_an_open_dependency_is_skipped_not_dispatched():
         ApiResponse(200, {}, json.dumps(
             [issue_json(1, body="/depends 2")]).encode()),      # list_issues
         ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main): true
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
     ])
@@ -2952,6 +2953,7 @@ def test_an_already_labelled_blocked_dependency_is_not_relabelled():
             labels=("grain-agent", "grain-waiting-on-dependency"),
         )]).encode()),                                            # list_issues
         ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main): true
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "open"}).encode()),        # get_issue(2): still open
     ])
@@ -2968,6 +2970,7 @@ def test_a_task_with_a_closed_dependency_dispatches_normally():
         ApiResponse(200, {}, json.dumps(
             [issue_json(1, body="/depends 2")]).encode()),      # list_issues
         ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main): true
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): closed
     ])
@@ -2983,6 +2986,7 @@ def test_only_the_still_open_dependencies_are_named_in_the_skip_outcome():
         ApiResponse(200, {}, json.dumps(
             [issue_json(1, body="/depends 2,3")]).encode()),    # list_issues
         ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main): true
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): closed
         ApiResponse(200, {}, json.dumps(
@@ -3009,6 +3013,7 @@ def test_a_missing_dependency_issue_is_treated_as_still_blocking():
         ApiResponse(200, {}, json.dumps(
             [issue_json(1, body="/depends 999")]).encode()),    # list_issues
         ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main): true
         ApiResponse(404, {}, b'{"message": "Not Found"}'),        # get_issue(999): gone
     ])
 
@@ -3051,6 +3056,7 @@ def test_a_blocked_dependency_does_not_stop_the_next_candidate_dispatching():
             issue_json(2, body="do the other thing"),
         ]).encode()),                                            # list_issues
         ApiResponse(200, {}, b"[]"),                              # #1 list_comments
+        ApiResponse(200, {}, b"{}"),                              # #1 branch_exists(main): true
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
     ])
@@ -3081,6 +3087,7 @@ def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
         ApiResponse(200, {}, json.dumps(
             [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 1
         ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 1
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main), cycle 1
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
     ])
@@ -3096,6 +3103,7 @@ def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
             labels=("grain-agent", "grain-waiting-on-dependency"),
         )]).encode()),                                            # list_issues, cycle 2
         ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 2
+        ApiResponse(200, {}, b"{}"),                              # branch_exists(main), cycle 2
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): now closed
     ])
@@ -3177,6 +3185,48 @@ def test_a_base_directive_also_builds_the_workspace_from_that_base():
     assert "checkout -f -B release-2 origin/release-2" in script
     # Not the repo's real default branch -- the whole point of the bug.
     assert "checkout -f --detach origin/HEAD" not in script
+
+
+def test_a_target_repo_with_no_such_base_branch_is_parked_not_retried_forever():
+    """bwsalmon/agents#224: an empty target repo (no commits, no branches
+    at all) still reports a `default_branch` name from GitHub's own repos
+    API -- that field is the repo's *configured* default, not proof a
+    branch by that name actually exists. Before this, `_resolve_target`
+    trusted it unchecked, so dispatch reached `ensure_workspace`'s `git
+    checkout` on the sandbox, which failed as a bare `CommandError` that
+    `_dispatch` only logs to the audit trail and retries next cycle --
+    forever, with nothing ever posted to the issue. This confirms that
+    failure is now caught up front, the same "clear comment, not a crash
+    three layers down" treatment the 404-target-repo case already gets.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(4)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                  # list_comments
+        ApiResponse(404, {}, b"not found"),                # branch_exists(main): false
+        ApiResponse(201, {}, json.dumps({"id": 3}).encode()),         # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    body = json.loads(comment["body"])["body"]
+    assert "main" in body
+    assert "doesn't exist" in body
+
+
+def test_a_non_404_error_confirming_the_base_branch_raises_rather_than_parking():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(4)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                  # list_comments
+        ApiResponse(500, {}, b"boom"),                     # branch_exists(main): error
+    ])
+
+    with pytest.raises(GitHubError):
+        orchestrator.run_once(NOW)
 
 
 def test_the_session_history_records_which_repo_the_work_was_in(tmp_path, monkeypatch):
