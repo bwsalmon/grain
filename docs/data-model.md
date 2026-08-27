@@ -2557,6 +2557,34 @@ written incrementally as the loop mutates it rather than once at the end
 of `run_once`. A `version` field and the established
 `.get()`-with-a-default convention carry an on-disk file forward.
 
+## Implementation status
+
+`grain/model/` holds the first of this: the model types, the schema, and
+a Dolt-backed store.
+
+| Module | What it is |
+|---|---|
+| `types.py` | the entities, storage-agnostic — no SQL, no store import |
+| `schema.py` | the same model as DDL, with the derivations as **views** |
+| `sql.py` | literal rendering for a database reached without bind parameters |
+| `dolt.py` | the store, over the `dolt` CLI through the existing `Runner` |
+
+Two decisions in this document are enforced by that code rather than
+restated by it. `TaskState` is a **view**, so there is no column any
+finish path could write; and declaration and observation are **separate
+tables**, which is what would let a declaration change land on a branch
+and be reviewed while observations keep being written.
+
+The state derivation exists twice on purpose — once in SQL for the store,
+once in Python for code holding a `Task` and no database — and
+`tests/test_model_schema.py` holds the two to the same precedence, since
+two implementations of one rule is a drift risk worth paying for
+deliberately.
+
+Not yet built: `TrackedPullRequest`, folders, the capability provider
+contract, and anything that reads or writes GitHub. `core.py` is
+untouched.
+
 ## Migration
 
 Four stages. Each ships on its own, and none changes a label, a
