@@ -151,6 +151,10 @@ afterwards, unlike a question — there is no reply to wait for.
   the known gaps.
 - **[`docs/host-adapter.md`](docs/host-adapter.md)** — the one
   platform-specific module, and what a macOS port would have to replace.
+- **[`docs/beads-incus-feasibility.md`](docs/beads-incus-feasibility.md)** —
+  whether to rebuild on incus (a third host-adapter driver) and beads (a
+  graph issue tracker): what each buys, what incus costs the macOS plan,
+  and why beads' source of truth decides it.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
 - **[`docs/next-session.md`](docs/next-session.md)** — what is left before
   a first real run, in the order worth doing it. Start here.
