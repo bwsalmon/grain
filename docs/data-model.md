@@ -8,8 +8,9 @@ document. One question is
 who writes what — and one
 [direction](#direction-the-declaration-moves-into-a-repo) is stated but
 not settled: the declared half of the model moving out of issues and into
-a repo. Everything below is written for tasks-as-issues and stays correct
-for that; it names the entities the automation loop already manipulates,
+a repo, with [a first-party UI](#direction-a-first-party-ui) over it.
+Everything below is written for tasks-as-issues and stays correct for
+that; it names the entities the automation loop already manipulates,
 states the invariants it already relies on, and proposes a shape that
 makes the next few features cost less than the last few did. The
 [migration](#migration) at the end is staged so that each stage is
@@ -340,6 +341,103 @@ declared. Stage 6's folder work gets cheaper by roughly the whole
 narrow-never-widen subsection. Nothing in stages 1–4 is wasted work if
 the direction is taken, which is the main reason it is safe to keep
 building while this stays open.
+
+### Direction: a first-party UI
+
+Also assumed. It composes with the direction above — a UI is the editor,
+a repo is the storage and audit layer, and git stays underneath — and it
+removes a constraint that has been shaping this document more than is
+obvious.
+
+**Almost everything about labels is a workaround for not having one.**
+`labels.py` spends its docstring on a two-tier palette: state labels dark
+and saturated so they read as a solid pill down a list of issues,
+capability labels pale so they annotate rather than compete. That is a
+rendering strategy for GitHub's issue list, expressed in hex colours,
+with a test holding the tiers apart by lightness. With a UI, `TaskState`
+and `Grant` render however the UI renders them, and the palette stops
+being part of the model's correctness. Labels either disappear with the
+issues or degrade to an **export** — a projection for people still
+looking at GitHub, which is a nice thing to have and a bad thing to
+depend on.
+
+The same goes for three other workarounds this document carries:
+relationships written as prose because a body is the only place for them,
+`needs_approval_label` because GitHub has no approve button for a thing
+that is not a PR, and `/lgtm` because a comment is the only affordance a
+thread offers.
+
+**The most valuable thing a UI adds is authoring-time validation.**
+Directives exist because an issue body is free text and that was the only
+channel. Everything they can get wrong is therefore discovered *after*
+the task is filed, which is why `DirectiveError`, `_park`, and a whole
+family of hand-written explanatory comments exist: an unparseable
+`/repo`, a repo that is not allow-listed, two conflicting `/depends`
+lines, a `grain-github-<name>` label naming a credential this deployment
+does not have, a `/review` with no `/pr` beside it.
+
+A form knows all of that before the task exists. The repo picker offers
+allow-listed repos; the folder picker walks the tree; the capability
+checkboxes show what the folder permits and grey out what it does not;
+`/review` cannot be checked without a PR selected. **A whole class of
+failure moves from runtime to authoring time**, and the parked-task path
+shrinks to the cases that are genuinely dynamic — a dependency that has
+not closed, a credential removed after the task was written.
+
+The text grammar does not go away. Task files are hand-editable, and
+`_suggest_fix` and `propose_task` author tasks programmatically. What
+changes is that it stops being the *primary* interface, which lowers the
+stakes on questions like [how a task names a
+folder](#open-questions) considerably: a picker writes whatever the
+schema says, and the grammar is a fallback rather than the thing every
+author types.
+
+**The one rule that matters: the UI is not a fourth record.** This
+document opened with five parallel dicts that could disagree about one
+task. A UI is the most natural place in the world to accidentally add a
+sixth. It must stay a *view plus an input surface*:
+
+- It reads declarations from the repo, grain's own acts from the store,
+  and outside facts from GitHub through grain — never its own copy of
+  any of them.
+- A human's action in it lands in whichever record owns that fact: a
+  commit to the task repo for a declaration change, a store write for a
+  cancel or a retarget of a running task, a GitHub call for a merge or a
+  thread reply. Never a UI-local database that then has to be
+  reconciled.
+- It shows **freshness** for anything in the third category.
+  `TrackedPullRequest.observed_at` exists precisely so a UI can say "PR
+  health as of 40 seconds ago" rather than presenting a cached value as
+  live. A UI that hides staleness turns the baseline rule back into a
+  correctness bug.
+
+**Identity should stay GitHub's.** A UI needs to know who a user is and
+what they may do — approve a task, grant a capability, cancel a run —
+and the temptation is to build a permission model for it. The trust gate
+today is `author_association`: can this person write to the task repo.
+That is GitHub's model, maintained by whoever administers the org, and it
+is already exactly the question grain needs answered.
+
+So: authenticate with GitHub OAuth and keep deriving permission from repo
+access. One permission model instead of two that can drift, no new
+credential store, and the gate keeps meaning the same thing it means
+today — which matters, because that gate is the whole prompt-injection
+defence and it should not be quietly reimplemented in a web app.
+
+**What it does to the open questions.** Conversation
+([the question the repo direction turns on](#open-questions)) stops being
+a choice between three unattractive GitHub surfaces: a task can simply
+have a thread, in grain's store, rendered by the UI, with `ask_question`
+posting to it. That is not a free win — GitHub supplies notifications,
+email and mobile for nothing, and a first-party thread supplies none of
+them — so the question changes shape rather than disappearing: it becomes
+*how does someone find out that a task is waiting on them*, which is a
+smaller and more tractable problem than which GitHub object to overload.
+
+**What it does not change.** The three records and their authority, the
+trust gate's meaning, the capability model, and every invariant below. A
+UI is a better window onto the model. It is not a change to the model,
+and the moment it starts being one, it has become the sixth dict.
 
 ## Entities
 
@@ -1160,6 +1258,9 @@ the model:
     review threads, issue open/closed, a human's label — is never decided
     from the store. The store's copy is a baseline for detecting change,
     and a decision that turns on it takes a fresh read first.
+16. The UI holds no record of its own. Every human action in it lands in
+    whichever of the three records owns that fact, and anything observed
+    is displayed with its freshness.
 
 ## What maps to what
 
@@ -1237,9 +1338,12 @@ dependencies allow:
 
 ## What this does not change
 
-- **Labels stay the human interface.** Every state and grant is still
-  visible on the issue, in the same two-tier palette, with the same
-  colours and the same meanings.
+- **Labels stay the human interface** for as long as GitHub is the
+  interface. Every state and grant is still visible on the issue, in the
+  same two-tier palette. Under [a first-party
+  UI](#direction-a-first-party-ui) they become an export rather than the
+  presentation layer — a projection worth having and a bad thing to
+  depend on.
 - **GitHub stays the system of record** for as long as tasks are issues.
   If the [declaration moves into a
   repo](#direction-the-declaration-moves-into-a-repo), GitHub stays the
@@ -1258,24 +1362,32 @@ dependencies allow:
 - **When does one JSON file stop working?** The store is rewritten whole
   on every save. At a few hundred tasks that is nothing; sub-tasks are
   the first feature that could multiply the count by an order of
-  magnitude. Worth measuring before stage 4, not before stage 1.
-- **Where does conversation live once the declaration is in a repo?**
-  The one that the [repo direction](#direction-the-declaration-moves-into-a-repo)
-  turns on — a per-task issue kept purely as a thread, the task file's own
-  PR review thread, or the target PR. Worth answering before building,
-  not during.
+  magnitude. A UI adds a second pressure — concurrent readers, and a
+  "has anything changed" question a whole-file read answers expensively.
+  The atomic temp-file-and-rename already gives a reader a consistent
+  view (it sees the old file or the new one, never a torn one), so the
+  question is cost and change-detection rather than correctness. Worth
+  measuring before stage 4, not before stage 1.
+- **How does someone find out a task is waiting on them?** With a
+  [first-party UI](#direction-a-first-party-ui), conversation can just be
+  a thread on the task, which is what the three GitHub-surface options
+  were all working around. What GitHub supplied for free and a first-party
+  thread does not is *reach*: notification, email, mobile. The tractable
+  version of the question is whether that is a notifier grain builds, a
+  mirror of the thread onto a GitHub object purely for its notifications,
+  or an accepted cost for a team that watches the queue anyway.
 - **Should an approved parent auto-approve its children?** Recommendation
   above is no by default, with an opt-in for children that request no
   capabilities and inherit their parent's repo. If decomposition turns
   out to be common, this is the first knob to revisit.
-- **How does a task name a folder inside a repo?** A path has to come
-  from somewhere, and there are three candidates: an extension to
-  `/repo owner/name:services/billing`, a separate `/folder` directive, or
-  inference from the paths the task's own diff touches. The third is the
-  most convenient and the least usable, because a folder's capabilities
-  must be resolved *before* dispatch and the diff does not exist yet. A
-  separate directive is the recommendation; the extended `/repo` form is
-  terser but overloads a directive that is already load-bearing.
+- **How does a task name a folder inside a repo?** Lower stakes than it
+  was: a UI's folder picker writes whatever the schema says, so the text
+  grammar is a fallback for hand-edited files rather than the thing every
+  author types. A separate `/folder` directive is still the
+  recommendation over extending `/repo owner/name:services/billing`,
+  which overloads a directive that is already load-bearing. Inference
+  from the diff remains unusable at any stakes — a folder's capabilities
+  resolve before dispatch, and the diff does not exist yet.
 - **Does a merge group need a merge order, or is dependency order
   enough?** The recommendation above says `DEPENDS_ON` between children
   covers it. The case that would force something more is a genuine cycle
