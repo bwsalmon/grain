@@ -205,6 +205,126 @@ that GitHub represents badly.
 That is a smaller, reversible bet. It also keeps the approval gate where
 the trust model already puts it.
 
+## Beads, or grain's own schema on Dolt?
+
+Beads runs on Dolt. So the fair comparison is not beads-versus-files but
+**beads-on-Dolt versus grain-on-Dolt**: same substrate, same operational
+risk, differing only in whose schema sits on top. That isolates the
+question usefully, because the Dolt risk then cancels out and stops being
+the deciding factor.
+
+### What Dolt itself gives, either way
+
+- **Cell-level diff and merge.** Branches, `dolt_diff()`, `dolt_merge()`,
+  with schema and data conflicts detected independently and data
+  conflicts resolved per cell rather than per line. For a structured
+  declaration that is strictly better than a text diff.
+- **Version control reachable from SQL** — system tables, functions and
+  procedures — so history is queryable rather than only inspectable.
+- **JSON column support**, which matters for the parts of the model that
+  are genuinely open-ended: capability grants, tags, placements.
+- Apache 2.0.
+
+And one constraint that shapes both options equally: **Dolt embeds only
+in Go.** grain's controller is Python. So either it shells out to the
+`dolt` CLI — which is exactly the idiom `gcloud` already established
+here, for reasons `gcp_keys.py` documents — or it runs `dolt sql-server`
+and adds a MySQL driver, meaning a new daemon *and* a non-stdlib
+dependency on the credential-holding VM. With beads the same shelling
+happens through `bd` instead. Roughly a wash.
+
+### What changes if the schema is grain's own
+
+**The model becomes DDL, with no impedance.** `Task`, `Run`, `Lease`,
+`Grant`, `TaskLink`, `TrackedPullRequest` are already tables in all but
+name.
+
+**Derived state becomes a view, which is as structural as it gets.**
+This model decided [`TaskState` is derived, never
+stored](data-model.md#taskstate-is-derived-not-stored), and made
+exactly-one-state a property of the design rather than a rule each finish
+path upholds. As a SQL view over approval and observations, that stops
+being a discipline entirely: there is no column to write, so no code path
+can write one.
+
+**Approval could be a Dolt merge.** The [repo
+direction](data-model.md#direction-the-declaration-moves-into-a-repo)
+wanted declaration changes to be reviewable and approval to be merging
+one. Dolt gives that natively — declaration changes land on a branch,
+review is a data diff, approval is `dolt_merge()` with cell-level
+conflicts — provided something renders it. Which
+[a first-party UI](data-model.md#direction-a-first-party-ui) already
+assumes.
+
+**Several things this document calls newly-answerable become one query.**
+"Which live leases came from the credential I am about to rotate?" is a
+join. "How many attempts has this task had?" is a count. "What is ready
+to dispatch?" is a recursive CTE over `TaskLink`.
+
+### What beads gives that would have to be rebuilt
+
+Honestly: less than it first appears, *for this system specifically*.
+
+- **The graph queries** — transitive blockers, cycle detection,
+  ready-work. Real, but a recursive CTE over a few hundred nodes, not a
+  research problem. And grain's model already specifies these completely.
+- **A JSON-first CLI**, which grain would build as its own surface anyway.
+- **External tracker sync** with GitHub, Jira, Linear. The largest genuine
+  gift — except grain already has extensive GitHub integration of its
+  own, so it is duplicating something rather than supplying something
+  missing.
+- **Someone else's maintenance**, which is the real argument and should
+  not be dismissed.
+
+### What beads would impose
+
+- **A vocabulary that is not grain's.** Core fields are title, priority
+  P0–P3, type (bug/task/message), status, assignee. grain's task carries
+  intent, origin-as-attribution, folder, one write target and many read
+  targets, base, auto-merge, capability grants and their leases. Labels
+  and custom tables can hold all of it — but then beads supplies an ID
+  scheme and a graph engine while grain's actual model lives in the
+  extension points, which is a thin return for a dependency.
+- **Stored status against derived state.** Beads stores `status`; this
+  model derives it. The workable compromise is to let beads answer the
+  *blocked* half and grain derive the rest — but that splits one
+  derivation across two stores, which is a fresh instance of exactly the
+  disease [this
+  model opens by describing](data-model.md#the-problem-the-model-is-real-but-it-is-not-written-down):
+  parallel records that can disagree.
+- **Upgrade coupling.** Beads enforces schema-version matching at open. A
+  beads release could require migrating grain's runtime authority on
+  beads' schedule.
+
+### The verdict between them
+
+**If Dolt is chosen at all, choose grain's own schema.** Beads' core
+carries an issue tracker's shape, and the overlap with grain is precisely
+*the graph* — which is the part this model has already specified in full
+and can express in SQL. It would supply what grain has designed and
+constrain what grain found hard.
+
+**But the more useful comparison is three-way, not two**, because
+"beads or custom" quietly assumes Dolt:
+
+| | Review | Queries | New machinery on the controller |
+|---|---|---|---|
+| **Files in git** | free — GitHub PRs, the property the repo direction wanted | manual; load and index in memory | none |
+| **Grain on Dolt** | a data diff, if the UI renders it | native and cheap | Dolt, plus a daemon or CLI shelling |
+| **Beads on Dolt** | same, minus schema control | native, in someone else's vocabulary | Dolt, plus beads' release cadence |
+
+The deciding question is **whether the declaration is something to query
+or something to review.** At a few hundred tasks, files in git plus an
+in-memory index answers every query this model poses, and review is free
+and familiar. Dolt earns its place when the query load or concurrent
+writes become real — which is a scale grain does not have yet, and the
+[store-size question](data-model.md#open-questions) is deliberately
+parked until sub-tasks make it concrete.
+
+So: **files in git now; grain-on-Dolt if scale forces it; beads-on-Dolt
+in neither case** — while still taking beads' `ready` framing, which this
+model reached independently.
+
 ## What a combined rebuild would actually cost
 
 | | Scope | Risk | Reversible |
@@ -228,8 +348,11 @@ or the reverse.
    Lima and treat incus as the Linux driver. If it does not, say so in
    `docs/design.md` and delete a constraint that is shaping the design.
 3. **Do not move the declaration into beads yet.** Verify its current
-   source of truth first (below). If Dolt is authoritative, the approval
-   mechanism this model depends on has no home there.
+   source of truth first (below). And if Dolt turns out to be the right
+   substrate, [put grain's own schema on
+   it](#beads-or-grains-own-schema-on-dolt) rather than beads' — beads
+   would supply the graph this model has already specified and constrain
+   the parts it found hard.
 4. **Steal `bd ready` regardless.** The derived-ready-work framing is
    right, and this model has already converged on it — see the
    [invariants](data-model.md#invariants) on derived state.
@@ -252,6 +375,14 @@ one version.
   reviewed as a diff; whether custom tables survive `bd dolt pull`
   cleanly; what concurrent access actually requires; whether the GitHub
   sync is rich enough to carry approval both ways.
+- **Dolt, if it is considered:** whether recursive CTEs are supported
+  well enough for the blocker graph; what `dolt sql` costs per
+  invocation when shelled to on a cron loop; what remotes are available
+  for a single-host deployment; and the honest cost list, which is
+  published as "When NOT to Use Dolt" and was unreachable from here —
+  `dolthub.com` is blocked by this environment's egress proxy, so no
+  performance or maturity figures in this document come from the
+  project's own accounting.
 - **Both:** that neither introduces a dependency the controller's
   deliberately short package list should not carry — `python3 git
   openssh-client curl ca-certificates gnupg`, plus `google-cloud-cli` as
