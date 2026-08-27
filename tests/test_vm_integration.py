@@ -730,6 +730,64 @@ def test_ensure_workspace_fetches_and_resets_an_already_cloned_workspace(
         ssh_runner.run(["rm", "-rf", workspace], check=False)
 
 
+def test_ensure_workspace_recovers_by_recloning_when_git_clean_cannot_run(
+    ssh_runner: SshRunner, git_proxy_target: GitProxyTarget, git_installed: None,
+):
+    # bwsalmon/agents#158, reproducing live the exact scenario bwsalmon/
+    # agents#154's fix was written for: a previous task ran something as
+    # root and left a root-owned file behind whose *parent directory* the
+    # sandbox user cannot write to (found live as a root-owned
+    # `__pycache__/`) -- `git clean -fdx` cannot unlink a file it has no
+    # write access to reach, and before that fix this whole `set -eu` reset
+    # script died at that step, so *no later dispatch to this sandbox would
+    # ever have gotten a workspace again*. The unit tests in
+    # test_automation_dispatch.py already cover this branch of the
+    # generated script against stand-in `git`/`sudo` binaries; this is what
+    # proves it against a real checkout, real permissions, and a real
+    # `sudo` -- that the new task's repo genuinely lands on the sandbox
+    # instead of leaving it stuck on whatever the last task left behind.
+    configure_git_credentials(ssh_runner, git_proxy_target.remote_url, git_proxy_target.token)
+    workspace = f"{WORKSPACE_PATH}-unclean-reclone-test"
+    try:
+        ensure_workspace(ssh_runner, git_proxy_target.remote_url, path=workspace)
+        first = ssh_runner.run(["cat", f"{workspace}/README.md"]).stdout
+        assert first == "hello from the live test upstream\n"
+
+        # A root-owned directory the sandbox user has no write access to --
+        # `git clean -fdx` can see the file inside it but cannot remove it,
+        # the same shape as the `__pycache__` this was found with live.
+        ssh_runner.run(["sudo", "mkdir", "-m", "755", f"{workspace}/root-owned"])
+        ssh_runner.run(["sudo", "touch", f"{workspace}/root-owned/stuck.txt"])
+        unclean = ssh_runner.run(["git", "-C", workspace, "clean", "-fdx"], check=False)
+        assert unclean.returncode != 0, (
+            "setup should have reproduced a workspace plain `git clean` can't remove"
+        )
+
+        # A second commit lands upstream in between -- the same "previous
+        # task's leftovers plus a new task's own commit" shape a reused
+        # sandbox actually sees, and what turns the assertion below from
+        # "recovered to the same content" into "the *new* repo state
+        # genuinely made it to the sandbox," the claim the issue asks for.
+        seed = git_proxy_target.seed_clone
+        (seed / "README.md").write_text("a new task's commit, after the root-owned leftover\n")
+        _run_ok(["git", "-C", str(seed), "commit", "-aqm", "second commit"])
+        _run_ok(["git", "-C", str(seed), "push", "-q", "origin", "main"])
+
+        # Must not raise: without the sudo-rm-rf-then-reclone fallback this
+        # hits CommandError from the `set -eu` script, exactly the failure
+        # that used to wedge every later dispatch to this sandbox.
+        ensure_workspace(ssh_runner, git_proxy_target.remote_url, path=workspace)
+
+        second = ssh_runner.run(["cat", f"{workspace}/README.md"]).stdout
+        assert second == "a new task's commit, after the root-owned leftover\n"
+        stuck = ssh_runner.run(["test", "-e", f"{workspace}/root-owned"], check=False)
+        assert stuck.returncode != 0, "re-clone should have discarded the root-owned directory"
+        status = ssh_runner.run(["git", "-C", workspace, "status", "--porcelain"]).stdout
+        assert status == "", "the re-cloned workspace should be a clean checkout"
+    finally:
+        ssh_runner.run(["sudo", "rm", "-rf", workspace], check=False)
+
+
 # --- ensure_workspace(branch=...) / dispatch_pr against the real proxy
 # --- (docs/roadmap.md item 9): checking out an *existing* PR branch is new
 # --- territory even though ensure_workspace already existed for the
