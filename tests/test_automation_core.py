@@ -1771,6 +1771,211 @@ def test_no_suggested_fix_on_record_skips_the_lgtm_poll_entirely():
     )
 
 
+# --- proposing new tasks (bwsalmon/agents#175) ------------------------------
+
+def test_a_succeeded_run_files_proposed_tasks_before_finishing(monkeypatch, tmp_path):
+    """`propose_task` calls made this run are filed as fresh task-repo
+    issues, each carrying `needs_approval_label` -- the same "grain
+    suggests, a human decides" gate `_suggest_fix` already uses -- before
+    the rest of this outcome's own finish handling runs. A `depends_on`
+    entry is resolved against either an existing issue number (`55` here)
+    or an earlier proposal's own `id` in the same batch (`infra`), in the
+    order the agent proposed them.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    tasks_file = tmp_path / "proposed-tasks.json"
+    tasks_file.write_text(json.dumps([
+        {"id": "infra", "title": "Set up infra", "body": "do infra work", "depends_on": []},
+        {"id": None, "title": "Build feature", "body": "do feature work",
+         "depends_on": ["infra", "55"]},
+    ]))
+    monkeypatch.setattr(core_module, "proposed_tasks_path", lambda unit: str(tasks_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(
+        [new_issue_response(101), new_issue_response(102),
+         ApiResponse(201, {}, json.dumps({"id": 900}).encode())]  # create_comment (summary)
+        + pr_flow_response(42)
+        + [
+            completion_priming_response(),
+            # `_promote_lgtm_comments` now also polls this cycle, since the
+            # two issues just filed above put something in
+            # `state.proposed_task_issues` for the first time.
+            ApiResponse(200, {}, b"[]"),
+            open_pr_response(42),
+        ]
+    )
+
+    orchestrator.run_once(NOW)
+
+    created = [c for c in transport.calls
+               if c["method"] == "POST" and c["path"] == "/repos/o/r/issues"]
+    assert len(created) == 2
+    first, second = (json.loads(c["body"]) for c in created)
+    assert first["labels"] == ["grain-agent-needs-approval"]
+    assert second["labels"] == ["grain-agent-needs-approval"]
+    assert "Set up infra" in first["title"]
+    assert "Proposed by o/r#5" in first["body"]
+    assert "/depends" not in first["body"]
+    assert "do feature work" in second["body"]
+    assert "/depends 101,55" in second["body"]
+
+    summary = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/comments"
+    )
+    sent = json.loads(summary["body"])
+    assert "o/r#101" in sent["body"] and "o/r#102" in sent["body"]
+
+    assert orchestrator.state.proposed_task_issues == {101, 102}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("filed 2 proposed task(s): o/r#101, o/r#102" in o for o in outcomes)
+
+
+def test_a_succeeded_run_with_no_proposed_tasks_files_nothing():
+    """The overwhelming common case: the agent never called `propose_task`
+    this run, so `proposed_tasks_path` is absent (`dispatch.py` never
+    writes it unless the tool is called) -- must not add any GitHub call
+    or change `run_once`'s existing behaviour at all.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(
+        pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] == "POST" and c["path"] == "/repos/o/r/issues"
+                   for c in transport.calls)
+    assert orchestrator.state.proposed_task_issues == set()
+
+
+def test_file_proposed_tasks_drops_an_unresolvable_dependency_with_a_note(
+    monkeypatch, tmp_path,
+):
+    """A `depends_on` entry naming neither a digit nor a seen `id` (a typo,
+    a forward reference, or the proposal's own `id`) must not lose the
+    whole proposal -- it's dropped, with a note in the filed issue's own
+    body, and everything else about the proposal still gets filed.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    tasks_file = tmp_path / "proposed-tasks.json"
+    tasks_file.write_text(json.dumps([
+        {"id": None, "title": "Orphaned", "body": "x", "depends_on": ["nonexistent"]},
+    ]))
+    monkeypatch.setattr(core_module, "proposed_tasks_path", lambda unit: str(tasks_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(
+        [new_issue_response(101), ApiResponse(201, {}, json.dumps({"id": 900}).encode())]
+        + pr_flow_response(42)
+        + [
+            completion_priming_response(),
+            # `_promote_lgtm_comments` now also polls this cycle -- same
+            # reason as the multi-proposal test above.
+            ApiResponse(200, {}, b"[]"),
+            open_pr_response(42),
+        ]
+    )
+
+    orchestrator.run_once(NOW)
+
+    created = next(c for c in transport.calls
+                    if c["method"] == "POST" and c["path"] == "/repos/o/r/issues")
+    sent = json.loads(created["body"])
+    assert "/depends" not in sent["body"]
+    assert "nonexistent" in sent["body"]
+    assert "dropped" in sent["body"]
+
+
+def test_file_proposed_tasks_tolerates_a_404_and_stops_filing_the_rest(
+    monkeypatch, tmp_path,
+):
+    """Same "stale config, not a crash" tolerance `_suggest_fix` already
+    holds a 404 to: the task repo itself is gone from underneath this
+    deployment, so nothing further in this batch gets filed either -- but
+    the rest of `run_once` still proceeds normally.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    tasks_file = tmp_path / "proposed-tasks.json"
+    tasks_file.write_text(json.dumps([
+        {"id": None, "title": "First", "body": "x", "depends_on": []},
+        {"id": None, "title": "Second", "body": "y", "depends_on": []},
+    ]))
+    monkeypatch.setattr(core_module, "proposed_tasks_path", lambda unit: str(tasks_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend(
+        [ApiResponse(404, {}, b'{"message": "Not Found"}')]
+        + pr_flow_response(42) + [completion_priming_response(), open_pr_response(42)]
+    )
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    assert orchestrator.state.proposed_task_issues == set()
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("First" in o and "not found" in o for o in outcomes)
+
+
+def test_a_proposed_task_on_record_does_not_skip_the_lgtm_poll():
+    """The mirror image of `test_no_suggested_fix_on_record_skips_the_lgtm_poll_entirely`:
+    an outstanding proposed task (bwsalmon/agents#175) is exactly the other
+    reason `_promote_lgtm_comments`'s guard now polls at all.
+    """
+    state = AutomationState()
+    state.record_proposed_task(100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.append(ApiResponse(200, {}, b"[]"))  # list_issues(needs_approval)
+
+    orchestrator.run_once(NOW)
+
+    assert any(
+        c["method"] == "GET" and "labels=grain-agent-needs-approval" in c["path"]
+        for c in transport.calls
+    )
+
+
+def test_an_lgtm_comment_approves_a_proposed_task_and_clears_it_from_state():
+    """A trusted `/lgtm` comment promotes a proposed task the same way it
+    already promotes a `_suggest_fix` one (`test_an_lgtm_comment_approves_a_suggested_fix_the_same_as_trigger_label_would`),
+    and -- unlike `fix_issue`, which is never cleared -- also drops it from
+    `state.proposed_task_issues`, since there is no later "original PR
+    closed" event to lean on for this feature the way `_suggest_fix` has.
+    """
+    state = AutomationState()
+    state.record_proposed_task(100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="maintainer", body="looks good\n/lgtm",
+                              author_association="OWNER"),
+        ]).encode()),
+        ApiResponse(200, {}, b"{}"),  # remove_label(needs_approval_label)
+        ApiResponse(200, {}, b"{}"),  # add_label(trigger_label)
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.proposed_task_issues == set()
+
+
 # --- auto-merging a stacked fix PR (bwsalmon/agents#83) --------------------
 
 def test_close_finished_prs_auto_merges_a_clean_auto_merge_pr():

@@ -428,3 +428,44 @@ def test_load_of_a_pre_item_9_state_file_defaults_to_issue_kind(tmp_path: Path):
     assignment = loaded.assignments["sandbox-0"]
     assert assignment.kind is TriggerKind.ISSUE
     assert assignment.branch is None
+
+
+def test_record_proposed_task_adds_it():
+    state = AutomationState()
+    state.record_proposed_task(100)
+    assert state.proposed_task_issues == {100}
+
+
+def test_clear_proposed_task_removes_it():
+    state = AutomationState()
+    state.record_proposed_task(100)
+    state.clear_proposed_task(100)
+    assert state.proposed_task_issues == set()
+
+
+def test_clear_proposed_task_on_an_absent_issue_is_a_no_op():
+    state = AutomationState()
+    state.clear_proposed_task(100)  # must not raise
+    assert state.proposed_task_issues == set()
+
+
+def test_save_and_load_round_trips_proposed_task_issues(tmp_path: Path):
+    state = AutomationState()
+    state.record_proposed_task(100)
+    state.record_proposed_task(101)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assert loaded.proposed_task_issues == {100, 101}
+
+
+def test_load_of_a_pre_175_state_file_has_no_proposed_task_issues(tmp_path: Path):
+    # A state file written before bwsalmon/agents#175 existed has no
+    # "proposed_task_issues" key at all -- loading it must default to
+    # empty rather than KeyError, the same tolerance every other addition
+    # here already has for a state file written before it existed.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"assignments": {}, "run_timestamps": []}))
+    loaded = AutomationState.load(path)
+    assert loaded.proposed_task_issues == set()

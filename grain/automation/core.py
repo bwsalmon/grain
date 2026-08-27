@@ -135,7 +135,8 @@ from .config import AutomationConfig
 from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, UnitState, branch_name, comment_path,
-    dispatch, dispatch_pr, dispatch_review, question_path, review_path, unit_name,
+    dispatch, dispatch_pr, dispatch_review, proposed_tasks_path, question_path,
+    review_path, unit_name,
 )
 from .gcp_keys import GcpKeyConfig
 from .gcp_keys import create_key as create_gcp_key
@@ -317,6 +318,19 @@ def _pending_review_comments(sandbox: str) -> list[dict]:
     """
     try:
         return json.loads(Path(review_path(unit_name(sandbox))).read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _pending_proposed_tasks(sandbox: str) -> list[dict]:
+    """Reads back every `propose_task` call the agent made this run
+    (bwsalmon/agents#175) -- the same file-based handoff `_pending_review_comments`
+    already uses: `mcp_server.py`'s tool appends, this reads the whole list
+    back at once. Absence (never written, or an empty/corrupt file) reads
+    as "nothing proposed," never an exception.
+    """
+    try:
+        return json.loads(Path(proposed_tasks_path(unit_name(sandbox))).read_text())
     except (OSError, json.JSONDecodeError):
         return []
 
@@ -854,6 +868,12 @@ class Orchestrator:
             )
 
     def _finish_succeeded(self, outcome: Outcome) -> None:
+        # bwsalmon/agents#175: filed first, unconditionally, regardless of
+        # `outcome.kind` or whether the run below also asks a question --
+        # proposing follow-up work is orthogonal to how the rest of this
+        # outcome resolves, and every kind-specific path (including the
+        # question one) returns early in a way that would otherwise skip it.
+        self._file_proposed_tasks(outcome)
         if outcome.kind is TriggerKind.REVIEW:
             self._finish_succeeded_review(outcome)
         elif outcome.kind is TriggerKind.PR:
@@ -1417,16 +1437,30 @@ class Orchestrator:
         own label filter on the next cycle -- there is nothing left that
         could re-trigger on the same comment.
 
-        `needs_approval_label` is only ever applied by `_suggest_fix`, which
-        records the issue it just filed as `fix_issue` on the *original*
-        PR's own `OpenPullRequest` record -- so, the same way
+        `needs_approval_label` is applied by `_suggest_fix`, which records
+        the issue it just filed as `fix_issue` on the *original* PR's own
+        `OpenPullRequest` record, and by `_file_proposed_tasks`
+        (bwsalmon/agents#175), which records each one in
+        `state.proposed_task_issues` instead -- so, the same way
         `_promote_answered_questions`/`_restart_commented_completions` skip
         straight past an empty `pending_questions`/`completed_issues`, this
         skips the `list_issues` call entirely unless `state` says a
-        suggested fix is actually outstanding somewhere. Without that
-        guard, every single `run_once` on every deployment would carry one
-        more GitHub call for a feature the overwhelming majority of cycles
-        have nothing to do with.
+        suggested fix or a proposed task is actually outstanding somewhere.
+        Without that guard, every single `run_once` on every deployment
+        would carry one more GitHub call for a feature the overwhelming
+        majority of cycles have nothing to do with.
+
+        Unlike `fix_issue` (never cleared once set -- see
+        `OpenPullRequest`'s own docstring), a `proposed_task_issues` entry
+        *is* dropped the moment this loop promotes it below, since there is
+        no other event downstream that would ever do it for this feature --
+        a fix's stale `fix_issue` eventually stops mattering once the
+        original PR it was suggested for closes and its whole record is
+        dropped with it, but a proposed task has no such original PR to
+        wait on. An entry approved by hand instead of `/lgtm` (bypassing
+        this loop) lingers here the same way a hand-approved `fix_issue`
+        already does -- an accepted, minor extra poll cost, not something
+        this method tries to detect.
 
         A 404 from `list_issues` or `list_comments` means the task repo (or
         one particular issue) is gone from underneath this deployment's own
@@ -1434,7 +1468,8 @@ class Orchestrator:
         to act on this cycle, not a reason to crash it.
         """
         if not any(o.fix_issue is not None
-                   for o in self.state.open_pull_requests.values()):
+                   for o in self.state.open_pull_requests.values()) \
+                and not self.state.proposed_task_issues:
             return
         try:
             issues = self.github.list_issues(
@@ -1470,6 +1505,8 @@ class Orchestrator:
                 self.config.task_owner, self.config.task_repo,
                 issue.number, self.config.trigger_label,
             )
+            self.state.clear_proposed_task(issue.number)
+            self._save_state()
             self.audit.record(
                 sandbox=None, issue=issue.number,
                 outcome=f"{approval.user} ({approval.author_association}) "
@@ -1492,6 +1529,112 @@ class Orchestrator:
                 c.name for c in checks
                 if c.status == "completed" and c.conclusion in _FAILING_CHECK_CONCLUSIONS
             ),
+        )
+
+    def _file_proposed_tasks(self, outcome: Outcome) -> None:
+        """Files whatever the agent proposed via `propose_task` this run
+        (bwsalmon/agents#175) as fresh task-repo issues, each carrying
+        `needs_approval_label` -- the same "grain suggests, a human
+        decides" gate `_suggest_fix` already established
+        (bwsalmon/agents#83): an agent proposing a task is not the same as
+        a human wanting it attempted, so none of these are ever picked up
+        by `_dispatch`'s own `trigger_label` poll on their own.
+        `_promote_lgtm_comments` already knows how to bring one into the
+        queue, the moment a human applies `trigger_label` by hand or
+        comments `/lgtm` -- reusing the label this way, rather than a new
+        one of its own, means this feature needed no changes there beyond
+        widening its own "is it worth polling" guard.
+
+        `depends_on` entries are resolved here, in the order the agent
+        proposed them: a bare issue number names an existing task;
+        anything else is looked up against the `id` an earlier proposal
+        *in this same batch* gave itself, letting one run propose a small
+        dependent chain of tasks without knowing any real issue numbers up
+        front. This only ever looks backward through the batch -- a
+        `depends_on` naming an `id` not yet filed (a forward reference, a
+        typo, or the proposal's own `id`) can't be resolved, and is dropped
+        with a note in the filed issue's own body rather than losing the
+        whole proposal over one bad reference.
+
+        Best-effort against a stale task issue the same way `_suggest_fix`/
+        `_park`/`_finish_question` already are: a 404 from `create_issue`
+        means the task repo itself is gone from underneath this
+        deployment's own config, not a reason to crash the cycle -- this
+        just stops filing the rest of this batch.
+        """
+        proposals = _pending_proposed_tasks(outcome.sandbox)
+        if not proposals:
+            return
+        task = self._task
+        filed_by_id: dict[str, int] = {}
+        filed_numbers: list[int] = []
+        for proposal in proposals:
+            depends: list[int] = []
+            notes: list[str] = []
+            for ref in proposal.get("depends_on") or []:
+                ref = str(ref)
+                if ref.isdigit():
+                    depends.append(int(ref))
+                elif ref in filed_by_id:
+                    depends.append(filed_by_id[ref])
+                else:
+                    notes.append(
+                        f"(could not resolve dependency {ref!r} named by this "
+                        "proposal -- dropped)"
+                    )
+            body_parts = [
+                _AUTOMATION_SIGNATURE, "",
+                f"Proposed by {task}#{outcome.issue} while working on that task.",
+                "", proposal["body"],
+            ]
+            if notes:
+                body_parts += [""] + notes
+            body_parts.append(
+                f"\nApply the `{self.config.trigger_label}` label to this issue, "
+                "or comment `/lgtm` on it, to let the agent set attempt it."
+            )
+            if depends:
+                body_parts.append("/depends " + ",".join(str(d) for d in depends))
+            try:
+                new_issue = self.github.create_issue(
+                    task.owner, task.name,
+                    title=f"🤖 grain: {proposal['title']}",
+                    body="\n".join(body_parts),
+                    labels=[self.config.needs_approval_label],
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.audit.record(
+                    sandbox=outcome.sandbox, issue=outcome.issue,
+                    outcome=f"wanted to file a proposed task ({proposal['title']!r}) "
+                            f"but {task} was not found -- stale config?",
+                )
+                break
+            proposal_id = proposal.get("id")
+            if proposal_id and str(proposal_id) not in filed_by_id:
+                filed_by_id[str(proposal_id)] = new_issue.number
+            filed_numbers.append(new_issue.number)
+            self.state.record_proposed_task(new_issue.number)
+
+        if not filed_numbers:
+            return
+        self._save_state()
+        named = ", ".join(f"{task}#{n}" for n in filed_numbers)
+        try:
+            self.github.create_comment(
+                task.owner, task.name, outcome.issue,
+                f"{_AUTOMATION_SIGNATURE}\n\n"
+                f"Proposed {len(filed_numbers)} follow-up task(s) while working on "
+                f"this: {named}. Apply the `{self.config.trigger_label}` label (or "
+                "comment `/lgtm`) on each one you'd like the agent set to attempt.",
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+        self.audit.record(
+            sandbox=outcome.sandbox, issue=outcome.issue,
+            outcome=f"filed {len(filed_numbers)} proposed task(s): {named}",
         )
 
     def _suggest_fix(self, pending: OpenPullRequest, pr: PullRequestDetail,

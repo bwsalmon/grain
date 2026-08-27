@@ -90,7 +90,25 @@ isn't a review, since nothing ever reads this file for one (`core.py`'s
 `_finish_succeeded_issue`/`_finish_succeeded_pr` never call
 `_pending_review_comments`).
 
-An eighth tool, `read_grain_logs` (bwsalmon/agents#62), is unlike every
+An eighth tool, `propose_task` (bwsalmon/agents#175), is the same "only
+ever writes to a local file, `core.py` reads it back at finish time" shape
+`add_review_comment` already is, and accumulates the same way: a JSON list
+on disk, one entry per call. It exists so an agent can plan, not just
+execute -- splitting follow-up work out of its own task, or flagging
+something out of scope it noticed along the way -- without that follow-up
+starting on its own the moment it's proposed. `core.py`'s
+`_file_proposed_tasks` reads the whole list back once a run finishes and
+files each entry as a fresh task-repo issue carrying `needs_approval_label`
+(bwsalmon/agents#83's own label, not a new one -- the trust bar is
+identical: grain suggesting work is never the same as a human wanting it
+attempted), so `_promote_lgtm_comments` already knows how to bring one into
+the queue for free. `depends_on` entries are resolved by `core.py`, not
+here: a bare issue number names an existing task, and anything else is
+looked up against `id`s given to earlier `propose_task` calls in the same
+run, so one run can propose a small dependent chain of tasks that don't
+have real issue numbers yet.
+
+A ninth tool, `read_grain_logs` (bwsalmon/agents#62), is unlike every
 tool above in one specific way: it reads from the *controller*, where this
 process already runs, rather than reaching the sandbox over SSH -- there is
 no `Runner`-over-SSH hop to make, since `journalctl` for grain's own
@@ -344,6 +362,50 @@ TOOLS = [
                 "comment": {"type": "string"},
             },
             "required": ["comment"],
+        },
+    },
+    {
+        "name": "propose_task",
+        "description": (
+            "Propose a new task for the task queue -- for example, "
+            "splitting follow-up work out of the task you were given, or "
+            "flagging work you noticed is needed but is out of scope for "
+            "this one. Each proposed task is filed as a new GitHub issue "
+            "once this run finishes, but it requires a human to apply the "
+            "trigger label (or comment /lgtm) before the agent set will "
+            "ever attempt it -- proposing a task never starts it. Call "
+            "this once per task you want to propose. Give a short `id` if "
+            "a later propose_task call in this same run should list this "
+            "one in its own depends_on -- for example, to propose a small "
+            "chain of tasks where the second can't start until the first "
+            "is done."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "A short local name for this proposal, used only "
+                        "so a later propose_task call in this same run can "
+                        "name it in its own depends_on -- not shown to the "
+                        "human and not the eventual issue number."
+                    ),
+                },
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "depends_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Existing issue numbers, and/or ids given to "
+                        "earlier propose_task calls in this same run, that "
+                        "this task must wait on before it can start."
+                    ),
+                },
+            },
+            "required": ["title", "body"],
         },
     },
     {
@@ -781,6 +843,40 @@ def comment_on_issue(comment_path: str, comment: str) -> ToolResult:
     )
 
 
+def propose_task(tasks_path: str, *, title: str, body: str,
+                  id: str | None = None,
+                  depends_on: list[str] | None = None) -> ToolResult:
+    """Records one proposed task (bwsalmon/agents#175) for `core.py`'s
+    `_file_proposed_tasks` to file as a GitHub issue once this run
+    finishes -- the same "write to a fixed per-dispatch file, `core.py`
+    reads it back at finish time" shape `add_review_comment` already uses,
+    and accumulates the same way: a JSON list on disk, read back
+    (defaulting to empty for a first call), appended to, and written back
+    whole.
+
+    `id`/`depends_on` travel through unvalidated: whether an `id` is
+    unique, or a `depends_on` entry names a real issue or an `id` given to
+    an earlier call this run, is something only `core.py`'s eventual
+    resolution can determine, not something this tool has the other
+    proposals (or GitHub) in hand to check against.
+    """
+    try:
+        existing = json.loads(Path(tasks_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        existing = []
+    existing.append({
+        "id": id, "title": title, "body": body,
+        "depends_on": list(depends_on) if depends_on else [],
+    })
+    Path(tasks_path).write_text(json.dumps(existing))
+    return ToolResult(
+        text=f"Recorded ({len(existing)} proposed task(s) so far this "
+             "run). Each will be filed as a new GitHub issue requiring a "
+             "human's approval before the agent set attempts it -- "
+             "nothing is filed yet."
+    )
+
+
 def add_review_comment(review_path: str, body: str, *, path: str | None = None,
                         line: int | None = None) -> ToolResult:
     """Appends one review comment to `review_path` (bwsalmon/agents#154) --
@@ -1024,6 +1120,7 @@ class McpServer:
                  question_path: str | None = None,
                  comment_path: str | None = None,
                  review_path: str | None = None,
+                 tasks_path: str | None = None,
                  self_debug: bool = False,
                  self_repair: bool = False,
                  local_runner: Runner | None = None,
@@ -1039,6 +1136,9 @@ class McpServer:
         # Same "None only in tests" treatment again, for add_review_comment
         # (bwsalmon/agents#154).
         self.review_path = review_path
+        # Same "None only in tests" treatment again, for propose_task
+        # (bwsalmon/agents#175).
+        self.tasks_path = tasks_path
         # bwsalmon/agents#62: whether this dispatch's task issue carried
         # `self_debug_label` -- `main()` sets this from `--self-debug`,
         # which `dispatch.py` only ever passes in that case. Gates both
@@ -1145,6 +1245,14 @@ class McpServer:
                 )
             return add_review_comment(self.review_path, args["body"],
                                        path=args.get("path"), line=args.get("line"))
+        if name == "propose_task":
+            if self.tasks_path is None:
+                return ToolResult(
+                    text="propose_task is not configured for this session.",
+                    is_error=True,
+                )
+            return propose_task(self.tasks_path, title=args["title"], body=args["body"],
+                                 id=args.get("id"), depends_on=args.get("depends_on"))
         if name == "read_grain_logs":
             if not self.self_debug:
                 return ToolResult(
@@ -1223,11 +1331,13 @@ class McpServer:
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
           comment_path: str | None = None, review_path: str | None = None,
+          tasks_path: str | None = None,
           self_debug: bool = False,
           self_repair: bool = False, task_unit: str | None = None,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
     server = McpServer(runner, workspace, question_path=question_path,
                         comment_path=comment_path, review_path=review_path,
+                        tasks_path=tasks_path,
                         self_debug=self_debug,
                         self_repair=self_repair, task_unit=task_unit)
     for line in stdin:
@@ -1253,6 +1363,7 @@ def main() -> None:
     parser.add_argument("--question-path", required=True)
     parser.add_argument("--comment-path", required=True)
     parser.add_argument("--review-path", required=True)
+    parser.add_argument("--tasks-path", required=True)
     # bwsalmon/agents#62: off unless `dispatch.py`'s `_mcp_config_json`
     # added it, which only happens for a task whose issue carried
     # `self_debug_label`.
@@ -1275,6 +1386,7 @@ def main() -> None:
     )
     serve(runner, args.workspace, question_path=args.question_path,
           comment_path=args.comment_path, review_path=args.review_path,
+          tasks_path=args.tasks_path,
           self_debug=args.self_debug,
           self_repair=args.self_repair, task_unit=args.task_unit)
 

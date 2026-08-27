@@ -7,8 +7,8 @@ import pytest
 
 from grain.automation.mcp_server import (
     TOOLS, McpServer, add_review_comment, ask_question, check_grain_health, comment_on_issue,
-    edit_file, main, reboot_controller, reboot_sandbox, read_automation_audit_log, read_file,
-    read_grain_config, read_grain_logs, reformat_sandbox, restart_grain_service,
+    edit_file, main, propose_task, reboot_controller, reboot_sandbox, read_automation_audit_log,
+    read_file, read_grain_config, read_grain_logs, reformat_sandbox, restart_grain_service,
     run_command, serve, write_file,
 )
 from grain.automation.ssh import SshRunner
@@ -267,6 +267,66 @@ def test_tools_call_routes_add_review_comment_to_the_configured_path(tmp_path):
     })
     assert resp["result"]["isError"] is False
     assert json.loads(path.read_text()) == [{"body": "nit", "path": "a.py", "line": 3}]
+
+
+def test_propose_task_writes_the_proposal_to_the_fixed_path_not_the_sandbox(tmp_path):
+    path = tmp_path / "proposed-tasks.json"
+    result = propose_task(str(path), title="Do the thing", body="Details here")
+    assert json.loads(path.read_text()) == [
+        {"id": None, "title": "Do the thing", "body": "Details here", "depends_on": []}
+    ]
+    assert not result.is_error
+    assert "recorded" in result.text.lower()
+
+
+def test_propose_task_accumulates_across_calls(tmp_path):
+    path = tmp_path / "proposed-tasks.json"
+    propose_task(str(path), title="First", body="body one", id="first")
+    propose_task(str(path), title="Second", body="body two", depends_on=["first", "42"])
+    proposals = json.loads(path.read_text())
+    assert proposals == [
+        {"id": "first", "title": "First", "body": "body one", "depends_on": []},
+        {"id": None, "title": "Second", "body": "body two", "depends_on": ["first", "42"]},
+    ]
+
+
+def test_propose_task_reports_the_running_count(tmp_path):
+    path = tmp_path / "proposed-tasks.json"
+    propose_task(str(path), title="First", body="x")
+    result = propose_task(str(path), title="Second", body="y")
+    assert "2" in result.text
+
+
+def test_propose_task_tolerates_a_missing_file_as_an_empty_start(tmp_path):
+    path = tmp_path / "does-not-exist" / "proposed-tasks.json"
+    with pytest.raises(OSError):
+        # Same boundary `add_review_comment` documents: a missing parent
+        # directory is a real error, unlike the file itself being absent.
+        propose_task(str(path), title="x", body="y")
+
+
+def test_tools_call_propose_task_is_refused_when_not_configured():
+    server = McpServer(FakeRunner(), WORKSPACE)
+    resp = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "propose_task", "arguments": {"title": "x", "body": "y"}},
+    })
+    assert resp["result"]["isError"] is True
+
+
+def test_tools_call_routes_propose_task_to_the_configured_path(tmp_path):
+    path = tmp_path / "proposed-tasks.json"
+    server = McpServer(FakeRunner(), WORKSPACE, tasks_path=str(path))
+    resp = server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "propose_task",
+                   "arguments": {"title": "Do the thing", "body": "Details",
+                                 "id": "a", "depends_on": ["1"]}},
+    })
+    assert resp["result"]["isError"] is False
+    assert json.loads(path.read_text()) == [
+        {"id": "a", "title": "Do the thing", "body": "Details", "depends_on": ["1"]}
+    ]
 
 
 def test_tools_list_includes_add_review_comment():
@@ -746,13 +806,13 @@ def test_notifications_initialized_produces_no_response():
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
-def test_tools_list_returns_exactly_the_seven_tools():
+def test_tools_list_returns_exactly_the_eight_tools():
     server = McpServer(FakeRunner(), WORKSPACE)
     response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in response["result"]["tools"]}
     assert names == {
         "run_command", "read_file", "edit_file", "write_file", "ask_question",
-        "comment_on_issue", "add_review_comment",
+        "comment_on_issue", "add_review_comment", "propose_task",
     }
     assert response["result"]["tools"] == TOOLS
 
@@ -920,10 +980,11 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
     captured = {}
 
     def fake_serve(runner, workspace, *, question_path, comment_path, review_path,
-                   self_debug, self_repair, task_unit):
+                   tasks_path, self_debug, self_repair, task_unit):
         captured.update(
             runner=runner, workspace=workspace, question_path=question_path,
             comment_path=comment_path, review_path=review_path,
+            tasks_path=tasks_path,
             self_debug=self_debug, self_repair=self_repair,
             task_unit=task_unit,
         )
@@ -933,7 +994,7 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
-        "--review-path", "/tmp/r.json",
+        "--review-path", "/tmp/r.json", "--tasks-path", "/tmp/t.json",
         "--self-debug", "--self-repair", "--task-unit", "grain-task-sandbox-0",
     ])
     main()
@@ -941,6 +1002,7 @@ def test_main_wires_cli_args_into_serve(monkeypatch):
     assert captured["question_path"] == "/tmp/q.txt"
     assert captured["comment_path"] == "/tmp/a.txt"
     assert captured["review_path"] == "/tmp/r.json"
+    assert captured["tasks_path"] == "/tmp/t.json"
     assert captured["self_debug"] is True
     assert captured["self_repair"] is True
     assert captured["task_unit"] == "grain-task-sandbox-0"
@@ -951,7 +1013,7 @@ def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
     captured = {}
 
     def fake_serve(runner, workspace, *, question_path, comment_path, review_path,
-                   self_debug, self_repair, task_unit):
+                   tasks_path, self_debug, self_repair, task_unit):
         captured["self_debug"] = self_debug
         captured["self_repair"] = self_repair
 
@@ -960,7 +1022,7 @@ def test_main_self_debug_and_self_repair_default_to_off(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
-        "--review-path", "/tmp/r.json",
+        "--review-path", "/tmp/r.json", "--tasks-path", "/tmp/t.json",
     ])
     main()
     assert captured["self_debug"] is False
@@ -971,7 +1033,7 @@ def test_main_task_unit_defaults_to_none(monkeypatch):
     captured = {}
 
     def fake_serve(runner, workspace, *, question_path, comment_path, review_path,
-                   self_debug, self_repair, task_unit):
+                   tasks_path, self_debug, self_repair, task_unit):
         captured["task_unit"] = task_unit
 
     monkeypatch.setattr("grain.automation.mcp_server.serve", fake_serve)
@@ -979,7 +1041,7 @@ def test_main_task_unit_defaults_to_none(monkeypatch):
         "mcp_server", "--address", "10.100.0.5", "--user", "agent",
         "--key-path", "/tmp/key", "--workspace", WORKSPACE,
         "--question-path", "/tmp/q.txt", "--comment-path", "/tmp/a.txt",
-        "--review-path", "/tmp/r.json",
+        "--review-path", "/tmp/r.json", "--tasks-path", "/tmp/t.json",
     ])
     main()
     assert captured["task_unit"] is None

@@ -97,7 +97,10 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     # attempting. A distinct shade of red, not the same one: the two are
     # different states (a stalled *existing* task vs. a *new* one grain is
     # asking permission to run) and `test_no_two_labels_share_a_colour`
-    # holds every label to a colour of its own regardless.
+    # holds every label to a colour of its own regardless. bwsalmon/agents#175:
+    # an agent's own `propose_task` calls carry this same label for the
+    # identical reason -- grain (or the agent set acting on its behalf)
+    # suggesting a task is never itself permission to run it.
     "needs_approval_label": (
         STATE, "b60205",
         "Grain suggested this task -- apply the trigger label (or comment /lgtm) to run it",
