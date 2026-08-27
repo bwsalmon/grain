@@ -148,6 +148,7 @@ from .gemini_keys import delete_key as delete_gemini_key
 from .github import (
     Comment, GitHubClient, GitHubError, Issue, NewReviewComment, PullRequestDetail,
 )
+from .github_keys import GitHubKeyConfig, repo_for_sandbox
 from .history import NullSessionHistory, SessionHistory
 from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
@@ -443,6 +444,15 @@ class Orchestrator:
     # `janitor.py`'s own docstring for what it deletes and how it avoids
     # grain's own core infrastructure.
     janitor_config: JanitorConfig | None = None
+    # bwsalmon/agents#159: the on/off switch for `config.scratch_repo_label`.
+    # `None` (production's default for a deployment that never ran `grain
+    # controller configure --github-key-app-id ...`) makes `_resolve_target`
+    # refuse the label with an explanation, the same "unusable request
+    # parks the task" shape `gemini_key_config` already has. Minting
+    # itself never happens here -- see `github_keys.py`'s own docstring
+    # for why it's lazy, on demand, from `self.github`'s own token
+    # resolution and the git proxy's, not from `_dispatch`.
+    github_key_config: GitHubKeyConfig | None = None
     # bwsalmon/agents#51: where to persist `AutomationState` immediately
     # after each mutation, not just once at the very end of `run_once`
     # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
@@ -1745,9 +1755,16 @@ class Orchestrator:
 
     # --- target resolution ----------------------------------------------
 
-    def _resolve_target(self, issue: Issue, comments: list[Comment]) -> "ResolvedTask":
+    def _resolve_target(self, issue: Issue, comments: list[Comment], *,
+                         sandbox: str) -> "ResolvedTask":
         """What a task's own text says to work on: which repo, optionally
         which PR to continue, and what base a new PR should target.
+
+        `sandbox` is the one `_dispatch` already picked for this candidate
+        before ever calling this -- needed only for
+        `config.scratch_repo_label` (bwsalmon/agents#159), which repo that
+        resolves to name has no coherent meaning independent of which
+        sandbox ends up doing the work.
 
         Reads directives from the issue body plus every *trusted* comment
         on it (`_TRUSTED_REPLY_ASSOCIATIONS`, the same "could have applied
@@ -1801,8 +1818,27 @@ class Orchestrator:
         # `ResolvedTask.self_repair`'s own docstring.
         self_repair = self.config.self_repair_label in issue.labels
         github_key = self._resolve_github_key(issue)
+        # bwsalmon/agents#159: same label tier as gemini_key above, refused
+        # the same way when this deployment has no `github_key_config` to
+        # honour it with.
+        scratch_repo = self.config.scratch_repo_label in issue.labels
+        if scratch_repo and self.github_key_config is None:
+            raise DirectiveError(
+                f"this task carries the `{self.config.scratch_repo_label}` "
+                "label, but this deployment has no scratch-repo support "
+                "configured. An operator enables it with `grain controller "
+                "configure --github-key-app-id ...` (see github_keys.py)."
+            )
         target = directives.target
-        if target is None:
+        if scratch_repo:
+            # One dedicated repo per sandbox, named deterministically off
+            # whichever sandbox `_dispatch` already picked for this task
+            # (`repo_for_sandbox`) -- which repo that is can't be known
+            # until then, so this overrides any `/repo` directive entirely
+            # rather than merely defaulting for a task that gave none.
+            target = RepoRef(owner=self.github_key_config.owner,
+                              name=repo_for_sandbox(self.github_key_config, sandbox))
+        elif target is None:
             if not self.config.default_target_repo:
                 raise DirectiveError(
                     "this task doesn't say which repository to work in. Add a "
@@ -1992,11 +2028,26 @@ class Orchestrator:
                 self.config.task_owner, self.config.task_repo, number
             )
             try:
-                task = self._resolve_target(issue, thread_comments)
+                task = self._resolve_target(issue, thread_comments, sandbox=sandbox)
             except DirectiveError as exc:
                 # No sandbox consumed and no rate-limit slot spent: parking
                 # is bookkeeping on the task repo, not a run.
                 self._park(number, str(exc))
+                continue
+            except CommandError as exc:
+                # bwsalmon/agents#159: a scratch-repo task's target
+                # resolution can mint a GitHub App installation token just
+                # to ask GitHub about the repo's default branch
+                # (`self.github`'s own token resolution, `github_keys.py`'s
+                # `InstallationTokenSource`) -- a broken minter (a bad or
+                # rotated App key, most likely) must not take down every
+                # other candidate still queued this cycle, the same "log
+                # and move on" discipline `gcp_key_mint_error` already gets
+                # (bwsalmon/agents#138). Not parked: this is a
+                # deployment-side infra problem, not something a human
+                # fixing the task issue's own text could ever resolve.
+                self.audit.record(sandbox=None, issue=number,
+                                   outcome=f"target resolution failed: {exc}")
                 continue
 
             sandbox_runner = self._ssh_runner_for(sandbox)

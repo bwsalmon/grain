@@ -53,7 +53,7 @@ def test_every_label_automation_config_names_has_a_row():
     assert {label.name for label in task_labels()} == expected
 
 
-def test_the_eight_labels_are_the_ones_the_deployment_actually_runs_on():
+def test_the_nine_labels_are_the_ones_the_deployment_actually_runs_on():
     """Names spelled out once, against the defaults the README, runbook
     and design docs all quote -- so a rename has to be deliberate."""
     assert [label.name for label in task_labels()] == [
@@ -65,6 +65,7 @@ def test_the_eight_labels_are_the_ones_the_deployment_actually_runs_on():
         "grain-gemini-key",
         "grain-self-debug",
         "grain-self-repair",
+        "grain-scratch-repo",
     ]
 
 
@@ -142,7 +143,9 @@ def test_the_state_tier_is_exactly_the_dispatch_state_machine():
         "grain-agent-needs-approval",
         "grain-agent-completed",
     ]
-    assert by_kind[CAPABILITY] == ["grain-gemini-key", "grain-self-debug", "grain-self-repair"]
+    assert by_kind[CAPABILITY] == [
+        "grain-gemini-key", "grain-self-debug", "grain-self-repair", "grain-scratch-repo",
+    ]
 
 
 def test_state_labels_are_solid_and_capability_labels_are_pale():
