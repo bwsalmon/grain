@@ -538,7 +538,8 @@ does not have, a `/review` with no `/pr` beside it.
 
 A form knows all of that before the task exists. The repo picker offers
 allow-listed repos; the folder picker walks the tree; the capability
-checkboxes show what the folder permits and grey out what it does not;
+checkboxes show what the folder already offers, so a grant is not
+requested twice;
 `/review` cannot be checked without a PR selected. **A whole class of
 failure moves from runtime to authoring time**, and the parked-task path
 shrinks to the cases that are genuinely dynamic — a dependency that has
@@ -615,7 +616,7 @@ and the moment it starts being one, it has become the sixth dict.
 erDiagram
     FOLDER ||--o{ FOLDER : "contains"
     FOLDER ||--o{ REPO : "contains"
-    FOLDER ||--o{ CAPABILITY : "permits and offers"
+    FOLDER ||--o{ CAPABILITY : "offers"
     REPO ||--o{ TASK : "task repo (the queue)"
     REPO ||--o| TASK : "write target"
     REPO }o--o{ TASK : "read targets"
@@ -705,12 +706,16 @@ class FolderRef:
 class Folder:
     ref: FolderRef
     repos: tuple[RepoRef, ...]        # for an "around" folder
-    permits: frozenset[str] | None    # ceiling: capabilities allowed here
-    offers: frozenset[str]            # floor: capabilities granted here
+    offers: frozenset[str]            # capabilities granted here
     base: str | None                  # default base branch for tasks here
     preamble: str | None              # prompt text every task here carries
     max_concurrent: int | None        # cap on simultaneous runs here
 ```
+
+No `permits` field. Ceilings are
+[deliberately not in v1](#attaching-capabilities-to-repos-and-folders),
+and a field the resolver ignores is a trap — an operator writes it,
+nothing enforces it, and it reads as policy that is not there.
 
 The tree is **operator config**, hot-reloaded from `/data/config` the way
 the allowlist already is, and it is not a persisted entity — a task
@@ -732,13 +737,12 @@ reason. A task that genuinely needs two policy domains is a
 decomposition: one child per folder, each with exactly its own folder's
 grants. That is the sub-task model doing what it is for.
 
-If spanning is ever supported, the effective permit set must be the
-**intersection of the folders spanned** — never their common ancestor's.
-Rising to the ancestor looks like the natural move and is a widening: if
-`services/billing` permits `{A}` and `services/ledger` permits `{B}`,
-their shared parent may well permit `{A, B, C}`, so a task placed there
-would hold more than either folder allows. Ceilings intersect *down* the
-tree, so going up is always a grant.
+One note for whenever spanning and ceilings both exist: the effective
+permit set would have to be the **intersection of the folders spanned** —
+never their common ancestor's. Rising to the ancestor looks like the
+natural move and is a widening, since ceilings intersect *down* the tree,
+so going up is always a grant. Neither feature is in v1; the trap is
+recorded here so it is not rediscovered.
 
 Capabilities are the first use and the one this document works through,
 but the entity is deliberately general: `base`, `preamble`, and
@@ -747,36 +751,59 @@ currently either a global or a per-task directive with no middle ground.
 
 ### Attaching capabilities to repos and folders
 
-Yes — with one asymmetry that is the whole of the safety argument.
-A node can say two different things, and they are not mirror images:
-
-- **`permits` is a ceiling.** "No task under this node may use anything
-  outside this set." Purely reducing.
-- **`offers` is a floor.** "Every task under this node gets these without
-  asking." Widening.
-
-They compose down the tree in opposite directions:
+Yes. **v1 is floors only** — a node says what every task under it gets
+without asking, and there is no mechanism for saying what a node may
+*not* use:
 
 ```
-permitted(node) = ∩ permits(n) for n in ancestors(node) + [node]
-offered(node)   = ∪ offers(n)  for n in ancestors(node) + [node]
-
-effective(task) = (requested(task) ∪ offered(folder)) ∩ permitted(folder)
+offered(node)   = ∪ offers(n) for n in ancestors(node) + [node]
+effective(task) = requested(task) ∪ offered(folder)
 ```
 
-Intersection for ceilings means a deeper folder can only ever narrow what
-its parent allows, so reading the tree top-down never has a surprise in
-it. Union for floors means a deeper folder can add a convenience its
-parent did not. The intersection is applied last, so a ceiling always
-beats a floor: a node cannot offer what an ancestor does not permit, and
-a misconfigured pair fails closed.
+Union down the tree: a deeper folder can add a convenience its parent did
+not. That is the whole composition rule in v1.
 
-**Ceilings are safe; floors need a guard.** A ceiling cannot grant
-anything, so it is worth having unconditionally and worth having first.
-A floor is a real escalation surface, because a task chooses its own
-target repo through `/repo` — text in an issue body. If `owner/deploy`
-offers `gcp-key`, then getting a task pointed at `owner/deploy` is
-equivalent to being granted a GCP key. Three rules keep that bounded:
+**Why floors and not ceilings, given ceilings cannot grant anything.**
+An earlier draft recommended the reverse, on the grounds that a ceiling
+is safe unconditionally and a floor is an escalation surface. The second
+half of that is true and the implication was not: ceilings were never the
+guard that makes floors safe. `Capability.auto_grantable` is, along with
+the existing trust gate, and both hold with no ceiling anywhere in the
+tree. Ceilings are a *separate* policy feature that also happened to
+bound floors as a side effect.
+
+And the policy they provide is a restriction on **humans** — on which
+capabilities an operator's own team may request where. A deployment with
+one team and a handful of repos is not being attacked by its own
+maintainers, so in v1 that is ceremony guarding against something that is
+not happening. Floors are the half that does work every day.
+
+**What v1 gives up, stated plainly**, because both are real:
+
+- **No "except here."** Offers only widen going down, so a restricted
+  subfolder inside a permissive parent is not expressible. If `payments`
+  offers `gcp-key`, everything beneath it does too, and
+  `payments/experimental` cannot be carved out as stricter. **The first
+  time someone wants "except here" is the signal ceilings are needed** —
+  it is a better trigger than a date.
+- **The allowlist keeps no read/write axis.** `proxy/core.py` checks
+  `allows()` identically before `git-upload-pack` and `git-receive-pack`,
+  so allow-listing a repo for reading also allow-lists pushing to it. A
+  `push` capability in a `permits` set was the natural fix, and it is a
+  ceiling, so it is not available in v1. This is the most concrete
+  security improvement this document identifies and it is now explicitly
+  deferred rather than quietly dropped.
+
+**Adding ceilings later is purely additive.** The composition gains one
+term — `effective = (requested ∪ offered) ∩ permitted` — and `permitted`
+defaults to *everything* for a node that sets none, so every v1 config
+keeps behaving exactly as it did. Nothing about floors changes shape.
+
+**Floors still need their guard, and it is not the ceiling.** A task
+chooses its own target repo through `/repo` — text in an issue body. If
+`owner/deploy` offers `gcp-key`, then getting a task pointed at
+`owner/deploy` is equivalent to being granted a GCP key. Three rules keep
+that bounded, and all three are v1:
 
 1. **A capability is floor-grantable only if its registry row says so.**
    `Capability.auto_grantable` is false by default and stays false for
@@ -792,36 +819,34 @@ equivalent to being granted a GCP key. Three rules keep that bounded:
    could have applied the trigger label, and the target must still be
    allow-listed. Floors do not widen that gate; they ride on it.
 
-**Where the tree lives, and why not in the repo.** A `.grain/` file in
-the target repo is the tempting design — it is how `CODEOWNERS` works,
-and it puts the policy next to the code it governs. It is also exactly
-the file a task with write access to that repo can edit. A task that
-could widen its own folder's `offers` would convert one human grant into
-a permanent one on the next run.
+**The tree is operator config, and in v1 there is no in-repo file at
+all.** A `.grain/` file in the target repo is the tempting design — it is
+how `CODEOWNERS` works, and it puts the policy next to the code it
+governs. It is also exactly the file a task with write access to that
+repo can edit, and a task that could widen its own folder's `offers`
+would convert one human grant into a permanent one on the next run.
 
-So the tree is operator config, with one exception that is safe by
-construction: **an in-repo file may narrow, never widen.** A
-`.grain/folder.toml` that sets `permits` is honoured; one that sets
-`offers` is ignored with a warning. The worst an agent can do by writing
-that file is take capabilities away from itself and from later tasks,
-which is visible in the diff, caught by the human PR review the threat
-model already relies on, and takes effect only after a merge.
+An earlier draft rescued the idea with a narrow-never-widen rule: an
+in-repo file may set `permits`, never `offers`, so the worst an agent can
+do is take capabilities away from itself. That rule is made entirely of
+ceilings. With floors only, an in-repo file has nothing safe left to say,
+so v1 does not read one — which retires the rule, the warning path, and
+the whole subsection along with it. It comes back if and when ceilings
+do.
 
 **Why this is not a second allowlist.** `config.py` argues against two
-lists that can disagree, and the argument holds. It is answered by
-direction rather than by merging the files: `repo-allowlist.json` stays
-exactly as it is — flat, default-deny, the one thing the git proxy reads
-on every operation, and deliberately simple because it is in the path of
-every fetch and push. The folder tree can only narrow what the allowlist
-already permits. Two files, one direction of authority, and no way for
-them to disagree in the direction that grants something.
+lists that can disagree, and the argument holds — but in v1 there is
+nothing for them to disagree about. `repo-allowlist.json` governs *which
+repos this deployment may touch*; the folder tree governs *which
+capabilities a task gets*. Different questions, no overlap, so the flat
+default-deny file the git proxy reads on every fetch and push stays
+exactly as it is, deliberately simple because it sits in that path.
 
-One thing the allowlist genuinely lacks and folders could supply: it has
-**no read/write axis**. `grain/proxy/core.py` checks `allows()` before
-`git-upload-pack` and `git-receive-pack` identically, so allow-listing a
-repo for reading also allow-lists it for pushing. A `permits` set
-containing a `push` capability is the natural place to fix that, and it
-is the strongest argument for building the ceiling half first.
+The two would begin to overlap the moment ceilings arrive, since a
+`permits` set is the natural place to give the allowlist the read/write
+axis it lacks (see above). At that point the rule from the earlier draft
+applies again: the tree may only narrow what the allowlist already
+permits, so the direction of authority stays one-way.
 
 ### One write target, many read targets
 
@@ -1221,8 +1246,7 @@ rather than a convenience.
 Two notes for whoever adds it:
 
 - **`Folder` is where the policy belongs**, not `AutomationConfig`. It
-  already carries `permits`, `offers`, `base`, `preamble` and
-  `max_concurrent`; `auto_approve_children` is one more row of exactly
+  already carries `offers`, `base`, `preamble` and `max_concurrent`; `auto_approve_children` is one more row of exactly
   that kind, and per-area is the granularity anyone actually wants —
   loose in a scratch area, strict where deploys live.
 - **Auditing it needs no new field.** "Was this run approved by a human
@@ -1504,10 +1528,11 @@ the model:
 10. A task has exactly one write target and any number of read targets.
 11. Folder capabilities are inherited from the **write** target's chain
     only. A read target grants nothing.
-12. Ceilings intersect down the folder tree, floors union down it, and
-    the intersection is applied last — a node can never offer what an
-    ancestor does not permit.
-13. An in-repo folder file may narrow, never widen.
+12. Folder offers union down the tree: a task's grants are what it
+    requested plus what its folder chain offers. Ceilings, and the
+    intersection term they add, are deferred past v1.
+13. Only a capability whose registry row sets `auto_grantable` may be
+    granted by a folder, and it is never one of the mutating ones.
 14. Only a review thread whose actor is a `HUMAN` principal can source a
     task, and only one already carrying an explicit request. A principal
     check, not a substring check.
@@ -1600,10 +1625,10 @@ dependencies allow:
    cheapest thing here — a directive, an allowlist check per repo, and a
    clone line. Worth doing early precisely because it needs none of the
    rest.
-6. **Folders.** The tree, then ceilings, then floors, in that order:
-   ceilings cannot grant anything, so they are safe to ship before the
-   `auto_grantable` machinery that makes floors safe. Needs stage 2's
-   capability registry to have anything to attach to.
+6. **Folders.** The tree, then floors — `offers` and the
+   `auto_grantable` guard that bounds them. No ceilings in v1, so no
+   `permits` field and no in-repo file. Needs stage 2's capability
+   registry to have anything to attach to.
 7. **Review-sourced tasks and merge groups.** Both need stage 3's links.
    Review-sourced tasks additionally need `ReviewComment` widened with
    thread linkage; merge groups need stage 4's sub-tasks.
@@ -1667,18 +1692,14 @@ else has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
-- **Do folder floors ship at all?** The
-  [recommendation](#attaching-capabilities-to-repos-and-folders) is
-  ceilings first, since a ceiling cannot grant anything and needs no
-  `auto_grantable` machinery to be safe. Whether `offers` is ever built
-  depends on whether the convenience turns out to be missed. Shipping only
-  ceilings is a coherent end state, not a half-measure.
-- **Does `permits` gain a `push` capability?** The allowlist has no
-  read/write axis — `proxy/core.py` checks `allows()` identically before
-  `git-upload-pack` and `git-receive-pack`, so allow-listing a repo for
-  reading also allow-lists pushing to it. This is the most concrete
-  security improvement in this document and currently only a suggestion in
-  passing.
+- **When do ceilings become necessary?** v1 is
+  [floors only](#attaching-capabilities-to-repos-and-folders) — decided.
+  The trigger to revisit is a concrete one rather than a date: the first
+  time someone wants a *stricter* subfolder inside a permissive parent,
+  which floors cannot express. Two things wait behind it — "except here",
+  and a `push` capability to give the allowlist the read/write axis it
+  lacks, which is the most concrete security improvement this document
+  identifies and is now deliberately deferred.
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
   version is immediate and noisy. Whether the knob exists at all is
