@@ -223,6 +223,12 @@ class AutomationState:
     # plain set of ints, not keyed like the dicts above -- nothing here is
     # ever looked up by issue number, only iterated or tested for emptiness.
     proposed_task_issues: set[int] = field(default_factory=set)
+    # bwsalmon/agents#163: when `core.py`'s `_scheduled_jobs` last filed an
+    # issue for each job, keyed by `ScheduledJob.name` -- an interval is
+    # only ever checked against this, never against `run_timestamps` (which
+    # times `run_once` itself, not any one job). Absent entirely for a job
+    # that has never fired, which reads the same as "due now".
+    scheduled_job_last_fired: dict[str, datetime] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "AutomationState":
@@ -276,11 +282,16 @@ class AutomationState:
             for key, c in raw.get("completed_issues", {}).items()
         }
         proposed_task_issues = set(raw.get("proposed_task_issues", []))
+        scheduled_job_last_fired = {
+            key: datetime.fromisoformat(t)
+            for key, t in raw.get("scheduled_job_last_fired", {}).items()
+        }
         return cls(assignments=assignments, run_timestamps=run_timestamps,
                     pending_questions=pending_questions,
                     open_pull_requests=open_pull_requests,
                     completed_issues=completed_issues,
-                    proposed_task_issues=proposed_task_issues)
+                    proposed_task_issues=proposed_task_issues,
+                    scheduled_job_last_fired=scheduled_job_last_fired)
 
     def save(self, path: Path) -> None:
         data = {
@@ -320,6 +331,9 @@ class AutomationState:
             # Sorted, purely so a diff of the state file across runs is
             # stable -- a set has no order of its own to preserve.
             "proposed_task_issues": sorted(self.proposed_task_issues),
+            "scheduled_job_last_fired": {
+                key: t.isoformat() for key, t in self.scheduled_job_last_fired.items()
+            },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -411,6 +425,10 @@ class AutomationState:
 
     def clear_proposed_task(self, issue: int) -> None:
         self.proposed_task_issues.discard(issue)
+
+    # --- scheduled jobs (bwsalmon/agents#163) -----------------------------
+    def record_scheduled_job_fired(self, name: str, now: datetime) -> None:
+        self.scheduled_job_last_fired[name] = now
 
     # --- rate limit -----------------------------------------------------
     def record_run(self, now: datetime) -> None:

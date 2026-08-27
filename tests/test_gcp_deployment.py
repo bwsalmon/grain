@@ -815,6 +815,19 @@ case "$1 $2 $3" in
     esac
     ;;
   "compute instances add-metadata")
+    # Only used by tests that care what actually got pushed (the named-
+    # GitHub-key merge tests below) -- $METADATA_DIR is unset for the
+    # rotation test above, and this block is then a no-op, same as before.
+    if [ -n "${METADATA_DIR:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          --metadata-from-file=*)
+            entry="${arg#--metadata-from-file=}"
+            cp "${entry#*=}" "$METADATA_DIR/${entry%%=*}"
+            ;;
+        esac
+      done
+    fi
     ;;
 esac
 """
@@ -879,6 +892,65 @@ def test_push_host_secrets_keeps_the_previous_key_alive_through_a_rotation():
         assert "--sort-by=~validAfterTime" in list_calls[0], (
             "the key list must be sorted newest-first for 'keep the two newest' to be correct"
         )
+
+
+def test_push_host_secrets_merges_per_secret_named_github_keys():
+    """bwsalmon/agents#187: GRAIN_GITHUB_KEYS packs every named credential
+    into one Actions secret, which makes adding or removing a single name a
+    hand-edit of a blob that also holds every other name's token.
+    GITHUB_SECRETS_JSON (`toJSON(secrets)`, the only way Actions exposes a
+    secret by name pattern) lets each name be its own
+    `GRAIN_GITHUB_KEY_<NAME>` secret instead. This checks the two are
+    merged into the one NAME=TOKEN blob deploy.sh on the host already knows
+    how to split -- so a deployment that upgrades keeps its existing
+    GRAIN_GITHUB_KEYS working, and a name in either place reaches the host.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        metadata_dir = tmp_path / "metadata"
+        metadata_dir.mkdir()
+        state = tmp_path / "keys.state"
+        calls = tmp_path / "calls.log"
+
+        fake = _FAKE_GCLOUD.replace("__STATE__", str(state)).replace("__CALLS__", str(calls))
+        (bin_dir / "gcloud").write_text(fake)
+        (bin_dir / "gcloud").chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PROJECT": "a-project",
+            "INSTANCE": "an-instance",
+            "ZONE": "us-central1-a",
+            "METADATA_DIR": str(metadata_dir),
+            "GRAIN_GITHUB_TOKEN": "ghp_default_secret",
+            "GRAIN_GITHUB_KEYS": "legacy=ghp_legacy_secret",
+            "GITHUB_SECRETS_JSON": json.dumps({
+                "GRAIN_GITHUB_KEY_WORKFLOW": "ghp_workflow_secret",
+                "GRAIN_GITHUB_KEY_RELEASE": "ghp_release_secret",
+                # Not a name: this is what GRAIN_GITHUB_TOKEN itself looks
+                # like in the same dump, and must not leak into the merged
+                # named-key blob just because it starts similarly.
+                "GRAIN_GITHUB_TOKEN": "ghp_default_secret",
+            }),
+        }
+        result = subprocess.run(
+            [str(PUSH_SECRETS)], env=env, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        pushed = (metadata_dir / "grain-github-keys").read_text()
+        pairs = dict(line.split("=", 1) for line in pushed.splitlines() if line.strip())
+        assert pairs == {
+            "legacy": "ghp_legacy_secret",
+            "workflow": "ghp_workflow_secret",
+            "release": "ghp_release_secret",
+        }
+
+        token_pushed = (metadata_dir / "grain-github-token").read_text()
+        assert token_pushed == "ghp_default_secret"
 
 
 def test_deploy_yml_never_stores_the_agent_key_as_a_repo_secret():

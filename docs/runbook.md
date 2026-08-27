@@ -809,6 +809,49 @@ failure for each resource kind every cycle.
 
 To disable it again: delete `/data/config/janitor.json`.
 
+## Scheduled jobs (optional, bwsalmon/agents#163)
+
+`grain automation run-once` can also file an issue automatically on a
+recurring interval, from a template — for a chore worth running
+regularly (a dependency audit, a weekly report) without a human having to
+remember to file it. Each job is one plain-text file: a `Title:`,
+`Interval-Hours:`, and optional `Needs-Approval:` header block, a blank
+line, then the issue body (which may use `$date`/`$datetime`, filled in
+at fire time). See `grain/automation/scheduled_jobs.py`'s own docstring
+for the exact format and `docs/roadmap.md`'s scheduled-jobs entry for the
+full design.
+
+A job never fires a second issue while its last one is still open and
+missing `grain-agent-completed` — `interval_hours` is a minimum cadence,
+not a guarantee, and a job whose issue takes longer than that to finish
+is held rather than duplicated.
+
+1. Write a template file, e.g. `weekly-audit.md`:
+
+   ```
+   Title: Weekly dependency audit ($date)
+   Interval-Hours: 168
+
+   Please check for outdated dependencies and file fixes for anything
+   with a known vulnerability.
+   ```
+
+2. Run `grain controller configure --scheduled-job weekly-audit=weekly-audit.md`
+   (any other `controller configure` flags in the same invocation still
+   apply normally — this one is additive, and repeatable for more than
+   one job). This writes `/data/config/scheduled-jobs/weekly-audit.md`,
+   read fresh (the whole directory) on every `automation run-once`
+   invocation, same as `janitor.json`. A Terraform-managed deployment
+   sets `scheduled_jobs = { "weekly-audit" = file("weekly-audit.md") }`
+   in `grain.tfvars` instead — see `terraform/gcp/variables.tf` — so the
+   template stays an actual file in your config repo you can preview and
+   diff normally, not a string pasted into `.tfvars`.
+
+To disable one job: delete its file, `/data/config/scheduled-jobs/<name>.md`
+(remove it from `scheduled_jobs` in `grain.tfvars` for a Terraform-managed
+deployment). To disable the feature entirely: delete the whole
+`/data/config/scheduled-jobs/` directory.
+
 ## Enabling `grain-self-debug` (bwsalmon/agents#62, #86)
 
 A task issue carrying the `grain-self-debug` label gets four extra MCP
@@ -927,10 +970,15 @@ switch to flip first:
    for a first-time deploy that wants a named key provisioned in the same
    run rather than as a separate step afterward. A Terraform/GCP
    deployment (`templates/gcp/`) can set this from its own config repo
-   instead of running either command by hand: the optional
-   `GRAIN_GITHUB_KEYS` Actions secret (one `NAME=TOKEN` pair per line) is
-   threaded through `deploy.sh` into `grain host bootstrap --github-key`
-   on every deploy — see that template's README, "Optional fifth secret."
+   instead of running either command by hand: an Actions secret named
+   `GRAIN_GITHUB_KEY_<NAME>`, holding just that name's token, is threaded
+   through `deploy.sh` into `grain host bootstrap --github-key` on every
+   deploy (bwsalmon/agents#187) — see that template's README, "Optional
+   named credentials." Adding or removing one is then adding or removing a
+   single repo secret, never a hand-edit of a blob shared with every other
+   name's token, which is what the older `GRAIN_GITHUB_KEYS` secret (one
+   `NAME=TOKEN` pair per line, still supported and merged with any
+   `GRAIN_GITHUB_KEY_<NAME>` secrets) required.
 2. A task now asks for it by carrying a `grain-github-<name>` label — a
    real GitHub label, applied by a human, the same trust tier as the
    trigger label itself; not a `/directive` line in the issue body. Until

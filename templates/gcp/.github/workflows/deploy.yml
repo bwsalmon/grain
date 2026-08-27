@@ -156,6 +156,13 @@ jobs:
           ZONE: ${{ steps.tf.outputs.zone }}
           GRAIN_GITHUB_TOKEN: ${{ secrets.GRAIN_GITHUB_TOKEN }}
           GRAIN_GITHUB_KEYS: ${{ secrets.GRAIN_GITHUB_KEYS }}
+          # The whole secrets context, so push-host-secrets.sh can pick out
+          # every `GRAIN_GITHUB_KEY_<NAME>` secret by prefix -- there is no
+          # `secrets["..."]` dynamic lookup in Actions expressions, only
+          # this or naming each one here by hand. Adding or removing a
+          # named credential is then a repo-secret edit, not a workflow
+          # edit (bwsalmon/agents#187).
+          GITHUB_SECRETS_JSON: ${{ toJSON(secrets) }}
           GRAIN_CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.GRAIN_CLAUDE_CODE_OAUTH_TOKEN }}
           AGENT_SERVICE_ACCOUNT: ${{ steps.tf.outputs.agent_service_account }}
           HOST_SERVICE_ACCOUNT: ${{ steps.tf.outputs.host_service_account }}

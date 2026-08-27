@@ -69,22 +69,28 @@ and the state bucket. You do not have to name a task repo — this one is it.
 service account key in `GCP_CREDENTIALS_JSON` instead. It is strictly
 worse; the workflows support it so that "no WIF" is not a blocker.)
 
-**Optional fifth secret, for a task that needs a scope `GRAIN_GITHUB_TOKEN`
-deliberately withholds** (`workflow`, most notably — see grain's
-`docs/design.md`, "Scopes to withhold"): `GRAIN_GITHUB_KEYS`, one
-`NAME=TOKEN` pair per line, e.g.
+**Optional named credentials, for a task that needs a scope
+`GRAIN_GITHUB_TOKEN` deliberately withholds** (`workflow`, most notably —
+see grain's `docs/design.md`, "Scopes to withhold"): add one repository
+secret per name, `GRAIN_GITHUB_KEY_<NAME>`, holding just that name's token
+— e.g. a secret named `GRAIN_GITHUB_KEY_WORKFLOW` holding `ghp_...` names
+the credential `workflow` (the part after the prefix, lowercased). A task
+opts into it by carrying the `grain-github-workflow` label instead of the
+default — grain's `docs/runbook.md`, "Adding a named GitHub key," covers
+how a task asks for one and what `grain github audit` should say about it
+afterward. Unlike `GRAIN_GITHUB_TOKEN`, none of these ever becomes any
+repo's default credential, and adding or removing one is adding or
+removing that one secret — never an edit to a blob that also holds every
+other name's token. Leaving all of them unset (the default) provisions no
+named keys at all. A name can only use the characters GitHub allows in a
+secret name (letters, digits, underscores — no hyphens), so a credential
+meant to be selected by a `grain-github-release-bot` label is not
+reachable this way; pick a hyphen-free name instead.
 
-```
-workflow=ghp_...
-release=ghp_...
-```
-
-Each `NAME` becomes a credential a task can opt into by carrying the
-`grain-github-NAME` label instead of the default — grain's
-`docs/runbook.md`, "Adding a named GitHub key," covers how a task asks for
-one and what `grain github audit` should say about it afterward. Unlike
-`GRAIN_GITHUB_TOKEN`, this never becomes any repo's default credential, and
-leaving it unset (the default) provisions no named keys at all.
+(Older deployments may instead have a single `GRAIN_GITHUB_KEYS` secret,
+one `NAME=TOKEN` pair per line — still supported and merged with any
+`GRAIN_GITHUB_KEY_<NAME>` secrets above, but new deployments should prefer
+one secret per name.)
 
 **4. Push to `main`.** The `deploy` workflow runs, and its last step waits
 for the host to report that it converged — so a green check means the
@@ -190,9 +196,10 @@ holds. All of it reviewable in a pull request, all of it reverted by
 reverting a commit.
 
 **In Actions secrets, never in the repo:** the required `GRAIN_GITHUB_TOKEN`
-and `GRAIN_CLAUDE_CODE_OAUTH_TOKEN`, the optional `GRAIN_GITHUB_KEYS`, all
-three of which CI attaches directly to the VM and never uses again, plus
-the two identifiers that let CI authenticate to GCP at all.
+and `GRAIN_CLAUDE_CODE_OAUTH_TOKEN`, the optional `GRAIN_GITHUB_KEY_<NAME>`
+per named credential, all of which CI attaches directly to the VM and never
+uses again, plus the two identifiers that let CI authenticate to GCP at
+all.
 
 **On the host:** nothing durable that CI put there. `deploy.sh` reads
 whichever of those secrets are set from its own instance metadata — no GCP
@@ -281,15 +288,16 @@ was bootstrapped before this option existed — it needs
 role — by editing `config/grain.tfvars` in a pull request. CI plans it;
 merging applies it and redeploys.
 
-**Rotate a credential** — including a named one in `GRAIN_GITHUB_KEYS` — by
-updating the Actions secret and running the `deploy` workflow manually
-(`workflow_dispatch`). The workflow pushes the new value to the host's
-instance metadata every run, and the manual run bumps the deploy generation
-so the host picks it up. Removing a `NAME=TOKEN` line from `GRAIN_GITHUB_KEYS`
-does not delete that key from the controller on the next deploy — `grain
-host bootstrap` only ever writes secrets it was given, never removes ones
-it wasn't; delete `/data/secrets/github/<name>.token` by hand (`grain
-sandbox login controller`) if a name should stop working entirely.
+**Rotate a credential** — a named one by updating its own
+`GRAIN_GITHUB_KEY_<NAME>` secret's value — then running the `deploy`
+workflow manually (`workflow_dispatch`). The workflow pushes the new value
+to the host's instance metadata every run, and the manual run bumps the
+deploy generation so the host picks it up. **Deleting** a
+`GRAIN_GITHUB_KEY_<NAME>` secret does not delete that key from the
+controller on the next deploy — `grain host bootstrap` only ever writes
+secrets it was given, never removes ones it wasn't; delete
+`/data/secrets/github/<name>.token` by hand (`grain sandbox login
+controller`) if a name should stop working entirely.
 
 **Deploy a new grain** by moving `grain_ref`. Pin it to a tag or SHA if you
 want deployments to be reproducible; leave it on `main` and uncomment the

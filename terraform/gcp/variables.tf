@@ -474,3 +474,25 @@ variable "janitor_ttl_hours" {
   EOT
   default     = 24
 }
+
+# ------------------------------------------------------------- scheduled jobs
+
+variable "scheduled_jobs" {
+  type        = map(string)
+  description = <<-EOT
+    Issues grain files automatically on a recurring interval (bwsalmon/
+    agents#163), keyed by job name. Each value is a whole template file
+    verbatim -- a `Title:`/`Interval-Hours:`/`Needs-Approval:` header
+    block, a blank line, then the issue body (see grain/automation/
+    scheduled_jobs.py's own docstring for the exact format) -- deploy.sh
+    writes it to /data/config/scheduled-jobs/<name>.md unchanged.
+
+    Deliberately map(string), not a bunch of nested attributes per job:
+    the intent is that each value is `file("path/to/scheduled-jobs/
+    <name>.md")` in your own config repo's Terraform, so a job's own
+    title/body live in an actual markdown file you can preview and diff
+    normally, never pasted as an inline HCL string literal. An empty map
+    (the default) is the off switch, same as cluster_overrides.
+  EOT
+  default     = {}
+}

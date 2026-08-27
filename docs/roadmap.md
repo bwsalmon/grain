@@ -1562,9 +1562,20 @@ issue closes. So a still-open dependency instead just logs `skipped:
 blocked on #N` to the audit trail and `continue`s the dispatch loop (a
 `break`, unlike "no free sandbox"/"rate limit" above it, would wrongly
 treat one task's block as true of every other candidate still queued this
-cycle). The trigger label, and everything else about the issue, is left
-exactly as a human set it — the very next cycle checks again, with no
-state of its own to track in between.
+cycle). The trigger label is left exactly as a human set it — the very
+next cycle checks again, with no state of its own to persist in between.
+
+bwsalmon/agents#194: that log line is the only place a block used to show
+up, which meant seeing that a queued task was actually stuck meant
+reading the audit log, not the issue. `_dispatch` now also applies
+`waiting_on_dependency_label` (`grain-waiting-on-dependency`,
+`labels.py`) to a still-blocked issue, alongside the untouched trigger
+label, and strips it the moment `blocking` comes back empty — whether
+that's because the named issue closed or because the `/depends` line
+itself is gone. Applied and cleared fresh every cycle from `issue.labels`
+(the same list already fetched for `_resolve_target`), not tracked in
+`AutomationState`, so a controller restart mid-block loses nothing: the
+label is exactly a projection of `blocking`, recomputed from scratch.
 
 The one case that *is* routed through `_park`: a task naming itself in
 its own `/depends` line, which can never close the loop and would
@@ -1633,3 +1644,54 @@ after this feature's first ever use. An entry approved by hand instead
 (a human applying `trigger_label` directly, bypassing `/lgtm`) still
 lingers un-cleared, the same accepted minor cost `fix_issue` already
 carries in that same case.
+
+## 28. Scheduled jobs
+
+- [x] Done
+
+bwsalmon/agents#163: every task issue grain has ever worked started with a
+human filing it. The ask was a way to get a recurring chore — a
+dependency audit, a weekly report — onto the queue automatically, on a
+schedule, while still being something a maintainer manages by editing
+files in the repo rather than a separate scheduler with its own UI.
+
+No new trigger, cron, or scheduler: `docs/design.md`'s "use cron, not
+webhooks" stance already means the whole system is a 2-minute poll
+(`Orchestrator.run_once`), so a scheduled job is one more phase in that
+same loop, not new infrastructure. `grain/automation/scheduled_jobs.py`'s
+`ScheduledJobsConfig` loads a directory of plain-text template files
+(`/data/config/scheduled-jobs/*.md`) — a `Title:`/`Interval-Hours:`/
+`Needs-Approval:` header block, a blank line, then the issue body,
+rendered with `string.Template` (`$date`/`$datetime`) rather than
+`str.format`/f-strings, since an issue body routinely contains literal
+`{...}` a naive substitution would mangle. One file per job, no separate
+manifest: adding, editing, or removing a job is adding, editing, or
+removing one file, and (per the operator's own steer on this issue) never
+a job's body pasted as an inline string into a Terraform variable —
+`terraform/gcp/variables.tf`'s `scheduled_jobs` is `map(string)`, meant to
+be populated from `file("...")` reads of actual files in a config repo.
+
+`core.py`'s new `_scheduled_jobs`, run last of the pre-dispatch phases (so
+an issue it files is picked up the same cycle, not left idle for one
+extra tick), fires each job whose `interval_hours` has elapsed since
+`AutomationState.scheduled_job_last_fired` — but only after confirming no
+issue it previously filed (found by a label derived from the job's own
+name, `grain-scheduled-<name>`) is still open without
+`completed_label`. That gate is deliberately independent of
+`interval_hours`, straight from the operator's own steer: a job whose
+issue took longer than one interval to finish must not get a duplicate
+the moment the interval elapses, and a job whose issue finished early is
+still held to its own cadence rather than refiring immediately.
+
+`needs_approval` is per job, in the file, not one deployment-wide switch
+— a job with real teeth opts in to landing with `needs_approval_label`
+instead of `trigger_label`, the same gate bwsalmon/agents#83's
+`_suggest_fix` established, while a routine chore dispatches the moment
+it's filed.
+
+Off by default (no `/data/config/scheduled-jobs/` directory, the same
+"absence is the off switch" shape `janitor_config` already has);
+`grain controller configure --scheduled-job NAME=FILE` writes one job by
+hand (repeatable), and a Terraform-managed deployment sets the
+`scheduled_jobs` map in `grain.tfvars` instead — see
+`terraform/gcp/files/deploy.sh` and docs/runbook.md's "Scheduled jobs".

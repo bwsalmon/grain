@@ -21,7 +21,24 @@
 #                             agents#134), one "NAME=TOKEN" pair per line;
 #                             deploy.sh on the host splits these into the
 #                             per-name files `grain host bootstrap
-#                             --github-key` wants
+#                             --github-key` wants. Superseded, but still
+#                             read and merged, by GITHUB_SECRETS_JSON below
+#                             (bwsalmon/agents#187) -- a deployment that
+#                             already has one of these keeps working
+#                             untouched.
+#   GITHUB_SECRETS_JSON       `toJSON(secrets)` (bwsalmon/agents#187):
+#                             every secret named `GRAIN_GITHUB_KEY_<NAME>`
+#                             in it becomes a named credential `<name>`
+#                             (the part after the prefix, lowercased) --
+#                             adding or removing one is then adding or
+#                             removing a single repo secret, never
+#                             hand-editing a blob that also holds every
+#                             other name's token. GitHub Actions has no way
+#                             to select secrets by name pattern short of
+#                             dumping the whole context; this script is
+#                             already the one place a secret value is ever
+#                             decrypted, so nothing new is trusted with it
+#                             by receiving it.
 #   GRAIN_CLAUDE_CODE_OAUTH_TOKEN
 #   HOST_SERVICE_ACCOUNT      email of the host account -- the identity the
 #                             controller mints agent keys as (agents#131)
@@ -69,8 +86,33 @@ push_secret() {
   echo "$key: pushed"
 }
 
+# Merges the legacy packed blob with any `GRAIN_GITHUB_KEY_<NAME>` secrets
+# discovered in GITHUB_SECRETS_JSON into the single "NAME=TOKEN per line"
+# blob deploy.sh on the host already knows how to split -- so the host
+# side (bwsalmon/agents#134) needs no change at all for this. Per-secret
+# entries are appended after the legacy blob's own lines, so one wins a
+# name collision between the two mechanisms: whichever named the credential
+# through its own dedicated secret, the newer and more direct of the two.
+collect_github_keys() {
+  python3 - "${GRAIN_GITHUB_KEYS:-}" <<'PY'
+import json
+import os
+import sys
+
+lines = [line for line in sys.argv[1].splitlines() if line.strip()]
+
+prefix = "GRAIN_GITHUB_KEY_"
+secrets = json.loads(os.environ.get("GITHUB_SECRETS_JSON") or "{}")
+for key, value in secrets.items():
+    if key.startswith(prefix) and value:
+        lines.append(f"{key[len(prefix):].lower()}={value}")
+
+print("\n".join(lines))
+PY
+}
+
 push_secret "grain-github-token" "${GRAIN_GITHUB_TOKEN:-}"
-push_secret "grain-github-keys" "${GRAIN_GITHUB_KEYS:-}"
+push_secret "grain-github-keys" "$(collect_github_keys)"
 push_secret "grain-claude-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 
 # bwsalmon/agents#131: the credential grain/automation/gcp_keys.py

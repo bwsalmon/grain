@@ -230,6 +230,45 @@ def test_build_orchestrator_loads_janitor_config_when_present(tmp_path: Path):
     assert orchestrator.janitor_config.ttl_hours == 12
 
 
+def test_build_orchestrator_loads_scheduled_jobs_config_when_present(tmp_path: Path):
+    """bwsalmon/agents#163: mirrors the janitor_config test above --
+    `scheduled_jobs_config` is `None` unless `/data/config/scheduled-jobs/`
+    exists as a directory, the same "absence is the off switch" shape,
+    just over a directory of template files instead of one JSON file.
+    """
+    import argparse
+
+    from grain.cli import build_orchestrator
+    from grain.inventory import Cluster
+    from grain.run import FakeRunner
+
+    _write_automation_json(tmp_path)
+    jobs_dir = tmp_path / "config" / "scheduled-jobs"
+    jobs_dir.mkdir(parents=True)
+    (jobs_dir / "weekly-audit.md").write_text(
+        "Title: Weekly audit\nInterval-Hours: 168\n\nPlease audit things."
+    )
+    args = argparse.Namespace(data_dir=str(tmp_path), dry_run=False)
+    orchestrator, _ = build_orchestrator(Cluster(sandbox_count=1), FakeRunner(), args)
+
+    assert orchestrator.scheduled_jobs_config is not None
+    assert [job.name for job in orchestrator.scheduled_jobs_config.jobs] == ["weekly-audit"]
+
+
+def test_build_orchestrator_leaves_scheduled_jobs_config_unset_when_dir_absent(tmp_path: Path):
+    import argparse
+
+    from grain.cli import build_orchestrator
+    from grain.inventory import Cluster
+    from grain.run import FakeRunner
+
+    _write_automation_json(tmp_path)
+    args = argparse.Namespace(data_dir=str(tmp_path), dry_run=False)
+    orchestrator, _ = build_orchestrator(Cluster(sandbox_count=1), FakeRunner(), args)
+
+    assert orchestrator.scheduled_jobs_config is None
+
+
 def test_build_orchestrator_leaves_gcp_key_config_unset_when_config_absent(tmp_path: Path):
     import argparse
 
