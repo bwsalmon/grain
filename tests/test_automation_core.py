@@ -22,6 +22,7 @@ from grain.automation.github import (
 from grain.automation.scratch_repo import ScratchRepoConfig
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.janitor import JanitorConfig
+from grain.automation.scheduled_jobs import ScheduledJob, ScheduledJobsConfig
 from grain.automation.ssh import SshRunner
 from grain.automation.state import AutomationState, OpenPullRequest, TriggerKind
 from grain.inventory import Cluster
@@ -227,7 +228,8 @@ def credentials_with(*names: str) -> CredentialSet:
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
                        credentials=None, credential_store=None, state_path=None,
-                       gcp_key_config=None, janitor_config=None, scratch_repo_config=None):
+                       gcp_key_config=None, janitor_config=None, scratch_repo_config=None,
+                       scheduled_jobs_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -262,6 +264,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         gemini_key_config=gemini_key_config,
         gcp_key_config=gcp_key_config, janitor_config=janitor_config,
         scratch_repo_config=scratch_repo_config,
+        scheduled_jobs_config=scheduled_jobs_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -2929,6 +2932,34 @@ def test_a_task_with_an_open_dependency_is_skipped_not_dispatched():
     assert "1" not in orchestrator.state.pending_questions
     assert not any(c["method"] == "POST" and c["path"].endswith("/comments")
                     for c in transport.calls)
+    # bwsalmon/agents#194: the block is visible on the issue itself too,
+    # not just that audit line.
+    label_call = next(c for c in transport.calls if c["method"] == "POST"
+                       and c["path"] == "/repos/o/r/issues/1/labels")
+    assert json.loads(label_call["body"]) == {"labels": ["grain-waiting-on-dependency"]}
+
+
+def test_an_already_labelled_blocked_dependency_is_not_relabelled():
+    """`GitHubClient.add_label` is a no-op against a label an issue already
+    carries, so this is free either way -- but a fresh POST every cycle
+    would still be one wasted call each time nothing changed, the same
+    reasoning `_refresh_agent_labels` docstring makes for `agent_label`.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(
+            1, body="/depends 2",
+            labels=("grain-agent", "grain-waiting-on-dependency"),
+        )]).encode()),                                            # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),        # get_issue(2): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] == "POST" and c["path"] == "/repos/o/r/issues/1/labels"
+                    for c in transport.calls)
 
 
 def test_a_task_with_a_closed_dependency_dispatches_normally():
@@ -3039,7 +3070,11 @@ def test_a_blocked_dependency_does_not_stop_the_next_candidate_dispatching():
 def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
     """No `_park` happened while blocked (previous tests) -- so nothing
     needs a human reply for this to resume; the very next cycle just
-    checks the dependency issue's state again and finds it closed.
+    checks the dependency issue's state again and finds it closed. The
+    label cycle 1 put on the issue (bwsalmon/agents#194) is expected to
+    still be there in cycle 2's fetched issue, the same way `trigger_label`
+    would be -- these fixtures don't model GitHub state persisting between
+    `run_once` calls, so it's set by hand on the cycle-2 `issue_json` here.
     """
     orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
     transport.responses.extend([
@@ -3051,10 +3086,15 @@ def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
     ])
     orchestrator.run_once(NOW)
     assert orchestrator.state.assignments == {}
+    label_call = next(c for c in transport.calls if c["method"] == "POST"
+                       and c["path"] == "/repos/o/r/issues/1/labels")
+    assert json.loads(label_call["body"]) == {"labels": ["grain-waiting-on-dependency"]}
 
     transport.responses.extend([
-        ApiResponse(200, {}, json.dumps(
-            [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 2
+        ApiResponse(200, {}, json.dumps([issue_json(
+            1, body="/depends 2",
+            labels=("grain-agent", "grain-waiting-on-dependency"),
+        )]).encode()),                                            # list_issues, cycle 2
         ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 2
         ApiResponse(200, {}, json.dumps(
             {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): now closed
@@ -3062,6 +3102,11 @@ def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
     orchestrator.run_once(NOW + timedelta(minutes=5))
 
     assert orchestrator.state.assignments["sandbox-0"].issue == 1
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/1/labels/grain-waiting-on-dependency"
+        for c in transport.calls
+    )
 
 
 def test_a_nonexistent_target_repo_is_parked_rather_than_crashing_the_cycle():
@@ -3838,6 +3883,149 @@ def test_janitor_never_deletes_a_gemini_key_still_referenced_by_a_live_assignmen
     orchestrator._janitor(NOW)
 
     assert not any("api-keys delete" in c for c in runner.commands)
+
+
+# --- scheduled jobs (bwsalmon/agents#163) -----------------------------
+
+def scheduled_job(name="weekly-audit", interval_hours=168, needs_approval=False) -> ScheduledJob:
+    return ScheduledJob(
+        name=name, interval_hours=interval_hours,
+        title_template="Weekly audit", body_template="Please audit things.",
+        needs_approval=needs_approval,
+    )
+
+
+def test_scheduled_jobs_is_a_noop_without_config():
+    orchestrator, transport = make_orchestrator(issues=[])
+
+    orchestrator._scheduled_jobs(NOW)
+
+    assert transport.calls == []
+
+
+def test_scheduled_jobs_files_an_issue_the_first_time_it_is_due():
+    orchestrator, transport = make_orchestrator(
+        issues=[], scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(),)),
+    )
+    transport.responses.append(ApiResponse(200, {}, b"[]"))  # list_issues(marker_label)
+    transport.responses.append(ApiResponse(201, {}, json.dumps(
+        issue_json(99, labels=("grain-agent", "grain-scheduled-weekly-audit"))
+    ).encode()))
+
+    orchestrator._scheduled_jobs(NOW)
+
+    create_call = transport.calls[-1]
+    assert create_call["method"] == "POST"
+    assert create_call["path"] == "/repos/o/r/issues"
+    payload = json.loads(create_call["body"])
+    assert payload["title"] == "Weekly audit"
+    assert payload["body"] == "Please audit things."
+    assert payload["labels"] == ["grain-agent", "grain-scheduled-weekly-audit"]
+    assert orchestrator.state.scheduled_job_last_fired["weekly-audit"] == NOW
+
+
+def test_scheduled_jobs_uses_needs_approval_label_when_the_job_opts_in():
+    orchestrator, transport = make_orchestrator(
+        issues=[],
+        scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(needs_approval=True),)),
+    )
+    transport.responses.append(ApiResponse(200, {}, b"[]"))
+    transport.responses.append(ApiResponse(201, {}, json.dumps(issue_json(99)).encode()))
+
+    orchestrator._scheduled_jobs(NOW)
+
+    payload = json.loads(transport.calls[-1]["body"])
+    assert payload["labels"] == ["grain-agent-needs-approval", "grain-scheduled-weekly-audit"]
+
+
+def test_scheduled_jobs_records_an_audit_entry_when_it_fires():
+    orchestrator, transport = make_orchestrator(
+        issues=[], scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(),)),
+    )
+    transport.responses.append(ApiResponse(200, {}, b"[]"))
+    transport.responses.append(ApiResponse(201, {}, json.dumps(issue_json(99)).encode()))
+
+    orchestrator._scheduled_jobs(NOW)
+
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("weekly-audit" in o and "99" in o for o in outcomes)
+
+
+def test_scheduled_jobs_does_not_refire_before_the_interval_elapses():
+    state = AutomationState()
+    state.record_scheduled_job_fired("weekly-audit", NOW - timedelta(hours=1))
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state,
+        scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(interval_hours=168),)),
+    )
+
+    orchestrator._scheduled_jobs(NOW)
+
+    assert transport.calls == []
+    assert orchestrator.state.scheduled_job_last_fired["weekly-audit"] == NOW - timedelta(hours=1)
+
+
+def test_scheduled_jobs_fires_again_once_the_interval_has_elapsed():
+    state = AutomationState()
+    state.record_scheduled_job_fired("weekly-audit", NOW - timedelta(hours=200))
+    orchestrator, transport = make_orchestrator(
+        issues=[], state=state,
+        scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(interval_hours=168),)),
+    )
+    transport.responses.append(ApiResponse(200, {}, b"[]"))
+    transport.responses.append(ApiResponse(201, {}, json.dumps(issue_json(99)).encode()))
+
+    orchestrator._scheduled_jobs(NOW)
+
+    assert orchestrator.state.scheduled_job_last_fired["weekly-audit"] == NOW
+
+
+def test_scheduled_jobs_skips_firing_while_a_previous_issue_is_still_uncompleted():
+    """bwsalmon/agents#163: the operator's own steer -- a job whose last
+    issue hasn't finished must not get a duplicate just because
+    `interval_hours` has since elapsed.
+    """
+    orchestrator, transport = make_orchestrator(
+        issues=[], scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(),)),
+    )
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        issue_json(50, labels=("grain-agent-in-progress", "grain-scheduled-weekly-audit")),
+    ]).encode()))
+
+    orchestrator._scheduled_jobs(NOW)
+
+    assert not any(c["method"] == "POST" for c in transport.calls)
+    assert "weekly-audit" not in orchestrator.state.scheduled_job_last_fired
+
+
+def test_scheduled_jobs_fires_again_once_the_previous_issue_is_completed():
+    orchestrator, transport = make_orchestrator(
+        issues=[], scheduled_jobs_config=ScheduledJobsConfig(jobs=(scheduled_job(),)),
+    )
+    transport.responses.append(ApiResponse(200, {}, json.dumps([
+        issue_json(50, labels=("grain-agent-completed", "grain-scheduled-weekly-audit")),
+    ]).encode()))
+    transport.responses.append(ApiResponse(201, {}, json.dumps(issue_json(99)).encode()))
+
+    orchestrator._scheduled_jobs(NOW)
+
+    assert any(c["method"] == "POST" for c in transport.calls)
+    assert orchestrator.state.scheduled_job_last_fired["weekly-audit"] == NOW
+
+
+def test_scheduled_jobs_runs_before_dispatch_in_run_once(monkeypatch):
+    """bwsalmon/agents#163: run last of the pre-dispatch phases so an
+    issue it files is picked up the same cycle, not left idle for one
+    extra `run_once` tick -- see `_scheduled_jobs`'s own docstring.
+    """
+    orchestrator, _ = make_orchestrator(issues=[])
+    order = []
+    monkeypatch.setattr(orchestrator, "_scheduled_jobs", lambda now: order.append("scheduled_jobs"))
+    monkeypatch.setattr(orchestrator, "_dispatch", lambda now: order.append("dispatch"))
+
+    orchestrator.run_once(NOW)
+
+    assert order == ["scheduled_jobs", "dispatch"]
 
 
 # --- grain's own comments never count as a human speaking ----------------

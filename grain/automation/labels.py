@@ -43,13 +43,16 @@ issue is in exactly one *state* at a time, and the reason to look at the
 queue at all is usually to see which -- so the state labels are dark
 and saturated, which GitHub renders as a solid pill that carries down a
 list of issues at a glance. The *capability* labels are not states: they
-are opt-in modifiers that a human adds to one task, they say nothing
-about where that task has got to, and a task can carry both at once. They
-are pale, so they read as an annotation on the row rather than competing
-with the state pill next to them. `Label.kind` records which tier a label
-is in, and tests/test_automation_labels.py holds the two apart by
-lightness, so a capability label added in a loud colour fails the suite
-rather than quietly eroding the scan.
+are modifiers on one task that say nothing about where that task has got
+to, and a task can carry both at once. Most are opt-in, added by a human;
+`waiting_on_dependency_label` (bwsalmon/agents#194) is the one exception,
+applied and removed by grain itself rather than a human, but it earns its
+place in the tier for the same reason the others do -- it is pale, so it
+reads as an annotation beside the state pill rather than competing with
+it. `Label.kind` records which tier a label is in, and
+tests/test_automation_labels.py holds the two apart by lightness, so a
+capability label added in a loud colour fails the suite rather than
+quietly eroding the scan.
 
 Within the state tier the hues follow the lifecycle and the ordinary
 meaning of the colours, rather than the order they were added in: blue is
@@ -129,6 +132,17 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     # `core.py`'s `_resolve_target`.
     "scratch_repo_label": (
         CAPABILITY, "bfd4f2", "Dispatch this task into its sandbox's own scratch repo",
+    ),
+    # bwsalmon/agents#194: the one CAPABILITY-tier label a human never
+    # applies -- `core.py`'s `_dispatch` adds it itself the moment a
+    # `/depends` issue is still open, and strips it the moment that clears,
+    # so it is a modifier on the row rather than a state `_dispatch`
+    # replaces `trigger_label` with (the task is still queued, just
+    # visibly not runnable yet). Pale for the same reason every other
+    # CAPABILITY label is: it must not out-shout the state pill next to it.
+    "waiting_on_dependency_label": (
+        CAPABILITY, "f9d0c4",
+        "Blocked: waiting on a /depends issue that hasn't closed yet",
     ),
 }
 

@@ -125,7 +125,7 @@ import dataclasses
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -153,6 +153,7 @@ from .scratch_repo import ScratchRepoConfig, repo_for_sandbox
 from .history import NullSessionHistory, SessionHistory
 from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
+from .scheduled_jobs import ScheduledJobsConfig
 from .ssh import SshRunner
 from .state import AutomationState, OpenPullRequest, TriggerKind
 from .sweeper import Outcome, sweep
@@ -466,6 +467,13 @@ class Orchestrator:
     # `janitor.py`'s own docstring for what it deletes and how it avoids
     # grain's own core infrastructure.
     janitor_config: JanitorConfig | None = None
+    # bwsalmon/agents#163: the on/off switch for scheduled jobs -- `None`
+    # (production's default for a deployment with no
+    # `/data/config/scheduled-jobs/` directory) makes `_scheduled_jobs` a
+    # no-op, the same "feature not configured" shape `janitor_config`
+    # above already has. See `scheduled_jobs.py`'s own docstring for how a
+    # job's own template file is authored and what it fires.
+    scheduled_jobs_config: ScheduledJobsConfig | None = None
     # bwsalmon/agents#159: the on/off switch for `config.scratch_repo_label`.
     # `None` (production's default for a deployment that never ran `grain
     # controller configure --scratch-repo-owner ...`) makes `_resolve_target`
@@ -564,6 +572,7 @@ class Orchestrator:
         self._restart_commented_completions()
         self._promote_lgtm_comments()
         self._close_finished_prs()
+        self._scheduled_jobs(now)
         self._dispatch(now)
 
     # --- sweep --------------------------------------------------------
@@ -731,6 +740,57 @@ class Orchestrator:
             self.audit.record(
                 sandbox=None, issue=None,
                 outcome=f"janitor warning ({warning.kind} {warning.name}): {warning.detail}",
+            )
+
+    # --- scheduled jobs (bwsalmon/agents#163) ---------------------------
+    def _scheduled_jobs(self, now: datetime) -> None:
+        """No-op when `scheduled_jobs_config` is unset. Run last in
+        `run_once`, right before `_dispatch`, so an issue this fires is
+        picked up the very same cycle rather than sitting idle for one
+        extra `run_once` tick -- the same "sweep before dispatch" ordering
+        every other phase above already follows.
+
+        For each job: skip it outright if `interval_hours` hasn't elapsed
+        since it last fired (`AutomationState.scheduled_job_last_fired`),
+        cheapest check first so a job nowhere near due costs nothing but a
+        dict lookup. Only once a job is otherwise due does this check
+        GitHub for an issue still carrying `job.marker_label` without
+        `completed_label` -- an earlier firing whose work isn't finished
+        yet -- and skips filing a second one if it finds one. That gate is
+        deliberately independent of `interval_hours`: a job whose issue
+        took longer than one interval to finish must not get a duplicate
+        the moment the interval elapses, and a job whose issue finished
+        early is still held to its own cadence rather than refiring
+        immediately.
+        """
+        if self.scheduled_jobs_config is None:
+            return
+        for job in self.scheduled_jobs_config.jobs:
+            last_fired = self.state.scheduled_job_last_fired.get(job.name)
+            if last_fired is not None and now - last_fired < timedelta(hours=job.interval_hours):
+                continue
+            open_issues = self.github.list_issues(
+                self.config.task_owner, self.config.task_repo, job.marker_label,
+            )
+            if any(
+                self.config.completed_label not in issue.labels
+                for issue in open_issues
+            ):
+                continue
+            label = (
+                self.config.needs_approval_label if job.needs_approval
+                else self.config.trigger_label
+            )
+            issue = self.github.create_issue(
+                self.config.task_owner, self.config.task_repo,
+                title=job.render_title(now), body=job.render_body(now),
+                labels=[label, job.marker_label],
+            )
+            self.state.record_scheduled_job_fired(job.name, now)
+            self._save_state()
+            self.audit.record(
+                sandbox=None, issue=issue.number,
+                outcome=f"scheduled job {job.name!r} filed issue #{issue.number}",
             )
 
     def _refresh_agent_labels(self) -> None:
@@ -2235,27 +2295,51 @@ class Orchestrator:
                 self._park(number, str(exc))
                 continue
 
-            if task.depends:
-                # bwsalmon/agents#164: checked fresh every cycle, the same
-                # "poll, don't trust a stale copy" discipline
-                # `_is_issue_closed` already holds to for the cancel-on-close
-                # poll (bwsalmon/agents#82) it's reused from here -- a
-                # dependency that was open last cycle may have closed since,
-                # with nothing about this task's own text having changed.
-                # Deliberately *not* `_park`: parking swaps the trigger
-                # label for the awaiting-reply one and waits on a human
-                # reply, but nothing here needs a human -- it needs the
-                # dependency issue to close, which happens on its own. A
-                # `continue`, not a `break`, since a blocked issue says
+            # bwsalmon/agents#164: checked fresh every cycle, the same
+            # "poll, don't trust a stale copy" discipline `_is_issue_closed`
+            # already holds to for the cancel-on-close poll
+            # (bwsalmon/agents#82) it's reused from here -- a dependency
+            # that was open last cycle may have closed since, with nothing
+            # about this task's own text having changed. `()` when
+            # `task.depends` is empty, which matters below: it's what makes
+            # the label-clearing branch fire equally for "never blocked"
+            # and "no longer names any dependency at all".
+            blocking = (
+                tuple(n for n in task.depends if not self._is_issue_closed(n))
+                if task.depends else ()
+            )
+            if blocking:
+                # bwsalmon/agents#194: visible on the issue itself, not just
+                # the audit log -- reapplied every cycle the block still
+                # holds (a no-op once it's already on, per
+                # `GitHubClient.add_label`) rather than tracked in
+                # `AutomationState`, so a controller restart mid-block has
+                # nothing to lose. Deliberately *not* `_park`: parking swaps
+                # the trigger label for the awaiting-reply one and waits on
+                # a human reply, but nothing here needs a human -- it needs
+                # the dependency issue to close, which happens on its own.
+                # A `continue`, not a `break`, since a blocked issue says
                 # nothing about whether the next one in the queue is also
                 # blocked -- unlike "no free sandbox"/"rate limit" above,
                 # which are true for every remaining candidate this cycle.
-                blocking = tuple(n for n in task.depends if not self._is_issue_closed(n))
-                if blocking:
-                    named = ", ".join(f"#{n}" for n in blocking)
-                    self.audit.record(sandbox=None, issue=number,
-                                       outcome=f"skipped: blocked on {named}")
-                    continue
+                if self.config.waiting_on_dependency_label not in issue.labels:
+                    self.github.add_label(
+                        self.config.task_owner, self.config.task_repo,
+                        number, self.config.waiting_on_dependency_label,
+                    )
+                named = ", ".join(f"#{n}" for n in blocking)
+                self.audit.record(sandbox=None, issue=number,
+                                   outcome=f"skipped: blocked on {named}")
+                continue
+            if self.config.waiting_on_dependency_label in issue.labels:
+                # The block just cleared (or the `/depends` line that
+                # caused it is gone) -- strip the label on this same cycle
+                # rather than leaving a stale "blocked" pill on an issue
+                # that's about to dispatch.
+                self.github.remove_label(
+                    self.config.task_owner, self.config.task_repo,
+                    number, self.config.waiting_on_dependency_label,
+                )
 
             sandbox_runner = self._ssh_runner_for(sandbox)
             # The same address/user `_ssh_runner_for` just used to build

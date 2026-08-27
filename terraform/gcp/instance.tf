@@ -43,6 +43,7 @@ locals {
     bootstrap_ssh_timeout_seconds = var.bootstrap_ssh_timeout_seconds
     name_prefix                   = var.name_prefix
     janitor_ttl_hours             = local.janitor_ttl_hours
+    scheduled_jobs                = var.scheduled_jobs
   }
 }
 

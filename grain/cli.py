@@ -31,8 +31,8 @@ from .automation.config import AutomationConfig
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_gcp_key_minter,
     configure_gemini_key, configure_github_credential, configure_janitor,
-    configure_named_github_key, configure_repo, configure_scratch_repo,
-    credential_repos,
+    configure_named_github_key, configure_repo, configure_scheduled_job,
+    configure_scratch_repo, credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
@@ -42,6 +42,7 @@ from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
 from .automation.history import FileSessionHistory
 from .automation.janitor import JanitorConfig
+from .automation.scheduled_jobs import ScheduledJobsConfig
 from .automation.scratch_repo import ScratchRepoConfig
 from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
@@ -161,6 +162,17 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         JanitorConfig.load(janitor_config_path)
         if janitor_config_path.exists() else None
     )
+    # bwsalmon/agents#163: same "absence is the off switch" shape as
+    # janitor_config above, over a directory instead of one file -- a
+    # deployment that has never written a `*.md` job template into
+    # `/data/config/scheduled-jobs/` gets no scheduled-jobs pass, not a
+    # crash. An existing-but-empty directory still loads (to zero jobs),
+    # which is just as harmless.
+    scheduled_jobs_dir = data_dir / "config" / "scheduled-jobs"
+    scheduled_jobs_config = (
+        ScheduledJobsConfig.load(scheduled_jobs_dir)
+        if scheduled_jobs_dir.is_dir() else None
+    )
     orchestrator = Orchestrator(
         cluster=cluster, github=github, config=config,
         state=AutomationState.load(state_path), base_runner=runner,
@@ -171,6 +183,7 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         audit=audit, history=history, gemini_key_config=gemini_key_config,
         gcp_key_config=gcp_key_config, janitor_config=janitor_config,
         scratch_repo_config=scratch_repo_config,
+        scheduled_jobs_config=scheduled_jobs_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
         # mid-`run_once`, rather than only once at the very end (see
@@ -514,6 +527,22 @@ def _read_named_github_keys(entries: list[str]) -> dict[str, str]:
     return keys
 
 
+def _read_scheduled_jobs(entries: list[str]) -> dict[str, str]:
+    """Parses repeated `--scheduled-job NAME=FILE` entries into
+    `{name: template_text}` (bwsalmon/agents#163) -- same `NAME=FILE`
+    shape `_read_named_github_keys` already has, kept as its own function
+    rather than shared since a job name has none of that one's reserved-
+    word ('anonymous') restriction.
+    """
+    jobs: dict[str, str] = {}
+    for entry in entries:
+        name, sep, path = entry.partition("=")
+        if not sep or not name or not path:
+            raise SystemExit(f"--scheduled-job must be NAME=FILE, got {entry!r}")
+        jobs[name] = sys.stdin.read() if path == "-" else Path(path).read_text()
+    return jobs
+
+
 def cmd_controller_configure(args: argparse.Namespace) -> int:
     """`grain controller configure` -- docs/bootstrap.md Phase 3's third
     missing verb: writes `/data/config/automation.json`,
@@ -589,6 +618,8 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
         configure_janitor(ssh, args.gcp_project_id, args.janitor_ttl_hours,
                            impersonate_service_account=args.gcp_agent_service_account_email,
                            name_prefix=args.janitor_name_prefix)
+    for name, template in _read_scheduled_jobs(args.scheduled_job).items():
+        configure_scheduled_job(ssh, name, template)
     if args.scratch_repo_owner:
         # bwsalmon/agents#159/#186: plain, non-secret config -- the
         # credential itself is just another `--github-key NAME=FILE` above
@@ -636,6 +667,7 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         gemini_project_id=args.gemini_project_id,
         janitor_ttl_hours=args.janitor_ttl_hours,
         janitor_name_prefix=args.janitor_name_prefix,
+        scheduled_jobs=_read_scheduled_jobs(args.scheduled_job),
         scratch_repo_owner=args.scratch_repo_owner,
         scratch_repo_prefix=args.scratch_repo_prefix,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
@@ -933,6 +965,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="must match this deployment's Terraform name_prefix (default: "
                          "grain) -- names the host/data-disk resources the janitor must "
                          "never delete")
+    p.add_argument("--scheduled-job", action="append", default=[], metavar="NAME=FILE",
+                    help="write a scheduled job's template file (bwsalmon/agents#163) to "
+                         "/data/config/scheduled-jobs/NAME.md -- a Title/Interval-Hours/"
+                         "Needs-Approval header block, a blank line, then the issue body "
+                         "to file automatically once every Interval-Hours. FILE holds the "
+                         "whole template, or '-' for stdin. Repeatable, once per job")
     p.add_argument("--scratch-repo-owner",
                     help="enables the grain-scratch-repo task label (bwsalmon/agents#159): "
                          "the account the grain-scratch-<sandbox> repos live under. The "
@@ -1067,6 +1105,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="must match this deployment's Terraform name_prefix (default: "
                          "grain) -- names the host/data-disk resources the janitor must "
                          "never delete")
+    p.add_argument("--scheduled-job", action="append", default=[], metavar="NAME=FILE",
+                    help="write a scheduled job's template file (bwsalmon/agents#163) to "
+                         "/data/config/scheduled-jobs/NAME.md -- a Title/Interval-Hours/"
+                         "Needs-Approval header block, a blank line, then the issue body "
+                         "to file automatically once every Interval-Hours. FILE holds the "
+                         "whole template, or '-' for stdin. Repeatable, once per job")
     p.add_argument("--scratch-repo-owner",
                     help="enables the grain-scratch-repo task label (bwsalmon/agents#159): "
                          "the account the grain-scratch-<sandbox> repos live under. The "

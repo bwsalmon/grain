@@ -6,8 +6,8 @@ from pathlib import Path
 from grain.automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
     configure_gcp_key_minter, configure_gemini_key, configure_github_credential,
-    configure_named_github_key, configure_repo, configure_scratch_repo,
-    ensure_sandbox_tokens,
+    configure_named_github_key, configure_repo, configure_scheduled_job,
+    configure_scratch_repo, ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
 from grain.inventory import Cluster
@@ -189,6 +189,26 @@ def test_named_github_key_is_never_in_argv():
     configure_named_github_key(ssh, secret, name="workflow")
     for argv, _ in inner.calls:
         assert all(secret not in arg for arg in argv)
+
+
+def test_configure_scheduled_job_writes_the_named_template_file():
+    ssh, inner = make_ssh()
+    template = "Title: Weekly audit\nInterval-Hours: 168\n\nAudit things."
+    configure_scheduled_job(ssh, "weekly-audit", template)
+    written = stdin_for(inner, "/data/config/scheduled-jobs/weekly-audit.md")
+    assert written == template  # written verbatim -- no stripping, no trailing newline added
+    assert any(
+        "sudo chmod 644 /data/config/scheduled-jobs/weekly-audit.md" in c
+        for c in inner.commands
+    )
+
+
+def test_configure_scheduled_job_writing_two_jobs_touches_two_files():
+    ssh, inner = make_ssh()
+    configure_scheduled_job(ssh, "weekly-audit", "Title: A\nInterval-Hours: 1\n\nb")
+    configure_scheduled_job(ssh, "daily-report", "Title: B\nInterval-Hours: 1\n\nb")
+    assert stdin_for(inner, "/data/config/scheduled-jobs/weekly-audit.md").startswith("Title: A")
+    assert stdin_for(inner, "/data/config/scheduled-jobs/daily-report.md").startswith("Title: B")
 
 
 def test_ensure_sandbox_tokens_mints_one_per_sandbox_when_the_file_is_absent():
