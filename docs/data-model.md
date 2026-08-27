@@ -1375,19 +1375,80 @@ class CapabilityContext:
     run: Run
     config: Deployment              # incl. this capability's own config
     credentials: CredentialResolver # by name; never enumerable
-    controller: Runner              # for minting. There is no sandbox runner.
+    controller: Runner              # minting, cloud APIs
+    sandbox: Runner                 # setup inside this task's own VM
+    workdir: Path                   # per-run scratch; see below
     now: datetime
 ```
 
-**Minting stays imperative; placement becomes declarative.** Writing the
-interface out is what makes the line obvious. `gemini_keys.create_key`
-shells to `gcloud` on the controller, and minting is genuinely varied —
-an API key, a service-account key, a JWT signed for a GitHub App — with
-no small vocabulary to reduce it to. Placement is the opposite: two
-capabilities, one shape, already written twice. So a provider keeps a
-**controller** runner and never gets a **sandbox** one, and the boundary
-the disciplines guard is exactly the boundary the provider cannot reach
-across.
+**Both runners, because the line is not controller-versus-sandbox.** An
+earlier draft withheld the sandbox runner, and that conflated two
+different things. The three
+[disciplines](#placement-what-materialize-returns) are about **credential
+material** — not in argv, not in a prompt, not inside `WORKSPACE_PATH` —
+and a provider that installs a package, starts a service, or writes a
+config template touches none of them. Withholding a runner to protect a
+rule about secrets blocked every capability that has nothing to do with
+secrets.
+
+So the line is **what crosses, not where code runs**:
+
+> Minting is imperative. Setup is imperative. **Material moves through a
+> `Placement` and never through a runner.**
+
+Be honest about what that is: with a sandbox runner in the context, the
+material rule is a **convention**, not a structure. A provider *could*
+`dd` a key itself. What the design still buys is that the declared path
+is the easy one — return a dataclass, versus hand-writing a
+stdin-not-argv invocation and a `chmod` — that everything taking it is
+enumerable and auditable, and that a provider shelling material into a
+sandbox is a legible anomaly in review rather than the ordinary way.
+Under [a sandbox per task](#direction-a-sandbox-per-task) the guarantee
+that was lost — reversibility — is the one disposability provides
+anyway.
+
+**Yes, it needs per-run scratch on the controller — `ctx.workdir`.** The
+moment a provider does more than mint-one-value-and-push-it, it needs
+somewhere to work: rendering a config from a template, generating a
+keypair and keeping only the public half, staging a multi-file bundle,
+downloading a tool before pushing it. Four properties, none of them the
+provider's to arrange:
+
+- **Per run, not per sandbox.** Under a sandbox per task those are the
+  same lifetime anyway, and per-run is the one that stays correct if they
+  ever diverge again.
+- **The executor owns its lifecycle.** Created before the first
+  `materialize`, removed after release — so a provider that forgets to
+  clean up does not leak, exactly as with placements.
+- **tmpfs, not the data disk.** Scratch that has held credential material
+  should not land on `/data`, which is the volume that survives
+  everything. This is a preference rather than a requirement — the
+  controller already holds standing credentials on disk under
+  `/data/secrets` — but that store is deliberate and audited, whereas
+  scratch is transient and easy to forget. On tmpfs the failure mode
+  self-corrects on reboot.
+- **Mode 700, owned by the automation account.** The same treatment
+  `/data/secrets` already gets.
+
+The sandbox needs no equivalent concept: it is disposable and single-task,
+so `/tmp` there is already scratch.
+
+**Sequencing, now that providers can act on both sides.** Three rules,
+because "run some setup" has an order in a way "return a file" did not:
+
+1. **Providers run in registration order**, deterministically, so two that
+   both touch the sandbox compose predictably.
+2. **After workspace preparation.** `ensure_workspace` leaves a known
+   clean checkout; a provider that wants to configure git in it, or
+   install a tool the task needs, should be able to assume it exists.
+3. **A failed `materialize` means no dispatch** — the task requeues or
+   parks rather than running half-provisioned. This is not new discipline;
+   `dispatch()` already threads "did a key actually get minted" through
+   precisely so "the prompt never claims one exists when
+   `configure_gemini_key` was never called." Generalised: **`prompt_section`
+   is only ever called for a capability whose `materialize` succeeded.**
+   The prompt is a promise to the agent, and a capability that half-applied
+   must not be described as present.
 
 A base class carries the defaults, so a provider writes only what applies
 to it:
@@ -1695,19 +1756,21 @@ knowingly given up. If it is ever taken, the effect here is that
 `cleanup()` and un-placement both become unnecessary; nothing else in
 this section changes.
 
-**What it costs, and the rule for when it binds.** A capability that
-needs to *run* something rather than write something cannot say so. None
-does today: the two `MINT` capabilities write one file each, and the two
-`GRANT` ones place nothing at all. When one arrives, **widen the
-vocabulary rather than handing back the runner** — one provider with an
-arbitrary runner means a reviewer can no longer assume any of the three
-disciplines hold anywhere, which is the entire gain, given up for one
-caller.
+**Why `Placement` still exists once providers have a sandbox runner.** It
+would be simpler to drop it and let every provider `dd` its own files.
+Three reasons not to, none of which needs the runner withheld:
 
-The risk of widening is turning the vocabulary into a bad configuration
-DSL. The guard is to add a verb only when a real capability needs it, and
-to treat the *third* exotic request as evidence the design is wrong
-rather than as a reason to add a fourth verb.
+- The declared path is shorter than the hand-written one, so the safe
+  path is the default path rather than the disciplined one.
+- Everything taking it is enumerable — which is what makes "which
+  credentials did this run hold, and where did they land?" answerable
+  from a record instead of from reading provider code.
+- Mode, ownership, and the `WORKSPACE_PATH` refusal are decided once, in
+  the executor, rather than re-derived per provider.
+
+The failure this accepts is a provider that moves material imperatively
+anyway. That is a review finding, and a legible one: `dd` or `chmod`
+inside a capability module is a grep away.
 
 **What is deliberately not pluggable.** A provider is code that runs on
 the controller with the controller's credentials, so:
@@ -2489,6 +2552,7 @@ Settled, with where each is argued and what would reopen it:
 | Decision | Where | Reopens if |
 |---|---|---|
 | Capabilities are a provider contract, not a table — one file plus one line to add | [here](#capabilities-are-an-extension-point-not-a-table) | — |
+| A provider runs code on both sides; material crosses via `Placement`, never a runner | [here](#what-writing-a-new-capability-looks-like) | — |
 | Three records, sorted by who writes them — grain's store wins for grain's own acts, GitHub for facts it owns | [here](#decided-whoever-writes-it-owns-it) | — |
 | Representation is separate from the model; the dataclasses are the model, storage and label and directive shapes are not | [here](#representation-is-not-the-model) | — |
 | Landing state is decided by the creating actor, never the reason | [here](#task--the-aggregate) | — |
@@ -2513,16 +2577,6 @@ Grouped by what each holds up. None blocks stage 1, and none is a
 correctness question — each has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
-
-- **Does `materialize` get a sandbox runner, or return a placement?**
-  Worked through under [placement](#placement-what-materialize-returns),
-  with a recommendation of declarative: it turns three conventions into
-  structural guarantees and gives un-placement an owner it does not have
-  today. Minting stays imperative either way — [a provider keeps a
-  controller runner](#what-writing-a-new-capability-looks-like), since
-  minting has no small vocabulary to reduce to. What is left to decide is
-  whether the placement vocabulary is worth the constraint before a
-  capability exists that strains it.
 
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
