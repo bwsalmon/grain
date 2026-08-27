@@ -9,6 +9,7 @@ from grain.proxy.core import GitProxy
 from grain.proxy.credentials import CredentialSet
 from grain.proxy.forward import FakeForwarder, UpstreamResponse
 from grain.proxy.tokens import SandboxCredentialOverrides, SandboxTokens
+from grain.run import CommandError
 
 
 def _basic(token: str) -> str:
@@ -215,3 +216,118 @@ def test_override_is_re_read_on_every_request_no_restart_needed(proxy_with_workf
     p.handle(method="GET", path="/owner/repo.git/info/refs",
               query="service=git-upload-pack", headers=headers, body=None)
     assert forwarder.calls[1]["token"] == "workflow-token"
+
+
+# --- scratch_source (bwsalmon/agents#159: grain-scratch-repo task label) ---
+
+class _FakeScratchSource:
+    """Stands in for `automation.github_keys.InstallationTokenSource` --
+    `None` for anything outside the one repo this test scripts, the same
+    "not my repo" answer the real thing gives.
+    """
+
+    def __init__(self, owner: str, repo: str, token: str) -> None:
+        self.owner = owner
+        self.repo = repo
+        self.token = token
+        self.calls: list[tuple[str, str]] = []
+
+    def token_for(self, owner: str, repo: str) -> str | None:
+        self.calls.append((owner, repo))
+        return self.token if (owner, repo) == (self.owner, self.repo) else None
+
+
+class _RaisingScratchSource:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def token_for(self, owner: str, repo: str) -> str | None:
+        raise self._exc
+
+
+@pytest.fixture
+def proxy_with_scratch_source(tmp_path):
+    (tmp_path / "repo-allowlist.json").write_text(
+        json.dumps(["owner/repo", "owner/grain-scratch-sandbox-0"])
+    )
+    (tmp_path / "credentials.json").write_text(json.dumps({"*": "bot"}))
+    (tmp_path / "bot.token").write_text("bot-token")
+    (tmp_path / "sandbox-tokens.json").write_text(json.dumps({"sandbox-0": "tok0"}))
+
+    forwarder = FakeForwarder(response=UpstreamResponse(200, {"Content-Type": "x"}, b"ok"))
+    audit = RecordingAuditLog()
+    scratch_source = _FakeScratchSource("owner", "grain-scratch-sandbox-0", "scratch-token")
+    p = GitProxy(
+        allowlist=Allowlist(tmp_path / "repo-allowlist.json"),
+        credentials=CredentialSet(tmp_path),
+        tokens=SandboxTokens(tmp_path / "sandbox-tokens.json"),
+        forwarder=forwarder,
+        audit=audit,
+        scratch_source=scratch_source,
+    )
+    return p, forwarder, audit, scratch_source
+
+
+def test_a_scratch_repo_push_is_forwarded_with_the_minted_token(proxy_with_scratch_source):
+    p, forwarder, audit, _source = proxy_with_scratch_source
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/grain-scratch-sandbox-0.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 200
+    assert forwarder.calls[0]["token"] == "scratch-token"
+    assert audit.entries[0]["credential"] == "scratch"
+
+
+def test_a_non_scratch_repo_falls_through_to_the_ordinary_ladder(proxy_with_scratch_source):
+    p, forwarder, audit, source = proxy_with_scratch_source
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 200
+    assert forwarder.calls[0]["token"] == "bot-token"
+    assert source.calls == [("owner", "repo")]  # consulted, but answered None
+
+
+def test_no_scratch_source_configured_is_unaffected(proxy):
+    """The default -- every existing caller/test -- must behave exactly
+    as it did before this feature existed."""
+    p, forwarder, audit = proxy
+    assert p.scratch_source is None
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/repo.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 200
+    assert forwarder.calls[0]["token"] == "bot-token"
+
+
+def test_scratch_repo_still_respects_the_allowlist(proxy_with_scratch_source):
+    p, forwarder, audit, _source = proxy_with_scratch_source
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/grain-scratch-sandbox-1.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 403
+    assert forwarder.calls == []
+
+
+def test_a_broken_minter_is_a_legible_500_not_a_crash(tmp_path):
+    (tmp_path / "repo-allowlist.json").write_text(
+        json.dumps(["owner/grain-scratch-sandbox-0"])
+    )
+    (tmp_path / "credentials.json").write_text(json.dumps({}))
+    (tmp_path / "sandbox-tokens.json").write_text(json.dumps({"sandbox-0": "tok0"}))
+    forwarder = FakeForwarder()
+    audit = RecordingAuditLog()
+    p = GitProxy(
+        allowlist=Allowlist(tmp_path / "repo-allowlist.json"),
+        credentials=CredentialSet(tmp_path),
+        tokens=SandboxTokens(tmp_path / "sandbox-tokens.json"),
+        forwarder=forwarder,
+        audit=audit,
+        scratch_source=_RaisingScratchSource(CommandError(["openssl"], 1, "no such file")),
+    )
+    headers = {**GIT_HEADERS, "Authorization": _basic("tok0")}
+    resp = p.handle(method="GET", path="/owner/grain-scratch-sandbox-0.git/info/refs",
+                     query="service=git-upload-pack", headers=headers, body=None)
+    assert resp.status == 500
+    assert forwarder.calls == []
+    assert "could not mint" in audit.entries[0]["outcome"]

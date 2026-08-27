@@ -1459,3 +1459,119 @@ either a comment already on the issue before the run even started, or (the
 third finish path's own `comment_on_issue` reply) the automation comment
 that finish path just posted, as a "new" one and restarting a task nobody
 actually asked to restart.
+
+## 24. Restart in-progress jobs that survived a lost state
+
+- [x] Done
+
+bwsalmon/agents#139: item 8's "Update" (bwsalmon/agents#51) already made
+sure a controller crash or VM restart *mid-`run_once`* can never lose an
+in-progress task, by saving `AutomationState` incrementally rather than
+once at the end — but that whole recovery path assumes the state file
+itself survives the restart. A restart that also loses `/data` (a fresh
+volume, a wiped or corrupted `state.json`, a from-scratch redeploy — what
+the issue title calls grain being "restarted or reformatted") comes back
+up with `AutomationState.assignments` empty. Every task issue still
+carrying `in_progress_label` from before that happened is now invisible to
+every existing poll: `_dispatch` only ever lists `trigger_label`, and the
+sweeper only ever looks at assignments *on disk* — so with neither in
+play, such an issue would sit `in_progress` forever with no agent actually
+working it, indistinguishable from the queue's point of view from a task
+that's simply taking a long time.
+
+`core.py`'s `_restart_orphaned_in_progress` closes that gap by treating
+GitHub's own labels as the fallback source of truth, the same "poll, don't
+trust a cache" bar every other reconciliation pass here already holds to:
+every `run_once`, it lists every issue still carrying `in_progress_label`
+and, for any one this process's own state has no assignment for, gives it
+exactly the treatment `_requeue` gives a stranded run — `in_progress_label`
+off, `trigger_label` back on, every sandbox's `agent_label` stripped since
+there's no assignment left to say which one it was — so the very next
+`_dispatch` in the same cycle picks it back up. Deliberately scoped to
+`in_progress_label` alone: `awaiting_reply_label`/`completed_label` are
+already resting states with a human reply or a later poll expected to move
+them along, not silently orphaned work in the sense this closes the gap
+on.
+
+## 25. Add a review option
+
+- [x] Done
+
+bwsalmon/agents#154: every existing task either changes code (a fresh
+branch or a `/pr`-continuation) or answers a question (`comment_on_issue`)
+— there was no way to ask the agent set to just *read* a pull request and
+leave feedback, without either pushing a competing branch or dumping one
+long comment with no attachment to specific lines.
+
+`/review true` (`directives.py`), only honoured alongside `/pr N`
+(`core.py`'s `_resolve_target` refuses it otherwise — a review has nothing
+to check out or post against without a PR number in hand), is a third
+dispatch shape alongside a fresh issue and a `/pr`-continuation:
+`dispatch.py`'s `dispatch_review` checks out the PR's own branch exactly
+`dispatch_pr` does, but `_review_prompt` tells the agent this is read-only
+— no `git push` instructions at all — and to use a new MCP tool,
+`add_review_comment`, instead. That tool (`mcp_server.py`) appends one
+piece of feedback at a time (a `path`/`line` pair to attach it to a
+specific line of the diff, or neither for a general remark) to a fixed
+per-unit JSON file, the same "only ever writes locally, `core.py` posts
+the human-facing half" shape `ask_question`/`comment_on_issue` already
+have — just accumulating instead of overwriting, since a review is
+naturally many small points rather than one.
+
+A new `TriggerKind.REVIEW` (`state.py`) carries the target PR's own number
+through to sweep time (`Assignment.pr_number`/`Outcome.pr_number`, next to
+the branch a PR assignment already carries), and `core.py`'s
+`_finish_succeeded_review` reads back whatever the agent left and posts it
+as one **draft** review (`GitHubClient.create_review`, bwsalmon/agents#154's
+addition to `github.py`) — the request carries no `event` key at all,
+which is what keeps GitHub from ever submitting it: an agent reviewing its
+own (or anyone's) code is never the one who gets to approve it, request
+changes on it, or even publish a plain comment review of it. The draft
+sits `PENDING`, visible only to the credential that created it, until a
+human opens it on github.com and submits it themselves. An agent that
+looked and found nothing worth flagging leaves the file unwritten, and
+`_finish_succeeded_review` posts no review at all rather than an empty one
+nobody asked for.
+
+## 26. Don't pick up issues with uncompleted dependencies
+
+- [x] Done
+
+bwsalmon/agents#164: a task that only makes sense once another task has
+landed (a follow-up filed against a change still in flight, a piece of
+work split across several issues on purpose) had no way to say so — it
+would dispatch the moment a human labelled it, agent set and all, whether
+or not what it needed was actually there yet.
+
+A new `/depends 12,34` directive (`directives.py`), a comma-separated list
+of issue numbers in the *task* repo (the queue itself, never `/repo`'s
+target — a dependency is between two entries in the same queue, not
+between repos). Unlike every other directive, what it names isn't
+resolved once by `_resolve_target` and pinned to the `Assignment` for the
+rest of the run: whether the named issues are still open can change cycle
+to cycle with nothing about the task's own text changing, so
+`ResolvedTask.depends` just carries the numbers through, and `_dispatch`
+checks them fresh — via `_is_issue_closed`, the same `get_issue` poll and
+404-tolerance the cancel-on-close check (bwsalmon/agents#82) already
+uses — right before a task would otherwise be dispatched.
+
+A block is deliberately not routed through `_park`: parking swaps the
+trigger label for `awaiting_reply_label` and waits on a human reply, but a
+`/depends` block needs no reply — it resolves itself the moment the named
+issue closes. So a still-open dependency instead just logs `skipped:
+blocked on #N` to the audit trail and `continue`s the dispatch loop (a
+`break`, unlike "no free sandbox"/"rate limit" above it, would wrongly
+treat one task's block as true of every other candidate still queued this
+cycle). The trigger label, and everything else about the issue, is left
+exactly as a human set it — the very next cycle checks again, with no
+state of its own to track in between.
+
+The one case that *is* routed through `_park`: a task naming itself in
+its own `/depends` line, which can never close the loop and would
+otherwise block forever with only the audit log to explain why. Refused
+outright, the same as any other unusable directive. A circular dependency
+between two *different* issues is not specially detected — each would
+simply show as blocked on the other, indefinitely, in the audit log for a
+human to notice and fix; chasing full cycle detection through directives
+on issues this hasn't even fetched yet was judged not worth the extra
+GitHub calls for a misconfiguration a human filed and a human can unfile.

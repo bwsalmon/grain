@@ -211,19 +211,25 @@ need cloud access.
 ## Install
 
 There is no package and no entry point — `grain` is invoked as
-`python3 -m grain.cli`. Clone it wherever you run it:
+`python3 -m grain.cli`, wrapped by `bin/grain` (`exec python3 -m grain.cli
+"$@"`, resolved against its own real path so it works from anywhere it's
+symlinked onto `PATH`, not just from inside the checkout). Clone it
+wherever you run it, then put that wrapper on `PATH`:
 
 ```sh
 git clone https://github.com/bwsalmon/grain
 cd grain
-alias grain='python3 -m grain.cli'      # the rest of this file assumes it
+sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain   # the rest of this file assumes it
 ```
 
 The same tree is deployed twice: **on the host**, where `grain host …`
 drives the hypervisor, and **on the controller** at `/opt/grain`, where
 everything else runs. Which machine a command belongs on is not
 cosmetic — the controller is the only one with `/data` and the
-credentials.
+credentials. `bin/grain` is symlinked onto the controller's `PATH`
+automatically (`provision/controller.sh`, and `terraform/gcp/files/deploy.sh`
+for the GCP host that plays the same role there) — this manual step is only
+needed for a host you set up yourself.
 
 | Command group | Runs on |
 |---|---|
@@ -565,7 +571,7 @@ holds credentials:
 
 ```sh
 sudo systemctl enable --now grain-git-proxy.service
-sudo systemctl enable --now grain-automation.timer     # 30-second cadence
+sudo systemctl enable --now grain-automation.timer     # two-minute cadence
 ```
 
 `systemctl cat grain-automation.timer` shows the exact unit; edit
@@ -663,6 +669,20 @@ comments, and it pushes more commits to that branch rather than opening a
 new one. The labels and the conversation still live on the task issue — no
 label of ours is ever applied in a target repo.
 
+**Add `/review true` alongside `/pr 42`** to have an agent *read* that
+pull request instead of continuing the work on it. The workspace lands on
+the same branch `/pr` alone would use, but the agent is told not to push
+anything — it leaves feedback with a dedicated tool instead, optionally
+attached to a specific file and line. Once the run finishes, everything it
+left is posted as a single **draft** review on the pull request: GitHub
+leaves a review with no `event` in the request `PENDING`, visible only to
+the credential that created it, until a human opens it on github.com and
+submits it themselves — an agent never approves, requests changes on, or
+even plain-comments its own (or anyone else's) code. `/review` with no
+`/pr` alongside it is refused and the task is parked, the same way an
+unlisted `/repo` is: a review needs a pull request to know which branch to
+read and which PR to post its draft against.
+
 **A completed task's PR is watched, too** (bwsalmon/agents#83): each
 `run-once` pass checks every still-open PR against a definite conflict
 (GitHub's own `mergeable` field reading `false`) or a definite failing
@@ -671,7 +691,8 @@ check, and the first time either shows up for a given PR, grain files a
 task is filed with `grain-agent-needs-approval`, not the trigger label, so
 it sits visibly in the queue without being picked up on its own; a comment
 on the original task links to it. Apply the trigger label to it, the same
-action that starts every other task, and the agent set attempts the fix on
+action that starts every other task, or comment `/lgtm` on it
+(bwsalmon/agents#136) — either one lets the agent set attempt the fix on
 a fresh branch built on top of the original PR's own branch — a PR stacked
 on that PR, not a second one against the target repo's default branch.
 That new task also carries `/auto-merge`, so once its own PR reads clean
@@ -695,6 +716,29 @@ rides in the prompt file, only its path in the sandbox — see
 `grain/automation/gemini_keys.py` for why this is minted on the
 controller's own account rather than the sandbox-facing metadata broker.
 
+**Label a task `grain-scratch-repo`** (bwsalmon/agents#159) to dispatch it
+into a repo dedicated to testing grain itself, one per sandbox slot
+(`owner/grain-scratch-<sandbox>`), instead of anywhere named by `/repo` —
+the label overrides any `/repo` line entirely, since which of the scratch
+repos applies isn't known until a sandbox is actually picked. Off by
+default: a deployment enables it once with `grain controller configure
+--github-key-app-id <id> --github-key-installation-id <id> --github-key-owner
+<owner> --github-key-minter-key-file <path to the App's private key>`; a
+task carrying the label before that's done is parked with a comment, the
+same as an unlisted `/repo`. Nothing is minted at dispatch time or stored
+anywhere: both the orchestrator (opening a PR, reading a branch) and the
+git proxy (a sandbox's own push) mint a fresh, repo-scoped GitHub App
+installation token the moment they actually need one, each independently,
+and let it expire on GitHub's own one-hour clock rather than tracking or
+revoking anything — see `grain/automation/github_keys.py` for the full
+design. Setting this up needs a one-time, mostly-manual step outside
+`grain`'s own reach: create a dedicated GitHub App, install it on however
+many `owner/grain-scratch-<sandbox>` repos this deployment's `Cluster` has
+sandboxes for (Contents, Issues, Pull requests, and Checks permissions —
+nothing else grain's own GitHub client ever exercises), and add each of
+those repos to `/data/config/repo-allowlist.json` the same way any other
+target repo would be.
+
 **Label a task `grain-self-debug`** (bwsalmon/agents#62, #86) to give the
 agent four extra tools, all strictly read-only, for triaging a bug in
 grain itself rather than the target repo's own code:
@@ -712,9 +756,9 @@ grain itself rather than the target repo's own code:
 - `read_grain_config`: one of grain's own non-secret config files under
   `/data/config` on the controller (`automation.json`,
   `repo-allowlist.json`, `gemini-key.json`, `gcp-key.json`,
-  `sandbox-github-key.json`) — every credential and token this deployment
-  holds lives under `/data/secrets` instead, which none of these tools can
-  reach.
+  `github-key.json`, `sandbox-github-key.json`) — every credential and
+  token this deployment holds lives under `/data/secrets` instead, which
+  none of these tools can reach.
 - `read_automation_audit_log`: recent entries from the dispatch/sweep
   audit log — one line per state-machine decision the orchestrator made
   (a task dispatched, skipped, succeeded, failed, or stranded, and why).

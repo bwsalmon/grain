@@ -11,9 +11,11 @@ end.
 
 All commands below assume you're running as the repo's `python3 -m
 grain.cli ...` (shortened to `grain ...` below — there is no installed
-entry point yet, so substitute the full invocation, or `alias grain='python3
--m grain.cli'`). Unless noted, run these **on the controller VM**, not the
-host — the controller is where `/data` and every credential live.
+entry point, so substitute the full invocation, or symlink `bin/grain` onto
+`PATH`: `sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain`, done for you
+already on the controller and on a GCP host — see README.md's "Install").
+Unless noted, run these **on the controller VM**, not the host — the
+controller is where `/data` and every credential live.
 
 ## System map
 
@@ -345,7 +347,7 @@ periodically by something else, not run as a daemon** — `docs/design.md`
 says "invoked by a systemd timer."
 
 **That timer is now shipped**: `provision/controller.sh` installs
-`grain-automation.service`/`.timer` (a 30-second `OnUnitActiveSec`, same
+`grain-automation.service`/`.timer` (a two-minute `OnUnitActiveSec`, same
 shape this section used to hand-draft) and `grain-git-proxy.service`, all
 disabled until step 12 of the first-time setup checklist enables them —
 they can't do anything useful before `/opt/grain` holds real code and
@@ -424,6 +426,7 @@ session record itself is still kept, just without transcript content.
     controller-ssh, controller-ssh.pub   # controller -> sandbox SSH identity
     sandbox-tokens.json                  # sandbox name -> bearer token (git proxy auth)
     gcp-service-account.json             # primary GCP key gemini_keys.py authenticates with (optional)
+    github-key-minter.pem                # GitHub App private key github_keys.py signs a JWT with (optional, bwsalmon/agents#159)
     github/
       credentials.json                   # owner/repo pattern -> credential name
       <name>.token                       # one file per credential named in credentials.json
@@ -433,6 +436,7 @@ session record itself is still kept, just without transcript content.
     cluster.toml                         # sandbox_count, subnet -- the controller's own copy; see below
     gemini-key.json                      # GeminiKeyConfig (optional, see below)
     gcp-key.json                         # GcpKeyConfig (optional, bwsalmon/agents#126, see below)
+    github-key.json                      # GitHubKeyConfig (optional, bwsalmon/agents#159, see below)
     sandbox-github-key.json              # sandbox name -> named credential override, if any (bwsalmon/agents#52)
   state/
     automation/state.json, audit.log
@@ -464,6 +468,13 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   all, despite `docs/design.md` describing rotation as "folded into
   recreate" — today that's aspirational, not implemented. Recreating a
   sandbox does *not* rotate its token; do that as a separate, manual step.
+- **The GitHub App private key** (`github-key-minter.pem`, bwsalmon/agents#159):
+  overwrite the file with the new key, `chmod 0600` it, restart both
+  `grain-git-proxy.service` and (since it's a fresh process per cycle
+  anyway) simply wait for the next `automation run-once` tick — unlike a
+  plain GitHub credential, both services read this one, since both mint
+  their own scratch-repo tokens independently (see
+  `grain/automation/github_keys.py`).
 - **`cluster.toml`**: written by `configure_cluster`
   (`grain/automation/configure.py`) on every `grain host bootstrap` run, not
   just the first — the host's own `--cluster-file` never leaves the host,
@@ -475,7 +486,7 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   `subnet` are written — the only two fields `sandbox_names`/`address_of`
   depend on; everything else in `Cluster` (VM sizing, image, bridge) is a
   host-side-only concern. Takes effect on the next `automation run-once`
-  tick (every 30s); no restart needed, since it's a oneshot invoked fresh
+  tick (every 2 min); no restart needed, since it's a oneshot invoked fresh
   each time, not a long-lived process holding a stale copy in memory.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing
@@ -703,6 +714,63 @@ To disable it again: delete `/data/config/gcp-key.json`. Any key already
 minted for a task still in flight is unaffected (it still gets revoked
 normally when that task's slot frees, or reaped at 24 hours) — this only
 stops new ones from being minted.
+
+## Enabling `grain-scratch-repo` (optional, bwsalmon/agents#159)
+
+A task issue carrying the `grain-scratch-repo` label dispatches into a
+repo dedicated to testing grain itself, one per sandbox slot
+(`owner/grain-scratch-<sandbox>`) — see the README's directives section
+and `grain/automation/github_keys.py`'s docstring for the full design.
+Off by default; nothing above requires it, and this feature has no
+Terraform-declarative equivalent (it involves a GitHub App, not GCP IAM).
+
+1. Create a scratch GitHub account or organisation to own the repos, if
+   this deployment doesn't already have one dedicated to grain's own
+   testing.
+2. Create `Cluster.sandbox_count` repos under it, one per sandbox slot,
+   named `grain-scratch-<sandbox>` — `sandbox-0`, `sandbox-1`, and so on
+   for however many sandboxes this deployment runs. Small, disposable, and
+   never holding anything real: a misbehaving test credential or a bug in
+   an agent's push can only ever touch these.
+3. Create a GitHub App (github.com → Settings → Developer settings →
+   GitHub Apps → New GitHub App) with exactly four repository permissions:
+   Contents (read/write), Issues (read/write), Pull requests (read/write),
+   and Checks (read) — the full surface `grain/automation/github.py`
+   exercises, nothing more. Generate a private key for it (a `.pem`
+   download) and note its App id.
+4. Install the App on the account from step 1, selecting exactly the
+   repos from step 2. Note the installation id (the numeric id in the
+   installed-App's URL, `.../settings/installations/<id>`).
+5. Add each `owner/grain-scratch-<sandbox>` repo to
+   `/data/config/repo-allowlist.json`, the same way any other target repo
+   would be (see "Adding or reconfiguring a target repo" above) — the
+   allowlist gates git transport regardless of which credential covers a
+   repo.
+6. Run `grain controller configure --github-key-app-id <id>
+   --github-key-installation-id <id> --github-key-owner <owner>
+   --github-key-minter-key-file <path to the .pem from step 3>` (any other
+   `controller configure` flags in the same invocation still apply
+   normally — this one is additive). This writes
+   `/data/config/github-key.json` and the App's private key to
+   `/data/secrets/github-key-minter.pem`, then restarts
+   `grain-git-proxy.service` (which, like `grain-automation.service`'s own
+   fresh-process-per-cycle reads, only needs to happen once — a running
+   proxy does not otherwise notice `github-key.json` changing). A
+   Terraform-managed deployment does this automatically as part of `host
+   bootstrap` instead, via the equivalent `github_key_*` `BootstrapConfig`
+   fields.
+7. A task now enables it by carrying the `grain-scratch-repo` label — see
+   the README's directives section. Until step 6 is done, that label
+   parks the task with a comment explaining why, the same as an unlisted
+   `/repo`.
+
+Nothing here is minted ahead of time or stored: both
+`grain-automation.service` (opening a PR, reading a branch) and
+`grain-git-proxy.service` (a sandbox's own push) mint a fresh, repo-scoped
+installation token from the App's private key the moment they actually
+need one, and let it expire on GitHub's own one-hour clock. To disable
+the feature again: delete `/data/config/github-key.json` (leaving the
+private key in place is harmless — nothing reads it without that file).
 
 ## Enabling the janitor (optional, bwsalmon/agents#113)
 

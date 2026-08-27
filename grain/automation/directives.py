@@ -18,6 +18,22 @@ request is opened. This module is the parser for how a task says so.
                          (bwsalmon/agents#83), the only thing that writes
                          this directive today, for why a task would ever
                          want that
+  /review true         optional: instead of continuing the work on `/pr`'s
+                         branch, read it and leave inline feedback -- see
+                         `core.py`'s `ResolvedTask.review` (bwsalmon/agents#154)
+                         for what this changes about the dispatch. Requires
+                         `/pr` on the same task: a review has nothing to
+                         attach comments to without one, and "which branch"
+                         is exactly what a bare `/review` (with no PR to
+                         name it) would leave ambiguous.
+    /depends 12,34       optional: comma-separated issue numbers, in the
+                         *task* repo (the queue itself, not `/repo`'s
+                         target), that must be closed before this one is
+                         dispatched -- see `core.py`'s `_dispatch`
+                         (bwsalmon/agents#164), which checks this fresh on
+                         every cycle rather than once, so a task un-blocks
+                         on its own the moment the last dependency closes,
+                         with no reply needed.
 
 A body line, not a label: a `repo:owner/name` label would have to exist in
 the task repo before it could be applied, is awkward to create once per
@@ -68,7 +84,7 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
 # left alone (a prose line starting with an absolute path, a Markdown list
 # of shell commands), which is why the name is matched from a fixed set
 # here rather than by shape.
-_DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base|auto-merge)\s+(\S+)\s*$")
+_DIRECTIVE_RE = re.compile(r"^\s*/(repo|pr|base|auto-merge|review|depends)\s+(\S+)\s*$")
 
 
 @dataclass(frozen=True)
@@ -111,6 +127,20 @@ class Directives:
     # "sticky" shape a label would have. `_apply` therefore ORs across
     # texts rather than letting a later one override to False.
     auto_merge: bool = False
+    # bwsalmon/agents#154: the identical presence-only, sticky shape as
+    # `auto_merge` above, for `/review`. `core.py`'s `_resolve_target` is
+    # what actually refuses this without a `/pr` alongside it -- this
+    # parser has no concept of "requires another directive," only of what
+    # was written.
+    review: bool = False
+    # bwsalmon/agents#164: the issue numbers a `/depends` line named, or
+    # `None` if the directive was never written -- distinct from `()`
+    # (an empty tuple) the same way `target`/`pr`/`base` distinguish
+    # "unset" from a real value, so a later text's `/depends` line can
+    # replace an earlier one's list wholesale rather than merging with it.
+    # `core.py`'s `_dispatch` is what actually checks whether the named
+    # issues are still open; this parser only extracts the numbers.
+    depends: tuple[int, ...] | None = None
 
 
 class DirectiveError(ValueError):
@@ -168,6 +198,8 @@ def _parse_one(text: str) -> Directives:
         pr=_parse_pr(found["pr"]) if "pr" in found else None,
         base=found["base"] if "base" in found else None,
         auto_merge="auto-merge" in found,
+        review="review" in found,
+        depends=_parse_depends(found["depends"]) if "depends" in found else None,
     )
 
 
@@ -181,10 +213,27 @@ def _parse_pr(value: str) -> int:
     return int(number)
 
 
+def _parse_depends(value: str) -> tuple[int, ...]:
+    numbers: list[int] = []
+    for part in value.split(","):
+        number = part.strip().lstrip("#")
+        if not number.isdigit() or int(number) <= 0:
+            raise DirectiveError(
+                f"`/depends` must be a comma-separated list of issue "
+                f"numbers (for example `/depends 12,34`), got `{value}`"
+            )
+        numbers.append(int(number))
+    # De-duped, first-seen order preserved -- `/depends 12,12` is the same
+    # request as `/depends 12`, not a reason to check #12 twice.
+    return tuple(dict.fromkeys(numbers))
+
+
 def _apply(base: Directives, override: Directives) -> Directives:
     return Directives(
         target=override.target if override.target is not None else base.target,
         pr=override.pr if override.pr is not None else base.pr,
         base=override.base if override.base is not None else base.base,
         auto_merge=override.auto_merge or base.auto_merge,
+        review=override.review or base.review,
+        depends=override.depends if override.depends is not None else base.depends,
     )

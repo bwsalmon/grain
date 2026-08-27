@@ -6,8 +6,8 @@ import pytest
 
 from grain.automation.github import (
     ApiResponse, BranchHead, CheckRun, Comment, DryRunGitHubClient, FakeTransport,
-    GitHubClient, GitHubError, Issue, PullRequest, PullRequestDetail, RealTransport,
-    ReviewComment,
+    GitHubClient, GitHubError, Issue, NewReviewComment, PullRequest, PullRequestDetail,
+    RealTransport, ReviewComment,
 )
 
 
@@ -638,6 +638,46 @@ def test_create_comment_raises_on_a_non_201():
     transport = FakeTransport(responses=[ApiResponse(404, {}, b"not found")])
     with pytest.raises(GitHubError):
         GitHubClient(transport, token="t").create_comment("o", "r", 5, "a question")
+
+
+def test_create_review_posts_a_draft_with_no_event_key():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps({"id": 321}).encode())])
+    review_id = GitHubClient(transport, token="t").create_review(
+        "o", "r", 5, body="looks good overall",
+        comments=[NewReviewComment(path="src/thing.py", line=12, body="nit: typo")],
+    )
+    assert review_id == 321
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["path"] == "/repos/o/r/pulls/5/reviews"
+    payload = json.loads(call["body"])
+    assert "event" not in payload
+    assert payload["body"] == "looks good overall"
+    assert payload["comments"] == [
+        {"path": "src/thing.py", "line": 12, "body": "nit: typo"}
+    ]
+
+
+def test_create_review_with_no_inline_comments_posts_an_empty_list():
+    transport = FakeTransport(responses=[ApiResponse(200, {}, json.dumps({"id": 1}).encode())])
+    GitHubClient(transport, token="t").create_review("o", "r", 5, body="LGTM")
+    assert json.loads(transport.calls[0]["body"])["comments"] == []
+
+
+def test_create_review_raises_on_a_non_200():
+    transport = FakeTransport(responses=[ApiResponse(422, {}, b"unprocessable")])
+    with pytest.raises(GitHubError):
+        GitHubClient(transport, token="t").create_review("o", "r", 5, body="x")
+
+
+def test_dry_run_client_prints_the_review_instead_of_posting_it(capsys):
+    inner = GitHubClient(FakeTransport(), token="t")
+    review_id = DryRunGitHubClient(inner).create_review(
+        "o", "r", 5, body="looks good",
+        comments=[NewReviewComment(path="a.py", line=1, body="nit")],
+    )
+    assert review_id == 0
+    assert "draft review on o/r#5" in capsys.readouterr().out
 
 
 def test_dry_run_client_passes_pr_reads_through(capsys):

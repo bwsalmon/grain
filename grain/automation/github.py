@@ -20,6 +20,20 @@ top-level conversation thread, distinct from `list_review_comments`'s
 inline diff comments) exists for the other half of that same item: showing
 a redispatched issue/PR the human's reply to a prior question.
 
+`create_review` (bwsalmon/agents#154) is the identical "the agent only ever
+writes to a local file, `core.py` is the one that calls this" shape, for a
+`/review`-directed dispatch's own `add_review_comment` MCP tool
+(`mcp_server.py`): a review, with whatever inline comments the agent
+attached, posted once the run finishes rather than one API call per
+comment. Deliberately left as a **draft**: the request body carries no
+`event` key, which is what keeps GitHub from submitting it (GitHub's own
+"Create a review for a pull request" reference — omitting `event` leaves
+the review `PENDING`, visible only to the credential that created it,
+until a human opens it on github.com and submits it themselves). An agent
+posting a *submitted* review of its own code would be marking its own
+homework; a draft is a human's opinion of what an agent found, waiting on
+that same human's sign-off before anyone else sees it.
+
 **One client, many repos.** Every method already took `owner, repo` as
 its first two arguments, but the token was fixed at construction — fine
 while a deployment had exactly one repo, wrong now that the task repo (API:
@@ -253,6 +267,26 @@ class ReviewComment:
     body: str
     path: str
     line: int | None
+
+
+@dataclass(frozen=True)
+class NewReviewComment:
+    """One inline comment to attach to a draft review (`create_review`) --
+    the input shape for what `ReviewComment` above is the output shape of.
+    A separate type rather than reusing `ReviewComment` itself: `id` and
+    `user` are GitHub's to assign once the review is created, never a
+    caller's to supply, and reusing it would mean every call site invents
+    placeholder values for fields that mean nothing until the request
+    round-trips.
+
+    `line` is the line number in the file's *new* version (the right-hand
+    side of the diff) that GitHub's own reviews API expects a `comments[]`
+    entry to name -- the same "new" side `ReviewComment.line` already
+    reads back once a comment exists.
+    """
+    path: str
+    line: int
+    body: str
 
 
 @dataclass(frozen=True)
@@ -688,6 +722,39 @@ class GitHubClient:
             raise GitHubError(resp.status, resp.body)
         return json.loads(resp.body)["id"]
 
+    def create_review(self, owner: str, repo: str, number: int, *, body: str = "",
+                       comments: list[NewReviewComment] = ()) -> int:
+        """Creates a **draft** review on a pull request -- `core.py`'s
+        `_finish_succeeded_review` (bwsalmon/agents#154) is the only
+        caller, once a `/review`-directed dispatch finishes, the same
+        "only `core.py` ever calls the mutating half" boundary
+        `create_comment` documents above. No `event` key in the request
+        body at all: GitHub's reviews API treats an omitted `event` as
+        "leave this PENDING" (its own reference for "Create a review for a
+        pull request"), which is what keeps this from ever auto-submitting
+        an approval, a request for changes, or even a plain comment review
+        on the agent's own behalf -- see this module's own docstring for
+        why that has to wait on a human.
+
+        Returns the new review's id -- unused by `core.py` today, kept for
+        the same reason `create_comment` returns one: cheap, and the
+        pattern every other creation call here already follows.
+        """
+        resp = self.transport.request(
+            method="POST", path=f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+            headers=self._headers(owner, repo, json_body=True),
+            body=json.dumps({
+                "body": body,
+                "comments": [
+                    {"path": c.path, "line": c.line, "body": c.body}
+                    for c in comments
+                ],
+            }).encode(),
+        )
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+        return json.loads(resp.body)["id"]
+
 
 @dataclass
 class DryRunGitHubClient:
@@ -758,4 +825,10 @@ class DryRunGitHubClient:
 
     def create_comment(self, owner: str, repo: str, number: int, body: str) -> int:
         print(f"+ comment on {owner}/{repo}#{number}: {body!r}")
+        return 0
+
+    def create_review(self, owner: str, repo: str, number: int, *, body: str = "",
+                       comments: list[NewReviewComment] = ()) -> int:
+        print(f"+ draft review on {owner}/{repo}#{number}: {body!r} "
+              f"({len(comments)} inline comment(s))")
         return 0

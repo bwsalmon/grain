@@ -339,3 +339,75 @@ def test_no_id_from_either_source_raises_without_a_bogus_delete():
     with pytest.raises(CommandError):
         create_key(runner, config())
     assert not [c for c in runner.commands if "keys delete" in c]
+
+
+# --- explaining FAILED_PRECONDITION (bwsalmon/agents#140) -----------------
+
+_AT_LIMIT = json.dumps([
+    {"name": f"projects/p/serviceAccounts/a/keys/k{i}",
+     "validAfterTime": "2026-08-26T00:00:00Z"} for i in range(10)
+])
+
+
+def _failing_create(stderr, *, listing=_AT_LIMIT, list_fails=False):
+    runner = FakeRunner()
+    runner.expect("gcloud auth activate-service-account", stdout="")
+    runner.expect("gcloud iam service-accounts keys create", returncode=1, stderr=stderr)
+    if list_fails:
+        runner.expect("gcloud iam service-accounts keys list", returncode=1, stderr="nope")
+    else:
+        runner.expect("gcloud iam service-accounts keys list", stdout=listing)
+    with pytest.raises(CommandError) as raised:
+        create_key(runner, config())
+    return str(raised.value), runner
+
+
+def test_the_key_cap_is_named_when_gcloud_only_says_precondition_failed():
+    """GCP answers "this account already has ten keys" with nothing but
+    FAILED_PRECONDITION: Precondition check failed. Diagnosing that took a
+    live incident, so say it outright -- with the count, since that is the
+    number that makes it obvious."""
+    message, _ = _failing_create(
+        "ERROR: (gcloud.iam.service-accounts.keys.create) "
+        "FAILED_PRECONDITION: Precondition check failed."
+    )
+    assert "at most 10 user-managed keys" in message
+    assert "currently has 10" in message
+    assert "keys list" in message  # tells you how to look
+    assert "Precondition check failed" in message  # gcloud's own text kept
+
+
+def test_an_org_policy_block_is_named_as_itself():
+    """The same error code, a completely different fix. Reporting the key
+    cap here would send an operator hunting for keys that are not the
+    problem."""
+    message, runner = _failing_create(
+        "ERROR: FAILED_PRECONDITION: Key creation is not allowed on this service "
+        "account (constraints/iam.disableServiceAccountKeyCreation)."
+    )
+    assert "organization policy" in message
+    assert "disableServiceAccountKeyCreation" in message
+    assert "at most 10" not in message
+    assert not [c for c in runner.commands if "keys list" in c], (
+        "no need to count keys when the cause is already named"
+    )
+
+
+def test_an_unrelated_failure_is_passed_through_unchanged():
+    """Only FAILED_PRECONDITION is ambiguous enough to be worth a gloss;
+    anything else must reach the operator as gcloud wrote it."""
+    message, runner = _failing_create(
+        "ERROR: PERMISSION_DENIED: caller lacks iam.serviceAccountKeys.create"
+    )
+    assert "PERMISSION_DENIED" in message
+    assert "at most 10" not in message and "organization policy" not in message
+    assert not [c for c in runner.commands if "keys list" in c]
+
+
+def test_a_failure_to_count_keys_does_not_replace_the_real_error():
+    """This runs while an exception is already propagating."""
+    message, _ = _failing_create(
+        "ERROR: FAILED_PRECONDITION: Precondition check failed.", list_fails=True,
+    )
+    assert "Precondition check failed" in message
+    assert "unknown (the listing call also failed)" in message

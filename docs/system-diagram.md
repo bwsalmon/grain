@@ -119,7 +119,7 @@ which is the seam a macOS port replaces. See `docs/host-adapter.md`.
 
 | Component | Unit / entry point | Listens | Runs as | Reads |
 |---|---|---|---|---|
-| Automation loop | `grain-automation.timer` → `.service`, every 30s | — (outbound only) | root | `/data/config/automation.json`, `/data/secrets/github/*`, `/data/secrets/sandbox-tokens.json`, `/data/secrets/controller-ssh` |
+| Automation loop | `grain-automation.timer` → `.service`, every 2 min | — (outbound only) | root | `/data/config/automation.json`, `/data/secrets/github/*`, `/data/secrets/sandbox-tokens.json`, `/data/secrets/controller-ssh` |
 | Git proxy | `grain-git-proxy.service` (`python3 -m grain.proxy.server`) | `10.100.0.2:8080` | root | `/data/config/repo-allowlist.json` (hot-reloaded), `/data/secrets/github/*`, `/data/secrets/sandbox-tokens.json` |
 | GCP key minting | `grain/automation/gcp_keys.py`, called from `core.py`'s dispatch/sweep | — (outbound only, `gcloud`) | root, as the host's own attached identity | `/data/config/gcp-key.json` |
 | Session browser | `grain sessions list/browse` | — | operator | `/data/state/automation/sessions/` |
@@ -325,7 +325,7 @@ sequenceDiagram
     participant P as Git proxy (controller)
 
     H->>GH: label issue `grain-agent`
-    Note over A: systemd timer, every 30s
+    Note over A: systemd timer, every 2 min
     A->>A: sweep first — finished / failed / stranded units
     A->>GH: list task-repo issues with the trigger label
     A->>A: rate limit (runs_per_hour), free-sandbox check

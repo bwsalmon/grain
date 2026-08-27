@@ -29,9 +29,16 @@ class TriggerKind(Enum):
     inferred, since `core.py`'s sweep-time handling has no other way to tell
     the two apart once `AutomationState` is reloaded from disk on a fresh
     `run-once` invocation.
+
+    REVIEW (bwsalmon/agents#154) is a third, distinct kind rather than a
+    flag on PR: a successful finish means something different again --
+    posting whatever inline comments the agent left as a draft review, not
+    checking for new commits on the branch (a review dispatch is not
+    supposed to push any).
     """
     ISSUE = "issue"
     PR = "pr"
+    REVIEW = "review"
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,14 @@ class Assignment:
     # time, when `GitHubClient.get_pull_request` already had to read it
     # anyway.
     branch: str | None = None
+    # bwsalmon/agents#154: the pull request a REVIEW assignment's draft
+    # review is posted against once it finishes -- unlike a PR assignment
+    # (which only ever needs to confirm its branch still exists), a review
+    # has nothing to attach its comments to without the PR's own number in
+    # hand, and it's gone from the task's own directives by finish time the
+    # same reason `target_owner`/`branch` already are. `None` for ISSUE and
+    # PR assignments, which have no draft review to post.
+    pr_number: int | None = None
     # The *target* repo this assignment's work is happening in — the one
     # cloned, pushed to, and opened a PR against — as opposed to the task
     # repo the trigger issue itself lives in (`AutomationConfig`'s
@@ -214,6 +229,7 @@ class AutomationState:
                 # necessarily an issue dispatch with no recorded branch.
                 kind=TriggerKind(a.get("kind", TriggerKind.ISSUE.value)),
                 branch=a.get("branch"),
+                pr_number=a.get("pr_number"),
                 target_owner=a.get("target_owner"),
                 target_repo=a.get("target_repo"),
                 base=a.get("base"),
@@ -261,6 +277,7 @@ class AutomationState:
                     "issue": a.issue, "unit": a.unit,
                     "started_at": a.started_at.isoformat(),
                     "kind": a.kind.value, "branch": a.branch,
+                    "pr_number": a.pr_number,
                     "target_owner": a.target_owner, "target_repo": a.target_repo,
                     "base": a.base, "gemini_key_name": a.gemini_key_name,
                     "gcp_key_id": a.gcp_key_id,
@@ -303,11 +320,13 @@ class AutomationState:
 
     def assign(self, sandbox: str, issue: int, unit: str, now: datetime, *,
                kind: TriggerKind = TriggerKind.ISSUE, branch: str | None = None,
+               pr_number: int | None = None,
                target_owner: str | None = None, target_repo: str | None = None,
                base: str | None = None, gemini_key_name: str | None = None,
                gcp_key_id: str | None = None, auto_merge: bool = False) -> None:
         self.assignments[sandbox] = Assignment(
             issue=issue, unit=unit, started_at=now, kind=kind, branch=branch,
+            pr_number=pr_number,
             target_owner=target_owner, target_repo=target_repo, base=base,
             gemini_key_name=gemini_key_name, gcp_key_id=gcp_key_id,
             auto_merge=auto_merge,

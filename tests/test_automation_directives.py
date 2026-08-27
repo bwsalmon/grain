@@ -43,6 +43,20 @@ def test_auto_merge_is_sticky_across_texts():
     assert d.auto_merge is True
 
 
+def test_review_directive_is_read():
+    d = parse_directives(["/repo acme/widgets\n/pr 42\n/review true\n"])
+    assert d.review is True
+
+
+def test_review_defaults_to_false():
+    assert parse_directives(["/repo acme/widgets\n/pr 42\n"]).review is False
+
+
+def test_review_is_sticky_across_texts():
+    d = parse_directives(["/review true", "just a reply, no directives"])
+    assert d.review is True
+
+
 def test_a_pr_directive_tolerates_a_leading_hash():
     assert parse_directives(["/pr #42"]).pr == 42
 
@@ -101,3 +115,64 @@ def test_strip_directives_removes_only_the_directive_lines():
 
 def test_repo_ref_renders_as_owner_slash_name():
     assert str(RepoRef("acme", "widgets")) == "acme/widgets"
+
+
+def test_depends_directive_is_read():
+    d = parse_directives(["/repo acme/widgets\n/depends 12,34\n"])
+    assert d.depends == (12, 34)
+
+
+def test_depends_defaults_to_none():
+    assert parse_directives(["/repo acme/widgets"]).depends is None
+
+
+def test_depends_tolerates_a_leading_hash():
+    assert parse_directives(["/depends #12"]).depends == (12,)
+
+
+def test_depends_dedupes_preserving_first_seen_order():
+    assert parse_directives(["/depends 12,34,12"]).depends == (12, 34)
+
+
+def test_a_non_numeric_depends_is_an_error():
+    with pytest.raises(DirectiveError):
+        parse_directives(["/depends soon"])
+
+
+def test_a_zero_depends_is_an_error():
+    with pytest.raises(DirectiveError):
+        parse_directives(["/depends 0"])
+
+
+def test_a_negative_depends_is_an_error():
+    with pytest.raises(DirectiveError):
+        parse_directives(["/depends -1"])
+
+
+def test_two_conflicting_depends_directives_in_one_text_are_an_error():
+    """Same "don't guess" rule the `/repo` case already gets -- two
+    different `/depends` lines in one text leave it ambiguous which list
+    applies.
+    """
+    with pytest.raises(DirectiveError) as exc:
+        parse_directives(["/depends 12\n/depends 34\n"])
+    assert "ambiguous" in str(exc.value)
+
+
+def test_the_same_depends_directive_repeated_verbatim_is_fine():
+    d = parse_directives(["/depends 12,34\nsome text\n/depends 12,34\n"])
+    assert d.depends == (12, 34)
+
+
+def test_a_later_depends_directive_replaces_the_earlier_list_wholesale():
+    """Unlike `auto_merge`/`review`, `/depends` isn't sticky -- a later
+    text's `/depends` line is a maintainer's full correction, not an
+    addition to merge with the earlier list.
+    """
+    d = parse_directives(["/depends 12,34", "/depends 56"])
+    assert d.depends == (56,)
+
+
+def test_a_later_text_with_no_depends_line_leaves_the_earlier_list_alone():
+    d = parse_directives(["/depends 12,34", "just a reply, no directives"])
+    assert d.depends == (12, 34)

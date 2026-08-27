@@ -82,10 +82,11 @@ class AutomationConfig:
     # but `_dispatch`'s own poll (which only ever lists `trigger_label`)
     # never picks it up on its own. A human applies `trigger_label` to it
     # once they're satisfied the fix is worth attempting, the same action
-    # that starts every other task; `_dispatch` then strips this label off
-    # on the same cycle it dispatches, the same "exactly one state at a
-    # time" invariant `labels.py`'s own docstring holds every other state
-    # label to.
+    # that starts every other task -- or, equivalently, comments `/lgtm`
+    # on it (bwsalmon/agents#136, `core.py`'s `_promote_lgtm_comments`);
+    # `_dispatch` then strips this label off on the same cycle it
+    # dispatches, the same "exactly one state at a time" invariant
+    # `labels.py`'s own docstring holds every other state label to.
     needs_approval_label: str = "grain-agent-needs-approval"
     # Asks for a short-lived Gemini API key for the task it's applied to
     # (bwsalmon/agents#47), minted and placed in its sandbox, revoked once
@@ -115,6 +116,17 @@ class AutomationConfig:
     # it work (`provision/controller.sh`) is unconditional, same as the
     # `systemd-journal` group membership `self_debug_label` relies on.
     self_repair_label: str = "grain-self-repair"
+    # bwsalmon/agents#159: routes a task straight into its own sandbox's
+    # dedicated scratch repo (`github_keys.py`'s `repo_for_sandbox`),
+    # overriding any `/repo` directive entirely -- which scratch repo that
+    # is can't be known until a sandbox is actually assigned, so it can't
+    # be a directive a task author writes in advance the way `/repo`
+    # normally is. The same "a human decided this" label tier
+    # `gemini_key_label` already carries, checked directly against
+    # `issue.labels` in `core.py`'s `_resolve_target`, and refused the
+    # same way when this deployment has no `github_key_config` (`grain
+    # controller configure --github-key-app-id ...`) to honour it with.
+    scratch_repo_label: str = "grain-scratch-repo"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

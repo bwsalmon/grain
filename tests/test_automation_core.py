@@ -19,6 +19,7 @@ from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import (
     ApiResponse, Comment, FakeTransport, GitHubClient, GitHubError, Issue,
 )
+from grain.automation.github_keys import GitHubKeyConfig
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.janitor import JanitorConfig
 from grain.automation.ssh import SshRunner
@@ -174,6 +175,17 @@ class OrchestratorTransport(FakeTransport):
     # `_pr_health` looks at it: not pending, not failing. A test about
     # conflicts or failing checks specifically overrides this attribute.
     check_runs_body: bytes = b'{"total_count": 0, "check_runs": []}'
+    # bwsalmon/agents#139: `_restart_orphaned_in_progress` runs this same
+    # "unconditional, unrelated to what most tests are actually testing"
+    # `list_issues` call every single `run_once`, regardless of state --
+    # answered here, bypassing the queue, for the identical reason the two
+    # routes above already are: without this, every existing test scripting
+    # an exact call sequence would need a spliced-in response for a listing
+    # it never asked to exercise. Empty by default (no orphaned in-progress
+    # issue), the same "the common case needs no test to know this exists"
+    # shape `check_runs_body` already has; a test about this feature
+    # specifically overrides it.
+    in_progress_issues_body: bytes = b"[]"
 
     def request(self, *, method: str, path: str, headers: dict, body):
         if method == "GET" and re.fullmatch(r"/repos/[^/]+/[^/]+", path):
@@ -188,6 +200,11 @@ class OrchestratorTransport(FakeTransport):
                 {"method": method, "path": path, "headers": dict(headers), "body": body}
             )
             return ApiResponse(200, {}, self.check_runs_body)
+        if method == "GET" and re.search(r"/issues\?labels=grain-agent-in-progress&", path):
+            self.calls.append(
+                {"method": method, "path": path, "headers": dict(headers), "body": body}
+            )
+            return ApiResponse(200, {}, self.in_progress_issues_body)
         return super().request(method=method, path=path, headers=headers, body=body)
 
 
@@ -210,7 +227,7 @@ def credentials_with(*names: str) -> CredentialSet:
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
                        credentials=None, credential_store=None, state_path=None,
-                       gcp_key_config=None, janitor_config=None):
+                       gcp_key_config=None, janitor_config=None, github_key_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -244,6 +261,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
         gcp_key_config=gcp_key_config, janitor_config=janitor_config,
+        github_key_config=github_key_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -1176,6 +1194,142 @@ def test_restarting_a_completed_issue_drops_its_stale_open_pr_record():
     assert orchestrator.state.open_pull_requests == {}
 
 
+# --- restart orphaned in-progress issues on a lost state (bwsalmon/agents#139) --
+
+def test_an_orphaned_in_progress_issue_is_requeued_to_the_trigger_label():
+    """No `Assignment` anywhere in `AutomationState` for issue #5 -- the
+    shape a wiped or never-loaded `state.json` leaves behind, e.g. after
+    grain itself is restarted or reformatted -- but GitHub still shows it
+    `in_progress_label`-ed from before that happened. `_dispatch`'s own
+    poll only ever lists `trigger_label`, so nothing else in `run_once`
+    would ever notice this issue again; `_restart_orphaned_in_progress`
+    is the only pass that reads `in_progress_label` itself rather than
+    trusting local state to already know about it.
+    """
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress", "grain-agent-working-0")),
+    ]).encode()
+
+    orchestrator.run_once(NOW)
+
+    calls = transport.calls
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-in-progress"
+        for c in calls
+    )
+    add_trigger = next(
+        c for c in calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(add_trigger["body"]) == {"labels": ["grain-agent"]}
+    # Every sandbox's working label is stripped, not just the one this
+    # issue happened to still carry -- the assignment that would have said
+    # which sandbox that was is exactly what's gone.
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-working-0"
+        for c in calls
+    )
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-working-1"
+        for c in calls
+    )
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("no known assignment" in o and "requeued" in o for o in outcomes)
+
+
+def test_a_tracked_in_progress_issue_is_left_alone_by_the_orphan_restart():
+    """The same `in_progress_label` listing, but this time
+    `AutomationState` does have an `Assignment` for it -- an ordinary
+    still-running task, not a lost one. This must never touch its labels;
+    that is `_sweep`'s decision to make once the unit itself actually
+    finishes, not something a lost-state fallback should preempt.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0", now=NOW)
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=active\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress", "grain-agent-working-0")),
+    ]).encode()
+    # The cancel-on-close poll's own `get_issue` read, for the still-active
+    # assignment `_sweep` leaves standing.
+    transport.responses.append(ApiResponse(200, {}, json.dumps(issue_json(5)).encode()))
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" in orchestrator.state.assignments
+    # `_refresh_agent_labels` re-applying the still-live working label is
+    # expected and unrelated -- what must never happen is anything treating
+    # this as an orphan: the in-progress label coming off, or the trigger
+    # label going back on.
+    assert not any(
+        c["method"] == "DELETE" and c["path"].endswith("/labels/grain-agent-in-progress")
+        for c in transport.calls
+    )
+    assert not any(
+        c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+        and json.loads(c["body"]) == {"labels": ["grain-agent"]}
+        for c in transport.calls
+    )
+
+
+def test_an_orphaned_in_progress_issue_tolerates_a_404_when_re_adding_the_trigger_label():
+    """The issue named by a stale `in_progress_label` listing can vanish
+    (or its number get reused into a PR, or the repo change out from under
+    it) in the instant between that read and this write -- the same
+    "stale listing/assignment" tolerance every other GitHub-facing call in
+    this module already extends, not a reason to crash the whole cycle.
+    """
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress",)),
+    ]).encode()
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # remove_label: in_progress_label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-0's agent label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-1's agent label
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),  # add_label: trigger_label
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("no known assignment" in o and "not found" in o for o in outcomes)
+
+
+def test_an_orphaned_in_progress_issue_is_redispatched_in_the_same_run():
+    """End-to-end: once the trigger label is back on, the exact same
+    `run_once` cycle's own `_dispatch` pass -- which runs after this --
+    picks the issue straight back up, the same "recovered without waiting
+    for a second cron tick" property bwsalmon/agents#51's crash-recovery
+    fix already gives a *tracked* stranded assignment.
+    """
+    orchestrator, transport = make_orchestrator(issues=[issue_json(5)])
+    transport.in_progress_issues_body = json.dumps([
+        issue_json(5, labels=("grain-agent-in-progress",)),
+    ]).encode()
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # remove_label: in_progress_label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-0's agent label
+        ApiResponse(200, {}, b"{}"),  # remove_label: sandbox-1's agent label
+        ApiResponse(200, {}, b"{}"),  # add_label: trigger_label
+        # _dispatch's own list_issues(trigger_label) poll -- spelled out
+        # rather than left to fall through to `default`, since the four
+        # calls above already emptied the queue by the time it would run.
+        ApiResponse(200, {}, json.dumps([issue_json(5)]).encode()),
+        ApiResponse(200, {}, b"[]"),  # _dispatch's own list_comments
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 5
+
+
 # --- PR creation on a successful run (docs/roadmap.md item 2) -------------
 
 def test_a_succeeded_run_verifies_the_branch_then_opens_a_pr():
@@ -1328,7 +1482,10 @@ def test_close_finished_prs_closes_the_task_issue_in_the_task_repo_not_the_targe
 
     orchestrator.run_once(NOW)
 
-    pr_get_call = transport.calls[0]
+    # Not transport.calls[0] any more (bwsalmon/agents#139):
+    # `_restart_orphaned_in_progress`'s own unconditional listing now runs
+    # ahead of `_close_finished_prs` in `run_once` and is call zero instead.
+    pr_get_call = next(c for c in transport.calls if c["method"] == "GET" and "/pulls/" in c["path"])
     assert pr_get_call["path"] == "/repos/other/service/pulls/42"
     close_call = next(c for c in transport.calls if c["method"] == "PATCH")
     assert close_call["path"] == "/repos/o/r/issues/5"
@@ -1464,6 +1621,10 @@ def test_close_finished_prs_does_not_suggest_a_fix_twice():
     state.record_open_pr(5, "o", "r", 42)
     state.mark_fix_suggested(5, 100)
     orchestrator, transport = make_orchestrator(issues=[], state=state)
+    # _promote_lgtm_comments runs first now that a fix is on record
+    # (bwsalmon/agents#136) -- it lists issues carrying needs_approval_label
+    # before _close_finished_prs gets to its own get_pull_request poll.
+    transport.responses.append(ApiResponse(200, {}, b"[]"))
     transport.responses.append(open_pr_response(42, mergeable=False))
 
     orchestrator.run_once(NOW)
@@ -1501,6 +1662,113 @@ def test_close_finished_prs_tolerates_a_404_while_suggesting_a_fix():
     orchestrator.run_once(NOW)  # must not raise
 
     assert orchestrator.state.open_pull_requests["5"].fix_issue is None
+
+
+# --- lgtm approval on comment (bwsalmon/agents#136) -------------------------
+
+def test_an_lgtm_comment_approves_a_suggested_fix_the_same_as_trigger_label_would():
+    """A trusted `/lgtm` comment on a `needs_approval_label` issue
+    (`_suggest_fix`, bwsalmon/agents#83) is a second way to approve it,
+    alongside a human applying `trigger_label` by hand
+    (`test_dispatch_strips_the_needs_approval_label_once_a_human_approves`).
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.mark_fix_suggested(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="maintainer", body="looks good\n/lgtm",
+                              author_association="OWNER"),
+        ]).encode()),
+        ApiResponse(200, {}, b"{}"),  # remove_label(needs_approval_label)
+        ApiResponse(200, {}, b"{}"),  # add_label(trigger_label)
+        open_pr_response(42, mergeable=True),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/100/labels/grain-agent-needs-approval"
+        for c in transport.calls
+    )
+    added = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/100/labels"
+    )
+    assert json.loads(added["body"]) == {"labels": ["grain-agent"]}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("maintainer" in o and "/lgtm" in o for o in outcomes)
+
+
+def test_an_untrusted_lgtm_comment_does_not_approve_a_suggested_fix():
+    """Same prompt-injection concern every other comment-triggered
+    promotion in this module already guards against (see
+    `test_an_untrusted_comment_does_not_restart_a_completed_issue`): a
+    random public commenter must not be able to approve a suggested fix
+    for the agent set to attempt just by leaving a comment.
+    """
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.mark_fix_suggested(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="rando", body="/lgtm",
+                              author_association="NONE"),
+        ]).encode()),
+        open_pr_response(42, mergeable=True),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] in ("DELETE", "POST") and "/labels" in c["path"]
+                   for c in transport.calls)
+
+
+def test_a_comment_without_lgtm_does_not_approve_a_suggested_fix():
+    state = AutomationState()
+    state.record_open_pr(5, "o", "r", 42)
+    state.mark_fix_suggested(5, 100)
+    orchestrator, transport = make_orchestrator(issues=[], state=state)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(100, labels=("grain-agent-needs-approval",))]
+        ).encode()),
+        ApiResponse(200, {}, json.dumps([
+            comment_json_for(200, user="maintainer", body="not yet, this needs more work",
+                              author_association="OWNER"),
+        ]).encode()),
+        open_pr_response(42, mergeable=True),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(c["method"] in ("DELETE", "POST") and "/labels" in c["path"]
+                   for c in transport.calls)
+
+
+def test_no_suggested_fix_on_record_skips_the_lgtm_poll_entirely():
+    """The overwhelming common case: no `_suggest_fix` has ever run, so
+    `state.open_pull_requests` carries no `fix_issue` at all. This must
+    add no GitHub call to a plain `run_once` -- see
+    `_promote_lgtm_comments`'s own docstring for why that guard matters.
+    """
+    orchestrator, transport = make_orchestrator(issues=[])
+
+    orchestrator.run_once(NOW)
+
+    assert not any(
+        c["method"] == "GET" and "labels=grain-agent-needs-approval" in c["path"]
+        for c in transport.calls
+    )
 
 
 # --- auto-merging a stacked fix PR (bwsalmon/agents#83) --------------------
@@ -1813,7 +2081,11 @@ def test_gcp_key_is_recorded_on_the_assignment_for_later_revocation():
     assert orchestrator.state.assignments["sandbox-0"].gcp_key_id == "abc123"
 
 
-def test_gcp_key_mint_failure_does_not_crash_the_cycle():
+def test_gcp_key_mint_failure_degrades_to_dispatching_without_one():
+    """bwsalmon/agents#138: unlike a dispatch failure (below), a broken
+    minter must not become a standing veto on every dispatch for as long
+    as it stays broken -- the sandbox still gets its task, just without a
+    GCP key, and the failure is only surfaced for visibility."""
     runner = FakeRunner()
     runner.expect("gcloud iam service-accounts keys create", returncode=1,
                   stderr="PERMISSION_DENIED")
@@ -1822,9 +2094,10 @@ def test_gcp_key_mint_failure_does_not_crash_the_cycle():
         gcp_key_config=GcpKeyConfig(service_account_email=GCP_KEY_EMAIL, project_id="p"),
     )
     orchestrator.run_once(NOW)
-    assert "sandbox-0" not in orchestrator.state.assignments
+    assert orchestrator.state.assignments["sandbox-0"].gcp_key_id is None
+    assert not runner.ran("keys delete")
     outcomes = [entry["outcome"] for entry in orchestrator.audit.entries]
-    assert any("dispatch failed" in o for o in outcomes)
+    assert any("dispatched to" in o and "PERMISSION_DENIED" in o for o in outcomes)
 
 
 def test_a_dispatch_failure_after_minting_a_gcp_key_revokes_it():
@@ -1988,6 +2261,178 @@ def test_a_pr_triggered_run_with_no_new_branch_is_requeued_not_dropped():
     assert len(mutating) == 3  # remove in-progress, add trigger back, remove
                                # agent label — same requeue path a
                                # failed/stranded run takes
+
+
+# --- review dispatch (bwsalmon/agents#154) ----------------------------------
+
+def test_a_review_directive_dispatches_to_the_prs_own_existing_branch_read_only():
+    """A task issue carrying `/pr N` plus `/review true` reads that PR's
+    branch instead of continuing work on it -- the review-mode counterpart
+    to `test_a_pr_directive_dispatches_to_the_prs_own_existing_branch`.
+    """
+    body = "please review this\n/repo o/r\n/pr 7\n/review true"
+    orchestrator, transport = make_orchestrator(issues=[issue_json(3, body=body)])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(3, body=body)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                            # list_comments
+        ApiResponse(200, {}, json.dumps(
+            pr_detail_json(7, head_ref="feature-x")).encode()),                 # get_pull_request
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert assignment.issue == 3
+    assert assignment.kind is TriggerKind.REVIEW
+    assert assignment.branch == "feature-x"
+    assert assignment.pr_number == 7
+    runner = orchestrator.base_runner
+    clone_calls = [argv for argv, _ in runner.calls if argv[:2] == ["bash", "-c"]]
+    assert any("checkout -f -B feature-x origin/feature-x" in c[2] for c in clone_calls)
+    prompt = next(
+        stdin for argv, stdin in runner.calls
+        if argv[:1] == ["sudo"] and any("prompt.md" in a for a in argv)
+    )
+    assert "add_review_comment" in prompt
+    assert "git push" not in prompt
+    # No inline-review-comment or top-level-conversation fetch: a review
+    # dispatch reads the PR fresh, unlike a `/pr`-continuation dispatch.
+    assert not any(c["path"] == "/repos/o/r/pulls/7/comments" for c in transport.calls)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("dispatched to o/r (review of PR #7)" in o for o in outcomes)
+
+
+def test_a_review_directive_without_a_pr_is_parked_not_dispatched():
+    body = "/repo o/r\n/review true"
+    orchestrator, transport = make_orchestrator(issues=[issue_json(4, body=body)])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([issue_json(4, body=body)]).encode()),  # list_issues
+        ApiResponse(200, {}, b"[]"),                                            # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),                 # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "/pr" in json.loads(comment["body"])["body"]
+
+
+def test_a_review_triggered_success_posts_a_draft_review_with_inline_and_general_comments(
+    monkeypatch, tmp_path,
+):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    review_file = tmp_path / "review.json"
+    review_file.write_text(json.dumps([
+        {"body": "looks fine overall", "path": None, "line": None},
+        {"body": "consider a docstring here", "path": "src/thing.py", "line": 12},
+    ]))
+    monkeypatch.setattr(core_module, "review_path", lambda unit: str(review_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),                              # branch_exists: true
+        ApiResponse(200, {}, json.dumps({"id": 555}).encode()),   # create_review
+        ApiResponse(200, {}, b"{}"),                              # add_label: completed
+        ApiResponse(200, {}, b"{}"),                              # remove_label: in-progress off
+        ApiResponse(200, {}, b"{}"),                              # remove_label: agent label off
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    review_call = next(c for c in transport.calls if c["method"] == "POST"
+                        and c["path"] == "/repos/o/r/pulls/7/reviews")
+    sent = json.loads(review_call["body"])
+    assert "event" not in sent  # never auto-submitted -- see github.py's create_review
+    assert "looks fine overall" in sent["body"]
+    assert "Posted automatically by grain-agent" in sent["body"]
+    assert sent["comments"] == [
+        {"path": "src/thing.py", "line": 12, "body": "consider a docstring here"}
+    ]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("posted a draft review on o/r#7 (1 inline comment(s))" in o for o in outcomes)
+
+
+def test_a_review_triggered_success_with_no_comments_posts_no_review(monkeypatch, tmp_path):
+    """The agent looking and finding nothing worth flagging is a normal
+    outcome, not a reason to post an empty draft review nobody asked for.
+    """
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    # Never written -- the agent never called add_review_comment.
+    monkeypatch.setattr(core_module, "review_path",
+                         lambda unit: str(tmp_path / "review.json"))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),   # branch_exists: true
+        ApiResponse(200, {}, b"{}"),   # add_label: completed
+        ApiResponse(200, {}, b"{}"),   # remove_label: in-progress off
+        ApiResponse(200, {}, b"{}"),   # remove_label: agent label off
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    assert not any(c["path"] == "/repos/o/r/pulls/7/reviews" for c in transport.calls)
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("left no review comments" in o for o in outcomes)
+
+
+def test_a_review_triggered_run_with_no_branch_is_requeued_not_dropped():
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.append(ApiResponse(404, {}, b"not found"))  # branch_exists: false
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("does not exist" in o for o in outcomes)
+    assert not any(c["path"] == "/repos/o/r/pulls/7/reviews" for c in transport.calls)
+
+
+def test_a_review_triggered_success_that_asked_a_question_also_posts_a_comment(
+    monkeypatch, tmp_path,
+):
+    state = AutomationState()
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1), kind=TriggerKind.REVIEW, branch="feature-x",
+                 pr_number=7, target_owner="o", target_repo="r")
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    question_file = tmp_path / "question.txt"
+    question_file.write_text("should I flag style nits too?")
+    monkeypatch.setattr(core_module, "question_path", lambda unit: str(question_file))
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(201, {}, json.dumps({"id": 555}).encode()),  # create_comment
+        ApiResponse(200, {}, b"{}"),  # remove_label (in-progress off)
+        ApiResponse(200, {}, b"{}"),  # add_label (awaiting-reply on)
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert "sandbox-0" not in orchestrator.state.assignments
+    comment_call = next(
+        c for c in transport.calls if c["method"] == "POST" and c["path"].endswith("/comments")
+    )
+    assert "should I flag style nits too?" in json.loads(comment_call["body"])["body"]
+    assert not any(c["path"] == "/repos/o/r/pulls/7/reviews" for c in transport.calls)
 
 
 # --- session history wiring (docs/roadmap.md item 10) -----------------------
@@ -2254,6 +2699,164 @@ def test_a_trusted_reply_can_carry_the_corrected_repo_directive():
 
     assignment = orchestrator.state.assignments["sandbox-0"]
     assert (assignment.target_owner, assignment.target_repo) == ("fix", "ed")
+
+
+# --- dependencies (bwsalmon/agents#164) -------------------------------------
+
+def test_a_task_with_an_open_dependency_is_skipped_not_dispatched():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #2" in outcomes
+    # Not parked: nothing needs a human reply for this to resume, so the
+    # trigger label stays put and no comment is posted -- unlike every
+    # other "can't dispatch this" case, which does both.
+    assert "1" not in orchestrator.state.pending_questions
+    assert not any(c["method"] == "POST" and c["path"].endswith("/comments")
+                    for c in transport.calls)
+
+
+def test_a_task_with_a_closed_dependency_dispatches_normally():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): closed
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 1
+
+
+def test_only_the_still_open_dependencies_are_named_in_the_skip_outcome():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2,3")]).encode()),    # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): closed
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(3), "state": "open"}).encode()),       # get_issue(3): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #3" in outcomes
+
+
+def test_a_missing_dependency_issue_is_treated_as_still_blocking():
+    """`_is_issue_closed`'s existing 404 tolerance (bwsalmon/agents#82) is
+    reused here rather than refusing the task outright: a `/depends` line
+    naming a typo'd or deleted issue number blocks instead of silently
+    dispatching anyway, and the recurring "skipped: blocked on #N" audit
+    line is what surfaces the mistake to a human, the same way any other
+    standing block would.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 999")]).encode()),    # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),        # get_issue(999): gone
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #999" in outcomes
+
+
+def test_a_task_depending_on_itself_is_parked_not_endlessly_blocked():
+    """Unlike a dependency on a different issue, this can never resolve on
+    its own -- refused outright the same as any other unusable directive,
+    rather than left to block forever with only the audit log to explain
+    why.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/depends 4")]).encode()),      # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),     # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "depend on its own completion" in json.loads(comment["body"])["body"]
+
+
+def test_a_blocked_dependency_does_not_stop_the_next_candidate_dispatching():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([
+            issue_json(1, body="/depends 2"),
+            issue_json(2, body="do the other thing"),
+        ]).encode()),                                            # list_issues
+        ApiResponse(200, {}, b"[]"),                              # #1 list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    # #1 stayed queued (blocked), #2 -- which carries no /depends of its
+    # own -- took the only sandbox instead. A `continue`, not the `break`
+    # "no free sandbox"/"rate limit" use: a block is specific to the one
+    # issue that named it, not a reason to stop looking at the rest of the
+    # queue.
+    assert orchestrator.state.assignments["sandbox-0"].issue == 2
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #2" in outcomes
+
+
+def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
+    """No `_park` happened while blocked (previous tests) -- so nothing
+    needs a human reply for this to resume; the very next cycle just
+    checks the dependency issue's state again and finds it closed.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 1
+        ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 1
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
+    ])
+    orchestrator.run_once(NOW)
+    assert orchestrator.state.assignments == {}
+
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 2
+        ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 2
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): now closed
+    ])
+    orchestrator.run_once(NOW + timedelta(minutes=5))
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 1
 
 
 def test_a_nonexistent_target_repo_is_parked_rather_than_crashing_the_cycle():
@@ -2524,6 +3127,88 @@ def test_a_dispatch_failure_whose_gemini_key_cleanup_also_fails_reports_both():
         "dispatch failed" in o and "also failed to revoke" in o and "API unreachable" in o
         for o in outcomes
     )
+
+
+# --- grain-scratch-repo label (bwsalmon/agents#159) -------------------------
+
+SCRATCH_LABELS = ("grain-agent", "grain-scratch-repo")
+
+
+def test_scratch_repo_label_without_config_is_parked():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, labels=SCRATCH_LABELS)]).encode()),         # list_issues
+        ApiResponse(200, {}, b"[]"),                                   # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),          # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "grain-scratch-repo" in json.loads(comment["body"])["body"]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+
+
+def test_scratch_repo_label_dispatches_into_the_sandboxs_own_repo():
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, labels=SCRATCH_LABELS)],
+        allowed=("o/r", "acme/grain-scratch-sandbox-0"),
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == (
+        "acme", "grain-scratch-sandbox-0",
+    )
+
+
+def test_scratch_repo_label_overrides_a_repo_directive():
+    """The label wins outright: which scratch repo applies can't be known
+    until a sandbox is picked, so it can't be reconciled with a `/repo`
+    line written in advance the normal way."""
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="/repo o/elsewhere", labels=SCRATCH_LABELS)],
+        allowed=("o/r", "o/elsewhere", "acme/grain-scratch-sandbox-0"),
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == (
+        "acme", "grain-scratch-sandbox-0",
+    )
+
+
+def test_a_task_with_no_scratch_repo_label_is_unaffected():
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4)],
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == ("o", "r")
+
+
+def test_resolve_target_names_the_repo_for_whichever_sandbox_was_assigned():
+    orchestrator, _ = make_orchestrator(
+        allowed=("acme/grain-scratch-sandbox-1",),
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+    issue = Issue(number=5, title="t", body="", html_url="https://github.com/o/r/issues/5",
+                   labels=SCRATCH_LABELS, state="open")
+
+    task = orchestrator._resolve_target(issue, [], sandbox="sandbox-1")
+
+    assert (task.repo.owner, task.repo.name) == ("acme", "grain-scratch-sandbox-1")
 
 
 # --- grain-github-<name> label (bwsalmon/agents#52) -------------------------
@@ -3050,7 +3735,7 @@ def test_a_directive_in_grains_own_comment_is_not_read_as_an_instruction():
     grain_said = Comment(id=101, user="grain-agent-bot", author_association="OWNER",
                           body=signed("/repo o/elsewhere"))
 
-    task = orchestrator._resolve_target(issue, [grain_said])
+    task = orchestrator._resolve_target(issue, [grain_said], sandbox="sandbox-0")
 
     assert (task.repo.owner, task.repo.name) == ("o", "r"), (
         "grain's own comment redirected the task it was describing"
@@ -3068,7 +3753,7 @@ def test_a_directive_in_a_maintainers_comment_is_still_read():
     human_said = Comment(id=101, user="maintainer", author_association="OWNER",
                           body="/repo o/elsewhere")
 
-    task = orchestrator._resolve_target(issue, [human_said])
+    task = orchestrator._resolve_target(issue, [human_said], sandbox="sandbox-0")
 
     assert (task.repo.owner, task.repo.name) == ("o", "elsewhere")
 

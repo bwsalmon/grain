@@ -4,7 +4,8 @@ from grain.automation.dispatch import (
     CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, GCP_KEY_PATH, GEMINI_KEY_PATH,
     SandboxTarget, UnitState, agent_id, branch_name, configure_gcp_key,
     configure_gemini_key, configure_git_credentials,
-    dispatch, dispatch_pr, ensure_workspace, reap, transcript_path, unit_name, unit_status,
+    dispatch, dispatch_pr, dispatch_review, ensure_workspace, reap, transcript_path,
+    unit_name, unit_status,
 )
 from grain.automation.github import Comment, Issue, PullRequestDetail, ReviewComment
 from grain.run import FakeRunner
@@ -17,6 +18,7 @@ PROMPT_PATH = f"{UNIT_DIR}/prompt.md"
 MCP_CONFIG_PATH = f"{UNIT_DIR}/mcp-config.json"
 QUESTION_PATH = f"{UNIT_DIR}/question.txt"
 COMMENT_PATH = f"{UNIT_DIR}/comment.txt"
+REVIEW_PATH = f"{UNIT_DIR}/review.json"
 
 
 def make_issue(number=1) -> Issue:
@@ -243,6 +245,30 @@ def test_dispatch_resets_the_comment_file_before_every_dispatch():
     assert runner.ran(f"sudo rm -f {COMMENT_PATH}")
 
 
+def test_dispatch_writes_an_mcp_config_naming_the_review_path():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    mcp_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={MCP_CONFIG_PATH}"
+    )
+    mcp_config = json.loads(mcp_stdin)
+    server = mcp_config["mcpServers"]["grain-sandbox"]
+    assert server["args"][server["args"].index("--review-path") + 1] == REVIEW_PATH
+
+
+def test_dispatch_resets_the_review_file_before_every_dispatch():
+    """Same reset discipline as the question/comment files, for the same
+    reason (bwsalmon/agents#154): leftover review comments from an
+    earlier, unrelated task must never be posted as part of this one.
+    """
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert runner.ran(f"sudo rm -f {REVIEW_PATH}")
+
+
 def test_dispatch_includes_the_issue_conversation_in_the_prompt():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
@@ -326,6 +352,7 @@ def test_dispatch_runs_claude_from_opt_grain_with_only_mcp_and_native_exceptions
     assert "mcp__grain-sandbox__edit_file" in unit_call
     assert "mcp__grain-sandbox__ask_question" in unit_call
     assert "mcp__grain-sandbox__comment_on_issue" in unit_call
+    assert "mcp__grain-sandbox__add_review_comment" in unit_call
     assert "--allowedTools" in unit_call and "Task" in unit_call
     assert "--no-session-persistence" in unit_call
     # The permission-mode flag existed only to auto-approve the native
@@ -628,6 +655,44 @@ def test_dispatch_pr_prompt_handles_no_conversation_yet():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "(no comments yet)" in prompt_stdin
+
+
+def test_dispatch_review_checks_out_the_prs_branch_read_only():
+    runner = FakeRunner()
+    dispatch_review(runner, runner, "sandbox-0", make_target(), make_pr(head_ref="feature-x"),
+                     remote_url=REMOTE_URL, token=TOKEN)
+    script = next(
+        argv[2] for argv, _ in runner.calls
+        if argv[0] == "bash" and argv[1] == "-c"
+    )
+    assert "checkout -f --detach origin/feature-x" in script or "feature-x" in script
+
+
+def test_dispatch_review_prompt_describes_a_review_not_a_fix():
+    runner = FakeRunner()
+    dispatch_review(runner, runner, "sandbox-0", make_target(), make_pr(),
+                     remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "a distinctive PR title" in prompt_stdin
+    assert "REVIEW" in prompt_stdin
+    assert "add_review_comment" in prompt_stdin
+    assert "Do not push any commits" in prompt_stdin
+    assert "git push" not in prompt_stdin
+
+
+def test_dispatch_review_prompt_names_the_task_issue_when_given():
+    runner = FakeRunner()
+    dispatch_review(runner, runner, "sandbox-0", make_target(), make_pr(),
+                     remote_url=REMOTE_URL, token=TOKEN,
+                     task_repo="o/tasks", task_issue=9)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "o/tasks#9" in prompt_stdin
 
 
 def test_dispatch_pr_prompt_gives_the_agent_a_unique_id_to_label_infrastructure_with():

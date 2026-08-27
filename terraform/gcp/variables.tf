@@ -291,6 +291,19 @@ variable "agent_can_manage_gke" {
     narrower predefined role that covers create/resize/delete of clusters
     without also covering what runs on them.
 
+    Also grants the agent account roles/iam.serviceAccountUser on itself
+    (iam.tf's agent_acts_as_self_for_gke_nodes) -- confirmed live,
+    bwsalmon/agents#146: container.admin alone is not enough to create a
+    cluster. GKE node pools run as some service account, and the caller
+    needs iam.serviceAccountUser on whichever one gets attached, or cluster
+    creation fails with a 400 naming it. A cluster this account creates
+    should pass --service-account=<this account's email> explicitly to use
+    this grant, rather than defaulting to the project's Compute Engine
+    default service account -- that account often carries broader legacy
+    project roles than this one, so using it for nodes would be a
+    privilege escalation for anything running as a pod, where using this
+    account's own (already fully known) identity is not.
+
     Applying this needs roles/serviceusage.serviceUsageAdmin on the
     deployer running Terraform, to enable the two APIs -- bootstrap-gcp.sh
     grants it.

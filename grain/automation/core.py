@@ -11,6 +11,10 @@ docs/design.md" convention:
     stops any in-progress unit whose task issue was closed on GitHub since
     dispatch (bwsalmon/agents#82), reported back as "cancelled" rather than
     requeued,
+    requeue any issue still carrying the in-progress label that this
+    process's own state has no assignment for (bwsalmon/agents#139) — the
+    fallback for a restart that lost the state file that named it, not
+    just the crash-mid-run case a *surviving* state file already covers,
     poll every task issue with a PR still open for it (bwsalmon/agents#54)
     and close the ones whose PR has itself closed since,
     list open trigger-labelled issues in the *task repo* not already
@@ -118,6 +122,7 @@ regardless of what triggered it. What that leaves:
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -130,7 +135,7 @@ from .config import AutomationConfig
 from .directives import DirectiveError, RepoRef, parse_directives, strip_directives
 from .dispatch import (
     CONTROLLER_AGENT_SSH_KEY_PATH, SandboxTarget, UnitState, branch_name, comment_path,
-    dispatch, dispatch_pr, question_path, unit_name,
+    dispatch, dispatch_pr, dispatch_review, question_path, review_path, unit_name,
 )
 from .gcp_keys import GcpKeyConfig
 from .gcp_keys import create_key as create_gcp_key
@@ -140,7 +145,10 @@ from .gemini_keys import GeminiKeyConfig
 from .gemini_keys import create_key as create_gemini_key
 from .gemini_keys import delete_expired_keys as delete_expired_gemini_keys
 from .gemini_keys import delete_key as delete_gemini_key
-from .github import Comment, GitHubClient, GitHubError, Issue, PullRequestDetail
+from .github import (
+    Comment, GitHubClient, GitHubError, Issue, NewReviewComment, PullRequestDetail,
+)
+from .github_keys import GitHubKeyConfig, repo_for_sandbox
 from .history import NullSessionHistory, SessionHistory
 from .janitor import JanitorConfig, run_janitor
 from .labels import agent_label
@@ -161,6 +169,14 @@ from ..run import CommandError, Runner
 # that would reopen the exact prompt-injection gate the trigger label
 # exists to close (docs/design.md's split surface).
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+# `/lgtm` on its own line approves a `needs_approval_label` issue
+# (bwsalmon/agents#136) -- the comment-triggered equivalent of applying
+# `trigger_label` by hand. Line-anchored like `directives.py`'s own
+# `_DIRECTIVE_RE`, so a prose sentence that merely mentions "lgtm" doesn't
+# count, but this isn't a directive itself: it carries no value, and it
+# acts on a label rather than becoming part of a task's own configuration.
+_LGTM_RE = re.compile(r"^\s*/lgtm\s*$", re.MULTILINE | re.IGNORECASE)
 
 # A consistent, visible marker on everything grain-agent itself posts to
 # GitHub (docs/roadmap.md item 14) -- so a comment or PR is immediately
@@ -290,6 +306,21 @@ def _pending_comment(sandbox: str) -> str | None:
     return text or None
 
 
+def _pending_review_comments(sandbox: str) -> list[dict]:
+    """Reads back every `add_review_comment` call the agent made this run
+    (bwsalmon/agents#154) -- the same file-based handoff `_pending_question`/
+    `_pending_comment` already use, but a list rather than a single value:
+    `mcp_server.py`'s tool appends, this reads the whole thing back at once.
+    Absence (never written, or an empty/corrupt file) reads as "no
+    comments," never an exception -- a review dispatch that genuinely found
+    nothing to say is a normal outcome, not a broken one.
+    """
+    try:
+        return json.loads(Path(review_path(unit_name(sandbox))).read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 @dataclass(frozen=True)
 class ResolvedTask:
     """What one task issue resolved to: the target repo, the PR being
@@ -331,6 +362,20 @@ class ResolvedTask:
     # since honouring it costs this deployment nothing it doesn't already
     # have (the same GitHub credential that opens a PR can merge one).
     auto_merge: bool = False
+    # bwsalmon/agents#154: whether the task issue carried `/review`. Unlike
+    # `auto_merge`, `_resolve_target` *does* refuse this one -- without a
+    # `/pr` alongside it there is no branch to check out or PR to post the
+    # draft review against, so `pr` above is always set whenever this is
+    # true.
+    review: bool = False
+    # bwsalmon/agents#164: the issue numbers a `/depends` line named (in
+    # the *task* repo), read straight off `Directives.depends`. Unlike
+    # every other field here, `_dispatch` -- not `_resolve_target` -- is
+    # what acts on this: whether the named issues are still open can
+    # change cycle to cycle with nothing about the task itself changing,
+    # so it isn't the kind of thing `_resolve_target` can resolve once and
+    # be done with the way a repo or PR number is.
+    depends: tuple[int, ...] = ()
 
 
 @dataclass
@@ -407,6 +452,15 @@ class Orchestrator:
     # `janitor.py`'s own docstring for what it deletes and how it avoids
     # grain's own core infrastructure.
     janitor_config: JanitorConfig | None = None
+    # bwsalmon/agents#159: the on/off switch for `config.scratch_repo_label`.
+    # `None` (production's default for a deployment that never ran `grain
+    # controller configure --github-key-app-id ...`) makes `_resolve_target`
+    # refuse the label with an explanation, the same "unusable request
+    # parks the task" shape `gemini_key_config` already has. Minting
+    # itself never happens here -- see `github_keys.py`'s own docstring
+    # for why it's lazy, on demand, from `self.github`'s own token
+    # resolution and the git proxy's, not from `_dispatch`.
+    github_key_config: GitHubKeyConfig | None = None
     # bwsalmon/agents#51: where to persist `AutomationState` immediately
     # after each mutation, not just once at the very end of `run_once`
     # (`cli.py`'s `cmd_automation_run_once`, still done there too as a
@@ -490,8 +544,10 @@ class Orchestrator:
         self._sweep(now)
         self._janitor(now)
         self._refresh_agent_labels()
+        self._restart_orphaned_in_progress()
         self._promote_answered_questions(now)
         self._restart_commented_completions()
+        self._promote_lgtm_comments()
         self._close_finished_prs()
         self._dispatch(now)
 
@@ -702,8 +758,105 @@ class Orchestrator:
                             "-- stale assignment?",
                 )
 
+    def _restart_orphaned_in_progress(self) -> None:
+        """bwsalmon/agents#139: the other half of the "controller can be
+        restarted or recreated at any moment" story bwsalmon/agents#51
+        already covers for a *state file that survives* the restart. That
+        fix made sure a crash between an in-memory `state.assign()` and
+        the next save can never lose the one on-disk record of an
+        in-progress assignment -- but it still assumes there is a state
+        file to reload. A restart that also loses `/data` (a fresh
+        volume, a wiped or corrupted `state.json`, a from-scratch
+        redeploy -- "reformatted" in the sense the issue title uses, not
+        `mcp_server.py`'s per-sandbox `reformat_sandbox`, which never
+        touches this file) comes back with `AutomationState.assignments`
+        empty, and every fallback the sweeper gives a *known* stranded
+        assignment (`sweeper.py`'s own docstring) has nothing left to act
+        on: an issue that still carries `in_progress_label` out on GitHub
+        is no longer `trigger_label`-ed, so `_dispatch`'s own poll never
+        sees it either. Without this, such an issue would sit
+        `in_progress` forever with no agent actually working it --
+        indistinguishable, from the queue's point of view, from a task
+        that's simply taking a long time.
+
+        So this treats GitHub's own labels as the fallback source of
+        truth, the same "poll, don't trust a cache" bar every other
+        reconciliation pass here already holds to: any issue carrying
+        `in_progress_label` that this process's own state has no
+        assignment for gets exactly the treatment `_requeue` gives a
+        stranded one -- `in_progress_label` off, `trigger_label` back on
+        -- so the next `_dispatch` picks it up fresh. Run after
+        `_sweep`/`_refresh_agent_labels`, so a *tracked* assignment
+        `_sweep` just finished this very cycle has already had its own
+        labels updated by the time this runs, and can never be
+        double-counted as orphaned here.
+
+        Every sandbox's `agent_label` is stripped, not just whichever one
+        was actually working the issue -- the `Assignment` that would
+        have named it is exactly what's gone, so there is no way left to
+        know which sandbox that was. Harmless either way:
+        `GitHubClient.remove_label` already treats a label the issue
+        never carried as success (see its own docstring), so stripping
+        every sandbox's label costs nothing beyond the extra calls.
+
+        Deliberately scoped to `in_progress_label` alone, not
+        `awaiting_reply_label`/`completed_label` too -- bwsalmon/agents#139
+        asks specifically about restarting "in progress" work, which is
+        the one state where a lost record means a live task's outcome
+        would never be heard from again. The other two are already
+        resting states with a human reply or a later poll expected to
+        move them along, not silently orphaned work in the sense this is
+        closing the gap on.
+
+        A 404 from `add_label` here means the same "stale listing" story
+        every other GitHub-facing call in this module already tolerates:
+        the issue this listing just returned closed or vanished in the
+        instant between that read and this write. `remove_label` never
+        raises on a 404 either way (its own docstring), so only
+        `add_label` needs the guard.
+        """
+        known = self.state.in_progress_issues()
+        for issue in self.github.list_issues(
+            self.config.task_owner, self.config.task_repo,
+            self.config.in_progress_label,
+        ):
+            if issue.number in known:
+                continue
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                issue.number, self.config.in_progress_label,
+            )
+            for sandbox in self.cluster.sandbox_names:
+                self.github.remove_label(
+                    self.config.task_owner, self.config.task_repo,
+                    issue.number, agent_label(sandbox),
+                )
+            try:
+                self.github.add_label(
+                    self.config.task_owner, self.config.task_repo,
+                    issue.number, self.config.trigger_label,
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                self.audit.record(
+                    sandbox=None, issue=issue.number,
+                    outcome=f"in progress with no known assignment but issue "
+                            f"#{issue.number} not found in {self.config.task_owner}/"
+                            f"{self.config.task_repo} -- stale listing?",
+                )
+                continue
+            self.audit.record(
+                sandbox=None, issue=issue.number,
+                outcome="in progress with no known assignment -- requeued "
+                        f"({self.config.in_progress_label!r} -> "
+                        f"{self.config.trigger_label!r})",
+            )
+
     def _finish_succeeded(self, outcome: Outcome) -> None:
-        if outcome.kind is TriggerKind.PR:
+        if outcome.kind is TriggerKind.REVIEW:
+            self._finish_succeeded_review(outcome)
+        elif outcome.kind is TriggerKind.PR:
             self._finish_succeeded_pr(outcome)
         else:
             self._finish_succeeded_issue(outcome)
@@ -897,6 +1050,70 @@ class Orchestrator:
             sandbox=outcome.sandbox, issue=outcome.issue,
             outcome=f"pushed additional commits to {target} ({branch!r})",
         )
+
+    def _finish_succeeded_review(self, outcome: Outcome) -> None:
+        """A `/review`-directed dispatch (bwsalmon/agents#154): posts
+        whatever the agent left via `add_review_comment` as one draft
+        review on the PR it was pointed at, then finishes the task the
+        same "just stop marking it in-progress" way `_finish_succeeded_pr`
+        does -- there is no PR of this task's own to open or track, the
+        target PR already existed before this task ever ran.
+        """
+        question = _pending_question(outcome.sandbox)
+        if question is not None:
+            self._finish_question(outcome, question)
+            return
+        # A REVIEW assignment always carries its branch and PR number
+        # (recorded at dispatch time -- see state.py's Assignment
+        # docstring); sweeper.py always fills both in from the assignment
+        # it just freed, so neither is ever actually None in practice.
+        branch = outcome.branch
+        assert branch is not None, "a REVIEW outcome must carry the branch it was assigned"
+        assert outcome.pr_number is not None, \
+            "a REVIEW outcome must carry the PR it was assigned to review"
+        target = self._target_of(outcome)
+        if not self.github.branch_exists(target.owner, target.name, branch):
+            # Same "verify, don't trust" bar every other finish path here
+            # already holds to: the unit exiting zero isn't proof the
+            # branch it was asked to read is still there to have read.
+            self._requeue(outcome, f"succeeded but branch {branch!r} does not exist")
+            return
+
+        comments = _pending_review_comments(outcome.sandbox)
+        general = [c["body"] for c in comments if c.get("path") is None]
+        inline = [
+            NewReviewComment(path=c["path"], line=c["line"], body=c["body"])
+            for c in comments if c.get("path") is not None
+        ]
+        if not comments:
+            # The agent looked and genuinely had nothing to say -- a normal
+            # outcome for a review (`_review_prompt` explicitly allows it),
+            # not a reason to post an empty draft review nobody asked for.
+            outcome_text = "left no review comments"
+        else:
+            body = "\n\n".join(general + [_AUTOMATION_SIGNATURE])
+            self.github.create_review(
+                target.owner, target.name, outcome.pr_number,
+                body=body, comments=inline,
+            )
+            outcome_text = (f"posted a draft review on {target}#{outcome.pr_number} "
+                             f"({len(inline)} inline comment(s))")
+
+        self.github.add_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.completed_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, self.config.in_progress_label,
+        )
+        self.github.remove_label(
+            self.config.task_owner, self.config.task_repo,
+            outcome.issue, agent_label(outcome.sandbox),
+        )
+        self.state.record_completed_issue(outcome.issue)
+        self._save_state()
+        self.audit.record(sandbox=outcome.sandbox, issue=outcome.issue, outcome=outcome_text)
 
     def _finish_question(self, outcome: Outcome, question: str) -> None:
         """The agent called `ask_question` instead of finishing the task
@@ -1215,6 +1432,86 @@ class Orchestrator:
                         "completed issue -- reopened and requeued",
             )
 
+    # --- lgtm approval on comment (bwsalmon/agents#136) -------------------
+
+    def _promote_lgtm_comments(self) -> None:
+        """A `needs_approval_label` issue (`_suggest_fix`, bwsalmon/agents#83)
+        sits idle until a human applies `trigger_label` by hand -- what this
+        adds is a second way to say the same thing: a trusted `/lgtm`
+        comment. Polls every open issue currently carrying
+        `needs_approval_label` each cycle and looks for a comment, from
+        someone in `_TRUSTED_REPLY_ASSOCIATIONS`, with a line that reads
+        `/lgtm` -- the same trust tier every other comment-triggered
+        promotion in this module already requires, since approving a task
+        is exactly the "a human decided this" act the trigger label itself
+        gates.
+
+        No baseline comment id to diff against, unlike
+        `_promote_answered_questions`/`_restart_commented_completions`:
+        `trigger_label` goes on and `needs_approval_label` comes straight
+        off in the same pass, so the issue no longer matches `list_issues`'s
+        own label filter on the next cycle -- there is nothing left that
+        could re-trigger on the same comment.
+
+        `needs_approval_label` is only ever applied by `_suggest_fix`, which
+        records the issue it just filed as `fix_issue` on the *original*
+        PR's own `OpenPullRequest` record -- so, the same way
+        `_promote_answered_questions`/`_restart_commented_completions` skip
+        straight past an empty `pending_questions`/`completed_issues`, this
+        skips the `list_issues` call entirely unless `state` says a
+        suggested fix is actually outstanding somewhere. Without that
+        guard, every single `run_once` on every deployment would carry one
+        more GitHub call for a feature the overwhelming majority of cycles
+        have nothing to do with.
+
+        A 404 from `list_issues` or `list_comments` means the task repo (or
+        one particular issue) is gone from underneath this deployment's own
+        config -- read the same as everywhere else in this module: nothing
+        to act on this cycle, not a reason to crash it.
+        """
+        if not any(o.fix_issue is not None
+                   for o in self.state.open_pull_requests.values()):
+            return
+        try:
+            issues = self.github.list_issues(
+                self.config.task_owner, self.config.task_repo,
+                self.config.needs_approval_label,
+            )
+        except GitHubError as exc:
+            if exc.status != 404:
+                raise
+            return
+        for issue in issues:
+            try:
+                comments = self.github.list_comments(
+                    self.config.task_owner, self.config.task_repo, issue.number
+                )
+            except GitHubError as exc:
+                if exc.status != 404:
+                    raise
+                continue
+            approval = next(
+                (c for c in comments
+                 if c.author_association in _TRUSTED_REPLY_ASSOCIATIONS
+                 and _LGTM_RE.search(c.body)),
+                None,
+            )
+            if approval is None:
+                continue
+            self.github.remove_label(
+                self.config.task_owner, self.config.task_repo,
+                issue.number, self.config.needs_approval_label,
+            )
+            self.github.add_label(
+                self.config.task_owner, self.config.task_repo,
+                issue.number, self.config.trigger_label,
+            )
+            self.audit.record(
+                sandbox=None, issue=issue.number,
+                outcome=f"{approval.user} ({approval.author_association}) "
+                        "commented /lgtm -- approved and requeued",
+            )
+
     # --- closing on PR close (bwsalmon/agents#54) -------------------------
 
     def _pr_health(self, owner: str, repo: str, pr: PullRequestDetail) -> _PrHealth:
@@ -1281,8 +1578,8 @@ class Orchestrator:
                     "branch) and, once it succeeds, its own pull request is merged "
                     f"back into `{pr.head_ref}` automatically -- no separate review "
                     "needed for the fix itself.\n\n"
-                    f"Apply the `{self.config.trigger_label}` label to this issue to "
-                    "let the agent set attempt it.\n\n"
+                    f"Apply the `{self.config.trigger_label}` label to this issue, or "
+                    "comment `/lgtm` on it, to let the agent set attempt it.\n\n"
                     f"/repo {target}\n/base {pr.head_ref}\n/auto-merge true\n"
                 ),
                 labels=[self.config.needs_approval_label],
@@ -1291,8 +1588,8 @@ class Orchestrator:
                 task.owner, task.name, pending.issue,
                 f"{_AUTOMATION_SIGNATURE}\n\n"
                 f"{target}#{pending.pr_number} {reason} -- filed {task}#{new_issue.number} "
-                f"to fix it. Apply the `{self.config.trigger_label}` label there once "
-                "you're happy for the agent to attempt it.",
+                f"to fix it. Apply the `{self.config.trigger_label}` label there, or "
+                "comment `/lgtm` on it, once you're happy for the agent to attempt it.",
             )
         except GitHubError as exc:
             if exc.status != 404:
@@ -1502,9 +1799,16 @@ class Orchestrator:
 
     # --- target resolution ----------------------------------------------
 
-    def _resolve_target(self, issue: Issue, comments: list[Comment]) -> "ResolvedTask":
+    def _resolve_target(self, issue: Issue, comments: list[Comment], *,
+                         sandbox: str) -> "ResolvedTask":
         """What a task's own text says to work on: which repo, optionally
         which PR to continue, and what base a new PR should target.
+
+        `sandbox` is the one `_dispatch` already picked for this candidate
+        before ever calling this -- needed only for
+        `config.scratch_repo_label` (bwsalmon/agents#159), which repo that
+        resolves to name has no coherent meaning independent of which
+        sandbox ends up doing the work.
 
         Reads directives from the issue body plus every *trusted* comment
         on it (`_TRUSTED_REPLY_ASSOCIATIONS`, the same "could have applied
@@ -1531,6 +1835,18 @@ class Orchestrator:
             and not _is_automation_comment(c.body)
         ]
         directives = parse_directives(texts)
+        if issue.number in (directives.depends or ()):
+            # A task naming itself in its own `/depends` line could never
+            # close the loop -- unlike a dependency on a *different* issue
+            # that is merely slow to close, this is never going to resolve
+            # on its own, so it is refused outright the same as any other
+            # unusable directive, rather than left to block forever with
+            # only the audit log to explain why.
+            raise DirectiveError(
+                f"this task's `/depends` directive names itself (#{issue.number}) "
+                "-- an issue can't depend on its own completion. Remove it "
+                "from the `/depends` line."
+            )
         # bwsalmon/agents#49: a label, not a `/gemini-key` directive --
         # `directives.py`'s own docstring has the reasoning. `issue.labels`
         # is read directly, the same trust tier the trigger label itself
@@ -1558,8 +1874,27 @@ class Orchestrator:
         # `ResolvedTask.self_repair`'s own docstring.
         self_repair = self.config.self_repair_label in issue.labels
         github_key = self._resolve_github_key(issue)
+        # bwsalmon/agents#159: same label tier as gemini_key above, refused
+        # the same way when this deployment has no `github_key_config` to
+        # honour it with.
+        scratch_repo = self.config.scratch_repo_label in issue.labels
+        if scratch_repo and self.github_key_config is None:
+            raise DirectiveError(
+                f"this task carries the `{self.config.scratch_repo_label}` "
+                "label, but this deployment has no scratch-repo support "
+                "configured. An operator enables it with `grain controller "
+                "configure --github-key-app-id ...` (see github_keys.py)."
+            )
         target = directives.target
-        if target is None:
+        if scratch_repo:
+            # One dedicated repo per sandbox, named deterministically off
+            # whichever sandbox `_dispatch` already picked for this task
+            # (`repo_for_sandbox`) -- which repo that is can't be known
+            # until then, so this overrides any `/repo` directive entirely
+            # rather than merely defaulting for a task that gave none.
+            target = RepoRef(owner=self.github_key_config.owner,
+                              name=repo_for_sandbox(self.github_key_config, sandbox))
+        elif target is None:
             if not self.config.default_target_repo:
                 raise DirectiveError(
                     "this task doesn't say which repository to work in. Add a "
@@ -1575,6 +1910,18 @@ class Orchestrator:
                 "nothing here can clone, push to, or open a pull request "
                 "against it. An operator adds it to "
                 "`/data/config/repo-allowlist.json` on the controller."
+            )
+        if directives.review and directives.pr is None:
+            # bwsalmon/agents#154: checked before the GitHub calls below,
+            # same "an unusable request parks the task without spending a
+            # call on it" discipline the gemini_key check above already
+            # follows -- there is no branch to check out or PR to post a
+            # draft review against without one.
+            raise DirectiveError(
+                "this task carries `/review` but no `/pr` -- a review "
+                "needs a pull request number to know which branch to read "
+                "and which PR to post its draft review against. Add a "
+                "`/pr <number>` line alongside it."
             )
         pr: PullRequestDetail | None = None
         try:
@@ -1599,7 +1946,8 @@ class Orchestrator:
         return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
                             gemini_key=gemini_key, self_debug=self_debug,
                             self_repair=self_repair,
-                            github_key=github_key, auto_merge=directives.auto_merge)
+                            github_key=github_key, auto_merge=directives.auto_merge,
+                            review=directives.review, depends=directives.depends or ())
 
     def _resolve_github_key(self, issue: Issue) -> str | None:
         """The named credential a `grain-github-<name>` label on `issue`
@@ -1736,12 +2084,49 @@ class Orchestrator:
                 self.config.task_owner, self.config.task_repo, number
             )
             try:
-                task = self._resolve_target(issue, thread_comments)
+                task = self._resolve_target(issue, thread_comments, sandbox=sandbox)
             except DirectiveError as exc:
                 # No sandbox consumed and no rate-limit slot spent: parking
                 # is bookkeeping on the task repo, not a run.
                 self._park(number, str(exc))
                 continue
+            except CommandError as exc:
+                # bwsalmon/agents#159: a scratch-repo task's target
+                # resolution can mint a GitHub App installation token just
+                # to ask GitHub about the repo's default branch
+                # (`self.github`'s own token resolution, `github_keys.py`'s
+                # `InstallationTokenSource`) -- a broken minter (a bad or
+                # rotated App key, most likely) must not take down every
+                # other candidate still queued this cycle, the same "log
+                # and move on" discipline `gcp_key_mint_error` already gets
+                # (bwsalmon/agents#138). Not parked: this is a
+                # deployment-side infra problem, not something a human
+                # fixing the task issue's own text could ever resolve.
+                self.audit.record(sandbox=None, issue=number,
+                                   outcome=f"target resolution failed: {exc}")
+                continue
+
+            if task.depends:
+                # bwsalmon/agents#164: checked fresh every cycle, the same
+                # "poll, don't trust a stale copy" discipline
+                # `_is_issue_closed` already holds to for the cancel-on-close
+                # poll (bwsalmon/agents#82) it's reused from here -- a
+                # dependency that was open last cycle may have closed since,
+                # with nothing about this task's own text having changed.
+                # Deliberately *not* `_park`: parking swaps the trigger
+                # label for the awaiting-reply one and waits on a human
+                # reply, but nothing here needs a human -- it needs the
+                # dependency issue to close, which happens on its own. A
+                # `continue`, not a `break`, since a blocked issue says
+                # nothing about whether the next one in the queue is also
+                # blocked -- unlike "no free sandbox"/"rate limit" above,
+                # which are true for every remaining candidate this cycle.
+                blocking = tuple(n for n in task.depends if not self._is_issue_closed(n))
+                if blocking:
+                    named = ", ".join(f"#{n}" for n in blocking)
+                    self.audit.record(sandbox=None, issue=number,
+                                       outcome=f"skipped: blocked on {named}")
+                    continue
 
             sandbox_runner = self._ssh_runner_for(sandbox)
             # The same address/user `_ssh_runner_for` just used to build
@@ -1792,9 +2177,8 @@ class Orchestrator:
             ]
             # A `CommandError` here (an SSH/command failure anywhere in
             # dispatch()/dispatch_pr()'s path -- ensure_workspace,
-            # configure_git_credentials, starting the unit; gemini_keys
-            # .create_key's own gcloud calls below (bwsalmon/agents#47); or
-            # gcp_keys.create_key's own gcloud calls (bwsalmon/agents#126))
+            # configure_git_credentials, starting the unit; or gemini_keys
+            # .create_key's own gcloud calls below (bwsalmon/agents#47))
             # must not take down every other candidate still queued this
             # cycle. Found live (docs/next-session.md): a proxy-auth
             # failure on one sandbox crashed `run_once` before it ever
@@ -1806,10 +2190,17 @@ class Orchestrator:
             # GitHub-side 404. Only `CommandError` specifically: anything
             # else is a real bug, not an expected failure mode, and should
             # still surface immediately.
+            #
+            # gcp_keys.create_key's own gcloud calls (bwsalmon/agents#126)
+            # are deliberately *not* covered by this catch, unlike the
+            # Gemini key -- see the `gcp_key_mint_error` handling just below
+            # (bwsalmon/agents#138) for why that failure is degraded instead
+            # of treated as this candidate's dispatch failing outright.
             gemini_key_string: str | None = None
             gemini_key_name: str | None = None
             gcp_key_json: str | None = None
             gcp_key_id: str | None = None
+            gcp_key_mint_error: str | None = None
             try:
                 if task.gemini_key:
                     # `_resolve_target` already refused this task outright
@@ -1825,9 +2216,40 @@ class Orchestrator:
                     # key above -- see `gcp_keys.py`'s own docstring for why
                     # this mirrors the old metadata broker's "every sandbox,
                     # every dispatch" behaviour rather than a task label.
-                    minted_gcp = create_gcp_key(self.base_runner, self.gcp_key_config)
-                    gcp_key_json, gcp_key_id = minted_gcp.key_json, minted_gcp.key_id
-                if task.pr is not None:
+                    #
+                    # bwsalmon/agents#138: unlike the Gemini key, this one
+                    # has no label gate, so a broken minter (bad IAM grant,
+                    # a GCP outage, an expired minter key) would otherwise
+                    # be a standing veto on *every* dispatch for as long as
+                    # it stayed broken, if this were left to the general
+                    # `except CommandError` below. Caught locally instead:
+                    # fall back to `gcp_key_json = None`, the exact shape
+                    # `dispatch()`/`configure_gcp_key` already treat as "no
+                    # GCP key configured for this deployment" (see
+                    # dispatch.py's own docstring), so the sandbox is
+                    # dispatched in degraded mode -- without a key -- rather
+                    # than not dispatched at all. The failure is still
+                    # surfaced below once the dispatch outcome is known, so
+                    # an agent can pick it up from the audit log.
+                    try:
+                        minted_gcp = create_gcp_key(self.base_runner, self.gcp_key_config)
+                        gcp_key_json, gcp_key_id = minted_gcp.key_json, minted_gcp.key_id
+                    except CommandError as exc:
+                        gcp_key_mint_error = str(exc)
+                if task.review:
+                    # `_resolve_target` never returns `review=True` without
+                    # `pr` also set -- it refuses that combination outright
+                    # (bwsalmon/agents#154).
+                    unit = dispatch_review(
+                        sandbox_runner, self.base_runner, sandbox, sandbox_target,
+                        task.pr,
+                        remote_url=self._remote_url(task.repo), token=token,
+                        task_repo=str(self._task), target_repo=str(task.repo),
+                        task_issue=number,
+                        gemini_key=gemini_key_string, gcp_key=gcp_key_json,
+                        self_debug=task.self_debug, self_repair=task.self_repair,
+                    )
+                elif task.pr is not None:
                     review_comments = self.github.list_review_comments(
                         task.repo.owner, task.repo.name, task.pr.number
                     )
@@ -1882,7 +2304,16 @@ class Orchestrator:
                                    outcome=f"dispatch failed: {exc}")
                 continue
 
-            if task.pr is not None:
+            if task.review:
+                self.state.assign(sandbox, number, unit, now,
+                                   kind=TriggerKind.REVIEW, branch=task.pr.head_ref,
+                                   pr_number=task.pr.number,
+                                   target_owner=task.repo.owner,
+                                   target_repo=task.repo.name, base=task.base,
+                                   gemini_key_name=gemini_key_name,
+                                   gcp_key_id=gcp_key_id,
+                                   auto_merge=task.auto_merge)
+            elif task.pr is not None:
                 self.state.assign(sandbox, number, unit, now,
                                    kind=TriggerKind.PR, branch=task.pr.head_ref,
                                    target_owner=task.repo.owner,
@@ -1933,5 +2364,9 @@ class Orchestrator:
             self.audit.record(
                 sandbox=sandbox, issue=number,
                 outcome=(f"dispatched to {task.repo}"
-                          + (f" (PR #{task.pr.number})" if task.pr else "")),
+                          + (f" (review of PR #{task.pr.number})" if task.review
+                             else f" (PR #{task.pr.number})" if task.pr else "")
+                          + (f" (degraded: GCP service-account key mint "
+                             f"failed, dispatched without one: "
+                             f"{gcp_key_mint_error})" if gcp_key_mint_error else "")),
             )

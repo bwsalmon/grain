@@ -183,6 +183,39 @@ def test_assign_records_pr_kind_and_branch():
     assert assignment.branch == "feature-x"
 
 
+def test_assign_defaults_to_no_pr_number():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=1, unit="u0", now=now)
+    assert state.assignments["sandbox-0"].pr_number is None
+
+
+def test_assign_records_review_kind_and_pr_number():
+    state = AutomationState()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=9, unit="u0", now=now,
+                 kind=TriggerKind.REVIEW, branch="feature-x", pr_number=42)
+    assignment = state.assignments["sandbox-0"]
+    assert assignment.kind is TriggerKind.REVIEW
+    assert assignment.branch == "feature-x"
+    assert assignment.pr_number == 42
+
+
+def test_save_and_load_round_trips_review_kind_and_pr_number(tmp_path: Path):
+    state = AutomationState()
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.assign("sandbox-0", issue=9, unit="grain-task-sandbox-0", now=now,
+                 kind=TriggerKind.REVIEW, branch="feature-x", pr_number=42)
+    path = tmp_path / "state.json"
+    state.save(path)
+
+    loaded = AutomationState.load(path)
+    assignment = loaded.assignments["sandbox-0"]
+    assert assignment.kind is TriggerKind.REVIEW
+    assert assignment.branch == "feature-x"
+    assert assignment.pr_number == 42
+
+
 def test_in_progress_issues_includes_pr_numbers_too():
     # docs/roadmap.md item 9's key fact: issues and PRs share one number
     # sequence per repo, so `in_progress_issues()` needs no change at all to

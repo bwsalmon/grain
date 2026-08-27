@@ -72,7 +72,25 @@ writes only ever supplies the *comment* to post, and only ever suppresses a
 PR on the one occasion a pushed branch can't: when the agent never pushed
 anything at all.
 
-A seventh tool, `read_grain_logs` (bwsalmon/agents#62), is unlike every
+A seventh tool, `add_review_comment` (bwsalmon/agents#154), is the same
+"only ever writes to a local file, `core.py` posts it" shape `ask_question`/
+`comment_on_issue` already are, for a `/review`-directed dispatch
+(`directives.py`): each call appends one piece of feedback -- either
+attached to a specific `path`/`line` in the diff, or, with both omitted, a
+general remark -- to a fixed per-unit JSON file. Unlike `ask_question`/
+`comment_on_issue` this does not end the turn and is not a single
+overwrite: a review is naturally many small pieces of feedback, so this
+accumulates a list instead, and `core.py`'s `_finish_succeeded_review`
+reads the whole thing back once the run finishes and posts it as one
+**draft** review (`GitHubClient.create_review`) -- never submitted by this
+process, only ever left for a human to read and submit themselves (see
+that method's own docstring for why). Advertised unconditionally, the same
+as `ask_question`/`comment_on_issue` -- harmless on any dispatch that
+isn't a review, since nothing ever reads this file for one (`core.py`'s
+`_finish_succeeded_issue`/`_finish_succeeded_pr` never call
+`_pending_review_comments`).
+
+An eighth tool, `read_grain_logs` (bwsalmon/agents#62), is unlike every
 tool above in one specific way: it reads from the *controller*, where this
 process already runs, rather than reaching the sandbox over SSH -- there is
 no `Runner`-over-SSH hop to make, since `journalctl` for grain's own
@@ -328,6 +346,44 @@ TOOLS = [
             "required": ["comment"],
         },
     },
+    {
+        "name": "add_review_comment",
+        "description": (
+            "Leave one piece of feedback as part of a draft code review on "
+            "the pull request you were asked to review. Give both `path` "
+            "and `line` to attach the comment to a specific line of a "
+            "specific file, as shown in the diff against the base branch; "
+            "omit both for a general remark that isn't tied to one line. "
+            "Call this once per point of feedback -- every call this run "
+            "accumulates into a single draft review, posted once you "
+            "finish. This never pushes commits and never posts anything "
+            "immediately: nothing is visible to anyone until a human opens "
+            "the draft review and submits it themselves."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "body": {"type": "string"},
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File path, relative to the repo root, the comment "
+                        "applies to. Omit for a general remark."
+                    ),
+                },
+                "line": {
+                    "type": "integer",
+                    "description": (
+                        "Line number in the new version of the file (as "
+                        "shown in the diff) the comment applies to. "
+                        "Required if path is given."
+                    ),
+                },
+            },
+            "required": ["body"],
+        },
+    },
 ]
 
 # The exact two long-running controller services this deployment ever runs
@@ -434,6 +490,7 @@ _SELF_DEBUG_CONFIG_FILES = {
     "repo-allowlist": "repo-allowlist.json",
     "gemini-key": "gemini-key.json",
     "gcp-key": "gcp-key.json",
+    "github-key": "github-key.json",
     "sandbox-github-key": "sandbox-github-key.json",
 }
 
@@ -444,14 +501,15 @@ _READ_GRAIN_CONFIG_TOOL = {
     "description": (
         "Read one of grain's own non-secret configuration files from "
         "/data/config on the controller: automation.json, "
-        "repo-allowlist.json, gemini-key.json, gcp-key.json, or "
-        "sandbox-github-key.json -- for triaging a bug in grain itself, "
-        "not the target repo's own code. Every credential and token this "
-        "deployment holds lives under /data/secrets instead, which this "
-        "tool has no path to reach at all: only these five names are "
-        "readable. Reports a file as unconfigured rather than erroring if "
-        "this deployment never wrote it (gemini-key.json, gcp-key.json, "
-        "and sandbox-github-key.json are all optional). Only available on "
+        "repo-allowlist.json, gemini-key.json, gcp-key.json, "
+        "github-key.json, or sandbox-github-key.json -- for triaging a "
+        "bug in grain itself, not the target repo's own code. Every "
+        "credential and token this deployment holds lives under "
+        "/data/secrets instead, which this tool has no path to reach at "
+        "all: only these six names are readable. Reports a file as "
+        "unconfigured rather than erroring if this deployment never wrote "
+        "it (gemini-key.json, gcp-key.json, github-key.json, and "
+        "sandbox-github-key.json are all optional). Only available on "
         "a task whose issue carries the grain-self-debug label."
     ),
     "inputSchema": {
@@ -723,6 +781,45 @@ def comment_on_issue(comment_path: str, comment: str) -> ToolResult:
     )
 
 
+def add_review_comment(review_path: str, body: str, *, path: str | None = None,
+                        line: int | None = None) -> ToolResult:
+    """Appends one review comment to `review_path` (bwsalmon/agents#154) --
+    a plain local file, no `Runner`/SSH involved, the same "the human-facing
+    half is for `core.py` to post, not this tool" shape `ask_question`/
+    `comment_on_issue` already have. Unlike either of those, this accumulates
+    rather than overwrites: a JSON list on disk, read back (defaulting to
+    empty for a first call, same "absence is just empty" treatment
+    `_pending_question`/`_pending_comment` already give a file that was
+    never written), appended to, and written back whole -- there is no
+    append-only format worth reaching for here, since a single dispatch
+    never leaves enough comments for rewriting the whole file each time to
+    matter.
+
+    `path`/`line` travel through unvalidated beyond the pairing check
+    below: whether they name a real file or a real line in the diff is
+    something only `core.py`'s eventual `GitHubClient.create_review` call
+    can discover (GitHub itself would reject a bad one), not something this
+    tool can check against a workspace it has no `Runner` to inspect.
+    """
+    if (path is None) != (line is None):
+        return ToolResult(
+            text="Give both path and line to attach this to a specific "
+                 "line, or neither for a general remark -- not just one.",
+            is_error=True,
+        )
+    try:
+        existing = json.loads(Path(review_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        existing = []
+    existing.append({"body": body, "path": path, "line": line})
+    Path(review_path).write_text(json.dumps(existing))
+    return ToolResult(
+        text=f"Recorded ({len(existing)} comment(s) so far this run). "
+             "It will be posted as part of one draft review once you "
+             "finish -- nothing is visible to anyone yet."
+    )
+
+
 def read_grain_logs(local_runner: Runner, unit: str, *, lines: int | None = None,
                      task_unit: str | None = None) -> ToolResult:
     """Reads recent journal entries for one of grain's own controller
@@ -926,6 +1023,7 @@ class McpServer:
     def __init__(self, runner: Runner, workspace: str, *,
                  question_path: str | None = None,
                  comment_path: str | None = None,
+                 review_path: str | None = None,
                  self_debug: bool = False,
                  self_repair: bool = False,
                  local_runner: Runner | None = None,
@@ -938,6 +1036,9 @@ class McpServer:
         # Same "None only in tests" treatment as question_path, for
         # comment_on_issue (bwsalmon/agents#50, bwsalmon/agents#89).
         self.comment_path = comment_path
+        # Same "None only in tests" treatment again, for add_review_comment
+        # (bwsalmon/agents#154).
+        self.review_path = review_path
         # bwsalmon/agents#62: whether this dispatch's task issue carried
         # `self_debug_label` -- `main()` sets this from `--self-debug`,
         # which `dispatch.py` only ever passes in that case. Gates both
@@ -1036,6 +1137,14 @@ class McpServer:
                     is_error=True,
                 )
             return comment_on_issue(self.comment_path, args["comment"])
+        if name == "add_review_comment":
+            if self.review_path is None:
+                return ToolResult(
+                    text="add_review_comment is not configured for this session.",
+                    is_error=True,
+                )
+            return add_review_comment(self.review_path, args["body"],
+                                       path=args.get("path"), line=args.get("line"))
         if name == "read_grain_logs":
             if not self.self_debug:
                 return ToolResult(
@@ -1113,11 +1222,13 @@ class McpServer:
 
 
 def serve(runner: Runner, workspace: str, *, question_path: str | None = None,
-          comment_path: str | None = None, self_debug: bool = False,
+          comment_path: str | None = None, review_path: str | None = None,
+          self_debug: bool = False,
           self_repair: bool = False, task_unit: str | None = None,
           stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
     server = McpServer(runner, workspace, question_path=question_path,
-                        comment_path=comment_path, self_debug=self_debug,
+                        comment_path=comment_path, review_path=review_path,
+                        self_debug=self_debug,
                         self_repair=self_repair, task_unit=task_unit)
     for line in stdin:
         line = line.strip()
@@ -1141,6 +1252,7 @@ def main() -> None:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--question-path", required=True)
     parser.add_argument("--comment-path", required=True)
+    parser.add_argument("--review-path", required=True)
     # bwsalmon/agents#62: off unless `dispatch.py`'s `_mcp_config_json`
     # added it, which only happens for a task whose issue carried
     # `self_debug_label`.
@@ -1162,7 +1274,8 @@ def main() -> None:
         address=ipaddress.IPv4Address(args.address), key_path=Path(args.key_path),
     )
     serve(runner, args.workspace, question_path=args.question_path,
-          comment_path=args.comment_path, self_debug=args.self_debug,
+          comment_path=args.comment_path, review_path=args.review_path,
+          self_debug=args.self_debug,
           self_repair=args.self_repair, task_unit=args.task_unit)
 
 

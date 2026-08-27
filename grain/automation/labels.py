@@ -99,7 +99,8 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     # asking permission to run) and `test_no_two_labels_share_a_colour`
     # holds every label to a colour of its own regardless.
     "needs_approval_label": (
-        STATE, "b60205", "Grain suggested this task -- apply the trigger label to run it",
+        STATE, "b60205",
+        "Grain suggested this task -- apply the trigger label (or comment /lgtm) to run it",
     ),
     # Terminal, and green in the sense every CI badge is green.
     "completed_label": (
@@ -119,6 +120,12 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     # different grants (read-only vs. restart/reboot/reformat).
     "self_repair_label": (
         CAPABILITY, "fef2c0", "Let this task restart grain services or reboot/reformat its sandbox",
+    ),
+    # bwsalmon/agents#159: routes this task into its own sandbox's
+    # dedicated scratch repo instead of anywhere named by `/repo` -- see
+    # `core.py`'s `_resolve_target`.
+    "scratch_repo_label": (
+        CAPABILITY, "bfd4f2", "Dispatch this task into its sandbox's own scratch repo",
     ),
 }
 
