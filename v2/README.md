@@ -7,6 +7,8 @@ here is wired into it.
 model/          the task model of ../docs/data-model.md
 model/dolt/     opening an embedded Dolt database — the only package that
                 imports Dolt
+loop/           the state transition loop: what one cycle decides to do
+                with the store, with no side effect beyond that decision
 ```
 
 ```sh
@@ -55,10 +57,12 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 ## What this does not have yet
 
 `TrackedPullRequest`, folders, the capability provider contract, and
-anything that reads or writes GitHub. The automation loop, the git proxy
-and the host adapter are all still v1 Python — 15,903 lines of it, with
-1,239 tests. Those tests are the asset in a rewrite; the assertions port,
-the harness does not.
+anything that reads or writes GitHub. `loop.Cycle` decides which task
+takes which slot and calls `StartRun`, and nothing past that: no sandbox
+gets created, no agent runs, no GitHub is touched. Actually dispatching —
+along with the git proxy and the host adapter — is all still v1 Python —
+15,903 lines of it, with 1,239 tests. Those tests are the asset in a
+rewrite; the assertions port, the harness does not.
 
 ## Single writer
 
