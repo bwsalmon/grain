@@ -1296,6 +1296,118 @@ being re-litigated per capability:**
 - **Revocation is idempotent and must tolerate a vanished resource.**
   Release and the expiry reaper can both reach the same lease.
 
+#### Placement: what `materialize` returns
+
+The one open piece of the contract, and worth working through because the
+answer is nearly written already.
+
+**Both existing placements are the same three lines.** `configure_gemini_key`
+and `configure_gcp_key` in `dispatch.py` differ only in a path and a
+variable name:
+
+```python
+runner.run(["dd", f"of={PATH}", "status=none"], stdin=material)
+runner.run(["chmod", "600", PATH])
+```
+
+`configure.py`'s `_write_remote_file` is the fuller form of the same
+thing — `mkdir -p` the parent, `dd` from stdin, `chmod`, optionally
+`chown` the file and its parent — used for controller-side files, where
+it adds `sudo`. So a placement vocabulary would not be a new invention;
+it would be naming the helper that exists twice.
+
+**Three disciplines currently held by convention.** Each is documented in
+a docstring and enforced by nothing:
+
+1. **stdin, never argv.** "The raw key never becomes a shell-interpolated
+   argument anywhere in this path." A provider that reached for
+   `runner.run(["sh", "-c", f"echo {key} > ..."])` would break it and no
+   test would notice.
+2. **The prompt names the path, never the value.** `_gemini_key_line`
+   "only ever names the *path*, not the value."
+3. **Mode 600, and outside `WORKSPACE_PATH`** — deliberately, so a task's
+   own `git add -A` can never sweep a credential into a commit.
+
+All three are exactly the kind of rule that decays when the thing they
+govern is added often, which is the premise here.
+
+**Declarative placement makes all three structural.**
+
+```python
+class Side(Enum):
+    SANDBOX = "sandbox"
+    CONTROLLER = "controller"
+
+@dataclass(frozen=True)
+class Placement:
+    side: Side
+    path: str
+    content: str        # material. Never logged, never reaches a prompt.
+    mode: str = "600"
+    owner: str | None = None
+
+@dataclass(frozen=True)
+class Materialization:
+    lease: Lease | None
+    placements: tuple[Placement, ...] = ()
+```
+
+`materialize` returns this instead of doing it, and one executor performs
+every placement. What that changes:
+
+- **A provider cannot interpolate material into a shell**, because it
+  never runs one. Discipline 1 stops being a rule and becomes an absence
+  of the capability to break it.
+- **A provider cannot leak material into a prompt.** `prompt_section`
+  receives the placement's *path*; `content` is not on the object it
+  sees. Discipline 2 becomes structurally impossible rather than
+  carefully avoided.
+- **Defaults carry the safe answer.** `mode` defaults to `600`, and the
+  executor can refuse a `SANDBOX` path inside `WORKSPACE_PATH` outright.
+  Discipline 3 becomes a check in one place.
+- **Providers become testable with no sandbox at all** — assert on a
+  returned `Placement` rather than on a fake runner's argv — and every
+  placement becomes auditable in one line (side, path, mode, byte count;
+  never content).
+
+A provider that returns no placements is a `GRANT` capability, which
+falls out rather than being special-cased.
+
+**It also closes a gap that has no owner today: nothing un-places.**
+`cleanup()` runs `kind delete clusters --all` and `docker system prune`,
+and that is all — the minted key files at `/home/debian/.gemini-api-key`
+and `/home/debian/.gcp-service-account.json` are never removed, and
+nothing resets them before the next dispatch. Sandboxes are long-lived
+and reused, so those files outlive the task that earned them.
+
+This is not a hole in the threat model: the material is revoked at
+release, and `docs/design.md` lists "isolating *sequential* tasks on one
+sandbox from each other" as an explicit non-goal, with
+`HostAdapter.recreate()` as the real boundary. But it is an asymmetry
+with two costs. `_revoke_*` returns a *warning* on failure rather than
+raising, so the one case where revocation fails is exactly the case where
+a live credential file sits in a sandbox now free for a task that was
+never granted it. And every future `MINT` capability adds another file
+nobody removes.
+
+Declarative placement fixes it for free: the executor knows every
+placement it made, so release reverses them without any provider writing
+cleanup code — and a provider *cannot* forget to.
+
+**What it costs, and the rule for when it binds.** A capability that
+needs to *run* something rather than write something cannot say so. None
+does today: the two `MINT` capabilities write one file each, and the two
+`GRANT` ones place nothing at all. When one arrives, **widen the
+vocabulary rather than handing back the runner** — one provider with an
+arbitrary runner means a reviewer can no longer assume any of the three
+disciplines hold anywhere, which is the entire gain, given up for one
+caller.
+
+The risk of widening is turning the vocabulary into a bad configuration
+DSL. The guard is to add a verb only when a real capability needs it, and
+to treat the *third* exotic request as evidence the design is wrong
+rather than as a reason to add a fourth verb.
+
 **What is deliberately not pluggable.** A provider is code that runs on
 the controller with the controller's credentials, so:
 
@@ -2094,21 +2206,12 @@ correctness question — each has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
-- **Does `materialize` get a runner, or return a placement?** The
-  [provider contract](#capabilities-are-an-extension-point-not-a-table)
-  hands a provider a `Runner` for the task's sandbox, which is what
-  placing a key file needs and is also the broadest thing in the context.
-  The alternative is declarative: a provider returns material plus *where
-  it goes* — path, mode, owner — and the dispatcher does the writing.
-
-  Recommendation: **declarative.** It is testable with no sandbox at all,
-  every placement becomes loggable in one place, and it narrows what a
-  provider can do to the thing providers actually do. It covers
-  everything that exists today — the two `MINT` capabilities each write
-  one file, and the two `GRANT` ones place nothing. The risk is a future
-  capability that needs to *run* something (install a package, start a
-  service) and cannot say so declaratively; the escape hatch is to widen
-  the placement vocabulary rather than hand back the runner.
+- **Does `materialize` get a runner, or return a placement?** Worked
+  through under [placement](#placement-what-materialize-returns), with a
+  recommendation of declarative: it turns three conventions into
+  structural guarantees, and gives un-placement an owner it does not have
+  today. What is left to decide is whether the placement vocabulary is
+  worth the constraint before a capability exists that strains it.
 
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
