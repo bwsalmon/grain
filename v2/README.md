@@ -26,6 +26,13 @@ gitproxy/       a port of grain/proxy: the only path from a sandbox to
                 file-based ladders grain/proxy uses. live_test.go proves
                 the whole thing end to end against a local git server —
                 see "What this actually verifies" below.
+e2e/            issues filed the way a user would, carried through
+                loop.Cycle, a real agent/gemini run, and a real gitproxy
+                push, against a real embedded Dolt store and a local git
+                server standing in for GitHub — fixed scenarios plus a
+                randomized multi-user simulation (bwsalmon/agents#233).
+                See "What this does not have yet" below for where it
+                stops.
 ```
 
 ```sh
@@ -115,6 +122,16 @@ up), and there is no GitHub client, so `ask_question`/`comment_on_issue`/
 (`mcp.MockSink`) instead of doing it. Wiring either of those up for real,
 and calling `agent.Framework.Run` from `loop.Cycle`, is follow-on work
 once v2 has a host adapter of its own.
+
+`e2e/` is that whole chain driven by hand, in a test, rather than by
+`loop.Cycle` itself: it calls `loop.Cycle` to decide what runs, then
+drives `agent/gemini` (scripted in most tests; the real API in
+`live_test.go`, gated on `GEMINI_API_KEY`) through a sandbox-stand-in
+directory against a real `gitproxy` in front of a local git server, and
+plays the part of "the PR opened," "the PR merged" and "a human replied"
+with the same `store.Observe` calls a real GitHub-sync component would
+make. It proves the pieces already built compose correctly; it does not
+close the gap above, since nothing there is wired to run on its own yet.
 
 ## Single writer
 
