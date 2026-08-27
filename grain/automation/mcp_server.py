@@ -157,7 +157,9 @@ never a raw path from the model" discipline:
   (`self.runner`) or the controller itself (`self.local_runner`), the same
   checks `grain host health` already exposes to an operator, now available
   to the agent for triaging a sandbox that's gone degraded or unreachable
-  mid-task.
+  mid-task. The controller target skips the docker check
+  (`include_docker=False`) since the controller never runs a docker
+  daemon in the first place (bwsalmon/agents#197).
 - `read_grain_config` reads one of the deployment's own config files under
   `/data/config` on the controller -- `automation.json`,
   `repo-allowlist.json`, `gemini-key.json`, `gcp-key.json`,
@@ -519,11 +521,12 @@ _CHECK_GRAIN_HEALTH_TOOL = {
         "Run grain's own health checks -- SSH reachability, systemd "
         "state, docker responsiveness, disk usage -- against either your "
         "assigned sandbox or the controller grain's own services run on. "
-        "The same checks `grain host health` reports to an operator, for "
-        "triaging a sandbox or controller that has gone degraded or "
-        "unreachable, not the target repo's own code. Read-only. Only "
-        "available on a task whose issue carries the grain-self-debug "
-        "label."
+        "The controller has no docker daemon, so that check is skipped "
+        "there; sandboxes get all four checks. The same checks "
+        "`grain host health` reports to an operator, for triaging a "
+        "sandbox or controller that has gone degraded or unreachable, "
+        "not the target repo's own code. Read-only. Only available on a "
+        "task whose issue carries the grain-self-debug label."
     ),
     "inputSchema": {
         "type": "object",
@@ -976,6 +979,15 @@ def check_grain_health(runner: Runner, local_runner: Runner, target: str) -> Too
     constrains it, but this function does not trust the caller to have
     honoured it, same discipline `read_grain_logs` already holds `unit`
     to.
+
+    The controller never runs a docker daemon -- `provision/controller.sh`
+    installs libvirt/qemu tooling, `provision/sandbox.sh` is the one that
+    installs `docker-ce` -- so its `docker` check would always and only
+    ever fail there, permanently reporting `degraded` regardless of the
+    controller's actual health (bwsalmon/agents#197). `include_docker` is
+    `False` for that target for the same reason `_sandbox_targets` in
+    `cli.py` keeps "controller" out of `grain host health`/`cleanup`
+    altogether.
     """
     if target not in _HEALTH_TARGETS:
         return ToolResult(
@@ -983,7 +995,7 @@ def check_grain_health(runner: Runner, local_runner: Runner, target: str) -> Too
             is_error=True,
         )
     chosen = runner if target == "sandbox" else local_runner
-    report = check_health(chosen)
+    report = check_health(chosen, include_docker=target != "controller")
     text = f"status={report.status.value}\n{report.summary()}"
     return ToolResult(text=text, is_error=not report.ok)
 

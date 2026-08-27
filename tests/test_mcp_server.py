@@ -426,9 +426,31 @@ def test_check_grain_health_checks_the_local_runner_for_the_controller():
     assert sandbox_runner.calls == []
 
 
-def test_check_grain_health_flags_a_degraded_report_as_an_error():
+def test_check_grain_health_skips_the_docker_check_for_the_controller():
+    # The controller runs no docker daemon (provision/controller.sh installs
+    # libvirt/qemu tooling, not docker-ce) -- a `docker info` that could
+    # never succeed there must not be run at all, let alone reported as a
+    # permanent failure (bwsalmon/agents#197).
     local_runner = healthy_runner()
     local_runner.expect("docker info", returncode=1, stderr="docker daemon down")
+    result = check_grain_health(FakeRunner(), local_runner, "controller")
+    assert not result.is_error
+    assert "status=healthy" in result.text
+    assert "docker" not in result.text
+    assert not any(call[0][0] == "docker" for call in local_runner.calls)
+
+
+def test_check_grain_health_still_checks_docker_for_the_sandbox():
+    sandbox_runner = healthy_runner()
+    sandbox_runner.expect("docker info", returncode=1, stderr="docker daemon down")
+    result = check_grain_health(sandbox_runner, FakeRunner(), "sandbox")
+    assert result.is_error
+    assert "docker=FAIL" in result.text
+
+
+def test_check_grain_health_flags_a_degraded_controller_report_as_an_error():
+    local_runner = healthy_runner()
+    local_runner.expect("systemctl is-system-running", stdout="degraded\n", returncode=1)
     result = check_grain_health(FakeRunner(), local_runner, "controller")
     assert result.is_error
     assert "status=degraded" in result.text

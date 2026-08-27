@@ -18,7 +18,10 @@ machinery — see that module's docstring for why.
 
 Four checks, always all run rather than short-circuited after the first
 failure (aside from `ssh` itself, which everything else depends on), so one
-bad reading doesn't hide another:
+bad reading doesn't hide another -- except `docker`, which `check_health`'s
+`include_docker=False` skips entirely for machines (the controller) that
+never run a docker daemon in the first place, rather than reporting a
+`FAIL` that could never mean anything:
 
 - **ssh**: can a trivial remote command even run at all? If not, the whole
   report is `UNREACHABLE` and no other check is attempted — they would just
@@ -131,11 +134,20 @@ def check_docker(runner: Runner) -> CheckResult:
 
 
 def check_health(runner: Runner, *, mount: str = DEFAULT_DISK_MOUNT,
-                  watermark_percent: int = DEFAULT_DISK_WATERMARK_PERCENT) -> HealthReport:
+                  watermark_percent: int = DEFAULT_DISK_WATERMARK_PERCENT,
+                  include_docker: bool = True) -> HealthReport:
     """Runs every check over `runner` — already scoped to one sandbox, the
     same `Runner` `dispatch.py`/`sweeper.py` use. Never raises: an
     unreachable sandbox is a reported `HealthReport`, not an exception, so a
     caller (the CLI, the sweeper) can always get an answer back.
+
+    `include_docker` defaults to `True` for every existing caller (a
+    sandbox's whole job depends on its docker daemon, per the module
+    docstring). The controller has no docker daemon to check at all --
+    `provision/controller.sh` installs libvirt/qemu tooling, not
+    `docker-ce` -- so `check_grain_health` passes `include_docker=False`
+    when pointed at the controller rather than reporting a `docker=FAIL`
+    that can never pass there.
     """
     probe = runner.run(["true"], check=False)
     if probe.returncode != 0:
@@ -144,8 +156,9 @@ def check_health(runner: Runner, *, mount: str = DEFAULT_DISK_MOUNT,
     checks = [
         CheckResult("ssh", True, "reachable"),
         check_systemd(runner),
-        check_docker(runner),
-        check_disk(runner, mount=mount, watermark_percent=watermark_percent),
     ]
+    if include_docker:
+        checks.append(check_docker(runner))
+    checks.append(check_disk(runner, mount=mount, watermark_percent=watermark_percent))
     status = HealthStatus.HEALTHY if all(c.ok for c in checks) else HealthStatus.DEGRADED
     return HealthReport(status, checks)

@@ -147,6 +147,17 @@ def test_disk_watermark_is_configurable():
     assert not disk.ok
 
 
+def test_include_docker_false_skips_the_docker_check_entirely():
+    runner = FakeRunner()
+    runner.expect("true", returncode=0)
+    runner.expect("systemctl is-system-running", stdout="running\n")
+    runner.expect("df -P /", stdout=DF_LOW)
+    report = check_health(runner, include_docker=False)
+    assert report.status is HealthStatus.HEALTHY
+    assert {c.name for c in report.checks} == {"ssh", "systemd", "disk"}
+    assert not any(call[0][0] == "docker" for call in runner.calls)
+
+
 def test_check_health_never_raises_even_when_every_probe_fails():
     runner = FakeRunner()
     runner.expect("true", returncode=0)
