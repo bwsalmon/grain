@@ -6,8 +6,8 @@ from pathlib import Path
 from grain.automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
     configure_gcp_key_minter, configure_gemini_key, configure_github_credential,
-    configure_github_key, configure_github_key_minter, configure_named_github_key,
-    configure_repo, configure_scheduled_job, ensure_sandbox_tokens,
+    configure_named_github_key, configure_repo, configure_scheduled_job,
+    configure_scratch_repo, ensure_sandbox_tokens,
 )
 from grain.automation.ssh import SshRunner
 from grain.inventory import Cluster
@@ -355,49 +355,18 @@ def test_configure_gemini_key_writes_the_project_id():
     )
 
 
-def test_configure_github_key_minter_writes_the_key_mode_600():
+def test_configure_scratch_repo_writes_the_config():
     ssh, inner = make_ssh()
-    configure_github_key_minter(ssh, "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n")
-    content = stdin_for(inner, "/data/secrets/github-key-minter.pem")
-    assert content == "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"  # stripped, single trailing newline
+    configure_scratch_repo(ssh, owner="acme")
+    config = json.loads(stdin_for(inner, "/data/config/scratch-repo.json"))
+    assert config == {"owner": "acme", "repo_prefix": "grain-scratch"}
     assert any(
-        "sudo chmod 600 /data/secrets/github-key-minter.pem" in c for c in inner.commands
+        "sudo chmod 644 /data/config/scratch-repo.json" in c for c in inner.commands
     )
 
 
-def test_configure_github_key_minter_never_chowns_the_shared_secrets_dir():
+def test_configure_scratch_repo_honours_a_custom_repo_prefix():
     ssh, inner = make_ssh()
-    configure_github_key_minter(ssh, "key material")
-    assert not [argv for argv, _ in inner.calls if "chown" in argv[-1]]
-
-
-def test_configure_github_key_minter_key_is_never_in_argv():
-    ssh, inner = make_ssh()
-    secret = "-----BEGIN PRIVATE KEY-----\nsupersecretvalue\n-----END PRIVATE KEY-----"
-    configure_github_key_minter(ssh, secret)
-    for argv, _ in inner.calls:
-        assert all(secret not in arg for arg in argv)
-
-
-def test_configure_github_key_writes_the_config():
-    ssh, inner = make_ssh()
-    configure_github_key(
-        ssh, app_id="123", installation_id="456", owner="acme",
-    )
-    config = json.loads(stdin_for(inner, "/data/config/github-key.json"))
-    assert config == {
-        "app_id": "123", "installation_id": "456", "owner": "acme",
-        "repo_prefix": "grain-scratch",
-    }
-    assert any(
-        "sudo chmod 644 /data/config/github-key.json" in c for c in inner.commands
-    )
-
-
-def test_configure_github_key_honours_a_custom_repo_prefix():
-    ssh, inner = make_ssh()
-    configure_github_key(
-        ssh, app_id="123", installation_id="456", owner="acme", repo_prefix="test-repo",
-    )
-    config = json.loads(stdin_for(inner, "/data/config/github-key.json"))
+    configure_scratch_repo(ssh, owner="acme", repo_prefix="test-repo")
+    config = json.loads(stdin_for(inner, "/data/config/scratch-repo.json"))
     assert config["repo_prefix"] == "test-repo"

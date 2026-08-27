@@ -121,15 +121,15 @@ class AutomationConfig:
     # `systemd-journal` group membership `self_debug_label` relies on.
     self_repair_label: str = "grain-self-repair"
     # bwsalmon/agents#159: routes a task straight into its own sandbox's
-    # dedicated scratch repo (`github_keys.py`'s `repo_for_sandbox`),
+    # dedicated scratch repo (`scratch_repo.py`'s `repo_for_sandbox`),
     # overriding any `/repo` directive entirely -- which scratch repo that
     # is can't be known until a sandbox is actually assigned, so it can't
     # be a directive a task author writes in advance the way `/repo`
     # normally is. The same "a human decided this" label tier
     # `gemini_key_label` already carries, checked directly against
     # `issue.labels` in `core.py`'s `_resolve_target`, and refused the
-    # same way when this deployment has no `github_key_config` (`grain
-    # controller configure --github-key-app-id ...`) to honour it with.
+    # same way when this deployment has no `scratch_repo_config` (`grain
+    # controller configure --scratch-repo-owner ...`) to honour it with.
     scratch_repo_label: str = "grain-scratch-repo"
     # bwsalmon/agents#194: applied by `_dispatch` (core.py) the moment a
     # task's `/depends` line names an issue that is still open, so the

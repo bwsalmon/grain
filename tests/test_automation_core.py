@@ -19,7 +19,7 @@ from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import (
     ApiResponse, Comment, FakeTransport, GitHubClient, GitHubError, Issue,
 )
-from grain.automation.github_keys import GitHubKeyConfig
+from grain.automation.scratch_repo import ScratchRepoConfig
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.janitor import JanitorConfig
 from grain.automation.scheduled_jobs import ScheduledJob, ScheduledJobsConfig
@@ -228,7 +228,7 @@ def credentials_with(*names: str) -> CredentialSet:
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
                        credentials=None, credential_store=None, state_path=None,
-                       gcp_key_config=None, janitor_config=None, github_key_config=None,
+                       gcp_key_config=None, janitor_config=None, scratch_repo_config=None,
                        scheduled_jobs_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
@@ -263,8 +263,8 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
         gcp_key_config=gcp_key_config, janitor_config=janitor_config,
+        scratch_repo_config=scratch_repo_config,
         scheduled_jobs_config=scheduled_jobs_config,
-        github_key_config=github_key_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -3407,7 +3407,7 @@ def test_scratch_repo_label_dispatches_into_the_sandboxs_own_repo():
     orchestrator, _ = make_orchestrator(
         issues=[issue_json(4, labels=SCRATCH_LABELS)],
         allowed=("o/r", "acme/grain-scratch-sandbox-0"),
-        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+        scratch_repo_config=ScratchRepoConfig(owner="acme"),
     )
 
     orchestrator.run_once(NOW)
@@ -3425,7 +3425,7 @@ def test_scratch_repo_label_overrides_a_repo_directive():
     orchestrator, _ = make_orchestrator(
         issues=[issue_json(4, body="/repo o/elsewhere", labels=SCRATCH_LABELS)],
         allowed=("o/r", "o/elsewhere", "acme/grain-scratch-sandbox-0"),
-        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+        scratch_repo_config=ScratchRepoConfig(owner="acme"),
     )
 
     orchestrator.run_once(NOW)
@@ -3439,7 +3439,7 @@ def test_scratch_repo_label_overrides_a_repo_directive():
 def test_a_task_with_no_scratch_repo_label_is_unaffected():
     orchestrator, _ = make_orchestrator(
         issues=[issue_json(4)],
-        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+        scratch_repo_config=ScratchRepoConfig(owner="acme"),
     )
 
     orchestrator.run_once(NOW)
@@ -3451,7 +3451,7 @@ def test_a_task_with_no_scratch_repo_label_is_unaffected():
 def test_resolve_target_names_the_repo_for_whichever_sandbox_was_assigned():
     orchestrator, _ = make_orchestrator(
         allowed=("acme/grain-scratch-sandbox-1",),
-        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+        scratch_repo_config=ScratchRepoConfig(owner="acme"),
     )
     issue = Issue(number=5, title="t", body="", html_url="https://github.com/o/r/issues/5",
                    labels=SCRATCH_LABELS, state="open")

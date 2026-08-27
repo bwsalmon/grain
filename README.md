@@ -722,22 +722,18 @@ into a repo dedicated to testing grain itself, one per sandbox slot
 the label overrides any `/repo` line entirely, since which of the scratch
 repos applies isn't known until a sandbox is actually picked. Off by
 default: a deployment enables it once with `grain controller configure
---github-key-app-id <id> --github-key-installation-id <id> --github-key-owner
-<owner> --github-key-minter-key-file <path to the App's private key>`; a
-task carrying the label before that's done is parked with a comment, the
-same as an unlisted `/repo`. Nothing is minted at dispatch time or stored
-anywhere: both the orchestrator (opening a PR, reading a branch) and the
-git proxy (a sandbox's own push) mint a fresh, repo-scoped GitHub App
-installation token the moment they actually need one, each independently,
-and let it expire on GitHub's own one-hour clock rather than tracking or
-revoking anything — see `grain/automation/github_keys.py` for the full
-design. Setting this up needs a one-time, mostly-manual step outside
-`grain`'s own reach: create a dedicated GitHub App, install it on however
-many `owner/grain-scratch-<sandbox>` repos this deployment's `Cluster` has
-sandboxes for (Contents, Issues, Pull requests, and Checks permissions —
-nothing else grain's own GitHub client ever exercises), and add each of
-those repos to `/data/config/repo-allowlist.json` the same way any other
-target repo would be.
+--scratch-repo-owner <owner>`; a task carrying the label before that's
+done is parked with a comment, the same as an unlisted `/repo`.
+Authentication is nothing custom (bwsalmon/agents#186): a personal access
+token with elevated permissions (Contents, Issues, Pull requests, and
+Checks — nothing else grain's own GitHub client ever exercises), placed
+like any other named credential (`grain controller configure --github-key
+scratch=PATH`), reaches every scratch repo through an `owner/*`
+`credentials.json` pattern an operator adds by hand — see
+`grain/automation/scratch_repo.py` and docs/runbook.md, "Enabling
+`grain-scratch-repo`", for the full setup. `--scratch-repo-owner` itself
+is plain, non-secret config: it only names which repo a given sandbox's
+scratch task should land in, and carries no credential of its own.
 
 **Label a task `grain-self-debug`** (bwsalmon/agents#62, #86) to give the
 agent four extra tools, all strictly read-only, for triaging a bug in
@@ -756,7 +752,7 @@ grain itself rather than the target repo's own code:
 - `read_grain_config`: one of grain's own non-secret config files under
   `/data/config` on the controller (`automation.json`,
   `repo-allowlist.json`, `gemini-key.json`, `gcp-key.json`,
-  `github-key.json`, `sandbox-github-key.json`) — every credential and
+  `scratch-repo.json`, `sandbox-github-key.json`) — every credential and
   token this deployment holds lives under `/data/secrets` instead, which
   none of these tools can reach.
 - `read_automation_audit_log`: recent entries from the dispatch/sweep

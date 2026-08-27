@@ -30,22 +30,20 @@ from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_gcp_key_minter,
-    configure_gemini_key, configure_github_credential, configure_github_key,
-    configure_github_key_minter, configure_janitor, configure_named_github_key,
-    configure_repo, configure_scheduled_job, credential_repos,
+    configure_gemini_key, configure_github_credential, configure_janitor,
+    configure_named_github_key, configure_repo, configure_scheduled_job,
+    configure_scratch_repo, credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
 from .automation.gcp_keys import GcpKeyConfig
 from .automation.gemini_keys import GeminiKeyConfig
 from .automation.github import DryRunGitHubClient, GitHubClient, RealTransport
-from .automation.github_keys import (
-    FallbackTokenSource, GitHubKeyConfig, InstallationTokenSource,
-)
 from .automation.health import DEFAULT_DISK_WATERMARK_PERCENT, check_health
 from .automation.history import FileSessionHistory
 from .automation.janitor import JanitorConfig
 from .automation.scheduled_jobs import ScheduledJobsConfig
+from .automation.scratch_repo import ScratchRepoConfig
 from .automation.ssh import SshRunner
 from .automation.state import AutomationState, utcnow
 from .automation import tui as sessions_tui
@@ -108,22 +106,21 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
     # tasks name, and the narrowest-pattern ladder is what picks the right
     # credential for each (`CredentialSet.token_for`).
     credentials = CredentialSet(data_dir / "secrets" / "github")
-    # bwsalmon/agents#159: absence is the off switch, same shape as
-    # gemini_key_config/gcp_key_config below -- a deployment that never
-    # ran `grain controller configure --github-key-app-id ...` has no such
-    # file, and `github_tokens` below falls straight through to
-    # `credentials` for every repo, unchanged from before this feature.
-    github_key_config_path = data_dir / "config" / "github-key.json"
-    github_key_config = (
-        GitHubKeyConfig.load(github_key_config_path)
-        if github_key_config_path.exists() else None
-    )
-    github_tokens = credentials if github_key_config is None else FallbackTokenSource(
-        InstallationTokenSource(runner, github_key_config), credentials,
-    )
     github: GitHubClient | DryRunGitHubClient = GitHubClient(
         RealTransport(config.github_host, use_tls=config.github_use_tls),
-        github_tokens,
+        credentials,
+    )
+    # bwsalmon/agents#159/#186: absence is the off switch, same shape as
+    # gemini_key_config/gcp_key_config below -- a deployment that never ran
+    # `grain controller configure --scratch-repo-owner ...` has no such
+    # file, and `Orchestrator._resolve_target` refuses the
+    # `scratch_repo_label` with an explanation. Carries no credential of
+    # its own -- a scratch repo's actual credential is just another entry
+    # in `credentials` above, see `scratch_repo.py`'s own docstring.
+    scratch_repo_config_path = data_dir / "config" / "scratch-repo.json"
+    scratch_repo_config = (
+        ScratchRepoConfig.load(scratch_repo_config_path)
+        if scratch_repo_config_path.exists() else None
     )
     if args.dry_run:
         github = DryRunGitHubClient(github)
@@ -185,8 +182,8 @@ def build_orchestrator(cluster: Cluster, runner: Runner,
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         audit=audit, history=history, gemini_key_config=gemini_key_config,
         gcp_key_config=gcp_key_config, janitor_config=janitor_config,
+        scratch_repo_config=scratch_repo_config,
         scheduled_jobs_config=scheduled_jobs_config,
-        github_key_config=github_key_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: lets `Orchestrator` persist state incrementally,
         # mid-`run_once`, rather than only once at the very end (see
@@ -623,16 +620,14 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
                            name_prefix=args.janitor_name_prefix)
     for name, template in _read_scheduled_jobs(args.scheduled_job).items():
         configure_scheduled_job(ssh, name, template)
-    if args.github_key_app_id and args.github_key_installation_id and args.github_key_owner:
-        # bwsalmon/agents#159: plain, non-secret config, same all-or-none-
-        # of-this-group latitude as --gcp-agent-service-account-email above.
-        configure_github_key(
-            ssh, app_id=args.github_key_app_id,
-            installation_id=args.github_key_installation_id,
-            owner=args.github_key_owner, repo_prefix=args.github_key_repo_prefix,
+    if args.scratch_repo_owner:
+        # bwsalmon/agents#159/#186: plain, non-secret config -- the
+        # credential itself is just another `--github-key NAME=FILE` above
+        # plus a `credentials.json` pattern added by hand, not anything
+        # this flag provisions.
+        configure_scratch_repo(
+            ssh, owner=args.scratch_repo_owner, repo_prefix=args.scratch_repo_prefix,
         )
-    if args.github_key_minter_key_file:
-        configure_github_key_minter(ssh, Path(args.github_key_minter_key_file).read_text())
     ssh.run(["sudo", "systemctl", "restart", "grain-git-proxy.service"])
     return 0
 
@@ -658,9 +653,6 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
     gcp_key_minter_key = None
     if args.gcp_key_minter_key_file:
         gcp_key_minter_key = Path(args.gcp_key_minter_key_file).read_text()
-    github_key_minter_key = None
-    if args.github_key_minter_key_file:
-        github_key_minter_key = Path(args.github_key_minter_key_file).read_text()
     task_repo, targets, default_target = _repo_args(args)
     config = BootstrapConfig(
         task_repo=task_repo, targets=tuple(targets),
@@ -676,11 +668,8 @@ def cmd_host_bootstrap(args: argparse.Namespace) -> int:
         janitor_ttl_hours=args.janitor_ttl_hours,
         janitor_name_prefix=args.janitor_name_prefix,
         scheduled_jobs=_read_scheduled_jobs(args.scheduled_job),
-        github_key_app_id=args.github_key_app_id,
-        github_key_installation_id=args.github_key_installation_id,
-        github_key_owner=args.github_key_owner,
-        github_key_repo_prefix=args.github_key_repo_prefix,
-        github_key_minter_key=github_key_minter_key,
+        scratch_repo_owner=args.scratch_repo_owner,
+        scratch_repo_prefix=args.scratch_repo_prefix,
         github_host=args.github_host, git_forward_host=args.git_forward_host,
         github_use_tls=not args.github_insecure_http,
         ssh_user=args.ssh_user, admin_private_key_path=Path(args.admin_ssh_private_key),
@@ -982,23 +971,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "Needs-Approval header block, a blank line, then the issue body "
                          "to file automatically once every Interval-Hours. FILE holds the "
                          "whole template, or '-' for stdin. Repeatable, once per job")
-    p.add_argument("--github-key-app-id",
+    p.add_argument("--scratch-repo-owner",
                     help="enables the grain-scratch-repo task label (bwsalmon/agents#159): "
-                         "the GitHub App id grain mints a fresh, repo-scoped installation "
-                         "token from on demand -- requires --github-key-installation-id, "
-                         "--github-key-owner, and --github-key-minter-key-file")
-    p.add_argument("--github-key-installation-id",
-                    help="the App's installation id covering every grain-scratch-<sandbox> "
-                         "repo -- required with --github-key-app-id")
-    p.add_argument("--github-key-owner",
-                    help="the account the grain-scratch-<sandbox> repos live under -- "
-                         "required with --github-key-app-id")
-    p.add_argument("--github-key-repo-prefix", default="grain-scratch",
+                         "the account the grain-scratch-<sandbox> repos live under. The "
+                         "credential that reaches them is an ordinary --github-key "
+                         "NAME=FILE plus a credentials.json pattern added by hand -- see "
+                         "docs/runbook.md, 'Enabling grain-scratch-repo'")
+    p.add_argument("--scratch-repo-prefix", default="grain-scratch",
                     help="names the one repo dedicated to each sandbox: "
                          "<prefix>-<sandbox> (default: grain-scratch)")
-    p.add_argument("--github-key-minter-key-file",
-                    help="PEM file holding the GitHub App's own RS256 private key, used to "
-                         "sign the JWT each installation-token mint exchanges")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
@@ -1130,23 +1111,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "Needs-Approval header block, a blank line, then the issue body "
                          "to file automatically once every Interval-Hours. FILE holds the "
                          "whole template, or '-' for stdin. Repeatable, once per job")
-    p.add_argument("--github-key-app-id",
+    p.add_argument("--scratch-repo-owner",
                     help="enables the grain-scratch-repo task label (bwsalmon/agents#159): "
-                         "the GitHub App id grain mints a fresh, repo-scoped installation "
-                         "token from on demand -- requires --github-key-installation-id, "
-                         "--github-key-owner, and --github-key-minter-key-file")
-    p.add_argument("--github-key-installation-id",
-                    help="the App's installation id covering every grain-scratch-<sandbox> "
-                         "repo -- required with --github-key-app-id")
-    p.add_argument("--github-key-owner",
-                    help="the account the grain-scratch-<sandbox> repos live under -- "
-                         "required with --github-key-app-id")
-    p.add_argument("--github-key-repo-prefix", default="grain-scratch",
+                         "the account the grain-scratch-<sandbox> repos live under. The "
+                         "credential that reaches them is an ordinary --github-key "
+                         "NAME=FILE plus a credentials.json pattern added by hand -- see "
+                         "docs/runbook.md, 'Enabling grain-scratch-repo'")
+    p.add_argument("--scratch-repo-prefix", default="grain-scratch",
                     help="names the one repo dedicated to each sandbox: "
                          "<prefix>-<sandbox> (default: grain-scratch)")
-    p.add_argument("--github-key-minter-key-file",
-                    help="PEM file holding the GitHub App's own RS256 private key, used to "
-                         "sign the JWT each installation-token mint exchanges")
     p.add_argument("--github-host", default="api.github.com",
                     help="REST API host override for a live test against a mock GitHub "
                          "server (default: api.github.com)")
