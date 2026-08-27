@@ -1656,6 +1656,24 @@ dependencies allow:
   it. Directives are read only from authors who could have applied that
   label. Agents get no GitHub API access.
 
+## Decided
+
+Settled, with where each is argued and what would reopen it:
+
+| Decision | Where | Reopens if |
+|---|---|---|
+| Three records, sorted by who writes them — grain's store wins for grain's own acts, GitHub for facts it owns | [here](#decided-whoever-writes-it-owns-it) | — |
+| Representation is separate from the model; the dataclasses are the model, storage and label and directive shapes are not | [here](#representation-is-not-the-model) | — |
+| Landing state is decided by the creating actor, never the reason | [here](#task--the-aggregate) | — |
+| Sub-tasks get no auto-approval; every child costs an approval | [here](#sub-tasks-are-tasks) | decomposition turns out to be common enough that the friction bites |
+| Folder capabilities are **floors only** in v1 — no `permits`, no in-repo file | [here](#attaching-capabilities-to-repos-and-folders) | somebody wants a *stricter* subfolder inside a permissive parent — "except here" |
+| Directive grammar questions are artifacts of the issues interface, not model questions | [here](#direction-a-first-party-ui) | — |
+
+Two things are **assumed rather than decided**, and the document is
+written to survive either: the declaration
+[moving into a repo](#direction-the-declaration-moves-into-a-repo), and
+[a first-party UI](#direction-a-first-party-ui) over it.
+
 ## Open questions
 
 Grouped by what each holds up. Only the first touches stage 1; everything
@@ -1692,14 +1710,6 @@ else has a safe default or a natural place later.
 
 ### Decisions with safe defaults, worth making deliberately
 
-- **When do ceilings become necessary?** v1 is
-  [floors only](#attaching-capabilities-to-repos-and-folders) — decided.
-  The trigger to revisit is a concrete one rather than a date: the first
-  time someone wants a *stricter* subfolder inside a permissive parent,
-  which floors cannot express. Two things wait behind it — "except here",
-  and a `push` capability to give the allowlist the read/write axis it
-  lacks, which is the most concrete security improvement this document
-  identifies and is now deliberately deferred.
 - **Does review-sourced tasking get an automatic mode?** Explicit opt-in
   is the recommended default because the failure mode of the automatic
   version is immediate and noisy. Whether the knob exists at all is
