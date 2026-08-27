@@ -9,6 +9,15 @@ model/dolt/     opening an embedded Dolt database — the only package that
                 imports Dolt
 loop/           the state transition loop: what one cycle decides to do
                 with the store, with no side effect beyond that decision
+mcp/            a port of grain/automation/mcp_server.py: a newline-
+                delimited JSON-RPC server exposing the sandbox tools
+                (run_command, read_file, edit_file, write_file) and the
+                escape-hatch tools (ask_question, comment_on_issue,
+                propose_task, add_review_comment)
+mcp/cmd/mcpserver/  the server as a standalone stdio binary
+agent/          the Framework interface an agent driver implements
+agent/gemini/   Framework via the Gemini API, talking to its own in-process
+                mcp/ server
 ```
 
 ```sh
@@ -63,6 +72,16 @@ gets created, no agent runs, no GitHub is touched. Actually dispatching —
 along with the git proxy and the host adapter — is all still v1 Python —
 15,903 lines of it, with 1,239 tests. Those tests are the asset in a
 rewrite; the assertions port, the harness does not.
+
+`agent/gemini` can run an agent end to end against `mcp/`'s tools today —
+it just has nothing to call it yet. There is no host adapter to hand it a
+real sandbox directory, so `mcp/`'s `run_command`/`read_file`/`edit_file`/
+`write_file` are confined to a local directory rather than the remote VM
+v1's versions of them SSH into, and there is no GitHub client, so
+`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
+record what they were asked to do (`mcp.MockSink`) instead of doing it.
+Wiring either of those up for real, and calling `agent.Framework.Run` from
+`loop.Cycle`, is follow-on work once v2 has a host adapter of its own.
 
 ## Single writer
 
