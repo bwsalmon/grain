@@ -6,8 +6,8 @@ is a drift risk, and this suite is what pays for it.
 
 import re
 
-from grain.model import schema
-from grain.model.types import (
+from v2.model import schema
+from v2.model.types import (
     Attribution, Observation, Origin, OriginReason, PrincipalKind,
     PrincipalRef, Task, TaskIntent, TaskState, state_of,
 )

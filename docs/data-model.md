@@ -2559,7 +2559,7 @@ of `run_once`. A `version` field and the established
 
 ## Implementation status
 
-`grain/model/` holds the first of this: the model types, the schema, and
+`v2/model/` holds the first of this: the model types, the schema, and
 a Dolt-backed store.
 
 | Module | What it is |
@@ -2577,7 +2577,7 @@ and be reviewed while observations keep being written.
 
 The state derivation exists twice on purpose — once in SQL for the store,
 once in Python for code holding a `Task` and no database — and
-`tests/test_model_schema.py` holds the two to the same precedence, since
+`v2/tests/test_model_schema.py` holds the two to the same precedence, since
 two implementations of one rule is a drift risk worth paying for
 deliberately.
 

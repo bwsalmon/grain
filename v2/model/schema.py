@@ -9,7 +9,7 @@ there is no column to write, so no finish path can write one, no
 migration can add one by accident, and "a task is in exactly one state"
 stops being a rule each code path upholds and becomes a property of the
 store. `types.state_of()` computes the same thing for code holding a
-`Task` in hand; `tests/test_model_schema.py` holds the two to agreeing.
+`Task` in hand; `v2/tests/test_model_schema.py` holds the two to agreeing.
 
 **Declaration and observation are separate tables**, not columns on one
 row. They answer to different records -- a human authors the first, grain
@@ -28,7 +28,7 @@ rather than as MySQL `ENUM` columns. A MySQL `ENUM` puts the vocabulary
 in the schema, so adding a `LinkKind` becomes a migration; a `VARCHAR`
 keeps the vocabulary in `types.py`, where the model already says it
 lives. The cost is that the database will not reject an unknown value,
-which `tests/test_model_schema.py` covers instead.
+which `v2/tests/test_model_schema.py` covers instead.
 """
 
 from __future__ import annotations
@@ -192,7 +192,7 @@ TABLES: tuple[str, ...] = (
 
 # The invariant, as a view. Precedence top to bottom, matching
 # `types.state_of()` exactly -- see this module's docstring on why both
-# exist and `tests/test_model_schema.py` on what holds them together.
+# exist and `v2/tests/test_model_schema.py` on what holds them together.
 _TASK_STATE = """
 CREATE OR REPLACE VIEW `task_state` AS
 SELECT

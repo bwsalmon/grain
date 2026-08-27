@@ -43,7 +43,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..run import Runner
+# The one edge back into v1: `Runner` is a ten-line Protocol and a test
+# seam this repo already has, so v2 borrows it rather than defining a
+# second one. If v2 stops being Python, this import is the boundary that
+# tells you where the rewrite starts.
+from grain.run import Runner
 from . import schema
 from .sql import ident, literal, render, explain
 from .types import (

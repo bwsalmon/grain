@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from grain.model.dolt import DoltCli, DoltDatabase, StoreError, TaskStore
-from grain.model.types import (
+from v2.model.dolt import DoltCli, DoltDatabase, StoreError, TaskStore
+from v2.model.types import (
     Attribution, CredentialRef, FolderRef, Grant, GrantSource, Lease,
     LinkKind, Observation, Origin, OriginReason, PrincipalKind,
     PrincipalRef, RepoBinding, RepoRef, Run, Task, TaskIntent, TaskLink,
@@ -150,7 +150,7 @@ def test_approve_records_who_and_on_whose_behalf():
     sql = runner.sql
     assert "UPDATE `task` SET `approval_actor_kind`" in sql
     # grain performed it, a human meant it -- the two-principal shape.
-    from grain.model.sql import explain
+    from v2.model.sql import explain
     assert "automation" in explain(sql) and "human" in explain(sql)
 
 

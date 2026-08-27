@@ -1,14 +1,14 @@
 """The literal renderer is the only thing standing between untrusted text
 and a concatenated statement, so it is tested adversarially rather than
-happily -- see `grain/model/sql.py`'s docstring for why hex and not quotes.
+happily -- see `v2/model/sql.py`'s docstring for why hex and not quotes.
 """
 
 from datetime import datetime, timezone
 
 import pytest
 
-from grain.model.sql import SqlError, explain, ident, literal, render
-from grain.model.types import LinkKind, TaskIntent
+from v2.model.sql import SqlError, explain, ident, literal, render
+from v2.model.types import LinkKind, TaskIntent
 
 UTC = timezone.utc
 
