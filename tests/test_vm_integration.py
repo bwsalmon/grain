@@ -758,11 +758,28 @@ def test_ensure_workspace_recovers_by_recloning_when_git_clean_cannot_run(
         # the same shape as the `__pycache__` this was found with live.
         ssh_runner.run(["sudo", "mkdir", "-m", "755", f"{workspace}/root-owned"])
         ssh_runner.run(["sudo", "touch", f"{workspace}/root-owned/stuck.txt"])
+        unclean = ssh_runner.run(["git", "-C", workspace, "clean", "-fdx"], check=False)
+        assert unclean.returncode != 0, (
+            "setup should have reproduced a workspace plain `git clean` can't remove"
+        )
 
+        # A second commit lands upstream in between -- the same "previous
+        # task's leftovers plus a new task's own commit" shape a reused
+        # sandbox actually sees, and what turns the assertion below from
+        # "recovered to the same content" into "the *new* repo state
+        # genuinely made it to the sandbox," the claim the issue asks for.
+        seed = git_proxy_target.seed_clone
+        (seed / "README.md").write_text("a new task's commit, after the root-owned leftover\n")
+        _run_ok(["git", "-C", str(seed), "commit", "-aqm", "second commit"])
+        _run_ok(["git", "-C", str(seed), "push", "-q", "origin", "main"])
+
+        # Must not raise: without the sudo-rm-rf-then-reclone fallback this
+        # hits CommandError from the `set -eu` script, exactly the failure
+        # that used to wedge every later dispatch to this sandbox.
         ensure_workspace(ssh_runner, git_proxy_target.remote_url, path=workspace)
 
         second = ssh_runner.run(["cat", f"{workspace}/README.md"]).stdout
-        assert second == "hello from the live test upstream\n"
+        assert second == "a new task's commit, after the root-owned leftover\n"
         stuck = ssh_runner.run(["test", "-e", f"{workspace}/root-owned"], check=False)
         assert stuck.returncode != 0, "re-clone should have discarded the root-owned directory"
         status = ssh_runner.run(["git", "-C", workspace, "status", "--porcelain"]).stdout
