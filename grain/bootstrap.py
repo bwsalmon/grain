@@ -39,6 +39,7 @@ from .automation.configure import (
     configure_github_credential, configure_github_key, configure_github_key_minter,
     configure_janitor, configure_named_github_key, configure_repo,
     configure_scheduled_job, credential_repos, ensure_sandbox_tokens,
+    require_credential_coverage, required_credential_repos,
 )
 from .automation.ssh import SshRunner
 from .inventory import Cluster, VmSpec
@@ -309,9 +310,13 @@ def bootstrap(*, cluster: Cluster, adapter: LibvirtAdapter, base_runner: Runner,
                     github_use_tls=config.github_use_tls)
     configure_cluster(admin_ssh, cluster)
     if config.github_token:
-        configure_github_credential(
+        mapping = configure_github_credential(
             admin_ssh, credential_repos(config.task_repo, targets), config.github_token,
             credential_name=config.credential_name,
+        )
+        require_credential_coverage(
+            mapping,
+            required_credential_repos(config.task_repo, targets, default_target),
         )
     for name, token in config.github_keys.items():
         configure_named_github_key(admin_ssh, token, name=name)

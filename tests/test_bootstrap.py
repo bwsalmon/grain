@@ -286,6 +286,31 @@ def test_github_token_is_only_configured_when_supplied(env):
     assert any("credentials.json" in c for c in runner2.commands)
 
 
+def test_bootstrap_raises_when_default_target_repo_resolves_no_credential(env):
+    """bwsalmon/agents#207: BootstrapConfig, unlike the CLI's own
+    `_repo_args`, does not itself check that `default_target_repo` is a
+    member of `targets` -- so a caller (or a config repo) that builds one
+    directly with a `default_target_repo` outside `targets` used to
+    converge silently. `configure_github_credential` never carries a
+    default_target_repo it wasn't also given as a target, so this must
+    fail *here*, before stage 9 ever creates a sandbox, rather than surface
+    only as a proxy 500 on the first task with no `/repo` directive.
+    """
+    adapter, runner, cluster, config, admin_private = env
+    prime_happy_path(
+        runner, cluster, admin_private,
+        controller_state=("controller", "running"),
+        sandbox_states=[("sandbox-0", "running")],
+    )
+    config = BootstrapConfig(
+        task_repo="acme/task", targets=("acme/widgets",),
+        default_target_repo="acme/empty", github_token="ghp_tok",
+        admin_private_key_path=admin_private,
+    )
+    with pytest.raises(RuntimeError, match="acme/empty"):
+        bootstrap(cluster=cluster, adapter=adapter, base_runner=runner, config=config)
+
+
 def test_named_github_keys_are_only_configured_when_supplied(env):
     """Mirrors test_github_token_is_only_configured_when_supplied --
     bwsalmon/agents#134 threads BootstrapConfig.github_keys through the

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import secrets
-from pathlib import PurePosixPath
+import tempfile
+from pathlib import Path, PurePosixPath
 
 from .dispatch import CONTROLLER_AGENT_TOKEN_PATH
 from ..inventory import Cluster
+from ..proxy.credentials import CredentialSet
 from ..run import Runner
 
 DATA_CONFIG = "/data/config"
@@ -162,7 +164,7 @@ def credential_repos(task_repo: str, targets: list[str]) -> list[str]:
 
 
 def configure_github_credential(runner: Runner, repos: list[str], token: str,
-                                 *, credential_name: str = "bot") -> None:
+                                 *, credential_name: str = "bot") -> dict[str, str]:
     """Writes the token file and the `credentials.json` patterns pointing
     each repo in `repos` at it (docs/runbook.md step 8). Only ever writes
     exact-repo patterns for the repos this deployment was given; a broader
@@ -174,6 +176,10 @@ def configure_github_credential(runner: Runner, repos: list[str], token: str,
     resolves a credential per repo (`CredentialSet.token_for`, wired into
     `GitHubClient`), so a repo absent from this mapping is one it will talk
     to anonymously and, for anything private, fail on.
+
+    Returns the mapping it wrote, so a caller can immediately check it with
+    `require_credential_coverage` -- bwsalmon/agents#207 -- rather than
+    re-deriving the same `{repo: credential_name}` dict by hand.
     """
     _write_remote_file(
         runner, f"{DATA_SECRETS_GITHUB}/{credential_name}.token",
@@ -184,6 +190,94 @@ def configure_github_credential(runner: Runner, repos: list[str], token: str,
         runner, f"{DATA_SECRETS_GITHUB}/credentials.json",
         json.dumps(mapping, indent=2) + "\n", mode="644",
     )
+    return mapping
+
+
+def required_credential_repos(task_repo: str, targets: list[str],
+                               default_target_repo: str | None) -> list[str]:
+    """Every repo `require_credential_coverage` must find a credential for:
+    `credential_repos`'s own task-repo-plus-targets set, plus
+    `default_target_repo` explicitly, even when it disagrees with `targets`.
+
+    The CLI's own `_repo_args` (`grain/cli.py`) already refuses a
+    `--default-target-repo` that isn't one of the `--target-repo` values, so
+    on that path this never adds anything `credential_repos` didn't already
+    include. `BootstrapConfig` carries no such cross-check of its own,
+    though, and nothing stops a caller from constructing one directly with a
+    `default_target_repo` outside `targets` -- exactly bwsalmon/agents#198's
+    shape, where a task with no `/repo` directive fell back to a
+    `default_target_repo` the credential mapping never covered. Checking it
+    here regardless of `targets` membership is what catches that even when
+    `_repo_args`'s own guard is bypassed.
+    """
+    repos = credential_repos(task_repo, targets)
+    if default_target_repo and default_target_repo not in repos:
+        repos = [*repos, default_target_repo]
+    return repos
+
+
+def verify_credential_coverage(mapping: dict[str, str], repos: list[str]) -> list[str]:
+    """Every repo in `repos` that the real `CredentialSet.select(owner,
+    repo)` -- the exact lookup the orchestrator and the git proxy both use
+    at dispatch time -- resolves no credential for, given the
+    `credentials.json` mapping `configure_github_credential` just wrote.
+
+    Checked against a throwaway local temp directory standing in for
+    `/data/secrets/github`, never the controller itself: the write already
+    succeeded (or this call wouldn't be reached), so there is nothing left
+    to read back over SSH, and re-fetching it would make this check do
+    nothing under `--dry-run` except read back the empty file a fake runner
+    never actually wrote. The token files' real contents don't matter for
+    this check either -- only whether `select` can name a credential at
+    all -- so each is stubbed with a placeholder rather than fetched.
+
+    This catches two distinct gaps, both bwsalmon/agents#207:
+
+    - a repo `select` would canonicalize (lowercase, strip a trailing
+      `.git`) to something not exactly matching any pattern in `mapping` --
+      `configure_github_credential` writes patterns keyed on the exact
+      strings it was given, uncanonicalized, so the two only ever agree if
+      every caller already passes canonical `owner/repo` strings in;
+    - a repo -- in particular `default_target_repo` -- that never made it
+      into `mapping` at all; see `required_credential_repos`.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "credentials.json").write_text(json.dumps(mapping))
+        for name in set(mapping.values()):
+            if name != "anonymous":
+                (tmp_path / f"{name}.token").write_text("unused-placeholder\n")
+        credentials = CredentialSet(tmp_path)
+        return [
+            repo for repo in repos
+            if credentials.select(*repo.split("/", 1)) is None
+        ]
+
+
+def require_credential_coverage(mapping: dict[str, str], repos: list[str]) -> None:
+    """Raises with a clear, actionable message if `verify_credential_coverage`
+    finds any repo with no credential.
+
+    Called right after `configure_github_credential` writes
+    `credentials.json`, by both `grain host bootstrap` and `grain
+    controller configure` -- both already have secrets-dir access, unlike a
+    sandboxed agent -- so a repo that would otherwise 500 the git proxy on
+    its first real dispatch fails configure instead. bwsalmon/agents#207:
+    filed after #198 found exactly this happening in production, unnoticed
+    for the ~3.5 hours between the config merging and the failures being
+    logged.
+    """
+    unresolved = verify_credential_coverage(mapping, repos)
+    if unresolved:
+        raise RuntimeError(
+            "no credential resolves for: " + ", ".join(unresolved) + " -- "
+            "CredentialSet.select(owner, repo) returns None for each of "
+            "these even though configure_github_credential just wrote "
+            f"{DATA_SECRETS_GITHUB}/credentials.json. Every repo in "
+            "target_repos, and especially default_target_repo, needs an "
+            "exact-repo pattern there (or a covering owner/* or * pattern) "
+            "or the git proxy will 500 the first real dispatch into it."
+        )
 
 
 def configure_named_github_key(runner: Runner, token: str, *, name: str) -> None:
