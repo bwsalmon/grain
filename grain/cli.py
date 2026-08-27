@@ -33,6 +33,7 @@ from .automation.configure import (
     configure_gemini_key, configure_github_credential, configure_janitor,
     configure_named_github_key, configure_repo, configure_scheduled_job,
     configure_scratch_repo, credential_repos,
+    require_credential_coverage, required_credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
@@ -577,9 +578,12 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
             sys.stdin.read() if args.github_token_file == "-"
             else Path(args.github_token_file).read_text()
         )
-        configure_github_credential(
+        mapping = configure_github_credential(
             ssh, credential_repos(task_repo, targets), token,
             credential_name=args.credential_name,
+        )
+        require_credential_coverage(
+            mapping, required_credential_repos(task_repo, targets, default_target),
         )
     for name, token in _read_named_github_keys(args.github_key).items():
         configure_named_github_key(ssh, token, name=name)

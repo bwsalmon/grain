@@ -3,11 +3,15 @@ import json
 import shlex
 from pathlib import Path
 
+import pytest
+
 from grain.automation.configure import (
     configure_agent_gcp_key, configure_claude_token, configure_cluster,
     configure_gcp_key_minter, configure_gemini_key, configure_github_credential,
     configure_named_github_key, configure_repo, configure_scheduled_job,
     configure_scratch_repo, ensure_sandbox_tokens,
+    require_credential_coverage, required_credential_repos,
+    verify_credential_coverage,
 )
 from grain.automation.ssh import SshRunner
 from grain.inventory import Cluster
@@ -157,6 +161,82 @@ def test_configure_github_credential_sets_mode_600_on_the_token():
     assert any(
         "sudo chmod 600 /data/secrets/github/bot.token" in c for c in inner.commands
     )
+
+
+def test_configure_github_credential_returns_the_mapping_it_wrote():
+    ssh, inner = make_ssh()
+    mapping = configure_github_credential(ssh, ["acme/widgets", "acme/other"], "tok")
+    assert mapping == {"acme/widgets": "bot", "acme/other": "bot"}
+
+
+def test_required_credential_repos_is_task_plus_targets_when_default_is_among_them():
+    assert required_credential_repos(
+        "acme/task", ["acme/widgets", "acme/other"], "acme/widgets",
+    ) == ["acme/task", "acme/widgets", "acme/other"]
+
+
+def test_required_credential_repos_adds_a_default_outside_targets():
+    """bwsalmon/agents#207's exact shape: default_target_repo need not be a
+    member of targets unless a caller validates that itself (the CLI's own
+    `_repo_args` does; `BootstrapConfig` built directly does not) -- this
+    must still be checked, or a task falling back to it silently gets no
+    credential at all.
+    """
+    assert required_credential_repos(
+        "acme/task", ["acme/widgets"], "acme/empty",
+    ) == ["acme/task", "acme/widgets", "acme/empty"]
+
+
+def test_required_credential_repos_dedupes_a_single_repo_deployment():
+    assert required_credential_repos("acme/widgets", ["acme/widgets"], "acme/widgets") == [
+        "acme/widgets",
+    ]
+
+
+def test_verify_credential_coverage_is_empty_when_every_repo_resolves():
+    mapping = {"acme/widgets": "bot", "acme/other": "bot"}
+    assert verify_credential_coverage(mapping, ["acme/widgets", "acme/other"]) == []
+
+
+def test_verify_credential_coverage_flags_a_repo_missing_from_the_mapping():
+    mapping = {"acme/widgets": "bot"}
+    assert verify_credential_coverage(
+        mapping, ["acme/widgets", "acme/empty"],
+    ) == ["acme/empty"]
+
+
+def test_verify_credential_coverage_honours_an_owner_wildcard():
+    mapping = {"acme/*": "bot"}
+    assert verify_credential_coverage(mapping, ["acme/widgets"]) == []
+
+
+def test_verify_credential_coverage_catches_a_case_mismatch():
+    """`CredentialSet.select` canonicalizes (lowercases) its query before
+    matching, but `configure_github_credential` writes patterns keyed on
+    the exact string it was given -- so a repo whose casing here doesn't
+    match how it's spelled in `mapping` resolves to nothing, exactly the
+    silent gap this check exists to catch before it reaches a real
+    dispatch.
+    """
+    mapping = {"Acme/Widgets": "bot"}
+    assert verify_credential_coverage(mapping, ["acme/widgets"]) == ["acme/widgets"]
+
+
+def test_verify_credential_coverage_treats_anonymous_as_resolved():
+    mapping = {"*": "anonymous"}
+    assert verify_credential_coverage(mapping, ["acme/widgets"]) == []
+
+
+def test_require_credential_coverage_is_silent_when_everything_resolves():
+    require_credential_coverage({"acme/widgets": "bot"}, ["acme/widgets"])  # does not raise
+
+
+def test_require_credential_coverage_raises_a_clear_message_for_default_target_repo():
+    with pytest.raises(RuntimeError, match="acme/empty"):
+        require_credential_coverage(
+            {"acme/task": "bot", "acme/widgets": "bot"},
+            required_credential_repos("acme/task", ["acme/widgets"], "acme/empty"),
+        )
 
 
 def test_configure_named_github_key_writes_only_the_token_file():
