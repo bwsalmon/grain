@@ -1584,6 +1584,49 @@ containment reading:
   module is an anomaly a reviewer can see, and a conformance test can
   assert against.
 
+**Does any of this survive disposable sandboxes?** Four of the five
+reasons do, and the one that dies is worth conceding cleanly.
+
+**What dies: the un-placement gap.** It exists only because a sandbox is
+reused. `docs/design.md` chose long-lived sandboxes deliberately and
+names `grain sandbox recreate` as "the boundary" — so a sandbox destroyed
+after every task makes a stale key file outlive nothing, and that entire
+argument goes away. (Lease revocation still matters: the credential lives
+in GCP, not in the file.)
+
+**What survives, and why: the three disciplines are about material
+*leaving* the sandbox, not persisting in it.** Disposability addresses
+what remains; the disciplines address what escapes, and destroying the VM
+afterwards does not recall any of it.
+
+- **A key in argv** is in the process table while it runs, and in any
+  command log that records the invocation. Written and gone before the
+  sandbox is.
+- **A key rendered into a prompt** is captured by `capture_trajectory`
+  into a transcript on the *controller* — which this document just
+  decided to keep [for about a
+  month](#decided-keep-run-records-indefinitely-the-transcripts-are-what-age-out).
+  The sandbox being disposable is irrelevant to a credential sitting in
+  retained history somewhere else. This one gets *stronger* under
+  disposability, not weaker, because the transcript becomes the
+  longest-lived copy.
+- **A key inside `WORKSPACE_PATH`** can be swept into a commit by a
+  task's own `git add -A` and pushed to a real repo, where it is
+  permanent. The most consequential leak of the three, and the one
+  furthest outside the sandbox's lifetime.
+
+The other two hold unchanged: providers stay testable without a sandbox,
+and what a run was given stays enumerable for audit — "which credentials
+did this task hold?" is a question about the past, which a destroyed
+sandbox cannot answer and a placement record can.
+
+**The model does not depend on which way that goes.** Disposability is a
+`docs/design.md` decision with its own cost — it trades provisioning time
+per task for the sequential-isolation properties that document lists as
+knowingly given up. If it is ever taken, the effect here is that
+`cleanup()` and un-placement both become unnecessary; nothing else in
+this section changes.
+
 **What it costs, and the rule for when it binds.** A capability that
 needs to *run* something rather than write something cannot say so. None
 does today: the two `MINT` capabilities write one file each, and the two
