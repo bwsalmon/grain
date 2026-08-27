@@ -908,8 +908,8 @@ same property `Assignment.issue`'s comment already relies on.
 class Task:
     ref: TaskRef
     intent: TaskIntent
-    state: TaskState
     origin: Origin
+    approval: Attribution | None    # None = not approved. Declaration.
 
     target: RepoRef | None          # the one *write* target; None until a
                                     # SCRATCH binding resolves
@@ -928,8 +928,11 @@ class Task:
     tags: frozenset[str]            # e.g. a scheduled job's marker label
 
     created_at: datetime
-    state_since: datetime
 ```
+
+No `state` field, and no `state_since`: `TaskState` is
+[derived](#taskstate-is-derived-not-stored), so there is nothing to store
+or to timestamp.
 
 Four of those fields need their own vocabulary.
 
@@ -961,7 +964,7 @@ no branch has failed, and an `ANALYZE` task that produced one is a
 surprise worth surfacing. The existing behaviour stays the default for a
 task that declares nothing, so this costs no compatibility.
 
-**`TaskState` — one at a time.**
+#### `TaskState` is derived, not stored
 
 ```python
 class TaskState(Enum):
@@ -973,11 +976,61 @@ class TaskState(Enum):
     CLOSED = "closed"                  # the issue itself is closed
 ```
 
-`labels.py` already asserts that a task is in exactly one state, and
-`_dispatch` already strips the old label as it applies the new one. As an
-enum with a projection onto labels, that invariant is enforced by
-construction: there is one place that writes state, and it cannot leave
-two pills on an issue because it does not have a way to express that.
+**Decided.** State straddled the
+[three records](#decided-whoever-writes-it-owns-it) — `PROPOSED` →
+`QUEUED` is a human approving, while `RUNNING`, `AWAITING_REPLY` and
+`COMPLETED` are grain observing itself — and putting the whole enum in
+either record would have been wrong in one direction or the other. The
+resolution: **approval is declaration; state is a pure function of that
+plus grain's observations, and nothing writes it.**
+
+```python
+def state(task, obs) -> TaskState:
+    if obs.closed:            return CLOSED
+    if obs.completed:         return COMPLETED
+    if obs.pending_question:  return AWAITING_REPLY
+    if obs.active_run:        return RUNNING
+    if task.approval is None: return PROPOSED
+    return QUEUED
+```
+
+`QUEUED` is *approved and not running*; `PROPOSED` is *not yet
+approved*. Nothing is authoritative for state, because state is not a
+fact anybody writes — which is why it needed neither record.
+
+**Approval is an `Attribution`, not a flag.** The obvious shape is
+`approved: bool`, and it loses the thing worth keeping: who approved, and
+whether they did it directly. The [principals
+model](#principals-three-actors-behind-one-github-identity) already has
+the right type. A human applying the trigger label is
+`(actor=HUMAN, on_behalf_of=None)`. Grain restarting a completed task
+because a human commented on it — `_restart_commented_completions` today
+— is `(actor=AUTOMATION, on_behalf_of=HUMAN)`, which says exactly what is
+true: grain performed it, a human meant it. `/lgtm` promotion is the same
+shape. Under the repo direction the approving commit's author corroborates
+the record rather than replacing it.
+
+This does not conflict with the rule that
+[the creating actor decides landing state](#task--the-aggregate). That
+rule is about task *creation*; re-approving an existing task is a
+different action, and it is still a human's intent either way — relayed
+rather than direct.
+
+**Three things fall out.**
+
+- **Exactly-one-state stops being a rule to maintain.** `labels.py`
+  asserts it in prose and `_dispatch` upholds it by stripping the old
+  label as it applies the new one. Derived state cannot be two things at
+  once, so the invariant is structural rather than something every future
+  finish path has to remember.
+- **`proposed_task_issues` disappears rather than consolidating.** Of the
+  five parallel dicts in `AutomationState`, four hold observations and
+  belong in the store. That one tracked which tasks carry
+  `needs_approval_label` — which is now just `approval is None`, so it is
+  derived, not stored.
+- **Cancellation gets a mechanism it did not have.** Under the repo
+  direction, closing an issue is not available; withdrawing approval is,
+  and it is a commit, reviewable like any other declaration change.
 
 **Blocked is deliberately not a state.** `waiting_on_dependency_label` is
 in the capability tier today, and `labels.py` gives the reason: a blocked
@@ -1246,16 +1299,18 @@ rather than a convenience.
 Two notes for whoever adds it:
 
 - **`Folder` is where the policy belongs**, not `AutomationConfig`. It
-  already carries `offers`, `base`, `preamble` and `max_concurrent`; `auto_approve_children` is one more row of exactly
-  that kind, and per-area is the granularity anyone actually wants —
-  loose in a scratch area, strict where deploys live.
-- **Auditing it needs no new field.** "Was this run approved by a human
-  or by policy?" is not recoverable from `Task` alone, since `state_since`
-  is one timestamp rather than a history. It does not need to be:
-  `audit.py` already records every dispatch, and that is the right place
-  for it. Adding provenance to the task — a `via` on the approval, the
-  shape `Grant.via` already uses — is worth doing only if the audit log
-  turns out to be the wrong place to answer it from.
+  already carries `offers`, `base`, `preamble` and `max_concurrent`;
+  `auto_approve_children` is one more row of exactly that kind, and
+  per-area is the granularity anyone actually wants — loose in a scratch
+  area, strict where deploys live.
+- **Auditing it is already free.** An earlier draft of this note said
+  "was this approved by a human or by policy?" was not recoverable from
+  `Task` and would have to come from `audit.py`. That stopped being true
+  when [approval became an
+  `Attribution`](#taskstate-is-derived-not-stored): a human approval is
+  `(HUMAN, None)`, a relayed one is `(AUTOMATION, on_behalf_of=HUMAN)`,
+  and a policy approval is `(AUTOMATION, None)` — three distinguishable
+  shapes on the task itself, with no field to add.
 
 **Depth and fan-out are bounded.** A child of a child of a child is
 almost always an agent looping, and the cheapest place to discover that
@@ -1507,7 +1562,10 @@ notice is for a human to read the issue's history.
 Each of these is a rule the current code follows, and each is a test in
 the model:
 
-1. A task is in exactly one `TaskState`. Blocked is derived, not a state.
+1. `TaskState` is derived from approval plus grain's observations, never
+   stored or written. Exactly-one-state is therefore structural rather
+   than a rule each finish path upholds, and blocked stays an annotation
+   on `QUEUED` rather than a state of its own.
 2. A task's target repo and base are pinned before its first push and not
    re-read from editable text afterwards.
 3. `/depends` and child links are evaluated fresh every cycle — the one
@@ -1564,7 +1622,8 @@ the model:
 | `_PrHealth`, `PullRequestDetail` reads | `TrackedPullRequest`'s observed fields |
 | `PendingQuestion` | `Task` in `AWAITING_REPLY` + its baseline comment id |
 | `CompletedIssue` | `Task` in `COMPLETED` + its baseline comment id |
-| `proposed_task_issues` | `Task` in `PROPOSED` |
+| `proposed_task_issues` | gone — derived from `approval is None` |
+| `trigger_label` applied by a human | `Task.approval`, an `Attribution` |
 | `OpenPullRequest.fix_issue` | a `FIXES` link |
 | "Proposed by X" prose in a body | a `PROPOSED_BY` link |
 | `/depends` re-parsed each cycle | `DEPENDS_ON` links, still re-evaluated |
@@ -1605,7 +1664,9 @@ directive, or anything an operator sees.
    [serialization boundary](#representation-is-not-the-model) goes:
    generic over the dataclasses rather than hand-written per field, so
    every later stage adds fields for free rather than paying the three
-   edits `gemini_key_name` and `gcp_key_id` each paid.
+   edits `gemini_key_name` and `gcp_key_id` each paid. Four dicts
+   consolidate; `proposed_task_issues` is deleted rather than migrated,
+   since [state is derived](#taskstate-is-derived-not-stored).
 2. **The capability registry.** `Capability` rows, `Grant`, `Lease`.
    `_resolve_target`'s per-label branches become a loop; `_release`'s two
    revoke branches become one; the two reapers become one. Behaviour
@@ -1665,6 +1726,7 @@ Settled, with where each is argued and what would reopen it:
 | Three records, sorted by who writes them — grain's store wins for grain's own acts, GitHub for facts it owns | [here](#decided-whoever-writes-it-owns-it) | — |
 | Representation is separate from the model; the dataclasses are the model, storage and label and directive shapes are not | [here](#representation-is-not-the-model) | — |
 | Landing state is decided by the creating actor, never the reason | [here](#task--the-aggregate) | — |
+| `TaskState` is derived, not stored; approval is declaration and carries an `Attribution` | [here](#taskstate-is-derived-not-stored) | — |
 | Sub-tasks get no auto-approval; every child costs an approval | [here](#sub-tasks-are-tasks) | decomposition turns out to be common enough that the friction bites |
 | Folder capabilities are **floors only** in v1 — no `permits`, no in-repo file | [here](#attaching-capabilities-to-repos-and-folders) | somebody wants a *stricter* subfolder inside a permissive parent — "except here" |
 | Directive grammar questions are artifacts of the issues interface, not model questions | [here](#direction-a-first-party-ui) | — |
@@ -1676,29 +1738,10 @@ written to survive either: the declaration
 
 ## Open questions
 
-Grouped by what each holds up. Only the first touches stage 1; everything
-else has a safe default or a natural place later.
+Grouped by what each holds up. None now blocks stage 1; each has a safe
+default or a natural place later.
 
 ### Touches the foundation
-
-- **Is `TaskState` declaration or grain's own record?** It straddles them,
-  and the [three-record split](#decided-whoever-writes-it-owns-it) did not
-  resolve it. `PROPOSED` → `QUEUED` is a human approving; `RUNNING`,
-  `AWAITING_REPLY` and `COMPLETED` are grain's own observations of itself.
-  Putting the whole enum in either record is wrong in one direction or the
-  other.
-
-  Recommendation: **approval is declaration, state is grain's record
-  derived from it.** The declaration carries an `approved` fact (a human's
-  intent to run this); `TaskState` is computed from that plus grain's
-  observations, and is never written by hand. It falls out cleanly —
-  `QUEUED` is *approved and not running*, and `PROPOSED` is *not yet
-  approved* — and it answers cancellation under the repo direction, which
-  otherwise has no obvious mechanism: cancelling is withdrawing approval,
-  which is a commit, reviewable like any other declaration change.
-
-  Worth settling before stage 1, since it decides what the store holds
-  versus what it derives.
 
 - **How long does a `Run` live?** The janitor case needs an agent
   principal resolvable *after* its run ends, potentially days later, since
