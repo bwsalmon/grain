@@ -116,6 +116,17 @@ class AutomationConfig:
     # it work (`provision/controller.sh`) is unconditional, same as the
     # `systemd-journal` group membership `self_debug_label` relies on.
     self_repair_label: str = "grain-self-repair"
+    # bwsalmon/agents#159: routes a task straight into its own sandbox's
+    # dedicated scratch repo (`github_keys.py`'s `repo_for_sandbox`),
+    # overriding any `/repo` directive entirely -- which scratch repo that
+    # is can't be known until a sandbox is actually assigned, so it can't
+    # be a directive a task author writes in advance the way `/repo`
+    # normally is. The same "a human decided this" label tier
+    # `gemini_key_label` already carries, checked directly against
+    # `issue.labels` in `core.py`'s `_resolve_target`, and refused the
+    # same way when this deployment has no `github_key_config` (`grain
+    # controller configure --github-key-app-id ...`) to honour it with.
+    scratch_repo_label: str = "grain-scratch-repo"
     ssh_user: str = "debian"
     ssh_key_path: Path = Path("/data/secrets/controller-ssh")
     runs_per_hour: int = 60

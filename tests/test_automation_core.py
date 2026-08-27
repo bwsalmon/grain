@@ -19,6 +19,7 @@ from grain.automation.gemini_keys import GeminiKeyConfig
 from grain.automation.github import (
     ApiResponse, Comment, FakeTransport, GitHubClient, GitHubError, Issue,
 )
+from grain.automation.github_keys import GitHubKeyConfig
 from grain.automation.history import NullSessionHistory, RecordingSessionHistory
 from grain.automation.janitor import JanitorConfig
 from grain.automation.ssh import SshRunner
@@ -226,7 +227,7 @@ def credentials_with(*names: str) -> CredentialSet:
 def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
                        history=None, allowed=("o/r",), gemini_key_config=None,
                        credentials=None, credential_store=None, state_path=None,
-                       gcp_key_config=None, janitor_config=None):
+                       gcp_key_config=None, janitor_config=None, github_key_config=None):
     cluster = Cluster(sandbox_count=2)
     # `default`, not a one-shot `responses` queue: a sweep pass can fire
     # label-mutation calls before `_dispatch`'s own `list_issues` GET, and
@@ -260,6 +261,7 @@ def make_orchestrator(*, issues=(), state=None, runner=None, token_store=None,
         ssh_runner_factory=lambda _sandbox: fake_runner,
         gemini_key_config=gemini_key_config,
         gcp_key_config=gcp_key_config, janitor_config=janitor_config,
+        github_key_config=github_key_config,
         credentials=credentials, credential_store=credential_store,
         # bwsalmon/agents#51: most tests leave this unset, which makes
         # `_save_state` a no-op -- exactly the pre-existing behaviour, since
@@ -2969,6 +2971,88 @@ def test_a_dispatch_failure_whose_gemini_key_cleanup_also_fails_reports_both():
     )
 
 
+# --- grain-scratch-repo label (bwsalmon/agents#159) -------------------------
+
+SCRATCH_LABELS = ("grain-agent", "grain-scratch-repo")
+
+
+def test_scratch_repo_label_without_config_is_parked():
+    orchestrator, transport = make_orchestrator(issues=[])
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, labels=SCRATCH_LABELS)]).encode()),         # list_issues
+        ApiResponse(200, {}, b"[]"),                                   # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),          # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "grain-scratch-repo" in json.loads(comment["body"])["body"]
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+
+
+def test_scratch_repo_label_dispatches_into_the_sandboxs_own_repo():
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, labels=SCRATCH_LABELS)],
+        allowed=("o/r", "acme/grain-scratch-sandbox-0"),
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == (
+        "acme", "grain-scratch-sandbox-0",
+    )
+
+
+def test_scratch_repo_label_overrides_a_repo_directive():
+    """The label wins outright: which scratch repo applies can't be known
+    until a sandbox is picked, so it can't be reconciled with a `/repo`
+    line written in advance the normal way."""
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4, body="/repo o/elsewhere", labels=SCRATCH_LABELS)],
+        allowed=("o/r", "o/elsewhere", "acme/grain-scratch-sandbox-0"),
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == (
+        "acme", "grain-scratch-sandbox-0",
+    )
+
+
+def test_a_task_with_no_scratch_repo_label_is_unaffected():
+    orchestrator, _ = make_orchestrator(
+        issues=[issue_json(4)],
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+
+    orchestrator.run_once(NOW)
+
+    assignment = orchestrator.state.assignments["sandbox-0"]
+    assert (assignment.target_owner, assignment.target_repo) == ("o", "r")
+
+
+def test_resolve_target_names_the_repo_for_whichever_sandbox_was_assigned():
+    orchestrator, _ = make_orchestrator(
+        allowed=("acme/grain-scratch-sandbox-1",),
+        github_key_config=GitHubKeyConfig(app_id="1", installation_id="2", owner="acme"),
+    )
+    issue = Issue(number=5, title="t", body="", html_url="https://github.com/o/r/issues/5",
+                   labels=SCRATCH_LABELS, state="open")
+
+    task = orchestrator._resolve_target(issue, [], sandbox="sandbox-1")
+
+    assert (task.repo.owner, task.repo.name) == ("acme", "grain-scratch-sandbox-1")
+
+
 # --- grain-github-<name> label (bwsalmon/agents#52) -------------------------
 
 def test_a_grain_github_label_records_the_override_for_the_dispatched_sandbox():
@@ -3493,7 +3577,7 @@ def test_a_directive_in_grains_own_comment_is_not_read_as_an_instruction():
     grain_said = Comment(id=101, user="grain-agent-bot", author_association="OWNER",
                           body=signed("/repo o/elsewhere"))
 
-    task = orchestrator._resolve_target(issue, [grain_said])
+    task = orchestrator._resolve_target(issue, [grain_said], sandbox="sandbox-0")
 
     assert (task.repo.owner, task.repo.name) == ("o", "r"), (
         "grain's own comment redirected the task it was describing"
@@ -3511,7 +3595,7 @@ def test_a_directive_in_a_maintainers_comment_is_still_read():
     human_said = Comment(id=101, user="maintainer", author_association="OWNER",
                           body="/repo o/elsewhere")
 
-    task = orchestrator._resolve_target(issue, [human_said])
+    task = orchestrator._resolve_target(issue, [human_said], sandbox="sandbox-0")
 
     assert (task.repo.owner, task.repo.name) == ("o", "elsewhere")
 

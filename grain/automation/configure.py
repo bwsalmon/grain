@@ -49,6 +49,17 @@ GCP_KEY_CONFIG_PATH = "/data/config/gcp-key.json"
 # Must match grain/automation/janitor.py's `JanitorConfig` load path --
 # same caveat, see this constant's own use in `configure_janitor`.
 JANITOR_CONFIG_PATH = "/data/config/janitor.json"
+# Must match grain/automation/github_keys.py's `GitHubKeyConfig.private_key_path`
+# default -- same "kept in sync by hand" caveat as the pair above.
+# bwsalmon/agents#159: the GitHub App's own credential -- deliberately a
+# different file from every other credential here, since it mints scratch-
+# repo tokens for both `grain-automation.service` and
+# `grain-git-proxy.service`, not one or the other.
+GITHUB_KEY_MINTER_KEY_PATH = "/data/secrets/github-key-minter.pem"
+# Must match grain/automation/github_keys.py's `GitHubKeyConfig` load path --
+# same "kept in sync by hand" caveat, see this constant's own use in
+# `configure_github_key`.
+GITHUB_KEY_CONFIG_PATH = "/data/config/github-key.json"
 
 
 def _write_remote_file(runner: Runner, path: str, content: str, *, mode: str,
@@ -315,6 +326,41 @@ def configure_janitor(runner: Runner, project_id: str, ttl_hours: int, *,
         payload["impersonate_service_account"] = impersonate_service_account
     janitor_json = json.dumps(payload, indent=2) + "\n"
     _write_remote_file(runner, JANITOR_CONFIG_PATH, janitor_json, mode="644")
+
+
+def configure_github_key(runner: Runner, *, app_id: str, installation_id: str,
+                          owner: str, repo_prefix: str = "grain-scratch") -> None:
+    """Writes `/data/config/github-key.json` (bwsalmon/agents#159), the
+    on/off switch `config.scratch_repo_label` needs -- absent,
+    `core.py`'s `_resolve_target` refuses the label with an explanation,
+    the same "unusable request parks the task" shape `configure_gemini_key`
+    already has for its own label.
+
+    Places no credential of its own -- app id, installation id, owner, and
+    repo prefix are all plain, non-secret configuration (the App and its
+    installation are already visible to anyone with access to it on
+    github.com); `configure_github_key_minter` below is what places the
+    actual credential, the App's own RS256 private key.
+    """
+    github_key_json = json.dumps({
+        "app_id": app_id, "installation_id": installation_id,
+        "owner": owner, "repo_prefix": repo_prefix,
+    }, indent=2) + "\n"
+    _write_remote_file(runner, GITHUB_KEY_CONFIG_PATH, github_key_json, mode="644")
+
+
+def configure_github_key_minter(runner: Runner, key: str) -> None:
+    """Places the GitHub App's own private key `github_keys.py` signs a
+    JWT with (bwsalmon/agents#159), at `GITHUB_KEY_MINTER_KEY_PATH`.
+
+    Read by both `grain-automation.service` (the orchestrator's own API
+    calls against a scratch repo) and `grain-git-proxy.service` (a
+    sandbox's git push through it) -- see `github_keys.py`'s own
+    docstring for why each mints its own token independently rather than
+    one being handed the other's. Root-owned, `600`, the same treatment
+    every other raw credential under `/data/secrets` already gets.
+    """
+    _write_remote_file(runner, GITHUB_KEY_MINTER_KEY_PATH, key.strip() + "\n", mode="600")
 
 
 def ensure_sandbox_tokens(runner: Runner, sandbox_names: list[str]) -> None:

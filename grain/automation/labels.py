@@ -121,6 +121,12 @@ _STYLES: dict[str, tuple[str, str, str]] = {
     "self_repair_label": (
         CAPABILITY, "fef2c0", "Let this task restart grain services or reboot/reformat its sandbox",
     ),
+    # bwsalmon/agents#159: routes this task into its own sandbox's
+    # dedicated scratch repo instead of anywhere named by `/repo` -- see
+    # `core.py`'s `_resolve_target`.
+    "scratch_repo_label": (
+        CAPABILITY, "bfd4f2", "Dispatch this task into its sandbox's own scratch repo",
+    ),
 }
 
 

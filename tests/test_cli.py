@@ -582,6 +582,43 @@ def test_controller_configure_without_gemini_project_id_writes_no_gemini_config(
     assert "gemini-key.json" not in out
 
 
+def test_dry_run_controller_configure_with_a_github_key_app(capsys, tmp_path):
+    key_file = tmp_path / "app-key.pem"
+    key_file.write_text("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n")
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--github-key-app-id", "123", "--github-key-installation-id", "456",
+         "--github-key-owner", "acme", "--github-key-minter-key-file", str(key_file)],
+        capsys,
+    )
+    assert "dd of=/data/config/github-key.json" in out
+    assert "dd of=/data/secrets/github-key-minter.pem" in out
+    for line in out.splitlines():
+        if line.startswith("+ ssh") and "dd of=" in line:
+            assert "BEGIN PRIVATE KEY" not in line
+
+
+def test_controller_configure_github_key_app_id_alone_writes_no_config(capsys):
+    """bwsalmon/agents#159: naming only part of the group (no installation
+    id/owner/minter key) just leaves the label off, the same "unusable
+    config parks/skips" latitude every other optional step here has."""
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets",
+         "--github-key-app-id", "123"],
+        capsys,
+    )
+    assert "github-key.json" not in out
+
+
+def test_controller_configure_without_github_key_app_id_writes_no_github_key_config(capsys):
+    out = run(
+        ["--dry-run", "controller", "configure", "--repo", "acme/widgets"],
+        capsys,
+    )
+    assert "github-key.json" not in out
+    assert "github-key-minter.pem" not in out
+
+
 def test_repo_without_a_slash_is_rejected():
     with pytest.raises(SystemExit, match="owner/name"):
         main(["--dry-run", "controller", "configure", "--repo", "not-a-repo-slug"])

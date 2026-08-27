@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..automation.config import AutomationConfig
+from ..automation.github_keys import GitHubKeyConfig, InstallationTokenSource
+from ..run import RealRunner
 from .allowlist import Allowlist
 from .audit import FileAuditLog
 from .core import GitProxy
@@ -79,6 +81,18 @@ def build_proxy(data_dir: Path) -> GitProxy:
     if automation_path.exists():
         config = AutomationConfig.load(automation_path)
         forwarder = RealForwarder(config.git_forward_host, use_tls=config.github_use_tls)
+    # bwsalmon/agents#159: absence is the off switch, the same "feature
+    # not configured" shape every other optional step here already has --
+    # a deployment that never ran `grain controller configure
+    # --github-key-app-id ...` has no such file, and every scratch-repo
+    # push simply falls through to the ordinary credential ladder (which
+    # has nothing configured for `repo_for_sandbox`'s own repos either,
+    # so it 500s the same way an unconfigured repo always has).
+    github_key_config_path = data_dir / "config" / "github-key.json"
+    scratch_source = (
+        InstallationTokenSource(RealRunner(), GitHubKeyConfig.load(github_key_config_path))
+        if github_key_config_path.exists() else None
+    )
     return GitProxy(
         allowlist=Allowlist(data_dir / "config" / "repo-allowlist.json"),
         credentials=CredentialSet(data_dir / "secrets" / "github"),
@@ -91,6 +105,7 @@ def build_proxy(data_dir: Path) -> GitProxy:
         credential_overrides=SandboxCredentialOverrides(
             data_dir / "config" / "sandbox-github-key.json"
         ),
+        scratch_source=scratch_source,
     )
 
 

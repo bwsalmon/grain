@@ -490,6 +490,7 @@ _SELF_DEBUG_CONFIG_FILES = {
     "repo-allowlist": "repo-allowlist.json",
     "gemini-key": "gemini-key.json",
     "gcp-key": "gcp-key.json",
+    "github-key": "github-key.json",
     "sandbox-github-key": "sandbox-github-key.json",
 }
 
@@ -500,14 +501,15 @@ _READ_GRAIN_CONFIG_TOOL = {
     "description": (
         "Read one of grain's own non-secret configuration files from "
         "/data/config on the controller: automation.json, "
-        "repo-allowlist.json, gemini-key.json, gcp-key.json, or "
-        "sandbox-github-key.json -- for triaging a bug in grain itself, "
-        "not the target repo's own code. Every credential and token this "
-        "deployment holds lives under /data/secrets instead, which this "
-        "tool has no path to reach at all: only these five names are "
-        "readable. Reports a file as unconfigured rather than erroring if "
-        "this deployment never wrote it (gemini-key.json, gcp-key.json, "
-        "and sandbox-github-key.json are all optional). Only available on "
+        "repo-allowlist.json, gemini-key.json, gcp-key.json, "
+        "github-key.json, or sandbox-github-key.json -- for triaging a "
+        "bug in grain itself, not the target repo's own code. Every "
+        "credential and token this deployment holds lives under "
+        "/data/secrets instead, which this tool has no path to reach at "
+        "all: only these six names are readable. Reports a file as "
+        "unconfigured rather than erroring if this deployment never wrote "
+        "it (gemini-key.json, gcp-key.json, github-key.json, and "
+        "sandbox-github-key.json are all optional). Only available on "
         "a task whose issue carries the grain-self-debug label."
     ),
     "inputSchema": {
