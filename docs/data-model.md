@@ -884,7 +884,7 @@ class Task:
     ref: TaskRef
     intent: TaskIntent
     state: TaskState
-    origin: TaskOrigin
+    origin: Origin
 
     target: RepoRef | None          # the one *write* target; None until a
                                     # SCRATCH binding resolves
@@ -963,33 +963,70 @@ task's own links (`any(link.unresolved for link in task.links if
 link.blocks)`), and the label is a projection of that derivation. No new
 state, no change to what an operator sees.
 
-**`TaskOrigin` — who asked.** Today this is inferable only from which
+**`Origin` — who asked, and why.** Today this is inferable only from which
 label a task was filed with, and only for two of the four cases.
 
 ```python
-class TaskOrigin(Enum):
-    HUMAN = "human"          # somebody filed and labelled an issue
-    SCHEDULED = "scheduled"  # scheduled_jobs.py filed it from a template
-    FIX = "fix"              # _suggest_fix filed it for a broken PR
-    REVIEW = "review"        # human review threads on a PR asked for it
-    PROPOSED = "proposed"    # propose_task, or a parent decomposing
+class OriginReason(Enum):
+    DIRECT = "direct"      # somebody just filed it
+    SCHEDULE = "schedule"  # scheduled_jobs.py fired from a template
+    FIX = "fix"            # _suggest_fix, for a broken PR
+    REVIEW = "review"      # review threads on a PR asked for it
+    PROPOSAL = "proposal"  # propose_task, or a parent decomposing
+
+@dataclass(frozen=True)
+class Origin:
+    attribution: Attribution   # who created the task
+    reason: OriginReason       # why
 ```
 
-Origin matters because it decides the *default* landing state, which is
-the whole trust model in one line: a `HUMAN` task lands `QUEUED`; `FIX`
-and `PROPOSED` tasks land `PROPOSED` and wait for a human to apply
-`trigger_label` or comment `/lgtm`. That is precisely the rule
-`_suggest_fix` and `_file_proposed_tasks` each implement separately
-today, and stating it once means a fifth origin cannot forget it.
-`REVIEW` is `FIX`'s sibling and shares its machinery: both mean *a pull
-request needs more work*, both produce a `CONTINUE` task on that PR's own
-branch, and both land `PROPOSED`. See
-[tasks from review comments](#tasks-from-review-comments).
+**Origin is two orthogonal facts, and an earlier draft of this document
+had them fused into one enum.** `Attribution` (added by the
+[principals](#principals-three-actors-behind-one-github-identity)
+section) answers *who*; `OriginReason` answers *why*. Neither subsumes
+the other, and stored as parallel fields they can disagree — a task
+claiming `PROPOSED` whose creating actor was a human. Storing the
+attribution *as* part of the origin is what makes that unrepresentable.
 
-`SCHEDULED` is the one origin that chooses per instance —
-`ScheduledJob.needs_approval` already decides whether a firing lands
-queued or waiting — which the model keeps as an override on the origin's
-default rather than a fifth code path.
+The old five-way enum expands cleanly, and two things it was hiding come
+out:
+
+| Was | actor | on_behalf_of | reason |
+|---|---|---|---|
+| `HUMAN` | HUMAN | — | `DIRECT` |
+| `SCHEDULED` | AUTOMATION | — | `SCHEDULE` |
+| `FIX` | AUTOMATION | — | `FIX` |
+| `PROPOSED` | AUTOMATION | AGENT | `PROPOSAL` |
+| `REVIEW` | AUTOMATION | HUMAN (the reviewer) | `REVIEW` |
+
+- `SCHEDULED` and `FIX` are **identical in who** and differ only in why,
+  which is the tell that one field was carrying two facts.
+- `REVIEW`'s `on_behalf_of` is a *human*, which is why it always felt
+  unlike `FIX` despite both meaning "a PR needs more work." The reviewer
+  is now identified rather than lost, so a review-sourced task can say
+  whose request it is answering.
+
+**The landing rule gets sharper: the actor decides, the reason does
+not.** A task whose creating actor is a `HUMAN` lands `QUEUED`. A task
+whose creating actor is `AUTOMATION` lands `PROPOSED` — whatever the
+reason, and whoever it was acting on behalf of.
+
+That is a stronger statement of the same trust property the enum version
+made, and it is stronger in the way that matters: a sixth reason added
+later cannot accidentally queue itself, because reasons do not decide
+landing state at all. *Grain proposing work is never approval of it,
+regardless of why grain proposed.*
+
+**And the `SCHEDULED` special case dissolves.** An earlier draft called
+it "the one origin that chooses per instance," because
+`ScheduledJob.needs_approval` decides whether a firing lands queued or
+waiting — an override on the enum's default. Under the recommendation
+that [approval is
+declaration](#open-questions), it is not an override at all: the job
+definition is a human's *standing* approval, written once and reviewed
+like any other declaration. A firing is an ordinary approved task whose
+creation happens to be automated. Nothing special-cased, and the actor
+rule holds unqualified.
 
 A scheduled job also carries a `marker_label` derived from its name,
 which is neither a state nor a capability: it is an idempotency tag, the
@@ -1166,12 +1203,12 @@ already knows how to evaluate every cycle, so the parent simply stays
 blocked and unblocks itself when the last child closes.
 
 **Decided: children land in `PROPOSED`, like every other grain-filed
-task.** `TaskOrigin.PROPOSED`, `needs_approval_label`, promoted by a
+task.** An `AUTOMATION` creating actor, `needs_approval_label`, promoted by a
 human or a `/lgtm`. No auto-approval, and every child costs an approval
 even when its parent already has one.
 
 Adding auto-approval later is additive, and that is not luck — the model
-already routes landing state through `TaskOrigin`, so the change is
+already routes landing state through `Origin.attribution`, so the change is
 turning a constant into a predicate, and both conditions worth gating on
 are computable from fields that already exist: `grants` being empty, and
 `binding == RepoBinding.INHERITED`. The two guards that make it safe are
@@ -1355,7 +1392,7 @@ That means the feature reuses machinery that already works: `CONTINUE` is
 today's `TriggerKind.PR`, `_finish_succeeded_pr` already means "new
 commits landed on the branch it was pointed at," and `_suggest_fix`
 already files exactly this shape of task for a PR that has gone red.
-`TaskOrigin.REVIEW` and the `ADDRESSES` links are the only genuinely new
+`OriginReason.REVIEW` and the `ADDRESSES` links are the only genuinely new
 parts.
 
 #### Three gates, and why each is needed
@@ -1461,7 +1498,9 @@ the model:
    agent labels.
 8. A capability this deployment cannot honour parks the task with an
    explanation. It never runs the task without the capability.
-9. A grain-filed task lands in `PROPOSED`, whatever filed it.
+9. Landing state is decided by the creating **actor**, never the reason:
+   a `HUMAN` actor lands `QUEUED`, an `AUTOMATION` actor lands
+   `PROPOSED`. A new origin reason cannot queue itself.
 10. A task has exactly one write target and any number of read targets.
 11. Folder capabilities are inherited from the **write** target's chain
     only. A read target grants nothing.
@@ -1509,6 +1548,8 @@ the model:
 | `labels._STYLES` state rows | `TaskState`'s projection |
 | `ScheduledJob.marker_label` | `Task.tags` — neither tier |
 | `_AUTOMATION_SIGNATURE` as a filter | `Attribution.actor`; the marker becomes a projection |
+| which label a task was filed with | `Origin.attribution` + `Origin.reason` |
+| `ScheduledJob.needs_approval` | standing approval in the job's declaration |
 | `audit.py`'s `sandbox` field | `Attribution` + `Run.id` (a slot is not an actor) |
 | `dispatch.agent_id()`, discarded | `Run.id`, persisted |
 | `repo_for_sandbox`, `branch_name`, `agent_label` | unchanged, still derived |
@@ -1517,7 +1558,7 @@ the model:
 | (nothing — no cross-repo grouping) | `MERGE_WITH` links |
 | (nothing — no folder concept) | the `Folder` tree, operator config |
 | `ReviewComment` (post-only shape) | widened with thread linkage |
-| (nothing — reviews are authored, not read) | `ADDRESSES` links, `TaskOrigin.REVIEW` |
+| (nothing — reviews are authored, not read) | `ADDRESSES` links, `OriginReason.REVIEW` |
 
 The five state dicts become one store keyed by `TaskRef`, with the
 existing durability discipline unchanged: atomic temp-file-and-rename,
