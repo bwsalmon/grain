@@ -1491,9 +1491,23 @@ class Placement:
 
 @dataclass(frozen=True)
 class Materialization:
-    lease: Lease | None
+    lease: Lease | None = None
     placements: tuple[Placement, ...] = ()
+    credential_override: CredentialRef | None = None   # for SELECT
 ```
+
+**Three fields because there are three kinds of effect, and an earlier
+draft had only two.** `SELECT` capabilities were unrepresentable:
+`grain-github-<name>` mints nothing and writes nothing into the sandbox —
+it sets one key in `SandboxCredentialStore`, a controller-side
+sandbox-keyed file the git proxy reads. That is not a `Placement` (a
+whole-file write would clobber the other sandboxes' entries) and not a
+`Lease` (there is no remote resource to revoke).
+
+The three fields then make release symmetric, and they line up exactly
+with what `sweeper._release` already does: revoke the lease, clear the
+credential override, free the slot — plus the un-placement it currently
+lacks.
 
 `materialize` returns this instead of doing it, and one executor performs
 every placement. What that changes:
@@ -1536,6 +1550,39 @@ nobody removes.
 Declarative placement fixes it for free: the executor knows every
 placement it made, so release reverses them without any provider writing
 cleanup code — and a provider *cannot* forget to.
+
+**What the restriction is, and what it is not.** It is worth being exact,
+because "a provider cannot run anything in the sandbox" overclaims in two
+directions.
+
+It is **not** a statement that nothing runs in a sandbox. The agent gets
+`run_command` — "run a shell command in your assigned sandbox workspace"
+— because a sandbox VM is precisely where arbitrary execution is meant to
+happen. Different actor, different surface: grain's *provisioning of* a
+sandbox is declarative; the agent's *use of* it is not.
+
+It is also **not** containment. A provider is trusted controller code by
+rule 1 below — Python, with `import` available — so one that wanted a
+sandbox runner could build itself one. The context shapes the easy path;
+it does not enforce a wall.
+
+What it does buy is worth having anyway, and none of it depends on the
+containment reading:
+
+- **The three disciplines hold on the normal path**, and they matter
+  regardless of what the agent can do afterwards. A key passed in argv is
+  visible in a process list; a key rendered into a prompt lands in the
+  captured transcript; a key written inside `WORKSPACE_PATH` is
+  committable. The agent having a shell later makes none of those
+  acceptable.
+- **What grain put into a sandbox is enumerable**, which is what makes
+  un-placement possible at all — the executor can reverse a list, and no
+  amount of reading provider code reverses a `runner.run`.
+- **Providers are testable without a sandbox**, and every placement is
+  auditable in one line.
+- **Bypassing it is legible.** An SSH runner imported inside a capability
+  module is an anomaly a reviewer can see, and a conformance test can
+  assert against.
 
 **What it costs, and the rule for when it binds.** A capability that
 needs to *run* something rather than write something cannot say so. None
