@@ -2147,7 +2147,30 @@ class Orchestrator:
                 + " -- GitHub returned 404. Either it doesn't exist, or this "
                   "deployment's credential can't see it."
             ) from exc
-        return ResolvedTask(repo=target, pr=pr, base=directives.base or default_branch,
+        base = directives.base or default_branch
+        # `default_branch` above is the *configured* default-branch name --
+        # GitHub still reports one even for a repo with no commits at all,
+        # where no branch of any name actually exists yet. Confirmed here
+        # (bwsalmon/agents#224) for the same reason the 404 check above
+        # exists: without it, this only surfaces as a `CommandError` from
+        # `ensure_workspace`'s `git checkout` deep inside the sandbox --
+        # which `_dispatch` merely logs to the audit trail and retries next
+        # cycle, forever, with nothing ever posted to the issue. Skipped
+        # for a `/pr` dispatch: `dispatch_pr` builds the workspace from the
+        # PR's own `head_ref`, never from `ResolvedTask.base`, so a missing
+        # `base` branch there is not a reason to refuse the task.
+        if pr is None and not self.github.branch_exists(target.owner, target.name, base):
+            raise DirectiveError(
+                f"the base branch `{base}` doesn't exist in `{target}`"
+                + (" -- named by this task's `/base` directive"
+                   if directives.base else
+                   " -- which is odd, since GitHub reports it as the "
+                   "repository's default branch; this usually means the "
+                   "repository has no commits yet")
+                + f". Push a commit to `{base}` (or correct the `/base` "
+                  "line) and reply here to pick this back up."
+            )
+        return ResolvedTask(repo=target, pr=pr, base=base,
                             gemini_key=gemini_key, self_debug=self_debug,
                             self_repair=self_repair,
                             github_key=github_key, auto_merge=directives.auto_merge,
