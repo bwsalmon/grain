@@ -767,9 +767,9 @@ not. That is the whole composition rule in v1.
 An earlier draft recommended the reverse, on the grounds that a ceiling
 is safe unconditionally and a floor is an escalation surface. The second
 half of that is true and the implication was not: ceilings were never the
-guard that makes floors safe. `Capability.auto_grantable` is, along with
-the existing trust gate, and both hold with no ceiling anywhere in the
-tree. Ceilings are a *separate* policy feature that also happened to
+guard that makes floors safe. The operator's floor-grantable list is,
+along with the existing trust gate, and both hold with no ceiling
+anywhere in the tree. Ceilings are a *separate* policy feature that also happened to
 bound floors as a side effect.
 
 And the policy they provide is a restriction on **humans** — on which
@@ -805,10 +805,12 @@ chooses its own target repo through `/repo` — text in an issue body. If
 `owner/deploy` is equivalent to being granted a GCP key. Three rules keep
 that bounded, and all three are v1:
 
-1. **A capability is floor-grantable only if its registry row says so.**
-   `Capability.auto_grantable` is false by default and stays false for
-   the mutating ones — `self-repair` and named GitHub credentials are
-   requested per task, by a human, or not at all.
+1. **A capability is floor-grantable only if the operator's own config
+   lists it.** Not the capability's declaration —
+   [a provider cannot make itself
+   auto-grantable](#capabilities-are-an-extension-point-not-a-table) —
+   and the list stays empty of the mutating ones: `self-repair` and named
+   GitHub credentials are requested per task, by a human, or not at all.
 2. **A floor grant is recorded and visible.** It is pinned onto the task
    at dispatch like every other resolved value, written into the audit
    line, and applied to the issue as a label grain adds itself — the same
@@ -1142,7 +1144,6 @@ class Capability:
     requires: str | None          # the credential or config it needs
     provision: Provision          # MINT | SELECT | GRANT -- see below
     max_lease: timedelta | None   # revoke unconditionally after this
-    auto_grantable: bool = False  # may a folder's `offers` grant it?
 
 @dataclass(frozen=True)
 class Grant:
@@ -1188,11 +1189,12 @@ code follows by convention and could stop following by accident:
   one exception is not an exception: a child sitting in the same folder
   as its parent inherits that *folder's* offers, because they are the
   folder's to give and would have applied to a task filed there by hand.
-- **`auto_grantable` is the floor's guard.** False by default, and false
-  for anything mutating, so
-  [a folder's `offers`](#attaching-capabilities-to-repos-and-folders)
-  cannot hand out `self-repair` or a named GitHub credential however it
-  is configured.
+- **Floor-grantability is the operator's to declare, not the
+  capability's.** Which capabilities [a folder's
+  `offers`](#attaching-capabilities-to-repos-and-folders) may hand out is
+  a list in operator config, so no provider can make itself
+  auto-grantable — see [the extension
+  point](#capabilities-are-an-extension-point-not-a-table).
 
 A `Lease` is what materialization produced:
 
@@ -1219,6 +1221,109 @@ two reapers in `core.py` become one pass over leases with an
 revoked twice, or revoked for a resource already gone, is not an error —
 because the reaper and the release path can both reach the same lease and
 today already have to tolerate that.
+
+#### Capabilities are an extension point, not a table
+
+Capabilities are expected to be added often, so the shape that matters is
+not the registry's fields but the **contract a new one implements**.
+
+**What adding one costs today.** `gemini-key` and then `gcp-key` each
+paid: a field on `AutomationConfig`, a row in `labels._STYLES`, a branch
+in `_resolve_target`, a field on `ResolvedTask`, a field on `Assignment`
+*plus* its hand-written `load`/`save` pair, a minting call in
+`_dispatch`, a constant and a `_..._line()` renderer in `dispatch.py`, a
+new boolean parameter on `_prompt`, `_pr_prompt` **and** `_review_prompt`
+with their call sites, a revoke branch in `sweeper._release`, and an
+expiry reaper of its own. Ten-odd edits across six files, none of which
+is where the capability's actual logic lives.
+
+**The four moments are already the four methods.** A capability is
+requested, resolved, materialized, revoked — so the provider is that,
+and nothing else:
+
+```python
+@dataclass(frozen=True)
+class CapabilitySpec:
+    name: str                     # "gemini-key"
+    label: str                    # the label that requests it
+    colour: str                   # its row in the label palette
+    description: str
+    source: GrantSource
+    provision: Provision          # MINT | SELECT | GRANT
+    max_lease: timedelta | None
+
+class CapabilityProvider(Protocol):
+    spec: CapabilitySpec
+
+    def resolve(self, ctx: CapabilityContext) -> Resolution: ...
+    def materialize(self, ctx: CapabilityContext) -> Lease | None: ...
+    def prompt_section(self, ctx: CapabilityContext) -> str | None: ...
+    def revoke(self, lease: Lease, ctx: CapabilityContext) -> None: ...
+```
+
+**Adding a capability becomes one file plus one line** — a module under
+`grain/automation/capabilities/` and its registration in that package's
+`__init__.py`. Explicit registration rather than filesystem discovery:
+the set is small, ordering should be deterministic, and this codebase is
+explicit everywhere else.
+
+**Five properties of the contract, each of which is a rule that stops
+being re-litigated per capability:**
+
+- **The context bounds what a provider can do.** `CapabilityContext`
+  carries the task, the run, the deployment config, a credential resolver
+  by name, and a `Runner` for *this task's* sandbox — not arbitrary
+  shell, not a credential store to browse. A provider that needs
+  something outside that is asking for a widening somebody should look
+  at.
+- **Refusal is a return value, not an exception.** `resolve` returns
+  `Honoured` or `Refused(reason)`, and `reason` is human-facing: it is
+  posted verbatim as the comment explaining why the task parked. That is
+  what `DirectiveError` already carries, promoted from an exception
+  message to part of the type.
+- **Prompt text comes from the granted capabilities, in a deterministic
+  order.** `_gemini_key_line`, `_gcp_key_line` and `_self_repair_line`
+  stop being hardcoded, and the three prompt builders take a list of
+  sections instead of one boolean each per capability — which is the
+  growth that made adding the fourth capability touch nine call sites.
+- **Materialization has a window that cannot be closed, and the backstop
+  is why.** The order is mint → record the lease → place it in the
+  sandbox. A failure after minting but before recording leaks a real
+  credential that nothing knows to revoke. That is not a bug to fix; it
+  is why `gcp_keys.DEFAULT_MAX_KEY_AGE_HOURS` exists, and any new MINT
+  provider needs the same unconditional expiry rather than relying on
+  release alone.
+- **Revocation is idempotent and must tolerate a vanished resource.**
+  Release and the expiry reaper can both reach the same lease.
+
+**What is deliberately not pluggable.** A provider is code that runs on
+the controller with the controller's credentials, so:
+
+1. **Providers are repo code.** Loaded from the grain package only —
+   never from config, a task, a target repo, or anything an agent can
+   write. A pluggable capability system that loaded plugins from
+   somewhere writable would hand an agent the controller.
+2. **`auto_grantable` moves out of the spec and into operator config.**
+   It was a registry row when the registry was one hand-maintained table.
+   With providers, the "registry" is written by whoever adds one, so a
+   plugin declaring itself floor-grantable would be granting itself the
+   thing [folder floors](#attaching-capabilities-to-repos-and-folders)
+   were guarded against. A provider declares what it *is*; the operator
+   declares, in their own config, which capabilities a folder may grant
+   without asking. Separation of powers, and the reason it changed is
+   worth keeping written down.
+
+**A conformance test over the registry replaces per-capability tests for
+the same things** — unique names and labels, a colour in the right tier
+for `source`, a `max_lease` present whenever `provision` is `MINT`, every
+provider satisfying the protocol.
+`tests/test_automation_labels.py::test_no_two_labels_share_a_colour` is
+the precedent: one test over the whole table beats remembering per row.
+
+**One edge to handle: a lease whose provider is gone.** Remove or rename
+a capability while a lease is outstanding and revocation has nothing to
+call. The registry should keep revoke-only stubs for retired names; the
+24-hour expiry is the backstop if it does not.
 
 ### Credentials: the model holds names, never material
 
@@ -1813,8 +1918,9 @@ the model:
 12. Folder offers union down the tree: a task's grants are what it
     requested plus what its folder chain offers. Ceilings, and the
     intersection term they add, are deferred past v1.
-13. Only a capability whose registry row sets `auto_grantable` may be
-    granted by a folder, and it is never one of the mutating ones.
+13. Only a capability the operator's own config lists as floor-grantable
+    may be granted by a folder. A capability provider cannot declare
+    itself auto-grantable.
 14. Only a review thread whose actor is a `HUMAN` principal can source a
     task, and only one already carrying an explicit request. A principal
     check, not a substring check.
@@ -1854,8 +1960,11 @@ the model:
 | `OpenPullRequest.fix_issue` | a `FIXES` link |
 | "Proposed by X" prose in a body | a `PROPOSED_BY` link |
 | `/depends` re-parsed each cycle | `DEPENDS_ON` links, still re-evaluated |
-| `labels._STYLES` capability rows | the `Capability` registry |
-| `_resolve_target`'s per-label branches | `Capability.requires` |
+| `labels._STYLES` capability rows | each provider's own `CapabilitySpec` |
+| `_resolve_target`'s per-label branches | `provider.resolve()` |
+| `_gemini_key_line`, `_gcp_key_line`, `_self_repair_line` | `provider.prompt_section()` |
+| a bool per capability on three prompt builders | one list of sections |
+| `_release`'s revoke branches, the two reapers | `provider.revoke()` |
 | `labels._STYLES` state rows | `TaskState`'s projection |
 | `ScheduledJob.marker_label` | `Task.tags` — neither tier |
 | `_AUTOMATION_SIGNATURE` as a filter | `Attribution.actor`; the marker becomes a projection |
@@ -1901,10 +2010,15 @@ directive, or anything an operator sees.
    *live* runs enter the store — finished ones append alongside
    `history.py`'s session records, or infinite retention becomes
    unbounded write cost on every cron cycle.
-2. **The capability registry.** `Capability` rows, `Grant`, `Lease`.
-   `_resolve_target`'s per-label branches become a loop; `_release`'s two
-   revoke branches become one; the two reapers become one. Behaviour
-   identical, including every parking message.
+2. **The capability extension point.** `CapabilityProvider`, `Grant`,
+   `Lease`, and the two existing capabilities ported onto it as the proof
+   the contract fits. `_resolve_target`'s per-label branches become a
+   loop; `_release`'s two revoke branches become one; the two reapers
+   become one; the prompt builders take a list of sections instead of a
+   boolean per capability. Behaviour identical, including every parking
+   message. This is the stage that changes the cost of every capability
+   after it, so it is worth porting both existing ones rather than
+   shimming them.
 3. **Links.** `DEPENDS_ON` and `FIXES` migrated off their current
    representations, `PROPOSED_BY` recorded instead of written as prose,
    DAG check added. Still no sub-tasks — this is the stage that makes
@@ -1921,7 +2035,7 @@ dependencies allow:
    clone line. Worth doing early precisely because it needs none of the
    rest.
 6. **Folders.** The tree, then floors — `offers` and the
-   `auto_grantable` guard that bounds them. No ceilings in v1, so no
+   floor-grantable list that bounds them. No ceilings in v1, so no
    `permits` field and no in-repo file. Needs stage 2's capability
    registry to have anything to attach to.
 7. **Review-sourced tasks and merge groups.** Both need stage 3's links.
@@ -1957,6 +2071,7 @@ Settled, with where each is argued and what would reopen it:
 
 | Decision | Where | Reopens if |
 |---|---|---|
+| Capabilities are a provider contract, not a table — one file plus one line to add | [here](#capabilities-are-an-extension-point-not-a-table) | — |
 | Three records, sorted by who writes them — grain's store wins for grain's own acts, GitHub for facts it owns | [here](#decided-whoever-writes-it-owns-it) | — |
 | Representation is separate from the model; the dataclasses are the model, storage and label and directive shapes are not | [here](#representation-is-not-the-model) | — |
 | Landing state is decided by the creating actor, never the reason | [here](#task--the-aggregate) | — |
