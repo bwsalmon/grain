@@ -502,6 +502,74 @@ narrow-never-widen subsection. Nothing in stages 1–4 is wasted work if
 the direction is taken, which is the main reason it is safe to keep
 building while this stays open.
 
+### Direction: a sandbox per task
+
+The third assumption, and unlike the other two it is not a preference —
+it follows from a decision already made in this document.
+
+**`docs/design.md` names its own trigger.** Long-lived sandboxes are
+chosen there knowingly, with the security cost accepted for one stated
+reason: tasks "come from the same repo allowlist and run under the same
+credential set — they are not mutually distrusting. **That stops holding
+if the allowlist ever spans repos of genuinely different sensitivity,
+which is the trigger to revisit.**"
+
+[Folder capabilities](#attaching-capabilities-to-repos-and-folders) are
+that trigger, by construction. The entire point of a folder offering
+`gcp-key` is that tasks under it hold something tasks elsewhere do not.
+Two tasks under different folders are then, precisely, under different
+credential sets — mutually distrusting in exactly the sense that
+paragraph reserves. `/reads` pushes the same way: more repos cloned into
+a sandbox that a later task inherits. So the capability model does not
+merely coexist with sequential reuse; it dissolves the argument that made
+reuse acceptable.
+
+**What it costs, and how to pay it.** The reason for long-lived
+sandboxes is provisioning time — a boot plus docker and `kind` — on the
+critical path of every task. Two mitigations make that nearly free, and
+neither is novel:
+
+- **A golden image.** Provision once into a base image; each task gets a
+  fresh VM from it, paying a boot rather than a provision. The adapter
+  interface already takes one — `create(name, image, cpus, memMb,
+  diskGb)`.
+- **A warm spare.** Keep one more VM than the concurrency limit, booting
+  ahead of demand, so the boot is off the critical path too. The pool
+  already hands out slots; this is a change to which one `free_sandbox`
+  returns, not a new mechanism.
+
+**What changes in this model**, which is the part that belongs here:
+
+- **A slot and a sandbox stop being the same thing.** Today "sandbox-1"
+  is both the concurrency unit and the VM. Per task, the slot persists
+  and the VM does not, so `Run` names both: the slot it occupied and the
+  instance created for it. `assignments: sandbox -> run_id` largely
+  collapses, since the mapping becomes one-to-one.
+- **Un-placement and `cleanup()` both become unnecessary.** Their entire
+  job is making a reused VM safe for the next task.
+- **The proxy token gets materially better.** `sandbox-tokens.json` mints
+  one bearer token per sandbox, today living as long as the VM and
+  therefore spanning many tasks. Per task, a leaked proxy token dies with
+  the task that leaked it.
+- **`SandboxCredentialStore`'s defensive dance goes away.** It currently
+  sets *and* clears on every dispatch attempt, specifically to close the
+  gap where a `CommandError` partway through dispatch leaves an override
+  with no `Assignment` for `_release` to find. A VM that does not survive
+  the task cannot carry a stale override into the next one.
+- **`design.md`'s non-goal becomes a property.** "Isolating sequential
+  tasks on one sandbox from each other" moves from knowingly given up to
+  achieved — which is that document's edit to make, not this one's.
+
+**What it does not fix, and this is why the placement design still
+stands.** Disposability governs what *remains* in a sandbox. It does
+nothing about what *leaves* one: a credential in argv is already in a
+process table, one rendered into a prompt is already in a transcript
+retained on the controller, and one swept into a commit is already in a
+remote repo. Those are the three
+[disciplines](#placement-what-materialize-returns), and per-task
+sandboxes make them more load-bearing rather than less, since they become
+the only thing standing between minted material and somewhere permanent.
+
 ### Direction: a first-party UI
 
 Also assumed. It composes with the direction above — a UI is the editor,
@@ -2134,7 +2202,10 @@ comments produces a push, which invites another review:
 class Run:
     id: str
     task: TaskRef
-    sandbox: str
+    slot: str                       # the concurrency unit, e.g. "sandbox-1"
+    sandbox: str                    # the VM instance. Same as slot while
+                                    # sandboxes are long-lived; per-run
+                                    # under a sandbox per task.
     unit: str
     started_at: datetime
     finished_at: datetime | None    # None = live. This is the assignment.
@@ -2320,6 +2391,7 @@ the model:
 | `/data/secrets/**`, `credentials.json` | `CredentialRef` + a scope ladder; material is representation |
 | `proxy.credentials.Credential` (carries a token) | controller-only loaded form, never in the model |
 | `sandbox-tokens.json` | the agent principal's identity credential |
+| `Assignment.unit` + sandbox name | `Run.slot` and `Run.sandbox`, which stop being one thing |
 | `credential_audit`'s UNVERIFIABLE | declared scope vs verified scope |
 | `repo_for_sandbox`, `branch_name`, `agent_label` | unchanged, still derived |
 | `repo-allowlist.json` | unchanged; folders may only narrow it |
@@ -2427,10 +2499,13 @@ Settled, with where each is argued and what would reopen it:
 | A run is bounded at 24 hours | [here](#run--one-attempt) | runs need to outlive a day |
 | Run records are kept indefinitely; transcripts are what a TTL should prune | [here](#decided-keep-run-records-indefinitely-the-transcripts-are-what-age-out) | disk pressure arrives — expect ~1 month for transcripts |
 
-Two things are **assumed rather than decided**, and the document is
-written to survive either: the declaration
-[moving into a repo](#direction-the-declaration-moves-into-a-repo), and
-[a first-party UI](#direction-a-first-party-ui) over it.
+Three things are **assumed rather than decided**, and the document is
+written to survive any of them: the declaration
+[moving into a repo](#direction-the-declaration-moves-into-a-repo),
+[a first-party UI](#direction-a-first-party-ui) over it, and
+[a sandbox per task](#direction-a-sandbox-per-task) — the last of which
+follows from the folder capability model rather than being chosen
+separately.
 
 ## Open questions
 
