@@ -293,6 +293,103 @@ equally. Nothing in the model may assume the identity is an integer, is
 assigned by GitHub, or is comparable — a task filed later having a higher
 number is a property of the representation, not a fact to sort by.
 
+### Principals: three actors behind one GitHub identity
+
+The identity above is a task's. The sharper problem is the *actor's*.
+GitHub knows one entity — the user — and grain currently has exactly one
+GitHub identity for three different things that act:
+
+```python
+class PrincipalKind(Enum):
+    AUTOMATION = "automation"  # the controller loop. One per deployment.
+    AGENT = "agent"            # one dispatched run, in one sandbox.
+    HUMAN = "human"            # a person.
+```
+
+**Collapsing them costs three things, all of them visible in the code
+today.**
+
+*The trust gate authenticates by string.* Grain posts as a credential
+GitHub reports as `OWNER`, squarely inside `_TRUSTED_REPLY_ASSOCIATIONS`,
+so every "did a trusted human say something new" check has to subtract
+grain's own comments — and it does that by looking for
+`_AUTOMATION_SIGNATURE` in the body. That is authentication by
+convention. It leaks if a finish path ever forgets to stamp the marker,
+or if an agent's relayed output ever contains it. It is also what
+[review-sourced tasks](#tasks-from-review-comments) depend on to avoid
+grain reviewing its own PR and tasking itself from its own comments
+forever, which is a lot of weight for a substring check.
+
+*Attribution stops at the boundary.* `audit.py` records `sandbox`,
+`issue` and `outcome`. A sandbox is a *slot*, reused across tasks — so
+even grain's own log identifies where something ran, not who ran it.
+
+*The agent identity is minted and then thrown away.* `agent_id()` already
+generates eight hex characters per dispatch, and threads them into the
+prompt so two agents cannot name cloud infrastructure identically
+(roadmap item 16). It is never persisted. `janitor.py`'s own docstring
+states the consequence plainly — the agent-id convention is "a prompt
+sentence an agent may or may not act on, never enforced or persisted," so
+there is **no positive signal** by which agent-created infrastructure can
+be recognised. The janitor is therefore built the dangerous way round: an
+exclusion list that assumes everything in the project older than the TTL
+is fair game *except* what Terraform can be proved to have named. A real
+agent principal turns that into an inclusion list.
+
+**The asymmetry that makes this tractable: automation is always the
+speaker.** Agents hold no GitHub credential and have no API access — that
+is the whole point of the split surface. `core.py` posts every comment,
+label, review and merge. The only artifact an agent authors directly is a
+**commit**, pushed through the proxy.
+
+So an action has two principals, not one:
+
+```python
+@dataclass(frozen=True)
+class Attribution:
+    actor: PrincipalRef                 # who performed the action
+    on_behalf_of: PrincipalRef | None   # whose output is being relayed
+```
+
+A comment relaying an agent's `ask_question` is `actor=AUTOMATION,
+on_behalf_of=AGENT(run)`. A label grain applies on its own schedule is
+`actor=AUTOMATION, on_behalf_of=None`. A human's approval is
+`actor=HUMAN`. `_AUTOMATION_SIGNATURE` is one bit gesturing at this
+two-field distinction, and becomes a *projection* of it for humans
+reading a GitHub thread rather than the mechanism anything checks.
+
+**Authorization stops being implicit.** Three principals with genuinely
+different powers, which is what makes the trust gate a table rather than
+an argument:
+
+| | Start work | Write the task repo | Push to target repos | GitHub API |
+|---|---|---|---|---|
+| **Human** (write access) | yes | yes | yes | own account |
+| **Automation** | only what a human approved | yes — this is how it proposes | no; it does not author code | full, deployment credential |
+| **Agent** | never | **never** | yes, via the proxy, allow-listed only | none |
+
+The two absolutes are already stated elsewhere in this document and now
+have a principal to attach to: an agent never writes the task repo (which
+is the whole gate — see the [repo
+direction](#direction-the-declaration-moves-into-a-repo)), and automation
+never starts work a human did not approve.
+
+**The cheap win: `Run.id` and `agent_id()` are the same concept.** One is
+in this model and persisted; the other exists in `dispatch.py` and is
+discarded. Unifying them costs almost nothing and buys attribution for
+free — every commit trailer, audit line and relayed comment can name the
+run, an orphaned cloud resource becomes traceable to the task that made
+it, and the janitor gets the positive signal it currently does without.
+
+**Principals are model; how they appear on GitHub is
+[representation](#representation-is-not-the-model).** This matters
+because the obvious objection — "one GitHub account per agent" — is a
+representation problem, and an expensive one. It is not required. A
+GitHub App or machine account gives automation a distinguishable
+identity; a commit trailer names the agent and run in git history
+permanently, without any account at all; humans authenticate as
+themselves. Three principals, one credential, no seats bought.
+
 ### Direction: the declaration moves into a repo
 
 **A stated direction, not yet a decision.** Everything below in this
@@ -1372,8 +1469,9 @@ the model:
     the intersection is applied last — a node can never offer what an
     ancestor does not permit.
 13. An in-repo folder file may narrow, never widen.
-14. Only a trusted, non-automation review thread can source a task, and
-    only one already carrying an explicit request.
+14. Only a review thread whose actor is a `HUMAN` principal can source a
+    task, and only one already carrying an explicit request. A principal
+    check, not a substring check.
 15. A fact GitHub owns — PR state, mergeability, checks, branch heads,
     review threads, issue open/closed, a human's label — is never decided
     from the store. The store's copy is a baseline for detecting change,
@@ -1381,6 +1479,11 @@ the model:
 16. The UI holds no record of its own. Every human action in it lands in
     whichever of the three records owns that fact, and anything observed
     is displayed with its freshness.
+17. Every action records its actor, and its `on_behalf_of` when it is
+    relaying another principal's output. An agent is never an actor on
+    the GitHub API; automation speaks for it.
+18. An agent never writes the task repo, and automation never starts work
+    a human did not approve. The two absolutes of the principal table.
 
 ## What maps to what
 
@@ -1405,6 +1508,9 @@ the model:
 | `_resolve_target`'s per-label branches | `Capability.requires` |
 | `labels._STYLES` state rows | `TaskState`'s projection |
 | `ScheduledJob.marker_label` | `Task.tags` — neither tier |
+| `_AUTOMATION_SIGNATURE` as a filter | `Attribution.actor`; the marker becomes a projection |
+| `audit.py`'s `sandbox` field | `Attribution` + `Run.id` (a slot is not an actor) |
+| `dispatch.agent_id()`, discarded | `Run.id`, persisted |
 | `repo_for_sandbox`, `branch_name`, `agent_label` | unchanged, still derived |
 | `repo-allowlist.json` | unchanged; folders may only narrow it |
 | (nothing — one target repo) | `Task.target` + `Task.reads` |
