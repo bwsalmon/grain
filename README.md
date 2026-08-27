@@ -138,6 +138,11 @@ afterwards, unlike a question — there is no reply to wait for.
 - **[`docs/design.md`](docs/design.md)** — the reasoning: why a VM per
   agent, the credential ladder, the threat model, what earlier revisions
   traded away.
+- **[`docs/data-model.md`](docs/data-model.md)** — the task model: what a
+  task, a repo role, a capability, a pull request, a sub-task and a run
+  are, which of them GitHub owns and which grain does, and the staged
+  migration from today's implicit version. A design; no code implements
+  it yet.
 - **[`docs/bootstrap.md`](docs/bootstrap.md)** — the design behind
   `grain host bootstrap`, which collapses the old fourteen-step setup into
   one command.
