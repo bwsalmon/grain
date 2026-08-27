@@ -412,6 +412,27 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	return out, err
 }
 
+// OccupiedSlots is every slot currently holding a live run — a run with
+// no `finished_at`. A dispatch loop reads this, rather than remembering
+// what it handed out last cycle, for the same reason IsBlocked re-reads
+// closed dependencies: a run can finish between cycles with nothing
+// about the loop's own state changing, and a slot freed that way must
+// show up as free the moment it is asked about.
+func (s *Store) OccupiedSlots(ctx context.Context) ([]string, error) {
+	var out []string
+	err := each(ctx, s.db,
+		"SELECT `slot` FROM `task_run` WHERE `finished_at` IS NULL ORDER BY `slot`", nil,
+		func(rows *sql.Rows) error {
+			var slot string
+			if err := rows.Scan(&slot); err != nil {
+				return err
+			}
+			out = append(out, slot)
+			return nil
+		})
+	return out, err
+}
+
 // OpenBlockers is how many unclosed tasks stand in front of this one.
 func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 	var n int
