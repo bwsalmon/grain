@@ -3082,3 +3082,119 @@ def test_the_marker_is_only_recognised_on_a_line_of_its_own():
     assert not core_module._is_automation_comment("please redo this")
     # Mentioned inside a sentence, not posted as one: still a human talking.
     assert not core_module._is_automation_comment(f"your footer ({SIGNATURE}) is wrong")
+
+
+# --- a second run of a task whose PR is already open ---------------------
+
+def _succeeded_run_hitting_an_existing_pr(*, lookup: ApiResponse):
+    """A sweep with one succeeded issue outcome whose `create_pull_request`
+    is answered with GitHub's real 422 for a head branch that already has
+    an open PR. `lookup` answers the `find_open_pull_request_for_branch`
+    call that 422 sends us to.
+    """
+    already_exists = json.dumps({
+        "message": "Validation Failed",
+        "errors": [{"resource": "PullRequest", "field": "base", "code": "invalid",
+                     "message": "A pull request already exists for o:grain/issue-5."}],
+    }).encode()
+    state = AutomationState()
+    state.assign("sandbox-0", issue=5, unit="grain-task-sandbox-0",
+                 now=NOW - timedelta(hours=1))
+    runner = FakeRunner()
+    runner.expect("systemctl show",
+                   stdout="LoadState=loaded\nActiveState=inactive\nResult=success\n")
+    orchestrator, transport = make_orchestrator(issues=[], state=state, runner=runner)
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(branch_json(DEFAULT_COMMIT_MESSAGE)).encode()),
+        ApiResponse(200, {}, json.dumps(issue_json(42)).encode()),
+        ApiResponse(422, {}, already_exists),
+        lookup,
+    ])
+    return orchestrator, transport
+
+
+def test_a_second_run_of_a_task_reuses_the_pr_its_first_run_opened():
+    """`branch_name` is a pure function of the issue number, so a second
+    run of the same task -- a human re-applying `trigger_label` for another
+    round, or `_restart_commented_completions` doing it for them -- pushes
+    to the branch the first run already opened a PR from. GitHub allows one
+    open PR per head branch and answers with a 422.
+
+    That is not a failure: a PR tracks its branch, so the commits this run
+    just pushed are already in the existing PR. Before this, the 422
+    propagated -- the issue stayed stuck carrying `in_progress_label`, with
+    its work sitting in a PR nobody was told about, and no `_requeue` to
+    get it out again.
+    """
+    orchestrator, transport = _succeeded_run_hitting_an_existing_pr(
+        lookup=ApiResponse(200, {}, json.dumps([
+            {"number": 42, "html_url": "https://github.com/o/r/pull/42"},
+        ]).encode()),
+    )
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"),  # add_label (completed)
+        ApiResponse(200, {}, b"{}"),  # remove_label (in-progress)
+        ApiResponse(200, {}, b"{}"),  # remove_label (agent label)
+        completion_priming_response(),
+        open_pr_response(42),
+    ])
+
+    orchestrator.run_once(NOW)  # must not raise
+
+    # The finish completed exactly as if this run had opened the PR itself.
+    assert "sandbox-0" not in orchestrator.state.assignments
+    assert orchestrator.state.open_pull_requests["5"].pr_number == 42
+    assert "5" in orchestrator.state.completed_issues
+    completed_call = next(
+        c for c in transport.calls
+        if c["method"] == "POST" and c["path"] == "/repos/o/r/issues/5/labels"
+    )
+    assert json.loads(completed_call["body"]) == {"labels": ["grain-agent-completed"]}
+    assert any(
+        c["method"] == "DELETE"
+        and c["path"] == "/repos/o/r/issues/5/labels/grain-agent-in-progress"
+        for c in transport.calls
+    )
+    # ...but the audit says what actually happened, rather than claiming a
+    # PR was opened that in fact already existed.
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any("existing PR o/r#42" in o for o in outcomes)
+    assert not any("opened PR" in o for o in outcomes)
+
+
+def test_a_422_with_no_existing_pr_behind_it_still_raises():
+    """422 is also GitHub's answer to "No commits between `main` and
+    `grain/issue-5`" -- a real problem whose message is worth keeping. Only
+    an open PR actually found for this head explains the 422 away.
+    """
+    orchestrator, _ = _succeeded_run_hitting_an_existing_pr(
+        lookup=ApiResponse(200, {}, b"[]"),
+    )
+
+    with pytest.raises(GitHubError) as caught:
+        orchestrator.run_once(NOW)
+
+    # The original 422, not whatever the lookup said -- the useful message
+    # is the one GitHub gave for the failed creation.
+    assert caught.value.status == 422
+
+
+def test_the_existing_pr_lookup_asks_about_this_tasks_own_branch():
+    orchestrator, transport = _succeeded_run_hitting_an_existing_pr(
+        lookup=ApiResponse(200, {}, json.dumps([
+            {"number": 42, "html_url": "https://github.com/o/r/pull/42"},
+        ]).encode()),
+    )
+    transport.responses.extend([
+        ApiResponse(200, {}, b"{}"), ApiResponse(200, {}, b"{}"),
+        ApiResponse(200, {}, b"{}"),
+        completion_priming_response(), open_pr_response(42),
+    ])
+
+    orchestrator.run_once(NOW)
+
+    lookup_call = next(
+        c for c in transport.calls
+        if c["method"] == "GET" and c["path"].startswith("/repos/o/r/pulls?")
+    )
+    assert lookup_call["path"] == "/repos/o/r/pulls?state=open&head=o%3Agrain%2Fissue-5"

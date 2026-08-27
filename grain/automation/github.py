@@ -485,6 +485,33 @@ class GitHubClient:
         data = json.loads(resp.body)
         return PullRequest(number=data["number"], html_url=data["html_url"])
 
+    def find_open_pull_request_for_branch(
+        self, owner: str, repo: str, branch: str,
+    ) -> PullRequest | None:
+        """The open PR whose head is `branch`, if there is one.
+
+        GitHub allows at most one open PR per head branch, so this is
+        either exactly one or none -- `core.py`'s `_finish_succeeded_issue`
+        uses it to recognise "the PR for this task already exists" after a
+        `create_pull_request` 422, rather than failing a finish that has in
+        fact already succeeded.
+
+        `head` is qualified `owner:branch` the way GitHub's own filter
+        requires; grain only ever pushes to branches in the target repo
+        itself (never a fork), so the head owner is always `owner`.
+        """
+        resp = self.transport.request(
+            method="GET",
+            path=(f"/repos/{owner}/{repo}/pulls"
+                  f"?state=open&head={quote(f'{owner}:{branch}', safe='')}"),
+            headers=self._headers(owner, repo), body=None,
+        )
+        if resp.status != 200:
+            raise GitHubError(resp.status, resp.body)
+        for data in json.loads(resp.body):
+            return PullRequest(number=data["number"], html_url=data["html_url"])
+        return None
+
     def create_issue(self, owner: str, repo: str, *, title: str, body: str = "",
                       labels: list[str] | None = None) -> Issue:
         """Files a new issue on the task repo -- bwsalmon/agents#83's
@@ -694,6 +721,11 @@ class DryRunGitHubClient:
 
     def get_branch_head(self, owner: str, repo: str, branch: str) -> BranchHead | None:
         return self.inner.get_branch_head(owner, repo, branch)
+
+    def find_open_pull_request_for_branch(
+        self, owner: str, repo: str, branch: str,
+    ) -> PullRequest | None:
+        return self.inner.find_open_pull_request_for_branch(owner, repo, branch)
 
     def create_pull_request(self, owner: str, repo: str, *, head: str, base: str,
                              title: str, body: str = "") -> PullRequest:
