@@ -4,8 +4,8 @@
 
 A design, not an implementation. Nothing in `grain/` changes with this
 document. One question is
-[decided](#decided-the-store-is-authoritative) — grain's store wins over
-GitHub's labels — and one
+[decided](#decided-whoever-writes-it-owns-it) — three records, sorted by
+who writes what — and one
 [direction](#direction-the-declaration-moves-into-a-repo) is stated but
 not settled: the declared half of the model moving out of issues and into
 a repo. Everything below is written for tasks-as-issues and stays correct
@@ -128,7 +128,7 @@ itself changing, so pinning it at dispatch would mean a task stayed
 blocked after its blocker closed. Pinned-at-dispatch is the default;
 "evaluated fresh" is a property some relationships have.
 
-### Decided: the store is authoritative
+### Decided: whoever writes it, owns it
 
 Where grain's own store and GitHub's labels disagree, **the store wins**.
 Labels are a projection, reconciled every cycle by reasserting what the
@@ -136,9 +136,98 @@ store believes — the self-healing shape `_refresh_agent_labels` already
 uses, where a label knocked off by hand comes back on the next pass
 rather than staying wrong.
 
-The trigger label is the one exception, and it is not really an
-exception: a human applying it is an *input*, not a claim about state, so
-the store follows it. Every other label is an output.
+But "the store is authoritative" is too broad as a general rule, and the
+place it breaks is pull requests. Whether a PR is open, whether it merges
+cleanly, whether its checks pass, whether a human resolved a review
+thread — none of that is grain's to decide. Grain did not cause it and
+cannot overrule it. If the store says a PR is clean and GitHub says it is
+conflicted, GitHub is right, and no amount of reasserting will change it.
+
+So the rule is not two categories but three, and the test that sorts them
+is **who is the writer**:
+
+| | Written by | Record | Grain's copy is |
+|---|---|---|---|
+| **Declaration** | a human, deliberately | the issue body — or a repo, per the direction below | the parsed form, pinned at dispatch |
+| **Grain's own acts** | grain, and only grain | the store | the record itself |
+| **The outside world** | GitHub, and humans through it | GitHub | a baseline, not a belief |
+
+The third row is what the PR case is about, and it covers more than PRs:
+issue open/closed (`_is_issue_closed`'s cancel-on-close poll), branch
+existence and head sha, check runs, review threads and their resolution,
+and every label a *human* applies.
+
+**Grain already behaves this way; it just was not written down.**
+`PullRequestDetail.mergeable` is read as `None` while GitHub is still
+computing it, and `_close_finished_prs` treats that as "ask again next
+cycle" rather than as an answer — an explicit admission that grain's view
+is a possibly-absent cache of something it does not own. Every finish
+path calls `branch_exists` before acting, on the stated grounds that the
+unit exiting zero is not proof the branch is there. That is the same rule:
+for anything GitHub owns, a fresh read beats grain's own record.
+
+**A stale copy is not corruption — it is the signal.** This is the part
+worth being precise about, because "cache" undersells it. When the store
+says grain opened PR #42 and a fresh read says #42 is closed, the store
+is not wrong; it holds the *previous* value, and the delta is exactly the
+event `_close_finished_prs` exists to notice. The same shape is already
+load-bearing three times over: `PendingQuestion.question_comment_id` and
+`CompletedIssue.baseline_comment_id` are both last-seen values whose only
+purpose is comparison against a fresh read. So the store's copy of an
+external fact is a **baseline**, and its job is delta detection rather
+than truth.
+
+**The trigger label stops being an exception.** In the two-category
+version it had to be carved out — a human applying it is an input, not a
+claim about state. With three categories it is simply an ordinary member
+of the third: a thing the outside world writes, which grain observes and
+never reasserts. The carve-out was an artifact of the wrong number of
+categories.
+
+### What grain still owns about a pull request
+
+GitHub owns a PR's **state**. Grain owns its **meaning in the task
+model**, and GitHub has no representation for any of it:
+
+- which task the PR belongs to, and why it exists;
+- whether it was asked to auto-merge (a property of the *task's*
+  declaration, not of the PR);
+- whether it is a member of a `MERGE_WITH` group;
+- which of its review threads have already been turned into tasks;
+- whether grain is still watching it at all.
+
+So `TrackedPullRequest` keeps every field that is grain's own and marks
+the rest as observed:
+
+```python
+@dataclass(frozen=True)
+class TrackedPullRequest:
+    ref: PullRequestRef
+    task: TaskRef
+    branch: str
+    base: str
+    auto_merge: bool              # the task's declaration
+    merge_group: tuple[TaskRef, ...]
+
+    # Observed. A baseline for comparison, never a basis for a decision
+    # without a fresh read.
+    health: PrHealth
+    head: str | None              # last-seen head sha
+    observed_at: datetime | None
+```
+
+`head` is what makes "did anything change since we last looked" a cheap
+question — for the review-comment loop bound, for confirming an agent
+actually pushed, and for deciding whether a cached `health` is worth
+trusting for one more cycle. `BranchHead` (sha plus commit message)
+already exists and already returns it.
+
+**One disagreement is a decision, not a fact.** GitHub has its own
+auto-merge feature. If somebody enables it on a PR whose task did not ask
+for it, grain and GitHub disagree about what *should* happen rather than
+about what is true. Grain should not fight it: the PR merging is an
+observation like any other, and `_close_finished_prs` already handles a
+merged PR correctly. Nothing should try to turn it back off.
 
 ### Direction: the declaration moves into a repo
 
@@ -153,21 +242,25 @@ current model conflates:
 - **The declaration** — what this task is: intent, target, reads, folder,
   capabilities requested, links, base. Written by a human (or proposed by
   grain), changed rarely, and worth reviewing when it changes.
-- **The observation** — what is true about it right now: which sandbox
-  holds it, what leases are outstanding, which PR it opened, how many
-  attempts it has taken. Written by grain, changed many times an hour,
-  and worth reviewing never.
+- **Grain's own record** — which sandbox holds it, what leases are
+  outstanding, which PR it opened, how many attempts it has taken.
+  Written by grain, changed many times an hour, and worth reviewing
+  never.
+
+The third category — what GitHub owns — is unaffected by this direction
+and stays where it is.
 
 Today both live half in GitHub and half in the store. The direction puts
 the declaration in a git repo as files and leaves the observation in the
 store — which is the same line rules 1 and 2 already draw, sharpened
 from "what a human touches" to "what a human *authors*."
 
-Answering "the store is authoritative" and moving the declaration into a
-repo are the same decision arriving from two directions. Once labels stop
-being an input, there is nothing left to reconcile: the repo is
-authoritative for declaration, the store for observation, and the two
-never describe the same fact.
+Answering "whoever writes it, owns it" and moving the declaration into a
+repo are the same decision arriving from two directions. The direction
+does not collapse the three categories into two — GitHub still owns pull
+requests, checks and review threads exactly as before. What it changes is
+only the first row: the declaration moves from an issue body to a file,
+and stops sharing a surface with the third row's labels.
 
 **What gets simpler.** Five things this document currently works around:
 
@@ -1063,6 +1156,10 @@ the model:
 13. An in-repo folder file may narrow, never widen.
 14. Only a trusted, non-automation review thread can source a task, and
     only one already carrying an explicit request.
+15. A fact GitHub owns — PR state, mergeability, checks, branch heads,
+    review threads, issue open/closed, a human's label — is never decided
+    from the store. The store's copy is a baseline for detecting change,
+    and a decision that turns on it takes a fresh read first.
 
 ## What maps to what
 
@@ -1075,8 +1172,8 @@ the model:
 | `Assignment.gemini_key_name`, `.gcp_key_id` | `Run.leases` |
 | `Assignment.target_owner/.target_repo/.base` | `Task.target`, `Task.base` |
 | `ResolvedTask` | `Task`, persisted rather than per-dispatch |
-| `OpenPullRequest` | `TrackedPullRequest` |
-| `_PrHealth` | `PrHealth` |
+| `OpenPullRequest` | `TrackedPullRequest` (grain's fields) |
+| `_PrHealth`, `PullRequestDetail` reads | `TrackedPullRequest`'s observed fields |
 | `PendingQuestion` | `Task` in `AWAITING_REPLY` + its baseline comment id |
 | `CompletedIssue` | `Task` in `COMPLETED` + its baseline comment id |
 | `proposed_task_issues` | `Task` in `PROPOSED` |
