@@ -2699,6 +2699,164 @@ def test_a_trusted_reply_can_carry_the_corrected_repo_directive():
     assert (assignment.target_owner, assignment.target_repo) == ("fix", "ed")
 
 
+# --- dependencies (bwsalmon/agents#164) -------------------------------------
+
+def test_a_task_with_an_open_dependency_is_skipped_not_dispatched():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #2" in outcomes
+    # Not parked: nothing needs a human reply for this to resume, so the
+    # trigger label stays put and no comment is posted -- unlike every
+    # other "can't dispatch this" case, which does both.
+    assert "1" not in orchestrator.state.pending_questions
+    assert not any(c["method"] == "POST" and c["path"].endswith("/comments")
+                    for c in transport.calls)
+
+
+def test_a_task_with_a_closed_dependency_dispatches_normally():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): closed
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 1
+
+
+def test_only_the_still_open_dependencies_are_named_in_the_skip_outcome():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2,3")]).encode()),    # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): closed
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(3), "state": "open"}).encode()),       # get_issue(3): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #3" in outcomes
+
+
+def test_a_missing_dependency_issue_is_treated_as_still_blocking():
+    """`_is_issue_closed`'s existing 404 tolerance (bwsalmon/agents#82) is
+    reused here rather than refusing the task outright: a `/depends` line
+    naming a typo'd or deleted issue number blocks instead of silently
+    dispatching anyway, and the recurring "skipped: blocked on #N" audit
+    line is what surfaces the mistake to a human, the same way any other
+    standing block would.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 999")]).encode()),    # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(404, {}, b'{"message": "Not Found"}'),        # get_issue(999): gone
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #999" in outcomes
+
+
+def test_a_task_depending_on_itself_is_parked_not_endlessly_blocked():
+    """Unlike a dependency on a different issue, this can never resolve on
+    its own -- refused outright the same as any other unusable directive,
+    rather than left to block forever with only the audit log to explain
+    why.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(4, body="/depends 4")]).encode()),      # list_issues
+        ApiResponse(200, {}, b"[]"),                              # list_comments
+        ApiResponse(201, {}, json.dumps({"id": 9}).encode()),     # the park comment
+    ])
+
+    orchestrator.run_once(NOW)
+
+    assert orchestrator.state.assignments == {}
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert any(o.startswith("parked, awaiting reply") for o in outcomes)
+    comment = next(c for c in transport.calls if c["method"] == "POST"
+                    and c["path"].endswith("/comments"))
+    assert "depend on its own completion" in json.loads(comment["body"])["body"]
+
+
+def test_a_blocked_dependency_does_not_stop_the_next_candidate_dispatching():
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps([
+            issue_json(1, body="/depends 2"),
+            issue_json(2, body="do the other thing"),
+        ]).encode()),                                            # list_issues
+        ApiResponse(200, {}, b"[]"),                              # #1 list_comments
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
+    ])
+
+    orchestrator.run_once(NOW)
+
+    # #1 stayed queued (blocked), #2 -- which carries no /depends of its
+    # own -- took the only sandbox instead. A `continue`, not the `break`
+    # "no free sandbox"/"rate limit" use: a block is specific to the one
+    # issue that named it, not a reason to stop looking at the rest of the
+    # queue.
+    assert orchestrator.state.assignments["sandbox-0"].issue == 2
+    outcomes = [e["outcome"] for e in orchestrator.audit.entries]
+    assert "skipped: blocked on #2" in outcomes
+
+
+def test_a_dependency_closing_lets_the_task_dispatch_on_a_later_cycle():
+    """No `_park` happened while blocked (previous tests) -- so nothing
+    needs a human reply for this to resume; the very next cycle just
+    checks the dependency issue's state again and finds it closed.
+    """
+    orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r",))
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 1
+        ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 1
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "open"}).encode()),       # get_issue(2): still open
+    ])
+    orchestrator.run_once(NOW)
+    assert orchestrator.state.assignments == {}
+
+    transport.responses.extend([
+        ApiResponse(200, {}, json.dumps(
+            [issue_json(1, body="/depends 2")]).encode()),      # list_issues, cycle 2
+        ApiResponse(200, {}, b"[]"),                              # list_comments, cycle 2
+        ApiResponse(200, {}, json.dumps(
+            {**issue_json(2), "state": "closed"}).encode()),     # get_issue(2): now closed
+    ])
+    orchestrator.run_once(NOW + timedelta(minutes=5))
+
+    assert orchestrator.state.assignments["sandbox-0"].issue == 1
+
+
 def test_a_nonexistent_target_repo_is_parked_rather_than_crashing_the_cycle():
     orchestrator, transport = make_orchestrator(issues=[], allowed=("o/r", "gone/away"))
     transport.responses.extend([

@@ -1532,3 +1532,46 @@ human opens it on github.com and submits it themselves. An agent that
 looked and found nothing worth flagging leaves the file unwritten, and
 `_finish_succeeded_review` posts no review at all rather than an empty one
 nobody asked for.
+
+## 26. Don't pick up issues with uncompleted dependencies
+
+- [x] Done
+
+bwsalmon/agents#164: a task that only makes sense once another task has
+landed (a follow-up filed against a change still in flight, a piece of
+work split across several issues on purpose) had no way to say so — it
+would dispatch the moment a human labelled it, agent set and all, whether
+or not what it needed was actually there yet.
+
+A new `/depends 12,34` directive (`directives.py`), a comma-separated list
+of issue numbers in the *task* repo (the queue itself, never `/repo`'s
+target — a dependency is between two entries in the same queue, not
+between repos). Unlike every other directive, what it names isn't
+resolved once by `_resolve_target` and pinned to the `Assignment` for the
+rest of the run: whether the named issues are still open can change cycle
+to cycle with nothing about the task's own text changing, so
+`ResolvedTask.depends` just carries the numbers through, and `_dispatch`
+checks them fresh — via `_is_issue_closed`, the same `get_issue` poll and
+404-tolerance the cancel-on-close check (bwsalmon/agents#82) already
+uses — right before a task would otherwise be dispatched.
+
+A block is deliberately not routed through `_park`: parking swaps the
+trigger label for `awaiting_reply_label` and waits on a human reply, but a
+`/depends` block needs no reply — it resolves itself the moment the named
+issue closes. So a still-open dependency instead just logs `skipped:
+blocked on #N` to the audit trail and `continue`s the dispatch loop (a
+`break`, unlike "no free sandbox"/"rate limit" above it, would wrongly
+treat one task's block as true of every other candidate still queued this
+cycle). The trigger label, and everything else about the issue, is left
+exactly as a human set it — the very next cycle checks again, with no
+state of its own to track in between.
+
+The one case that *is* routed through `_park`: a task naming itself in
+its own `/depends` line, which can never close the loop and would
+otherwise block forever with only the audit log to explain why. Refused
+outright, the same as any other unusable directive. A circular dependency
+between two *different* issues is not specially detected — each would
+simply show as blocked on the other, indefinitely, in the audit log for a
+human to notice and fix; chasing full cycle detection through directives
+on issues this hasn't even fetched yet was judged not worth the extra
+GitHub calls for a misconfiguration a human filed and a human can unfile.
