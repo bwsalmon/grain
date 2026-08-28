@@ -7,10 +7,13 @@
 //
 // It is a library, not a binary — RunCycle is what a deployment's own
 // cron/timer loop calls once per tick, the same shape v1's `automation
-// run-once` command wraps around core.py's Orchestrator.run_once. No
-// cmd/ binary exists yet to call it on a real deployment; that is the
-// obvious next step once this has a real GitHub credential and a real
-// place to run agents, neither of which this package assumes.
+// run-once` command wraps around core.py's Orchestrator.run_once.
+// cmd/graind is that timer loop, calling RunCycle against a real embedded
+// Dolt store, a real github.RESTClient, and a real agent/gemini.Framework
+// (bwsalmon/agents#263, reconciling this package with the parallel
+// pkg/orchestrate/cmd/graind bwsalmon/agents#254 built independently of
+// it — see v2/README.md's "What this does not have yet" for what that
+// merge kept and dropped).
 //
 // **Sandboxing defaults to "execute on the host," deliberately, for now,
 // with a real host adapter available as an opt in.** Deps.Sandboxes is the
@@ -50,7 +53,8 @@ type Sandboxes interface {
 }
 
 // Config is what one deployment's orchestrator needs to know: which repo
-// is the task queue, and which label marks an issue as ready to dispatch.
+// is the task queue, which label marks an issue as ready to dispatch, and
+// what a dispatched run is allowed to do on its own.
 type Config struct {
 	TaskRepo     model.RepoRef
 	TriggerLabel string
@@ -59,6 +63,21 @@ type Config struct {
 	// deployment configures default_target_repo". Nil means every task
 	// must name its target explicitly.
 	DefaultTarget *model.RepoRef
+
+	// Capabilities is the registry RunDispatch resolves and materializes
+	// each dispatched task's Grants against before running its agent, and
+	// revokes once the run finishes -- ported from pkg/orchestrate's own
+	// Config.Capabilities (bwsalmon/agents#254) when that package merged
+	// into this one. Nil, or a task with no Grants, skips capability
+	// handling entirely rather than erroring, so a deployment or test
+	// that grants no capabilities needs to configure none of this.
+	Capabilities *model.CapabilityRegistry
+	// Credentials resolves the named credentials a capability provider
+	// asks for by name, e.g. gcpkey's minter service account.
+	Credentials model.CredentialResolver
+	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
+	// agent framework's own default in place.
+	MaxAgentTurns int
 }
 
 // TaskID names the task a task-repo issue maps to, deterministically —
