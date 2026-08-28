@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -203,6 +205,84 @@ func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("task written before the restart did not survive reopening the same -data-dir")
+	}
+}
+
+// TestLoadConfigSeedsAFreshStoreFromFlags is the first-run case: nothing
+// has written grain_config yet, so loadConfig both returns the flags
+// untouched and writes them as the seed a UI or a CLI would read next.
+func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
+	store, db, err := openStore(t.TempDir(), dolt.ServerConfig{})
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	flagCfg := config{
+		slots: []string{"a", "b"}, pollInterval: time.Minute,
+		geminiModel: "gemini-2.5-pro", maxAgentTurns: 10,
+		githubHost: "github.example.com", githubInsecureHTTP: true,
+		gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com",
+	}
+	got, err := loadConfig(ctx, store, flagCfg)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !reflect.DeepEqual(got, flagCfg) {
+		t.Fatalf("loadConfig on a fresh store = %+v, want the flags unchanged: %+v", got, flagCfg)
+	}
+
+	stored, err := store.GetConfig(ctx)
+	if err != nil || stored == nil {
+		t.Fatalf("GetConfig after seeding: (%+v, %v)", stored, err)
+	}
+	if !reflect.DeepEqual(*stored, flagCfg.toModelConfig()) {
+		t.Fatalf("seeded config = %+v, want %+v", *stored, flagCfg.toModelConfig())
+	}
+}
+
+// TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists is the restart
+// case: a UI or a CLI wrote a config through the store, and the next
+// start must run with that rather than whatever the flags on this
+// particular invocation happen to say.
+func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
+	store, db, err := openStore(t.TempDir(), dolt.ServerConfig{})
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	stored := model.Config{
+		Slots: []string{"only-one"}, PollInterval: 5 * time.Second,
+		GeminiModel: "gemini-2.5-flash", MaxAgentTurns: 99,
+		GitHubHost: "github.com", GitHubInsecureHTTP: false,
+		GCPProject: "stored-proj", GCPServiceAccountEmail: "stored@stored-proj.iam.gserviceaccount.com",
+	}
+	if err := store.PutConfig(ctx, stored); err != nil {
+		t.Fatalf("PutConfig: %v", err)
+	}
+
+	flagCfg := config{
+		dataDir: "/should/be/left/alone",
+		slots:   []string{"whatever", "the", "flags", "say"}, pollInterval: time.Hour,
+		geminiModel: "ignored", maxAgentTurns: -1,
+		githubHost: "ignored.example.com", githubInsecureHTTP: true,
+		gcpProject: "ignored-proj", gcpServiceAccountEmail: "ignored@example.com",
+	}
+	got, err := loadConfig(ctx, store, flagCfg)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !reflect.DeepEqual(got, flagCfg.withModelConfig(stored)) {
+		t.Fatalf("loadConfig with a stored config = %+v, want the stored fields applied: %+v",
+			got, flagCfg.withModelConfig(stored))
+	}
+	// -data-dir is not a grain_config field at all -- loadConfig must
+	// leave it exactly as the flags set it, on both branches.
+	if got.dataDir != flagCfg.dataDir {
+		t.Fatalf("loadConfig changed dataDir to %q, want it left alone", got.dataDir)
 	}
 }
 
