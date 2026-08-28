@@ -7,6 +7,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -25,16 +26,17 @@ func BuildPrompt(task model.Task) string {
 }
 
 // RunDispatch drives one loop.Dispatch to completion: it runs framework
-// against sandboxRoot (see the package doc comment on why that is a plain
-// host directory rather than a real sandbox VM) and records the run's
-// outcome once it returns. It does not touch task_observation or GitHub
-// at all -- see ProcessResult for that half, kept separate the same way
-// v2/e2e's own runDispatch and its caller are, since deciding what a run
-// produced is a different question from deciding what to do about it.
+// against tools (whatever Deps.Sandboxes.ToolsFor produced for d.Slot --
+// see the package doc comment on the local-directory-vs-real-VM choice
+// that makes) and records the run's outcome once it returns. It does not
+// touch task_observation or GitHub at all -- see ProcessResult for that
+// half, kept separate the same way v2/e2e's own runDispatch and its caller
+// are, since deciding what a run produced is a different question from
+// deciding what to do about it.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
-	task model.Task, d loop.Dispatch, sandboxRoot string, at time.Time) (*agent.Result, error) {
+	task model.Task, d loop.Dispatch, tools []mcp.Tool, at time.Time) (*agent.Result, error) {
 
-	result, err := framework.Run(ctx, agent.RunConfig{Prompt: BuildPrompt(task), SandboxRoot: sandboxRoot})
+	result, err := framework.Run(ctx, agent.RunConfig{Prompt: BuildPrompt(task), Tools: tools})
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: running %s: %w", d.RunID, err)
 	}

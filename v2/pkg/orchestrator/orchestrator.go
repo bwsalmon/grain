@@ -12,30 +12,42 @@
 // obvious next step once this has a real GitHub credential and a real
 // place to run agents, neither of which this package assumes.
 //
-// **Sandboxing is "execute on the host," deliberately, for now.** v2 has
-// no host adapter (no way to create an isolated VM/container and run
-// commands in it — v2/README.md) and this package does not build one. It
-// reuses exactly the stand-in v2/e2e already validated: a plain directory
-// on the machine this process runs on, which pkg/mcp's sandbox tools
-// confine a run to (NewSandboxTools' own doc comment: "root stands in for
-// the sandbox"). HostSandboxes below is that stand-in promoted from
-// test-only code to something RunCycle actually uses. This carries no
-// isolation at all — an agent given a directory here can do anything this
-// process's own user can do — which is why v1 runs the agent process
-// itself against a real, separate sandbox VM reached over SSH. Wiring a
-// real host adapter into v2, and threading a Runner through this package
-// in its place, is follow-on work; this package's own docstrings on
-// HostSandboxes and RunDispatch say so at the point that would change.
+// **Sandboxing defaults to "execute on the host," deliberately, for now,
+// with a real host adapter available as an opt in.** Deps.Sandboxes is the
+// seam: HostSandboxes reuses exactly the stand-in v2/e2e already
+// validated, a plain directory on the machine this process runs on, which
+// pkg/mcp's sandbox tools confine a run to (NewSandboxTools' own doc
+// comment: "root stands in for the sandbox"). It carries no isolation at
+// all — an agent given a directory here can do anything this process's own
+// user can do. KonturSandboxes is the real alternative: one
+// bwsalmon/kontur-managed VM per dispatch slot, reached over SSH the way
+// v1 runs the agent process itself against a real, separate sandbox VM.
+// Neither this package nor pkg/kontur builds that VM's guest image —
+// KonturSandboxes assumes one already exists that carries the operator's
+// SSH key and runs sshd, the same assumption v1's own sandbox provisioning
+// stands in for; provisioning it is still open (v2/README.md).
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
+
+// Sandboxes hands out the MCP tools one dispatch slot's agent run should
+// have its tool calls confined to. HostSandboxes and KonturSandboxes both
+// implement it; RunCycle only ever calls ToolsFor, never anything backend-
+// specific, so swapping Deps.Sandboxes between them is the whole change a
+// deployment needs to make to move a slot from the local stand-in to a
+// real VM.
+type Sandboxes interface {
+	ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error)
+}
 
 // Config is what one deployment's orchestrator needs to know: which repo
 // is the task queue, and which label marks an issue as ready to dispatch.
@@ -96,4 +108,14 @@ func (h *HostSandboxes) RootFor(slot string) (string, error) {
 	}
 	h.roots[slot] = root
 	return root, nil
+}
+
+// ToolsFor implements Sandboxes: mcp.NewSandboxTools confined to
+// RootFor(slot).
+func (h *HostSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
+	root, err := h.RootFor(slot)
+	if err != nil {
+		return nil, err
+	}
+	return mcp.NewSandboxTools(root), nil
 }

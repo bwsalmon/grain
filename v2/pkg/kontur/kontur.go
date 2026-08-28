@@ -20,6 +20,14 @@
 //     crictl, the exact tool deploy/static-kubelet/README.md already
 //     points an operator at by hand ("crictl ... is the standalone
 //     equivalent for inspecting pods/containers").
+//
+// Create and Delete, unlike Port and PodIP, do not read kontur's own state
+// -- they just run the `kontur` binary itself ("kontur vm create"/"kontur
+// vm delete"), the same command an operator would type by hand. That is a
+// different, much shallower kind of dependency than importing
+// bwsalmon/kontur as a Go module would be (see above): this package still
+// never needs to agree with kontur's own code on any Go type, only on the
+// two subcommand names and the state file Port and PodIP already read.
 package kontur
 
 import (
@@ -141,4 +149,39 @@ func PodIP(ctx context.Context, runtimeEndpoint, vmName string) (string, error) 
 		return "", fmt.Errorf("kontur: pod %q has no network IP yet", podName)
 	}
 	return status.Status.Network.IP, nil
+}
+
+// vm runs `kontur vm <subcommand> name -state-dir stateDir <extraArgs...>`,
+// the shape every `kontur vm` subcommand shares (DefaultStateDir's own doc
+// comment). It returns kontur's combined stdout+stderr on failure, folded
+// into the error, the same "let the caller see why" reasoning crictl above
+// already uses.
+func vm(ctx context.Context, subcommand, stateDir, name string, extraArgs ...string) error {
+	args := append([]string{"vm", subcommand, name, "-state-dir", stateDir}, extraArgs...)
+	cmd := exec.CommandContext(ctx, "kontur", args...)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("kontur: vm %s %s: %w: %s", subcommand, name, err, strings.TrimSpace(output.String()))
+	}
+	return nil
+}
+
+// Create runs "kontur vm create", bringing name up. extraArgs carries
+// whatever else create needs beyond a name and -state-dir -- guest image,
+// guest SSH port, resource sizing, and so on -- since this package has no
+// way to know those without importing bwsalmon/kontur itself (see the
+// package doc comment), and they are a deployment's own choice, not
+// something Create can default sensibly on its own. Port(stateDir, name)
+// is not valid to call until the create this starts has actually
+// finished; callers that need the assigned port should call Create and
+// then Port, not assume one implies the other is already true.
+func Create(ctx context.Context, stateDir, name string, extraArgs ...string) error {
+	return vm(ctx, "create", stateDir, name, extraArgs...)
+}
+
+// Delete runs "kontur vm delete", tearing name down.
+func Delete(ctx context.Context, stateDir, name string) error {
+	return vm(ctx, "delete", stateDir, name)
 }

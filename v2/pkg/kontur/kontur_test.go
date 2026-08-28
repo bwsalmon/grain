@@ -125,3 +125,68 @@ func TestPodIPErrorsWhenNetworkNotYetAssigned(t *testing.T) {
 		t.Error("PodIP() with an empty network IP: got nil error, want one")
 	}
 }
+
+// writeFakeKontur installs a shell script named "kontur" on PATH (same
+// technique as writeFakeCrictl above), which appends every invocation's
+// argv to argvLog (one line per call, space-joined) and exits with
+// exitCode.
+func writeFakeKontur(t *testing.T, argvLog string, exitCode int) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake kontur script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %s
+exit %d
+`, argvLog, exitCode)
+	path := filepath.Join(dir, "kontur")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestCreateRunsKonturVMCreate(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "argv.log")
+	writeFakeKontur(t, log, 0)
+
+	if err := Create(context.Background(), "/var/lib/kontur/vms", "sandbox-0", "-image", "grain-sandbox.qcow2"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "vm create sandbox-0 -state-dir /var/lib/kontur/vms -image grain-sandbox.qcow2\n"
+	if string(got) != want {
+		t.Errorf("kontur invoked with %q, want %q", got, want)
+	}
+}
+
+func TestCreateReturnsErrorOnFailure(t *testing.T) {
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "argv.log"), 1)
+
+	if err := Create(context.Background(), "/var/lib/kontur/vms", "sandbox-0"); err == nil {
+		t.Error("Create() with a failing kontur binary: got nil error, want one")
+	}
+}
+
+func TestDeleteRunsKonturVMDelete(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "argv.log")
+	writeFakeKontur(t, log, 0)
+
+	if err := Delete(context.Background(), "/var/lib/kontur/vms", "sandbox-0"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "vm delete sandbox-0 -state-dir /var/lib/kontur/vms\n"
+	if string(got) != want {
+		t.Errorf("kontur invoked with %q, want %q", got, want)
+	}
+}
