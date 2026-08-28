@@ -470,25 +470,157 @@ func TestObservationBaselinesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDoltCommitMakesAKnownGoodPoint(t *testing.T) {
-	// The durability boundary is a Dolt commit, not a transaction: this
-	// is what a data diff is later taken against.
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+// --- history ------------------------------------------------------------
+
+// Every write is a Dolt commit, so the store keeps a history rather than
+// only a current state. Nothing used to commit at all: dolt_log showed
+// "Initialize data repository" and nothing else, however much grain had
+// done.
+func TestEveryWriteBecomesACommit(t *testing.T) {
+	store, db, ctx := openConcurrent(t, 1)
+
+	before := commitMessages(t, db)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+		tk.Title = "renamed"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID: "a1b2", Author: model.Attribution{Actor: human}, Body: "hello", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := commitMessages(t, db)
+	if len(got) <= len(before) {
+		t.Fatalf("no commits were made: %v", got)
+	}
+	// The messages say what happened, which is the point of keeping them
+	// -- a history of "grain: write" a dozen times would be no history.
+	for _, want := range []string{
+		"grain: put task a1b2",
+		"grain: update task a1b2",
+		"grain: comment on task a1b2",
+	} {
+		if !containsString(got, want) {
+			t.Fatalf("no commit says %q; log is %v", want, got)
+		}
+	}
+}
+
+// Commits are attributed to grain, not to whoever happens to be running
+// the process. Dolt otherwise credits the connected database user, so an
+// embedded deployment's history reads as having been done by "root".
+func TestCommitsAreAttributedToGrain(t *testing.T) {
+	store, db, ctx := openConcurrent(t, 1)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	var committer, email string
+	if err := db.QueryRowContext(ctx,
+		"SELECT `committer`, `email` FROM `dolt_log` ORDER BY `date` DESC LIMIT 1").
+		Scan(&committer, &email); err != nil {
+		t.Fatal(err)
+	}
+	if committer != "grain-automation" {
+		t.Fatalf("committer = %q, want grain-automation -- the history reads as somebody else's work", committer)
+	}
+	if email != "grain-automation@localhost" {
+		t.Fatalf("email = %q, want grain-automation@localhost", email)
+	}
+}
+
+// A commit stages everything outstanding, so under concurrent writers one
+// commit can carry another's work. Nothing is lost; the boundaries are
+// approximate. Worth pinning so the doc comment on commitHistory stays
+// true.
+func TestACommitSweepsUpWhateverElseLanded(t *testing.T) {
+	_, db, ctx := openConcurrent(t, 4)
+	if _, err := db.ExecContext(ctx,
+		"CREATE TABLE `sweep` (`id` INT NOT NULL, `v` VARCHAR(32), PRIMARY KEY (`id`))"); err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	store := model.New(db)
-	ctx := context.Background()
-	if err := store.Init(ctx); err != nil {
+	defer other.Close()
+
+	// Another writer's change lands but is not itself committed yet.
+	if _, err := other.ExecContext(ctx, "INSERT INTO `sweep` VALUES (1, 'theirs')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-A', '--allow-empty', '-m', ?)", "grain: someone else's write"); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `sweep` AS OF 'HEAD'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("rows at HEAD = %d, want 1 -- the other writer's change was not swept in, "+
+			"so commitHistory's doc comment is wrong about the boundaries", n)
+	}
+}
+
+// A commit that fails costs a coarser history, never a lost change: the
+// next write stages everything outstanding.
+func TestAMissedCommitIsRecoveredByTheNextWrite(t *testing.T) {
+	store, db, ctx := openConcurrent(t, 1)
+
+	// Stand in for a commit that did not happen by writing straight to the
+	// tables, bypassing Store.write entirely.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_tag` (`task_id`, `tag`) VALUES ('orphan', 'uncommitted')"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := dolt.Commit(db, "grain: one cycle"); err != nil {
-		t.Fatalf("dolt commit: %v", err)
+
+	var n int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM `task_tag` AS OF 'HEAD' WHERE `task_id` = 'orphan'").Scan(&n); err != nil {
+		t.Fatal(err)
 	}
+	if n != 1 {
+		t.Fatal("the uncommitted change was not picked up by the next write's commit")
+	}
+}
+
+func commitMessages(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(),
+		"SELECT `message` FROM `dolt_log` ORDER BY `date` DESC, `commit_hash`")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // --- task identity and the conversation --------------------------------
@@ -983,5 +1115,54 @@ func TestAFailedWriteLeavesNothingBehind(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("the store was left unusable by a failed write: %v", err)
+	}
+}
+
+// What the history is for: the store can now answer what changed, not
+// just what is true. This is also the thing a change feed would be built
+// on, so it is worth knowing it works before anyone needs it.
+func TestTheHistoryAnswersWhatChanged(t *testing.T) {
+	store, db, ctx := openConcurrent(t, 1)
+
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+		tk.Title = "renamed"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.QueryContext(ctx,
+		"SELECT `diff_type`, `from_title`, `to_title` FROM `dolt_diff_task` "+
+			"WHERE `to_id` = 'a1b2' OR `from_id` = 'a1b2' ORDER BY `to_commit_date` DESC")
+	if err != nil {
+		t.Fatalf("reading the task diff: %v", err)
+	}
+	defer rows.Close()
+
+	type change struct{ kind, from, to string }
+	var changes []change
+	for rows.Next() {
+		var kind string
+		var from, to sql.NullString
+		if err := rows.Scan(&kind, &from, &to); err != nil {
+			t.Fatal(err)
+		}
+		changes = append(changes, change{kind, from.String, to.String})
+	}
+	if len(changes) < 2 {
+		t.Fatalf("diff has %d entries, want the add and the rename: %+v", len(changes), changes)
+	}
+	if changes[0].kind != "modified" || changes[0].to != "renamed" {
+		t.Fatalf("newest change = %+v, want the rename with its new title", changes[0])
+	}
+	if changes[0].from != "Rename the endpoint" {
+		t.Fatalf("newest change lost the old value: %+v -- before-and-after is the "+
+			"whole reason a diff beats a snapshot", changes[0])
+	}
+	if changes[len(changes)-1].kind != "added" {
+		t.Fatalf("oldest change = %+v, want the task being added", changes[len(changes)-1])
 	}
 }

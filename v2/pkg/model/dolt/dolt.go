@@ -9,10 +9,14 @@
 // Python controller could not have — Dolt embeds only in Go — and it is
 // most of why v2 is written in this language.
 //
-// Single writer. Embedded Dolt permits one, which suits a cron-driven
-// controller and does not suit a controller plus a UI plus a human at a
-// CLI. When that becomes real, the answer is a Dolt SQL server and this
-// package grows a second constructor; nothing above it changes.
+// Single writer. Embedded Dolt permits one, which suited a cron-driven
+// controller and stopped suiting grain once the CLI and the UI became how
+// tasks are created. Connect (server.go) is the second constructor that
+// answers it; nothing above this package changed to get it.
+//
+// Committing lives in model.Store, not here. Every write is a Dolt commit
+// now (Store.write), so there is no separate "commit the cycle" step for
+// a caller to remember or forget.
 package dolt
 
 import (
@@ -31,6 +35,11 @@ import (
 // Dolt records an author on every commit, so these are not decoration:
 // they are what a later `dolt log` shows for changes grain made itself,
 // which is the audit trail a data store with version control is for.
+//
+// Author and Email apply to the commit that creates the database. Every
+// commit after that is made by model.Store as it writes, which passes the
+// same identity explicitly -- see model's historyAuthor, and keep the two
+// in step.
 type Config struct {
 	Dir    string // the directory holding the Dolt database
 	Name   string // the database name within it
@@ -135,18 +144,4 @@ func quoteIdent(name string) string {
 		return "`grain`"
 	}
 	return "`" + name + "`"
-}
-
-// Commit makes a Dolt commit of whatever is in the working set.
-//
-// This is the durability boundary, not the SQL transaction. Transactions
-// keep one logical change atomic; a commit is what makes a cycle's work a
-// point the deployment can be reset to, and what a data diff is taken
-// against when a declaration change is reviewed.
-func Commit(db *sql.DB, message string) error {
-	// CALL rather than SELECT: DOLT_COMMIT is a procedure, and -A stages
-	// every table so a caller does not have to enumerate them. --allow-empty
-	// keeps a cycle that changed nothing from being an error to special-case.
-	_, err := db.Exec("CALL DOLT_COMMIT('-A', '--allow-empty', '-m', ?)", message)
-	return err
 }

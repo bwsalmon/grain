@@ -343,6 +343,53 @@ GitHub is the pull request. Its sibling proves the question path: a run
 parks, a human replies with one `AddComment`, and the next cycle resumes
 it.
 
+## Every write is a commit
+
+`Store.write` makes a Dolt commit after each successful write, naming
+what it was: `grain: approve task 2`, `grain: comment on task 1`,
+`grain: update task 1`. Nothing committed before this — however much
+grain had done, `dolt_log` showed "Initialize data repository" and
+nothing else, and the store kept only a current state.
+
+It now keeps a history, which is what choosing a versioned database was
+for. `dolt_log` is what grain did and when; `dolt_diff_task` answers what
+*changed*, with the old and new value side by side; and every commit is a
+point the deployment can be reset to.
+
+**Commits are attributed to grain, via an explicit `--author`.** Without
+it Dolt credits the connected database user, so an embedded deployment's
+history reads as having been done by `root` — whoever started the
+process. The connection's configured author applies only to creating the
+database, which is measured rather than assumed
+(`TestCommitsAreAttributedToGrain`). The author says *grain* rather than
+which principal asked, because `Store.write` does not know that and the
+message already carries the interesting half; `historyAuthor` is where
+per-principal attribution would hook in.
+
+**The commit runs after the transaction, not inside it.** The transaction
+is what makes a change atomic; the commit is what makes it a named point
+in history. Two different boundaries, and conflating them would put a
+commit in the path of the write's own success.
+
+**A failed commit is dropped on purpose, and that is safe rather than
+sloppy.** By then the write has landed, so failing the call would tell a
+caller their change did not happen when it did — and a retry of, say,
+`AddComment` would post it twice. The next write stages everything
+outstanding (`-A`), so a missed commit costs a coarser history and
+nothing else; the gap closes itself, which
+`TestAMissedCommitIsRecoveredByTheNextWrite` pins down.
+
+The same `-A` means a commit under concurrent writers can contain more
+than the change its message names — another writer's transaction that
+landed in between is swept in. Nothing is ever lost and the boundaries
+are approximate; with one writer, which is what an embedded deployment
+has by construction, they are exact.
+
+Commits are proportional to real activity rather than to time: an idle
+`graind` writes nothing, so it commits nothing. `dolt.Commit` is gone —
+there is no separate "commit the cycle" step left for a caller to
+remember or forget.
+
 ## One stamp, and start over on conflict
 
 Every mutation runs in a transaction that also rewrites a single shared
@@ -866,16 +913,17 @@ through typing into. Both were checked by driving the real UI in a
 browser, which is also how the second one was found.
 
 Polling rather than a change feed is deliberate, and it is the one place
-this project declines something the substrate offers. Dolt is a versioned
-database: `dolt_log` hands out commit hashes that would serve as a
-`resourceVersion`, and `dolt_diff_task` reports `added`/`modified`/
-`removed` with before-and-after values. Using it would mean a Dolt commit
-per write, a diff joined across six tables to answer "what changed about
-this task" (a capability toggle changes `task_grant`, a comment changes
-`task_comment`), unbounded history to garbage-collect, and a story for a
-cursor that has aged out. That is a real feature; this is fifteen lines
-with nothing to get wrong, and for one operator watching a handful of
-tasks on the same machine the two are indistinguishable.
+this project declines something the substrate offers. The history is
+there now (see "Every write is a commit" above): `dolt_log` hands out
+commit hashes that would serve as a `resourceVersion`, and
+`dolt_diff_task` reports `added`/`modified`/`removed` with
+before-and-after values. What a feed would still need is a diff joined
+across six tables to answer "what changed about this task" (a capability
+toggle changes `task_grant`, a comment changes `task_comment`), a story
+for history that grows without bound, and handling for a cursor that has
+aged out. That is a real feature; this is fifteen lines with nothing to
+get wrong, and for one operator watching a handful of tasks on the same
+machine the two are indistinguishable.
 
 ## Single writer
 
