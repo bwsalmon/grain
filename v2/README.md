@@ -87,6 +87,13 @@ cmd/graind/     the daemon: pkg/orchestrate's reconcile loop run on a
                 timer against one real embedded Dolt store, until
                 SIGINT/SIGTERM, with an in-process gitproxy and a real
                 github.RESTClient wired in
+pkg/ui/         a JSON API, and the static frontend it serves, for
+                creating and managing tasks and their capability grants
+                by hand (bwsalmon/agents#237) -- see "The UI" below for
+                why it talks straight to GitHub rather than through a
+                store or an orchestrator
+cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
+                listener, opening the system's default browser
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -414,6 +421,66 @@ plays the part of "the PR opened," "the PR merged" and "a human replied"
 with the same `store.Observe` calls a real GitHub-sync component would
 make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
+
+## The UI
+
+`pkg/ui`/`cmd/ui` (bwsalmon/agents#237) is a first cut at
+[`docs/data-model.md`'s "first-party UI"
+direction](../docs/data-model.md#direction-a-first-party-ui): create a
+task, approve a proposed one, attach or remove a capability, comment,
+close/reopen -- everything a human does by hand to a task issue today,
+from a form instead of a body of directive lines and a label picker.
+
+**It talks straight to GitHub, not through a store.** That direction's
+own "the UI is not a fourth record" rule says a UI reads declarations
+from the repo, grain's own acts from the store, and outside facts from
+GitHub through grain -- but the intake half of that pipeline (a labelled
+issue becoming a `model.Task` row) is not wired into any running binary
+yet, on either the `pkg/orchestrate` or the `pkg/orchestrator` side (see
+"What this does not have yet" above). A task issue is therefore the only
+place a task genuinely lives in a real deployment today, so `pkg/ui`
+reads and writes it directly, through the same `github.Client` interface
+`cmd/graind` and `pkg/orchestrator` use -- one `Config{TaskRepo, Labels,
+Capabilities}` naming which repo and which label taxonomy
+(`grain/automation/labels.py`'s own defaults, ported as `ui.Labels`/
+`ui.Capability`), not a copy of anything the store or the repo owns.
+`State` is derived off labels on every read, the same "never stored"
+discipline `model.StateOf`'s own doc comment describes for the store-
+backed version. Once intake exists this package's `Config`/`Server`
+seam is exactly where a `model.Store`-backed implementation would slot
+in behind the same JSON API, without the frontend knowing the
+difference.
+
+**No OAuth.** The direction document calls for GitHub OAuth plus
+`author_association` as the permission gate; `cmd/ui` instead takes a
+single GitHub token (`-github-token-file`, or `$GITHUB_TOKEN`) the way
+every other `-github-*` flag across `v2/cmd` does, because this is a
+single-operator tool run locally against a token that operator already
+holds, not a hosted multi-user service -- the OAuth gate is worth
+building the day this runs anywhere other than one person's own machine
+(bwsalmon/agents#237's follow-up).
+
+**Why a local web server, not Electron/Tauri/a native app.** `go build`
+already produces one dependency-free binary per OS `cmd/ui` runs on
+(Mac, Linux today); a `net/http` server that opens the system's default
+browser gets "runs standalone on Mac and Linux" for free, in the one
+language every other substrate here already commits to (see "Why Go"
+above), with no second toolchain (Node, Rust, Xcode) for this repo to
+carry. "Set up to run on iOS/Android in the future" is what shapes
+`pkg/ui` into an HTTP+JSON API in the first place rather than
+server-rendered pages or a Go-templated app: a future mobile client --
+native, or a thin webview shell -- is just another caller of the same
+`/api/*` surface `cmd/ui`'s own frontend (`pkg/ui/static/`, plain
+HTML/CSS/JS, no build step) already uses, with nothing about the server
+to rewrite.
+
+**Freshness, not a cache.** Every mutation in the frontend
+(`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
+than assuming its own optimistic update is now true, matching the
+direction document's "it shows freshness for anything" read live from
+GitHub rather than presenting a stale value as current -- there is
+nowhere here for staleness to hide since nothing is ever cached across
+one request.
 
 ## Single writer
 
