@@ -208,6 +208,46 @@ failure. Verified by linking the binary, confirming `ldd` reports no
 case-insensitive matching, which needs ICU's data) out of the resulting
 binary.
 
+**The machine that links the binary is still in it, unless you box it
+in.** Static ICU removes the coupling to the *runtime's* ICU; what it
+leaves is the toolchain doing the linking, in two places. A host whose
+GCC writes `.sframe` unwind sections into objects its `ld` is too old to
+read reports every member of the distribution's prebuilt `libicuuc.a`
+with a "section ignored" warning -- one per object, ahead of any real
+diagnostic. (SFrame arrives in GCC 14 and binutils 2.41, so it is a
+mixed toolchain -- new compiler, older linker -- that hits this, not an
+old one or a new one.) And `libstdc++`, `libgcc` and `libc` stay
+dynamic, so the binary records the symbol versions of whichever glibc
+linked it: link against one newer than the controller's and it dies at
+exec time there, which is the failure static ICU was adopted to end,
+reappearing one layer down.
+
+`make container-build` runs the same `make build`, out of this same
+Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain -- the
+release `packer/kontur/image.pkr.hcl` and `terraform/gcp/variables.tf`
+both deploy to. Bookworm's GCC 12.2 and binutils 2.40 predate SFrame, so the
+first cannot arise; its glibc 2.36 and GCC 12's `GLIBCXX_3.4.30` bound
+the second, and are what the target already ships. The Go version is
+read back out of `go.mod` rather than written down twice, and
+`GOTOOLCHAIN=local` in the image turns a stale image into an error
+naming both versions instead of a silent toolchain download. The tree is
+bind-mounted rather than copied in, so both paths build from one copy of
+the rules; `.container-cache/` keeps the module and build caches, so only
+the first run is cold, and `make clean` removes it with `bin/`. It is
+not the default -- `make build` needs no container engine, is what
+`tests.yml` runs, and on a host that agrees with itself produces the same
+binary.
+
+What comes out is portable across mainstream x86-64 Linux, not across
+every Linux, and is not meant to be: it needs glibc -- musl is not
+glibc, so Alpine will not run it -- no older than the builder's (2.36 on
+bookworm; today's link only reaches for 2.34), a `libstdc++` from GCC 12
+or newer, and x86-64. Debian 12, Ubuntu 22.04 and anything newer than
+either clear both; RHEL 9, whose `libstdc++` is GCC 11's, does not. A
+binary that runs anywhere regardless would have to link `libstdc++` and
+libc statically too, which this has not needed: every machine it is
+deployed to is the Debian 12 above.
+
 **Embedded Dolt serves one database per directory**, so naming it in the
 DSN before it exists fails with "database not found". `Open` therefore
 connects twice: once with no database selected purely to create it, then

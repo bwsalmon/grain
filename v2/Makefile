@@ -54,7 +54,48 @@ icu4c (brew), or set ICU_STATIC=0 to silence this.)
 endif
 endif
 
-.PHONY: all build test vet fmt clean $(CMDS)
+# --- Containerised build ----------------------------------------------
+#
+# `make build` links against whatever ICU, GCC and ld the machine running
+# it happens to have, which is right on a host whose toolchain agrees with
+# its own prebuilt ICU archives and wrong on one where it does not. Two
+# ways it goes wrong: where GCC writes .sframe unwind sections that the
+# installed ld is too old to read, every member of libicuuc.a links with a
+# "section ignored" warning; and where glibc is newer than the target's,
+# the binary links clean and then fails to exec on the controller, which
+# is the coupling static ICU was adopted to remove, reappearing one layer
+# down in libc.
+#
+# `make container-build` runs this same `make build`, out of this same
+# Makefile, inside Dockerfile.build's pinned Debian 12 toolchain -- the
+# release packer/kontur/image.pkr.hcl and terraform/gcp/variables.tf
+# both deploy to -- so neither depends on the machine that drove it. It
+# is not the default: it wants a container engine, and a first run pays
+# for an image pull and a cold module cache, which is a poor trade on a
+# host that agrees with itself. `make build` stays what CI and a working
+# laptop use.
+CONTAINER_ENGINE ?= docker
+# Substituted whole on a network that does not reach Docker Hub, e.g.
+# GO_IMAGE=mirror.gcr.io/library/golang.
+GO_IMAGE ?= golang
+BUILDER_IMAGE ?= grain-builder:bookworm
+# Read out of go.mod rather than written down a second time here: the Go
+# the container carries and the one the module asks for cannot drift if
+# only one of them is ever edited. GOTOOLCHAIN=local in Dockerfile.build
+# turns a stale image into an error that names both versions.
+GO_VERSION := $(shell sed -n 's/^go[[:space:]]\{1,\}//p' go.mod)
+# Bind-mounted rather than left inside the container: a build cache that
+# dies with the container makes every run a cold one. Under the working
+# tree (and .gitignore'd) rather than in a named volume so that `rm -rf`
+# is enough to clear it and nothing survives the checkout.
+CONTAINER_CACHE ?= $(CURDIR)/.container-cache
+# Runs as the invoking user so bin/grain and the caches come out owned by
+# whoever ran make, not by root. Rootless podman already maps the caller
+# to the container's root and needs this left empty -- CONTAINER_USER=
+# does that, and the flag disappears with it.
+CONTAINER_USER ?= $(shell id -u):$(shell id -g)
+
+.PHONY: all build test vet fmt clean builder container-build $(CMDS)
 
 all: vet test build
 
@@ -62,6 +103,25 @@ build: $(CMDS)
 
 $(CMDS):
 	CGO_LDFLAGS="$(ICU_LDFLAGS)" go build $(ICU_TAGS) -o $(BIN)/$@ ./cmd/$@
+
+builder:
+	$(CONTAINER_ENGINE) build \
+		--build-arg GO_IMAGE=$(GO_IMAGE) \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		-t $(BUILDER_IMAGE) -f Dockerfile.build .
+
+# The whole checkout is mounted, not just this directory: `go build`
+# stamps the binary with the commit it came from, which it can only read
+# from the .git at the repository root.
+container-build: builder
+	@mkdir -p $(CONTAINER_CACHE)/build $(CONTAINER_CACHE)/mod
+	$(CONTAINER_ENGINE) run --rm \
+		$(if $(CONTAINER_USER),--user $(CONTAINER_USER),) \
+		-v "$(CURDIR)/..":/src \
+		-v "$(CONTAINER_CACHE)/build":/gocache \
+		-v "$(CONTAINER_CACHE)/mod":/gomodcache \
+		-e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
+		-w /src/v2 $(BUILDER_IMAGE) make build
 
 test:
 	go test ./...
@@ -78,4 +138,4 @@ fmt:
 	fi
 
 clean:
-	rm -rf $(BIN)
+	rm -rf $(BIN) $(CONTAINER_CACHE)

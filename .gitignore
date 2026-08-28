@@ -3,4 +3,7 @@ __pycache__/
 .pytest_cache/
 .claude/settings.local.json
 v2/bin/
+# Module and build caches the Makefile bind-mounts into the
+# container-build toolchain (v2/Dockerfile.build), owned by whoever ran make.
+v2/.container-cache/
 v2/grain
