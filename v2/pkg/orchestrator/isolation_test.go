@@ -5,9 +5,9 @@
 // could have been done was done, even though something else in the same
 // cycle failed. Before Reconcilers() existed, RunCycle was a pipeline --
 // the first error returned, and everything after it simply did not
-// happen -- so a GitHub outage during intake also stalled a merge that
-// was ready and a queue that needed advancing. Each test below fails one
-// specific thing and asserts that the unrelated work still landed.
+// happen -- so one failure stalled a merge that was ready and a queue
+// that needed advancing. Each test below fails one specific thing and
+// asserts that the unrelated work still landed.
 package orchestrator_test
 
 import (
@@ -33,23 +33,7 @@ var errInjected = errors.New("injected failure")
 // later does not need touching here.
 type failingClient struct {
 	github.Client
-	listIssues     bool // ListIssues fails
-	removeLabelFor int  // RemoveLabel fails for this issue number
-	getPRFor       int  // GetPullRequest fails for this PR number
-}
-
-func (c failingClient) ListIssues(owner, repo, label string) ([]github.Issue, error) {
-	if c.listIssues {
-		return nil, errInjected
-	}
-	return c.Client.ListIssues(owner, repo, label)
-}
-
-func (c failingClient) RemoveLabel(owner, repo string, number int, label string) error {
-	if c.removeLabelFor != 0 && number == c.removeLabelFor {
-		return errInjected
-	}
-	return c.Client.RemoveLabel(owner, repo, number, label)
+	getPRFor int // GetPullRequest fails for this PR number
 }
 
 func (c failingClient) GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error) {
@@ -99,11 +83,10 @@ func completesWithAComment() func() agent.Framework {
 // SyncPullRequests exists to notice, so a test can assert on whether it
 // got the chance to.
 func mergedPullRequestTask(t *testing.T, ctx context.Context, store *model.Store, sim *githubsim.Sim,
-	client github.Client, id string, repo model.RepoRef, issueNumber int, merge bool) model.Task {
+	client github.Client, id string, repo model.RepoRef, merge bool) model.Task {
 
 	t.Helper()
-	seedIssue(sim, issueNumber)
-	task := filedTask(t, ctx, store, id, repo, issueNumber)
+	task := filedTask(t, ctx, store, id, repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	pr, err := orchestrator.EnsurePullRequest(client, task)
@@ -139,28 +122,80 @@ func stateOf(t *testing.T, ctx context.Context, store *model.Store, id string) m
 // A cycle whose intake cannot reach GitHub still closes out the pull
 // requests it already knows about. This is the headline regression: poll
 // runs first, and used to take the whole cycle down with it.
-func TestRunCycleSyncsPullRequestsEvenWhenPollingFails(t *testing.T) {
+// A cycle whose dispatch cannot build a sandbox still closes out the
+// pull requests it already knows about. Dispatch runs first, and used to
+// take the whole cycle down with it.
+func TestRunCycleSyncsPullRequestsEvenWhenDispatchFails(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	task := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, 1, true)
+
+	// One task with a merged PR waiting to be closed out, and one queued
+	// task whose dispatch will fail.
+	done := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, true)
+	filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:     store,
-		Client:    failingClient{Client: client, listIssues: true},
-		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Store:  store,
+		Client: client,
+		Sandboxes: failingSandboxes{
+			inner: orchestrator.NewHostSandboxes(t.TempDir()),
+			slot:  "bad",
+		},
 		Framework: completesWithAComment(),
-		Config:    orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"},
-		Slots:     []string{"s1"},
+		Slots:     []string{"bad"},
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
 	if !errors.Is(err, errInjected) {
-		t.Fatalf("RunCycle error = %v, want it to carry the injected poll failure", err)
+		t.Fatalf("RunCycle error = %v, want it to carry the injected dispatch failure", err)
 	}
-	if st := stateOf(t, ctx, store, task.ID); st != model.StateClosed {
-		t.Fatalf("state = %q, want closed: the sync reconciler should have run despite poll failing", st)
+	if st := stateOf(t, ctx, store, done.ID); st != model.StateClosed {
+		t.Fatalf("state = %q, want closed: sync should have run despite dispatch failing", st)
 	}
+}
+
+// And the other way round: a cycle whose pull-request sync cannot reach
+// GitHub still dispatches the work that was ready.
+func TestRunCycleDispatchesEvenWhenPullRequestSyncFails(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	watched := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, false)
+	queued := filedTask(t, ctx, store, "t2", repo)
+
+	deps := orchestrator.Deps{
+		Store:     store,
+		Client:    failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
+		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework: completesWithAComment(),
+		Slots:     []string{"good"},
+	}
+
+	err := orchestrator.RunCycle(ctx, deps, baseTime)
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("RunCycle error = %v, want it to carry the injected sync failure", err)
+	}
+	if st := stateOf(t, ctx, store, queued.ID); st != model.StateCompleted {
+		t.Fatalf("state = %q, want completed: dispatch should have run despite sync failing", st)
+	}
+}
+
+// pullRequestNumber reads the PR a task's own LinkFixes link names.
+func pullRequestNumber(t *testing.T, task model.Task) int {
+	t.Helper()
+	for _, l := range task.Links {
+		if l.Kind == model.LinkFixes {
+			ref, err := model.ParsePullRequestRef(l.Target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ref.Number
+		}
+	}
+	t.Fatal("task has no pull request link")
+	return 0
 }
 
 // Every reconciler's failure reaches the caller, not just the first --
@@ -170,26 +205,19 @@ func TestRunCycleReportsEveryFailingReconcilerNotJustTheFirst(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	task := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, 1, false)
 
-	prNumber := 0
-	for _, l := range task.Links {
-		if l.Kind == model.LinkFixes {
-			ref, err := model.ParsePullRequestRef(l.Target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			prNumber = ref.Number
-		}
-	}
+	watched := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, false)
+	filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:     store,
-		Client:    failingClient{Client: client, listIssues: true, getPRFor: prNumber},
-		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Store:  store,
+		Client: failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
+		Sandboxes: failingSandboxes{
+			inner: orchestrator.NewHostSandboxes(t.TempDir()),
+			slot:  "bad",
+		},
 		Framework: completesWithAComment(),
-		Config:    orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"},
-		Slots:     []string{"s1"},
+		Slots:     []string{"bad"},
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -199,94 +227,23 @@ func TestRunCycleReportsEveryFailingReconcilerNotJustTheFirst(t *testing.T) {
 	// Both reconcilers failed for the same injected reason, so the join is
 	// what carries them; naming each one is what tells them apart.
 	msg := err.Error()
-	for _, want := range []string{"poll:", "sync:"} {
+	for _, want := range []string{"dispatch:", "sync:"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("RunCycle error = %q, want it to name the %q reconciler", msg, want)
 		}
 	}
 }
 
-// One issue that cannot be taken in does not strand the rest of the
-// batch, and the one that failed keeps its trigger label so the next tick
-// retries it.
-func TestPollIssuesTakesInEveryIssueWhenOneFails(t *testing.T) {
-	store, ctx := openStore(t)
-	sim, client := newSim(t, "acme", "widgets", "main")
-	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	cfg := orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"}
-
-	for _, n := range []int{1, 2} {
-		sim.Issues[n] = &githubsim.Issue{
-			Title: "task", Body: "please\n\n/repo acme/widgets\n", Author: "alice",
-			Labels: map[string]struct{}{"grain-agent": {}},
-		}
-	}
-
-	err := orchestrator.PollIssues(ctx, store,
-		failingClient{Client: client, removeLabelFor: 1}, cfg, baseTime)
-	if !errors.Is(err, errInjected) {
-		t.Fatalf("PollIssues error = %v, want the injected label failure", err)
-	}
-
-	// Both issues were taken in: the one whose label removal failed is
-	// still filed (the store write happens first, deliberately), and the
-	// one behind it was not skipped over.
-	for _, n := range []int{1, 2} {
-		id := orchestrator.TaskID(repo, n)
-		task, err := store.GetTask(ctx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if task == nil {
-			t.Fatalf("issue %d was never filed as a task", n)
-		}
-	}
-
-	// Persistence before the irreversible effect: issue 1 keeps the label
-	// it was found with, so a later tick lists and retries it, while
-	// issue 2's came off as normal.
-	issue1, err := client.GetIssue("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasLabel(issue1, "grain-agent") {
-		t.Fatal("issue 1 lost its trigger label even though removing it failed")
-	}
-	issue2, err := client.GetIssue("acme", "widgets", 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hasLabel(issue2, "grain-agent") {
-		t.Fatal("issue 2 kept its trigger label, so it will be taken in twice")
-	}
-}
-
-func hasLabel(issue github.Issue, label string) bool {
-	_, ok := issue.Labels[label]
-	return ok
-}
-
-// One pull request that cannot be read does not stop the others being
-// closed out. Neither task opts into auto-merge, so no queue ordering is
 // involved -- this is purely about the per-entry loop.
 func TestSyncPullRequestsClosesOutEveryTaskWhenOneFails(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	first := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, 1, true)
-	second := mergedPullRequestTask(t, ctx, store, sim, client, "t2", repo, 2, true)
+	first := mergedPullRequestTask(t, ctx, store, sim, client, "t1", repo, true)
+	second := mergedPullRequestTask(t, ctx, store, sim, client, "t2", repo, true)
 
-	firstPR := 0
-	for _, l := range first.Links {
-		if l.Kind == model.LinkFixes {
-			ref, err := model.ParsePullRequestRef(l.Target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			firstPR = ref.Number
-		}
-	}
+	firstPR := pullRequestNumber(t, first)
 
 	err := orchestrator.SyncPullRequests(ctx, store,
 		failingClient{Client: client, getPRFor: firstPR}, baseTime)
@@ -308,13 +265,11 @@ func TestSyncPullRequestsClosesOutEveryTaskWhenOneFails(t *testing.T) {
 // that is not theirs.
 func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
 	store, ctx := openStore(t)
-	sim, client := newSim(t, "acme", "widgets", "main")
+	_, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	seedIssue(sim, 1)
-	seedIssue(sim, 2)
-	first := filedTask(t, ctx, store, "t1", repo, 1)
-	second := filedTask(t, ctx, store, "t2", repo, 2)
+	first := filedTask(t, ctx, store, "t1", repo)
+	second := filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
 		Store:  store,
@@ -324,7 +279,6 @@ func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
 			slot:  "bad",
 		},
 		Framework: completesWithAComment(),
-		Config:    orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"},
 		Slots:     []string{"bad", "good"},
 	}
 

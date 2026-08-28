@@ -31,7 +31,7 @@ package model
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 2
+const SchemaVersion = 4
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -59,7 +59,6 @@ var Tables = []string{
   ` + "`folder`" + `                VARCHAR(512) NULL,
 
   ` + "`auto_merge`" + `            BOOLEAN      NOT NULL,
-  ` + "`external_ref`" + `          VARCHAR(255) NULL,
   ` + "`created_at`" + `            DATETIME(6)  NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
@@ -132,6 +131,42 @@ var Tables = []string{
   ` + "`issued_at`" + `  DATETIME(6)  NOT NULL,
   ` + "`expires_at`" + ` DATETIME(6)  NULL,
   PRIMARY KEY (` + "`run_id`" + `, ` + "`capability`" + `, ` + "`resource`" + `)
+)`,
+
+	// The conversation, as grain's own rows rather than a GitHub issue's
+	// comment thread. AUTO_INCREMENT because the id is both the ordering
+	// and the thing task_observation.pending_question_comment_id names:
+	// a caller that has just written a question needs its id back to
+	// record which question is outstanding.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_comment`" + ` (
+  ` + "`id`" + `                 BIGINT       NOT NULL AUTO_INCREMENT,
+  ` + "`task_id`" + `            VARCHAR(64)  NOT NULL,
+  ` + "`author_kind`" + `        VARCHAR(32)  NOT NULL,
+  ` + "`author_id`" + `          VARCHAR(255) NOT NULL,
+  ` + "`author_behalf_kind`" + ` VARCHAR(32)  NULL,
+  ` + "`author_behalf_id`" + `   VARCHAR(255) NULL,
+  ` + "`body`" + `               LONGTEXT     NOT NULL,
+  ` + "`created_at`" + `         DATETIME(6)  NOT NULL,
+  PRIMARY KEY (` + "`id`" + `),
+  KEY ` + "`task_comment_task`" + ` (` + "`task_id`" + `)
+)`,
+
+	// Task identity, allocated here rather than borrowed from a GitHub
+	// issue number. A task used to be identified by the issue it was filed
+	// from ("owner/name/7"), which meant nothing could file a task without
+	// first creating an issue -- the coupling that made GitHub the input.
+	//
+	// A table with AUTO_INCREMENT rather than a counter column somebody
+	// reads and writes back: allocation has to stay correct with a
+	// controller, a UI and a CLI all writing at once (README's "Single
+	// writer"), and INSERT ... LAST_INSERT_ID() is atomic where
+	// read-modify-write is a race. The row it leaves behind is also a
+	// record of when each id was handed out, which a bare counter throws
+	// away.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_sequence`" + ` (
+  ` + "`number`" + `    BIGINT      NOT NULL AUTO_INCREMENT,
+  ` + "`issued_at`" + ` DATETIME(6) NOT NULL,
+  PRIMARY KEY (` + "`number`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (

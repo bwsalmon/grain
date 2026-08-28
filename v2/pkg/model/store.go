@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -92,13 +93,13 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `external_ref`, `created_at`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?)`,
+  `+"`auto_merge`, `created_at`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID,
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, nullable(t.ExternalRef), timeOf(t.CreatedAt),
+		t.AutoMerge, timeOf(t.CreatedAt),
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -140,31 +141,127 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
 	return tx.Commit()
 }
 
+// NewTaskID allocates a task identity from the store.
+//
+// A task used to be named after the GitHub issue it was filed from, so
+// nothing could file one without creating an issue first. This is that
+// coupling's replacement: ids come from task_sequence, and a caller with
+// a store and nothing else can create a task.
+//
+// The result is the decimal sequence number ("42"), which is what makes
+// `grain get 42` and the branch `grain/task-42` read the way they do --
+// where a GitHub-derived id put a repo path inside the branch name.
+// Task.ID stays an opaque string, so nothing but this function is
+// entitled to assume the shape.
+func (s *Store) NewTaskID(ctx context.Context) (string, error) {
+	res, err := s.db.ExecContext(ctx,
+		"INSERT INTO `task_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
+	if err != nil {
+		return "", fmt.Errorf("allocating a task id: %w", err)
+	}
+	n, err := res.LastInsertId()
+	if err != nil {
+		return "", fmt.Errorf("reading the allocated task id: %w", err)
+	}
+	return strconv.FormatInt(n, 10), nil
+}
+
+// AddComment appends one entry to a task's conversation and returns the
+// id the store assigned it -- which a caller recording an outstanding
+// question needs, since Observation.PendingQuestionCommentID names one of
+// these.
+func (s *Store) AddComment(ctx context.Context, c Comment) (int64, error) {
+	behalf := c.Author.OnBehalfOf
+	res, err := s.db.ExecContext(ctx, "INSERT INTO `task_comment` ("+
+		"`task_id`, `author_kind`, `author_id`, `author_behalf_kind`, `author_behalf_id`, "+
+		"`body`, `created_at`) VALUES (?,?,?,?,?,?,?)",
+		c.TaskID, string(c.Author.Actor.Kind), c.Author.Actor.ID,
+		kindOf(behalf), idOf(behalf), c.Body, c.CreatedAt.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("commenting on task %s: %w", c.TaskID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading the new comment's id on task %s: %w", c.TaskID, err)
+	}
+	return id, nil
+}
+
+// Comments returns a task's conversation, oldest first. Ordering is by
+// the assigned id rather than created_at: two comments written in the
+// same instant still have an order, and it is the one they were written
+// in.
+func (s *Store) Comments(ctx context.Context, taskID string) ([]Comment, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+
+		"`id`, `author_kind`, `author_id`, `author_behalf_kind`, `author_behalf_id`, "+
+		"`body`, `created_at` FROM `task_comment` WHERE `task_id` = ? ORDER BY `id`", taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading comments on task %s: %w", taskID, err)
+	}
+	defer rows.Close()
+
+	var out []Comment
+	for rows.Next() {
+		c := Comment{TaskID: taskID}
+		var actorKind, actorID string
+		var behalfKind, behalfID sql.NullString
+		if err := rows.Scan(&c.ID, &actorKind, &actorID, &behalfKind, &behalfID,
+			&c.Body, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		c.Author.Actor = Principal{Kind: PrincipalKind(actorKind), ID: actorID}
+		if behalfKind.Valid {
+			c.Author.OnBehalfOf = &Principal{
+				Kind: PrincipalKind(behalfKind.String), ID: behalfID.String,
+			}
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // GetTask returns a task, or nil if there is none with that ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT "+
-		"`id`,`intent`,`title`,`body`,"+
-		"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`,"+
-		"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,"+
-		"`target_owner`,`target_name`,`binding`,`base`,`folder`,"+
-		"`auto_merge`,`external_ref`,`created_at` "+
-		"FROM `task` WHERE `id` = ?", id)
-
-	var t Task
-	var intent, binding string
-	var oaKind, oaID, oReason string
-	var obKind, obID, aaKind, aaID, abKind, abID sql.NullString
-	var tOwner, tName, base, folder, extRef sql.NullString
-	var createdAt sql.NullTime
-	if err := row.Scan(&t.ID, &intent, &t.Title, &t.Body,
-		&oaKind, &oaID, &obKind, &obID, &oReason,
-		&aaKind, &aaID, &abKind, &abID,
-		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &extRef, &createdAt); err != nil {
+	t, err := scanTask(s.db.QueryRowContext(ctx,
+		"SELECT "+taskColumns+" FROM `task` WHERE `id` = ?", id).Scan)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if err := s.hydrate(ctx, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// taskColumns is the task row, in the order scanTask reads it. Shared so
+// GetTask and ListTasks cannot drift into scanning different column
+// orders -- the kind of mismatch that fails as a type error at a
+// distance, if it fails at all.
+const taskColumns = "`id`,`intent`,`title`,`body`," +
+	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
+	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`," +
+	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
+	"`auto_merge`,`created_at`"
+
+// scanTask reads one task row. It takes the Scan method rather than a
+// *sql.Row or *sql.Rows so one function serves both the single-row and
+// the many-row query.
+func scanTask(scan func(...any) error) (Task, error) {
+	var t Task
+	var intent, binding string
+	var oaKind, oaID, oReason string
+	var obKind, obID, aaKind, aaID, abKind, abID sql.NullString
+	var tOwner, tName, base, folder sql.NullString
+	var createdAt sql.NullTime
+	if err := scan(&t.ID, &intent, &t.Title, &t.Body,
+		&oaKind, &oaID, &obKind, &obID, &oReason,
+		&aaKind, &aaID, &abKind, &abID,
+		&tOwner, &tName, &binding, &base, &folder,
+		&t.AutoMerge, &createdAt); err != nil {
+		return Task{}, err
 	}
 
 	t.Intent, t.Binding = Intent(intent), RepoBinding(binding)
@@ -184,16 +281,101 @@ func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	if tOwner.Valid {
 		t.Target = &RepoRef{Owner: tOwner.String, Name: tName.String}
 	}
-	t.Base, t.ExternalRef = base.String, extRef.String
+	t.Base = base.String
 	t.Folder = ParseFolder(folder.String)
 	if createdAt.Valid {
 		t.CreatedAt = &createdAt.Time
 	}
+	return t, nil
+}
 
-	if err := s.hydrate(ctx, &t); err != nil {
+// ListTasks returns every task, newest first, fully hydrated.
+//
+// This is what a UI or a CLI lists, and it is deliberately the whole
+// table: grain's task count is bounded by what a small team files by
+// hand, and a store that answers "everything" in one call costs less
+// complexity than a pagination scheme nothing has yet asked for. When
+// that stops being true, this is where a filter goes.
+//
+// Hydration is a handful of queries per task rather than one join over
+// all of them. The join would return a task's row once per read target
+// per grant per link and need de-duplicating in Go, which is more code
+// to get wrong than the extra round trips are worth at this size.
+//
+// Ties on created_at break by id, lexically -- ids are decimal strings,
+// so that is not numeric order. Nothing depends on the tie-break beyond
+// it being stable.
+func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+taskColumns+" FROM `task` ORDER BY `created_at` DESC, `id` DESC")
+	if err != nil {
+		return nil, fmt.Errorf("listing tasks: %w", err)
+	}
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows.Scan)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
 	}
-	return &t, nil
+	rows.Close()
+
+	for i := range out {
+		if err := s.hydrate(ctx, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// States reads every task's state from the view in one query, for a
+// caller rendering a list -- State per task would be one round trip each,
+// and the view already computes the whole column.
+func (s *Store) States(ctx context.Context) (map[string]State, error) {
+	out := map[string]State{}
+	err := each(ctx, s.db, "SELECT `task_id`,`state` FROM `task_state`", nil,
+		func(rows *sql.Rows) error {
+			var id, state string
+			if err := rows.Scan(&id, &state); err != nil {
+				return err
+			}
+			out[id] = State(state)
+			return nil
+		})
+	return out, err
+}
+
+// ObserveField reads a task's current observation (or starts a fresh one
+// if it has none), applies set, and writes it back with ObservedAt
+// stamped.
+//
+// Observe REPLACEs the whole row rather than patching one column, so
+// every caller changing one field without erasing the others has to
+// read-modify-write. That read-modify-write lives here rather than in
+// each caller, because there is now more than one: the orchestrator
+// closing a task out, and a person closing one from the CLI or the UI.
+func (s *Store) ObserveField(ctx context.Context, taskID string, now time.Time,
+	set func(*Observation)) error {
+
+	obs, err := s.GetObservation(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("reading observation for %s: %w", taskID, err)
+	}
+	if obs == nil {
+		obs = &Observation{TaskID: taskID}
+	}
+	set(obs)
+	obs.ObservedAt = &now
+	if err := s.Observe(ctx, *obs); err != nil {
+		return fmt.Errorf("observing %s: %w", taskID, err)
+	}
+	return nil
 }
 
 func (s *Store) hydrate(ctx context.Context, t *Task) error {

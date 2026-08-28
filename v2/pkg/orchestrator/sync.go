@@ -227,7 +227,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		health = healthFrom(detail, checks)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
-		if err := advanceMergeQueueHead(ctx, store, client, task, ref, detail, health, now); err != nil {
+		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, now); err != nil {
 			return err
 		}
 	}
@@ -236,13 +236,10 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		return nil
 	}
 
-	repo, number, err := model.ParseExternalRef(task.ExternalRef)
-	if err != nil {
-		return fmt.Errorf("orchestrator: closing out %s: %w", task.ID, err)
-	}
-	if err := client.CloseIssue(repo.Owner, repo.Name, number); err != nil {
-		return fmt.Errorf("orchestrator: closing %s#%d: %w", repo, number, err)
-	}
+	// Closing out is one write now. It used to be two -- close the task's
+	// GitHub issue, then record the closure -- with the issue closed first
+	// and the store told second, so a crash in between left a closed issue
+	// that grain still believed was open.
 	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.ClosedAt = &now })
 }
 
@@ -250,13 +247,13 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 // merge queue, its PR conflicted or failing checks -- progress: file an
 // automatic fix the first time this happens, or notice the fix already
 // filed has finished and decide whether that resolved things.
-func advanceMergeQueueHead(ctx context.Context, store *model.Store, client github.Client,
+func advanceMergeQueueHead(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, now time.Time) error {
 
 	fixTaskID, hasFix := fixTaskLink(task)
 	if !hasFix {
-		return fileFixTask(ctx, store, client, task, ref, detail, health, now)
+		return fileFixTask(ctx, store, task, ref, detail, health, now)
 	}
 
 	fixState, err := store.State(ctx, fixTaskID)
@@ -274,7 +271,7 @@ func advanceMergeQueueHead(ctx context.Context, store *model.Store, client githu
 	// broken this cycle: the automatic fix did not stick. One attempt is
 	// the deployment's whole policy here -- see fileFixTask's own doc
 	// comment on why a second attempt is not just retried outright.
-	return escalateToUser(ctx, store, client, task, ref, health, now)
+	return escalateToUser(ctx, store, task, ref, health, now)
 }
 
 // fixTaskLink returns the ID task's own LinkFixTask names, if it has filed
@@ -310,64 +307,57 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail) string
 // dispatches it with no human in the loop. That is the issue's own "we
 // will no longer suggest tasks the user needs to approve for this."
 //
-// The fix task carries /base <detail.HeadRef> and /auto-merge true, the
-// same stacked-branch trick core.py's own _suggest_fix used: a fresh
-// branch built on top of ref's own branch is a stacked PR, and
-// /auto-merge is what lets syncEntry merge that stacked PR straight back
-// into ref's branch once it reads clean, with no separate review of the
-// fix itself. LinkFixTask on task is what stops this from running a
+// The fix task's Base is ref's own head branch and its AutoMerge is set,
+// the same stacked-branch trick core.py's own _suggest_fix used: a fresh
+// branch built on top of ref's branch is a stacked PR, and AutoMerge is
+// what lets syncEntry merge that stacked PR straight back into ref's
+// branch once it reads clean, with no separate review of the fix itself.
+// Both were directive lines written into an issue body before; they are
+// columns set directly now. LinkFixTask on task is what stops this from running a
 // second time next cycle (advanceMergeQueueHead checks it first), and what
 // lets a later cycle find the fix task again once it finishes to decide
 // whether ref is fixed.
 //
-// A GitHub issue is filed for the fix too, unlabelled -- visible the same
-// way every other task is, and somewhere for the fix task's own
-// ask_question/comment_on_issue calls to land if it needs one, the same
-// as any other task's ExternalRef.
-func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
+// The fix task is filed straight into the store, and a comment on the
+// task it repairs says so -- both writes grain owns, where the GitHub
+// version needed an issue created for the fix and a comment posted on the
+// original task's own issue.
+func fileFixTask(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, now time.Time) error {
 
-	taskRepo, taskIssueNumber, err := model.ParseExternalRef(task.ExternalRef)
-	if err != nil {
-		return fmt.Errorf("orchestrator: filing a fix task for %s: %w", task.ID, err)
-	}
 	reason := healthReason(health, detail)
+	queue := model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}
 
+	id, err := store.NewTaskID(ctx)
+	if err != nil {
+		return fmt.Errorf("orchestrator: allocating an id for a fix task for %s: %w", task.ID, err)
+	}
 	title := fmt.Sprintf("\U0001F916 grain: fix %s", ref)
 	body := fmt.Sprintf(
-		"%s opened %s (%s), but %s.\n\n"+
+		"Task %s opened %s (%s), but %s.\n\n"+
 			"This is an automatic fix, filed by the merge queue: it works from "+
 			"`%s` (the same branch) and, once it succeeds, its own pull request "+
 			"is merged straight back into `%s` -- no approval needed, since the "+
-			"merge queue dispatches it itself.\n\n"+
-			"/repo %s\n/base %s\n/auto-merge true\n",
-		task.ExternalRef, ref, detail.HTMLURL, reason,
-		detail.HeadRef, detail.HeadRef,
-		ref.Repo, detail.HeadRef,
+			"merge queue dispatches it itself.",
+		task.ID, ref, detail.HTMLURL, reason, detail.HeadRef, detail.HeadRef,
 	)
 
-	issue, err := client.CreateIssue(taskRepo.Owner, taskRepo.Name, title, body, nil)
-	if err != nil {
-		return fmt.Errorf("orchestrator: filing fix issue for %s: %w", ref, err)
-	}
-
 	fixTask := model.Task{
-		ID:     TaskID(taskRepo, issue.Number),
+		ID:     id,
 		Intent: model.IntentImplement,
 		Title:  title,
 		Body:   body,
 		Origin: model.Origin{
-			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}},
+			Attribution: model.Attribution{Actor: queue},
 			Reason:      model.ReasonFix,
 		},
-		Approval:    &model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}},
-		Target:      &ref.Repo,
-		Binding:     model.BindingDirective,
-		Base:        detail.HeadRef,
-		AutoMerge:   true,
-		ExternalRef: model.ExternalRef(taskRepo, issue.Number),
-		CreatedAt:   &now,
+		Approval:  &model.Attribution{Actor: queue},
+		Target:    &ref.Repo,
+		Binding:   model.BindingDirective,
+		Base:      detail.HeadRef,
+		AutoMerge: true,
+		CreatedAt: &now,
 	}
 	if err := store.PutTask(ctx, fixTask); err != nil {
 		return fmt.Errorf("orchestrator: filing fix task %s: %w", fixTask.ID, err)
@@ -379,12 +369,28 @@ func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
 	}
 
 	comment := fmt.Sprintf(
-		"%s %s -- filed %s to fix it automatically. No approval needed: the "+
+		"%s %s -- filed task %s to fix it automatically. No approval needed: the "+
 			"merge queue will run it and, if it succeeds, merge it straight back "+
-			"into this branch.", ref, reason, fixTask.ExternalRef,
+			"into this branch.", ref, reason, fixTask.ID,
 	)
-	if _, err := client.CreateComment(taskRepo.Owner, taskRepo.Name, taskIssueNumber, comment); err != nil {
-		return fmt.Errorf("orchestrator: commenting on %s about its fix task: %w", task.ID, err)
+	if err := queueComment(ctx, store, task.ID, comment, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+// queueComment records something the merge queue said about a task,
+// attributed to it rather than to grain generally -- the merge queue is
+// its own automation principal, and a human reading the conversation can
+// tell its remarks from a relayed agent's.
+func queueComment(ctx context.Context, store *model.Store, taskID, body string, now time.Time) error {
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID:    taskID,
+		Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}},
+		Body:      body,
+		CreatedAt: now,
+	}); err != nil {
+		return fmt.Errorf("orchestrator: commenting on %s: %w", taskID, err)
 	}
 	return nil
 }
@@ -404,13 +410,8 @@ func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
 // _suggest_fix reasoning ("suggesting a fix for a fix risks an unbounded
 // chain") applies just as much to retrying a fix that already failed once
 // without anything about the PR having changed in between.
-func escalateToUser(ctx context.Context, store *model.Store, client github.Client,
+func escalateToUser(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, health model.PrHealth, now time.Time) error {
-
-	taskRepo, taskIssueNumber, err := model.ParseExternalRef(task.ExternalRef)
-	if err != nil {
-		return fmt.Errorf("orchestrator: escalating %s: %w", task.ID, err)
-	}
 
 	comment := fmt.Sprintf(
 		"The automatic fix for %s didn't take -- %s -- so this needs a person. "+
@@ -419,8 +420,8 @@ func escalateToUser(ctx context.Context, store *model.Store, client github.Clien
 			"the next task in %s.",
 		ref, healthReasonSuffix(health), ref, ref.Repo,
 	)
-	if _, err := client.CreateComment(taskRepo.Owner, taskRepo.Name, taskIssueNumber, comment); err != nil {
-		return fmt.Errorf("orchestrator: commenting on %s about its stuck merge: %w", task.ID, err)
+	if err := queueComment(ctx, store, task.ID, comment, now); err != nil {
+		return err
 	}
 	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.MergeQueueBlockedAt = &now })
 }

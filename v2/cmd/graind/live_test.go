@@ -48,6 +48,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 // syncedSim serializes every call into a *githubsim.Sim: the real Sim
@@ -231,7 +232,7 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	// no hook for a test to insert a task in between, so it has to
 	// already be there -- the same "-data-dir already has work queued"
 	// shape a real restart finds.
-	store, db, err := openStore(dataDir)
+	store, db, err := openStore(dataDir, dolt.ServerConfig{})
 	if err != nil {
 		t.Fatalf("seeding the store: %v", err)
 	}

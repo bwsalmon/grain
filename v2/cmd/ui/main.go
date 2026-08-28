@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -16,84 +17,99 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
 	"strings"
 
-	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
 func main() {
-	taskRepo := flag.String("task-repo", "", "owner/name of the GitHub repo task issues are filed against (required)")
 	addr := flag.String("addr", "127.0.0.1:8420", "address to serve the UI on")
-	githubHost := flag.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing")
-	githubInsecureHTTP := flag.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)")
-	githubTokenFile := flag.String("github-token-file", "", "file holding a GitHub token to authenticate as (falls back to $GITHUB_TOKEN, then unauthenticated)")
-	dryRun := flag.Bool("dry-run", false, "print every GitHub mutation instead of making it -- for trying the UI with no write access")
+	storeAddr := flag.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- the multi-writer deployment (graind plus this plus a CLI)")
+	storeDatabase := flag.String("store-database", "grain", "database name on -store-addr")
+	storeUser := flag.String("store-user", "root", "user to connect to -store-addr as")
+	storePasswordFile := flag.String("store-password-file", "", "file holding the password for -store-user")
+	dataDir := flag.String("data-dir", "", "root directory of an embedded store, used when -store-addr is unset -- single writer, so nothing else may be running against it")
+	actor := flag.String("as", "", "principal to attribute tasks created here to (defaults to the OS user)")
+	defaultTargetRepo := flag.String("default-target-repo", "",
+		"owner/name a task with no repo of its own targets")
 	open := flag.Bool("open", true, "open the UI in the system's default browser once it's listening")
 	flag.Parse()
 
-	if *taskRepo == "" {
-		fmt.Fprintln(os.Stderr, "ui: -task-repo is required")
-		os.Exit(2)
-	}
-	repo, err := model.ParseRepo(*taskRepo)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ui: -task-repo: %v\n", err)
-		os.Exit(2)
-	}
-
-	client, err := buildClient(*githubHost, *githubInsecureHTTP, *githubTokenFile, *dryRun)
+	server, err := serverConfig(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile)
 	if err != nil {
 		log.Fatalf("ui: %v", err)
 	}
+	db, err := dolt.OpenOrConnect(*dataDir, server)
+	if err != nil {
+		log.Fatalf("ui: opening the task store: %v", err)
+	}
+	defer db.Close()
 
-	srv := ui.NewServer(ui.Config{
-		TaskRepo:     repo,
-		Labels:       ui.DefaultLabels(),
+	store := model.New(db)
+	if err := store.Init(context.Background()); err != nil {
+		log.Fatalf("ui: applying the schema: %v", err)
+	}
+
+	cfg := ui.Config{
+		Actor:        ui.DefaultActor(actorID(*actor)),
 		Capabilities: ui.DefaultCapabilities(),
-	}, client)
+	}
+	if *defaultTargetRepo != "" {
+		repo, err := model.ParseRepo(*defaultTargetRepo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ui: -default-target-repo: %v\n", err)
+			os.Exit(2)
+		}
+		cfg.DefaultTarget = &repo
+	}
+	srv := ui.NewServer(cfg, store)
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatalf("ui: listening on %s: %v", *addr, err)
 	}
 	url := "http://" + ln.Addr().String()
-	log.Printf("ui: serving %s on %s", repo, url)
+	log.Printf("ui: serving the task store on %s as %s", url, cfg.Actor.ID)
 	if *open {
 		openBrowser(url)
 	}
 	log.Fatal(http.Serve(ln, srv))
 }
 
-// buildClient resolves the GitHub token ladder (-github-token-file, then
-// $GITHUB_TOKEN, then unauthenticated -- fine for a public repo, per
-// github.NewClient's own doc comment) and wraps it in DryRunClient when
-// -dry-run asks for one, the same split every other v2 binary that talks
-// to GitHub offers.
-func buildClient(host string, insecureHTTP bool, tokenFile string, dryRun bool) (github.Client, error) {
-	var token *string
-	switch {
-	case tokenFile != "":
-		data, err := os.ReadFile(tokenFile)
+// serverConfig assembles a dolt.ServerConfig from the -store-* flags. An
+// empty addr means "no server", which OpenOrConnect reads as "use the
+// embedded database".
+func serverConfig(addr, database, user, passwordFile string) (dolt.ServerConfig, error) {
+	if addr == "" {
+		return dolt.ServerConfig{}, nil
+	}
+	cfg := dolt.ServerConfig{Addr: addr, Database: database, User: user}
+	if passwordFile != "" {
+		data, err := os.ReadFile(passwordFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading -github-token-file: %w", err)
+			return dolt.ServerConfig{}, fmt.Errorf("reading -store-password-file: %w", err)
 		}
-		t := strings.TrimSpace(string(data))
-		token = &t
-	case os.Getenv("GITHUB_TOKEN") != "":
-		t := os.Getenv("GITHUB_TOKEN")
-		token = &t
+		cfg.Password = strings.TrimSpace(string(data))
 	}
+	return cfg, nil
+}
 
-	transport := github.NewRealTransport(host)
-	transport.UseTLS = !insecureHTTP
-	var client github.Client = github.NewClient(transport, github.StaticToken{Token: token})
-	if dryRun {
-		client = github.DryRunClient{Inner: client}
+// actorID resolves who this process acts as: the -as flag, else the OS
+// user, else ui.DefaultActor's own fallback. A GitHub issue used to
+// answer this with its own opening account; nothing files an issue now,
+// so the deployment has to say.
+func actorID(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
 	}
-	return client, nil
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return ""
 }
 
 // openBrowser best-effort launches url in the system's default browser --

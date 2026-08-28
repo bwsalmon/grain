@@ -36,6 +36,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
@@ -72,7 +73,7 @@ func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "secrets", "github", "credentials.json"), []byte(`{"*": "anonymous"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, db, err := openStore(dataDir)
+	store, db, err := openStore(dataDir, dolt.ServerConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

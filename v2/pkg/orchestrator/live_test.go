@@ -16,10 +16,10 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
-	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
+	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
 // credentialSlot gives slot's own sandbox directory a git identity, the
@@ -96,32 +96,55 @@ func scriptedFramework(script []*genai.GenerateContentResponse) func() agent.Fra
 	return func() agent.Framework { return gemini.NewForTest(&scriptedGenerator{responses: script}) }
 }
 
+// fileTask creates a task exactly the way a person at the CLI or the UI
+// does -- through pkg/ui.Client, against the same store RunCycle reads.
+// That is the whole point of driving these two scenarios this way: the
+// task's entire existence is one store write, where it used to be a
+// labelled GitHub issue that a poll had to notice first.
+func fileTask(t *testing.T, ctx context.Context, store *model.Store, repo model.RepoRef,
+	title, body string) (*ui.Client, ui.Task) {
+
+	t.Helper()
+	client := ui.NewClient(ui.Config{
+		Actor:         ui.DefaultActor("alice"),
+		DefaultTarget: &repo,
+		Capabilities:  ui.DefaultCapabilities(),
+	}, store)
+	client.Now = func() time.Time { return baseTime }
+
+	task, err := client.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: title, Description: body, Approved: true,
+	})
+	if err != nil {
+		t.Fatalf("filing a task: %v", err)
+	}
+	return client, task
+}
+
 func TestRunCycleCompletesEndToEnd(t *testing.T) {
 	const slot = "sandbox-249-1"
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	sim.Issues[1] = &githubsim.Issue{
-		Title: "add a NOTES file", Body: "please add one\n\n/repo acme/widgets\n",
-		Author: "alice", Labels: map[string]struct{}{"grain-agent": {}},
-	}
-	cfg := orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"}
+	_, task := fileTask(t, ctx, store, repo, "add a NOTES file", "please add one")
+
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 	credentialSlot(t, sandboxes, slot)
 
 	clock := baseTime
-	taskID := orchestrator.TaskID(repo, 1)
-	branch := model.BranchName(taskID)
+	branch := model.BranchName(task.ID)
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, Config: cfg, Slots: []string{slot},
-		Framework: scriptedFramework(pushScript(sim.BareRepo, branch, taskID)),
+		Store: store, Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Framework: scriptedFramework(pushScript(sim.BareRepo, branch, task.ID)),
 	}
+	// One cycle, straight from the store write: no poll, and no tick spent
+	// waiting for one to notice the task exists.
 	if err := orchestrator.RunCycle(ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle: %v", err)
 	}
 
-	st, err := store.State(ctx, taskID)
+	st, err := store.State(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,13 +153,6 @@ func TestRunCycleCompletesEndToEnd(t *testing.T) {
 	}
 	if len(sim.PullRequests) != 1 {
 		t.Fatalf("expected a pull request to have been opened, got %+v", sim.PullRequests)
-	}
-	issue, err := client.GetIssue("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if issue.HasLabel("grain-agent") {
-		t.Fatal("expected the trigger label to have been removed")
 	}
 
 	// GitHub itself merges the PR -- nothing in this package does that; a
@@ -151,19 +167,18 @@ func TestRunCycleCompletesEndToEnd(t *testing.T) {
 		t.Fatalf("RunCycle (second, sync-only): %v", err)
 	}
 
-	st, err = store.State(ctx, taskID)
+	st, err = store.State(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st != model.StateClosed {
 		t.Fatalf("state after the merge = %q, want closed", st)
 	}
-	issue, err = client.GetIssue("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if issue.State != "closed" {
-		t.Fatalf("task-repo issue state = %q, want closed", issue.State)
+	// Closing out is one store write now. There is no issue to close
+	// alongside it, and nothing filed one: the only thing this run put on
+	// GitHub is the pull request.
+	if len(sim.Issues) != 0 {
+		t.Fatalf("expected no GitHub issues at all, got %+v", sim.Issues)
 	}
 }
 
@@ -172,56 +187,54 @@ func TestRunCycleParksOnAQuestionThenResumesAfterAReply(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	sim.Issues[1] = &githubsim.Issue{
-		Title: "ambiguous task", Body: "do the thing\n\n/repo acme/widgets\n",
-		Author: "alice", Labels: map[string]struct{}{"grain-agent": {}},
-	}
-	cfg := orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"}
+	tasks, task := fileTask(t, ctx, store, repo, "ambiguous task", "do the thing")
+
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 	credentialSlot(t, sandboxes, slot)
-	taskID := orchestrator.TaskID(repo, 1)
 
 	clock := baseTime
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, Config: cfg, Slots: []string{slot},
+		Store: store, Client: client, Sandboxes: sandboxes, Slots: []string{slot},
 		Framework: scriptedFramework(askScript("which file should this go in?")),
 	}
 	if err := orchestrator.RunCycle(ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle: %v", err)
 	}
 
-	st, err := store.State(ctx, taskID)
+	st, err := store.State(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st != model.StateAwaitingReply {
 		t.Fatalf("state after the question = %q, want awaiting_reply", st)
 	}
-	comments, err := client.ListComments("acme", "widgets", 1)
+	detail, err := tasks.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(comments) != 1 || comments[0].Body != "which file should this go in?" {
-		t.Fatalf("got %+v", comments)
+	if len(detail.Comments) != 1 || detail.Comments[0].Body != "which file should this go in?" {
+		t.Fatalf("conversation = %+v, want the relayed question", detail.Comments)
+	}
+	if detail.Comments[0].OnBehalfOf == "" {
+		t.Fatal("the relayed question is not attributed on behalf of the agent")
 	}
 
-	// A human replies and re-applies the trigger label -- the only way an
-	// awaiting_reply task ever queues again (poll.go's own doc comment).
-	if _, err := client.CreateComment("acme", "widgets", 1, "put it in NOTES.md"); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.AddLabel("acme", "widgets", 1, "grain-agent"); err != nil {
+	// A human replies. That is the whole of it: replying is what resumes
+	// the task. It used to take two acts -- comment, then re-apply the
+	// trigger label so the next poll would notice -- and forgetting the
+	// second left the task parked forever.
+	if err := tasks.AddComment(ctx, task.ID, "put it in NOTES.md"); err != nil {
 		t.Fatal(err)
 	}
 
-	branch := model.BranchName(taskID)
-	deps.Framework = scriptedFramework(pushScript(sim.BareRepo, branch, taskID))
+	branch := model.BranchName(task.ID)
+	deps.Framework = scriptedFramework(pushScript(sim.BareRepo, branch, task.ID))
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle (resume): %v", err)
 	}
 
-	st, err = store.State(ctx, taskID)
+	st, err = store.State(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

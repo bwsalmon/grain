@@ -45,37 +45,42 @@ type Reconciler struct {
 // Reconcilers returns the cycle's reconcilers, in the order RunCycle runs
 // them.
 //
-// The order is a latency preference, not a dependency: polling first lets
-// an issue filed since the last tick dispatch on this one instead of
-// waiting for the next, and syncing last lets a pull request opened
-// moments ago by this very cycle be picked up without a tick's delay.
-// Every one of them still reads its own inputs from the store, so any
-// other order produces the same state one cycle later — which is exactly
-// why one failing does not invalidate the ones after it.
+// There were three. "poll" listed the task repo's labelled GitHub issues
+// and turned each into a task, and it is gone: tasks are created by
+// writing them (README, "Input is a model update, not a GitHub issue"),
+// so there is no longer an outside source of tasks to reconcile against.
+// A task filed by the CLI or the UI is in task_ready the moment it is
+// written, rather than on whichever tick happened to poll next.
+//
+// The order of the two that remain is a latency preference, not a
+// dependency: syncing last lets a pull request opened moments ago by this
+// very cycle be picked up without a tick's delay. Both read their own
+// inputs from the store, so the other order produces the same state one
+// cycle later — which is exactly why one failing does not invalidate the
+// other.
 func Reconcilers() []Reconciler {
 	return []Reconciler{
-		{Name: "poll", Reconcile: reconcilePoll},
 		{Name: "dispatch", Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
 	}
 }
 
-// RunCycle is v2's whole Orchestrator.run_once equivalent: poll the task
-// repo, let dispatch.Cycle decide what runs, actually run it, turn each
-// result into the GitHub effect it implies, and refresh every pull
-// request grain is still watching. A deployment's own timer calls this
-// once per tick; nothing here loops on its own.
+// RunCycle is v2's whole Orchestrator.run_once equivalent: let
+// dispatch.Cycle decide what runs, actually run it, turn each result into
+// the effect it implies, and refresh every pull request grain is still
+// watching. A deployment's own timer calls this once per tick; nothing
+// here loops on its own.
 //
 // **Every reconciler runs, whatever the ones before it did.** A cycle is
-// not a pipeline: a GitHub outage during intake used to return early and
-// take dispatch and pull-request sync down with it, so a merge that was
-// ready and a queue that needed advancing waited on a failure they had
-// nothing to do with. Each Reconcilers() entry now runs on its own and
-// its error is collected rather than returned, so what a cycle achieves
-// degrades to whichever parts of the world are reachable rather than to
-// the first one that isn't. The returned error joins everything that
-// failed (errors.Join, so errors.Is still answers for any of them);
-// graind logs it and ticks again.
+// not a pipeline: a GitHub outage in one reconciler used to return early
+// and take the others down with it, so a merge that was ready and a queue
+// that needed advancing waited on a failure they had nothing to do with.
+// Each Reconcilers() entry runs on its own and its error is collected
+// rather than returned, so what a cycle achieves degrades to whichever
+// parts of the world are reachable rather than to the first one that
+// isn't. The returned error joins everything that failed (errors.Join, so
+// errors.Is still answers for any of them); graind logs it and ticks
+// again.
 //
 // Cancellation is the one thing that does stop a cycle early, since a
 // cancelled context means the daemon is shutting down rather than that
@@ -92,11 +97,6 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// reconcilePoll brings the task repo's labelled issues into the store.
-func reconcilePoll(ctx context.Context, deps Deps, now time.Time) error {
-	return PollIssues(ctx, deps.Store, deps.Client, deps.Config, now)
 }
 
 // reconcileSync refreshes every pull request grain is still watching.

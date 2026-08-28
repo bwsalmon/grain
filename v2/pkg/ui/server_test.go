@@ -1,4 +1,9 @@
-package ui
+package ui_test
+
+// The HTTP surface, over the same real store client_test.go uses. These
+// assert on status codes and JSON shape; what the calls actually do to a
+// task is client_test.go's job, since Server is a thin shim over Client
+// and nothing more.
 
 import (
 	"encoding/json"
@@ -8,24 +13,26 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
-func testServer() (*Server, *memClient) {
-	client := newMemClient()
-	cfg := Config{
-		TaskRepo:     model.RepoRef{Owner: "acme", Name: "tasks"},
-		Labels:       DefaultLabels(),
-		Capabilities: DefaultCapabilities(),
-	}
-	return NewServer(cfg, client), client
+func testServer(t *testing.T) (*ui.Server, *ui.Client) {
+	t.Helper()
+	client, _, _ := testClient(t)
+	return ui.NewServerWithClient(client), client
 }
 
-func do(t *testing.T, s *Server, method, path, body string) *httptest.ResponseRecorder {
+func do(t *testing.T, srv *ui.Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	var reader *strings.Reader
+	if body == "" {
+		reader = strings.NewReader("")
+	} else {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
+	srv.ServeHTTP(rec, req)
 	return rec
 }
 
@@ -33,225 +40,144 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 	t.Helper()
 	var v T
 	if err := json.NewDecoder(rec.Body).Decode(&v); err != nil {
-		t.Fatalf("decoding response %s: %v", rec.Body.String(), err)
+		t.Fatalf("decoding response: %v", err)
 	}
 	return v
 }
 
-func TestListTasksMergesAcrossStateLabelsAndDeduplicates(t *testing.T) {
-	s, client := testServer()
-	l := DefaultLabels()
-	client.seed(1, "queued task", "body", l.Trigger)
-	client.seed(2, "proposed task", "body", l.NeedsApproval)
-	// A task that (incorrectly) carries two state labels must still
-	// appear exactly once in the merged list, not twice.
-	client.seed(3, "double-labelled task", "body", l.Completed, l.InProgress)
-	// An issue on the repo carrying none of the state labels (not a task
-	// at all) must not appear.
-	client.seed(4, "unrelated issue", "body")
+func TestCreateThenListAndGet(t *testing.T) {
+	srv, _ := testServer(t)
 
-	rec := do(t, s, "GET", "/api/tasks", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	tasks := decode[[]Task](t, rec)
-	if len(tasks) != 3 {
-		t.Fatalf("got %d tasks, want 3: %+v", len(tasks), tasks)
-	}
-	byNumber := map[int]Task{}
-	for _, task := range tasks {
-		byNumber[task.Number] = task
-	}
-	if byNumber[1].State != StateQueued {
-		t.Errorf("task 1 state = %q, want queued", byNumber[1].State)
-	}
-	if byNumber[2].State != StateNeedsApproval {
-		t.Errorf("task 2 state = %q, want needs_approval", byNumber[2].State)
-	}
-	if byNumber[3].State != StateCompleted {
-		t.Errorf("task 3 state = %q, want completed (precedence over in-progress)", byNumber[3].State)
-	}
-	if _, ok := byNumber[4]; ok {
-		t.Errorf("unrelated issue #4 should not appear in the task list")
-	}
-	// Newest first.
-	if tasks[0].Number < tasks[1].Number {
-		t.Errorf("tasks not sorted newest-first: %v", tasks)
-	}
-}
-
-func TestCreateTaskRendersDirectivesAndLabels(t *testing.T) {
-	s, client := testServer()
-	payload := `{
-		"title": "Fix the widget",
-		"description": "The widget is broken.",
-		"repo": "acme/widget",
-		"base": "release",
-		"autoMerge": true,
-		"capabilities": ["gemini-key"],
-		"approved": true
-	}`
-	rec := do(t, s, "POST", "/api/tasks", payload)
+	rec := do(t, srv, http.MethodPost, "/api/tasks",
+		`{"title":"fix it","description":"please","approved":true}`)
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("create status = %d, want 201: %s", rec.Code, rec.Body)
 	}
-	task := decode[Task](t, rec)
-	if task.Repo != "acme/widget" || task.Base != "release" || task.AutoMerge == nil || !*task.AutoMerge {
-		t.Fatalf("declared fields not round-tripped: %+v", task)
+	created := decode[ui.Task](t, rec)
+	if created.ID == "" {
+		t.Fatal("created task came back with no id")
 	}
-	if task.State != StateQueued {
-		t.Fatalf("approved task state = %q, want queued", task.State)
-	}
-	if len(task.Capabilities) != 1 || task.Capabilities[0] != "gemini-key" {
-		t.Fatalf("capabilities = %v, want [gemini-key]", task.Capabilities)
+	if created.State != model.StateQueued {
+		t.Fatalf("state = %q, want queued", created.State)
 	}
 
-	issue, _ := client.GetIssue("acme", "tasks", task.Number)
-	if !issue.HasLabel(DefaultLabels().Trigger) {
-		t.Errorf("created issue missing trigger label: %+v", issue.Labels)
-	}
-	if issue.HasLabel(DefaultLabels().NeedsApproval) {
-		t.Errorf("approved task should not carry needsApproval label")
-	}
-	if !strings.Contains(issue.Body, "The widget is broken.") {
-		t.Errorf("issue body dropped the description: %q", issue.Body)
-	}
-}
-
-func TestCreateTaskUnapprovedFilesAsProposal(t *testing.T) {
-	s, client := testServer()
-	rec := do(t, s, "POST", "/api/tasks", `{"title": "Maybe do this"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	task := decode[Task](t, rec)
-	if task.State != StateNeedsApproval {
-		t.Fatalf("state = %q, want needs_approval", task.State)
-	}
-	issue, _ := client.GetIssue("acme", "tasks", task.Number)
-	if !issue.HasLabel(DefaultLabels().NeedsApproval) {
-		t.Errorf("proposed task missing needsApproval label: %+v", issue.Labels)
-	}
-}
-
-func TestCreateTaskRejectsEmptyTitle(t *testing.T) {
-	s, _ := testServer()
-	rec := do(t, s, "POST", "/api/tasks", `{"title": ""}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestCreateTaskRejectsUnknownCapability(t *testing.T) {
-	s, _ := testServer()
-	rec := do(t, s, "POST", "/api/tasks", `{"title": "x", "capabilities": ["no-such-thing"]}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestApproveSwapsNeedsApprovalForTrigger(t *testing.T) {
-	s, client := testServer()
-	l := DefaultLabels()
-	client.seed(5, "proposed", "body", l.NeedsApproval)
-
-	rec := do(t, s, "POST", "/api/tasks/5/approve", "")
+	rec = do(t, srv, http.MethodGet, "/api/tasks", "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("list status = %d, want 200", rec.Code)
 	}
-	task := decode[Task](t, rec)
-	if task.State != StateQueued {
-		t.Fatalf("state = %q, want queued", task.State)
+	if listed := decode[[]ui.Task](t, rec); len(listed) != 1 {
+		t.Fatalf("listed %d tasks, want 1", len(listed))
 	}
-	issue, _ := client.GetIssue("acme", "tasks", 5)
-	if issue.HasLabel(l.NeedsApproval) {
-		t.Errorf("needsApproval label should be gone")
+
+	rec = do(t, srv, http.MethodGet, "/api/tasks/"+created.ID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200", rec.Code)
 	}
-	if !issue.HasLabel(l.Trigger) {
-		t.Errorf("trigger label should be present")
+	if detail := decode[ui.TaskDetail](t, rec); detail.ID != created.ID {
+		t.Fatalf("got task %q, want %q", detail.ID, created.ID)
 	}
 }
 
-func TestSetCapabilityAttachAndDetach(t *testing.T) {
-	s, client := testServer()
-	l := DefaultLabels()
-	client.seed(6, "task", "body", l.Trigger)
-
-	rec := do(t, s, "POST", "/api/tasks/6/capabilities", `{"id": "self-debug", "attach": true}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("attach: status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	task := decode[Task](t, rec)
-	if len(task.Capabilities) != 1 || task.Capabilities[0] != "self-debug" {
-		t.Fatalf("after attach, capabilities = %v", task.Capabilities)
-	}
-
-	rec = do(t, s, "POST", "/api/tasks/6/capabilities", `{"id": "self-debug", "attach": false}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("detach: status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	task = decode[Task](t, rec)
-	if len(task.Capabilities) != 0 {
-		t.Fatalf("after detach, capabilities = %v, want none", task.Capabilities)
-	}
-
-	issue, _ := client.GetIssue("acme", "tasks", 6)
-	if issue.HasLabel("grain-self-debug") {
-		t.Errorf("label should have been removed from the issue")
-	}
-}
-
-func TestCommentsAndCloseReopen(t *testing.T) {
-	s, client := testServer()
-	l := DefaultLabels()
-	client.seed(7, "task", "body", l.Trigger)
-
-	rec := do(t, s, "POST", "/api/tasks/7/comments", `{"body": "hello"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("comment: status = %d body = %s", rec.Code, rec.Body.String())
-	}
-
-	rec = do(t, s, "GET", "/api/tasks/7", "")
-	detail := decode[TaskDetail](t, rec)
-	if len(detail.Comments) != 1 || detail.Comments[0].Body != "hello" {
-		t.Fatalf("comments = %+v", detail.Comments)
-	}
-
-	rec = do(t, s, "POST", "/api/tasks/7/close", "")
-	task := decode[Task](t, rec)
-	if task.GitHubState != "closed" {
-		t.Fatalf("githubState = %q after close, want closed", task.GitHubState)
-	}
-
-	rec = do(t, s, "POST", "/api/tasks/7/reopen", "")
-	task = decode[Task](t, rec)
-	if task.GitHubState != "open" {
-		t.Fatalf("githubState = %q after reopen, want open", task.GitHubState)
-	}
-	_ = client
-}
-
-func TestGetTaskNotFound(t *testing.T) {
-	s, _ := testServer()
-	rec := do(t, s, "GET", "/api/tasks/999", "")
-	if rec.Code != http.StatusNotFound {
+func TestGetUnknownTaskIs404(t *testing.T) {
+	srv, _ := testServer(t)
+	if rec := do(t, srv, http.MethodGet, "/api/tasks/404", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 
-func TestConfigEndpointListsCapabilities(t *testing.T) {
-	s, _ := testServer()
-	rec := do(t, s, "GET", "/api/config", "")
+func TestCreateRejectionsAre400(t *testing.T) {
+	srv, _ := testServer(t)
+
+	for name, body := range map[string]string{
+		"empty title":        `{"title":"  "}`,
+		"unknown capability": `{"title":"t","capabilities":["nope"]}`,
+		"malformed json":     `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := do(t, srv, http.MethodPost, "/api/tasks", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// Every mutating route answers with the task as it now stands, so the
+// frontend never has to assume its own optimistic update was right.
+func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it"}`)
+	id := decode[ui.Task](t, rec).ID
+
+	// A slice, not a map: these run against one task in sequence, so the
+	// expected state after each step depends on the step before it. Map
+	// iteration order is randomised, which would make that a coin flip.
+	for _, call := range []struct {
+		name string
+		path string
+		body string
+		want model.State
+	}{
+		{name: "approve", path: "/approve", want: model.StateQueued},
+		{name: "capability", path: "/capabilities", body: `{"id":"gemini-key","attach":true}`, want: model.StateQueued},
+		{name: "comment", path: "/comments", body: `{"body":"hello"}`, want: model.StateQueued},
+		{name: "close", path: "/close", want: model.StateClosed},
+	} {
+		name := call.name
+		t.Run(name, func(t *testing.T) {
+			rec := do(t, srv, http.MethodPost, "/api/tasks/"+id+call.path, call.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+			}
+			task := decode[ui.Task](t, rec)
+			if task.ID != id {
+				t.Fatalf("responded with task %q, want %q", task.ID, id)
+			}
+			if task.State != call.want {
+				t.Fatalf("state = %q, want %q", task.State, call.want)
+			}
+		})
+	}
+
+	rec = do(t, srv, http.MethodPost, "/api/tasks/"+id+"/reopen", "")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
+		t.Fatalf("reopen status = %d, want 200", rec.Code)
 	}
-	var cfg struct {
-		Capabilities []Capability `json:"capabilities"`
+	if task := decode[ui.Task](t, rec); task.State != model.StateQueued {
+		t.Fatalf("state after reopen = %q, want queued", task.State)
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&cfg); err != nil {
-		t.Fatal(err)
+}
+
+func TestConfigEndpointReportsActorAndCapabilities(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if len(cfg.Capabilities) != len(DefaultCapabilities()) {
-		t.Fatalf("got %d capabilities, want %d", len(cfg.Capabilities), len(DefaultCapabilities()))
+	cfg := decode[struct {
+		Actor        model.Principal `json:"actor"`
+		Capabilities []ui.Capability `json:"capabilities"`
+	}](t, rec)
+
+	if cfg.Actor.ID != "alice" {
+		t.Fatalf("actor = %+v, want the configured one", cfg.Actor)
+	}
+	if len(cfg.Capabilities) != len(ui.DefaultCapabilities()) {
+		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.DefaultCapabilities()))
+	}
+	// The GitHub label a capability used to carry is gone from the wire
+	// shape along with the labels themselves.
+	if strings.Contains(rec.Body.String(), "grain-gemini-key") {
+		t.Fatalf("config still reports a GitHub label: %s", rec.Body)
+	}
+}
+
+func TestStaticFrontendIsServed(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodGet, "/", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 }

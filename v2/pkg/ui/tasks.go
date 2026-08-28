@@ -3,132 +3,130 @@ package ui
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
-	"sort"
-	"strconv"
-	"strings"
+	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/github"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
-// Task is a task issue's JSON shape -- everything the frontend needs to
-// list and render one, with the declared (/repo, /base, /auto-merge)
-// fields already split out of the free-text body the same way a create
-// form edits them, per docs/data-model.md's "a form knows all of that
-// before the task exists."
+// Task is a task's JSON shape -- everything the frontend needs to list
+// and render one.
+//
+// ID is a string, not a number. It used to be the GitHub issue number a
+// task was named after; it is now whatever Store.NewTaskID allocated,
+// which happens to be decimal today and is opaque to everything here.
+//
+// Three fields the issue-backed shape carried are gone: htmlUrl and
+// githubState, because there is no issue to link to or mirror the open/
+// closed flag of, and labels, because state and capabilities are no
+// longer derived from any. PullRequest replaces htmlUrl as the one thing
+// worth linking to on GitHub, read off the task's own LinkFixes link.
 type Task struct {
-	Number       int      `json:"number"`
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
-	HTMLURL      string   `json:"htmlUrl"`
-	Author       string   `json:"author"`
-	State        State    `json:"state"`
-	GitHubState  string   `json:"githubState"`
-	Repo         string   `json:"repo,omitempty"`
-	Base         string   `json:"base,omitempty"`
-	AutoMerge    *bool    `json:"autoMerge,omitempty"`
-	Capabilities []string `json:"capabilities"`
-	Labels       []string `json:"labels"`
+	ID           string      `json:"id"`
+	Title        string      `json:"title"`
+	Description  string      `json:"description"`
+	Author       string      `json:"author"`
+	State        model.State `json:"state"`
+	Repo         string      `json:"repo,omitempty"`
+	Base         string      `json:"base,omitempty"`
+	AutoMerge    bool        `json:"autoMerge"`
+	Capabilities []string    `json:"capabilities"`
+	PullRequest  string      `json:"pullRequest,omitempty"`
+	CreatedAt    *time.Time  `json:"createdAt,omitempty"`
 }
 
-// Comment is a plain top-level issue comment's JSON shape.
+// Comment is one entry in a task's conversation.
+//
+// AuthorAssociation is gone with the issue thread that had one. What
+// replaces it says more: OnBehalfOf is set when grain relayed somebody
+// else's words, so a question from a dispatched run renders as grain
+// speaking for an agent rather than as grain's own.
 type Comment struct {
-	ID                int    `json:"id"`
-	User              string `json:"user"`
-	Body              string `json:"body"`
-	AuthorAssociation string `json:"authorAssociation"`
+	ID         int64     `json:"id"`
+	Author     string    `json:"author"`
+	AuthorKind string    `json:"authorKind"`
+	OnBehalfOf string    `json:"onBehalfOf,omitempty"`
+	Body       string    `json:"body"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
-// TaskDetail is one task plus its conversation thread -- what GET
-// /api/tasks/{number} returns, wider than the list shape (Task) since a
-// list of many tasks has no reason to pay for every comment thread.
+// TaskDetail is one task plus its conversation -- what GET
+// /api/tasks/{id} returns, wider than the list shape since a list of many
+// tasks has no reason to pay for every conversation.
 type TaskDetail struct {
 	Task
 	Comments []Comment `json:"comments"`
 }
 
-func taskFrom(issue github.Issue) Task {
-	d, err := parseDirectives(issue.Body)
-	if err != nil {
-		// A body a human hand-edited into something parseDirectives can't
-		// read is still a real issue worth showing -- just with its
-		// declared fields left blank, the same "genuinely dynamic, shows up
-		// at read time" case docs/data-model.md carves out for the parked
-		// path. Logged, not surfaced as a 500: one malformed task must not
-		// take the whole list down with it.
-		log.Printf("ui: parsing directives on #%d: %v", issue.Number, err)
-	}
-	t := Task{
-		Number: issue.Number, Title: issue.Title, HTMLURL: issue.HTMLURL,
-		Author: issue.Author, GitHubState: issue.State,
-		Description:  stripDirectives(issue.Body),
+func taskFrom(t model.Task, state model.State) Task {
+	out := Task{
+		ID:           t.ID,
+		Title:        t.Title,
+		Description:  t.Body,
+		Author:       t.Origin.Attribution.Actor.ID,
+		State:        state,
+		Base:         t.Base,
+		AutoMerge:    t.AutoMerge,
 		Capabilities: []string{},
-		Labels:       []string{},
+		CreatedAt:    t.CreatedAt,
 	}
-	if d.Repo != nil {
-		t.Repo = d.Repo.String()
+	if t.Target != nil {
+		out.Repo = t.Target.String()
 	}
-	t.Base = d.Base
-	if d.HasAutoMerge {
-		am := d.AutoMerge
-		t.AutoMerge = &am
+	for _, g := range t.Grants {
+		out.Capabilities = append(out.Capabilities, g.Capability)
 	}
-	for name := range issue.Labels {
-		t.Labels = append(t.Labels, name)
+	for _, l := range t.Links {
+		if l.Kind == model.LinkFixes {
+			out.PullRequest = l.Target
+		}
 	}
-	sort.Strings(t.Labels)
-	return t
+	return out
 }
 
-// stripDirectives removes directive lines from body, leaving the
-// free-text description a create form edits -- bodyOf's inverse for the
-// part that isn't a declared field.
-func stripDirectives(body string) string {
-	lines := strings.Split(body, "\n")
-	kept := lines[:0]
-	for _, line := range lines {
-		if directiveRe.MatchString(line) {
-			continue
-		}
-		kept = append(kept, line)
+func commentFrom(c model.Comment) Comment {
+	out := Comment{
+		ID:         c.ID,
+		Author:     c.Author.Actor.ID,
+		AuthorKind: string(c.Author.Actor.Kind),
+		Body:       c.Body,
+		CreatedAt:  c.CreatedAt,
 	}
-	return strings.TrimSpace(strings.Join(kept, "\n"))
+	if b := c.Author.OnBehalfOf; b != nil {
+		out.OnBehalfOf = b.ID
+	}
+	return out
 }
 
 // --- handlers ------------------------------------------------------------
 //
 // Every handler below is a thin HTTP shim over a Client method: decode
 // the request, call it, translate the result (or error) into a status
-// code and a JSON body. The logic that actually reads or writes GitHub
+// code and a JSON body. The logic that actually reads or writes the store
 // lives in client.go, once, so a non-HTTP caller (cmd/grain's CLI) gets
 // identical behaviour by calling the same Client directly.
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"taskRepo":     s.tasks.Config.TaskRepo,
-		"labels":       s.tasks.Config.Labels,
-		"capabilities": s.tasks.Config.Capabilities,
+		"actor":         s.tasks.Config.Actor,
+		"defaultTarget": s.tasks.Config.DefaultTarget,
+		"capabilities":  s.tasks.Config.Capabilities,
 	})
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.tasks.ListTasks()
+	tasks, err := s.tasks.ListTasks(r.Context())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeClientError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
 }
 
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	number, ok := s.pathNumber(w, r)
-	if !ok {
-		return
-	}
-	detail, err := s.tasks.GetTask(number)
+	detail, err := s.tasks.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeGitHubError(w, err)
+		writeClientError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)
@@ -139,7 +137,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	task, err := s.tasks.CreateTask(req)
+	task, err := s.tasks.CreateTask(r.Context(), req)
 	if err != nil {
 		writeClientError(w, err)
 		return
@@ -153,33 +151,27 @@ type setCapabilityRequest struct {
 }
 
 func (s *Server) handleSetCapability(w http.ResponseWriter, r *http.Request) {
-	number, ok := s.pathNumber(w, r)
-	if !ok {
-		return
-	}
 	var req setCapabilityRequest
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.tasks.SetCapability(number, req.ID, req.Attach); err != nil {
+	id := r.PathValue("id")
+	if err := s.tasks.SetCapability(r.Context(), id, req.ID, req.Attach); err != nil {
 		writeClientError(w, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, id)
 }
 
 // handleApprove is the UI's own "approve button" docs/data-model.md's UI
-// direction asks for, since GitHub itself has none for a plain issue.
+// direction asks for.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
-	number, ok := s.pathNumber(w, r)
-	if !ok {
+	id := r.PathValue("id")
+	if err := s.tasks.Approve(r.Context(), id); err != nil {
+		writeClientError(w, err)
 		return
 	}
-	if err := s.tasks.Approve(number); err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, id)
 }
 
 type addCommentRequest struct {
@@ -187,64 +179,46 @@ type addCommentRequest struct {
 }
 
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
-	number, ok := s.pathNumber(w, r)
-	if !ok {
-		return
-	}
 	var req addCommentRequest
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.tasks.AddComment(number, req.Body); err != nil {
+	id := r.PathValue("id")
+	if err := s.tasks.AddComment(r.Context(), id, req.Body); err != nil {
 		writeClientError(w, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, id)
 }
 
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
-	number, ok := s.pathNumber(w, r)
-	if !ok {
+	id := r.PathValue("id")
+	if err := s.tasks.Close(r.Context(), id); err != nil {
+		writeClientError(w, err)
 		return
 	}
-	if err := s.tasks.Close(number); err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, id)
 }
 
 func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
-	number, ok := s.pathNumber(w, r)
-	if !ok {
+	id := r.PathValue("id")
+	if err := s.tasks.Reopen(r.Context(), id); err != nil {
+		writeClientError(w, err)
 		return
 	}
-	if err := s.tasks.Reopen(number); err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, id)
 }
 
-func (s *Server) respondWithTask(w http.ResponseWriter, number int) {
-	task, err := s.tasks.Task(number)
+func (s *Server) respondWithTask(w http.ResponseWriter, r *http.Request, id string) {
+	task, err := s.tasks.Task(r.Context(), id)
 	if err != nil {
-		writeGitHubError(w, err)
+		writeClientError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
 }
 
 // --- request/response plumbing -----------------------------------------
-
-func (s *Server) pathNumber(w http.ResponseWriter, r *http.Request) (int, bool) {
-	number, err := strconv.Atoi(r.PathValue("number"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, errors.New("invalid task number"))
-		return 0, false
-	}
-	return number, true
-}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -256,31 +230,27 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
-// writeClientError maps a Client error to 400 when it is a
-// ValidationError (a mistake caught before any GitHub call was made) and
-// to 502 otherwise (the GitHub call itself failing) -- the same split
-// every mutating handler made inline before Client existed.
+// writeClientError maps a Client error to a status: 400 for a
+// ValidationError (a mistake caught before the store was touched), 404
+// for a task id with nothing behind it, and 500 otherwise.
+//
+// The fallback is 500 rather than the 502 this used to return. 502 was
+// right when every failure came from an upstream GitHub call; the store
+// is not upstream of this process in the same sense, and reporting a
+// database error as "the gateway had trouble" would point an operator at
+// the wrong thing.
 func writeClientError(w http.ResponseWriter, err error) {
 	var ve *ValidationError
 	if errors.As(err, &ve) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeError(w, http.StatusBadGateway, err)
-}
-
-// writeGitHubError reports a github.Error's own status (e.g. 404 for a
-// task number that doesn't exist) instead of flattening every upstream
-// failure to 502 -- the one call site (get/respondWithTask) where the
-// caller's mistake (a bad number) and GitHub's own trouble need telling
-// apart.
-func writeGitHubError(w http.ResponseWriter, err error) {
-	var ghErr *github.Error
-	if errors.As(err, &ghErr) && ghErr.Status == http.StatusNotFound {
+	var nf *NotFoundError
+	if errors.As(err, &nf) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	writeError(w, http.StatusBadGateway, err)
+	writeError(w, http.StatusInternalServerError, err)
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
