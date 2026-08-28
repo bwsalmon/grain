@@ -76,14 +76,20 @@ func newFramework(generator contentGenerator, opts ...Option) *Framework {
 	return f
 }
 
-// Run implements agent.Framework: it starts an in-process MCP server scoped
-// to cfg.SandboxRoot, advertises its tools to Gemini as function
-// declarations, and loops sending the conversation to the model and
-// executing whatever function calls come back until a turn produces a
-// final answer with no more calls, or MaxTurns is exhausted.
+// Run implements agent.Framework: it starts an in-process MCP server
+// scoped to cfg's sandbox tools -- cfg.Tools directly if the caller built
+// its own set, otherwise mcp.NewSandboxTools(cfg.SandboxRoot) -- advertises
+// them to Gemini as function declarations, and loops sending the
+// conversation to the model and executing whatever function calls come
+// back until a turn produces a final answer with no more calls, or
+// MaxTurns is exhausted.
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
-	if cfg.SandboxRoot == "" {
-		return nil, fmt.Errorf("gemini: RunConfig.SandboxRoot is required")
+	sandboxTools := cfg.Tools
+	if sandboxTools == nil {
+		if cfg.SandboxRoot == "" {
+			return nil, fmt.Errorf("gemini: RunConfig.SandboxRoot or .Tools is required")
+		}
+		sandboxTools = mcp.NewSandboxTools(cfg.SandboxRoot)
 	}
 	maxTurns := f.maxTurns
 	if cfg.MaxTurns > 0 {
@@ -91,7 +97,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	}
 
 	registry := mcp.NewRegistry()
-	registry.Register(mcp.NewSandboxTools(cfg.SandboxRoot)...)
+	registry.Register(sandboxTools...)
 	registry.Register(mcp.NewMockTools(&mcp.MockSink{})...)
 	client := mcp.NewInProcess(registry)
 	defer client.Close()

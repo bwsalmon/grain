@@ -356,24 +356,26 @@ section is the checked-in listing of, per capability.
 and `cmd/graind` now calls it for real from `pkg/orchestrate`'s dispatch
 loop rather than only from a test. `pkg/orchestrate`/`cmd/graind` still
 only ever hands it a local directory (`mcp.ConfigureGitCredentials` sets
-that directory's git credentials up once per slot at `graind` startup) —
+that directory's git credentials up once per slot at `graind` startup).
 `orchestrator.RunCycle` (below), `pkg/orchestrate`'s not-yet-wired-to-
-anything sibling, is the one that can now reach a real remote VM instead.
-`pkg/kontur` resolves a bwsalmon/kontur-managed VM's SSH endpoint (the
-external port kontur persisted at `kontur vm create` time, plus the pod IP
-that port answers on, asked of containerd via `crictl` since kontur has no
-apiserver to have recorded it anywhere itself), and `mcp.NewSSHSandboxTools`
+anything sibling, can now reach a real remote VM instead: `pkg/kontur`
+resolves a bwsalmon/kontur-managed VM's SSH endpoint (the external port
+kontur persisted at `kontur vm create` time, plus the pod IP that port
+answers on, asked of containerd via `crictl` since kontur has no
+apiserver to have recorded it anywhere itself), `mcp.NewSSHSandboxTools`
 runs the same four tools — `run_command`/`read_file`/`edit_file`/
-`write_file` — against it instead of a local directory. `cmd/mcpserver`
-can be pointed at one by hand via `-kontur-vm` (bwsalmon/agents#256), and
-`orchestrator.KonturSandboxes` (bwsalmon/agents#262) does the same thing
-`RunCycle` itself now drives: one kontur VM per dispatch slot, created on
-first use and reused across cycles the same way `HostSandboxes` reuses its
-directories, torn down by nothing here (see that type's own doc comment).
-A kontur VM's own image is still expected to arrive already carrying the
-operator's SSH key and a running sshd, the same assumption v1's sandbox
-image build stood in for and still no successor here builds — provisioning
-one is still open. So is a real `github.RESTClient` for the agent's own
+`write_file` — against it instead of a local directory (`cmd/mcpserver`
+can already be pointed at one by hand via `-kontur-vm`,
+bwsalmon/agents#256), and `orchestrator.KonturSandboxes`
+(bwsalmon/agents#262) is `Deps.Sandboxes`' real alternative to
+`HostSandboxes`: one kontur VM per dispatch slot, created via
+`kontur.Create` on first use and reused across cycles the same way
+`HostSandboxes` reuses its directories, torn down by nothing here (see
+that type's own doc comment). A kontur VM's own image is still expected to
+arrive already carrying the operator's SSH key and a running sshd, the
+same assumption v1's sandbox image build stood in for and still no
+successor here builds — provisioning one is still open. So is a real
+`github.RESTClient` for the agent's own
 `ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
 calls: `gemini.Framework.Run` still wires those to a `mcp.MockSink` it
 builds and discards internally on every call, so they still just record
