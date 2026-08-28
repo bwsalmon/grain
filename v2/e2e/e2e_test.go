@@ -99,9 +99,11 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 		t.Fatalf("agent run did not push cleanly: %+v", result.ToolCalls)
 	}
 
-	// FinishRun alone is a requeue -- v2 has no completion detector of
-	// its own yet (v2/README.md), so nothing marks this done until the
-	// GitHub-sync stand-in below observes it.
+	// FinishRun alone is a requeue -- this harness builds no github.Client
+	// at all (see harness_test.go's own doc comment on why), so nothing
+	// marks this done until the GitHub-sync stand-in below observes it the
+	// way pkg/orchestrator/finish.go's ProcessResult does for real,
+	// against a real github.Client, in pkg/orchestrator/live_test.go.
 	assertState(w, "iss-1", model.StateQueued, false)
 	if occ, _ := w.store.OccupiedSlots(w.ctx); len(occ) != 0 {
 		t.Fatalf("occupied slots after finish = %v, want none", occ)
@@ -117,8 +119,11 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	}
 	assertState(w, "iss-1", model.StateCompleted, false)
 
-	// GitHub itself merges the PR -- no code in v2 does this yet (see
-	// harness_test.go's package doc), so the test plays GitHub's part.
+	// GitHub itself merges the PR -- this harness has no real GitHub to
+	// merge it on (see harness_test.go's package doc), so the test plays
+	// GitHub's part; pkg/orchestrator/live_test.go proves the real
+	// close-out (pkg/orchestrator/sync.go's SyncPullRequests) against an
+	// actual githubsim-backed merge instead.
 	w.mergeBranchIntoDefault("acme", "widgets", branch, "main")
 	if got := w.log1("acme", "widgets", "main", "%s"); got != "Merge "+branch {
 		t.Fatalf("main tip after merge = %q, want the merge commit", got)

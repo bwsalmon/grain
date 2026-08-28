@@ -185,11 +185,15 @@ func TestSimPanicsOnAnUnhandledRequest(t *testing.T) {
 			t.Fatalf("got panic %v", r)
 		}
 	}()
-	// MergePullRequest is real GitHub API surface Sim deliberately doesn't
-	// implement (nothing in the live-test path this package exists for
-	// ever merges a PR) -- a test that exercised it in error should fail
-	// loudly, the same as v1's own RealGitHubMock raising AssertionError.
-	client.MergePullRequest("acme", "widgets", 1)
+	// CreateReview is real GitHub API surface Sim still doesn't implement
+	// (bwsalmon/agents#249 wired MergePullRequest/GetPullRequest/
+	// ListCheckRuns/CreateComment/CloseIssue/CreateIssue/
+	// FindOpenPullRequestForBranch in for the orchestrator's own close-out
+	// path, but nothing exercises a draft review yet -- see
+	// pkg/orchestrator/finish.go's own note on why) -- a test that
+	// exercised it in error should fail loudly, the same as v1's own
+	// RealGitHubMock raising AssertionError.
+	client.CreateReview("acme", "widgets", 1, "looks good", nil)
 }
 
 func TestSimPanicsWhenAskedAboutARepoItIsNotConfiguredFor(t *testing.T) {

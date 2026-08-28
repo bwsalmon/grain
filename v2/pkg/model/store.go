@@ -563,6 +563,41 @@ func (s *Store) TrackedTargets(ctx context.Context) ([]TrackedTarget, error) {
 	return out, err
 }
 
+// TaskPullRequestLink is one task_link row of kind LinkFixes, belonging to
+// a task whose state is 'completed' — a run pushed and a PR was opened or
+// found for it, and grain has not yet observed that PR finish.
+type TaskPullRequestLink struct {
+	TaskID string
+	// PullRequest is the link's own target, a model.PullRequestRef's
+	// String() — parse it back with model.ParsePullRequestRef.
+	PullRequest string
+}
+
+// OpenPullRequestLinks returns every fixes-link on a completed task —
+// what a GitHub-sync component polls each cycle to find a PR whose health
+// it should refresh, without needing a table of its own: task_link and
+// task_state already carry everything this needs, and task_state already
+// stops returning 'completed' the moment task_observation's closed_at is
+// set, so a closed-out task drops out of this list with no extra
+// bookkeeping.
+func (s *Store) OpenPullRequestLinks(ctx context.Context) ([]TaskPullRequestLink, error) {
+	var out []TaskPullRequestLink
+	err := each(ctx, s.db,
+		"SELECT `l`.`task_id`, `l`.`target` FROM `task_link` AS `l` "+
+			"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
+			"WHERE `l`.`kind` = ? AND `st`.`state` = 'completed' ORDER BY `l`.`task_id`",
+		string(LinkFixes),
+		func(rows *sql.Rows) error {
+			var l TaskPullRequestLink
+			if err := rows.Scan(&l.TaskID, &l.PullRequest); err != nil {
+				return err
+			}
+			out = append(out, l)
+			return nil
+		})
+	return out, err
+}
+
 // OpenBlockers is how many unclosed tasks stand in front of this one.
 func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 	var n int
