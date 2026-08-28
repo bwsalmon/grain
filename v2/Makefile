@@ -113,6 +113,19 @@ builder:
 # The whole checkout is mounted, not just this directory: `go build`
 # stamps the binary with the commit it came from, which it can only read
 # from the .git at the repository root.
+#
+# Which is also why safe.directory is set. The uid inside the container
+# need not own the mounted tree -- it does not under rootless podman,
+# which maps the invoking user to the container's root, nor under Docker
+# with userns-remap, nor on a checkout owned by another account -- and
+# git refuses to read a repository it sees as someone else's ("detected
+# dubious ownership"). `go build` does not treat that as "no VCS here"
+# and carry on; it stops with "error obtaining VCS status: exit status
+# 128", and the suggestion it prints, -buildvcs=false, buys the build at
+# the cost of the commit stamp. Passed as GIT_CONFIG_* rather than
+# `git config --global` so the exception lasts exactly one container and
+# covers exactly the mount, instead of being written into a gitconfig
+# somewhere that outlives the build.
 container-build: builder
 	@mkdir -p $(CONTAINER_CACHE)/build $(CONTAINER_CACHE)/mod
 	$(CONTAINER_ENGINE) run --rm \
@@ -121,6 +134,8 @@ container-build: builder
 		-v "$(CONTAINER_CACHE)/build":/gocache \
 		-v "$(CONTAINER_CACHE)/mod":/gomodcache \
 		-e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
+		-e GIT_CONFIG_COUNT=1 \
+		-e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
 		-w /src/v2 $(BUILDER_IMAGE) make build
 
 test:
