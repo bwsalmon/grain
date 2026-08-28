@@ -5,8 +5,12 @@ here is wired into it.
 
 ```
 pkg/model/      the task model of ../docs/data-model.md
-pkg/model/dolt/ opening an embedded Dolt database — the only package that
-                imports Dolt
+pkg/model/dolt/ opening the Dolt database — the only package that imports
+                a driver. Open is the embedded, single-writer one;
+                Connect dials a Dolt SQL server, which is what makes
+                graind, the UI and a CLI writing at once a supported case
+                (see "Single writer" below); OpenOrConnect picks between
+                them from a deployment's flags
 pkg/dispatch/   which task takes which slot: what one cycle decides to
                 do with the store, with no side effect beyond that
                 decision. It does not loop itself -- cmd/graind's timer
@@ -99,17 +103,21 @@ cmd/graind/     the daemon: pkg/orchestrator's RunCycle run on a timer
                 github.RESTClient wired in
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
-                by hand (bwsalmon/agents#237) -- see "The UI" below for
-                why it talks straight to GitHub rather than through a
-                store or an orchestrator
+                by hand (bwsalmon/agents#237). It reads and writes
+                model.Store: creating a task here IS filing it, with no
+                GitHub issue and no poll in between -- see "Input is a
+                model update, not a GitHub issue" below
 cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
-                listener, opening the system's default browser
+                listener, opening the system's default browser. Takes
+                -store-addr (a Dolt SQL server) or -data-dir (embedded),
+                and no GitHub credentials at all
 cmd/grain/      a CLI over pkg/ui.Client -- the same model code cmd/ui's
                 Server wraps in JSON and HTTP, driven from a terminal
                 instead: list/get/create/update a task, approve, attach
-                or detach a capability, comment, close ("delete" -- a
-                GitHub issue has no such endpoint through an ordinary
-                token) or reopen one (bwsalmon/agents#271)
+                or detach a capability, comment (which also answers a
+                parked question), close ("delete" -- a task that ran is a
+                record of a dispatch that happened) or reopen one
+                (bwsalmon/agents#271). Same store flags as cmd/ui
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -198,7 +206,7 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## Input is a model update, not a GitHub issue
 
-**In progress — stage 1 of 3 has landed.**
+**In progress — stages 1 and 2 of 3 have landed.**
 
 A task used to begin its life as a GitHub issue. `PollIssues` listed the
 task repo's labelled issues and turned each into a `model.Task`; the CLI
@@ -244,16 +252,45 @@ and become grain's, which means grain has to render them. That is what
   whole stage — an approved task with no `ExternalRef` reads `queued` and
   is dispatchable.
 
-**Not yet (stages 2 and 3).** `pkg/orchestrator` still polls issues and
-still relays to them, and `pkg/ui.Client` still reads and writes issues
-rather than the store — nothing above `pkg/model` has changed yet, so the
-GitHub-derived `TaskID(repo, issueNumber)` is still what actually files
-tasks today. Stage 2 rewrites `pkg/ui.Client` against `model.Store` and
-moves the CLI and UI onto a Dolt SQL server (`pkg/model/dolt` grows a
-second constructor — see "Single writer" below, which stops being a
-caveat and becomes the deployment). Stage 3 deletes `PollIssues`, the
-`poll` reconciler and the issue-write sites in `finish.go`/`sync.go`,
-and retires `ExternalRef`.
+**Landed (stage 2) — the CLI and the UI write the store:**
+
+- `pkg/ui.Client` is store-backed. Creating a task *is* filing it:
+  `Store.NewTaskID` allocates, `PutTask` writes, and the task is in
+  `task_ready` before the call returns — where before it opened a GitHub
+  issue and waited for a poll to notice, which meant no task could be
+  created without GitHub reachable, or dispatched until the next tick.
+  `pkg/ui` imports nothing from `pkg/github` at all now.
+- **The two state vocabularies are one.** This package used to derive
+  state from labels with its own set, which had drifted: `needs_approval`
+  for what the store calls `proposed`, an `untracked` the store has no
+  notion of, and no `closed` that it does. State now comes from the
+  `task_state` view, so there is one derivation, not two.
+- `/repo`, `/base` and `/auto-merge` stop being directive lines parsed
+  out of an issue body and become what they always were in the store:
+  columns. `pkg/ui/directives.go` is deleted — a form edits fields.
+- Capability grants are `model.Grant` rows rather than GitHub labels, so
+  `Capability.Label` is gone from the wire shape.
+- **Replying resumes a parked task, in one act.** `AddComment` clears
+  `Observation.PendingQuestionCommentID`. Answering a question used to
+  take two — post a comment *and* re-apply the trigger label so the next
+  poll would notice — and forgetting the second left the task parked
+  forever.
+- `dolt.Connect`/`dolt.OpenOrConnect` and the `-store-addr`/`-data-dir`
+  flags on `cmd/grain` and `cmd/ui`; see "Single writer" below, which
+  stops being a caveat and becomes the deployment.
+- `Store` grew `ListTasks`, `States` and `ObserveField`. The last is
+  `pkg/orchestrator`'s own `observeField` promoted: `Observe` REPLACEs the
+  whole observation row, so changing one field means reading it first,
+  and that stopped being one package's business once a person closing a
+  task from a CLI needed it too.
+
+**Not yet (stage 3).** `pkg/orchestrator` still polls issues and still
+relays to them: `PollIssues`, the `poll` reconciler, and the
+`CreateComment`/`CreateIssue`/`CloseIssue` sites in `finish.go` and
+`sync.go` are all still there, as is `ExternalRef`. So a task filed by
+the CLI today gets dispatched, but a question it asks still tries to
+reach a GitHub issue that no longer exists for it. Stage 3 is deleting
+that half and pointing those relays at `Store.AddComment` instead.
 
 ## Reconcilers, not a pipeline
 
@@ -637,69 +674,79 @@ close the gap above, since nothing there is wired to run on its own yet.
 
 ## The UI
 
-`pkg/ui`/`cmd/ui` (bwsalmon/agents#237) is a first cut at
+`pkg/ui`/`cmd/ui` (bwsalmon/agents#237) is
 [`docs/data-model.md`'s "first-party UI"
 direction](../docs/data-model.md#direction-a-first-party-ui): create a
 task, approve a proposed one, attach or remove a capability, comment,
-close/reopen -- everything a human does by hand to a task issue today,
+close/reopen — everything a human used to do by hand to a task issue,
 from a form instead of a body of directive lines and a label picker.
 
-**It talks straight to GitHub, not through a store.** That direction's
-own "the UI is not a fourth record" rule says a UI reads declarations
-from the repo, grain's own acts from the store, and outside facts from
-GitHub through grain -- but `pkg/ui` predates `cmd/graind` driving
-`pkg/orchestrator.PollIssues` on a timer (bwsalmon/agents#263), and still
-reads and writes a task issue directly rather than through a
-`model.Store`, the same as it always has: an operator working through
-`pkg/ui` and `graind`'s own reconcile loop are now two independent paths
-that can both touch the same GitHub issue, with nothing reconciling the
-two. `pkg/ui` reads and writes it directly, through the same
-`github.Client` interface `cmd/graind` and `pkg/orchestrator` use -- one
-`Config{TaskRepo, Labels, Capabilities}` naming which repo and which
-label taxonomy (`grain/automation/labels.py`'s own defaults, ported as
-`ui.Labels`/`ui.Capability`), not a copy of anything the store or the
-repo owns. `State` is derived off labels on every read, the same "never
-stored" discipline `model.StateOf`'s own doc comment describes for the
-store-backed version. `pkg/ui`'s own `Config`/`Server` seam is exactly
-where a `model.Store`-backed implementation would slot in behind the
-same JSON API, without the frontend knowing the difference, if the two
-paths are ever unified.
+**It talks to the store, not to GitHub.** That direction's own "the UI is
+not a fourth record" rule is now satisfied outright rather than argued
+around: there is one record, and this reads and writes it. The two
+independent paths that used to touch the same GitHub issue — an operator
+working through `pkg/ui`, and `graind`'s own reconcile loop — are one
+path to one store. `State` still comes from a derivation rather than a
+column, but it is `model.StateOf`'s own view now instead of a second
+label-shaped copy.
 
-**No OAuth.** The direction document calls for GitHub OAuth plus
-`author_association` as the permission gate; `cmd/ui` instead takes a
-single GitHub token (`-github-token-file`, or `$GITHUB_TOKEN`) the way
-every other `-github-*` flag across `v2/cmd` does, because this is a
-single-operator tool run locally against a token that operator already
-holds, not a hosted multi-user service -- the OAuth gate is worth
-building the day this runs anywhere other than one person's own machine
-(bwsalmon/agents#237's follow-up).
+**No OAuth, and now nothing to authenticate to.** The direction document
+calls for GitHub OAuth plus `author_association` as the permission gate.
+`cmd/ui` takes no GitHub credential at all any more — it takes `-as`,
+naming the principal it acts as, defaulting to the OS user. This is a
+single-operator tool run locally against a store that operator already
+reaches; a real permission gate is worth building the day this runs
+anywhere other than one person's own machine (bwsalmon/agents#237's
+follow-up), and it would gate store writes rather than API calls.
 
 **Why a local web server, not Electron/Tauri/a native app.** `go build`
-already produces one dependency-free binary per OS `cmd/ui` runs on
-(Mac, Linux today); a `net/http` server that opens the system's default
-browser gets "runs standalone on Mac and Linux" for free, in the one
-language every other substrate here already commits to (see "Why Go"
-above), with no second toolchain (Node, Rust, Xcode) for this repo to
-carry. "Set up to run on iOS/Android in the future" is what shapes
-`pkg/ui` into an HTTP+JSON API in the first place rather than
-server-rendered pages or a Go-templated app: a future mobile client --
-native, or a thin webview shell -- is just another caller of the same
-`/api/*` surface `cmd/ui`'s own frontend (`pkg/ui/static/`, plain
-HTML/CSS/JS, no build step) already uses, with nothing about the server
-to rewrite.
+already produces one dependency-free binary per OS `cmd/ui` runs on (Mac,
+Linux today); a `net/http` server that opens the system's default browser
+gets "runs standalone on Mac and Linux" for free, in the one language
+every other substrate here already commits to (see "Why Go" above), with
+no second toolchain (Node, Rust, Xcode) for this repo to carry. "Set up
+to run on iOS/Android in the future" is what shapes `pkg/ui` into an
+HTTP+JSON API in the first place rather than server-rendered pages: a
+future mobile client — native, or a thin webview shell — is just another
+caller of the same `/api/*` surface `cmd/ui`'s own frontend
+(`pkg/ui/static/`, plain HTML/CSS/JS, no build step) already uses, with
+nothing about the server to rewrite.
 
 **Freshness, not a cache.** Every mutation in the frontend
 (`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
 than assuming its own optimistic update is now true, matching the
-direction document's "it shows freshness for anything" read live from
-GitHub rather than presenting a stale value as current -- there is
+direction document's "it shows freshness for anything" — read live from
+the store rather than presenting a stale value as current. There is
 nowhere here for staleness to hide since nothing is ever cached across
 one request.
 
 ## Single writer
 
-Embedded Dolt permits one writer, which suits a cron-driven controller
-and does not suit a controller plus a UI plus a human at a CLI. When that
-becomes real the answer is a Dolt SQL server, `pkg/model/dolt` grows a second
-constructor, and nothing above it changes — which is why `Store` takes a
-`*sql.DB` and imports no driver.
+Embedded Dolt permits one writer, which suited a cron-driven controller
+and does not suit a controller plus a UI plus a human at a CLI. That
+became real the moment the CLI and the UI started writing the store
+instead of GitHub, so the answer this section always named is now built:
+`dolt.Connect` dials a Dolt SQL server, `dolt.OpenOrConnect` picks
+between it and the embedded database from a deployment's flags, and
+nothing above `pkg/model/dolt` changed — which is exactly why `Store`
+takes a `*sql.DB` and imports no driver.
+
+Both ends stay supported on purpose. Embedded is still right for a
+one-process deployment and for every test in this repo, which is why the
+store's own tests run against it. `-store-addr` opts a deployment into
+the server; `-data-dir` is the embedded fallback, and its flag help says
+plainly that nothing else may be running against it.
+
+Two settings on the server DSN are load-bearing rather than defaults
+restated, and both would otherwise show up only when run against a real
+server: `parseTime`, because the wire protocol hands `DATETIME` back as
+bytes otherwise and every `time.Time` on `model.Task`/`model.Observation`
+would fail to scan; and `loc=UTC`, because the store writes UTC and a
+driver left on `Local` hands it back shifted — a wrong timestamp rather
+than an error, and the merge queue orders by `Task.CreatedAt`.
+
+`MaxOpenConns` is deliberately *not* pinned to one on the server path.
+That pin exists in the embedded case because a pool there produces lock
+contention that reads as a deadlock; a server is the thing that makes
+concurrent writers supported rather than hazardous, so pinning it there
+would throw away the whole reason to run one.

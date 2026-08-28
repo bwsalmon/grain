@@ -5,39 +5,33 @@ import (
 	"io/fs"
 	"net/http"
 
-	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 //go:embed static
 var staticFS embed.FS
 
-// Config is what a Server needs to know about the deployment it fronts:
-// which repo holds task issues, and what its label taxonomy is. Both are
-// operator config, the same way AutomationConfig's fields are in v1 --
-// nothing here discovers either by inspecting the repo.
-type Config struct {
-	TaskRepo     model.RepoRef
-	Labels       Labels
-	Capabilities []Capability
-}
-
 // Server is the JSON API plus the static frontend it serves, a thin HTTP
-// shim over a Client -- no store, no database of its own. See the
-// package doc comment for why: a task issue is the record, and this is a
-// view onto it, not a fourth one.
+// shim over a Client. The store behind that Client is the record -- this
+// holds no state of its own and caches nothing, so there is nowhere here
+// for a stale value to hide.
 type Server struct {
 	tasks *Client
 	mux   *http.ServeMux
 }
 
-// NewServer builds a Server. client is deliberately the github.Client
-// interface, not *github.RESTClient -- a caller can point this at
-// github.DryRunClient (mutations print instead of firing) or
-// githubsim.Sim the same way every other v2 package that takes a Client
-// can, e.g. for a demo run against no real GitHub token at all.
-func NewServer(cfg Config, client github.Client) *Server {
-	s := &Server{tasks: NewClient(cfg, client), mux: http.NewServeMux()}
+// NewServer builds a Server over a store.
+func NewServer(cfg Config, store *model.Store) *Server {
+	s := &Server{tasks: NewClient(cfg, store), mux: http.NewServeMux()}
+	s.routes()
+	return s
+}
+
+// NewServerWithClient builds a Server over an already-configured Client
+// -- for a caller that needs to set its clock, or share one Client with a
+// non-HTTP path.
+func NewServerWithClient(client *Client) *Server {
+	s := &Server{tasks: client, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -48,12 +42,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	s.mux.HandleFunc("GET /api/tasks", s.handleListTasks)
 	s.mux.HandleFunc("POST /api/tasks", s.handleCreateTask)
-	s.mux.HandleFunc("GET /api/tasks/{number}", s.handleGetTask)
-	s.mux.HandleFunc("POST /api/tasks/{number}/capabilities", s.handleSetCapability)
-	s.mux.HandleFunc("POST /api/tasks/{number}/approve", s.handleApprove)
-	s.mux.HandleFunc("POST /api/tasks/{number}/comments", s.handleAddComment)
-	s.mux.HandleFunc("POST /api/tasks/{number}/close", s.handleClose)
-	s.mux.HandleFunc("POST /api/tasks/{number}/reopen", s.handleReopen)
+	s.mux.HandleFunc("GET /api/tasks/{id}", s.handleGetTask)
+	s.mux.HandleFunc("POST /api/tasks/{id}/capabilities", s.handleSetCapability)
+	s.mux.HandleFunc("POST /api/tasks/{id}/approve", s.handleApprove)
+	s.mux.HandleFunc("POST /api/tasks/{id}/comments", s.handleAddComment)
+	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
+	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {

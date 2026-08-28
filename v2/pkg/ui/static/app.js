@@ -5,21 +5,25 @@
 //
 // Every value on screen is re-fetched from the API, never cached across
 // actions (see refreshList/openTask below) -- docs/data-model.md's UI
-// direction: "it shows freshness for anything" read live from GitHub,
+// direction: "it shows freshness for anything" read live from the store,
 // rather than presenting a stale value as current.
 "use strict";
 
 let config = null;
 let stateFilter = "all";
 
-const STATE_ORDER = ["needs_approval", "queued", "running", "awaiting_reply", "completed", "untracked"];
+// model.State's own vocabulary, in model.StateOf's precedence order.
+// This used to be a second, label-shaped set that had drifted from it:
+// "needs_approval" for what the store calls proposed, plus an
+// "untracked" the store has no notion of and no "closed" that it does.
+const STATE_ORDER = ["proposed", "queued", "running", "awaiting_reply", "completed", "closed"];
 const STATE_LABELS = {
-  needs_approval: "Needs approval",
+  proposed: "Proposed",
   queued: "Queued",
   running: "Running",
   awaiting_reply: "Awaiting reply",
   completed: "Completed",
-  untracked: "Untracked",
+  closed: "Closed",
 };
 
 async function api(path, opts) {
@@ -95,8 +99,8 @@ function renderList(tasks) {
     const chips = [];
     if (t.repo) chips.push(el("span", { class: "chip", text: t.repo }));
     for (const id of t.capabilities) chips.push(el("span", { class: "chip", text: capabilityName(id) }));
-    list.appendChild(el("li", { onclick: () => openTask(t.number) }, [
-      el("span", { class: "task-number", text: `#${t.number}` }),
+    list.appendChild(el("li", { onclick: () => openTask(t.id) }, [
+      el("span", { class: "task-number", text: t.id }),
       el("span", { class: "task-title", text: t.title }),
       el("span", { class: "chips" }, chips),
       el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state }),
@@ -106,9 +110,9 @@ function renderList(tasks) {
 
 // --- detail view ---------------------------------------------------------
 
-async function openTask(number) {
+async function openTask(id) {
   try {
-    const detail = await api(`/api/tasks/${number}`);
+    const detail = await api(`/api/tasks/${id}`);
     renderDetail(detail);
     document.getElementById("detail-overlay").classList.remove("hidden");
   } catch (err) {
@@ -121,29 +125,35 @@ function renderDetail(t) {
   container.innerHTML = "";
 
   container.appendChild(el("div", { class: "detail-header" }, [
-    el("h2", { text: `#${t.number} ${t.title}` }),
+    el("h2", { text: `${t.id} ${t.title}` }),
     el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state }),
   ]));
-  container.appendChild(el("div", { class: "freshness", text: `as of just now · ${t.githubState} on GitHub · ` }, [
-    el("a", { href: t.htmlUrl, target: "_blank", rel: "noopener", text: "open on GitHub" }),
-  ]));
+  const freshness = el("div", { class: "freshness", text: "as of just now" });
+  if (t.pullRequest) {
+    freshness.appendChild(document.createTextNode(" · "));
+    freshness.appendChild(el("span", { text: t.pullRequest }));
+  }
+  container.appendChild(freshness);
 
+  // Real columns on the task now, not directive lines parsed out of a
+  // body -- so they are rendered as fields rather than as the /repo,
+  // /base, /auto-merge syntax they used to have to be written in.
   const declaredParts = [];
-  if (t.repo) declaredParts.push(`/repo ${t.repo}`);
-  if (t.base) declaredParts.push(`/base ${t.base}`);
-  if (t.autoMerge !== undefined && t.autoMerge !== null) declaredParts.push(`/auto-merge ${t.autoMerge}`);
-  if (declaredParts.length) container.appendChild(el("div", { class: "declared", text: declaredParts.join("  ") }));
+  if (t.repo) declaredParts.push(`repo ${t.repo}`);
+  if (t.base) declaredParts.push(`base ${t.base}`);
+  declaredParts.push(`auto-merge ${t.autoMerge}`);
+  container.appendChild(el("div", { class: "declared", text: declaredParts.join("  ") }));
 
   container.appendChild(el("div", { class: "description", text: t.description || "(no description)" }));
 
   const actions = el("div", { class: "actions" });
-  if (t.state === "needs_approval") {
-    actions.appendChild(el("button", { class: "primary", onclick: () => act(() => api(`/api/tasks/${t.number}/approve`, { method: "POST" }), t.number) }, ["Approve"]));
+  if (t.state === "proposed") {
+    actions.appendChild(el("button", { class: "primary", onclick: () => act(() => api(`/api/tasks/${t.id}/approve`, { method: "POST" }), t.id) }, ["Approve"]));
   }
-  if (t.githubState === "open") {
-    actions.appendChild(el("button", { class: "danger secondary", onclick: () => act(() => api(`/api/tasks/${t.number}/close`, { method: "POST" }), t.number) }, ["Close"]));
+  if (t.state === "closed") {
+    actions.appendChild(el("button", { class: "secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id) }, ["Reopen"]));
   } else {
-    actions.appendChild(el("button", { class: "secondary", onclick: () => act(() => api(`/api/tasks/${t.number}/reopen`, { method: "POST" }), t.number) }, ["Reopen"]));
+    actions.appendChild(el("button", { class: "danger secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id) }, ["Close"]));
   }
   container.appendChild(actions);
 
@@ -157,10 +167,10 @@ function renderCapabilityToggles(t) {
     const checked = t.capabilities.includes(c.id);
     const input = el("input", { type: "checkbox" });
     input.checked = checked;
-    input.addEventListener("change", () => act(() => api(`/api/tasks/${t.number}/capabilities`, {
+    input.addEventListener("change", () => act(() => api(`/api/tasks/${t.id}/capabilities`, {
       method: "POST",
       body: JSON.stringify({ id: c.id, attach: input.checked }),
-    }), t.number));
+    }), t.id));
     fs.appendChild(el("label", { class: "checkbox", title: c.description }, [input, c.name]));
   }
   return fs;
@@ -169,15 +179,19 @@ function renderCapabilityToggles(t) {
 function renderComments(t) {
   const wrap = el("div", { class: "comments" }, [el("h3", { text: "Conversation" })]);
   for (const c of t.comments || []) {
+    // onBehalfOf is set when grain relayed somebody else's words -- a
+    // question from a dispatched run reads as grain speaking for an
+    // agent, not as grain's own.
+    const who = c.onBehalfOf ? `${c.author} on behalf of ${c.onBehalfOf}` : c.author;
     wrap.appendChild(el("div", { class: "comment" }, [
-      el("div", { class: "meta", text: `${c.user} · ${c.authorAssociation}` }),
+      el("div", { class: "meta", text: `${who} · ${c.authorKind}` }),
       el("div", { text: c.body }),
     ]));
   }
   const textarea = el("textarea", { rows: "2", placeholder: "Reply..." });
   const send = el("button", { class: "secondary", onclick: async () => {
     if (!textarea.value.trim()) return;
-    await act(() => api(`/api/tasks/${t.number}/comments`, { method: "POST", body: JSON.stringify({ body: textarea.value }) }), t.number);
+    await act(() => api(`/api/tasks/${t.id}/comments`, { method: "POST", body: JSON.stringify({ body: textarea.value }) }), t.id);
   } }, ["Comment"]);
   wrap.appendChild(el("div", { class: "comment-form" }, [textarea, send]));
   return wrap;
@@ -186,10 +200,10 @@ function renderComments(t) {
 // act runs a mutation, then re-fetches the task (and the list behind it)
 // so the screen reflects what GitHub now reports -- never the value the
 // UI optimistically assumed it wrote, per the freshness rule above.
-async function act(mutate, number) {
+async function act(mutate, id) {
   try {
     await mutate();
-    await openTask(number);
+    await openTask(id);
     await refreshList();
   } catch (err) {
     showError(err);
@@ -259,7 +273,9 @@ async function main() {
 
   try {
     config = await api("/api/config");
-    document.getElementById("repo-name").textContent = `${config.taskRepo.Owner}/${config.taskRepo.Name}`;
+    const target = config.defaultTarget;
+    document.getElementById("repo-name").textContent =
+      target ? `${target.Owner}/${target.Name}` : `as ${config.actor.ID}`;
     populateCapabilityFieldset();
     await refreshList();
   } catch (err) {

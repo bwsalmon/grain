@@ -159,28 +159,19 @@ func finishWithPullRequest(ctx context.Context, store *model.Store, client githu
 	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })
 }
 
-// observeField reads a task's current observation (or starts a fresh one
-// if it has none), applies set, and writes it back. Store.Observe REPLACEs
-// the whole row rather than patching one column -- its own doc comment on
-// task_observation's schema, and simulate_test.go's
-// TestGitHubSyncObservationsReplaceTheWholeRowNotJustTheChangedField pins
-// it down -- so every caller that wants to change one field without
-// erasing the others has to read-modify-write, this being the one place
-// in this package that does it more than once.
+// observeField is Store.ObserveField with this package's error prefix.
+// The read-modify-write itself moved to the store once the CLI and the UI
+// needed the same thing -- Observe REPLACEs the whole row rather than
+// patching one column (its own doc comment on task_observation's schema,
+// and simulate_test.go's
+// TestGitHubSyncObservationsReplaceTheWholeRowNotJustTheChangedField),
+// so every caller changing one field without erasing the others has to
+// read the row first, and that is not per-package logic.
 func observeField(ctx context.Context, store *model.Store, taskID string, now time.Time,
 	set func(*model.Observation)) error {
 
-	obs, err := store.GetObservation(ctx, taskID)
-	if err != nil {
-		return fmt.Errorf("orchestrator: reading observation for %s: %w", taskID, err)
-	}
-	if obs == nil {
-		obs = &model.Observation{TaskID: taskID}
-	}
-	set(obs)
-	obs.ObservedAt = &now
-	if err := store.Observe(ctx, *obs); err != nil {
-		return fmt.Errorf("orchestrator: observing %s: %w", taskID, err)
+	if err := store.ObserveField(ctx, taskID, now, set); err != nil {
+		return fmt.Errorf("orchestrator: %w", err)
 	}
 	return nil
 }
