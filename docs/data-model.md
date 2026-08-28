@@ -2617,8 +2617,16 @@ deliberately. The store's own tests run against a real embedded Dolt
 database, so the DDL and the views are verified rather than only
 generated.
 
-Not yet built: `TrackedPullRequest`, folders, the capability provider
-contract, and anything that reads or writes GitHub. `core.py` is
+Not yet built: folders, and a real host adapter for a dispatched run to
+execute against. The capability provider contract now exists
+(`v2/pkg/model/capability.go`, bwsalmon/agents#238), and so does
+`TrackedPullRequest` — though as a value assembled fresh each cycle from
+`Task`'s own `LinkFixes` link and a live GitHub read
+(`v2/pkg/model/pullrequest.go`, `v2/pkg/orchestrator/sync.go`,
+bwsalmon/agents#249), not a table of its own; see that package's own doc
+comments for why a cache here would just go stale. `v2/pkg/orchestrator/`
+is what now reads and writes GitHub — polling labelled issues, dispatching
+through `loop.Cycle`, and closing out a finished PR. `core.py` is
 untouched.
 
 ## Migration

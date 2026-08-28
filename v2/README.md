@@ -50,6 +50,14 @@ pkg/github/githubsim/  a port of tests/test_live_issue_to_pr.py's
                 real bare git repo, for a live end-to-end test to wire a
                 real github.RESTClient against instead of the real
                 network.
+pkg/orchestrator/  v1's core.py/Orchestrator equivalent: polls a task
+                repo's labelled issues into model.Store tasks, runs
+                loop.Cycle's own dispatches, turns a finished run's tool
+                calls into real GitHub effects (a comment, a pull
+                request, a filed follow-up task), and closes out a
+                pull request once GitHub reports it merged or closed.
+                See "What this does not have yet" below for what it
+                still stops short of.
 e2e/            issues filed the way a user would, carried through
                 loop.Cycle, a real agent/gemini run, and a real gitproxy
                 push, against a real embedded Dolt store and a local git
@@ -121,13 +129,53 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## What this does not have yet
 
-`TrackedPullRequest`, folders, and anything that decides *when* to call
-GitHub's REST API from a running cycle. `loop.Cycle` decides which task
-takes which slot and calls `StartRun`, and nothing past that: no sandbox
-gets created, no agent runs, and nothing polls a PR's state back into the
-store. Actually dispatching, and the host adapter, are still v1 Python —
-15,903 lines of it, with 1,239 tests. Those tests are the asset in a
-rewrite; the assertions port, the harness does not.
+A real host adapter. `pkg/orchestrator/` (bwsalmon/agents#249) now decides
+*when* to call GitHub's REST API — polling a task repo's labelled issues,
+running `loop.Cycle`'s own dispatches, turning a finished run's tool calls
+into a comment/PR/follow-up issue, and closing out a merged or closed PR —
+but the sandbox each dispatch runs against is still a plain directory on
+whatever host this process itself runs on (`orchestrator.HostSandboxes`),
+the same stand-in `pkg/mcp`'s own tools and `e2e/` already used, promoted
+from test-only code to something `orchestrator.RunCycle` actually calls.
+That carries no isolation at all: a real deployment still needs the actual
+host adapter (creating a real VM/container per task and running commands
+in it over something better than "this process's own filesystem"), which
+remains v1 Python — 15,903 lines of it, with 1,239 tests. Those tests are
+the asset in a rewrite; the assertions port, the harness does not.
+`orchestrator.Deps.Sandboxes`/`.Framework` are exactly the two seams a real
+host adapter and a real dispatched-agent connection would replace, without
+changing anything about `RunCycle`'s own shape.
+
+`TrackedPullRequest` (`model.PullRequestRef`/`model.PrHealth`/
+`model.TrackedPullRequest`, `pkg/model/pullrequest.go`) turned out not to
+need a table of its own: `model.Task`'s existing `LinkFixes` link already
+records which PR a task's push produced, `task_observation` already
+records completion/closure, and `Store.OpenPullRequestLinks` is the one
+new read `pkg/orchestrator/sync.go`'s `SyncPullRequests` needed against
+those two tables — a `TrackedPullRequest` value is assembled fresh from a
+`GetPullRequest`/`ListCheckRuns` read each cycle rather than cached
+anywhere, which is what its own `ObservedAt` field is for. Folders are
+still unbuilt; nothing here needed them.
+
+`orchestrator`'s own directive parser (`ParseDirectives`) is deliberately
+narrower than `grain/automation/directives.py`: `/repo`, `/base` and
+`/auto-merge` only. `/pr` (continue an existing PR), `/review` (post a
+review instead of pushing) and `/depends` (cross-task ordering) all need a
+dispatch shape `RunDispatch`/`BuildPrompt` don't build yet — every task
+today is `IntentImplement`, fresh branch, no continuation — and are listed
+in `directives.go`'s own doc comment as exactly that, not silently
+dropped. `add_review_comment` calls from a run are recorded (`agent.
+Result.ToolCalls` carries them, the same seam `ProcessResult` reads
+`ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
+into a real `CreateReview` call for the same reason: nothing yet dispatches
+with review intent for one to attach to. `propose_task`'s `depends_on`
+also files today without resolving a same-run local `id` to the real issue
+number GitHub assigned it — each proposal lands as its own issue, with
+`depends_on` printed into nothing yet, since resolving it needs holding a
+whole batch open and rewriting cross-references after every one is filed.
+Filing a fix task when a PR goes red (`SyncPullRequests`, and
+`docs/data-model.md`'s own stated reason `TrackedPullRequest` exists) is
+unbuilt for the same `propose_task`-numbering reason.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
@@ -165,11 +213,12 @@ file's own docstring describes — every real `GitHubClient` behaviour
 call underneath swapped for an in-memory stand-in — and `BranchExists`
 answers from a real bare git repo via `git show-ref` rather than its own
 bookkeeping, since that check is the one a live test can't afford to
-fake. Nothing here decides when to call any of it, though: no
-`Orchestrator` equivalent exists yet to poll issues, dispatch, or close
-out a finished PR — that, `TrackedPullRequest`, and wiring `pkg/github/`
-into `loop.Cycle` are still open, waiting on the same host adapter the
-paragraph above and "What this actually verifies" describe.
+fake. `pkg/orchestrator/` (below) is what decides when to call any of it
+now; `live_test.go` there drives the same two scenarios `e2e/e2e_test.go`
+already proved by hand (a push that becomes a merged, closed PR; a
+question that parks a task and a labelled reply that resumes it) through
+`orchestrator.RunCycle` and a real `github.Client` against `githubsim`
+instead.
 
 The capability provider contract exists now too (`pkg/model/capability.go`),
 though nothing here ported it — `docs/data-model.md`'s design was never
