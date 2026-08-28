@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -83,7 +83,7 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	fileIssue(w, "iss-1", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	assertState(w, "iss-1", model.StateQueued, false)
 
-	dispatches, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	clock := baseTime
 	fileIssue(w, "iss-2", human("bob"), model.RepoRef{Owner: "acme", Name: "gadgets"})
 
-	first, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first Cycle: %v, %+v", err, first)
 	}
@@ -170,7 +170,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 
 	// Parked means not dispatchable, even with a free slot sitting right
 	// there.
-	stillParked, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	stillParked, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	}
 	assertState(w, "iss-2", model.StateQueued, false)
 
-	second, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("second Cycle: %v, %+v, want attempt 2", err, second)
 	}
@@ -224,14 +224,14 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	fileIssue(w, "iss-3", human("carol"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	branch := model.BranchName("iss-3")
 
-	first, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first Cycle: %v, %+v", err, first)
 	}
 
 	// The agent's first attempt mistakenly targets a repo the task never
 	// named -- the same denial gitproxy/live_test.go proves in isolation,
-	// here reached through the whole stack: loop dispatched it, the
+	// here reached through the whole stack: dispatch chose it, the
 	// script ran, and the push still never lands anywhere.
 	clock = clock.Add(time.Minute)
 	badResult := w.runDispatch(first[0], pushScript(w.remote("acme", "other"), branch, "iss-3"), clock)
@@ -243,7 +243,7 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	}
 	assertState(w, "iss-3", model.StateQueued, false)
 
-	second, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)
 	}

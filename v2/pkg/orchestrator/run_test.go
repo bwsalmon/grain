@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
@@ -77,7 +77,7 @@ func (c *fakeCapability) Revoke(ctx context.Context, cc model.CapabilityContext,
 }
 
 // dispatchTask puts an approved (human-filed) task directly, standing in
-// for what loop.Cycle would already have found ready by the time
+// for what dispatch.Cycle would already have found ready by the time
 // RunDispatch runs -- these tests are about what RunDispatch does with a
 // task's own Grants, not about approval or scheduling.
 func dispatchTask(t *testing.T, ctx context.Context, store *model.Store, id string, grants ...model.Grant) model.Task {
@@ -97,11 +97,11 @@ func dispatchTask(t *testing.T, ctx context.Context, store *model.Store, id stri
 	return task
 }
 
-// startRun records the task_run row loop.Cycle would already have written
+// startRun records the task_run row dispatch.Cycle would already have written
 // by the time RunDispatch ever sees a Dispatch -- RunDispatch only ever
 // UPDATEs it (via store.FinishRun), the same "the run is already durable"
 // assumption pkg/orchestrate's own runDispatch documented.
-func startRun(t *testing.T, ctx context.Context, store *model.Store, d loop.Dispatch, at time.Time) {
+func startRun(t *testing.T, ctx context.Context, store *model.Store, d dispatch.Dispatch, at time.Time) {
 	t.Helper()
 	if err := store.StartRun(ctx, model.Run{
 		ID: d.RunID, TaskID: d.TaskID, Slot: d.Slot, Sandbox: d.Slot, Attempt: d.Attempt, StartedAt: at,
@@ -113,7 +113,7 @@ func startRun(t *testing.T, ctx context.Context, store *model.Store, d loop.Disp
 func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "keyed", Via: model.GrantByLabel})
-	d := loop.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -164,7 +164,7 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "locked", Via: model.GrantByLabel})
-	d := loop.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -209,7 +209,7 @@ func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T)
 func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := loop.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {

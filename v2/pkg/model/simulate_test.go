@@ -6,7 +6,7 @@ package model_test
 // session working inside one, and GitHub sync observing what happened.
 // Nothing here is a fake standing in for the store -- these run against a
 // real embedded Dolt database, the discipline model/dolt/store_test.go
-// and loop/loop_test.go already hold to. What is mocked is the *caller*:
+// and dispatch/dispatch_test.go already hold to. What is mocked is the *caller*:
 // every function below makes the same store calls a real GitHub poller,
 // sandbox manager or approval handler would make, so the sequences they
 // produce are only ever ones the model permits, not ones invented for
@@ -14,7 +14,7 @@ package model_test
 //
 // TestModelInvariantsHoldUnderRandomComponentActions runs many rounds of
 // these components in random combination and, after every round, checks
-// the property loop/loop_test.go's random test does not: that
+// the property dispatch/dispatch_test.go's random test does not: that
 // model.StateOf -- the pure Go derivation a caller with no database can
 // use -- agrees with task_state, the SQL view the store actually reads,
 // for every task, under whatever sequence of raw facts the components

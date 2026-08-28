@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/github"
-	"github.com/bwsalmon/grain/v2/pkg/loop"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -27,7 +27,7 @@ type Deps struct {
 }
 
 // RunCycle is v2's whole Orchestrator.run_once equivalent: poll the task
-// repo, let loop.Cycle decide what runs, actually run it, turn each
+// repo, let dispatch.Cycle decide what runs, actually run it, turn each
 // result into the GitHub effect it implies, and refresh every pull
 // request grain is still watching. A deployment's own timer calls this
 // once per tick; nothing here loops on its own.
@@ -36,7 +36,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 		return err
 	}
 
-	dispatches, err := loop.Cycle(ctx, deps.Store, deps.Slots, now)
+	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.Slots, now)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
@@ -50,13 +50,13 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 	return SyncPullRequests(ctx, deps.Store, deps.Client, now)
 }
 
-func runOne(ctx context.Context, deps Deps, d loop.Dispatch, now time.Time) error {
+func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) error {
 	task, err := deps.Store.GetTask(ctx, d.TaskID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: reading task %s: %w", d.TaskID, err)
 	}
 	if task == nil {
-		return fmt.Errorf("orchestrator: loop.Cycle dispatched unknown task %s", d.TaskID)
+		return fmt.Errorf("orchestrator: dispatch.Cycle dispatched unknown task %s", d.TaskID)
 	}
 
 	tools, err := deps.Sandboxes.ToolsFor(ctx, d.Slot)

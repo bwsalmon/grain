@@ -16,7 +16,7 @@
 // of, and in parallel with, pkg/orchestrator (bwsalmon/agents#249) --
 // bwsalmon/agents#263 reconciled the two, keeping pkg/orchestrator (issue
 // intake, directive parsing, and PR-health sync were all already wired to
-// loop.Cycle there) and porting pkg/orchestrate's own capability
+// dispatch.Cycle there) and porting pkg/orchestrate's own capability
 // resolution/materialization and reconcile-loop shape onto it. See
 // v2/README.md for what that merge kept and dropped.
 package main
@@ -51,7 +51,7 @@ import (
 
 func main() {
 	dataDir := flag.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
-	slotList := flag.String("slots", "local", "comma-separated slot names -- the concurrency pool loop.Cycle fills")
+	slotList := flag.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills")
 	pollInterval := flag.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
 
 	taskRepo := flag.String("task-repo", "", "owner/name of the repo whose labelled issues become tasks (required)")

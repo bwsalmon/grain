@@ -20,7 +20,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
-	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -37,7 +37,7 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 	clock := baseTime
 	fileIssue(w, "iss-live", human("tester"), model.RepoRef{Owner: "acme", Name: "live"})
 
-	dispatches, err := loop.Cycle(w.ctx, w.store, []string{slot}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(dispatches) != 1 {
 		t.Fatalf("Cycle: %v, %+v", err, dispatches)
 	}
