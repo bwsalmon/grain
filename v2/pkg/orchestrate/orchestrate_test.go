@@ -67,6 +67,24 @@ func toolError(text string) *agent.Result {
 	return &agent.Result{ToolCalls: []agent.ToolCall{{Name: "run_command", Text: text, IsError: true}}}
 }
 
+func askedQuestion(question string) *agent.Result {
+	return &agent.Result{ToolCalls: []agent.ToolCall{
+		{Name: "ask_question", Arguments: map[string]any{"question": question}},
+	}}
+}
+
+func commentedOnIssue(comment string) *agent.Result {
+	return &agent.Result{ToolCalls: []agent.ToolCall{
+		{Name: "comment_on_issue", Arguments: map[string]any{"comment": comment}},
+	}}
+}
+
+func proposedTask(title, body string) *agent.Result {
+	return &agent.Result{ToolCalls: []agent.ToolCall{
+		{Name: "propose_task", Arguments: map[string]any{"title": title, "body": body}},
+	}}
+}
+
 // fakeGitHub implements github.Client by hand rather than scripting
 // FakeTransport's JSON wire shapes -- github_test.go already proves
 // RESTClient decodes the wire correctly; what this package's own tests
@@ -79,14 +97,31 @@ type fakeGitHub struct {
 	defaultBranch string
 	created       []createdPR
 	branchCalls   int
+	comments      []createdComment
+	issues        []createdIssue
+	nextCommentID int
 }
 
 type createdPR struct {
 	Owner, Repo, Head, Base, Title, Body string
 }
 
+type createdComment struct {
+	Owner, Repo string
+	Number      int
+	Body        string
+}
+
+type createdIssue struct {
+	Owner, Repo, Title, Body string
+	Labels                   []string
+}
+
 func newFakeGitHub() *fakeGitHub {
-	return &fakeGitHub{branches: map[string]bool{}, openPRs: map[string]*github.PullRequest{}, defaultBranch: "main"}
+	return &fakeGitHub{
+		branches: map[string]bool{}, openPRs: map[string]*github.PullRequest{},
+		defaultBranch: "main", nextCommentID: 1000,
+	}
 }
 
 func key(owner, repo, branch string) string { return owner + "/" + repo + "/" + branch }
@@ -145,7 +180,10 @@ func (f *fakeGitHub) GetBranchHead(owner, repo, branch string) (*github.BranchHe
 	return nil, nil
 }
 func (f *fakeGitHub) CreateIssue(owner, repo, title, body string, labels []string) (github.Issue, error) {
-	return github.Issue{}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issues = append(f.issues, createdIssue{owner, repo, title, body, labels})
+	return github.Issue{Number: len(f.issues), Title: title, Body: body}, nil
 }
 func (f *fakeGitHub) MergePullRequest(owner, repo string, n int) error { return nil }
 func (f *fakeGitHub) GetPullRequest(owner, repo string, n int) (github.PullRequestDetail, error) {
@@ -161,7 +199,11 @@ func (f *fakeGitHub) ListComments(owner, repo string, n int) ([]github.Comment, 
 	return nil, nil
 }
 func (f *fakeGitHub) CreateComment(owner, repo string, n int, body string) (int, error) {
-	return 0, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.comments = append(f.comments, createdComment{owner, repo, n, body})
+	f.nextCommentID++
+	return f.nextCommentID - 1, nil
 }
 func (f *fakeGitHub) CreateReview(owner, repo string, n int, body string, comments []github.NewReviewComment) (int, error) {
 	return 0, nil
@@ -482,6 +524,166 @@ func TestSyncGitHubClosesATaskWhenItsOpenPullRequestDisappears(t *testing.T) {
 	}
 	if state != model.StateClosed {
 		t.Fatalf("state = %q, want closed", state)
+	}
+}
+
+func TestTickParksATaskAndPostsARealCommentWhenTheAgentAsksAQuestion(t *testing.T) {
+	store, ctx := newStore(t)
+	fileTask(t, store, ctx, model.Task{
+		ID: "acme/tasks/1", Intent: model.IntentImplement, Title: "Do the thing",
+		Target:      &model.RepoRef{Owner: "acme", Name: "widgets"},
+		Binding:     model.BindingDirective,
+		ExternalRef: model.ExternalRef(model.RepoRef{Owner: "acme", Name: "tasks"}, 1),
+	})
+
+	gh := newFakeGitHub()
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return askedQuestion("Which repo should this land in?"), nil
+	})
+	r := New(Config{
+		Store: store, Slots: []string{"local"}, Roots: map[string]string{"local": t.TempDir()},
+		Agent: fw, Capabilities: model.NewCapabilityRegistry(), GitHub: gh,
+	})
+	if err := r.Tick(ctx, baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gh.comments) != 1 {
+		t.Fatalf("comments = %+v, want exactly one", gh.comments)
+	}
+	got := gh.comments[0]
+	if got.Owner != "acme" || got.Repo != "tasks" || got.Number != 1 || got.Body != "Which repo should this land in?" {
+		t.Errorf("posted comment = %+v", got)
+	}
+	if len(gh.created) != 0 {
+		t.Errorf("created PRs = %+v, want none -- a question ends the turn", gh.created)
+	}
+
+	state, err := store.State(ctx, "acme/tasks/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateAwaitingReply {
+		t.Fatalf("state = %q, want awaiting_reply", state)
+	}
+}
+
+func TestTickClosesATaskWithARealCommentWhenTheAgentAnswersWithoutPushing(t *testing.T) {
+	store, ctx := newStore(t)
+	fileTask(t, store, ctx, model.Task{
+		ID: "acme/tasks/2", Intent: model.IntentAnalyze, Title: "What does this do?",
+		Target:      &model.RepoRef{Owner: "acme", Name: "widgets"},
+		Binding:     model.BindingDirective,
+		ExternalRef: model.ExternalRef(model.RepoRef{Owner: "acme", Name: "tasks"}, 2),
+	})
+
+	gh := newFakeGitHub()
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return commentedOnIssue("It computes the widget count."), nil
+	})
+	r := New(Config{
+		Store: store, Slots: []string{"local"}, Roots: map[string]string{"local": t.TempDir()},
+		Agent: fw, Capabilities: model.NewCapabilityRegistry(), GitHub: gh,
+	})
+	if err := r.Tick(ctx, baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gh.comments) != 1 {
+		t.Fatalf("comments = %+v, want exactly one", gh.comments)
+	}
+	got := gh.comments[0]
+	if got.Owner != "acme" || got.Repo != "tasks" || got.Number != 2 || got.Body != "It computes the widget count." {
+		t.Errorf("posted comment = %+v", got)
+	}
+
+	// Closed outright, not merely completed -- see closeWithComment's own
+	// doc comment on why a comment-only task (no pull request ever) must
+	// not be left for syncGitHub's branch-existence re-derivation to
+	// mistake for a since-merged-or-closed one.
+	state, err := store.State(ctx, "acme/tasks/2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateClosed {
+		t.Fatalf("state = %q, want closed", state)
+	}
+}
+
+func TestTickFilesAProposedTaskAsARealIssue(t *testing.T) {
+	store, ctx := newStore(t)
+	fileTask(t, store, ctx, model.Task{
+		ID: "acme/tasks/3", Intent: model.IntentImplement, Title: "Do the thing", Body: "why",
+		Target:      &model.RepoRef{Owner: "acme", Name: "widgets"},
+		Binding:     model.BindingDirective,
+		ExternalRef: model.ExternalRef(model.RepoRef{Owner: "acme", Name: "tasks"}, 3),
+	})
+
+	gh := newFakeGitHub()
+	branch := model.BranchName("acme/tasks/3")
+	gh.branches[key("acme", "widgets", branch)] = true // the agent pushed, and also proposed a follow-up
+
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		result := pushed()
+		result.ToolCalls = append(result.ToolCalls, agent.ToolCall{
+			Name:      "propose_task",
+			Arguments: map[string]any{"title": "Follow-up", "body": "worth doing next"},
+		})
+		return result, nil
+	})
+	r := New(Config{
+		Store: store, Slots: []string{"local"}, Roots: map[string]string{"local": t.TempDir()},
+		Agent: fw, Capabilities: model.NewCapabilityRegistry(), GitHub: gh,
+	})
+	if err := r.Tick(ctx, baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gh.issues) != 1 {
+		t.Fatalf("filed issues = %+v, want exactly one", gh.issues)
+	}
+	got := gh.issues[0]
+	if got.Owner != "acme" || got.Repo != "tasks" || got.Title != "Follow-up" || got.Body != "worth doing next" {
+		t.Errorf("filed issue = %+v", got)
+	}
+	// The push still opened its own pull request -- propose_task
+	// accompanies other work rather than replacing it.
+	if len(gh.created) != 1 {
+		t.Errorf("created PRs = %+v, want exactly one", gh.created)
+	}
+}
+
+func TestTickRelaysNothingWhenATaskHasNoTrackingIssue(t *testing.T) {
+	store, ctx := newStore(t)
+	fileTask(t, store, ctx, model.Task{
+		ID: "t1", Intent: model.IntentImplement, Title: "Do the thing",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"}, Binding: model.BindingDirective,
+	})
+
+	gh := newFakeGitHub()
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return askedQuestion("Which repo?"), nil
+	})
+	r := New(Config{
+		Store: store, Slots: []string{"local"}, Roots: map[string]string{"local": t.TempDir()},
+		Agent: fw, Capabilities: model.NewCapabilityRegistry(), GitHub: gh,
+	})
+	if err := r.Tick(ctx, baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gh.comments) != 0 {
+		t.Errorf("comments = %+v, want none -- t1 has no ExternalRef to relay to", gh.comments)
+	}
+	// Nothing to park against either -- the task lands back in queued,
+	// the same as any other run that made a tool call and produced
+	// nothing to act on.
+	state, err := store.State(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateQueued {
+		t.Errorf("state = %q, want queued", state)
 	}
 }
 
