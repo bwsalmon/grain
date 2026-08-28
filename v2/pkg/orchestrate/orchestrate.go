@@ -148,13 +148,14 @@ func (r *Reconciler) runDispatch(ctx context.Context, d loop.Dispatch, now time.
 	}
 	if outcome == "" {
 		outcome = "succeeded"
-		if err := r.openPullRequest(ctx, *task, result); err != nil {
-			// The push already happened; failing to open the PR is worth
-			// logging and retrying next sync pass, not worth failing the
-			// run over -- FindOpenPullRequestForBranch inside syncGitHub
-			// and a retried CreatePullRequest here are both idempotent.
-			r.log.Printf("orchestrate: dispatch %s: opening pull request: %v", d.RunID, err)
-		}
+		// The push, if any, already happened; failing to open the PR (or
+		// to relay a question/comment/proposed task) is worth logging and
+		// retrying next pass, not worth failing the run over --
+		// FindOpenPullRequestForBranch inside syncGitHub and a retried
+		// CreatePullRequest here are both idempotent, and reportOutcome
+		// itself logs rather than propagates every effect it attempts.
+		// See effects.go's own doc comment for what this call covers.
+		r.reportOutcome(ctx, *task, result, now)
 	}
 
 	r.finish(ctx, d.RunID, now, outcome)
