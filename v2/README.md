@@ -100,8 +100,11 @@ cmd/graind/     the daemon: pkg/orchestrator's RunCycle run on a timer
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237) -- see "The UI" below for
-                why it talks straight to GitHub rather than through a
-                store or an orchestrator
+                how it reads a task's state, grants and run history off a
+                model.Store once one is configured (bwsalmon/agents#273),
+                falling back to GitHub directly for a task not yet filed
+                by pkg/orchestrator.PollIssues, or for a deployment with
+                no store configured at all
 cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
                 listener, opening the system's default browser
 cmd/grain/      a CLI over pkg/ui.Client -- the same model code cmd/ui's
@@ -585,26 +588,43 @@ task, approve a proposed one, attach or remove a capability, comment,
 close/reopen -- everything a human does by hand to a task issue today,
 from a form instead of a body of directive lines and a label picker.
 
-**It talks straight to GitHub, not through a store.** That direction's
-own "the UI is not a fourth record" rule says a UI reads declarations
-from the repo, grain's own acts from the store, and outside facts from
-GitHub through grain -- but `pkg/ui` predates `cmd/graind` driving
-`pkg/orchestrator.PollIssues` on a timer (bwsalmon/agents#263), and still
-reads and writes a task issue directly rather than through a
-`model.Store`, the same as it always has: an operator working through
-`pkg/ui` and `graind`'s own reconcile loop are now two independent paths
-that can both touch the same GitHub issue, with nothing reconciling the
-two. `pkg/ui` reads and writes it directly, through the same
-`github.Client` interface `cmd/graind` and `pkg/orchestrator` use -- one
-`Config{TaskRepo, Labels, Capabilities}` naming which repo and which
-label taxonomy (`grain/automation/labels.py`'s own defaults, ported as
-`ui.Labels`/`ui.Capability`), not a copy of anything the store or the
-repo owns. `State` is derived off labels on every read, the same "never
-stored" discipline `model.StateOf`'s own doc comment describes for the
-store-backed version. `pkg/ui`'s own `Config`/`Server` seam is exactly
-where a `model.Store`-backed implementation would slot in behind the
-same JSON API, without the frontend knowing the difference, if the two
-paths are ever unified.
+**It reads a store when one is configured, and GitHub directly when it
+has to (bwsalmon/agents#273).** That direction's own "the UI is not a
+fourth record" rule says a UI reads declarations from the repo, grain's
+own acts from the store, and outside facts from GitHub through grain.
+`pkg/ui` originally predated `cmd/graind` driving
+`pkg/orchestrator.PollIssues` on a timer (bwsalmon/agents#263), so it read
+and wrote a task issue directly, the only place a task genuinely lived.
+Now that intake is real, `Client.Store` -- a `*model.Store`, nil or not --
+is the seam: nil is exactly the original all-GitHub behaviour (still what
+a deployment gets if it configures no store, which is what keeps this
+package usable standalone, per its own package doc comment), and non-nil
+means a *tracked* task (one `PollIssues` has already filed -- `Store`'s
+own `GetTask` finds a row) has its state, capability grants and run
+history read and written on the store instead of re-derived from GitHub
+labels, the same discipline `model.StateOf`'s own doc comment describes.
+An *untracked* task -- a bare issue still carrying only the trigger or
+needsApproval label, with no store row yet -- is still read and written
+straight off GitHub exactly as before, because that is genuinely the only
+place it lives until some later poll files it. Comments are always read
+from GitHub either way: the conversation thread has no store
+representation of its own to read *through* grain for. `pkg/ui.Config`
+keeps naming `TaskRepo`/`Labels`/`Capabilities` either way -- the label
+taxonomy still matters for the untracked half, and for `cmd/graind`'s own
+`-trigger-label` vocabulary the two must agree on.
+
+**Single writer, so `cmd/ui`/`cmd/grain`'s own `-data-dir` is optional and
+must not race `graind`.** `pkg/model/dolt`'s own package doc comment:
+embedded Dolt permits exactly one process to hold a given store open.
+`cmd/ui -data-dir` and `cmd/grain -data-dir` point at the same directory
+`cmd/graind -data-dir` does (both open `<dir>/store`, `cmd/graind`'s own
+subdirectory) -- but the operator's job is making sure at most one of
+`graind`, `ui`, and `grain` is running against that directory at a time,
+today: nothing here arbitrates that. A Dolt SQL server, per `pkg/model/
+dolt`'s own doc comment on the fix, is what would let a controller, a UI,
+and a human at a CLI hold the same store open concurrently; until that
+exists, running the UI against a live `graind`'s own data directory means
+stopping `graind` first.
 
 **No OAuth.** The direction document calls for GitHub OAuth plus
 `author_association` as the permission gate; `cmd/ui` instead takes a

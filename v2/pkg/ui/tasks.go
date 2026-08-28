@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 )
@@ -46,6 +47,25 @@ type Comment struct {
 type TaskDetail struct {
 	Task
 	Comments []Comment `json:"comments"`
+	// Runs is a tracked task's own run history, off the store -- nil for
+	// a task not yet filed (see Client.GetTask), which has never been
+	// dispatched. Additive to the wire shape pkg/ui/static/app.js already
+	// parses: an old build simply never reads this key, the same as any
+	// other field it does not render.
+	Runs []Run `json:"runs,omitempty"`
+}
+
+// Run is one past attempt at a task, read off model.Store's own run
+// history (Store.Runs) -- see TaskDetail's own doc comment on why this
+// is only ever populated for a tracked task.
+type Run struct {
+	ID         string     `json:"id"`
+	Slot       string     `json:"slot"`
+	Sandbox    string     `json:"sandbox"`
+	Attempt    int        `json:"attempt"`
+	StartedAt  time.Time  `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Outcome    string     `json:"outcome,omitempty"`
 }
 
 func taskFrom(issue github.Issue) Task {
@@ -113,7 +133,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.tasks.ListTasks()
+	tasks, err := s.tasks.ListTasks(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -126,7 +146,7 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	detail, err := s.tasks.GetTask(number)
+	detail, err := s.tasks.GetTask(r.Context(), number)
 	if err != nil {
 		writeGitHubError(w, err)
 		return
@@ -139,7 +159,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	task, err := s.tasks.CreateTask(req)
+	task, err := s.tasks.CreateTask(r.Context(), req)
 	if err != nil {
 		writeClientError(w, err)
 		return
@@ -161,11 +181,11 @@ func (s *Server) handleSetCapability(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.tasks.SetCapability(number, req.ID, req.Attach); err != nil {
+	if err := s.tasks.SetCapability(r.Context(), number, req.ID, req.Attach); err != nil {
 		writeClientError(w, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, number)
 }
 
 // handleApprove is the UI's own "approve button" docs/data-model.md's UI
@@ -175,11 +195,11 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.tasks.Approve(number); err != nil {
+	if err := s.tasks.Approve(r.Context(), number); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, number)
 }
 
 type addCommentRequest struct {
@@ -195,11 +215,11 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.tasks.AddComment(number, req.Body); err != nil {
+	if err := s.tasks.AddComment(r.Context(), number, req.Body); err != nil {
 		writeClientError(w, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, number)
 }
 
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
@@ -207,11 +227,11 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.tasks.Close(number); err != nil {
+	if err := s.tasks.Close(r.Context(), number); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, number)
 }
 
 func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
@@ -219,15 +239,15 @@ func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.tasks.Reopen(number); err != nil {
+	if err := s.tasks.Reopen(r.Context(), number); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	s.respondWithTask(w, number)
+	s.respondWithTask(w, r, number)
 }
 
-func (s *Server) respondWithTask(w http.ResponseWriter, number int) {
-	task, err := s.tasks.Task(number)
+func (s *Server) respondWithTask(w http.ResponseWriter, r *http.Request, number int) {
+	task, err := s.tasks.Task(r.Context(), number)
 	if err != nil {
 		writeGitHubError(w, err)
 		return

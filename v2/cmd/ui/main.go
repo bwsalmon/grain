@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -16,11 +17,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -32,6 +35,13 @@ func main() {
 	githubTokenFile := flag.String("github-token-file", "", "file holding a GitHub token to authenticate as (falls back to $GITHUB_TOKEN, then unauthenticated)")
 	dryRun := flag.Bool("dry-run", false, "print every GitHub mutation instead of making it -- for trying the UI with no write access")
 	open := flag.Bool("open", true, "open the UI in the system's default browser once it's listening")
+	dataDir := flag.String("data-dir", "",
+		"root directory of a running cmd/graind's own store (its own -data-dir) -- reads task state, "+
+			"grants and run history from there instead of re-deriving them from GitHub labels on every "+
+			"request. Optional: omitting it is exactly today's GitHub-only behaviour. Must NOT be pointed "+
+			"at the same directory as a graind that is running right now -- embedded Dolt permits only one "+
+			"process to hold a store open at a time (v2/README.md's \"Single writer\" section); run this "+
+			"against graind's data dir only while graind itself is stopped.")
 	flag.Parse()
 
 	if *taskRepo == "" {
@@ -49,11 +59,17 @@ func main() {
 		log.Fatalf("ui: %v", err)
 	}
 
+	store, err := openStore(*dataDir)
+	if err != nil {
+		log.Fatalf("ui: %v", err)
+	}
+
 	srv := ui.NewServer(ui.Config{
 		TaskRepo:     repo,
 		Labels:       ui.DefaultLabels(),
 		Capabilities: ui.DefaultCapabilities(),
-	}, client)
+		GitHubHost:   *githubHost,
+	}, client, store)
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -65,6 +81,25 @@ func main() {
 		openBrowser(url)
 	}
 	log.Fatal(http.Serve(ln, srv))
+}
+
+// openStore opens the same embedded Dolt store cmd/graind's own -data-dir
+// holds, or returns a nil *model.Store if dataDir is empty -- ui.NewServer
+// treats that as "no store backs this deployment," pkg/ui's own
+// GitHub-only fallback.
+func openStore(dataDir string) (*model.Store, error) {
+	if dataDir == "" {
+		return nil, nil
+	}
+	db, err := dolt.Open(dolt.DefaultConfig(filepath.Join(dataDir, "store")))
+	if err != nil {
+		return nil, fmt.Errorf("opening store under -data-dir: %w", err)
+	}
+	store := model.New(db)
+	if err := store.Init(context.Background()); err != nil {
+		return nil, fmt.Errorf("initializing store schema: %w", err)
+	}
+	return store, nil
 }
 
 // buildClient resolves the GitHub token ladder (-github-token-file, then

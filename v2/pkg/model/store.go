@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -569,6 +570,77 @@ func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 		return 0, nil
 	}
 	return n, err
+}
+
+// TasksInRepo returns every task filed against repo, across every state --
+// the whole task list a UI or CLI reads instead of re-deriving it from
+// GitHub labels, one GetTask round trip per row. orchestrator.TaskID's own
+// doc comment is why a LIKE-prefix match on `id` is safe: owner and name
+// can never themselves contain '/', so "owner/name/" is an unambiguous
+// prefix of every issue number filed under it. '%' and '_' in an owner or
+// repo name are still LIKE metacharacters, so both are escaped before the
+// match rather than trusted to appear literally.
+func (s *Store) TasksInRepo(ctx context.Context, repo RepoRef) ([]Task, error) {
+	esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	prefix := esc.Replace(repo.Owner) + "/" + esc.Replace(repo.Name) + "/"
+
+	var ids []string
+	err := each(ctx, s.db,
+		"SELECT `id` FROM `task` WHERE `id` LIKE ? ESCAPE '\\\\' ORDER BY `id`", prefix+"%",
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+			return nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("listing tasks in %s: %w", repo, err)
+	}
+
+	tasks := make([]Task, 0, len(ids))
+	for _, id := range ids {
+		t, err := s.GetTask(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if t != nil {
+			tasks = append(tasks, *t)
+		}
+	}
+	return tasks, nil
+}
+
+// Runs returns every run recorded for taskID, oldest attempt first -- the
+// run history a UI reads instead of re-deriving "how many times has this
+// been tried, and what happened" from anything else. Leases are omitted:
+// LiveLeases already answers "what's outstanding right now," and a
+// finished run's leases are gone from the `lease` table the moment
+// DropLease or a Reaper clears them, so there is nothing left to show
+// against a past run.
+func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
+	var out []Run
+	err := each(ctx, s.db,
+		"SELECT `id`,`slot`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome` "+
+			"FROM `task_run` WHERE `task_id` = ? ORDER BY `attempt`", taskID,
+		func(rows *sql.Rows) error {
+			r := Run{TaskID: taskID}
+			var unit, outcome sql.NullString
+			var finished sql.NullTime
+			if err := rows.Scan(&r.ID, &r.Slot, &r.Sandbox, &unit, &r.Attempt,
+				&r.StartedAt, &finished, &outcome); err != nil {
+				return err
+			}
+			r.Unit, r.Outcome = unit.String, outcome.String
+			r.FinishedAt = timePtr(finished)
+			out = append(out, r)
+			return nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("reading run history for %s: %w", taskID, err)
+	}
+	return out, nil
 }
 
 // --- helpers ---------------------------------------------------------

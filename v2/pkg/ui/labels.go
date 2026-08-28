@@ -2,18 +2,25 @@
 // for creating and managing grain tasks and their capability grants,
 // without needing a running graind/orchestrator to talk to.
 //
-// It reads and writes GitHub directly, the same task repo cmd/graind's
-// own pkg/orchestrator.Config.TaskRepo names: state and capability grants
-// are GitHub labels (grain/automation/labels.py's taxonomy, unchanged
-// here), and a task's declared fields (/repo, /base, /auto-merge) are
-// directive lines in the issue body (pkg/orchestrator.ParseDirectives'
-// own grammar). That is a deliberate scope cut, not an oversight -- see
-// v2/README.md's ui/ section for why: the store-backed intake path
-// (issue -> model.Task) is not wired into any running binary yet, so
-// GitHub is the only place a task genuinely lives today, and reading it
-// straight from there is what keeps this package a *view*, never a
-// second copy of the record, per docs/data-model.md's "the UI is not a
-// fourth record" rule.
+// A task's state, grants and run history are read off a model.Store when
+// Client.Store is non-nil (bwsalmon/agents#273): the same store
+// cmd/graind's own pkg/orchestrator.PollIssues files a labelled issue
+// into. Before that poll ever runs, though -- a brand-new issue still
+// carrying only the trigger or needsApproval label -- there is no
+// model.Task row for it yet, so this package falls back to reading it
+// straight off GitHub the same way it always has: state derived from
+// labels (grain/automation/labels.py's taxonomy) and declared fields
+// (/repo, /base, /auto-merge) parsed out of the issue body
+// (pkg/orchestrator.ParseDirectives' own grammar, duplicated in
+// directives.go for the reason its own doc comment gives). Client.Store
+// nil is the same fallback, always: a deployment with no store configured
+// gets exactly today's GitHub-only behaviour, which is what keeps this
+// package usable standalone, per this comment's first line.
+//
+// The conversation thread (comments) has no store representation at all
+// and is always read from GitHub, tracked task or not -- an outside fact
+// this package reads *through* nothing but the GitHub API itself, per
+// docs/data-model.md's "the UI is not a fourth record" rule.
 package ui
 
 // Labels is the label taxonomy a task repo uses, mirroring
@@ -85,6 +92,13 @@ const (
 	StateNeedsApproval State = "needs_approval"
 	StateQueued        State = "queued"
 	StateUntracked     State = "untracked"
+	// StateClosed is a tracked task's own terminal state
+	// (model.StateClosed), read off task_observation.closed_at rather
+	// than derived here -- see stateFromModel. A GitHub-only task never
+	// produces this value: closing one before it is ever filed just
+	// removes it from the list, the same as before this package read a
+	// store at all.
+	StateClosed State = "closed"
 )
 
 // deriveState reads a task's state off its labels, in the precedence

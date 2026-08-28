@@ -20,6 +20,13 @@ type Config struct {
 	TaskRepo     model.RepoRef
 	Labels       Labels
 	Capabilities []Capability
+	// GitHubHost is the host issue URLs are built against for a task read
+	// off the store, where there is no fresh GitHub API response to carry
+	// its own HTMLURL -- fetching one just for that would defeat the
+	// point of reading state off the store instead of GitHub (see
+	// Client.trackedTask). Empty means "github.com", matching
+	// github.NewRealTransport's own default.
+	GitHubHost string
 }
 
 // Server is the JSON API plus the static frontend it serves, a thin HTTP
@@ -36,8 +43,17 @@ type Server struct {
 // github.DryRunClient (mutations print instead of firing) or
 // githubsim.Sim the same way every other v2 package that takes a Client
 // can, e.g. for a demo run against no real GitHub token at all.
-func NewServer(cfg Config, client github.Client) *Server {
-	s := &Server{tasks: NewClient(cfg, client), mux: http.NewServeMux()}
+//
+// store may be nil, meaning "no store backs this deployment" -- every
+// task is then read and written straight off GitHub, exactly as this
+// package behaved before it could read one at all. A non-nil store must
+// be the same one cmd/graind's own pkg/orchestrator.PollIssues polls
+// into -- see v2/README.md's "Single writer" section: embedded Dolt
+// permits exactly one process to hold a given store open, so a Server
+// and a graind pointed at the same data directory must never run at the
+// same time.
+func NewServer(cfg Config, client github.Client, store *model.Store) *Server {
+	s := &Server{tasks: NewClient(cfg, client, store), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }

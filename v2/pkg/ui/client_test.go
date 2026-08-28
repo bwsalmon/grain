@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -14,7 +15,7 @@ func testClient() (*Client, *memClient) {
 		Labels:       DefaultLabels(),
 		Capabilities: DefaultCapabilities(),
 	}
-	return NewClient(cfg, client), client
+	return NewClient(cfg, client, nil), client
 }
 
 func TestUpdateTaskChangesOnlyTheFieldsGiven(t *testing.T) {
@@ -23,7 +24,7 @@ func TestUpdateTaskChangesOnlyTheFieldsGiven(t *testing.T) {
 	gh.seed(1, "original title", "original body\n\n/repo acme/widget\n/base main", l.Trigger)
 
 	newTitle := "updated title"
-	task, err := c.UpdateTask(1, UpdateTaskRequest{Title: &newTitle})
+	task, err := c.UpdateTask(context.Background(), 1, UpdateTaskRequest{Title: &newTitle})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestUpdateTaskEditsDeclaredFields(t *testing.T) {
 	gh.seed(2, "title", "body\n\n/repo acme/widget\n/base main", l.Trigger)
 
 	newBase := "release"
-	task, err := c.UpdateTask(2, UpdateTaskRequest{Base: &newBase})
+	task, err := c.UpdateTask(context.Background(), 2, UpdateTaskRequest{Base: &newBase})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestUpdateTaskClearsRepoOnEmptyString(t *testing.T) {
 	gh.seed(3, "title", "body\n\n/repo acme/widget", l.Trigger)
 
 	empty := ""
-	task, err := c.UpdateTask(3, UpdateTaskRequest{Repo: &empty})
+	task, err := c.UpdateTask(context.Background(), 3, UpdateTaskRequest{Repo: &empty})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestUpdateTaskRejectsBadRepo(t *testing.T) {
 	gh.seed(4, "title", "body", l.Trigger)
 
 	bad := "not-a-repo"
-	_, err := c.UpdateTask(4, UpdateTaskRequest{Repo: &bad})
+	_, err := c.UpdateTask(context.Background(), 4, UpdateTaskRequest{Repo: &bad})
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected a ValidationError, got %v", err)
@@ -90,7 +91,7 @@ func TestUpdateTaskRejectsEmptyTitle(t *testing.T) {
 	gh.seed(5, "title", "body", l.Trigger)
 
 	empty := ""
-	_, err := c.UpdateTask(5, UpdateTaskRequest{Title: &empty})
+	_, err := c.UpdateTask(context.Background(), 5, UpdateTaskRequest{Title: &empty})
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("expected a ValidationError, got %v", err)
@@ -99,7 +100,7 @@ func TestUpdateTaskRejectsEmptyTitle(t *testing.T) {
 
 func TestUpdateTaskNotFound(t *testing.T) {
 	c, _ := testClient()
-	_, err := c.UpdateTask(999, UpdateTaskRequest{})
+	_, err := c.UpdateTask(context.Background(), 999, UpdateTaskRequest{})
 	if err == nil {
 		t.Fatal("expected an error")
 	}

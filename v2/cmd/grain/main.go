@@ -17,16 +17,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -46,6 +49,10 @@ Global flags (must come before the command):
   -github-token-file string  file holding a GitHub token (falls back to $GITHUB_TOKEN, then unauthenticated)
   -dry-run                   print every GitHub mutation instead of making it
   -json                      print machine-readable JSON instead of a human-readable table
+  -data-dir string           a running cmd/graind's own -data-dir -- reads/writes task state, grants and
+                              run history there instead of GitHub labels once a task is filed (optional;
+                              omit for today's GitHub-only behaviour). Do not point this at a graind's
+                              data dir while that graind is running -- see cmd/ui's own -data-dir flag.
 
 Commands:
   list                                     list every task
@@ -70,6 +77,7 @@ func run(args []string) error {
 	githubTokenFile := fs.String("github-token-file", "", "file holding a GitHub token to authenticate as (falls back to $GITHUB_TOKEN, then unauthenticated)")
 	dryRun := fs.Bool("dry-run", false, "print every GitHub mutation instead of making it")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON instead of a human-readable table")
+	dataDir := fs.String("data-dir", "", "a running cmd/graind's own -data-dir (optional; see usage above)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -91,39 +99,64 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	store, err := openStore(*dataDir)
+	if err != nil {
+		return err
+	}
 	c := ui.NewClient(ui.Config{
 		TaskRepo:     repo,
 		Labels:       ui.DefaultLabels(),
 		Capabilities: ui.DefaultCapabilities(),
-	}, client)
+		GitHubHost:   *githubHost,
+	}, client, store)
 	out := &printer{json: *jsonOutput}
+	ctx := context.Background()
 
 	cmd, cmdArgs := rest[0], rest[1:]
 	switch cmd {
 	case "list":
-		return cmdList(c, out, cmdArgs)
+		return cmdList(ctx, c, out, cmdArgs)
 	case "get":
-		return cmdGet(c, out, cmdArgs)
+		return cmdGet(ctx, c, out, cmdArgs)
 	case "create":
-		return cmdCreate(c, out, cmdArgs)
+		return cmdCreate(ctx, c, out, cmdArgs)
 	case "update":
-		return cmdUpdate(c, out, cmdArgs)
+		return cmdUpdate(ctx, c, out, cmdArgs)
 	case "approve":
-		return cmdApprove(c, out, cmdArgs)
+		return cmdApprove(ctx, c, out, cmdArgs)
 	case "capability":
-		return cmdCapability(c, out, cmdArgs)
+		return cmdCapability(ctx, c, out, cmdArgs)
 	case "comment":
-		return cmdComment(c, out, cmdArgs)
+		return cmdComment(ctx, c, out, cmdArgs)
 	case "close", "delete":
-		return cmdClose(c, out, cmdArgs)
+		return cmdClose(ctx, c, out, cmdArgs)
 	case "reopen":
-		return cmdReopen(c, out, cmdArgs)
+		return cmdReopen(ctx, c, out, cmdArgs)
 	case "config":
-		return cmdConfig(c, out, cmdArgs)
+		return cmdConfig(ctx, c, out, cmdArgs)
 	default:
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// openStore is cmd/ui's own helper of the same name: open the same
+// embedded Dolt store cmd/graind's own -data-dir holds, or return a nil
+// *model.Store if dataDir is empty -- ui.NewClient treats that as "no
+// store backs this deployment," pkg/ui's own GitHub-only fallback.
+func openStore(dataDir string) (*model.Store, error) {
+	if dataDir == "" {
+		return nil, nil
+	}
+	db, err := dolt.Open(dolt.DefaultConfig(filepath.Join(dataDir, "store")))
+	if err != nil {
+		return nil, fmt.Errorf("opening store under -data-dir: %w", err)
+	}
+	store := model.New(db)
+	if err := store.Init(context.Background()); err != nil {
+		return nil, fmt.Errorf("initializing store schema: %w", err)
+	}
+	return store, nil
 }
 
 // buildClient resolves the GitHub token ladder (-github-token-file, then
@@ -168,8 +201,8 @@ func parseNumber(s string) (int, error) {
 // respond re-reads number and prints it -- what every mutating command
 // below does once its own call to Client succeeds, the CLI's analogue of
 // pkg/ui's own respondWithTask.
-func respond(c *ui.Client, out *printer, number int) error {
-	task, err := c.Task(number)
+func respond(ctx context.Context, c *ui.Client, out *printer, number int) error {
+	task, err := c.Task(ctx, number)
 	if err != nil {
 		return err
 	}
@@ -177,12 +210,12 @@ func respond(c *ui.Client, out *printer, number int) error {
 	return nil
 }
 
-func cmdList(c *ui.Client, out *printer, args []string) error {
+func cmdList(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain list", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	tasks, err := c.ListTasks()
+	tasks, err := c.ListTasks(ctx)
 	if err != nil {
 		return err
 	}
@@ -190,7 +223,7 @@ func cmdList(c *ui.Client, out *printer, args []string) error {
 	return nil
 }
 
-func cmdGet(c *ui.Client, out *printer, args []string) error {
+func cmdGet(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain get", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -199,7 +232,7 @@ func cmdGet(c *ui.Client, out *printer, args []string) error {
 	if err != nil {
 		return err
 	}
-	detail, err := c.GetTask(number)
+	detail, err := c.GetTask(ctx, number)
 	if err != nil {
 		return err
 	}
@@ -218,7 +251,7 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-func cmdCreate(c *ui.Client, out *printer, args []string) error {
+func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain create", flag.ContinueOnError)
 	title := fs.String("title", "", "task title (required)")
 	body := fs.String("body", "", "task description")
@@ -244,7 +277,7 @@ func cmdCreate(c *ui.Client, out *printer, args []string) error {
 		}
 	})
 
-	task, err := c.CreateTask(req)
+	task, err := c.CreateTask(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -252,7 +285,7 @@ func cmdCreate(c *ui.Client, out *printer, args []string) error {
 	return nil
 }
 
-func cmdUpdate(c *ui.Client, out *printer, args []string) error {
+func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain update", flag.ContinueOnError)
 	title := fs.String("title", "", "new task title")
 	body := fs.String("body", "", "new task description")
@@ -289,7 +322,7 @@ func cmdUpdate(c *ui.Client, out *printer, args []string) error {
 		}
 	})
 
-	task, err := c.UpdateTask(number, req)
+	task, err := c.UpdateTask(ctx, number, req)
 	if err != nil {
 		return err
 	}
@@ -297,7 +330,7 @@ func cmdUpdate(c *ui.Client, out *printer, args []string) error {
 	return nil
 }
 
-func cmdApprove(c *ui.Client, out *printer, args []string) error {
+func cmdApprove(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain approve", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -306,13 +339,13 @@ func cmdApprove(c *ui.Client, out *printer, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.Approve(number); err != nil {
+	if err := c.Approve(ctx, number); err != nil {
 		return err
 	}
-	return respond(c, out, number)
+	return respond(ctx, c, out, number)
 }
 
-func cmdCapability(c *ui.Client, out *printer, args []string) error {
+func cmdCapability(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain capability", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -334,13 +367,13 @@ func cmdCapability(c *ui.Client, out *printer, args []string) error {
 	default:
 		return fmt.Errorf("third argument must be attach or detach, got %q", fs.Arg(2))
 	}
-	if err := c.SetCapability(number, id, attach); err != nil {
+	if err := c.SetCapability(ctx, number, id, attach); err != nil {
 		return err
 	}
-	return respond(c, out, number)
+	return respond(ctx, c, out, number)
 }
 
-func cmdComment(c *ui.Client, out *printer, args []string) error {
+func cmdComment(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain comment", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -353,13 +386,13 @@ func cmdComment(c *ui.Client, out *printer, args []string) error {
 		return err
 	}
 	body := strings.Join(fs.Args()[1:], " ")
-	if err := c.AddComment(number, body); err != nil {
+	if err := c.AddComment(ctx, number, body); err != nil {
 		return err
 	}
-	return respond(c, out, number)
+	return respond(ctx, c, out, number)
 }
 
-func cmdClose(c *ui.Client, out *printer, args []string) error {
+func cmdClose(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain close", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -368,13 +401,13 @@ func cmdClose(c *ui.Client, out *printer, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.Close(number); err != nil {
+	if err := c.Close(ctx, number); err != nil {
 		return err
 	}
-	return respond(c, out, number)
+	return respond(ctx, c, out, number)
 }
 
-func cmdReopen(c *ui.Client, out *printer, args []string) error {
+func cmdReopen(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain reopen", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -383,13 +416,13 @@ func cmdReopen(c *ui.Client, out *printer, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := c.Reopen(number); err != nil {
+	if err := c.Reopen(ctx, number); err != nil {
 		return err
 	}
-	return respond(c, out, number)
+	return respond(ctx, c, out, number)
 }
 
-func cmdConfig(c *ui.Client, out *printer, args []string) error {
+func cmdConfig(ctx context.Context, c *ui.Client, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain config", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -428,6 +461,14 @@ func (p *printer) detail(d ui.TaskDetail) {
 		return
 	}
 	fmt.Print(taskBlock(d.Task))
+	for _, r := range d.Runs {
+		status := "running"
+		if r.FinishedAt != nil {
+			status = fmt.Sprintf("finished %s (%s)", r.FinishedAt.Format("2006-01-02 15:04"), r.Outcome)
+		}
+		fmt.Printf("\n--- run #%d (%s), started %s: %s ---\n", r.Attempt, r.Slot,
+			r.StartedAt.Format("2006-01-02 15:04"), status)
+	}
 	for _, cm := range d.Comments {
 		fmt.Printf("\n--- comment #%d by %s ---\n%s\n", cm.ID, cm.User, cm.Body)
 	}
