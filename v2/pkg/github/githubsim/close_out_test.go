@@ -1,6 +1,7 @@
 package githubsim
 
 import (
+	"os/exec"
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
@@ -148,7 +149,8 @@ func TestSimGetPullRequestReadsStateAndMergeable(t *testing.T) {
 }
 
 func TestSimMergePullRequestClosesIt(t *testing.T) {
-	_, client := newSim(t, "main")
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/issue-1")
 	pr, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "main", "t", "")
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +164,14 @@ func TestSimMergePullRequestClosesIt(t *testing.T) {
 	}
 	if detail.State != "closed" {
 		t.Fatalf("state = %q, want closed", detail.State)
+	}
+
+	// MergePullRequest now performs the merge for real, at the git level
+	// -- the same thing GitHub's own PUT .../merge does as a side effect
+	// -- not just github.PullRequestDetail's own State field.
+	cmd := exec.Command("git", "--git-dir", sim.BareRepo, "merge-base", "--is-ancestor", "grain/issue-1", "main")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("expected grain/issue-1 to have actually landed in main: %v", err)
 	}
 }
 

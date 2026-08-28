@@ -19,6 +19,18 @@
 // dispatch.Cycle there) and porting pkg/orchestrate's own capability
 // resolution/materialization and reconcile-loop shape onto it. See
 // v2/README.md for what that merge kept and dropped.
+//
+// Most of this file's own flags (-slots, -poll-interval, -gemini-model,
+// -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
+// -gcp-agent-service-account) are store-backed now (bwsalmon/agents#320):
+// loadConfig writes them into model.Store's grain_config row the first
+// time a deployment's store has none, and reads them back out of it on
+// every start after that, so a UI or a CLI editing model.Config changes
+// what the next restart runs with. What stays flags-only either has to
+// be known before there is a store to read it from (-data-dir, -store-*)
+// or names secret material rather than being configuration itself
+// (-gemini-api-key-file, -kontur-ssh-key) -- bwsalmon/agents#320's own
+// "but not the secrets."
 package main
 
 import (
@@ -64,10 +76,17 @@ func (s *stringSliceFlag) Set(v string) error {
 }
 
 func daemon(args []string) {
+	// seedOnly marks a flag loadConfig only consults the first time this
+	// -data-dir/-store-addr has ever seen a daemon: it seeds grain_config,
+	// and every start after that reads the stored value back instead,
+	// silently ignoring whatever this flag says -- see loadConfig's own
+	// doc comment for why.
+	const seedOnly = " (bwsalmon/agents#320: seeds the stored configuration on first use; ignored once one exists -- see loadConfig)"
+
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
-	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills")
-	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
+	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills"+seedOnly)
+	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
 
 	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- required to share the store with a UI or a CLI")
 	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
@@ -75,14 +94,14 @@ func daemon(args []string) {
 	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
 
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
-	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
-	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
+	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
+	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)"+seedOnly)
 
-	githubHost := fs.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing")
-	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)")
+	githubHost := fs.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing"+seedOnly)
+	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)"+seedOnly)
 
-	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both")
-	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both"+seedOnly)
+	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for"+seedOnly)
 
 	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
 	// host, no isolation) exactly as it always has -- see run()'s own
@@ -206,6 +225,11 @@ func run(ctx context.Context, cfg config) error {
 		return err
 	}
 	defer db.Close()
+
+	cfg, err = loadConfig(ctx, store, cfg)
+	if err != nil {
+		return fmt.Errorf("loading deployment configuration: %w", err)
+	}
 
 	// Sandboxing defaults to orchestrator.HostSandboxes -- one local
 	// directory per slot, no isolation -- exactly as it always has;
@@ -353,6 +377,71 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 			tick()
 		}
 	}
+}
+
+// loadConfig resolves cfg's store-backed fields (bwsalmon/agents#320)
+// against store's own grain_config row: on a database with no row yet --
+// a fresh -data-dir, or a store no daemon has ever started against --
+// flagCfg's own values (the daemon's flags, as parsed) are the seed,
+// written once so a UI or a CLI has something to read and edit; on a
+// database that already has a row, every field below is read back from
+// it instead, discarding whatever the flags said. That is deliberate,
+// not a bug: bwsalmon/agents#320 asked for the store to become the
+// record the same way it already is for tasks (README, "Input is a
+// model update, not a GitHub issue"), and a flag whose value silently
+// depended on how many times the daemon had already started would be a
+// worse surprise than one that is simply ignored after the first.
+//
+// Picking up a change made through the store still needs a restart --
+// this reads grain_config exactly once, at startup, applying no update
+// while RunCycle is running. bwsalmon/agents#320 explicitly did not ask
+// for graceful in-flight reloading, so run() does not attempt it.
+//
+// Only the fields with no bearing on reaching the store in the first
+// place move through here: -data-dir, the -store-* family and
+// -gemini-api-key-file (a secret, not configuration -- bwsalmon/
+// agents#320's own "but not the secrets") stay flags-only, read by run()
+// before loadConfig has a store to call.
+func loadConfig(ctx context.Context, store *model.Store, flagCfg config) (config, error) {
+	stored, err := store.GetConfig(ctx)
+	if err != nil {
+		return config{}, fmt.Errorf("reading stored configuration: %w", err)
+	}
+	if stored == nil {
+		seed := flagCfg.toModelConfig()
+		if err := store.PutConfig(ctx, seed); err != nil {
+			return config{}, fmt.Errorf("seeding stored configuration from flags: %w", err)
+		}
+		return flagCfg, nil
+	}
+	return flagCfg.withModelConfig(*stored), nil
+}
+
+// toModelConfig is the flag-parsed subset of config that mirrors
+// model.Config -- the seed loadConfig writes when a deployment has never
+// stored one.
+func (c config) toModelConfig() model.Config {
+	return model.Config{
+		PollInterval: c.pollInterval, Slots: c.slots,
+		GeminiModel: c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
+		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
+		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
+	}
+}
+
+// withModelConfig returns c with every store-backed field replaced by
+// mc's -- everything loadConfig reads back out of grain_config once a
+// row exists.
+func (c config) withModelConfig(mc model.Config) config {
+	c.pollInterval = mc.PollInterval
+	c.slots = mc.Slots
+	c.geminiModel = mc.GeminiModel
+	c.maxAgentTurns = mc.MaxAgentTurns
+	c.githubHost = mc.GitHubHost
+	c.githubInsecureHTTP = mc.GitHubInsecureHTTP
+	c.gcpProject = mc.GCPProject
+	c.gcpServiceAccountEmail = mc.GCPServiceAccountEmail
+	return c
 }
 
 // capabilityProviders builds every capability provider this deployment
