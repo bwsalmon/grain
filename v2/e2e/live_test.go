@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/agent"
-	"github.com/bwsalmon/grain/v2/agent/gemini"
-	"github.com/bwsalmon/grain/v2/loop"
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 func TestLiveIssueCompletesEndToEnd(t *testing.T) {

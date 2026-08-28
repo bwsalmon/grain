@@ -2033,11 +2033,11 @@ in it**, which is exactly the kind of thing a UI should say out loud.
 "No secret store in the model" is about the *task* model above — nothing
 resolvable to material is allowed anywhere a `Task`, a `Grant`, or a UI
 can see it. Material still has to live somewhere, and in v2 that
-somewhere is `v2/secrets`: a `model.CredentialResolver` reading a
+somewhere is `v2/pkg/secrets`: a `model.CredentialResolver` reading a
 directory shaped exactly like a Kubernetes Secret volume mount —
 `<dir>/<secret>/<key>`, one subdirectory per secret, one file per key,
 raw bytes, no wrapper format. `grain/proxy/credentials.py` and
-`v2/gitproxy/credentials.go`'s `<name>.token` convention already do this
+`v2/pkg/gitproxy/credentials.go`'s `<name>.token` convention already do this
 for GitHub credentials specifically; `v2/secrets.Store` generalises it to
 any capability, addressed the same way Kubernetes itself addresses one
 value in a Secret — `name`, or `name/key` when a secret carries more than

@@ -27,8 +27,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/bwsalmon/grain/v2/loop"
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // simTask is what the simulation's own components know about one issue,
