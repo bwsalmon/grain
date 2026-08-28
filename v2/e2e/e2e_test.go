@@ -214,6 +214,163 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	}
 }
 
+// TestParentBlockedUntilChildrenClose exercises model.LinkChildOf per
+// docs/data-model.md's "A parent is not complete while a child is open"
+// rule: "an open child is an unresolved blocking link" -- meaning the
+// *parent* holds one ChildOf link per child (mirroring how a blocked
+// task holds DependsOn links, per dispatch_test.go's
+// TestCycleSkipsBlockedTasksUntilTheirDependencyCloses), not the other
+// way around. LinkKind.Blocks (task.go) and IsBlocked (state.go) block
+// whoever holds the link, keyed on whether the link's target has closed,
+// so a child's own ChildOf link back at its parent would block the
+// child on the parent instead -- the opposite of what "a parent is not
+// complete while a child is open" needs, and briefly a deadlock if both
+// directions were linked at once.
+//
+// Blocked is deliberately not a State (task.go's docstring: "a blocked
+// task is still queued"), and nothing in dispatch or store.Observe
+// refuses to mark a blocked task completed or closed outright -- see
+// model/state.go's StateOf and IsBlocked, and pkg/model/store.go's
+// Ready, none of which cross-check each other. The one real, observable
+// effect blocking has today is dispatch eligibility: store.Ready's
+// underlying task_ready view (schema.go) excludes a task with any open
+// blocking link, so dispatch.Cycle never selects it, however many free
+// slots there are, until every blocker closes. That is what this test
+// asserts -- not that the parent literally "cannot be closed" (nothing
+// stops that directly), but that it can never reach closed through the
+// normal dispatch/push/complete/merge/close pipeline while blocked,
+// because that pipeline starts with a dispatch it never gets.
+func TestParentBlockedUntilChildrenClose(t *testing.T) {
+	// A third slot, kept unused until the parent's own dispatch: pushScript
+	// clones into a fixed "work" directory under its slot's sandbox root,
+	// so reusing slotA or slotB for the parent after a child already
+	// cloned there would collide with that leftover directory.
+	const slotA, slotB, slotC = "sandbox-bd453be9-4a", "sandbox-bd453be9-4b", "sandbox-bd453be9-4c"
+	w := newWorld(t, []string{slotA, slotB, slotC})
+	w.newRepo("acme", "widgets")
+	w.newRepo("acme", "other")
+	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
+	other := model.RepoRef{Owner: "acme", Name: "other"}
+
+	clock := baseTime
+	// Children first: task_blocked's join against task_link.target only
+	// counts a link once its target row exists, so filing them before the
+	// parent is what makes the parent's ChildOf links actually block.
+	fileIssue(w, "kid-a", human("dana"), widgets)
+	fileIssue(w, "kid-b", human("dana"), other)
+	fileIssue(w, "par", human("dana"), widgets,
+		model.Link{Kind: model.LinkChildOf, Target: "kid-a"},
+		model.Link{Kind: model.LinkChildOf, Target: "kid-b"},
+	)
+	assertState(w, "par", model.StateQueued, false)
+
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byTask := map[string]dispatch.Dispatch{}
+	for _, d := range dispatches {
+		byTask[d.TaskID] = d
+	}
+	if len(dispatches) != 2 || byTask["kid-a"].TaskID == "" || byTask["kid-b"].TaskID == "" {
+		t.Fatalf("Cycle dispatched %+v, want exactly kid-a and kid-b, parent still blocked", dispatches)
+	}
+
+	// Drive both children through a real dispatch/push/complete cycle,
+	// each against its own repo so their merges below cannot collide on
+	// the same file.
+	for _, spec := range []struct{ id, owner, name string }{
+		{"kid-a", "acme", "widgets"},
+		{"kid-b", "acme", "other"},
+	} {
+		d := byTask[spec.id]
+		branch := model.BranchName(spec.id)
+		clock = clock.Add(time.Minute)
+		result := w.runDispatch(d, pushScript(w.remote(spec.owner, spec.name), branch, spec.id), clock)
+		if !pushedOK(result) {
+			t.Fatalf("%s: agent run did not push cleanly: %+v", spec.id, result.ToolCalls)
+		}
+		clock = clock.Add(time.Minute)
+		if err := w.store.Observe(w.ctx, model.Observation{TaskID: spec.id, CompletedAt: &clock}); err != nil {
+			t.Fatal(err)
+		}
+		assertState(w, spec.id, model.StateCompleted, false)
+	}
+
+	// Completed is not closed -- task_blocked reads closed_at, not
+	// completed_at, so the parent must still be excluded from every
+	// cycle with both children merely completed.
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillBlocked) != 0 {
+		t.Fatalf("Cycle dispatched a still-blocked parent: %+v", stillBlocked)
+	}
+
+	// GitHub merges kid-a's PR and its "Closes #N" convention closes it --
+	// one of the two blockers gone, one still open.
+	w.mergeBranchIntoDefault("acme", "widgets", model.BranchName("kid-a"), "main")
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "kid-a", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "kid-a", model.StateClosed, false)
+
+	oneOpen, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oneOpen) != 0 {
+		t.Fatalf("Cycle dispatched the parent with kid-b still open: %+v", oneOpen)
+	}
+
+	// Close kid-b, the last blocker.
+	w.mergeBranchIntoDefault("acme", "other", model.BranchName("kid-b"), "main")
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "kid-b", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "kid-b", model.StateClosed, false)
+
+	// Both children closed -- the parent is unblocked and dispatches on
+	// the very next cycle, with nothing re-applied to it. Only slotC is
+	// offered here: slotA and slotB each already hold a child's cloned
+	// "work" directory from pushScript above, and the parent's own push
+	// below needs a clean slot to clone into.
+	freed, err := dispatch.Cycle(w.ctx, w.store, []string{slotC}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freed) != 1 || freed[0].TaskID != "par" {
+		t.Fatalf("Cycle after both children closed = %+v, want exactly par", freed)
+	}
+	assertState(w, "par", model.StateRunning, true)
+
+	// Carry the parent itself through the same real push/complete/merge/
+	// close cycle iss-1 gets in TestIssueCompletesEndToEnd, so the test
+	// proves not just that the parent becomes eligible but that it can
+	// actually reach closed once it does.
+	branch := model.BranchName("par")
+	clock = clock.Add(time.Minute)
+	result := w.runDispatch(freed[0], pushScript(w.remote("acme", "widgets"), branch, "par"), clock)
+	if !pushedOK(result) {
+		t.Fatalf("parent's agent run did not push cleanly: %+v", result.ToolCalls)
+	}
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "par", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "par", model.StateCompleted, false)
+
+	w.mergeBranchIntoDefault("acme", "widgets", branch, "main")
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "par", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "par", model.StateClosed, false)
+}
+
 func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	const slot = "sandbox-bd453be9-3"
 	w := newWorld(t, []string{slot})
