@@ -3,12 +3,22 @@ package e2e
 // bwsalmon/agents#233 asked for a test that files issues the way a user
 // would and checks that they complete -- branches made, merged, and the
 // issue's own state transitioning the way a human watching the tracker
-// would expect. The three tests below are that, fixed rather than
+// would expect. The first three tests below are that, fixed rather than
 // randomized (simulate_test.go is the randomized counterpart): one happy
 // path from queued through running, completed and closed with a real
 // branch pushed and a real merge landed; one that parks on a question
 // and resumes; and one where a first attempt is denied by the proxy and
 // a retry succeeds.
+//
+// bwsalmon/agents#319 then asked for the same whole-pipeline coverage
+// extended to more than one run in flight at once. TestConcurrentRuns
+// DenyCrossRepoPushWithoutTouchingTheOtherRun (bwsalmon/agents#322) is
+// the first of that family: two tasks dispatched into two slots at the
+// same time, one of them scripted to push against the other's repo
+// instead of its own, proving gitproxy authorizes per-run/per-slot with
+// a second, genuinely live run in play -- not just against a repo no
+// live run happens to target, which TestFailedRunReturnsTaskToQueueFor
+// Retry above already covers.
 
 import (
 	"testing"
@@ -265,5 +275,80 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	}
 	if got := w.log1("acme", "widgets", branch, "%s"); got != "agent commit for iss-3" {
 		t.Fatalf("pushed branch tip = %q, want the agent's commit", got)
+	}
+}
+
+// TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun is
+// TestFailedRunReturnsTaskToQueueForRetry's scenario above, but with a
+// second, genuinely live run in another slot standing in for "the wrong
+// repo" instead of a repo nothing has ever touched -- proving gitproxy
+// authorizes per-run/per-slot rather than "any repo any live run
+// happens to target."
+func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T) {
+	const slotA = "sandbox-bd453be9-4"
+	const slotB = "sandbox-bd453be9-5"
+	w := newWorld(t, []string{slotA, slotB})
+	w.newRepo("acme", "widgets")
+	w.newRepo("acme", "gadgets")
+
+	clock := baseTime
+	fileIssue(w, "iss-4a", human("dave"), model.RepoRef{Owner: "acme", Name: "widgets"})
+	fileIssue(w, "iss-4b", human("erin"), model.RepoRef{Owner: "acme", Name: "gadgets"})
+
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatches) != 2 {
+		t.Fatalf("Cycle dispatched %+v, want both tasks started", dispatches)
+	}
+	var dA, dB dispatch.Dispatch
+	for _, d := range dispatches {
+		switch d.TaskID {
+		case "iss-4a":
+			dA = d
+		case "iss-4b":
+			dB = d
+		}
+	}
+	if dA.Slot != slotA || dB.Slot != slotB {
+		t.Fatalf("expected iss-4a on %s and iss-4b on %s, got %+v", slotA, slotB, dispatches)
+	}
+	assertState(w, "iss-4a", model.StateRunning, true)
+	assertState(w, "iss-4b", model.StateRunning, true)
+
+	branchA := model.BranchName("iss-4a")
+	branchB := model.BranchName("iss-4b")
+
+	// Slot A's agent targets slot B's repo -- acme/gadgets, a second run's
+	// legitimate target right now, not merely a repo nothing has touched.
+	// The harness's runDispatch is synchronous, so this and B's push below
+	// cannot literally interleave, but both runs are live (StartRun has
+	// happened for both, neither has finished) exactly as they would be if
+	// they had.
+	clock = clock.Add(time.Minute)
+	badResult := w.runDispatch(dA, pushScript(w.remote("acme", "gadgets"), branchA, "iss-4a"), clock)
+	if pushedOK(badResult) {
+		t.Fatalf("expected slot A's push against slot B's repo to be denied, got: %+v", badResult.ToolCalls)
+	}
+	if w.branchExists("acme", "widgets", branchA) || w.branchExists("acme", "gadgets", branchA) {
+		t.Fatalf("a denied push must land nowhere")
+	}
+	assertState(w, "iss-4a", model.StateQueued, false)
+
+	// B's own legitimate push to its own repo, run right after, must
+	// succeed untouched by A's denied attempt against that same repo.
+	clock = clock.Add(time.Minute)
+	goodResult := w.runDispatch(dB, pushScript(w.remote("acme", "gadgets"), branchB, "iss-4b"), clock)
+	if !pushedOK(goodResult) {
+		t.Fatalf("slot B's legitimate push failed: %+v", goodResult.ToolCalls)
+	}
+	assertState(w, "iss-4b", model.StateQueued, false)
+
+	if got := w.log1("acme", "gadgets", branchB, "%s"); got != "agent commit for iss-4b" {
+		t.Fatalf("pushed branch tip = %q, want B's own commit", got)
+	}
+	if w.branchExists("acme", "gadgets", branchA) {
+		t.Fatalf("A's denied branch must still not exist in acme/gadgets after B's own push landed")
 	}
 }
