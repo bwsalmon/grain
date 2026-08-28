@@ -1007,6 +1007,64 @@ func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 	return n, err
 }
 
+// GetConfig reads the deployment's stored configuration, or nil (with no
+// error) if nothing has written one yet -- a fresh database, or one
+// whose daemon has never started. See Config's own doc comment on why
+// nil, not a zero-value Config, marks that case.
+func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
+	row := s.db.QueryRowContext(ctx, "SELECT "+configColumns+" FROM `grain_config` WHERE `id` = 1")
+	c, err := scanConfig(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &c, nil
+}
+
+const configColumns = "`poll_interval_ms`,`slots`,`gemini_model`,`max_agent_turns`," +
+	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`"
+
+func scanConfig(scan func(...any) error) (Config, error) {
+	var c Config
+	var pollMS int64
+	var slots string
+	if err := scan(&pollMS, &slots, &c.GeminiModel, &c.MaxAgentTurns,
+		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail); err != nil {
+		return Config{}, err
+	}
+	c.PollInterval = time.Duration(pollMS) * time.Millisecond
+	c.Slots = splitSlots(slots)
+	return c, nil
+}
+
+// PutConfig replaces the deployment's stored configuration wholesale --
+// there is one row, so there is nothing to merge a partial update
+// against; a caller changing one field reads Config first the same way
+// UpdateTask's mutate does for a task.
+func (s *Store) PutConfig(ctx context.Context, c Config) error {
+	return s.write(ctx, "update config", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?)",
+			c.PollInterval.Milliseconds(), joinSlots(c.Slots), c.GeminiModel, c.MaxAgentTurns,
+			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail)
+		return err
+	})
+}
+
+// joinSlots/splitSlots round-trip Config.Slots through the same
+// comma-separated shape the daemon's own -slots flag already parses, so
+// a value written by one reads back identically through the other.
+func joinSlots(slots []string) string { return strings.Join(slots, ",") }
+
+func splitSlots(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
 // --- helpers ---------------------------------------------------------
 
 func each(ctx context.Context, q querier, query string, args any,

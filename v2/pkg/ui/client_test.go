@@ -9,6 +9,7 @@ package ui_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -417,5 +418,122 @@ func TestTaskNotFound(t *testing.T) {
 	var nf *ui.NotFoundError
 	if !errors.As(err, &nf) {
 		t.Fatalf("error = %v, want a NotFoundError", err)
+	}
+}
+
+func TestGetSettingsIsUnconfiguredOnAFreshStore(t *testing.T) {
+	c, _, ctx := testClient(t)
+	got, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Configured {
+		t.Fatalf("got %+v, want Configured false before anything has ever been saved", got)
+	}
+}
+
+func firstSettings() ui.UpdateSettingsRequest {
+	pollInterval, slots, geminiModel, host := "30s", []string{"local"}, "gemini-2.5-pro", "github.com"
+	return ui.UpdateSettingsRequest{
+		PollInterval: &pollInterval, Slots: &slots, GeminiModel: &geminiModel, GitHubHost: &host,
+	}
+}
+
+func TestUpdateSettingsFirstTimeRequiresTheCoreFields(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	full := firstSettings()
+	if _, err := c.UpdateSettings(ctx, full); err != nil {
+		t.Fatalf("saving with every core field given: %v", err)
+	}
+
+	c2, _, ctx2 := testClient(t)
+	slots := []string{"local"}
+	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{Slots: &slots})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("saving settings for the first time with pollInterval missing: error = %v, want a ValidationError", err)
+	}
+}
+
+func TestUpdateSettingsThenGetRoundTrips(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	got, err := c.UpdateSettings(ctx, firstSettings())
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if !got.Configured || got.PollInterval != "30s" || got.GeminiModel != "gemini-2.5-pro" ||
+		got.GitHubHost != "github.com" {
+		t.Fatalf("UpdateSettings returned %+v", got)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read, got) {
+		t.Fatalf("GetSettings = %+v, want the just-written %+v", read, got)
+	}
+
+	// And it actually landed in the store UpdateSettings itself reads and
+	// writes -- not some copy this package keeps of its own.
+	stored, err := store.GetConfig(ctx)
+	if err != nil || stored == nil {
+		t.Fatalf("store.GetConfig: (%+v, %v)", stored, err)
+	}
+	if stored.GeminiModel != "gemini-2.5-pro" {
+		t.Fatalf("store's own config = %+v", stored)
+	}
+}
+
+// A later partial update changes only the fields given, leaving
+// everything else -- including fields with no UI equivalent yet, like
+// GCPProject -- exactly as they were, the same UpdateTaskRequest
+// convention.
+func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	turns := 12
+	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{MaxAgentTurns: &turns})
+	if err != nil {
+		t.Fatalf("partial update: %v", err)
+	}
+	if got.MaxAgentTurns != 12 {
+		t.Fatalf("maxAgentTurns = %d, want 12", got.MaxAgentTurns)
+	}
+	if got.PollInterval != "30s" || got.GeminiModel != "gemini-2.5-pro" || got.GitHubHost != "github.com" {
+		t.Fatalf("partial update changed fields it was not given: %+v", got)
+	}
+}
+
+func TestUpdateSettingsValidates(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	bad := "not-a-duration"
+	empty := ""
+	negative := -1
+	noSlots := []string{}
+	cases := map[string]ui.UpdateSettingsRequest{
+		"unparseable poll interval": {PollInterval: &bad},
+		"zero-length slots":         {Slots: &noSlots},
+		"blank gemini model":        {GeminiModel: &empty},
+		"blank github host":         {GitHubHost: &empty},
+		"negative max agent turns":  {MaxAgentTurns: &negative},
+	}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := c.UpdateSettings(ctx, req)
+			var ve *ui.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("error = %v, want a ValidationError", err)
+			}
+		})
 	}
 }

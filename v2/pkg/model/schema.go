@@ -31,7 +31,7 @@ package model
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -197,6 +197,24 @@ var Tables = []string{
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (
   ` + "`id`" + `      INT NOT NULL,
   ` + "`version`" + ` INT NOT NULL,
+  PRIMARY KEY (` + "`id`" + `)
+)`,
+
+	// A deployment's tunable, non-secret configuration -- see config.go's
+	// own doc comment on Config for what belongs here and what does not.
+	// One row, like grain_write and grain_schema: there is exactly one of
+	// these per deployment, not one per something else, so there is
+	// nothing for a second row to key against.
+	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
+  ` + "`id`" + `                         INT          NOT NULL,
+  ` + "`poll_interval_ms`" + `           BIGINT       NOT NULL,
+  ` + "`slots`" + `                      VARCHAR(512) NOT NULL,
+  ` + "`gemini_model`" + `                VARCHAR(128) NOT NULL,
+  ` + "`max_agent_turns`" + `             INT          NOT NULL,
+  ` + "`github_host`" + `                 VARCHAR(255) NOT NULL,
+  ` + "`github_insecure_http`" + `        BOOLEAN      NOT NULL,
+  ` + "`gcp_project`" + `                 VARCHAR(255) NOT NULL,
+  ` + "`gcp_service_account_email`" + `   VARCHAR(255) NOT NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 }

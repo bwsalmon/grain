@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1164,5 +1165,70 @@ func TestTheHistoryAnswersWhatChanged(t *testing.T) {
 	}
 	if changes[len(changes)-1].kind != "added" {
 		t.Fatalf("oldest change = %+v, want the task being added", changes[len(changes)-1])
+	}
+}
+
+func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
+	store, ctx := open(t)
+	got, err := store.GetConfig(ctx)
+	if err != nil || got != nil {
+		t.Fatalf("want (nil, nil) before anything has written a config, got (%+v, %v)", got, err)
+	}
+}
+
+func testConfig() model.Config {
+	return model.Config{
+		PollInterval: 30 * time.Second, Slots: []string{"a", "b"},
+		GeminiModel: "gemini-2.5-pro", MaxAgentTurns: 40,
+		GitHubHost: "github.com", GitHubInsecureHTTP: false,
+		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
+	}
+}
+
+func TestConfigRoundTrips(t *testing.T) {
+	store, ctx := open(t)
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+}
+
+// PutConfig replaces the single row wholesale rather than accumulating a
+// second one -- there is exactly one deployment configuration, the same
+// discipline grain_write and grain_schema hold to.
+func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
+	store, ctx := open(t)
+	if err := store.PutConfig(ctx, testConfig()); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	updated := testConfig()
+	updated.PollInterval = time.Minute
+	updated.Slots = []string{"only-one"}
+	if err := store.PutConfig(ctx, updated); err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, updated) {
+		t.Fatalf("got %+v, want %+v", *got, updated)
+	}
+}
+
+func TestPutConfigIsACommit(t *testing.T) {
+	store, db, ctx := openConcurrent(t, 1)
+	if err := store.PutConfig(ctx, testConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(commitMessages(t, db), "grain: update config") {
+		t.Fatalf("no commit named the config write; log is %v", commitMessages(t, db))
 	}
 }

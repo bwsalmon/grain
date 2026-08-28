@@ -102,6 +102,7 @@ Commands:
   delete <id>                          alias for close
   reopen <id>                          reopen a closed task
   config                               show the capabilities this deployment offers
+  settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
 `
 
 func runCLI(args []string) error {
@@ -177,6 +178,8 @@ func runCLI(args []string) error {
 		return cmdReopen(ctx, c, out, cmdArgs)
 	case "config":
 		return cmdConfig(ctx, c, out, cmdArgs)
+	case "settings":
+		return cmdSettings(ctx, c, out, cmdArgs)
 	default:
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -452,6 +455,73 @@ func cmdConfig(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	return nil
 }
 
+// cmdSettings shows, or changes, the daemon's own store-backed
+// configuration (bwsalmon/agents#320, ui.Settings/model.Config) -- with
+// no flags given it prints what is currently stored (or that nothing is
+// yet, on a store no daemon has ever started against); with any given,
+// it applies only those, the same fs.Visit convention cmdUpdate uses for
+// a task's own fields, and prints the result.
+func cmdSettings(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
+	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
+	slots := fs.String("slots", "", "comma-separated slot names -- the daemon's concurrency pool")
+	geminiModel := fs.String("gemini-model", "", "Gemini model the agent framework calls")
+	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
+	githubHost := fs.String("github-host", "", "GitHub API host")
+	var githubInsecureHTTP bool
+	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS")
+	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
+	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var req ui.UpdateSettingsRequest
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "poll-interval":
+			v := *pollInterval
+			req.PollInterval = &v
+		case "slots":
+			v := strings.Split(*slots, ",")
+			req.Slots = &v
+		case "gemini-model":
+			v := *geminiModel
+			req.GeminiModel = &v
+		case "max-agent-turns":
+			v := *maxAgentTurns
+			req.MaxAgentTurns = &v
+		case "github-host":
+			v := *githubHost
+			req.GitHubHost = &v
+		case "github-insecure-http":
+			v := githubInsecureHTTP
+			req.GitHubInsecureHTTP = &v
+		case "gcp-project":
+			v := *gcpProject
+			req.GCPProject = &v
+		case "gcp-agent-service-account":
+			v := *gcpServiceAccountEmail
+			req.GCPServiceAccountEmail = &v
+		}
+	})
+
+	if fs.NFlag() == 0 {
+		settings, err := c.GetSettings(ctx)
+		if err != nil {
+			return err
+		}
+		out.settings(settings)
+		return nil
+	}
+	settings, err := c.UpdateSettings(ctx, req)
+	if err != nil {
+		return err
+	}
+	out.settings(settings)
+	return nil
+}
+
 // printer renders CLI output either as a human-readable table (the
 // default) or as JSON (-json) -- the same shape a script or another
 // program (the UI included, per this command's own doc comment) would
@@ -505,6 +575,29 @@ func (p *printer) config(cfg ui.Config) {
 	fmt.Println("\ncapabilities:")
 	for _, cp := range cfg.Capabilities {
 		fmt.Printf("  %-14s %-20s %s\n", cp.ID, cp.Name, cp.Description)
+	}
+}
+
+func (p *printer) settings(s ui.Settings) {
+	if p.json {
+		p.encode(s)
+		return
+	}
+	if !s.Configured {
+		fmt.Println("not configured yet -- nothing here until a daemon starts, or a value is set")
+		return
+	}
+	fmt.Printf("poll interval:  %s\n", s.PollInterval)
+	fmt.Printf("slots:          %s\n", strings.Join(s.Slots, ", "))
+	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
+	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)
+	fmt.Printf("github host:    %s\n", s.GitHubHost)
+	fmt.Printf("github insecure http: %t\n", s.GitHubInsecureHTTP)
+	if s.GCPProject != "" {
+		fmt.Printf("gcp project:    %s\n", s.GCPProject)
+	}
+	if s.GCPServiceAccountEmail != "" {
+		fmt.Printf("gcp agent service account: %s\n", s.GCPServiceAccountEmail)
 	}
 }
 
