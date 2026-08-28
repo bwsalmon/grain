@@ -254,20 +254,23 @@ func (s *Store) Approve(ctx context.Context, taskID string, a Attribution) error
 func (s *Store) Observe(ctx context.Context, o Observation) error {
 	_, err := s.db.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
-			"`pending_question_comment_id`,`baseline_comment_id`,`observed_at`) VALUES (?,?,?,?,?,?)",
+			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`) "+
+			"VALUES (?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
-		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID), timeOf(o.ObservedAt))
+		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
+		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt))
 	return err
 }
 
 func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation, error) {
 	row := s.db.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`observed_at` FROM `task_observation` WHERE `task_id` = ?", taskID)
+			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at` "+
+			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
-	var closed, completed, observed sql.NullTime
+	var closed, completed, blocked, observed sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &observed); err != nil {
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -275,6 +278,7 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 	}
 	o.ClosedAt, o.CompletedAt, o.ObservedAt = timePtr(closed), timePtr(completed), timePtr(observed)
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
+	o.MergeQueueBlockedAt = timePtr(blocked)
 	return &o, nil
 }
 
