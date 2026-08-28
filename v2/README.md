@@ -20,6 +20,12 @@ agent/gemini/   Framework via the Gemini API, talking to its own in-process
                 mcp/ server
 capability/geminikey/  a MINT model.CapabilityProvider: mints, places and
                 revokes a Gemini API key, direct against the API Keys API
+gcpkey/         the gcp-key capability: a real MINT model.CapabilityProvider
+                that mints/revokes a per-task GCP service-account key
+                against the IAM API directly (google.golang.org/api/iam/v1,
+                no gcloud subprocess), plus Reap, a standalone safety net
+                that deletes anything GCP itself reports as older than 24h
+                regardless of whether a Lease survived to say so
 gitproxy/       a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -142,15 +148,34 @@ library rather than shelling out to `gcloud` the way the Python version
 has to — one of the two things `google.golang.org/api` was expected to
 correct, per "Two things the port corrected" above. `DeleteExpired` is
 the "clean up after 24 hours if leaked" safety net, mirroring
-`delete_expired_keys`. What is still missing is not this provider's own
-logic but the same wiring `gcp-key` also lacks: nothing constructs a
-real `CapabilityContext` against a live deployment yet, and there is no
-`gcp-key` provider for `geminikey`'s `Credential` to actually share an
-account with (bwsalmon/agents#239's "This can share the same account
-from the gcp capability") — both need standing credentials and a
-controller v2 does not yet have — and there is still no executor that
-applies a `Placement` to a sandbox, which needs the same host adapter
-`loop.Cycle` is still waiting on above.
+`delete_expired_keys`.
+
+`gcpkey.Provider` (`gcpkey/`) is now a real `MINT` provider too —
+`gcp-key`, ported from `grain/automation/gcp_keys.py` but talking to the
+IAM API directly rather than shelling to `gcloud`, and authenticated
+through `CapabilityContext.Credentials` rather than a Runner, so it needed
+no controller of its own to build. `model.Reaper` (`model/capability.go`)
+is new alongside it: an optional interface for a provider whose minted
+resource can outlive the `Lease` that recorded it, matching
+`docs/data-model.md`'s description of `gcp_keys.py`'s own
+`delete_expired_keys` as a backstop independent of any task record —
+`gcpkey.Provider.Reap` implements it by asking GCP's own key listing for
+the answer, not grain's store. `geminikey.DeleteExpired` plays the same
+backstop role for Gemini keys but stays a free function rather than a
+`model.Reaper` implementation, since an API key carries no service
+account of its own for a `ListKeys` call to scope to the way
+`gcpkey.Provider.Reap`'s does.
+
+Both providers can now point at the same standing credential —
+`geminikey.Capability.Credential` and `gcpkey.Provider.Config.
+MinterCredential` are each just a name resolved through
+`CapabilityContext.Credentials`, so an operator wires them to the same
+one to get bwsalmon/agents#239's "This can share the same account from
+the gcp capability" — but nothing here does that wiring yet: there is
+still no executor that constructs a real `CapabilityContext` against a
+live deployment, applies a `Placement` to a sandbox, or calls
+`Revoke`/`Reap`, all of which need the same host adapter `loop.Cycle` is
+still waiting on above.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
 it just has nothing to call it yet outside a test. There is no host
