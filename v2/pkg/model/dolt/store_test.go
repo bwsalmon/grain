@@ -8,6 +8,7 @@ package dolt_test
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -483,5 +484,202 @@ func TestDoltCommitMakesAKnownGoodPoint(t *testing.T) {
 	}
 	if err := dolt.Commit(db, "grain: one cycle"); err != nil {
 		t.Fatalf("dolt commit: %v", err)
+	}
+}
+
+// --- task identity and the conversation --------------------------------
+
+func TestNewTaskIDAllocatesDistinctIncreasingIDs(t *testing.T) {
+	store, ctx := open(t)
+
+	seen := map[string]bool{}
+	var previous int64
+	for i := 0; i < 5; i++ {
+		id, err := store.NewTaskID(ctx)
+		if err != nil {
+			t.Fatalf("allocating id %d: %v", i, err)
+		}
+		if seen[id] {
+			t.Fatalf("id %q handed out twice", id)
+		}
+		seen[id] = true
+
+		// The decimal shape is what makes `grain get 42` and the branch
+		// grain/task-42 read the way they do, so it is worth pinning.
+		n, err := strconv.ParseInt(id, 10, 64)
+		if err != nil {
+			t.Fatalf("id %q is not a decimal number: %v", id, err)
+		}
+		if n <= previous {
+			t.Fatalf("id %d did not increase on %d", n, previous)
+		}
+		previous = n
+	}
+}
+
+// A task can be created with nothing but a store -- the whole point of
+// allocating identity here rather than borrowing a GitHub issue number.
+func TestATaskCanBeFiledWithNoGitHubIssueAtAll(t *testing.T) {
+	store, ctx := open(t)
+
+	id, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filed := task(id, true)
+	filed.ExternalRef = ""
+	if err := store.PutTask(ctx, filed); err != nil {
+		t.Fatalf("filing a task with no external ref: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("task was not stored")
+	}
+	if got.ExternalRef != "" {
+		t.Fatalf("external ref = %q, want empty", got.ExternalRef)
+	}
+	state, err := store.State(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateQueued {
+		t.Fatalf("state = %q, want queued: an approved task needs no issue to be dispatchable", state)
+	}
+}
+
+func TestCommentsRoundTripInWriteOrder(t *testing.T) {
+	store, ctx := open(t)
+	if err := store.PutTask(ctx, task("t1", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := model.Principal{Kind: model.PrincipalAgent, ID: "run-1"}
+	bodies := []model.Comment{
+		{TaskID: "t1", Author: model.Attribution{Actor: human}, Body: "please do the thing", CreatedAt: now},
+		// Grain relaying an agent's question: the case Attribution exists
+		// for, and the one a signature substring used to stand in for.
+		{TaskID: "t1", Author: model.Attribution{Actor: bot, OnBehalfOf: &agent}, Body: "which endpoint?", CreatedAt: now},
+		{TaskID: "t1", Author: model.Attribution{Actor: human}, Body: "the second one", CreatedAt: now},
+	}
+	for i, c := range bodies {
+		if _, err := store.AddComment(ctx, c); err != nil {
+			t.Fatalf("adding comment %d: %v", i, err)
+		}
+	}
+
+	got, err := store.Comments(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(bodies) {
+		t.Fatalf("read back %d comments, want %d", len(got), len(bodies))
+	}
+	for i := range got {
+		if got[i].Body != bodies[i].Body {
+			t.Fatalf("comment %d body = %q, want %q (order is the write order)", i, got[i].Body, bodies[i].Body)
+		}
+		if got[i].Author.Actor != bodies[i].Author.Actor {
+			t.Fatalf("comment %d actor = %+v, want %+v", i, got[i].Author.Actor, bodies[i].Author.Actor)
+		}
+	}
+	relayed := got[1].Author.OnBehalfOf
+	if relayed == nil || *relayed != agent {
+		t.Fatalf("relayed comment's OnBehalfOf = %+v, want %+v", relayed, agent)
+	}
+	if got[0].Author.OnBehalfOf != nil {
+		t.Fatalf("a human acting directly got an OnBehalfOf: %+v", got[0].Author.OnBehalfOf)
+	}
+}
+
+func TestCommentsAreScopedToTheirTask(t *testing.T) {
+	store, ctx := open(t)
+	for _, id := range []string{"t1", "t2"} {
+		if err := store.PutTask(ctx, task(id, true)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AddComment(ctx, model.Comment{
+			TaskID: id, Author: model.Attribution{Actor: human}, Body: "on " + id, CreatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := store.Comments(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Body != "on t1" {
+		t.Fatalf("comments on t1 = %+v, want just its own", got)
+	}
+}
+
+// The id AddComment returns is the one an Observation names, which is how
+// "a question is outstanding" survives without a GitHub comment id.
+func TestAPendingQuestionNamesAStoredComment(t *testing.T) {
+	store, ctx := open(t)
+	if err := store.PutTask(ctx, task("t1", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := model.Principal{Kind: model.PrincipalAgent, ID: "run-1"}
+	id, err := store.AddComment(ctx, model.Comment{
+		TaskID: "t1", Author: model.Attribution{Actor: bot, OnBehalfOf: &agent},
+		Body: "which endpoint?", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: "t1", PendingQuestionCommentID: &id, ObservedAt: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.State(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateAwaitingReply {
+		t.Fatalf("state = %q, want awaiting_reply", state)
+	}
+
+	obs, err := store.GetObservation(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs == nil || obs.PendingQuestionCommentID == nil || *obs.PendingQuestionCommentID != id {
+		t.Fatalf("pending question = %+v, want the stored comment id %d", obs, id)
+	}
+}
+
+// Comment bodies are untrusted text, the same as titles and task bodies
+// (see TestUntrustedTextIsStoredNotInterpreted above).
+func TestAnUntrustedCommentBodyIsStoredNotInterpreted(t *testing.T) {
+	store, ctx := open(t)
+	if err := store.PutTask(ctx, task("t1", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	nasty := "'); DROP TABLE `task`; -- \x00 \\ \" ' %s ?"
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID: "t1", Author: model.Attribution{Actor: human}, Body: nasty, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("storing an untrusted comment body: %v", err)
+	}
+
+	got, err := store.Comments(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Body != nasty {
+		t.Fatalf("comment body did not round-trip verbatim: %q", got[0].Body)
+	}
+	// The table it tried to drop is still answering.
+	if _, err := store.GetTask(ctx, "t1"); err != nil {
+		t.Fatalf("task table after an injection attempt: %v", err)
 	}
 }

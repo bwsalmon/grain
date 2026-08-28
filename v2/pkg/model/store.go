@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -138,6 +139,85 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
 		}
 	}
 	return tx.Commit()
+}
+
+// NewTaskID allocates a task identity from the store.
+//
+// A task used to be named after the GitHub issue it was filed from, so
+// nothing could file one without creating an issue first. This is that
+// coupling's replacement: ids come from task_sequence, and a caller with
+// a store and nothing else can create a task.
+//
+// The result is the decimal sequence number ("42"), which is what makes
+// `grain get 42` and the branch `grain/task-42` read the way they do --
+// where a GitHub-derived id put a repo path inside the branch name.
+// Task.ID stays an opaque string, so nothing but this function is
+// entitled to assume the shape.
+func (s *Store) NewTaskID(ctx context.Context) (string, error) {
+	res, err := s.db.ExecContext(ctx,
+		"INSERT INTO `task_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
+	if err != nil {
+		return "", fmt.Errorf("allocating a task id: %w", err)
+	}
+	n, err := res.LastInsertId()
+	if err != nil {
+		return "", fmt.Errorf("reading the allocated task id: %w", err)
+	}
+	return strconv.FormatInt(n, 10), nil
+}
+
+// AddComment appends one entry to a task's conversation and returns the
+// id the store assigned it -- which a caller recording an outstanding
+// question needs, since Observation.PendingQuestionCommentID names one of
+// these.
+func (s *Store) AddComment(ctx context.Context, c Comment) (int64, error) {
+	behalf := c.Author.OnBehalfOf
+	res, err := s.db.ExecContext(ctx, "INSERT INTO `task_comment` ("+
+		"`task_id`, `author_kind`, `author_id`, `author_behalf_kind`, `author_behalf_id`, "+
+		"`body`, `created_at`) VALUES (?,?,?,?,?,?,?)",
+		c.TaskID, string(c.Author.Actor.Kind), c.Author.Actor.ID,
+		kindOf(behalf), idOf(behalf), c.Body, c.CreatedAt.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("commenting on task %s: %w", c.TaskID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading the new comment's id on task %s: %w", c.TaskID, err)
+	}
+	return id, nil
+}
+
+// Comments returns a task's conversation, oldest first. Ordering is by
+// the assigned id rather than created_at: two comments written in the
+// same instant still have an order, and it is the one they were written
+// in.
+func (s *Store) Comments(ctx context.Context, taskID string) ([]Comment, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+
+		"`id`, `author_kind`, `author_id`, `author_behalf_kind`, `author_behalf_id`, "+
+		"`body`, `created_at` FROM `task_comment` WHERE `task_id` = ? ORDER BY `id`", taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading comments on task %s: %w", taskID, err)
+	}
+	defer rows.Close()
+
+	var out []Comment
+	for rows.Next() {
+		c := Comment{TaskID: taskID}
+		var actorKind, actorID string
+		var behalfKind, behalfID sql.NullString
+		if err := rows.Scan(&c.ID, &actorKind, &actorID, &behalfKind, &behalfID,
+			&c.Body, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		c.Author.Actor = Principal{Kind: PrincipalKind(actorKind), ID: actorID}
+		if behalfKind.Valid {
+			c.Author.OnBehalfOf = &Principal{
+				Kind: PrincipalKind(behalfKind.String), ID: behalfID.String,
+			}
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // GetTask returns a task, or nil if there is none with that ID.

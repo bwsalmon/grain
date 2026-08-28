@@ -196,6 +196,65 @@ connects twice: once with no database selected purely to create it, then
 again for real. Not a `CREATE`-then-`USE` on one connection, which would
 be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
+## Input is a model update, not a GitHub issue
+
+**In progress — stage 1 of 3 has landed.**
+
+A task used to begin its life as a GitHub issue. `PollIssues` listed the
+task repo's labelled issues and turned each into a `model.Task`; the CLI
+and the UI created tasks by creating issues, approved them by swapping
+one label for another, attached a capability by adding a label, and
+carried the conversation in the issue's comment thread. GitHub was the
+input, and the store was a projection of it.
+
+That is being inverted. The CLI and the UI push model updates directly,
+the store is the record, and GitHub keeps exactly one artifact: the pull
+request a run produces, which tasks are still synced against
+(`SyncPullRequests`, the merge queue, check runs — all unchanged). Issues
+go away entirely rather than staying on as a mirror, because a mirror is
+just the two-writer problem in a new shape: a second place a task's state
+lives, with nothing reconciling the two (the same objection the "The UI"
+section below already raises against `pkg/ui` and `graind` both writing
+the same issue today).
+
+What that costs, stated plainly: the conversation, the audit trail and
+the "somewhere a human can watch this" surface all stop being GitHub's
+and become grain's, which means grain has to render them. That is what
+`task_comment` is for.
+
+**Landed (stage 1) — identity and the conversation, in `pkg/model`:**
+
+- `Store.NewTaskID` allocates from `task_sequence` instead of a task
+  being named after the issue it came from. Ids are decimal (`"42"`), so
+  the branch is `grain/task-42` where a GitHub-derived id put a whole
+  repo path inside the branch name. `AUTO_INCREMENT` rather than a
+  counter read and written back, because allocation has to stay correct
+  with a controller, a UI and a CLI all writing at once.
+- `model.Comment` plus `Store.AddComment`/`Store.Comments` are the
+  conversation as grain's own rows. The author is an `Attribution`, not a
+  bare `Principal`, because the distinction is load-bearing exactly here:
+  grain relaying an agent's question is (automation, on behalf of agent)
+  and a human answering is (human, nil) — the difference a signature
+  substring in a comment body used to gesture at with one bit.
+- `Observation.PendingQuestionCommentID` needs no schema change: it was
+  always a `BIGINT`, and it now names a `task_comment.id` instead of a
+  GitHub comment id. `TestAPendingQuestionNamesAStoredComment` pins that
+  down end to end, and
+  `TestATaskCanBeFiledWithNoGitHubIssueAtAll` proves the point of the
+  whole stage — an approved task with no `ExternalRef` reads `queued` and
+  is dispatchable.
+
+**Not yet (stages 2 and 3).** `pkg/orchestrator` still polls issues and
+still relays to them, and `pkg/ui.Client` still reads and writes issues
+rather than the store — nothing above `pkg/model` has changed yet, so the
+GitHub-derived `TaskID(repo, issueNumber)` is still what actually files
+tasks today. Stage 2 rewrites `pkg/ui.Client` against `model.Store` and
+moves the CLI and UI onto a Dolt SQL server (`pkg/model/dolt` grows a
+second constructor — see "Single writer" below, which stops being a
+caveat and becomes the deployment). Stage 3 deletes `PollIssues`, the
+`poll` reconciler and the issue-write sites in `finish.go`/`sync.go`,
+and retires `ExternalRef`.
+
 ## Reconcilers, not a pipeline
 
 `RunCycle` runs three independent reconcilers — `poll`, `dispatch`,

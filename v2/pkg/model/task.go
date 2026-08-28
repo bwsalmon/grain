@@ -370,6 +370,33 @@ type Run struct {
 	Leases     []Lease
 }
 
+// --- conversation ----------------------------------------------------
+
+// Comment is one entry in a task's conversation: what a human asked for,
+// what grain relayed on an agent's behalf, why the merge queue gave up.
+//
+// This is grain's own record, not a copy of one. v2 used to hold the
+// conversation in a GitHub issue's comment thread and read it back as
+// input -- which made the issue a second place a task's state lived, and
+// made "has a human replied yet?" a question only a poll could answer.
+// A task is a row here; so is everything said about it.
+//
+// The author is an Attribution rather than a bare Principal because the
+// distinction is load-bearing exactly here: grain relaying an agent's
+// question is (automation, on behalf of agent), and a human answering it
+// directly is (human, nil). That is the difference a signature substring
+// in a comment body used to gesture at with one bit.
+type Comment struct {
+	// ID is assigned by the store on write, and ordering by it is the
+	// conversation's order. Observation.PendingQuestionCommentID names one
+	// of these.
+	ID        int64
+	TaskID    string
+	Author    Attribution
+	Body      string
+	CreatedAt time.Time
+}
+
 // BranchName is the branch a task's work goes on — derived, never stored
 // and never self-reported, so any two callers compute the same name.
 func BranchName(taskID string) string { return "grain/task-" + taskID }
