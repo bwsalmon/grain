@@ -2028,6 +2028,38 @@ one service that reads it." That last one has an operational consequence
 worth surfacing rather than hiding: **a credential change has a restart
 in it**, which is exactly the kind of thing a UI should say out loud.
 
+#### The secret store is a folder, not a table
+
+"No secret store in the model" is about the *task* model above — nothing
+resolvable to material is allowed anywhere a `Task`, a `Grant`, or a UI
+can see it. Material still has to live somewhere, and in v2 that
+somewhere is `v2/secrets`: a `model.CredentialResolver` reading a
+directory shaped exactly like a Kubernetes Secret volume mount —
+`<dir>/<secret>/<key>`, one subdirectory per secret, one file per key,
+raw bytes, no wrapper format. `grain/proxy/credentials.py` and
+`v2/gitproxy/credentials.go`'s `<name>.token` convention already do this
+for GitHub credentials specifically; `v2/secrets.Store` generalises it to
+any capability, addressed the same way Kubernetes itself addresses one
+value in a Secret — `name`, or `name/key` when a secret carries more than
+one. Extensible because a new capability needing a new secret is an
+operator writing a new subdirectory, never a schema change.
+
+**A capability's `Requires` lists names, never values, and is safe to
+publish.** `CapabilitySpec.Requires` (`model/capability.go`) is this
+document's `requires` field, widened from one name to every name a
+provider actually resolves — `gcp-key`, for instance, needs a minter
+credential distinct from the key it mints. Because a name carries no
+material, `Requires` is exactly the piece of a capability's contract this
+repository's own model — this document, and the Go it describes — can
+state in the open: which secrets a deployment must configure for a
+capability to materialize, discoverable by reading `Spec()` or this
+table, with nothing here or in git ever answering *what the value is*.
+
+| Capability | `Requires` |
+|---|---|
+| `gcp-key` | the minter credential (`gcp-key-minter` by default) — never the agent account's own key, see `gcpkey`'s doc comment |
+| `self-debug`, `self-repair` | none — `GRANT`, no credential of any kind |
+
 ### `TaskLink` — relationships, including sub-tasks
 
 ```python
