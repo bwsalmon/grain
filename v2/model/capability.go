@@ -154,6 +154,30 @@ func (BaseCapability) Revoke(context.Context, CapabilityContext, Lease) error {
 	return nil
 }
 
+// Reaper is implemented by a capability provider whose minted resource can
+// outlive the Lease that recorded it -- a controller crash between mint and
+// store write, or an operator-invalidated record. Unlike Revoke, which acts
+// on one Lease a task held, Reap consults the resource's own source of
+// truth (a cloud API's own listing, never grain's store, which is exactly
+// what a lost record has nothing left to say) and deletes anything older
+// than the provider's own idea of "too old" -- the same backstop role
+// docs/data-model.md gives grain/automation/gcp_keys.py's
+// delete_expired_keys, run independent of any task or run.
+//
+// creds resolves whatever standing credential the provider needs to do
+// that: the same kind of resolver a Materialize/Revoke call is handed
+// through CapabilityContext, but usable with no live task in hand, since a
+// reap is not scoped to one. Reap returns the identifiers of whatever it
+// deleted, for a caller to log; it is best-effort per resource, the same
+// "one already-gone item must not stop the rest" rule Revoke's own callers
+// already apply.
+//
+// Optional: a provider that mints nothing external to a Lease has nothing
+// to check outside its own leases and need not implement this.
+type Reaper interface {
+	Reap(ctx context.Context, creds CredentialResolver, now time.Time) ([]string, error)
+}
+
 // CapabilityRegistry holds providers in registration order --
 // deterministic, so two providers that both act on the same task
 // compose predictably rather than by map iteration order -- and looks
