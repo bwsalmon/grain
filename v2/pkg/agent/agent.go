@@ -4,8 +4,8 @@
 // -- there is no equivalent interface there to reuse. This is that
 // interface's first appearance, with one implementation so far
 // (v2/agent/gemini); nothing in v2 constructs a Framework yet, since
-// v2/loop has nowhere to run one (no host adapter, no GitHub client -- see
-// v2/README.md).
+// v2/pkg/dispatch has nowhere to run one (no host adapter, no GitHub
+// client -- see v2/README.md).
 package agent
 
 import (

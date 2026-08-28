@@ -1,5 +1,5 @@
 // Package orchestrator is v2's equivalent of v1's core.py Orchestrator:
-// the component that decides *when* to call GitHub, wired to loop.Cycle's
+// the component that decides *when* to call GitHub, wired to dispatch.Cycle's
 // dispatch decisions and model.Store's state. v2/README.md's "What this
 // does not have yet" section named this gap after bwsalmon/agents#243
 // ported github.Client and github/githubsim but wired neither into
@@ -81,7 +81,7 @@ type Config struct {
 }
 
 // TaskID names the task a task-repo issue maps to, deterministically —
-// the same reasoning model.BranchName and loop.RunID already give for
+// the same reasoning model.BranchName and dispatch.RunID already give for
 // their own names: two callers (a poll that just filed the task, and a
 // later poll that sees the same issue again) must agree on its ID without
 // coordinating through anything but the issue itself.

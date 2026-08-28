@@ -2,15 +2,15 @@ package e2e
 
 // The randomized counterpart bwsalmon/agents#233 asked for alongside
 // e2e_test.go's fixed scenarios: several users filing issues against
-// several repos over many rounds, loop.Cycle deciding what runs when,
+// several repos over many rounds, dispatch.Cycle deciding what runs when,
 // real gemini agent turns actually pushing branches through a real
 // gitproxy, and a GitHub-sync stand-in observing completion, questions,
 // and merges -- all against real embedded Dolt and real (local) git, the
-// same discipline model/simulate_test.go and loop/loop_test.go already
+// same discipline model/simulate_test.go and dispatch/dispatch_test.go already
 // hold their own random tests to one layer down.
 //
 // What this test checks that neither of those two can: model/
-// simulate_test.go and loop/loop_test.go never touch git, so nothing
+// simulate_test.go and dispatch/dispatch_test.go never touch git, so nothing
 // there can catch a task whose state says "done" with no branch behind
 // it, or a push that landed on the wrong repo because two concurrently
 // live sandboxes' scopes got crossed. checkSimInvariants' last section
@@ -27,7 +27,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -41,7 +41,7 @@ type simTask struct {
 	branch string
 
 	liveRunID    string
-	liveDispatch loop.Dispatch
+	liveDispatch dispatch.Dispatch
 	attempts     int
 
 	pushed        bool
@@ -95,7 +95,7 @@ func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
 		// itself excludes anything already running, so a task with an
 		// unresolved live run from an earlier round is never redispatched
 		// out from under itself.
-		dispatches, err := loop.Cycle(w.ctx, w.store, slots, clock)
+		dispatches, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
 		if err != nil {
 			t.Fatalf("round %d: Cycle: %v", round, err)
 		}
@@ -281,7 +281,7 @@ func checkSimInvariants(t *testing.T, w *world, round int, tasks map[string]*sim
 				round, id, attempts, st.attempts)
 		}
 
-		// The check neither model/simulate_test.go nor loop/loop_test.go
+		// The check neither model/simulate_test.go nor dispatch/dispatch_test.go
 		// can run, since neither touches git: model state and real git
 		// state must agree on whether this task's branch exists.
 		exists := w.branchExists(st.repo.Owner, st.repo.Name, st.branch)

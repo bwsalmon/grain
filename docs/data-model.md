@@ -2626,7 +2626,7 @@ execute against. The capability provider contract now exists
 bwsalmon/agents#249), not a table of its own; see that package's own doc
 comments for why a cache here would just go stale. `v2/pkg/orchestrator/`
 is what now reads and writes GitHub — polling labelled issues, dispatching
-through `loop.Cycle`, and closing out a finished PR. `core.py` is
+through `dispatch.Cycle`, and closing out a finished PR. `core.py` is
 untouched.
 
 ## Migration

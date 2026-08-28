@@ -7,8 +7,11 @@ here is wired into it.
 pkg/model/      the task model of ../docs/data-model.md
 pkg/model/dolt/ opening an embedded Dolt database — the only package that
                 imports Dolt
-pkg/loop/       the state transition loop: what one cycle decides to do
-                with the store, with no side effect beyond that decision
+pkg/dispatch/   which task takes which slot: what one cycle decides to
+                do with the store, with no side effect beyond that
+                decision. It does not loop itself -- cmd/graind's timer
+                does, through pkg/orchestrator -- and it carries no
+                scheduling policy: it drains task_ready into free slots
 pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
@@ -71,17 +74,19 @@ pkg/github/githubsim/  a port of tests/test_live_issue_to_pr.py's
                 network.
 pkg/orchestrator/  v1's core.py/Orchestrator equivalent: polls a task
                 repo's labelled issues into model.Store tasks, runs
-                loop.Cycle's own dispatches (resolving and materializing
-                each one's capabilities first, and revoking what was
-                minted once it finishes), turns a finished run's tool
+                dispatch.Cycle's own dispatches (resolving and
+                materializing each one's capabilities first, and revoking
+                what was minted once it finishes), turns a finished run's
+                tool
                 calls into real GitHub effects (a comment, a pull
                 request, a filed follow-up task), and closes out a
                 pull request once GitHub reports it merged or closed.
                 See "What this does not have yet" below for what it
                 still stops short of.
 e2e/            issues filed the way a user would, carried through
-                loop.Cycle, a real agent/gemini run, and a real gitproxy
-                push, against a real embedded Dolt store and a local git
+                dispatch.Cycle, a real agent/gemini run, and a real
+                gitproxy push, against a real embedded Dolt store and a
+                local git
                 server standing in for GitHub — fixed scenarios plus a
                 randomized multi-user simulation (bwsalmon/agents#233).
                 See "What this does not have yet" below for where it
@@ -170,9 +175,10 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 A real host adapter, primarily. There used to be a second gap here too:
 two independent packages, `pkg/orchestrate` (bwsalmon/agents#254) and
 `pkg/orchestrator` (bwsalmon/agents#249), each decided *when* to call
-GitHub's REST API from a running `loop.Cycle`, built in parallel without
-either knowing about the other. bwsalmon/agents#263 reconciled them —
-`pkg/orchestrator` kept its own name and its more complete GitHub-facing
+GitHub's REST API from a running `dispatch.Cycle`, built in parallel
+without either knowing about the other. bwsalmon/agents#263 reconciled
+them — `pkg/orchestrator` kept its own name and its more complete
+GitHub-facing
 half (issue intake via `PollIssues`, a finished run's tool calls turned
 into a comment/PR/follow-up issue via `ProcessResult`, and closing out a
 merged or closed PR via `SyncPullRequests`/`Store.OpenPullRequestLinks`),
@@ -267,9 +273,10 @@ issue and waited for a human to apply the trigger label or comment
 `/lgtm` — bwsalmon/agents#283 asked for exactly that human step to go
 away. The fix task carries `/base` the original PR's own branch and
 `/auto-merge true`, the same stacked-branch trick `_suggest_fix` used, so
-it dispatches on the very next `loop.Cycle` with no approval in between
-and, once clean, merges straight back into the branch it repairs. If it
-finishes and the original PR is still broken, `SyncPullRequests` gives up
+it dispatches on the very next `dispatch.Cycle` with no approval in
+between and, once clean, merges straight back into the branch it
+repairs. If it finishes and the original PR is still broken,
+`SyncPullRequests` gives up
 automatically rather than refiling: it comments explaining why, sets
 `Observation.MergeQueueBlockedAt`, and the queue moves on to the next
 task in that repo — a blocked task still merges the moment a human's own
@@ -290,7 +297,7 @@ task down to the name it names, and `GitProxy.Handle` uses that name
 against `CredentialSet.Get` in place of the owner/repo ladder whenever
 one is present — no override outlives the task, because it is stored
 with every other Grant the task carries rather than written and cleared
-around dispatch. `loop.Cycle` also mints no leases yet — a run's
+around dispatch. `dispatch.Cycle` also mints no leases yet — a run's
 `Leases` field exists in the schema and `gitproxy` never reads it; the
 git proxy authorizes straight off `Task.Target`/`Reads` instead, which
 serves the same fail-closed purpose without depending on that field being
@@ -316,9 +323,10 @@ call underneath swapped for an in-memory stand-in — and `BranchExists`
 answers from a real bare git repo via `git show-ref` rather than its own
 bookkeeping, since that check is the one a live test can't afford to
 fake. `pkg/orchestrator` decides when to call any of it: it polls a
-labelled issue into a `Task` row, dispatches it through `loop.Cycle`,
-opens or reuses a pull request once a run pushes, and closes one out once
-GitHub reports it merged or closed. Its `live_test.go` drives the same two
+labelled issue into a `Task` row, dispatches it through
+`dispatch.Cycle`, opens or reuses a pull request once a run pushes, and
+closes one out once GitHub reports it merged or closed. Its
+`live_test.go` drives the same two
 scenarios `e2e/e2e_test.go` already proved by hand (a push that becomes a
 merged, closed PR; a question that parks a task and a labelled reply that
 resumes it) through `orchestrator.RunCycle` and a real `github.Client`
@@ -400,7 +408,8 @@ section is the checked-in listing of, per capability.
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today,
 and `cmd/graind` now calls it for real from `pkg/orchestrator`'s dispatch
 loop rather than only from a test — `orchestrator.HostSandboxes` is the
-only other thing `loop.Cycle`'s own dispatch path drives, and neither
+only other thing `dispatch.Cycle`'s own dispatch path drives, and
+neither
 hands it more than a local directory to confine itself to yet
 (`mcp.ConfigureGitCredentials` sets that directory's git credentials up
 the same way v1's `configure_git_credentials` sets a real sandbox's up,
@@ -448,7 +457,8 @@ what they were asked to do rather than posting it anywhere real.
 caller) a way to inject a real sink is still open.
 
 `e2e/` is that whole chain driven by hand, in a test, rather than by
-`loop.Cycle` itself: it calls `loop.Cycle` to decide what runs, then
+`dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,
+then
 drives `agent/gemini` (scripted in most tests; the real API in
 `live_test.go`, gated on `GEMINI_API_KEY`) through a sandbox-stand-in
 directory against a real `gitproxy` in front of a local git server, and

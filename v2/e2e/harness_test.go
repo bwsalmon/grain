@@ -1,10 +1,10 @@
 // Package e2e ties every layer v2 owns today into one pipeline: a task
-// filed the way a human would, loop.Cycle deciding when it runs, an agent
+// filed the way a human would, dispatch.Cycle deciding when it runs, an agent
 // (agent/gemini) actually driving it, and gitproxy actually authorizing
 // and forwarding the git push that results -- against a real embedded
 // Dolt store and a real (local, git http-backend) stand-in for GitHub.
 // That is the same discipline gitproxy/live_test.go already holds to one
-// layer down; what this package adds is loop.Cycle's own dispatch
+// layer down; what this package adds is dispatch.Cycle's own dispatch
 // decision, more than one task/run, and the state transitions that
 // follow a run (completed, awaiting_reply, closed), not just the push
 // itself.
@@ -45,8 +45,8 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
-	"github.com/bwsalmon/grain/v2/pkg/loop"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
@@ -170,13 +170,13 @@ func (w *world) remote(owner, name string) string {
 	return w.proxyURL + "/" + owner + "/" + name + ".git"
 }
 
-// runDispatch drives one loop.Cycle Dispatch to completion in its slot's
+// runDispatch drives one dispatch.Cycle Dispatch to completion in its slot's
 // sandbox-stand-in directory, through a scripted (not live) gemini
 // agent, and calls FinishRun once the agent's turn ends. It does not
 // touch task_observation -- that is the GitHub-sync stand-in's job,
 // applied by the caller from the returned result, the same separation
 // model/simulate_test.go's components hold to.
-func (w *world) runDispatch(d loop.Dispatch, script []*genai.GenerateContentResponse, at time.Time) *agent.Result {
+func (w *world) runDispatch(d dispatch.Dispatch, script []*genai.GenerateContentResponse, at time.Time) *agent.Result {
 	w.t.Helper()
 	root := w.roots[d.Slot]
 	if root == "" {

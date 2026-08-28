@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
@@ -41,7 +41,7 @@ type rootedSandboxes interface {
 	RootFor(slot string) (string, error)
 }
 
-// RunDispatch drives one loop.Dispatch to completion: resolve and
+// RunDispatch drives one dispatch.Dispatch to completion: resolve and
 // materialize its task's capabilities (writing any SideSandbox placements
 // into sandboxRoot, which may be empty when the task has none to place),
 // run the agent against tools (whatever Deps.Sandboxes.ToolsFor produced
@@ -56,7 +56,7 @@ type rootedSandboxes interface {
 // since deciding what a run produced is a different question from
 // deciding what to do about it.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
-	cfg Config, task model.Task, d loop.Dispatch, tools []mcp.Tool, sandboxRoot string, at time.Time) (*agent.Result, error) {
+	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot string, at time.Time) (*agent.Result, error) {
 
 	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Slot: d.Slot, Sandbox: d.Slot, Attempt: d.Attempt, StartedAt: at}
 	cc := model.CapabilityContext{Task: task, Run: run, Now: at, Workdir: sandboxRoot, Credentials: cfg.Credentials}

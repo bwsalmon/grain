@@ -100,7 +100,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	// Neither a push, a question, nor a closing comment: the run produced
 	// nothing to act on (the failScript case in the e2e harness this
 	// mirrors). Left running-less and un-observed, it is eligible for
-	// another attempt the next time loop.Cycle looks at task_ready --
+	// another attempt the next time dispatch.Cycle looks at task_ready --
 	// nothing here forces a retry, but nothing prevents one either.
 	return nil
 }

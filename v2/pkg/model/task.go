@@ -255,7 +255,7 @@ const (
 	// repair this task's own PR (-> the fix task's ID), so a later cycle
 	// knows one is already in flight rather than filing a second, and can
 	// tell whether it has finished. It does not block dispatch -- the
-	// fix task runs on its own the moment loop.Cycle sees it ready,
+	// fix task runs on its own the moment dispatch.Cycle sees it ready,
 	// independent of this task's own state.
 	LinkFixTask LinkKind = "fix-task"
 )

@@ -277,7 +277,7 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail) string
 // and left it for a human to apply trigger_label (or comment /lgtm)
 // before the agent set would touch it, this files the task straight into
 // the store already approved -- Approval set, by PrincipalAutomation, so
-// task_state reads it 'queued' immediately and the very next loop.Cycle
+// task_state reads it 'queued' immediately and the very next dispatch.Cycle
 // dispatches it with no human in the loop. That is the issue's own "we
 // will no longer suggest tasks the user needs to approve for this."
 //

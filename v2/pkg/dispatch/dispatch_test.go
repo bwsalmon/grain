@@ -1,4 +1,4 @@
-package loop_test
+package dispatch_test
 
 // Cycle against a real embedded Dolt database, the same discipline
 // model/dolt/store_test.go holds to: these prove the dispatch decision
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
@@ -69,7 +69,7 @@ func TestCycleDispatchesReadyTasksInOrderAndNoFurther(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true), task("t2", true))
 
-	got, err := loop.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
+	got, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
 
-	first, err := loop.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
+	first, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -115,7 +115,7 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	// Two slots, still only one task in the world, and it is already
 	// running — task_ready excludes it, so a second cycle must dispatch
 	// nothing even though slot-2 has never been used.
-	second, err := loop.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestCycleRespectsTheSlotCount(t *testing.T) {
 	}
 	slots := []string{"slot-1", "slot-2"}
 
-	first, err := loop.Cycle(ctx, store, slots, now)
+	first, err := dispatch.Cycle(ctx, store, slots, now)
 	if err != nil || len(first) != 2 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -143,7 +143,7 @@ func TestCycleRespectsTheSlotCount(t *testing.T) {
 
 	// No free slot: nothing more may be dispatched no matter how many
 	// tasks are ready.
-	second, err := loop.Cycle(ctx, store, slots, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, slots, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestCycleRespectsTheSlotCount(t *testing.T) {
 	if err := store.FinishRun(ctx, first[0].RunID, now.Add(2*time.Minute), "succeeded"); err != nil {
 		t.Fatal(err)
 	}
-	third, err := loop.Cycle(ctx, store, slots, now.Add(3*time.Minute))
+	third, err := dispatch.Cycle(ctx, store, slots, now.Add(3*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 		task("blocked", true, model.Link{Kind: model.LinkDependsOn, Target: "blocker"}),
 	)
 
-	got, err := loop.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
+	got, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 	if err := store.Observe(ctx, model.Observation{TaskID: "blocker", ClosedAt: &now}); err != nil {
 		t.Fatal(err)
 	}
-	got, err = loop.Cycle(ctx, store, []string{"slot-2"}, now.Add(time.Minute))
+	got, err = dispatch.Cycle(ctx, store, []string{"slot-2"}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	putTasks(t, store, ctx, task("t0", true))
 	slots := []string{"slot-1"}
 
-	first, err := loop.Cycle(ctx, store, slots, now)
+	first, err := dispatch.Cycle(ctx, store, slots, now)
 	if err != nil || len(first) != 1 || first[0].Attempt != 1 {
 		t.Fatalf("first dispatch: %v, %+v", err, first)
 	}
@@ -218,7 +218,7 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "requeued"); err != nil {
 		t.Fatal(err)
 	}
-	second, err := loop.Cycle(ctx, store, slots, now.Add(2*time.Minute))
+	second, err := dispatch.Cycle(ctx, store, slots, now.Add(2*time.Minute))
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("second dispatch: %v, %+v", err, second)
 	}
@@ -230,9 +230,9 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	}
 }
 
-// TestInvariantsHoldAcrossManyRandomCycles is the property this loop
+// TestInvariantsHoldAcrossManyRandomCycles is the property this package
 // exists to guarantee, checked the way a property survives rather than
-// the way one example does: build a small DAG of tasks, run the loop for
+// the way one example does: build a small DAG of tasks, drive Cycle for
 // many cycles against a real store, and after every single one confirm
 // three things no cycle may ever violate — no slot holds two runs, no
 // task holds two runs, and no blocked task ever runs — while a runs of
@@ -272,7 +272,7 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 
 	for cycle := 0; cycle < 60; cycle++ {
 		clock = clock.Add(time.Minute)
-		dispatches, err := loop.Cycle(ctx, store, slots, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, slots, clock)
 		if err != nil {
 			t.Fatalf("cycle %d: %v", cycle, err)
 		}
