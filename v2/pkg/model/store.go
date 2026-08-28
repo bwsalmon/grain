@@ -93,13 +93,13 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `external_ref`, `created_at`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?)`,
+  `+"`auto_merge`, `created_at`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID,
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, nullable(t.ExternalRef), timeOf(t.CreatedAt),
+		t.AutoMerge, timeOf(t.CreatedAt),
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -244,7 +244,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`external_ref`,`created_at`"
+	"`auto_merge`,`created_at`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -254,13 +254,13 @@ func scanTask(scan func(...any) error) (Task, error) {
 	var intent, binding string
 	var oaKind, oaID, oReason string
 	var obKind, obID, aaKind, aaID, abKind, abID sql.NullString
-	var tOwner, tName, base, folder, extRef sql.NullString
+	var tOwner, tName, base, folder sql.NullString
 	var createdAt sql.NullTime
 	if err := scan(&t.ID, &intent, &t.Title, &t.Body,
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &extRef, &createdAt); err != nil {
+		&t.AutoMerge, &createdAt); err != nil {
 		return Task{}, err
 	}
 
@@ -281,7 +281,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 	if tOwner.Valid {
 		t.Target = &RepoRef{Owner: tOwner.String, Name: tName.String}
 	}
-	t.Base, t.ExternalRef = base.String, extRef.String
+	t.Base = base.String
 	t.Folder = ParseFolder(folder.String)
 	if createdAt.Valid {
 		t.CreatedAt = &createdAt.Time

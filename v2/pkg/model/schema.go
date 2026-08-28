@@ -31,7 +31,7 @@ package model
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -59,7 +59,6 @@ var Tables = []string{
   ` + "`folder`" + `                VARCHAR(512) NULL,
 
   ` + "`auto_merge`" + `            BOOLEAN      NOT NULL,
-  ` + "`external_ref`" + `          VARCHAR(255) NULL,
   ` + "`created_at`" + `            DATETIME(6)  NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,

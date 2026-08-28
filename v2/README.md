@@ -76,20 +76,19 @@ pkg/github/githubsim/  a port of tests/test_live_issue_to_pr.py's
                 real bare git repo, for a live end-to-end test to wire a
                 real github.RESTClient against instead of the real
                 network.
-pkg/orchestrator/  v1's core.py/Orchestrator equivalent: polls a task
-                repo's labelled issues into model.Store tasks, runs
+pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 dispatch.Cycle's own dispatches (resolving and
                 materializing each one's capabilities first, and revoking
                 what was minted once it finishes), turns a finished run's
-                tool
-                calls into real GitHub effects (a comment, a pull
-                request, a filed follow-up task), and closes out a
-                pull request once GitHub reports it merged or closed.
-                RunCycle runs those as three independent reconcilers
+                tool calls into effects (a comment on the task, a pull
+                request, a filed follow-up task), and closes out a pull
+                request once GitHub reports it merged or closed. It no
+                longer polls anything: tasks arrive by being written
+                (see "Input is a model update, not a GitHub issue").
+                RunCycle runs the two halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
-                pipeline" below. See "What this does not have yet" for
-                what it still stops short of.
-e2e/            issues filed the way a user would, carried through
+                pipeline" below.
+e2e/            tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/gemini run, and a real
                 gitproxy push, against a real embedded Dolt store and a
                 local git
@@ -98,9 +97,10 @@ e2e/            issues filed the way a user would, carried through
                 See "What this does not have yet" below for where it
                 stops.
 cmd/graind/     the daemon: pkg/orchestrator's RunCycle run on a timer
-                against one real embedded Dolt store, until
-                SIGINT/SIGTERM, with an in-process gitproxy and a real
-                github.RESTClient wired in
+                against one real Dolt store (embedded, or a SQL server
+                via -store-addr so a UI and a CLI can write it too),
+                until SIGINT/SIGTERM, with an in-process gitproxy and a
+                real github.RESTClient wired in
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237). It reads and writes
@@ -206,7 +206,7 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## Input is a model update, not a GitHub issue
 
-**In progress — stages 1 and 2 of 3 have landed.**
+**Done — all three stages have landed.**
 
 A task used to begin its life as a GitHub issue. `PollIssues` listed the
 task repo's labelled issues and turned each into a `model.Task`; the CLI
@@ -284,13 +284,53 @@ and become grain's, which means grain has to render them. That is what
   and that stopped being one package's business once a person closing a
   task from a CLI needed it too.
 
-**Not yet (stage 3).** `pkg/orchestrator` still polls issues and still
-relays to them: `PollIssues`, the `poll` reconciler, and the
-`CreateComment`/`CreateIssue`/`CloseIssue` sites in `finish.go` and
-`sync.go` are all still there, as is `ExternalRef`. So a task filed by
-the CLI today gets dispatched, but a question it asks still tries to
-reach a GitHub issue that no longer exists for it. Stage 3 is deleting
-that half and pointing those relays at `Store.AddComment` instead.
+**Landed (stage 3) — the orchestrator stops reading and writing issues:**
+
+- `PollIssues`, `pollIssue`, `fileTask`, `parkIssue`,
+  `requeueIfAwaitingReply` and `orchestrator.TaskID` are deleted, along
+  with the `poll` reconciler. `RunCycle` has two reconcilers now, not
+  three: there is no outside source of tasks left to reconcile against,
+  because a task filed by the CLI or the UI is in `task_ready` the moment
+  it is written rather than on whichever tick polls next.
+- Everything a run says lands in the store. `ask_question` and
+  `comment_on_issue` become `model.Comment`s attributed as grain relaying
+  an agent — (automation, on behalf of agent), the distinction v1 could
+  only gesture at by looking for a signature substring in a comment body.
+  `propose_task` files a real `model.Task` with no `Approval`, so
+  `proposeTaskTool`'s "a human must accept it first" contract is enforced
+  by the state machine rather than by withholding a label, and
+  `model.LinkProposedBy` records which task proposed it — something the
+  issue version had no way to say.
+- The merge queue's own two voices moved too: `fileFixTask` files a store
+  task instead of an issue, and both it and `escalateToUser` comment
+  through `Store.AddComment` as the `merge-queue` principal, so a human
+  reading a task's conversation can tell the queue's remarks from a
+  relayed agent's.
+- **Closing out is one write.** It used to be two — close the task's
+  GitHub issue, then record the closure — with the issue closed first and
+  the store told second, so a crash in between left a closed issue that
+  grain still believed was open.
+- `Task.ExternalRef`, `model.ExternalRef`, `model.ParseExternalRef` and
+  the `external_ref` column are gone (schema version 4).
+  `orchestrator.Config` loses `TaskRepo`, `TriggerLabel` and
+  `DefaultTarget`: there is no task repo to list, no label to look for,
+  and a task arrives with its `Target` already set because whatever wrote
+  it set one. `graind` loses the matching flags and gains the
+  `-store-addr` family.
+
+GitHub is still reached, for exactly what is genuinely GitHub's: the
+branch a run pushed, the pull request opened for it, its checks, and its
+merge. `pkg/github` keeps its full client — `ListIssues` and friends are
+simply no longer called by anything outside their own tests.
+
+`pkg/orchestrator/live_test.go` is the proof, and it now drives the real
+path: a task filed through `pkg/ui.Client` exactly as a person at the CLI
+would, dispatched by `RunCycle` in the same cycle, pushed, opened as a
+pull request, and closed out once GitHub merges it — asserting at the end
+that `sim.Issues` is empty, because the only thing the whole run put on
+GitHub is the pull request. Its sibling proves the question path: a run
+parks, a human replies with one `AddComment`, and the next cycle resumes
+it.
 
 ## Reconcilers, not a pipeline
 
@@ -373,9 +413,11 @@ GitHub's REST API from a running `dispatch.Cycle`, built in parallel
 without either knowing about the other. bwsalmon/agents#263 reconciled
 them — `pkg/orchestrator` kept its own name and its more complete
 GitHub-facing
-half (issue intake via `PollIssues`, a finished run's tool calls turned
-into a comment/PR/follow-up issue via `ProcessResult`, and closing out a
-merged or closed PR via `SyncPullRequests`/`Store.OpenPullRequestLinks`),
+half (issue intake via `PollIssues` — since deleted, see "Input is a
+model update, not a GitHub issue" above — a finished run's tool calls
+turned into a comment/PR/follow-up task via `ProcessResult`, and closing
+out a merged or closed PR via
+`SyncPullRequests`/`Store.OpenPullRequestLinks`),
 and gained what only `pkg/orchestrate` had: `RunDispatch` now resolves and
 materializes a dispatched task's capabilities, applies every placement
 under its sandbox root, and revokes what was minted once the run
@@ -525,15 +567,15 @@ file's own docstring describes — every real `GitHubClient` behaviour
 call underneath swapped for an in-memory stand-in — and `BranchExists`
 answers from a real bare git repo via `git show-ref` rather than its own
 bookkeeping, since that check is the one a live test can't afford to
-fake. `pkg/orchestrator` decides when to call any of it: it polls a
-labelled issue into a `Task` row, dispatches it through
-`dispatch.Cycle`, opens or reuses a pull request once a run pushes, and
-closes one out once GitHub reports it merged or closed. Its
-`live_test.go` drives the same two
-scenarios `e2e/e2e_test.go` already proved by hand (a push that becomes a
-merged, closed PR; a question that parks a task and a labelled reply that
-resumes it) through `orchestrator.RunCycle` and a real `github.Client`
-against `githubsim` instead. This absorbed a second, independently-built
+fake. `pkg/orchestrator` decides when to call any of it: it dispatches a
+task through `dispatch.Cycle`, opens or reuses a pull request once a run
+pushes, and closes one out once GitHub reports it merged or closed. Its
+`live_test.go` drives the same two scenarios `e2e/e2e_test.go` already
+proved by hand (a push that becomes a merged, closed PR; a question that
+parks a task and a reply that resumes it) through
+`orchestrator.RunCycle` and a real `github.Client` against `githubsim`
+instead — starting, since the inversion, from a task filed through
+`pkg/ui.Client` the way a person at the CLI files one. This absorbed a second, independently-built
 package that once did a narrower version of the same job — see "What this
 does not have yet" below.
 

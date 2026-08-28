@@ -26,6 +26,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 func TestReadTrimmedFile(t *testing.T) {
@@ -142,7 +143,7 @@ func TestCapabilityProviders(t *testing.T) {
 }
 
 func TestOpenStore(t *testing.T) {
-	store, db, err := openStore(t.TempDir())
+	store, db, err := openStore(t.TempDir(), dolt.ServerConfig{})
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestOpenStore(t *testing.T) {
 func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 
-	store1, db1, err := openStore(dir)
+	store1, db1, err := openStore(dir, dolt.ServerConfig{})
 	if err != nil {
 		t.Fatalf("openStore (first): %v", err)
 	}
@@ -188,7 +189,7 @@ func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("closing the first connection: %v", err)
 	}
 
-	store2, db2, err := openStore(dir)
+	store2, db2, err := openStore(dir, dolt.ServerConfig{})
 	if err != nil {
 		t.Fatalf("openStore (second, same dir): %v", err)
 	}
@@ -204,7 +205,7 @@ func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 
 func TestStartGitProxyServesAndStops(t *testing.T) {
 	dataDir := t.TempDir()
-	store, db, err := openStore(dataDir)
+	store, db, err := openStore(dataDir, dolt.ServerConfig{})
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}

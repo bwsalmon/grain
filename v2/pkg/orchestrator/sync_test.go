@@ -11,8 +11,7 @@ func TestSyncPullRequestsClosesOutAMergedPullRequest(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	pr, err := orchestrator.EnsurePullRequest(client, task)
@@ -46,12 +45,11 @@ func TestSyncPullRequestsClosesOutAMergedPullRequest(t *testing.T) {
 	if st != model.StateClosed {
 		t.Fatalf("state = %q, want closed", st)
 	}
-	issue, err := client.GetIssue("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if issue.State != "closed" {
-		t.Fatalf("issue state = %q, want closed", issue.State)
+	// Closing out is one store write. There is no issue to close alongside
+	// it, so nothing here can end up with a closed issue and a store that
+	// still believes the task is open.
+	if len(sim.Issues) != 0 {
+		t.Fatalf("expected no GitHub issues at all, got %+v", sim.Issues)
 	}
 }
 
@@ -59,8 +57,7 @@ func TestSyncPullRequestsLeavesAnOpenCleanPullRequestAlone(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	pr, err := orchestrator.EnsurePullRequest(client, task)
@@ -88,12 +85,12 @@ func TestSyncPullRequestsLeavesAnOpenCleanPullRequestAlone(t *testing.T) {
 	if st != model.StateCompleted {
 		t.Fatalf("state = %q, want still completed (not yet closed)", st)
 	}
-	issue, err := client.GetIssue("acme", "widgets", 1)
+	obs, err := store.GetObservation(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue.State == "closed" {
-		t.Fatal("expected the issue to still be open")
+	if obs != nil && obs.ClosedAt != nil {
+		t.Fatal("expected the task not to have been closed out yet")
 	}
 }
 
@@ -101,8 +98,7 @@ func TestSyncPullRequestsAutoMergesACleanPullRequest(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	task.AutoMerge = true
 	if err := store.PutTask(ctx, task); err != nil {
 		t.Fatal(err)

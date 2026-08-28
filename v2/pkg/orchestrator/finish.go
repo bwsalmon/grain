@@ -40,11 +40,19 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 	return out
 }
 
-// ProcessResult is what a finished run's tool calls turn into on GitHub:
-// v1's own "core.py writes a file, then turns it into a real GitHub call"
-// split, done here in one step since nothing else needs the intermediate
-// file. task must be the same Task RunDispatch was given -- its
-// ExternalRef names the task-repo issue every relayed comment lands on.
+// ProcessResult is what a finished run's tool calls turn into: a comment
+// on the task, a pull request, a proposed task -- v1's own "core.py
+// writes a file, then turns it into a real effect" split, done here in
+// one step since nothing else needs the intermediate file.
+//
+// Everything a run says now lands in the store. It used to land on the
+// task's own GitHub issue, which is why this needed a task repo and an
+// ExternalRef to relay to at all. A task has no issue any more (README,
+// "Input is a model update, not a GitHub issue"), so a question is a
+// model.Comment, a closing remark is a model.Comment, and a proposed task
+// is a model.Task with no Approval. GitHub is still reached for the one
+// thing that is genuinely GitHub's: the branch a run pushed, and the pull
+// request opened for it.
 //
 // Order matters. A question ends the run's turn by contract (mcp's own
 // ask_question doc comment: "after calling this, do not take any further
@@ -63,22 +71,18 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 func ProcessResult(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, result *agent.Result, now time.Time) error {
 
-	repo, number, err := model.ParseExternalRef(task.ExternalRef)
-	if err != nil {
-		return fmt.Errorf("orchestrator: processing result for %s: %w", task.ID, err)
-	}
-
-	if err := relayProposedTasks(client, repo, result); err != nil {
+	if err := relayProposedTasks(ctx, store, task, result, now); err != nil {
 		return err
 	}
 
 	if question, ok := firstToolCallArg(result, "ask_question", "question"); ok && question != "" {
-		commentID, err := client.CreateComment(repo.Owner, repo.Name, number, question)
+		commentID, err := relayComment(ctx, store, task, question, now)
 		if err != nil {
 			return fmt.Errorf("orchestrator: posting question for %s: %w", task.ID, err)
 		}
-		id64 := int64(commentID)
-		return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.PendingQuestionCommentID = &id64 })
+		return observeField(ctx, store, task.ID, now, func(o *model.Observation) {
+			o.PendingQuestionCommentID = &commentID
+		})
 	}
 
 	pushed, err := client.BranchExists(task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
@@ -91,7 +95,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	}
 
 	if comment, ok := firstToolCallArg(result, "comment_on_issue", "comment"); ok && comment != "" {
-		if _, err := client.CreateComment(repo.Owner, repo.Name, number, comment); err != nil {
+		if _, err := relayComment(ctx, store, task, comment, now); err != nil {
 			return fmt.Errorf("orchestrator: posting closing comment for %s: %w", task.ID, err)
 		}
 		return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })
@@ -105,23 +109,76 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	return nil
 }
 
-// relayProposedTasks files each propose_task call as a real (but
-// unlabelled) GitHub issue -- proposeTaskTool's own doc comment: "requires
-// a human to apply the trigger label ... before the agent set will ever
-// attempt it." depends_on referring to another call's local `id` in the
-// same run is not resolved to a real issue number here -- doing that
-// needs holding every proposal until the whole batch is filed and
-// rewriting cross-references afterward, which is follow-on work; today
-// each proposal's depends_on is posted into the new issue's body verbatim
-// for a human to resolve by hand.
-func relayProposedTasks(client github.Client, taskRepo model.RepoRef, result *agent.Result) error {
+// relayComment records something a dispatched run said, attributed as
+// grain relaying an agent: (automation, on behalf of agent).
+//
+// That attribution is the whole reason model.Comment carries an
+// Attribution rather than a bare Principal. v1 could only gesture at it
+// by looking for a signature substring in an issue comment's body, since
+// GitHub knows one entity -- the account the token belongs to -- and
+// grain has three.
+func relayComment(ctx context.Context, store *model.Store, task model.Task,
+	body string, now time.Time) (int64, error) {
+
+	agentPrincipal := model.Principal{Kind: model.PrincipalAgent, ID: task.ID}
+	return store.AddComment(ctx, model.Comment{
+		TaskID: task.ID,
+		Author: model.Attribution{
+			Actor:      model.Principal{Kind: model.PrincipalAutomation, ID: "grain"},
+			OnBehalfOf: &agentPrincipal,
+		},
+		Body:      body,
+		CreatedAt: now,
+	})
+}
+
+// relayProposedTasks files each propose_task call as a real task with no
+// Approval -- which model.StateOf reads as 'proposed', so it sits in the
+// store waiting for a human to approve it and is never dispatchable
+// meanwhile. That is exactly proposeTaskTool's own contract ("requires a
+// human to ... before the agent set will ever attempt it"), enforced by
+// the state machine now rather than by withholding a label.
+//
+// The proposal is linked back to the task that made it
+// (model.LinkProposedBy, provenance only -- it blocks nothing), which the
+// GitHub-issue version had no way to record.
+//
+// depends_on referring to another call's local `id` in the same run is
+// still not resolved: doing that needs holding every proposal until the
+// whole batch is filed and rewriting cross-references afterward, which is
+// follow-on work. Today each proposal's depends_on stays in the body
+// verbatim for a human to resolve by hand.
+func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task,
+	result *agent.Result, now time.Time) error {
+
 	for _, p := range proposedTaskCalls(result) {
 		title, _ := p["title"].(string)
 		body, _ := p["body"].(string)
 		if title == "" || body == "" {
 			continue
 		}
-		if _, err := client.CreateIssue(taskRepo.Owner, taskRepo.Name, title, body, nil); err != nil {
+		id, err := store.NewTaskID(ctx)
+		if err != nil {
+			return fmt.Errorf("orchestrator: allocating an id for proposed task %q: %w", title, err)
+		}
+		proposal := model.Task{
+			ID:     id,
+			Intent: model.IntentImplement,
+			Title:  title,
+			Body:   body,
+			Origin: model.Origin{
+				Attribution: model.Attribution{
+					Actor:      model.Principal{Kind: model.PrincipalAutomation, ID: "grain"},
+					OnBehalfOf: &model.Principal{Kind: model.PrincipalAgent, ID: task.ID},
+				},
+				Reason: model.ReasonDirect,
+			},
+			Target:    task.Target,
+			Binding:   model.BindingDirective,
+			Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
+			CreatedAt: &now,
+		}
+		if err := store.PutTask(ctx, proposal); err != nil {
 			return fmt.Errorf("orchestrator: filing proposed task %q: %w", title, err)
 		}
 	}
@@ -202,6 +259,8 @@ func EnsurePullRequest(client github.Client, task model.Task) (github.PullReques
 	if title == "" {
 		title = "grain: " + task.ID
 	}
-	body := fmt.Sprintf("Automated change for %s.", task.ExternalRef)
+	// The task id, not an issue reference: a task has no issue to point a
+	// reader at any more, and its id is what `grain get` takes.
+	body := fmt.Sprintf("Automated change for grain task %s.", task.ID)
 	return client.CreatePullRequest(task.Target.Owner, task.Target.Name, branch, base, title, body)
 }

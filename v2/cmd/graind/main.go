@@ -67,10 +67,10 @@ func main() {
 	slotList := flag.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills")
 	pollInterval := flag.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
 
-	taskRepo := flag.String("task-repo", "", "owner/name of the repo whose labelled issues become tasks (required)")
-	triggerLabel := flag.String("trigger-label", "grain-agent", "label that marks an issue ready to dispatch")
-	defaultTargetRepo := flag.String("default-target-repo", "",
-		"owner/name used when a task's issue carries no /repo directive (optional)")
+	storeAddr := flag.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- required to share the store with a UI or a CLI")
+	storeDatabase := flag.String("store-database", "grain", "database name on -store-addr")
+	storeUser := flag.String("store-user", "root", "user to connect to -store-addr as")
+	storePasswordFile := flag.String("store-password-file", "", "file holding the password for -store-user")
 
 	geminiAPIKeyFile := flag.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := flag.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
@@ -115,10 +115,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "graind: -data-dir is required")
 		os.Exit(2)
 	}
-	if *taskRepo == "" {
-		fmt.Fprintln(os.Stderr, "graind: -task-repo is required")
-		os.Exit(2)
-	}
 	if *geminiAPIKeyFile == "" {
 		fmt.Fprintln(os.Stderr, "graind: -gemini-api-key-file is required")
 		os.Exit(2)
@@ -144,7 +140,8 @@ func main() {
 
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
-		taskRepo: *taskRepo, triggerLabel: *triggerLabel, defaultTargetRepo: *defaultTargetRepo,
+		storeAddr: *storeAddr, storeDatabase: *storeDatabase,
+		storeUser: *storeUser, storePasswordFile: *storePasswordFile,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -161,9 +158,10 @@ type config struct {
 	slots        []string
 	pollInterval time.Duration
 
-	taskRepo          string
-	triggerLabel      string
-	defaultTargetRepo string
+	storeAddr         string
+	storeDatabase     string
+	storeUser         string
+	storePasswordFile string
 
 	geminiAPIKeyFile string
 	geminiModel      string
@@ -192,20 +190,16 @@ type config struct {
 // under cfg.dataDir and starts the reconcile loop; it returns only once
 // ctx is cancelled (or setup itself fails).
 func run(ctx context.Context, cfg config) error {
-	taskRepo, err := model.ParseRepo(cfg.taskRepo)
-	if err != nil {
-		return fmt.Errorf("parsing -task-repo: %w", err)
-	}
-	var defaultTarget *model.RepoRef
-	if cfg.defaultTargetRepo != "" {
-		dt, err := model.ParseRepo(cfg.defaultTargetRepo)
-		if err != nil {
-			return fmt.Errorf("parsing -default-target-repo: %w", err)
-		}
-		defaultTarget = &dt
-	}
 
-	store, db, err := openStore(cfg.dataDir)
+	server := dolt.ServerConfig{Addr: cfg.storeAddr, Database: cfg.storeDatabase, User: cfg.storeUser}
+	if cfg.storePasswordFile != "" {
+		password, err := readTrimmedFile(cfg.storePasswordFile)
+		if err != nil {
+			return fmt.Errorf("reading -store-password-file: %w", err)
+		}
+		server.Password = password
+	}
+	store, db, err := openStore(cfg.dataDir, server)
 	if err != nil {
 		return err
 	}
@@ -320,14 +314,13 @@ func run(ctx context.Context, cfg config) error {
 		Store: store, Client: githubClient, Sandboxes: sandboxes,
 		Framework: func() agent.Framework { return agentFramework },
 		Config: orchestrator.Config{
-			TaskRepo: taskRepo, TriggerLabel: cfg.triggerLabel, DefaultTarget: defaultTarget,
 			Capabilities:  registry,
 			Credentials:   secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 			MaxAgentTurns: cfg.maxAgentTurns,
 		},
 		Slots: cfg.slots,
 	}
-	log.Printf("graind: reconciling every %s across slots %v for task repo %s", cfg.pollInterval, cfg.slots, taskRepo)
+	log.Printf("graind: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
 	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
 }
@@ -398,10 +391,16 @@ func (c credentialTokenSource) TokenFor(owner, repo string) *string {
 // close the connection on the way out -- model.Store itself has no
 // Close, deliberately: it imports no driver (pkg/model/dolt's own doc
 // comment), so closing is the caller's job.
-func openStore(dataDir string) (*model.Store, *sql.DB, error) {
-	db, err := dolt.Open(dolt.DefaultConfig(filepath.Join(dataDir, "store")))
+//
+// -store-addr points at a Dolt SQL server, which is what a deployment
+// running a UI or a CLI alongside this daemon needs: embedded Dolt is a
+// single writer, and those are writers now (README, "Single writer").
+// Without it, the embedded database under -data-dir is used, and nothing
+// else may be running against it.
+func openStore(dataDir string, server dolt.ServerConfig) (*model.Store, *sql.DB, error) {
+	db, err := dolt.OpenOrConnect(filepath.Join(dataDir, "store"), server)
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening embedded dolt: %w", err)
+		return nil, nil, fmt.Errorf("opening the task store: %w", err)
 	}
 	store := model.New(db)
 	if err := store.Init(context.Background()); err != nil {

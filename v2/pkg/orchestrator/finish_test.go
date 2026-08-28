@@ -2,34 +2,27 @@ package orchestrator_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
-// filedTask puts a queued task directly, standing in for what PollIssues
-// would have produced -- these tests are about what ProcessResult does
-// with a run's own tool calls, not about intake. It names the same repo
-// as both the task repo (ExternalRef) and the target (Target): githubsim.
-// Sim answers for exactly one repo (its own doc comment says so), and a
-// single-repo deployment -- task and target repo the same -- is a real,
-// common shape (docs/next-session.md: "a single-repo deployment ...
-// behaves exactly as before"), so this is not a corner these tests invent
-// just to dodge Sim's limits.
-func filedTask(t *testing.T, ctx context.Context, store *model.Store, id string, repo model.RepoRef, issueNumber int) model.Task {
+// filedTask puts a queued task in the store, the way the CLI or the UI
+// would -- these tests are about what ProcessResult does with a run's own
+// tool calls. There is no issue to seed alongside it any more: a task is
+// a row, and githubsim.Sim answers only for the target repo's pull
+// requests.
+func filedTask(t *testing.T, ctx context.Context, store *model.Store, id string, repo model.RepoRef) model.Task {
 	t.Helper()
 	human := model.Principal{Kind: model.PrincipalHuman, ID: "alice"}
 	task := model.Task{
 		ID: id, Intent: model.IntentImplement, Title: "fix the thing", Body: "please",
-		Origin:      model.Origin{Attribution: model.Attribution{Actor: human}, Reason: model.ReasonDirect},
-		Approval:    &model.Attribution{Actor: human},
-		Target:      &repo,
-		Binding:     model.BindingDirective,
-		ExternalRef: fmt.Sprintf("%s#%d", repo, issueNumber),
+		Origin:   model.Origin{Attribution: model.Attribution{Actor: human}, Reason: model.ReasonDirect},
+		Approval: &model.Attribution{Actor: human},
+		Target:   &repo,
+		Binding:  model.BindingDirective,
 	}
 	if err := store.PutTask(ctx, task); err != nil {
 		t.Fatalf("filing task: %v", err)
@@ -37,11 +30,19 @@ func filedTask(t *testing.T, ctx context.Context, store *model.Store, id string,
 	return task
 }
 
-// seedIssue puts a blank issue in sim, standing in for the task-repo issue
-// PollIssues would already have created before any run this package's own
-// tests care about ever started.
-func seedIssue(sim *githubsim.Sim, number int) {
-	sim.Issues[number] = &githubsim.Issue{Title: "t", Body: "b", Author: "alice", Labels: map[string]struct{}{}}
+// commentBodies is what a task's conversation now says, in order -- where
+// these tests used to read client.ListComments off a GitHub issue.
+func commentBodies(t *testing.T, ctx context.Context, store *model.Store, taskID string) []string {
+	t.Helper()
+	comments, err := store.Comments(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, 0, len(comments))
+	for _, c := range comments {
+		out = append(out, c.Body)
+	}
+	return out
 }
 
 func toolResult(calls ...agent.ToolCall) *agent.Result {
@@ -52,8 +53,7 @@ func TestProcessResultOpensAPullRequestForAPushedBranch(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	result := toolResult(agent.ToolCall{Name: "run_command", Text: "pushed"})
@@ -96,8 +96,7 @@ func TestProcessResultReusesAnAlreadyOpenPullRequest(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	existing, err := client.CreatePullRequest("acme", "widgets", model.BranchName(task.ID), "main", "existing", "")
@@ -119,10 +118,9 @@ func TestProcessResultReusesAnAlreadyOpenPullRequest(t *testing.T) {
 
 func TestProcessResultRelaysAQuestionAndParksTheTask(t *testing.T) {
 	store, ctx := openStore(t)
-	sim, client := newSim(t, "acme", "widgets", "main")
+	_, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 
 	result := toolResult(agent.ToolCall{
 		Name: "ask_question", Arguments: map[string]any{"question": "which config file?"},
@@ -139,21 +137,33 @@ func TestProcessResultRelaysAQuestionAndParksTheTask(t *testing.T) {
 		t.Fatalf("state = %q, want awaiting_reply", st)
 	}
 
-	comments, err := client.ListComments("acme", "widgets", 1)
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 || got[0] != "which config file?" {
+		t.Fatalf("conversation = %q, want the relayed question", got)
+	}
+
+	// The question grain is waiting on is named by id, and the relay is
+	// attributed as grain speaking for the agent rather than as its own.
+	comments, err := store.Comments(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(comments) != 1 || comments[0].Body != "which config file?" {
-		t.Fatalf("got %+v", comments)
+	obs, err := store.GetObservation(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.PendingQuestionCommentID == nil || *obs.PendingQuestionCommentID != comments[0].ID {
+		t.Fatalf("pending question = %+v, want the stored comment's id %d", obs.PendingQuestionCommentID, comments[0].ID)
+	}
+	if comments[0].Author.Actor.Kind != model.PrincipalAutomation || comments[0].Author.OnBehalfOf == nil {
+		t.Fatalf("relayed question attribution = %+v, want automation on behalf of the agent", comments[0].Author)
 	}
 }
 
 func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	store, ctx := openStore(t)
-	sim, client := newSim(t, "acme", "widgets", "main")
+	_, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 
 	result := toolResult(agent.ToolCall{
 		Name: "comment_on_issue", Arguments: map[string]any{"comment": "the answer is 4"},
@@ -169,21 +179,16 @@ func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	if st != model.StateCompleted {
 		t.Fatalf("state = %q, want completed", st)
 	}
-	comments, err := client.ListComments("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(comments) != 1 || comments[0].Body != "the answer is 4" {
-		t.Fatalf("got %+v", comments)
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 || got[0] != "the answer is 4" {
+		t.Fatalf("conversation = %q, want the relayed closing comment", got)
 	}
 }
 
-func TestProcessResultFilesAProposedTaskAsAnUnlabelledIssue(t *testing.T) {
+func TestProcessResultFilesAProposedTaskIntoTheStore(t *testing.T) {
 	store, ctx := openStore(t)
-	sim, client := newSim(t, "acme", "widgets", "main")
+	_, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 
 	result := toolResult(agent.ToolCall{
 		Name: "propose_task",
@@ -195,14 +200,46 @@ func TestProcessResultFilesAProposedTaskAsAnUnlabelledIssue(t *testing.T) {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
-	// Sim numbers a freshly filed issue at 8001 (its own New() starts
-	// nextIssue at 8000 and pre-increments) -- this test's own repo has no
-	// other issue filed through CreateIssue before this one.
-	issue, err := client.GetIssue("acme", "widgets", 8001)
+	tasks, err := store.ListTasks(ctx)
 	if err != nil {
-		t.Fatalf("expected the proposed task to have been filed: %v", err)
+		t.Fatal(err)
 	}
-	if issue.Title != "follow-up work" || issue.HasLabel("grain-agent") {
-		t.Fatalf("got %+v", issue)
+	var proposal *model.Task
+	for i := range tasks {
+		if tasks[i].ID != task.ID {
+			proposal = &tasks[i]
+		}
+	}
+	if proposal == nil {
+		t.Fatal("the proposed task was never filed")
+	}
+	if proposal.Title != "follow-up work" {
+		t.Fatalf("title = %q, want the proposed one", proposal.Title)
+	}
+
+	// Unapproved is the whole contract: proposeTaskTool's own doc comment
+	// says a human must accept it before the agent set ever attempts it,
+	// which the state machine enforces now rather than a withheld label.
+	state, err := store.State(ctx, proposal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateProposed {
+		t.Fatalf("state = %q, want proposed", state)
+	}
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ready {
+		if id == proposal.ID {
+			t.Fatal("a proposed task is dispatchable")
+		}
+	}
+	// And it records which task proposed it, which the issue version had
+	// no way to say.
+	if len(proposal.Links) != 1 || proposal.Links[0].Kind != model.LinkProposedBy ||
+		proposal.Links[0].Target != task.ID {
+		t.Fatalf("links = %+v, want proposed-by the task that asked", proposal.Links)
 	}
 }

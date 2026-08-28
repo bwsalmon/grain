@@ -77,9 +77,6 @@ func TestCreateTaskFilesStraightIntoTheStore(t *testing.T) {
 	if stored == nil {
 		t.Fatal("task is not in the store")
 	}
-	if stored.ExternalRef != "" {
-		t.Fatalf("external ref = %q, want empty: nothing files an issue any more", stored.ExternalRef)
-	}
 	if stored.Origin.Attribution.Actor.ID != "alice" {
 		t.Fatalf("origin actor = %q, want the configured actor", stored.Origin.Attribution.Actor.ID)
 	}

@@ -56,13 +56,12 @@ type Sandboxes interface {
 // is the task queue, which label marks an issue as ready to dispatch, and
 // what a dispatched run is allowed to do on its own.
 type Config struct {
-	TaskRepo     model.RepoRef
-	TriggerLabel string
-	// DefaultTarget is used when a task's issue body carries no /repo
-	// directive — grain/automation/directives.py's own "unless the
-	// deployment configures default_target_repo". Nil means every task
-	// must name its target explicitly.
-	DefaultTarget *model.RepoRef
+	// TaskRepo, TriggerLabel and DefaultTarget are gone with the poll that
+	// needed them: nothing here reads GitHub issues to find tasks any
+	// more, so there is no task repo to list, no label to look for, and no
+	// default target to apply to an issue body that named none. A task
+	// arrives with its Target already set, because whatever wrote it set
+	// one (ui.Config.DefaultTarget is where that fallback lives now).
 
 	// Capabilities is the registry RunDispatch resolves and materializes
 	// each dispatched task's Grants against before running its agent, and
@@ -78,20 +77,6 @@ type Config struct {
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
 	// agent framework's own default in place.
 	MaxAgentTurns int
-}
-
-// TaskID names the task a task-repo issue maps to, deterministically —
-// the same reasoning model.BranchName and dispatch.RunID already give for
-// their own names: two callers (a poll that just filed the task, and a
-// later poll that sees the same issue again) must agree on its ID without
-// coordinating through anything but the issue itself.
-//
-// docs/data-model.md's own representation table calls this out directly:
-// "a task has a stable identity: a GitHub issue number in a repo." Owner
-// and name can never themselves contain '/', so joining all three with it
-// is unambiguous with no escaping.
-func TaskID(taskRepo model.RepoRef, issueNumber int) string {
-	return fmt.Sprintf("%s/%s/%d", taskRepo.Owner, taskRepo.Name, issueNumber)
 }
 
 // HostSandboxes hands out one directory per slot, on the host this

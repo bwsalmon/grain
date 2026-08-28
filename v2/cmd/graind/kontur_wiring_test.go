@@ -120,7 +120,6 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 
 	cfg := config{
 		dataDir: dataDir, slots: []string{slot}, pollInterval: time.Hour,
-		taskRepo: "acme/widgets", triggerLabel: "grain-agent",
 		geminiAPIKeyFile: geminiKeyFile,
 		githubHost:       "127.0.0.1:0", githubInsecureHTTP: true,
 

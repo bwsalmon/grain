@@ -72,7 +72,6 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	want.Grants = []model.Grant{{Capability: "gemini-key", Via: model.GrantByFolder, Folder: &folder}}
 	want.Links = []model.Link{{Kind: model.LinkDependsOn, Target: "c3d4"}}
 	want.Tags = []string{"nightly"}
-	want.ExternalRef = "owner/agents#42"
 	want.AutoMerge = true
 
 	if err := store.PutTask(ctx, want); err != nil {
@@ -103,7 +102,7 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	if got.Approval == nil || got.Approval.Actor.Kind != model.PrincipalHuman {
 		t.Errorf("approval: %+v", got.Approval)
 	}
-	if !got.AutoMerge || got.ExternalRef != "owner/agents#42" {
+	if !got.AutoMerge {
 		t.Errorf("flags: %+v", got)
 	}
 }
@@ -526,10 +525,8 @@ func TestATaskCanBeFiledWithNoGitHubIssueAtAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	filed := task(id, true)
-	filed.ExternalRef = ""
-	if err := store.PutTask(ctx, filed); err != nil {
-		t.Fatalf("filing a task with no external ref: %v", err)
+	if err := store.PutTask(ctx, task(id, true)); err != nil {
+		t.Fatalf("filing a task: %v", err)
 	}
 
 	got, err := store.GetTask(ctx, id)
@@ -538,9 +535,6 @@ func TestATaskCanBeFiledWithNoGitHubIssueAtAll(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("task was not stored")
-	}
-	if got.ExternalRef != "" {
-		t.Fatalf("external ref = %q, want empty", got.ExternalRef)
 	}
 	state, err := store.State(ctx, id)
 	if err != nil {

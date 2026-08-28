@@ -12,8 +12,7 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	task.AutoMerge = true
 	task.CreatedAt = &baseTime
 	if err := store.PutTask(ctx, task); err != nil {
@@ -92,38 +91,22 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 		t.Fatalf("fix task state = %q, want queued (ready to dispatch with no approval step)", fixState)
 	}
 
-	comments, err := client.ListComments("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(comments) != 1 {
-		t.Fatalf("expected one comment announcing the fix, got %+v", comments)
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 {
+		t.Fatalf("expected one comment announcing the fix, got %q", got)
 	}
 
-	issue, err := client.GetIssue("acme", "widgets", fixTaskParse(t, fixTask.ExternalRef))
-	if err != nil {
-		t.Fatal(err)
+	// Nothing filed a GitHub issue for the fix: it is a store row, and
+	// pre-approved, so dispatch.Cycle picks it up with no label anywhere.
+	if len(sim.Issues) != 0 {
+		t.Fatalf("expected no GitHub issues at all, got %+v", sim.Issues)
 	}
-	if issue.HasLabel("grain-agent") {
-		t.Fatal("fix issue should carry no trigger label -- it is dispatched from the store directly")
-	}
-}
-
-func fixTaskParse(t *testing.T, externalRef string) int {
-	t.Helper()
-	_, number, err := model.ParseExternalRef(externalRef)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return number
 }
 
 func TestSyncPullRequestsDoesNotFileASecondFixWhileOneIsInFlight(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	task.AutoMerge = true
 	task.CreatedAt = &baseTime
 	if err := store.PutTask(ctx, task); err != nil {
@@ -155,17 +138,17 @@ func TestSyncPullRequestsDoesNotFileASecondFixWhileOneIsInFlight(t *testing.T) {
 		t.Fatalf("second SyncPullRequests: %v", err)
 	}
 
-	// One issue for the original task, one for its fix -- a second cycle
-	// finding the fix already in flight must not file a second one.
-	if len(sim.Issues) != 2 {
-		t.Fatalf("expected exactly one fix issue filed (two issues total), got %d: %+v", len(sim.Issues), sim.Issues)
-	}
-	comments, err := client.ListComments("acme", "widgets", 1)
+	// The original task and its one fix -- a second cycle finding the fix
+	// already in flight must not file a second one.
+	tasks, err := store.ListTasks(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(comments) != 1 {
-		t.Fatalf("expected exactly one fix-filed comment, got %+v", comments)
+	if len(tasks) != 2 {
+		t.Fatalf("expected exactly one fix task filed (two tasks total), got %d", len(tasks))
+	}
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 {
+		t.Fatalf("expected exactly one fix-filed comment, got %q", got)
 	}
 }
 
@@ -173,8 +156,7 @@ func TestSyncPullRequestsEscalatesWhenTheFixTaskFinishesButThePrIsStillBroken(t 
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	task := filedTask(t, ctx, store, "t1", repo, 1)
+	task := filedTask(t, ctx, store, "t1", repo)
 	task.AutoMerge = true
 	task.CreatedAt = &baseTime
 	if err := store.PutTask(ctx, task); err != nil {
@@ -235,12 +217,8 @@ func TestSyncPullRequestsEscalatesWhenTheFixTaskFinishesButThePrIsStillBroken(t 
 		t.Fatal("expected the original task to be marked as needing user input")
 	}
 
-	comments, err := client.ListComments("acme", "widgets", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(comments) != 2 {
-		t.Fatalf("expected the fix-filed comment plus one escalation comment, got %+v", comments)
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 2 {
+		t.Fatalf("expected the fix-filed comment plus one escalation comment, got %q", got)
 	}
 
 	// No third SyncPullRequests call refiles another fix -- the task
@@ -267,13 +245,11 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	seedIssue(sim, 1)
-	seedIssue(sim, 2)
 
 	earlier := baseTime
 	later := baseTime.Add(time.Hour)
 
-	head := filedTask(t, ctx, store, "t1", repo, 1)
+	head := filedTask(t, ctx, store, "t1", repo)
 	head.AutoMerge = true
 	head.CreatedAt = &earlier
 	if err := store.PutTask(ctx, head); err != nil {
@@ -294,7 +270,7 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := filedTask(t, ctx, store, "t2", repo, 2)
+	second := filedTask(t, ctx, store, "t2", repo)
 	second.AutoMerge = true
 	second.CreatedAt = &later
 	if err := store.PutTask(ctx, second); err != nil {

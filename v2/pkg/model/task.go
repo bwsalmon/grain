@@ -23,7 +23,6 @@ package model
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -321,10 +320,7 @@ type Task struct {
 	Tags   []string
 
 	AutoMerge bool
-	// Where this task appears for humans, if anywhere. A projection, not
-	// the identity: nothing may assume it exists, is an integer, or sorts.
-	ExternalRef string
-	CreatedAt   *time.Time
+	CreatedAt *time.Time
 }
 
 // Observation is the half grain writes: what it has seen happen.
@@ -400,37 +396,3 @@ type Comment struct {
 // BranchName is the branch a task's work goes on — derived, never stored
 // and never self-reported, so any two callers compute the same name.
 func BranchName(taskID string) string { return "grain/task-" + taskID }
-
-// ExternalRef formats the ExternalRef a task filed from a GitHub issue is
-// stamped with: "owner/name#number", so ParseExternalRef can read the
-// originating issue back off a Task with nothing else in hand. This is
-// the one convention every caller that files a task from a GitHub issue,
-// or relays a tool call back to one, must agree on — pkg/orchestrator's
-// own intake and pkg/orchestrate's dispatch loop both need to read the
-// same Task.ExternalRef the same way, so the format lives here rather
-// than in either package.
-func ExternalRef(repo RepoRef, issueNumber int) string {
-	return fmt.Sprintf("%s#%d", repo, issueNumber)
-}
-
-// ParseExternalRef reverses ExternalRef. It errors on any Task.ExternalRef
-// not in that shape — including "", which a task with no GitHub issue of
-// its own (or one filed before this convention existed) legitimately
-// has, per ExternalRef's own doc comment: "nothing may assume it exists."
-// A caller that only knows how to relay to a GitHub issue treats that
-// error as "nothing to relay to," not a failure worth propagating.
-func ParseExternalRef(s string) (repo RepoRef, number int, err error) {
-	repoPart, numPart, ok := strings.Cut(s, "#")
-	if !ok {
-		return RepoRef{}, 0, fmt.Errorf("external ref must be owner/name#number, got %q", s)
-	}
-	repo, err = ParseRepo(repoPart)
-	if err != nil {
-		return RepoRef{}, 0, fmt.Errorf("external ref %q: %w", s, err)
-	}
-	number, err = strconv.Atoi(numPart)
-	if err != nil {
-		return RepoRef{}, 0, fmt.Errorf("external ref %q: bad issue number: %w", s, err)
-	}
-	return repo, number, nil
-}
