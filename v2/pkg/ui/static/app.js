@@ -11,6 +11,14 @@
 
 let config = null;
 let stateFilter = "all";
+// The task whose detail overlay is open, so a poll can refresh it too.
+let openTaskID = null;
+// The last payload rendered for the list and for the open task. A poll
+// that finds them unchanged renders nothing, which is what keeps a
+// 3-second refresh from stealing focus, resetting scroll, or rebuilding
+// the comment box under someone's cursor.
+let lastList = null;
+let lastDetail = null;
 
 // model.State's own vocabulary, in model.StateOf's precedence order.
 // This used to be a second, label-shaped set that had drifted from it:
@@ -65,6 +73,9 @@ function capabilityName(id) {
 
 async function refreshList() {
   const tasks = await api("/api/tasks");
+  const seen = JSON.stringify(tasks);
+  if (seen === lastList) return;
+  lastList = seen;
   renderFilters(tasks);
   renderList(tasks);
 }
@@ -113,10 +124,31 @@ function renderList(tasks) {
 async function openTask(id) {
   try {
     const detail = await api(`/api/tasks/${id}`);
-    renderDetail(detail);
+    openTaskID = id;
+    renderDetailIfChanged(detail);
     document.getElementById("detail-overlay").classList.remove("hidden");
   } catch (err) {
     showError(err);
+  }
+}
+
+// renderDetailIfChanged re-renders the open task only when it actually
+// differs, and carries an unsent comment across when it does.
+//
+// renderDetail rebuilds the whole pane, textarea included, so a poll
+// landing while somebody is halfway through a comment would otherwise
+// delete what they had typed.
+function renderDetailIfChanged(detail) {
+  const seen = JSON.stringify(detail);
+  if (seen === lastDetail) return;
+  lastDetail = seen;
+
+  const draft = document.querySelector("#detail-body .comment-form textarea");
+  const unsent = draft ? draft.value : "";
+  renderDetail(detail);
+  if (unsent) {
+    const replacement = document.querySelector("#detail-body .comment-form textarea");
+    if (replacement) replacement.value = unsent;
   }
 }
 
@@ -203,6 +235,12 @@ function renderComments(t) {
 async function act(mutate, id) {
   try {
     await mutate();
+    // Force the re-read through: a mutation's whole point is that the
+    // screen should now show what the store says, and the change check
+    // would otherwise skip a render for a mutation that changed nothing
+    // visible (re-approving, detaching an absent capability).
+    lastList = null;
+    lastDetail = null;
     await openTask(id);
     await refreshList();
   } catch (err) {
@@ -251,6 +289,10 @@ async function submitNewTask(evt) {
 
 function closeOverlay(name) {
   document.getElementById(`${name}-overlay`).classList.add("hidden");
+  if (name === "detail") {
+    openTaskID = null;
+    lastDetail = null;
+  }
 }
 
 function wireOverlays() {
@@ -259,9 +301,53 @@ function wireOverlays() {
   });
   document.querySelectorAll(".overlay").forEach((overlay) => {
     overlay.addEventListener("click", (evt) => {
-      if (evt.target === overlay) overlay.classList.add("hidden");
+      if (evt.target !== overlay) return;
+      // Route through closeOverlay so clicking the backdrop clears the
+      // same state the close button does.
+      closeOverlay(overlay.id.replace(/-overlay$/, ""));
     });
   });
+}
+
+// POLL_INTERVAL_MS is how long the UI can be out of date by.
+//
+// A task changes state when graind dispatches it, when a run finishes,
+// and when a pull request merges -- none of which the browser is told
+// about, so without this the screen only moves when somebody clicks. A
+// few seconds is far below what anyone notices and the request is a
+// list of a handful of rows against a store on the same machine.
+//
+// Polling rather than a change feed is deliberate. The store is a
+// versioned database and could hand out a cursor and a diff
+// (v2/README.md), but that needs a commit per write, a diff joined
+// across six tables to answer "what changed about this task", and a
+// story for a cursor that has aged out. This is fifteen lines and
+// nothing to get wrong.
+const POLL_INTERVAL_MS = 3000;
+
+// poll refreshes whatever is on screen. It skips a tick entirely while
+// the tab is hidden -- there is nobody to show it to -- and never
+// overlaps itself, so a slow response delays the next read instead of
+// queueing another one behind it.
+let polling = false;
+
+async function poll() {
+  if (polling || document.visibilityState === "hidden") return;
+  polling = true;
+  try {
+    await refreshList();
+    if (openTaskID !== null) {
+      renderDetailIfChanged(await api(`/api/tasks/${openTaskID}`));
+    }
+  } catch (err) {
+    // Deliberately quiet. A failed poll is not something the person did,
+    // and a banner every few seconds while graind restarts would be
+    // worse than a screen that stops updating for a moment; the next
+    // tick recovers on its own.
+    console.warn("grain: poll failed", err);
+  } finally {
+    polling = false;
+  }
 }
 
 async function main() {
@@ -281,6 +367,12 @@ async function main() {
   } catch (err) {
     showError(err);
   }
+
+  setInterval(poll, POLL_INTERVAL_MS);
+  // Coming back to the tab should not wait out the rest of an interval.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") poll();
+  });
 }
 
 main();
