@@ -28,6 +28,18 @@ type ScopeLookup interface {
 	GitScope(ctx context.Context, sandbox string) (*model.RepoRef, []model.RepoRef, error)
 }
 
+// CredentialOverrideLookup resolves a sandbox to the named credential its
+// live task asks the proxy to use in place of the owner/repo ladder --
+// bwsalmon/agents#52's `grain-github-<name>` label, by way of
+// model.GitCredentialGrant. model.Store implements this via
+// GitCredentialOverride; a test supplies a stub instead. Kept separate
+// from ScopeLookup because it answers a different question (which
+// credential, not which repo) that GitProxy.Handle only needs to ask
+// once authorization has already allowed the request through.
+type CredentialOverrideLookup interface {
+	GitCredentialOverride(ctx context.Context, sandbox string) (name string, ok bool, err error)
+}
+
 // ModelAuthorizer is the Authorizer backed by the live task model.
 type ModelAuthorizer struct {
 	Store ScopeLookup

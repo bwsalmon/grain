@@ -86,10 +86,11 @@ func BuildProxy(cfg BuildConfig) (*GitProxy, error) {
 	}
 
 	return &GitProxy{
-		Authorizer:  &ModelAuthorizer{Store: cfg.Store},
-		Credentials: credentials,
-		Tokens:      tokens,
-		Forwarder:   &RealForwarder{Host: host, UseTLS: useTLS},
-		Audit:       audit,
+		Authorizer:          &ModelAuthorizer{Store: cfg.Store},
+		Credentials:         credentials,
+		Tokens:              tokens,
+		Forwarder:           &RealForwarder{Host: host, UseTLS: useTLS},
+		Audit:               audit,
+		CredentialOverrides: cfg.Store,
 	}, nil
 }

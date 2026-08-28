@@ -209,21 +209,11 @@ func (s *Store) hydrate(ctx context.Context, t *Task) error {
 		}); err != nil {
 		return err
 	}
-	if err := each(ctx, s.db,
-		"SELECT `capability`,`via`,`folder` FROM `task_grant` WHERE `task_id` = ? ORDER BY `capability`",
-		t.ID, func(rows *sql.Rows) error {
-			var g Grant
-			var via string
-			var folder sql.NullString
-			if err := rows.Scan(&g.Capability, &via, &folder); err != nil {
-				return err
-			}
-			g.Via, g.Folder = GrantSource(via), ParseFolder(folder.String)
-			t.Grants = append(t.Grants, g)
-			return nil
-		}); err != nil {
+	grants, err := s.grantsOf(ctx, t.ID)
+	if err != nil {
 		return err
 	}
+	t.Grants = grants
 	if err := each(ctx, s.db,
 		"SELECT `kind`,`target` FROM `task_link` WHERE `task_id` = ? ORDER BY `kind`,`target`",
 		t.ID, func(rows *sql.Rows) error {
@@ -441,15 +431,9 @@ func (s *Store) OccupiedSlots(ctx context.Context) ([]string, error) {
 // one can never drift from what a task actually declares, because it
 // isn't a second copy of that declaration.
 func (s *Store) GitScope(ctx context.Context, sandbox string) (target *RepoRef, reads []RepoRef, err error) {
-	var taskID string
-	err = s.db.QueryRowContext(ctx,
-		"SELECT `task_id` FROM `task_run` WHERE `sandbox` = ? AND `finished_at` IS NULL "+
-			"ORDER BY `started_at` DESC LIMIT 1", sandbox).Scan(&taskID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, nil
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("finding the live run on %s: %w", sandbox, err)
+	taskID, live, err := s.liveTaskID(ctx, sandbox)
+	if err != nil || !live {
+		return nil, nil, err
 	}
 
 	row := s.db.QueryRowContext(ctx,
@@ -476,6 +460,65 @@ func (s *Store) GitScope(ctx context.Context, sandbox string) (target *RepoRef, 
 		return nil, nil, fmt.Errorf("reading reads of task %s: %w", taskID, err)
 	}
 	return target, reads, nil
+}
+
+// GitCredentialOverride is the named credential a sandbox's currently
+// live task asks the git proxy to use in place of the owner/repo ladder,
+// via a GitCredentialGrant among its Grants -- bwsalmon/agents#52's
+// `grain-github-<name>` label, ported onto Task.Grants rather than
+// grain/proxy/tokens.py's second, sandbox-keyed SandboxCredentialOverrides
+// file. false means no override: either the sandbox has no live run, or
+// its task carries none, and the proxy falls back to the ordinary
+// per-repo credential ladder.
+func (s *Store) GitCredentialOverride(ctx context.Context, sandbox string) (name string, ok bool, err error) {
+	taskID, live, err := s.liveTaskID(ctx, sandbox)
+	if err != nil || !live {
+		return "", false, err
+	}
+	grants, err := s.grantsOf(ctx, taskID)
+	if err != nil {
+		return "", false, fmt.Errorf("reading grants of task %s: %w", taskID, err)
+	}
+	name, ok = gitCredentialOverride(grants)
+	return name, ok, nil
+}
+
+// liveTaskID is the task ID of the sandbox's currently live run, if any --
+// shared by GitScope and GitCredentialOverride, which answer two
+// different questions about the same live task. live is false, with a
+// nil error, for a sandbox with nothing running on it right now.
+func (s *Store) liveTaskID(ctx context.Context, sandbox string) (taskID string, live bool, err error) {
+	err = s.db.QueryRowContext(ctx,
+		"SELECT `task_id` FROM `task_run` WHERE `sandbox` = ? AND `finished_at` IS NULL "+
+			"ORDER BY `started_at` DESC LIMIT 1", sandbox).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("finding the live run on %s: %w", sandbox, err)
+	}
+	return taskID, true, nil
+}
+
+// grantsOf is a task's Grants, read straight off task_grant -- shared by
+// hydrate (a full Task) and GitCredentialOverride (which needs only
+// these, and without ever paying for the rest of the task).
+func (s *Store) grantsOf(ctx context.Context, taskID string) ([]Grant, error) {
+	var grants []Grant
+	err := each(ctx, s.db,
+		"SELECT `capability`,`via`,`folder` FROM `task_grant` WHERE `task_id` = ? ORDER BY `capability`",
+		taskID, func(rows *sql.Rows) error {
+			var g Grant
+			var via string
+			var folder sql.NullString
+			if err := rows.Scan(&g.Capability, &via, &folder); err != nil {
+				return err
+			}
+			g.Via, g.Folder = GrantSource(via), ParseFolder(folder.String)
+			grants = append(grants, g)
+			return nil
+		})
+	return grants, err
 }
 
 // OpenBlockers is how many unclosed tasks stand in front of this one.

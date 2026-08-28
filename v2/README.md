@@ -100,11 +100,16 @@ does not.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
-and sandbox-token identity included. What it does *not* yet do that
-`grain/proxy` does: `SandboxCredentialOverrides` (bwsalmon/agents#52's
-per-task `grain-github-<name>` label) has no v2 equivalent, so every
-request still resolves through the ordinary owner/repo credential ladder
-with no override path. `loop.Cycle` also mints no leases yet — a run's
+and sandbox-token identity included. `grain/proxy`'s
+`SandboxCredentialOverrides` (bwsalmon/agents#52's per-task
+`grain-github-<name>` label) is a `Task.Grants` entry here instead of a
+second sandbox-keyed file: `model.GitCredentialGrant` is the Grant the
+label produces, `Store.GitCredentialOverride` resolves a sandbox's live
+task down to the name it names, and `GitProxy.Handle` uses that name
+against `CredentialSet.Get` in place of the owner/repo ladder whenever
+one is present — no override outlives the task, because it is stored
+with every other Grant the task carries rather than written and cleared
+around dispatch. `loop.Cycle` also mints no leases yet — a run's
 `Leases` field exists in the schema and `gitproxy` never reads it; the
 git proxy authorizes straight off `Task.Target`/`Reads` instead, which
 serves the same fail-closed purpose without depending on that field being

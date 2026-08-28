@@ -6,7 +6,9 @@ package gitproxy
 //	match the four legal smart-HTTP paths,
 //	authenticate the caller by per-sandbox token,
 //	check the caller's live task scope against (owner, repo), default-deny,
-//	select the credential for that repo and set Authorization,
+//	select the credential -- the caller's own named override
+//	  (bwsalmon/agents#52) if its task carries one, the owner/repo ladder
+//	  otherwise -- and set Authorization,
 //	stream the body through, and log the tuple.
 //
 // Authentication is checked before authorization so an unauthenticated
@@ -37,6 +39,11 @@ type GitProxy struct {
 	Forwarder   Forwarder
 	Audit       AuditLog
 	Now         func() time.Time
+	// CredentialOverrides resolves bwsalmon/agents#52's per-task named
+	// credential override, if any. nil (every existing caller/test)
+	// leaves every request on the ordinary owner/repo ladder, the same
+	// as an override lookup that always answered false.
+	CredentialOverrides CredentialOverrideLookup
 }
 
 func (p *GitProxy) now() time.Time {
@@ -97,13 +104,20 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 		}
 	}
 
-	credential, ok := p.Credentials.Select(req.Owner, req.Repo)
-	if !ok {
+	credential, notConfigured, err := p.selectCredential(ctx, sandbox, req.Owner, req.Repo)
+	if err != nil {
 		p.audit().Record(AuditEntry{
 			Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
-			Action: req.Action, Outcome: "error: no credential configured",
+			Action: req.Action, Outcome: fmt.Sprintf("error: %v", err),
 		})
-		return ProxyResponse{Status: 500, Body: ErrPkt("no credential configured for this repository")}
+		return ProxyResponse{Status: 500, Body: ErrPkt("resolving credential override failed")}
+	}
+	if notConfigured != "" {
+		p.audit().Record(AuditEntry{
+			Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
+			Action: req.Action, Outcome: "error: " + notConfigured,
+		})
+		return ProxyResponse{Status: 500, Body: ErrPkt(notConfigured)}
 	}
 
 	upstream, err := p.Forwarder.Forward(
@@ -124,4 +138,36 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 		Outcome: fmt.Sprintf("forwarded: %d", upstream.Status),
 	})
 	return ProxyResponse{Status: upstream.Status, Headers: upstream.Headers, Body: upstream.Body}
+}
+
+// selectCredential is which credential a request should forward with.
+// notConfigured is a non-empty, request-safe message (never err) for the
+// two "nothing here" business outcomes -- an override naming a credential
+// this deployment has no `<name>.token` for, or no ladder entry covering
+// (owner, repo) -- both of which get logged and returned to the caller
+// exactly as CredentialSet's own docstring already promises. err is
+// reserved for a genuine failure to resolve the override itself.
+func (p *GitProxy) selectCredential(ctx context.Context, sandbox, owner, repo string) (credential Credential, notConfigured string, err error) {
+	if p.CredentialOverrides != nil {
+		name, overridden, err := p.CredentialOverrides.GitCredentialOverride(ctx, sandbox)
+		if err != nil {
+			return Credential{}, "", fmt.Errorf("resolving credential override for %s: %w", sandbox, err)
+		}
+		if overridden {
+			// A grain-github-<name> label names a credential explicitly --
+			// it replaces the owner/repo ladder entirely rather than
+			// narrowing it, since the whole point is a scope the ladder's
+			// own credentials deliberately don't carry.
+			cred, ok := p.Credentials.Get(name)
+			if !ok {
+				return Credential{}, fmt.Sprintf("no credential named %q configured", name), nil
+			}
+			return cred, "", nil
+		}
+	}
+	cred, ok := p.Credentials.Select(owner, repo)
+	if !ok {
+		return Credential{}, "no credential configured for this repository", nil
+	}
+	return cred, "", nil
 }

@@ -181,6 +181,37 @@ type Grant struct {
 	Folder     *FolderRef
 }
 
+// gitCredentialGrantPrefix marks a Grant as bwsalmon/agents#52's per-task
+// git credential override: the named credential (gitproxy's
+// CredentialSet.Get) a sandbox's git proxy requests should use in place
+// of the owner/repo ladder, for a scope the ladder's own credentials
+// deliberately withhold (docs/design.md, "Scopes to withhold" --
+// `workflow`, most notably).
+const gitCredentialGrantPrefix = "github-credential:"
+
+// GitCredentialGrant is the Grant a `grain-github-<name>` label produces.
+// Via is GrantByLabel: applying the label already requires the same
+// "can apply a label" trust tier the trigger label itself relies on, so
+// this opens no new gate -- the same reasoning bwsalmon/agents#52 gave
+// for the label in the first place. Unlike grain/proxy's
+// SandboxCredentialOverrides, this needs no storage or dispatch/release
+// lifecycle of its own: it lives and dies with the task the same as
+// every other Grant.
+func GitCredentialGrant(name string) Grant {
+	return Grant{Capability: gitCredentialGrantPrefix + name, Via: GrantByLabel}
+}
+
+// gitCredentialOverride returns the credential name a GitCredentialGrant
+// among grants asks for, if any.
+func gitCredentialOverride(grants []Grant) (name string, ok bool) {
+	for _, g := range grants {
+		if n, isOverride := strings.CutPrefix(g.Capability, gitCredentialGrantPrefix); isOverride {
+			return n, true
+		}
+	}
+	return "", false
+}
+
 // Lease is something minted for a task that must be given back.
 //
 // MintedBy turns revocation and rotation from control flow into data:
