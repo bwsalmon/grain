@@ -34,7 +34,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -150,24 +149,30 @@ func runCLI(t *testing.T, bin string, args ...string) string {
 	return stdout.String()
 }
 
-// openCLIStore opens a real embedded Dolt store in a temp directory, the
-// same discipline every other package's own tests hold to -- duplicated from
-// pkg/orchestrator's own openStore (an unexported _test.go helper, not
-// importable) rather than this package's own newWorld, which bundles a
-// gitproxy this test has no use for.
-func openCLIStore(t *testing.T) (*model.Store, context.Context) {
+// withStore opens the shared embedded Dolt store, hands it to fn, and
+// closes it again.
+//
+// Opening and closing around every step is the point, not ceremony.
+// Embedded Dolt permits one writer, and this test has two: the grain CLI,
+// which runs as a real subprocess, and the orchestrator running in the
+// test process. A deployment that genuinely wants both at once runs a
+// Dolt SQL server instead (README, "Single writer"); a test that only
+// needs them to take turns can simply take turns, and doing so proves the
+// handoff is through the store rather than through anything held in
+// memory.
+func withStore(t *testing.T, dir string, fn func(*model.Store, context.Context)) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := dolt.Open(dolt.DefaultConfig(dir))
 	if err != nil {
 		t.Fatalf("opening embedded dolt: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	defer db.Close()
 	store := model.New(db)
 	ctx := context.Background()
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("applying schema: %v", err)
 	}
-	return store, ctx
+	fn(store, ctx)
 }
 
 // scriptedFramework turns a scripted response sequence into the
@@ -178,7 +183,7 @@ func scriptedFramework(script []*genai.GenerateContentResponse) func() agent.Fra
 	return func() agent.Framework { return gemini.NewForTest(&scriptedGenerator{responses: script}) }
 }
 
-func TestCLICreatesIssueAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
+func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -208,13 +213,12 @@ func TestCLICreatesIssueAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	githubHost := githubHostServer(t, sim, upstream)
 
 	// Step 1: create the task the way an operator actually would, through
-	// the real CLI binary against the fake GitHub host, approved
-	// immediately so it carries the trigger label from the moment it's
-	// filed (ui.Client.CreateTask's own behavior for Approved: true).
+	// the real CLI binary -- which takes no GitHub credentials at all and
+	// writes the store directly, approved immediately so it is
+	// dispatchable the moment it is filed.
+	storeDir := t.TempDir()
 	created := runCLI(t, bin,
-		"-task-repo", owner+"/"+repoName,
-		"-github-host", githubHost,
-		"-github-insecure-http",
+		"-data-dir", storeDir,
 		"-json",
 		"create",
 		"-title", "add a NOTES entry",
@@ -226,18 +230,17 @@ func TestCLICreatesIssueAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	if err := json.Unmarshal([]byte(created), &task); err != nil {
 		t.Fatalf("parsing grain create -json output: %v\n%s", err, created)
 	}
-	if task.Number == 0 {
-		t.Fatalf("grain create did not return an issue number: %s", created)
+	if task.ID == "" {
+		t.Fatalf("grain create did not return a task id: %s", created)
+	}
+	if task.State != model.StateQueued {
+		t.Fatalf("state after create = %q, want queued", task.State)
 	}
 
-	// Step 2: the agent generates the code and grain opens the PR --
-	// orchestrator.RunCycle polls the very issue the CLI just filed,
-	// dispatches it to a scripted agent that clones and pushes over the
-	// same local git server the CLI's issue points at, and opens a real
-	// pull request against sim once the push lands.
-	store, ctx := openCLIStore(t)
-	repo := model.RepoRef{Owner: owner, Name: repoName}
-	cfg := orchestrator.Config{TaskRepo: repo, TriggerLabel: "grain-agent"}
+	// Step 2: the agent generates the code and grain opens the PR. The
+	// orchestrator reads the very task the CLI just wrote -- the two share
+	// the store, where before they shared only a GitHub issue and each
+	// kept its own store, which is exactly the split the inversion closed.
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 	const slot = "cli-e2e-1"
 	root, err := sandboxes.RootFor(slot)
@@ -249,24 +252,26 @@ func TestCLICreatesIssueAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	taskID := orchestrator.TaskID(repo, task.Number)
-	branch := model.BranchName(taskID)
+	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, Config: cfg, Slots: []string{slot},
-		Framework: scriptedFramework(pushScript(remote, branch, taskID)),
-	}
-	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
-		t.Fatalf("RunCycle (dispatch): %v", err)
+		Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Framework: scriptedFramework(pushScript(remote, branch, task.ID)),
 	}
 
-	st, err := store.State(ctx, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st != model.StateCompleted {
-		t.Fatalf("state after the agent's push = %q, want completed", st)
-	}
+	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
+		deps.Store = store
+		if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
+			t.Fatalf("RunCycle (dispatch): %v", err)
+		}
+		st, err := store.State(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != model.StateCompleted {
+			t.Fatalf("state after the agent's push = %q, want completed", st)
+		}
+	})
 	if sim.pullRequestCount() != 1 {
 		t.Fatalf("expected grain to have opened one pull request, got %d", sim.pullRequestCount())
 	}
@@ -274,10 +279,8 @@ func TestCLICreatesIssueAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 
 	// Step 3: the user submits the PR -- a real git merge over the same
 	// local git server the agent pushed to, plus a real HTTP PUT to the
-	// merge endpoint, driven by a second, independent github.Client the
-	// same way the grain CLI itself is a client independent of the
-	// orchestrator's own, standing in for a human clicking "Merge pull
-	// request" on GitHub.
+	// merge endpoint, driven by a second, independent github.Client
+	// standing in for a human clicking "Merge pull request" on GitHub.
 	mergeParent := t.TempDir()
 	run(t, mergeParent, "git", "clone", remote, "merge")
 	mergeWd := filepath.Join(mergeParent, "merge")
@@ -295,34 +298,41 @@ func TestCLICreatesIssueAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 
-	// Step 4: another cycle syncs the now-merged PR and closes the linked
-	// issue -- SyncPullRequests' own job, the same second RunCycle
+	// Step 4: another cycle syncs the now-merged PR and closes the task
+	// out -- SyncPullRequests' own job, the same second RunCycle
 	// pkg/orchestrator/live_test.go's TestRunCycleCompletesEndToEnd makes.
-	if err := orchestrator.RunCycle(ctx, deps, baseTime.Add(time.Minute)); err != nil {
-		t.Fatalf("RunCycle (sync): %v", err)
-	}
-	st, err = store.State(ctx, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st != model.StateClosed {
-		t.Fatalf("state after the merge = %q, want closed", st)
+	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
+		deps.Store = store
+		if err := orchestrator.RunCycle(ctx, deps, baseTime.Add(time.Minute)); err != nil {
+			t.Fatalf("RunCycle (sync): %v", err)
+		}
+		st, err := store.State(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st != model.StateClosed {
+			t.Fatalf("state after the merge = %q, want closed", st)
+		}
+	})
+
+	// The only thing this whole loop put on GitHub is the pull request.
+	if len(sim.sim.Issues) != 0 {
+		t.Fatalf("expected no GitHub issues at all, got %+v", sim.sim.Issues)
 	}
 
 	// Step 5: confirm the loop closed the way an operator would actually
-	// see it -- by asking the CLI itself, not by reading the store.
+	// see it -- by asking the CLI itself, in a fresh subprocess, not by
+	// reading the store from in here.
 	got := runCLI(t, bin,
-		"-task-repo", owner+"/"+repoName,
-		"-github-host", githubHost,
-		"-github-insecure-http",
+		"-data-dir", storeDir,
 		"-json",
-		"get", strconv.Itoa(task.Number),
+		"get", task.ID,
 	)
 	var detail ui.TaskDetail
 	if err := json.Unmarshal([]byte(got), &detail); err != nil {
 		t.Fatalf("parsing grain get -json output: %v\n%s", err, got)
 	}
-	if detail.GitHubState != "closed" {
-		t.Fatalf("issue #%d githubState = %q after the merge, want closed", task.Number, detail.GitHubState)
+	if detail.State != model.StateClosed {
+		t.Fatalf("task %s state = %q as the CLI reports it, want closed", task.ID, detail.State)
 	}
 }
