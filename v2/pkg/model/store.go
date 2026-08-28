@@ -109,11 +109,12 @@ const maxWriteAttempts = 5
 // therefore read what it needs through the querier it is handed rather
 // than relying on anything read before write was called -- that is what
 // makes the retry see the winner's state instead of rewriting over it.
-func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
+func (s *Store) write(ctx context.Context, what string, fn func(*sql.Tx) error) error {
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
 		err := s.writeOnce(ctx, fn)
 		if err == nil {
+			commitHistory(ctx, s.db, what)
 			return nil
 		}
 		if !isSerializationFailure(err) {
@@ -123,6 +124,65 @@ func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
 	}
 	return fmt.Errorf("%w after %d attempts: %v", ErrConflict, maxWriteAttempts, lastErr)
 }
+
+// commitHistory records the write that just landed as a Dolt commit, so
+// the store keeps a real history rather than only a current state: what
+// grain did and when, a data diff per change, and a point the deployment
+// can be reset to.
+//
+// It runs after the SQL transaction rather than inside it, because the
+// transaction is what makes the change atomic and the commit is what
+// makes it a named point in history -- two different boundaries, and
+// conflating them would put a commit in the path of the write's own
+// success.
+//
+// **Its error is deliberately dropped, and that is safe rather than
+// sloppy.** The write has already landed by this point, so failing the
+// call would tell a caller their change did not happen when it did --
+// and a retry of, say, AddComment would post it twice. A missed commit
+// costs nothing but a coarser history: the next write stages everything
+// outstanding (`-A`), so the change is recorded in the commit after it
+// rather than its own. History gaps close themselves.
+//
+// A commit under concurrent writers can therefore contain more than the
+// change its message names -- another writer's transaction that landed in
+// between is swept in by `-A`, which TestACommitSweepsUpWhateverElseLanded
+// pins down. Nothing is ever lost; the boundaries are approximate. With
+// one writer, which is what an embedded deployment has by construction,
+// they are exact.
+//
+// This is the one statement in the package that assumes Dolt rather than
+// SQL in general. The property that actually matters -- that pkg/model
+// imports no driver, so the same Store runs embedded or over the wire --
+// is untouched.
+func commitHistory(ctx context.Context, db *sql.DB, what string) {
+	// CALL rather than SELECT: DOLT_COMMIT is a procedure. -A stages every
+	// table so this does not have to enumerate them, and --allow-empty
+	// keeps a write whose tables happen to be unchanged from being an
+	// error to special-case.
+	//
+	// --author is not decoration. Without it Dolt attributes the commit to
+	// the connected database user, which for an embedded store is whoever
+	// started the process -- so a history of grain's own work reads as
+	// having been done by "root". The connection's configured author
+	// applies only to creating the database, which is measurable and was
+	// measured.
+	_, _ = db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-A', '--allow-empty', '-m', ?, '--author', ?)",
+		"grain: "+what, historyAuthor)
+}
+
+// historyAuthor is who grain's own commits are by.
+//
+// It says grain rather than which principal asked, because Store.write
+// does not know that and threading it through every mutator would be a
+// lot of plumbing for a field the message already covers ("approve task
+// 2" is the interesting half). If per-principal attribution is ever
+// wanted, this is where it hooks in.
+//
+// Kept in step with dolt.DefaultConfig's own author, which names the same
+// identity for the commit that creates the database.
+const historyAuthor = "grain-automation <grain-automation@localhost>"
 
 func (s *Store) writeOnce(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -198,7 +258,7 @@ func isSerializationFailure(err error) bool {
 // tiny, and "the row set equals the object" is a property worth having
 // outright rather than maintaining.
 func (s *Store) PutTask(ctx context.Context, t Task) error {
-	return s.write(ctx, func(tx *sql.Tx) error { return putTask(ctx, tx, t) })
+	return s.write(ctx, "put task "+t.ID, func(tx *sql.Tx) error { return putTask(ctx, tx, t) })
 }
 
 // putTask is PutTask's body, against whatever transaction it is running
@@ -283,7 +343,7 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
 // Task.ID stays an opaque string, so nothing but this function is
 // entitled to assume the shape.
 func (s *Store) NewTaskID(ctx context.Context) (id string, err error) {
-	err = s.write(ctx, func(tx *sql.Tx) error {
+	err = s.write(ctx, "allocate a task id", func(tx *sql.Tx) error {
 		id, err = newTaskID(ctx, tx)
 		return err
 	})
@@ -308,7 +368,7 @@ func newTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
 // question needs, since Observation.PendingQuestionCommentID names one of
 // these.
 func (s *Store) AddComment(ctx context.Context, c Comment) (id int64, err error) {
-	err = s.write(ctx, func(tx *sql.Tx) error {
+	err = s.write(ctx, "comment on task "+c.TaskID, func(tx *sql.Tx) error {
 		id, err = addComment(ctx, tx, c)
 		return err
 	})
@@ -556,7 +616,7 @@ func hydrate(ctx context.Context, q querier, t *Task) error {
 // over it.
 func (s *Store) UpdateTask(ctx context.Context, id string, mutate func(*Task) error) error {
 	var missing bool
-	err := s.write(ctx, func(tx *sql.Tx) error {
+	err := s.write(ctx, "update task "+id, func(tx *sql.Tx) error {
 		missing = false
 		task, err := getTask(ctx, tx, id)
 		if err != nil {
@@ -591,7 +651,7 @@ func (s *Store) UpdateTask(ctx context.Context, id string, mutate func(*Task) er
 func (s *Store) ObserveField(ctx context.Context, taskID string, now time.Time,
 	set func(*Observation)) error {
 
-	return s.write(ctx, func(tx *sql.Tx) error {
+	return s.write(ctx, "observe task "+taskID, func(tx *sql.Tx) error {
 		obs, err := getObservation(ctx, tx, taskID)
 		if err != nil {
 			return fmt.Errorf("reading observation for %s: %w", taskID, err)
@@ -606,7 +666,7 @@ func (s *Store) ObserveField(ctx context.Context, taskID string, now time.Time,
 }
 
 func (s *Store) Approve(ctx context.Context, taskID string, a Attribution) error {
-	return s.write(ctx, func(tx *sql.Tx) error { return approve(ctx, tx, taskID, a) })
+	return s.write(ctx, "approve task "+taskID, func(tx *sql.Tx) error { return approve(ctx, tx, taskID, a) })
 }
 
 func approve(ctx context.Context, tx *sql.Tx, taskID string, a Attribution) error {
@@ -619,7 +679,7 @@ func approve(ctx context.Context, tx *sql.Tx, taskID string, a Attribution) erro
 
 // Observe records what grain has seen about a task.
 func (s *Store) Observe(ctx context.Context, o Observation) error {
-	return s.write(ctx, func(tx *sql.Tx) error { return observe(ctx, tx, o) })
+	return s.write(ctx, "observe task "+o.TaskID, func(tx *sql.Tx) error { return observe(ctx, tx, o) })
 }
 
 // observe is Observe's body, against whatever transaction it is running
@@ -661,7 +721,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 
 // StartRun records a run and its leases together.
 func (s *Store) StartRun(ctx context.Context, r Run) error {
-	return s.write(ctx, func(tx *sql.Tx) error { return startRun(ctx, tx, r) })
+	return s.write(ctx, "start run "+r.ID+" for task "+r.TaskID, func(tx *sql.Tx) error { return startRun(ctx, tx, r) })
 }
 
 func startRun(ctx context.Context, tx *sql.Tx, r Run) error {
@@ -685,7 +745,7 @@ func startRun(ctx context.Context, tx *sql.Tx, r Run) error {
 }
 
 func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outcome string) error {
-	return s.write(ctx, func(tx *sql.Tx) error {
+	return s.write(ctx, "finish run "+runID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE `task_run` SET `finished_at` = ?, `outcome` = ? WHERE `id` = ?",
 			at.UTC(), outcome, runID)
@@ -698,7 +758,7 @@ func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outco
 // which is what lets release and the expiry reaper both reach the same
 // lease without coordinating.
 func (s *Store) DropLease(ctx context.Context, runID, capability, resource string) error {
-	return s.write(ctx, func(tx *sql.Tx) error {
+	return s.write(ctx, "drop lease "+capability+" on "+resource, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"DELETE FROM `lease` WHERE `run_id` = ? AND `capability` = ? AND `resource` = ?",
 			runID, capability, resource)
