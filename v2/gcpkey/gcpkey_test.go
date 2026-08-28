@@ -127,6 +127,20 @@ func TestSpecMaxLeaseDefaultsTo24Hours(t *testing.T) {
 	}
 }
 
+func TestSpecNamesTheMinterCredentialAsARequiredSecret(t *testing.T) {
+	p := NewProvider(Config{})
+	want := []string{DefaultMinterCredential}
+	if got := p.Spec().RequiredSecrets; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("RequiredSecrets = %v, want %v", got, want)
+	}
+
+	p = NewProvider(Config{MinterCredential: "custom-minter"})
+	want = []string{"custom-minter"}
+	if got := p.Spec().RequiredSecrets; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("RequiredSecrets = %v, want %v", got, want)
+	}
+}
+
 func TestResolveRefusesWhenUnconfigured(t *testing.T) {
 	p := NewProvider(Config{})
 	res, err := p.Resolve(context.Background(), model.CapabilityContext{})

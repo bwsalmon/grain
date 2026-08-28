@@ -112,6 +112,18 @@ type CapabilitySpec struct {
 	// revoked regardless of its own ExpiresAt -- see Lease.Expired. Zero
 	// for a GRANT or SELECT capability, which mint nothing to expire.
 	MaxLease time.Duration
+	// RequiredSecrets names every secret this provider's Materialize/
+	// Revoke/Reap resolves through CapabilityContext.Credentials --
+	// docs/data-model.md's `requires` (the credential a capability needs),
+	// generalised to a list since a provider is free to resolve more than
+	// one. Names only, the same "the model holds names, never material"
+	// rule CredentialRef already follows: wherever a capability's spec is
+	// rendered for a human -- a label description, an issue comment, any
+	// future GitHub-facing view of the registry -- this is what lets that
+	// view say which secrets an operator must configure without that view
+	// ever being handed a secret's value to render. A GRANT capability
+	// needs none of this and leaves it nil.
+	RequiredSecrets []string
 }
 
 // CapabilityProvider is the contract a capability implements.
@@ -220,6 +232,25 @@ func (r *CapabilityRegistry) Providers() []CapabilityProvider {
 	out := make([]CapabilityProvider, len(r.order))
 	for i, name := range r.order {
 		out[i] = r.providers[name]
+	}
+	return out
+}
+
+// RequiredSecrets pairs every registered capability's name with
+// CapabilitySpec.RequiredSecrets, in registration order, skipping any
+// capability that names none. This is the query "the model in github
+// should list what secrets are needed by various capabilities, but not
+// the values" (bwsalmon/agents#240) reduces to: every value in here is a
+// name a Store's own directory listing could equally produce, never
+// material, so nothing that renders this needs to be trusted with a
+// secret to say which ones a deployment must configure.
+func (r *CapabilityRegistry) RequiredSecrets() map[string][]string {
+	out := make(map[string][]string)
+	for _, p := range r.Providers() {
+		spec := p.Spec()
+		if len(spec.RequiredSecrets) > 0 {
+			out[spec.Name] = spec.RequiredSecrets
+		}
 	}
 	return out
 }

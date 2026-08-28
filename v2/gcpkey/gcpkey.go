@@ -178,12 +178,13 @@ func (p *Provider) newMinter(ctx context.Context, credentialJSON string) (Minter
 
 func (p *Provider) Spec() model.CapabilitySpec {
 	return model.CapabilitySpec{
-		Name:        capabilityName,
-		Label:       "grain-gcp-key",
-		Description: "Mint a short-lived GCP service-account key for this task",
-		Source:      model.GrantByLabel,
-		Provision:   model.ProvisionMint,
-		MaxLease:    p.maxKeyAge(),
+		Name:            capabilityName,
+		Label:           "grain-gcp-key",
+		Description:     "Mint a short-lived GCP service-account key for this task",
+		Source:          model.GrantByLabel,
+		Provision:       model.ProvisionMint,
+		MaxLease:        p.maxKeyAge(),
+		RequiredSecrets: []string{p.minterCredential()},
 	}
 }
 

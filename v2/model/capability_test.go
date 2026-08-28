@@ -161,6 +161,34 @@ func TestRegistryReregisteringReplacesInPlace(t *testing.T) {
 	}
 }
 
+// --- required secrets ---------------------------------------------------
+
+type secretMintCapability struct{ mintCapability }
+
+func (secretMintCapability) Spec() CapabilitySpec {
+	spec := mintCapability{}.Spec()
+	spec.RequiredSecrets = []string{"gcp-key-minter"}
+	return spec
+}
+
+func TestRegistryRequiredSecretsListsNamesNotValues(t *testing.T) {
+	reg := NewCapabilityRegistry(secretMintCapability{}, grantCapability{}, selectCapability{})
+	got := reg.RequiredSecrets()
+
+	// grantCapability and selectCapability declare no secrets, so neither
+	// should appear at all -- "list what's needed", not every capability.
+	if len(got) != 1 {
+		t.Fatalf("RequiredSecrets() = %v, want exactly one capability listed", got)
+	}
+	names, ok := got["test-mint"]
+	if !ok {
+		t.Fatalf("RequiredSecrets() = %v, want an entry for test-mint", got)
+	}
+	if len(names) != 1 || names[0] != "gcp-key-minter" {
+		t.Fatalf("RequiredSecrets()[test-mint] = %v, want [gcp-key-minter]", names)
+	}
+}
+
 // --- resolve -----------------------------------------------------------
 
 func TestResolveGrantsHonoursAndRefuses(t *testing.T) {

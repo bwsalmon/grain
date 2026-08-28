@@ -18,6 +18,10 @@ mcp/cmd/mcpserver/  the server as a standalone stdio binary
 agent/          the Framework interface an agent driver implements
 agent/gemini/   Framework via the Gemini API, talking to its own in-process
                 mcp/ server
+secrets/        Store, a model.CredentialResolver reading a directory in
+                Kubernetes's own Secret-volume shape -- one file (or
+                kubelet-style symlink) per secret, the file's name the
+                secret's name (bwsalmon/agents#240)
 gcpkey/         the gcp-key capability: a real MINT model.CapabilityProvider
                 that mints/revokes a per-task GCP service-account key
                 against the IAM API directly (google.golang.org/api/iam/v1,
@@ -150,6 +154,37 @@ called from anywhere yet: there is still no executor to apply a `Placement`
 to a sandbox or call `Revoke` when a run ends, and no periodic sweep calls
 `Reap` — both need the same host adapter `loop.Cycle` is still waiting on
 above. `gemini-key` remains unbuilt.
+
+`model.CredentialResolver` (`model/capability.go`) now has a real
+implementation: `secrets.Store` (`secrets/`) reads a directory in
+Kubernetes's own Secret-volume shape and resolves a name to whatever that
+directory holds under it -- the same flat "one file per name" layout
+`grain/proxy/credentials.py`'s `CredentialSet` already reads, but format-
+compatible with an actual mounted Secret (kubelet's `..data` symlink and
+`..<timestamp>` bookkeeping skipped, its per-key symlinks followed) rather
+than that package's own `<name>.token` convention. It is the extension
+point `CredentialResolver` already was, not a new one: a deployment
+wanting secrets from somewhere other than a local directory implements
+the same one-method interface, and no provider changes. Nothing
+constructs one yet outside its own tests, for the same reason nothing
+calls `gcpkey.Provider.Materialize` yet — no host adapter exists to wire
+a real controller's resolver into a real dispatch.
+
+Alongside it, `CapabilitySpec` (`model/capability.go`) gained
+`RequiredSecrets []string` — the names a provider's own
+`Materialize`/`Revoke`/`Reap` will resolve through
+`CapabilityContext.Credentials`, declared on the spec rather than left
+implicit in each provider's code so something *other* than that code can
+ask what a capability needs. `CapabilityRegistry.RequiredSecrets()` reduces
+that across every registered provider to `map[capability][]secret name` —
+capability name to secret names, never values, which is what lets a
+future GitHub-facing view of the registry (a label description, most
+likely — see `grain/automation/labels.py`'s `_STYLES` for the v1
+precedent this has no v2 counterpart of yet) say which secrets an
+operator must configure without that view ever being handed one to
+render. `gcpkey.Provider.Spec()` sets it to its own configured
+`MinterCredential` name, both as the real usage and as this contract's
+first caller.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
 it just has nothing to call it yet outside a test. There is no host
