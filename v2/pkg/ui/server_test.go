@@ -150,6 +150,28 @@ func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
 	}
 }
 
+func TestSubmitRouteSetsAutoMerge(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it","approved":true}`)
+	id := decode[ui.Task](t, rec).ID
+
+	rec = do(t, srv, http.MethodPost, "/api/tasks/"+id+"/submit", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if task := decode[ui.Task](t, rec); !task.AutoMerge {
+		t.Fatalf("autoMerge = %v, want true", task.AutoMerge)
+	}
+}
+
+func TestSubmitUnknownTaskIs404(t *testing.T) {
+	srv, _ := testServer(t)
+	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
 func TestConfigEndpointReportsActorAndCapabilities(t *testing.T) {
 	srv, _ := testServer(t)
 

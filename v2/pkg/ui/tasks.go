@@ -174,6 +174,19 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	s.respondWithTask(w, r, id)
 }
 
+// handleSubmit is the UI's own "submit" button docs/data-model.md's UI
+// direction asks for, alongside the approve button handleApprove already
+// is: once a task's run has produced a pull request, this is what queues
+// it for the merge queue's automatic conflict resolution and merging.
+func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.tasks.Submit(r.Context(), id); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	s.respondWithTask(w, r, id)
+}
+
 type addCommentRequest struct {
 	Body string `json:"body"`
 }

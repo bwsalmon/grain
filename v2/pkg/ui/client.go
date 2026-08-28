@@ -325,6 +325,19 @@ func (c *Client) Approve(ctx context.Context, id string) error {
 	return c.Store.Approve(ctx, id, model.Attribution{Actor: c.Config.Actor})
 }
 
+// Submit is the UI's own "submit" button: once a task has a pull request
+// open, this is what puts it on its target repo's merge queue for
+// automatic conflict resolution and merging -- see
+// orchestrator.isQueueMember's own doc comment, which already names this
+// step and reuses AutoMerge as the field that means it rather than adding
+// a second one. Submitting an already-submitted task is a no-op.
+func (c *Client) Submit(ctx context.Context, id string) error {
+	return c.mutate(ctx, id, func(task *model.Task) error {
+		task.AutoMerge = true
+		return nil
+	})
+}
+
 // AddComment appends to a task's conversation.
 //
 // This is also how a human answers a question a run parked on: an
