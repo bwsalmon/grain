@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
-	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // Task is a task issue's JSON shape -- everything the frontend needs to
@@ -97,70 +96,28 @@ func stripDirectives(body string) string {
 	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
-// annotate fills in State and Capabilities against cfg's label taxonomy
-// -- split out of taskFrom since that has no Config to read taxonomy off
-// of, and every call site here has one on hand instead.
-func (s *Server) annotate(t Task) Task {
-	set := make(map[string]struct{}, len(t.Labels))
-	for _, l := range t.Labels {
-		set[l] = struct{}{}
-	}
-	t.State = deriveState(set, s.cfg.Labels)
-	for _, c := range s.cfg.Capabilities {
-		if _, ok := set[c.Label]; ok {
-			t.Capabilities = append(t.Capabilities, c.ID)
-		}
-	}
-	return t
-}
-
-func (s *Server) capabilityByID(id string) (Capability, bool) {
-	for _, c := range s.cfg.Capabilities {
-		if c.ID == id {
-			return c, true
-		}
-	}
-	return Capability{}, false
-}
-
-// --- handlers ----------------------------------------------------------
+// --- handlers ------------------------------------------------------------
+//
+// Every handler below is a thin HTTP shim over a Client method: decode
+// the request, call it, translate the result (or error) into a status
+// code and a JSON body. The logic that actually reads or writes GitHub
+// lives in client.go, once, so a non-HTTP caller (cmd/grain's CLI) gets
+// identical behaviour by calling the same Client directly.
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"taskRepo":     s.cfg.TaskRepo,
-		"labels":       s.cfg.Labels,
-		"capabilities": s.cfg.Capabilities,
+		"taskRepo":     s.tasks.Config.TaskRepo,
+		"labels":       s.tasks.Config.Labels,
+		"capabilities": s.tasks.Config.Capabilities,
 	})
 }
 
-// handleListTasks merges the open issues carrying each state label into
-// one deduplicated list. One call per state label rather than one
-// unfiltered call: GitHub's issues-list endpoint has no "any of these
-// labels" filter (a comma-separated list is AND, not OR), and every real
-// task issue carries exactly one state label by construction, so the
-// union of five label-scoped lists is exactly the task list -- with
-// nothing skipped that a single, filterless call (which would also
-// return every non-task issue on the repo) would have included instead.
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	seen := map[int]Task{}
-	for _, label := range []string{
-		s.cfg.Labels.Trigger, s.cfg.Labels.InProgress, s.cfg.Labels.AwaitingReply,
-		s.cfg.Labels.NeedsApproval, s.cfg.Labels.Completed,
-	} {
-		issues, err := s.client.ListIssues(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, label)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-		for _, issue := range issues {
-			seen[issue.Number] = s.annotate(taskFrom(issue))
-		}
+	tasks, err := s.tasks.ListTasks()
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
 	}
-	tasks := make([]Task, 0, len(seen))
-	for _, t := range seen {
-		tasks = append(tasks, t)
-	}
-	sort.Slice(tasks, func(i, j int) bool { return tasks[i].Number > tasks[j].Number })
 	writeJSON(w, http.StatusOK, tasks)
 }
 
@@ -169,90 +126,25 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	issue, err := s.client.GetIssue(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number)
+	detail, err := s.tasks.GetTask(number)
 	if err != nil {
 		writeGitHubError(w, err)
 		return
 	}
-	comments, err := s.client.ListComments(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	detail := TaskDetail{Task: s.annotate(taskFrom(issue))}
-	for _, c := range comments {
-		detail.Comments = append(detail.Comments, Comment{
-			ID: c.ID, User: c.User, Body: c.Body, AuthorAssociation: c.AuthorAssociation,
-		})
-	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// createTaskRequest is POST /api/tasks' body -- a form's fields, not an
-// issue body: the repo picker, base field, auto-merge checkbox and
-// capability checkboxes docs/data-model.md's "a form knows all of that
-// before the task exists" describes, rendered into directive lines and
-// labels server-side so the frontend never constructs GitHub-flavoured
-// text itself.
-type createTaskRequest struct {
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
-	Repo         string   `json:"repo"`
-	Base         string   `json:"base"`
-	AutoMerge    *bool    `json:"autoMerge"`
-	Capabilities []string `json:"capabilities"`
-	// Approved is false for "file this as a proposal" (needsApproval
-	// label, the same needs_approval_label a maintainer must apply the
-	// trigger label over before anything runs) and true for "queue it
-	// now" (trigger label directly) -- LandsQueued's own human/agent
-	// distinction (pkg/model/task.go), decided by a checkbox instead of
-	// which principal filed it, since every task this form files was
-	// filed by the human using it.
-	Approved bool `json:"approved"`
-}
-
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	var req createTaskRequest
+	var req CreateTaskRequest
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Title) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("title is required"))
-		return
-	}
-
-	var repo *model.RepoRef
-	if strings.TrimSpace(req.Repo) != "" {
-		parsed, err := model.ParseRepo(req.Repo)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		repo = &parsed
-	}
-
-	labels := make([]string, 0, len(req.Capabilities)+1)
-	for _, id := range req.Capabilities {
-		capability, ok := s.capabilityByID(id)
-		if !ok {
-			writeError(w, http.StatusBadRequest, errors.New("unknown capability "+id))
-			return
-		}
-		labels = append(labels, capability.Label)
-	}
-	if req.Approved {
-		labels = append(labels, s.cfg.Labels.Trigger)
-	} else {
-		labels = append(labels, s.cfg.Labels.NeedsApproval)
-	}
-
-	body := bodyOf(req.Description, repo, req.Base, req.AutoMerge)
-	issue, err := s.client.CreateIssue(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, req.Title, body, labels)
+	task, err := s.tasks.CreateTask(req)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeClientError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, s.annotate(taskFrom(issue)))
+	writeJSON(w, http.StatusCreated, task)
 }
 
 type setCapabilityRequest struct {
@@ -269,40 +161,21 @@ func (s *Server) handleSetCapability(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	capability, ok := s.capabilityByID(req.ID)
-	if !ok {
-		writeError(w, http.StatusBadRequest, errors.New("unknown capability "+req.ID))
-		return
-	}
-	var err error
-	if req.Attach {
-		err = s.client.AddLabel(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number, capability.Label)
-	} else {
-		err = s.client.RemoveLabel(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number, capability.Label)
-	}
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+	if err := s.tasks.SetCapability(number, req.ID, req.Attach); err != nil {
+		writeClientError(w, err)
 		return
 	}
 	s.respondWithTask(w, number)
 }
 
-// handleApprove swaps needsApproval for trigger -- the UI's own "approve
-// button" docs/data-model.md's UI direction asks for, since GitHub itself
-// has none for a plain issue. Removing a label that isn't there 404s at
-// the Client level, which RemoveLabel already treats as success (github.go's
-// own doc comment on it), so approving an already-queued task is a no-op
-// rather than an error.
+// handleApprove is the UI's own "approve button" docs/data-model.md's UI
+// direction asks for, since GitHub itself has none for a plain issue.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	number, ok := s.pathNumber(w, r)
 	if !ok {
 		return
 	}
-	if err := s.client.RemoveLabel(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number, s.cfg.Labels.NeedsApproval); err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	if err := s.client.AddLabel(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number, s.cfg.Labels.Trigger); err != nil {
+	if err := s.tasks.Approve(number); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -322,12 +195,8 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Body) == "" {
-		writeError(w, http.StatusBadRequest, errors.New("body is required"))
-		return
-	}
-	if _, err := s.client.CreateComment(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number, req.Body); err != nil {
-		writeError(w, http.StatusBadGateway, err)
+	if err := s.tasks.AddComment(number, req.Body); err != nil {
+		writeClientError(w, err)
 		return
 	}
 	s.respondWithTask(w, number)
@@ -338,7 +207,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.client.CloseIssue(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number); err != nil {
+	if err := s.tasks.Close(number); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -350,7 +219,7 @@ func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.client.ReopenIssue(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number); err != nil {
+	if err := s.tasks.Reopen(number); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -358,12 +227,12 @@ func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) respondWithTask(w http.ResponseWriter, number int) {
-	issue, err := s.client.GetIssue(s.cfg.TaskRepo.Owner, s.cfg.TaskRepo.Name, number)
+	task, err := s.tasks.Task(number)
 	if err != nil {
 		writeGitHubError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.annotate(taskFrom(issue)))
+	writeJSON(w, http.StatusOK, task)
 }
 
 // --- request/response plumbing -----------------------------------------
@@ -385,6 +254,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// writeClientError maps a Client error to 400 when it is a
+// ValidationError (a mistake caught before any GitHub call was made) and
+// to 502 otherwise (the GitHub call itself failing) -- the same split
+// every mutating handler made inline before Client existed.
+func writeClientError(w http.ResponseWriter, err error) {
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeError(w, http.StatusBadGateway, err)
 }
 
 // writeGitHubError reports a github.Error's own status (e.g. 404 for a
