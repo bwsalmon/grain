@@ -91,6 +91,20 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	}
 
 	if pushed {
+		// task was read at the top of this cycle, before the run itself
+		// finished, so it cannot see a close that landed while the run was
+		// still live -- re-checking the observation here is what
+		// model/state.go's StateOf precedence (ClosedAt outranks a live
+		// run) actually means for a run that already pushed: nobody wants
+		// this work merged, so the branch is left pushed but unopened
+		// rather than turned into a real pull request on GitHub.
+		closed, err := taskClosed(ctx, store, task.ID)
+		if err != nil {
+			return err
+		}
+		if closed {
+			return nil
+		}
 		return finishWithPullRequest(ctx, store, client, task, now)
 	}
 
@@ -217,6 +231,18 @@ func finishWithPullRequest(ctx context.Context, store *model.Store, client githu
 	}
 
 	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })
+}
+
+// taskClosed reports whether taskID's current observation already has
+// ClosedAt set -- read fresh from the store rather than off the caller's
+// task/result, since a close racing a still-live run is exactly the case
+// this exists to catch.
+func taskClosed(ctx context.Context, store *model.Store, taskID string) (bool, error) {
+	obs, err := store.GetObservation(ctx, taskID)
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: checking whether %s closed while its run was live: %w", taskID, err)
+	}
+	return obs != nil && obs.ClosedAt != nil, nil
 }
 
 // observeField is Store.ObserveField with this package's error prefix.
