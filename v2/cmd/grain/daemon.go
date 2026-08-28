@@ -1,16 +1,3 @@
-// Command graind is the grain daemon: it runs pkg/orchestrate's reconcile
-// loop in the background on a timer, until SIGINT/SIGTERM, against one
-// real embedded Dolt store.
-//
-// bwsalmon/agents#254 asks for exactly this, with one simplification: v2
-// has no host adapter yet (v2/README.md), so there is no fleet of real
-// sandbox VMs to dispatch onto. graind assumes what that issue grants --
-// the MCP server's sandbox tools are confined to a local directory, and
-// one slot is the whole concurrency pool -- rather than inventing a fleet
-// this deployment shape has nowhere to run. -slots accepts a comma list
-// for the day a host adapter exists to give a second slot somewhere real
-// to point at; nothing above pkg/orchestrate.Config needs to change to
-// serve more than one.
 package main
 
 import (
@@ -40,28 +27,42 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
 
-func main() {
-	dataDir := flag.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
-	slotList := flag.String("slots", "local", "comma-separated slot names -- the concurrency pool loop.Cycle fills")
-	pollInterval := flag.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
+// runDaemon is `grain daemon`: the grain daemon, running pkg/orchestrate's
+// reconcile loop in the background on a timer, until SIGINT/SIGTERM,
+// against one real embedded Dolt store.
+//
+// bwsalmon/agents#254 asks for exactly this, with one simplification: v2
+// has no host adapter yet (v2/README.md), so there is no fleet of real
+// sandbox VMs to dispatch onto. runDaemon assumes what that issue grants
+// -- the MCP server's sandbox tools are confined to a local directory,
+// and one slot is the whole concurrency pool -- rather than inventing a
+// fleet this deployment shape has nowhere to run. -slots accepts a comma
+// list for the day a host adapter exists to give a second slot somewhere
+// real to point at; nothing above pkg/orchestrate.Config needs to change
+// to serve more than one.
+func runDaemon(args []string) {
+	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
+	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool loop.Cycle fills")
+	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
 
-	geminiAPIKeyFile := flag.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
-	geminiModel := flag.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
-	maxAgentTurns := flag.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
+	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
+	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
+	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
 
-	githubHost := flag.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing")
-	githubInsecureHTTP := flag.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)")
+	githubHost := fs.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing")
+	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)")
 
-	gcpProject := flag.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both")
-	gcpServiceAccountEmail := flag.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
-	flag.Parse()
+	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both")
+	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	fs.Parse(args)
 
 	if *dataDir == "" {
-		fmt.Fprintln(os.Stderr, "graind: -data-dir is required")
+		fmt.Fprintln(os.Stderr, "grain daemon: -data-dir is required")
 		os.Exit(2)
 	}
 	if *geminiAPIKeyFile == "" {
-		fmt.Fprintln(os.Stderr, "graind: -gemini-api-key-file is required")
+		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
 	}
 	slots := strings.Split(*slotList, ",")
@@ -69,17 +70,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, config{
+	if err := runDaemonLoop(ctx, daemonConfig{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 	}); err != nil {
-		log.Fatalf("graind: %v", err)
+		log.Fatalf("grain daemon: %v", err)
 	}
 }
 
-type config struct {
+type daemonConfig struct {
 	dataDir      string
 	slots        []string
 	pollInterval time.Duration
@@ -95,10 +96,10 @@ type config struct {
 	gcpServiceAccountEmail string
 }
 
-// run wires every piece pkg/orchestrate needs from real, on-disk material
-// under cfg.dataDir and starts the reconcile loop; it returns only once
-// ctx is cancelled (or setup itself fails).
-func run(ctx context.Context, cfg config) error {
+// runDaemonLoop wires every piece pkg/orchestrate needs from real,
+// on-disk material under cfg.dataDir and starts the reconcile loop; it
+// returns only once ctx is cancelled (or setup itself fails).
+func runDaemonLoop(ctx context.Context, cfg daemonConfig) error {
 	store, db, err := openStore(cfg.dataDir)
 	if err != nil {
 		return err
@@ -160,7 +161,7 @@ func run(ctx context.Context, cfg config) error {
 		MaxAgentTurns: cfg.maxAgentTurns,
 		GitHub:        githubClient,
 	})
-	log.Printf("graind: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
+	log.Printf("grain daemon: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
 	r.Run(ctx, cfg.pollInterval)
 	return nil
 }
@@ -170,7 +171,7 @@ func run(ctx context.Context, cfg config) error {
 // that grants "gcp-key" or "gemini-key" against a registry that never
 // registered one is refused, cleanly, by model.ResolveGrants -- not a
 // crash at startup.
-func capabilityProviders(cfg config) []model.CapabilityProvider {
+func capabilityProviders(cfg daemonConfig) []model.CapabilityProvider {
 	if cfg.gcpProject == "" {
 		return nil
 	}
@@ -199,10 +200,10 @@ func (c credentialTokenSource) TokenFor(owner, repo string) *string {
 	return cred.Token
 }
 
-// openStore returns both the Store and the *sql.DB behind it, so run can
-// close the connection on the way out -- model.Store itself has no
-// Close, deliberately: it imports no driver (pkg/model/dolt's own doc
-// comment), so closing is the caller's job.
+// openStore returns both the Store and the *sql.DB behind it, so
+// runDaemonLoop can close the connection on the way out --
+// model.Store itself has no Close, deliberately: it imports no driver
+// (pkg/model/dolt's own doc comment), so closing is the caller's job.
 func openStore(dataDir string) (*model.Store, *sql.DB, error) {
 	db, err := dolt.Open(dolt.DefaultConfig(filepath.Join(dataDir, "store")))
 	if err != nil {
@@ -237,7 +238,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 	srv := &http.Server{Handler: gitproxy.NewHandler(proxy)}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("graind: git proxy: %v", err)
+			log.Printf("grain daemon: git proxy: %v", err)
 		}
 	}()
 	return "http://" + ln.Addr().String(), srv.Shutdown, nil

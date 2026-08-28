@@ -91,17 +91,19 @@ pkg/orchestrate/  the side-effecting counterpart loop.Cycle's own doc
                 real, open the pull request a successful push implies,
                 revoke what was minted, and poll GitHub for what changed
                 on every task still worth asking about
-cmd/graind/     the daemon: pkg/orchestrate's reconcile loop run on a
-                timer against one real embedded Dolt store, until
-                SIGINT/SIGTERM, with an in-process gitproxy and a real
-                github.RESTClient wired in
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237) -- see "The UI" below for
                 why it talks straight to GitHub rather than through a
                 store or an orchestrator
-cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
-                listener, opening the system's default browser
+cmd/grain/      the one operator binary (bwsalmon/agents#275): `grain
+                daemon` is pkg/orchestrate's reconcile loop run on a
+                timer against one real embedded Dolt store, until
+                SIGINT/SIGTERM, with an in-process gitproxy and a real
+                github.RESTClient wired in; `grain ui` is pkg/ui.Server
+                behind a local HTTP listener, opening the system's
+                default browser. One `go build` output rather than two,
+                each subcommand keeping its own flag set
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -171,7 +173,7 @@ GitHub's REST API from a running `loop.Cycle`, built in parallel without
 either knowing about the other, and reconciling them into one is still
 open (see the note at the end of this section):
 
-`pkg/orchestrate` (bwsalmon/agents#254), driven by `cmd/graind` on a
+`pkg/orchestrate` (bwsalmon/agents#254), driven by `grain daemon` on a
 timer, re-derives "is there still an open PR for this branch" from GitHub
 on every pass (`github.FindOpenPullRequestForBranch`) rather than
 remembering a PR number anywhere, which costs an extra request per
@@ -179,7 +181,7 @@ tracked task but needs no schema of its own — and because GitHub's REST
 API exposes no separate "merged" bit at the list level, a PR that was
 open and is not anymore reads as closed, not distinguished from merged,
 matching `model.Observation`'s own vocabulary (`ClosedAt`/`CompletedAt`,
-no merged flag). `graind` also still runs against the same "no host
+no merged flag). `grain daemon` also still runs against the same "no host
 adapter" stand-in every other package here does: one slot, one local
 directory doing sandbox duty (bwsalmon/agents#254's own explicit
 simplification). Three of the `mcp.NewMockTools` escape hatches
@@ -200,7 +202,7 @@ convention both packages now share for reading which GitHub issue a
 started as a private detail of its own intake) since `orchestrate` needed
 to agree with it, not invent a second one. A task with no parseable
 `ExternalRef` still gets its pull request opened exactly as before; there
-is just nothing to relay a question, comment, or proposal to. `graind`
+is just nothing to relay a question, comment, or proposal to. `grain daemon`
 still has no `PollIssues` equivalent of its own to produce that
 `ExternalRef` in the first place — turning GitHub issues carrying a
 trigger label into `Task` rows (v1's own intake, `dispatch.py`'s
@@ -209,7 +211,7 @@ trigger label into `Task` rows (v1's own intake, `dispatch.py`'s
 "nothing yet dispatches with review intent for one to attach to" gap
 `pkg/orchestrator` has (below) — this deployment shape still assumes
 tasks already exist in the store, with an `ExternalRef` already stamped
-on by whatever put them there, by the time `graind` looks.
+on by whatever put them there, by the time `grain daemon` looks.
 
 `pkg/orchestrator/` (bwsalmon/agents#249) goes further on that last point
 — polling a task repo's labelled issues, running `loop.Cycle`'s own
@@ -230,7 +232,7 @@ assertions port, the harness does not. `orchestrator.Deps.Sandboxes`/
 `.Framework` are exactly the two seams a real host adapter and a real
 dispatched-agent connection would replace, without changing anything
 about `RunCycle`'s own shape — `pkg/orchestrate`'s equivalent seams would
-need the same treatment. Which of the two packages `cmd/graind` should
+need the same treatment. Which of the two packages `grain daemon` should
 end up driving, and what happens to the other, is unresolved; both are
 kept for now rather than one being deleted out from under the task that
 is still relying on it.
@@ -305,7 +307,7 @@ bookkeeping, since that check is the one a live test can't afford to
 fake. Two packages decide when to call any of it, built independently of
 each other: `pkg/orchestrate` (bwsalmon/agents#254) opens a pull request
 after a successful dispatch and polls `FindOpenPullRequestForBranch` to
-close one out, driven by `cmd/graind` on a timer, though it still polls
+close one out, driven by `grain daemon` on a timer, though it still polls
 issues for nothing, since turning a labelled GitHub issue into a `Task`
 row is not wired to `loop.Cycle` from that package. `pkg/orchestrator/`
 (below) does that intake too; its `live_test.go` drives the same two
@@ -364,7 +366,7 @@ Both providers can now point at the same standing credential —
 MinterCredential` are each just a name resolved through
 `CapabilityContext.Credentials`, so an operator wires them to the same
 one to get bwsalmon/agents#239's "This can share the same account from
-the gcp capability" — `cmd/graind` is now the executor that does that
+the gcp capability" — `grain daemon` is now the executor that does that
 wiring (`-gcp-project`/`-gcp-agent-service-account`, bwsalmon/agents#254):
 it constructs a real `CapabilityContext` per dispatch, applies every
 `SideSandbox` `Placement` under the dispatch's sandbox root, and calls
@@ -386,10 +388,10 @@ resolves through that resolver -- which `gcpkey.Provider.Spec()` and
 section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today,
-and `cmd/graind` now calls it for real from `pkg/orchestrate`'s dispatch
-loop rather than only from a test. `pkg/orchestrate`/`cmd/graind` still
+and `grain daemon` now calls it for real from `pkg/orchestrate`'s dispatch
+loop rather than only from a test. `pkg/orchestrate`/`grain daemon` still
 only ever hands it a local directory (`mcp.ConfigureGitCredentials` sets
-that directory's git credentials up once per slot at `graind` startup).
+that directory's git credentials up once per slot at `grain daemon` startup).
 `orchestrator.RunCycle` (below), `pkg/orchestrate`'s not-yet-wired-to-
 anything sibling, can now reach a real remote VM instead: `pkg/kontur`
 resolves a bwsalmon/kontur-managed VM's SSH endpoint (the external port
@@ -422,7 +424,7 @@ equivalent alternative to its own local-directory stand-in either, so
 today this is a capability `pkg/orchestrator` exposes rather than one
 either reconcile loop drives by default.
 
-A real `github.RESTClient` exists and is wired into `graind` too, but
+A real `github.RESTClient` exists and is wired into `grain daemon` too, but
 only for `orchestrate`'s own two calls (`FindOpenPullRequestForBranch`/
 `CreatePullRequest`), not for the agent's own `ask_question`/
 `comment_on_issue`/`propose_task`/`add_review_comment` calls:
@@ -447,7 +449,7 @@ close the gap above, since nothing there is wired to run on its own yet.
 
 ## The UI
 
-`pkg/ui`/`cmd/ui` (bwsalmon/agents#237) is a first cut at
+`pkg/ui`/`grain ui` (bwsalmon/agents#237) is a first cut at
 [`docs/data-model.md`'s "first-party UI"
 direction](../docs/data-model.md#direction-a-first-party-ui): create a
 task, approve a proposed one, attach or remove a capability, comment,
@@ -463,7 +465,7 @@ yet, on either the `pkg/orchestrate` or the `pkg/orchestrator` side (see
 "What this does not have yet" above). A task issue is therefore the only
 place a task genuinely lives in a real deployment today, so `pkg/ui`
 reads and writes it directly, through the same `github.Client` interface
-`cmd/graind` and `pkg/orchestrator` use -- one `Config{TaskRepo, Labels,
+`grain daemon` and `pkg/orchestrator` use -- one `Config{TaskRepo, Labels,
 Capabilities}` naming which repo and which label taxonomy
 (`grain/automation/labels.py`'s own defaults, ported as `ui.Labels`/
 `ui.Capability`), not a copy of anything the store or the repo owns.
@@ -475,7 +477,7 @@ in behind the same JSON API, without the frontend knowing the
 difference.
 
 **No OAuth.** The direction document calls for GitHub OAuth plus
-`author_association` as the permission gate; `cmd/ui` instead takes a
+`author_association` as the permission gate; `grain ui` instead takes a
 single GitHub token (`-github-token-file`, or `$GITHUB_TOKEN`) the way
 every other `-github-*` flag across `v2/cmd` does, because this is a
 single-operator tool run locally against a token that operator already
@@ -484,7 +486,7 @@ building the day this runs anywhere other than one person's own machine
 (bwsalmon/agents#237's follow-up).
 
 **Why a local web server, not Electron/Tauri/a native app.** `go build`
-already produces one dependency-free binary per OS `cmd/ui` runs on
+already produces one dependency-free binary per OS `grain` runs on
 (Mac, Linux today); a `net/http` server that opens the system's default
 browser gets "runs standalone on Mac and Linux" for free, in the one
 language every other substrate here already commits to (see "Why Go"
@@ -493,7 +495,7 @@ carry. "Set up to run on iOS/Android in the future" is what shapes
 `pkg/ui` into an HTTP+JSON API in the first place rather than
 server-rendered pages or a Go-templated app: a future mobile client --
 native, or a thin webview shell -- is just another caller of the same
-`/api/*` surface `cmd/ui`'s own frontend (`pkg/ui/static/`, plain
+`/api/*` surface `grain ui`'s own frontend (`pkg/ui/static/`, plain
 HTML/CSS/JS, no build step) already uses, with nothing about the server
 to rewrite.
 
