@@ -8,7 +8,12 @@ package dolt_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -675,5 +680,308 @@ func TestAnUntrustedCommentBodyIsStoredNotInterpreted(t *testing.T) {
 	// The table it tried to drop is still answering.
 	if _, err := store.GetTask(ctx, "t1"); err != nil {
 		t.Fatalf("task table after an injection attempt: %v", err)
+	}
+}
+
+// --- concurrency: the write stamp ---------------------------------------
+
+// openConcurrent opens a store that permits more than one connection.
+//
+// dolt.Open pins the pool to one because embedded Dolt is a single
+// writer; these tests raise it precisely to make two writers race, which
+// is the situation a Dolt SQL server deployment has for real.
+func openConcurrent(t *testing.T, conns int) (*model.Store, *sql.DB, context.Context) {
+	t.Helper()
+	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(conns)
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return store, db, ctx
+}
+
+// Two writers changing different fields of the same task at the same
+// time: one wins, the other conflicts, retries on the winner's state, and
+// both changes end up present.
+func TestConcurrentUpdatesBothLand(t *testing.T) {
+	store, _, ctx := openConcurrent(t, 4)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		errs[0] = store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+			tk.Title = "renamed"
+			return nil
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		errs[1] = store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+			tk.Base = "release"
+			return nil
+		})
+	}()
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "renamed" {
+		t.Fatalf("title = %q, want the first writer's change", got.Title)
+	}
+	if got.Base != "release" {
+		t.Fatalf("base = %q, want the second writer's change -- it was lost", got.Base)
+	}
+}
+
+// A conflict rolls the loser's transaction back whole, child rows
+// included. Without the stamp, two writers each doing PutTask's
+// delete-and-reinsert of a task's tags had their sets silently unioned.
+func TestAConflictRollsBackChildRowsToo(t *testing.T) {
+	store, _, ctx := openConcurrent(t, 4)
+	base := task("a1b2", true)
+	base.Tags = []string{"keep"}
+	if err := store.PutTask(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(2)
+	for i, tag := range []string{"from-0", "from-1"} {
+		go func(i int, tag string) {
+			defer wg.Done()
+			<-start
+			if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+				tk.Tags = append(tk.Tags, tag)
+				return nil
+			}); err != nil {
+				t.Errorf("writer %d: %v", i, err)
+			}
+		}(i, tag)
+	}
+	close(start)
+	wg.Wait()
+
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got.Tags)
+	want := []string{"from-0", "from-1", "keep"}
+	if len(got.Tags) != len(want) {
+		t.Fatalf("tags = %v, want %v -- a retry that rewrote over the winner would have lost one", got.Tags, want)
+	}
+	for i := range want {
+		if got.Tags[i] != want[i] {
+			t.Fatalf("tags = %v, want %v", got.Tags, want)
+		}
+	}
+}
+
+// The trap the stamp has to avoid, stated as a test so nobody optimises
+// the random token into a counter.
+//
+// Dolt merges concurrent writes cell by cell and reports a conflict only
+// when the two disagree. Two writers that both read version N and both
+// write N+1 agree, so the merge succeeds and neither is told anything --
+// which is exactly the lost update the stamp exists to prevent.
+func TestACounterStampWouldNotConflict(t *testing.T) {
+	_, db, ctx := openConcurrent(t, 4)
+	for _, q := range []string{
+		"CREATE TABLE `counter_probe` (`id` INT NOT NULL, `n` INT NOT NULL, PRIMARY KEY (`id`))",
+		"INSERT INTO `counter_probe` VALUES (1, 0)",
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tx := range []*sql.Tx{a, b} {
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT `n` FROM `counter_probe` WHERE `id`=1").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		// Both read 0 and both write 1: the same value.
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `counter_probe` SET `n` = ? WHERE `id`=1", n+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Commit(); err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+	if err := b.Commit(); err != nil {
+		_ = b.Rollback()
+		t.Skipf("this Dolt build conflicts even on equal values (%v) -- "+
+			"a counter stamp would work here, but the random token is still correct", err)
+	}
+	t.Log("confirmed: two writers landing the same value merge silently, " +
+		"so a counter stamp would not have caught this overlap")
+}
+
+// The wording model.isSerializationFailure matches on, asserted against
+// the real engine rather than assumed. pkg/model's own stamp_test.go
+// pins the same string, so a Dolt reword fails both together.
+func TestDoltReportsASerializationFailure(t *testing.T) {
+	_, db, ctx := openConcurrent(t, 4)
+	for _, q := range []string{
+		"CREATE TABLE `probe` (`id` INT NOT NULL, `v` VARCHAR(64) NOT NULL, PRIMARY KEY (`id`))",
+		"INSERT INTO `probe` VALUES (1, 'v0')",
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tx := range []*sql.Tx{a, b} {
+		var v string
+		if err := tx.QueryRowContext(ctx, "SELECT `v` FROM `probe` WHERE `id`=1").Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Different values, which is what the stamp guarantees.
+	if _, err := a.ExecContext(ctx, "UPDATE `probe` SET `v`='a' WHERE `id`=1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ExecContext(ctx, "UPDATE `probe` SET `v`='b' WHERE `id`=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Commit(); err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+	err = b.Commit()
+	if err == nil {
+		_ = b.Rollback()
+		t.Fatal("the second commit succeeded: Dolt no longer reports a lost race, " +
+			"so the write stamp catches nothing")
+	}
+	if !strings.Contains(err.Error(), "serialization failure") &&
+		!strings.Contains(err.Error(), "try restarting transaction") {
+		t.Fatalf("Dolt reports a lost race as %q, which model.isSerializationFailure "+
+			"does not recognise -- update the markers there and in pkg/model/stamp_test.go", err)
+	}
+	t.Logf("Dolt reports a lost race as: %v", err)
+}
+
+// The retry path, forced rather than raced for: the mutate closure makes
+// a competing write the first time it runs, so its own commit loses and
+// the whole operation starts over on the winner's state.
+func TestARetryComposesOnTheWinnersState(t *testing.T) {
+	store, _, ctx := openConcurrent(t, 4)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	competed := false
+	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+		if !competed {
+			competed = true
+			if err := store.UpdateTask(ctx, "a1b2", func(inner *model.Task) error {
+				inner.Base = "release"
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		tk.Title = "renamed"
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+	if !competed {
+		t.Fatal("the competing write never ran, so no conflict was forced")
+	}
+
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "renamed" {
+		t.Fatalf("title = %q, want the retried change", got.Title)
+	}
+	if got.Base != "release" {
+		t.Fatalf("base = %q, want the competing change to have survived the retry", got.Base)
+	}
+}
+
+// The answer to "what if it crashes mid-write": an operation that does
+// not reach commit leaves nothing behind. There is no lock to release and
+// no version to reconcile, so the failure needs no cleanup at all.
+func TestAFailedWriteLeavesNothingBehind(t *testing.T) {
+	store, _, ctx := openConcurrent(t, 4)
+	before := task("a1b2", true)
+	before.Tags = []string{"keep"}
+	if err := store.PutTask(ctx, before); err != nil {
+		t.Fatal(err)
+	}
+
+	boom := errors.New("the process died here")
+	err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+		// Change everything, then fail before the commit.
+		tk.Title = "half-written"
+		tk.Tags = []string{"gone"}
+		tk.Base = "wrong"
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want the failure to reach the caller", err)
+	}
+
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != before.Title || got.Base != before.Base {
+		t.Fatalf("task changed despite the write failing: %+v", got)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "keep" {
+		t.Fatalf("tags = %v, want the original -- a partial write survived", got.Tags)
+	}
+
+	// And the store is immediately usable: nothing is held.
+	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+		tk.Title = "after the failure"
+		return nil
+	}); err != nil {
+		t.Fatalf("the store was left unusable by a failed write: %v", err)
 	}
 }

@@ -332,6 +332,64 @@ GitHub is the pull request. Its sibling proves the question path: a run
 parks, a human replies with one `AddComment`, and the next cycle resumes
 it.
 
+## One stamp, and start over on conflict
+
+Every mutation runs in a transaction that also rewrites a single shared
+row, `grain_write`. Two operations that overlap therefore disagree about
+what that one cell should say, the database refuses the second commit, and
+`Store.write` runs the whole operation again on fresh state.
+
+That is the entirety of grain's concurrency control. There is no lock, no
+per-row version, and nothing a caller has to carry or remember — the four
+mutating call sites go through `Store.UpdateTask` or `Store.ObserveField`
+and never mention any of it.
+
+**Why one shared row rather than a version per task.** Per-task versioning
+sounds better and is much harder to be sure of. Dolt merges concurrent
+writes *cell by cell*, so whether two overlapping operations are safe
+depends on which columns and which child tables each touched — and the
+answer is genuinely surprising in places. Two writers that each rewrite a
+task's tags as delete-all-then-reinsert had their sets silently **unioned**
+into one neither asked for, with both commits reporting success. A single
+shared cell makes every overlap a conflict, so that question never has to
+be answered. All writes serialising is the cost, and for a deployment with
+one developer and occasional edits it is not a cost.
+
+**The stamp must be unique per operation, never a counter.** This is the
+one sharp edge, and it is sharp: Dolt reports a conflict only when two
+writers *disagree* about a cell. Two writers that both read version N and
+both write N+1 agree — so the merge succeeds, both commit, and the
+child-row union above happens anyway. A counter is the obvious
+implementation and it is the broken one.
+`TestACounterStampWouldNotConflict` pins that down so nobody optimises the
+random token into a counter later.
+
+**Failure needs no cleanup.** An operation that does not reach its commit
+leaves nothing behind: no lock to release, no version to reconcile, no
+half-written row. A process that dies mid-write leaves an aborted
+transaction and the store immediately usable —
+`TestAFailedWriteLeavesNothingBehind` asserts both halves of that. This is
+the property that ruled out the alternative: `GET_LOCK` works on Dolt, but
+a lock returned to `database/sql`'s pool without an explicit release stays
+held, so any path that skips the release — a panic past a `defer`, a
+cancelled context — wedges the process against itself. Measured, not
+feared.
+
+**Retries are bounded and rare.** Five attempts, then `model.ErrConflict`,
+which `pkg/ui` maps to a 409 meaning plainly that the change did not land.
+Reaching that needs another writer to win five times in a row.
+
+Two things this leans on that were measured rather than assumed, both
+pinned by tests so a Dolt change breaks them loudly: that a lost race is
+reported at COMMIT as `Error 1213: serialization failure` (matched by
+message text, because this package imports no driver on purpose), and that
+the conflict aborts the whole transaction rather than just the stamp —
+`TestAConflictRollsBackChildRowsToo`.
+
+Verifying any of this against a real `dolt sql-server` still needs an
+environment that can install one; everything above is measured against the
+embedded engine with its connection pool widened to let two writers race.
+
 ## Reconcilers, not a pipeline
 
 `RunCycle` runs three independent reconcilers — `poll`, `dispatch`,
