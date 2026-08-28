@@ -103,7 +103,7 @@ func fileTask(ctx context.Context, store *model.Store, client github.Client, cfg
 		Binding:     model.BindingDirective,
 		Base:        directives.Base,
 		AutoMerge:   directives.AutoMerge,
-		ExternalRef: externalRef(cfg.TaskRepo, issue.Number),
+		ExternalRef: model.ExternalRef(cfg.TaskRepo, issue.Number),
 		CreatedAt:   &now,
 	}
 	if err := store.PutTask(ctx, task); err != nil {

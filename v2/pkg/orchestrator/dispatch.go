@@ -12,6 +12,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -29,10 +30,23 @@ func BuildPrompt(task model.Task) string {
 	)
 }
 
+// rootedSandboxes is implemented by a Sandboxes backend that also hands
+// out a plain local directory for a slot -- HostSandboxes' own RootFor.
+// RunDispatch needs one of these to write a capability's SideSandbox
+// placements directly to disk; KonturSandboxes (SSH-backed, with no local
+// directory of its own) does not implement it, so a caller dispatching a
+// task with Grants against it must resolve that itself before calling
+// RunDispatch -- see runOne.
+type rootedSandboxes interface {
+	RootFor(slot string) (string, error)
+}
+
 // RunDispatch drives one loop.Dispatch to completion: resolve and
-// materialize its task's capabilities, run the agent against sandboxRoot
-// (see the package doc comment on why that is a plain host directory
-// rather than a real sandbox VM), revoke whatever was materialized, and
+// materialize its task's capabilities (writing any SideSandbox placements
+// into sandboxRoot, which may be empty when the task has none to place),
+// run the agent against tools (whatever Deps.Sandboxes.ToolsFor produced
+// for d.Slot -- see the package doc comment on the local-directory-vs-
+// real-VM choice that makes), revoke whatever was materialized, and
 // record the run's outcome. Every path here finishes the run, even a
 // failing one -- ported from pkg/orchestrate's own runDispatch
 // (bwsalmon/agents#254) when that package merged into this one: an
@@ -42,7 +56,7 @@ func BuildPrompt(task model.Task) string {
 // since deciding what a run produced is a different question from
 // deciding what to do about it.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
-	cfg Config, task model.Task, d loop.Dispatch, sandboxRoot string, at time.Time) (*agent.Result, error) {
+	cfg Config, task model.Task, d loop.Dispatch, tools []mcp.Tool, sandboxRoot string, at time.Time) (*agent.Result, error) {
 
 	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Slot: d.Slot, Sandbox: d.Slot, Attempt: d.Attempt, StartedAt: at}
 	cc := model.CapabilityContext{Task: task, Run: run, Now: at, Workdir: sandboxRoot, Credentials: cfg.Credentials}
@@ -56,7 +70,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	case prepErr != nil:
 		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, prepErr)
 	default:
-		result, runErr = framework.Run(ctx, agent.RunConfig{Prompt: prompt, SandboxRoot: sandboxRoot, MaxTurns: cfg.MaxAgentTurns})
+		result, runErr = framework.Run(ctx, agent.RunConfig{Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns})
 		if runErr != nil {
 			runErr = fmt.Errorf("orchestrator: running %s: %w", d.RunID, runErr)
 		} else {

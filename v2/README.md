@@ -29,6 +29,14 @@ pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
 pkg/agent/      the Framework interface an agent driver implements
 pkg/agent/gemini/  Framework via the Gemini API, talking to its own
                 in-process pkg/mcp/ server
+pkg/agent/claude/  Framework via the real `claude` CLI, run as a
+                subprocess on the controller (bwsalmon/agents#255) --
+                unlike agent/gemini there is no in-process API to drive, so
+                this points --mcp-config at a built cmd/mcpserver binary
+                the same way v1's dispatch.py pointed it at
+                `python3 -m grain.automation.mcp_server`, and parses the
+                resulting --output-format stream-json transcript back into
+                an agent.Result
 pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
                 and revokes a Gemini API key, direct against the API Keys
                 API
@@ -82,6 +90,13 @@ cmd/graind/     the daemon: pkg/orchestrator's RunCycle run on a timer
                 against one real embedded Dolt store, until
                 SIGINT/SIGTERM, with an in-process gitproxy and a real
                 github.RESTClient wired in
+pkg/ui/         a JSON API, and the static frontend it serves, for
+                creating and managing tasks and their capability grants
+                by hand (bwsalmon/agents#237) -- see "The UI" below for
+                why it talks straight to GitHub rather than through a
+                store or an orchestrator
+cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
+                listener, opening the system's default browser
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -169,18 +184,36 @@ covered the same "which pull request should grain still be watching"
 question, more precisely, so keeping both was pure duplication.
 
 `graind` still runs against the same "no host adapter" stand-in every
-other package here does: one slot, one local directory doing sandbox duty
-(bwsalmon/agents#254's own explicit simplification, inherited by
-`orchestrator.HostSandboxes`), and the `mcp.NewMockTools` escape hatches
-(`ask_question`, `comment_on_issue`, `propose_task`, `add_review_comment`)
-`agent/gemini.Framework.Run` wires internally are still discarded rather
-than posted anywhere real while a run is live — `ProcessResult` only ever
-inspects `agent.Result.ToolCalls` after a run finishes. This carries no
-real isolation at all: a real deployment still needs the actual host
-adapter (creating a real VM/container per task and running commands in it
-over something better than "this process's own filesystem"), which
-remains v1 Python — 15,903 lines of it, with 1,239 tests. Those tests are
-the asset in a rewrite; the assertions port, the harness does not.
+other package here does by default: one slot, one local directory doing
+sandbox duty (`orchestrator.HostSandboxes`). `orchestrator.KonturSandboxes`
+(bwsalmon/agents#262) is the real alternative `Deps.Sandboxes` also
+accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached over
+SSH via `mcp.NewSSHSandboxTools` instead of a local directory, created
+via `kontur.Create` on first use and reused across cycles the same way
+`HostSandboxes` reuses its directories — but `cmd/graind` still only ever
+constructs a `HostSandboxes`; nothing wires `KonturSandboxes` in as its
+actual `Deps.Sandboxes` outside its own tests yet, so today it is a
+capability `pkg/orchestrator` exposes rather than one the reconcile loop
+drives by default. A kontur VM's own guest image is still expected to
+arrive already carrying the operator's SSH key and a running sshd, the
+same assumption v1's own sandbox provisioning stood in for and still no
+successor here builds — provisioning one is still open. The
+`mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
+`propose_task`, `add_review_comment`) `agent/gemini.Framework.Run` wires
+internally are still discarded rather than posted anywhere real while a
+run is live — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
+after a run finishes, and relays `ask_question`/`comment_on_issue`/
+`propose_task` for real at that point (see the package tree entry
+above); giving `Framework.Run` (or its caller) a way to inject a live
+sink instead is still open, and `add_review_comment` calls are still
+just recorded and nothing more, since nothing yet dispatches with review
+intent for one to attach to. Neither sandbox stand-in carries any real
+isolation: a real deployment still needs the actual host adapter
+(creating a real VM/container per task and running commands in it over
+something better than "this process's own filesystem," or an SSH hop to
+a VM with no other tenancy boundary of its own), which remains v1
+Python — 15,903 lines of it, with 1,239 tests. Those tests are the asset
+in a rewrite; the assertions port, the harness does not.
 `orchestrator.Deps.Sandboxes`/`.Framework` are exactly the two seams a
 real host adapter and a real dispatched-agent connection would replace,
 without changing anything about `RunCycle`'s own shape.
@@ -377,6 +410,67 @@ plays the part of "the PR opened," "the PR merged" and "a human replied"
 with the same `store.Observe` calls a real GitHub-sync component would
 make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
+
+## The UI
+
+`pkg/ui`/`cmd/ui` (bwsalmon/agents#237) is a first cut at
+[`docs/data-model.md`'s "first-party UI"
+direction](../docs/data-model.md#direction-a-first-party-ui): create a
+task, approve a proposed one, attach or remove a capability, comment,
+close/reopen -- everything a human does by hand to a task issue today,
+from a form instead of a body of directive lines and a label picker.
+
+**It talks straight to GitHub, not through a store.** That direction's
+own "the UI is not a fourth record" rule says a UI reads declarations
+from the repo, grain's own acts from the store, and outside facts from
+GitHub through grain -- but `pkg/ui` predates `cmd/graind` driving
+`pkg/orchestrator.PollIssues` on a timer (bwsalmon/agents#263), and still
+reads and writes a task issue directly rather than through a
+`model.Store`, the same as it always has: an operator working through
+`pkg/ui` and `graind`'s own reconcile loop are now two independent paths
+that can both touch the same GitHub issue, with nothing reconciling the
+two. `pkg/ui` reads and writes it directly, through the same
+`github.Client` interface `cmd/graind` and `pkg/orchestrator` use -- one
+`Config{TaskRepo, Labels, Capabilities}` naming which repo and which
+label taxonomy (`grain/automation/labels.py`'s own defaults, ported as
+`ui.Labels`/`ui.Capability`), not a copy of anything the store or the
+repo owns. `State` is derived off labels on every read, the same "never
+stored" discipline `model.StateOf`'s own doc comment describes for the
+store-backed version. `pkg/ui`'s own `Config`/`Server` seam is exactly
+where a `model.Store`-backed implementation would slot in behind the
+same JSON API, without the frontend knowing the difference, if the two
+paths are ever unified.
+
+**No OAuth.** The direction document calls for GitHub OAuth plus
+`author_association` as the permission gate; `cmd/ui` instead takes a
+single GitHub token (`-github-token-file`, or `$GITHUB_TOKEN`) the way
+every other `-github-*` flag across `v2/cmd` does, because this is a
+single-operator tool run locally against a token that operator already
+holds, not a hosted multi-user service -- the OAuth gate is worth
+building the day this runs anywhere other than one person's own machine
+(bwsalmon/agents#237's follow-up).
+
+**Why a local web server, not Electron/Tauri/a native app.** `go build`
+already produces one dependency-free binary per OS `cmd/ui` runs on
+(Mac, Linux today); a `net/http` server that opens the system's default
+browser gets "runs standalone on Mac and Linux" for free, in the one
+language every other substrate here already commits to (see "Why Go"
+above), with no second toolchain (Node, Rust, Xcode) for this repo to
+carry. "Set up to run on iOS/Android in the future" is what shapes
+`pkg/ui` into an HTTP+JSON API in the first place rather than
+server-rendered pages or a Go-templated app: a future mobile client --
+native, or a thin webview shell -- is just another caller of the same
+`/api/*` surface `cmd/ui`'s own frontend (`pkg/ui/static/`, plain
+HTML/CSS/JS, no build step) already uses, with nothing about the server
+to rewrite.
+
+**Freshness, not a cache.** Every mutation in the frontend
+(`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
+than assuming its own optimistic update is now true, matching the
+direction document's "it shows freshness for anything" read live from
+GitHub rather than presenting a stale value as current -- there is
+nowhere here for staleness to hide since nothing is ever cached across
+one request.
 
 ## Single writer
 
