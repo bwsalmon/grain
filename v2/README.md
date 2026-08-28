@@ -13,8 +13,19 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment)
-cmd/mcpserver/  the server as a standalone stdio binary
+                propose_task, add_review_comment). NewSandboxTools runs
+                those four locally, confined to a directory; NewSSHSandboxTools
+                (SSHRunner) runs the same four tools over SSH against a
+                real remote host instead, the transport a kontur-managed
+                sandbox VM needs
+cmd/mcpserver/  the server as a standalone stdio binary -- -sandbox-root
+                for NewSandboxTools, or -kontur-vm (plus pkg/kontur, below)
+                for NewSSHSandboxTools against a real kontur-managed VM
+pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
+                external port kontur itself persisted at "kontur vm
+                create" time, plus the pod IP that port answers on, asked
+                of containerd directly via crictl since kontur has no
+                apiserver to have recorded it anywhere itself
 pkg/agent/      the Framework interface an agent driver implements
 pkg/agent/gemini/  Framework via the Gemini API, talking to its own
                 in-process pkg/mcp/ server
@@ -287,17 +298,26 @@ resolves through that resolver -- which `gcpkey.Provider.Spec()` and
 section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
-it just has nothing to call it yet outside a test. There is no host
-adapter to hand it a real sandbox directory, so `mcp/`'s `run_command`/
-`read_file`/`edit_file`/`write_file` are confined to a local directory
-rather than the remote VM v1's versions of them SSH into (`mcp.
-ConfigureGitCredentials` now sets that local directory's git credentials
-up the same way v1's `configure_git_credentials` sets a real sandbox's
-up), and there is no GitHub client, so `ask_question`/`comment_on_issue`/
-`propose_task`/`add_review_comment` record what they were asked to do
-(`mcp.MockSink`) instead of doing it. Wiring either of those up for real,
-and calling `agent.Framework.Run` from `loop.Cycle`, is follow-on work
-once v2 has a host adapter of its own.
+it just has nothing to call it yet outside a test. `orchestrator.
+HostSandboxes` (below) is still the only thing `loop.Cycle`'s own dispatch
+path drives, and it still hands `mcp.NewSandboxTools` a local directory to
+confine itself to rather than a real remote VM. `cmd/mcpserver` itself can
+now be pointed at a real one instead — `-kontur-vm` resolves a
+bwsalmon/kontur-managed VM's SSH endpoint (`pkg/kontur`: the external port
+kontur persisted at `kontur vm create` time, plus the pod IP that port
+answers on, asked of containerd via `crictl` since kontur has no
+apiserver to have recorded it anywhere itself) and runs
+`mcp.NewSSHSandboxTools` against it, the same four tools
+`run_command`/`read_file`/`edit_file`/`write_file` but reaching a real VM
+under a real kubelet instead of a local directory (`mcp.
+ConfigureGitCredentials` still only sets up the local-directory form's git
+credentials; a kontur VM's own image is expected to arrive already
+configured, the same assumption v1's sandbox provisioning makes) —
+bwsalmon/agents#256. `orchestrator.HostSandboxes`/`RunCycle` calling that
+instead of the local stand-in, and a GitHub client so
+`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
+do something instead of recording it (`mcp.MockSink`), are still
+follow-on work.
 
 `e2e/` is that whole chain driven by hand, in a test, rather than by
 `loop.Cycle` itself: it calls `loop.Cycle` to decide what runs, then
