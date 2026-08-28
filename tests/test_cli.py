@@ -403,6 +403,30 @@ def test_controller_configure_restarts_the_git_proxy_so_it_picks_up_the_new_conf
     assert out.index("dd of=/data/config/automation.json") < out.index("systemctl restart")
 
 
+def test_controller_configure_syncs_cluster_toml_to_the_controller(capsys):
+    """The controller's own copy is what `grain-automation.service` reads
+    (`provision/controller.sh` passes `--cluster-file
+    /data/config/cluster.toml`), and until now only `host bootstrap` ever
+    wrote it -- so reconfiguring a live deployment could not change how
+    many sandboxes the orchestrator would use.
+    """
+    out = run(["--dry-run", "controller", "configure", "--repo", "acme/widgets"], capsys)
+    assert "dd of=/data/config/cluster.toml" in out
+
+
+def test_controller_configure_carries_a_raised_sandbox_count_through(capsys):
+    """`Cluster.load` falls back to its bare defaults (two sandboxes) for
+    anything the file does not say, silently -- so a count that never
+    reaches the controller is a deployment that only ever schedules two.
+    """
+    out = run(
+        ["--dry-run", "--sandboxes", "4", "controller", "configure",
+         "--repo", "acme/widgets"],
+        capsys,
+    )
+    assert "sandbox_count = 4" in out
+
+
 def test_dry_run_controller_configure_with_a_github_token_file(capsys, tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("ghp_dryruntoken\n")
