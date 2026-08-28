@@ -528,6 +528,121 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	}
 }
 
+// TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch is
+// TestCycleSkipsBlockedTasksUntilTheirDependencyCloses
+// (pkg/dispatch/dispatch_test.go) threaded through the same real
+// push/complete/merge/close pipeline TestIssueCompletesEndToEnd drives by
+// hand, rather than through simulated Observations alone: task B depends
+// on task A (model.LinkDependsOn, one of the two kinds LinkKind.Blocks()
+// names), so B must sit out every Cycle -- even with its slot idle -- for
+// as long as A is merely running or completed, and only becomes
+// dispatchable the moment A reads closed.
+func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) {
+	slots := []string{"sandbox-fd357cb3-1", "sandbox-fd357cb3-2"}
+	w := newWorld(t, slots)
+	w.newRepo("acme", "widgets")
+
+	clock := baseTime
+	fileIssue(w, "iss-a", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
+	fileIssue(w, "iss-b", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"},
+		model.Link{Kind: model.LinkDependsOn, Target: "iss-a"})
+	assertState(w, "iss-a", model.StateQueued, false)
+	assertState(w, "iss-b", model.StateQueued, false)
+
+	// B stays out of the dispatch even though its own slot sits idle
+	// right alongside A's.
+	first, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range first {
+		if d.TaskID == "iss-b" {
+			t.Fatalf("dispatched iss-b while its dependency iss-a was still open: %+v", first)
+		}
+	}
+	if len(first) != 1 || first[0].TaskID != "iss-a" {
+		t.Fatalf("expected only iss-a dispatched, got %+v", first)
+	}
+	assertState(w, "iss-a", model.StateRunning, true)
+
+	branchA := model.BranchName("iss-a")
+	clock = clock.Add(time.Minute)
+	resultA := w.runDispatch(first[0], pushScript(w.remote("acme", "widgets"), branchA, "iss-a"), clock)
+	if !pushedOK(resultA) {
+		t.Fatalf("iss-a agent run did not push cleanly: %+v", resultA.ToolCalls)
+	}
+	assertState(w, "iss-a", model.StateQueued, false)
+
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-a", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "iss-a", model.StateCompleted, false)
+
+	// Completed is not closed -- schema.go's task_blocked view only
+	// clears once the dependency's own row reads closed, so B must still
+	// sit out this cycle, even with both slots free now that A's run has
+	// finished.
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillBlocked) != 0 {
+		t.Fatalf("dispatched iss-b while iss-a was only completed, not closed: %+v", stillBlocked)
+	}
+
+	w.mergeBranchIntoDefault("acme", "widgets", branchA, "main")
+	if got := w.log1("acme", "widgets", "main", "%s"); got != "Merge "+branchA {
+		t.Fatalf("main tip after iss-a's merge = %q, want the merge commit", got)
+	}
+
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-a", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "iss-a", model.StateClosed, false)
+
+	// Only now, with iss-a closed, does iss-b become dispatchable. Restrict
+	// this cycle to the second slot -- the same narrowing
+	// TestCycleSkipsBlockedTasksUntilTheirDependencyCloses uses -- so B
+	// lands on a sandbox root that has never cloned "work" before, rather
+	// than colliding with the one A's own successful push already left
+	// behind on the first slot.
+	second, err := dispatch.Cycle(w.ctx, w.store, slots[1:], clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].TaskID != "iss-b" {
+		t.Fatalf("expected iss-b dispatched once iss-a closed, got %+v", second)
+	}
+	assertState(w, "iss-b", model.StateRunning, true)
+
+	branchB := model.BranchName("iss-b")
+	clock = clock.Add(time.Minute)
+	resultB := w.runDispatch(second[0], pushScript(w.remote("acme", "widgets"), branchB, "iss-b"), clock)
+	if !pushedOK(resultB) {
+		t.Fatalf("iss-b agent run did not push cleanly: %+v", resultB.ToolCalls)
+	}
+	assertState(w, "iss-b", model.StateQueued, false)
+
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-b", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "iss-b", model.StateCompleted, false)
+
+	w.mergeBranchIntoDefault("acme", "widgets", branchB, "main")
+	if got := w.log1("acme", "widgets", "main", "%s"); got != "Merge "+branchB {
+		t.Fatalf("main tip after iss-b's merge = %q, want the merge commit", got)
+	}
+
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-b", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "iss-b", model.StateClosed, false)
+}
+
 // TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun is
 // TestFailedRunReturnsTaskToQueueForRetry's scenario above, but with a
 // second, genuinely live run in another slot standing in for "the wrong
