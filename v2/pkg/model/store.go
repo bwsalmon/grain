@@ -2,10 +2,13 @@ package model
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,6 +30,18 @@ type Store struct {
 }
 
 func New(db *sql.DB) *Store { return &Store{db: db} }
+
+// querier is the subset of *sql.DB that *sql.Tx also provides.
+//
+// It exists so a read and the write that depends on it happen inside one
+// transaction. That is not a nicety: Store.write retries an operation
+// from the top when it loses a race, and a retry is only correct if the
+// re-read sees the winner's state.
+type querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 // ErrSchemaTooNew is returned when the database was written by a build
 // that knows a later schema. Refusing up front beats failing later with a
@@ -58,23 +73,137 @@ func (s *Store) Init(ctx context.Context) error {
 	return nil
 }
 
+// ErrConflict reports that an operation lost a race and could not be
+// completed even after retrying. A caller seeing it should tell whoever
+// asked that their change did not land.
+var ErrConflict = errors.New("conflict: the store kept changing under this operation")
+
+// maxWriteAttempts bounds write's retry loop. A handful is plenty:
+// conflicts need two writers overlapping in the same instant, and a
+// caller losing this many races in a row is contending with something
+// that is not going to stop.
+const maxWriteAttempts = 5
+
+// write runs a mutation in one transaction, stamped so that any other
+// mutation overlapping it is rejected, and starts the whole thing over if
+// this one is the loser.
+//
+// The stamp is the entire mechanism. Every mutation rewrites the single
+// row of grain_write, so two overlapping transactions disagree about what
+// that cell should say and the database reports a serialization failure
+// to whichever commits second -- rolling its work back whole. There is no
+// per-row version to compare and no lock to hold, so there is nothing to
+// leak: a process that dies mid-write leaves an aborted transaction and
+// nothing else.
+//
+// **The stamp must be unique per operation, never a counter.** Dolt
+// merges concurrent writes cell by cell and only reports a conflict when
+// the two disagree, so two writers that both read version N and both
+// write N+1 agree, merge silently, and both commit -- with the child-row
+// rewrites of each silently unioned. A counter is the obvious
+// implementation and it is the broken one;
+// dolt/store_test.go's TestACounterStampWouldNotConflict pins that down
+// so nobody optimises this into a counter later.
+//
+// fn may run more than once, on a fresh transaction each time. It must
+// therefore read what it needs through the querier it is handed rather
+// than relying on anything read before write was called -- that is what
+// makes the retry see the winner's state instead of rewriting over it.
+func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
+	var lastErr error
+	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
+		err := s.writeOnce(ctx, fn)
+		if err == nil {
+			return nil
+		}
+		if !isSerializationFailure(err) {
+			return err
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("%w after %d attempts: %v", ErrConflict, maxWriteAttempts, lastErr)
+}
+
+func (s *Store) writeOnce(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := stamp(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	// The commit is where a lost race is reported, not the statement, so
+	// this return is the load-bearing one.
+	return tx.Commit()
+}
+
+// stamp writes a value unique to this attempt into grain_write's single
+// row. REPLACE rather than UPDATE so the first write to a fresh database
+// creates the row instead of silently affecting nothing -- which would
+// leave that operation unguarded.
+func stamp(ctx context.Context, tx *sql.Tx) error {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return fmt.Errorf("generating a write stamp: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"REPLACE INTO `grain_write` (`id`, `token`) VALUES (1, ?)",
+		hex.EncodeToString(token[:])); err != nil {
+		return fmt.Errorf("stamping the write: %w", err)
+	}
+	return nil
+}
+
+// isSerializationFailure reports whether the database is telling us this
+// transaction lost a race and should be tried again.
+//
+// Dolt says "Error 1213: serialization failure: this transaction
+// conflicts with a committed transaction from another client, try
+// restarting transaction" -- measured, and pinned by
+// dolt/store_test.go's TestDoltReportsASerializationFailure. MySQL uses
+// 1213 for a deadlock and 1205 for a lock-wait timeout, which mean the
+// same thing to a caller.
+//
+// Matching message text is not how anyone would choose to do this; the
+// alternative is importing a driver to type-assert its error, and this
+// package imports no driver on purpose (pkg/model/dolt's own doc
+// comment). A miss costs a pointless surfaced error rather than a wrong
+// answer, and the pinning test is there to catch a reword.
+func isSerializationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"serialization failure",
+		"try restarting transaction",
+		"Deadlock found",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // PutTask inserts or replaces a task and everything hanging off it, in
 // one transaction.
 //
 // Child rows are deleted and re-inserted rather than diffed: the sets are
 // tiny, and "the row set equals the object" is a property worth having
 // outright rather than maintaining.
-func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
+func (s *Store) PutTask(ctx context.Context, t Task) error {
+	return s.write(ctx, func(tx *sql.Tx) error { return putTask(ctx, tx, t) })
+}
 
+// putTask is PutTask's body, against whatever transaction it is running
+// in -- so UpdateTask can read and write in the same one.
+func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
 	oActor, oBehalf := t.Origin.Attribution.Actor, t.Origin.Attribution.OnBehalfOf
 	var aActorKind, aActorID, aBehalfKind, aBehalfID any
 	if t.Approval != nil {
@@ -88,7 +217,7 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
 		targetOwner, targetName = t.Target.Owner, t.Target.Name
 	}
 
-	if _, err = tx.ExecContext(ctx, `REPLACE INTO `+"`task`"+` (
+	if _, err := tx.ExecContext(ctx, `REPLACE INTO `+"`task`"+` (
   `+"`id`, `intent`, `title`, `body`"+`,
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`"+`,
@@ -105,40 +234,40 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
 	}
 
 	for _, table := range []string{"task_read", "task_grant", "task_link", "task_tag"} {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM `"+table+"` WHERE `task_id` = ?", t.ID); err != nil {
 			return err
 		}
 	}
 	for _, r := range t.Reads {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO `task_read` (`task_id`, `owner`, `name`) VALUES (?,?,?)",
 			t.ID, r.Owner, r.Name); err != nil {
 			return err
 		}
 	}
 	for _, g := range t.Grants {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO `task_grant` (`task_id`, `capability`, `via`, `folder`) VALUES (?,?,?,?)",
 			t.ID, g.Capability, string(g.Via), folderOf(g.Folder)); err != nil {
 			return err
 		}
 	}
 	for _, l := range t.Links {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO `task_link` (`task_id`, `kind`, `target`, `blocks`) VALUES (?,?,?,?)",
 			t.ID, string(l.Kind), l.Target, l.Kind.Blocks()); err != nil {
 			return err
 		}
 	}
 	for _, tag := range t.Tags {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO `task_tag` (`task_id`, `tag`) VALUES (?,?)",
 			t.ID, tag); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // NewTaskID allocates a task identity from the store.
@@ -153,8 +282,16 @@ func (s *Store) PutTask(ctx context.Context, t Task) (err error) {
 // where a GitHub-derived id put a repo path inside the branch name.
 // Task.ID stays an opaque string, so nothing but this function is
 // entitled to assume the shape.
-func (s *Store) NewTaskID(ctx context.Context) (string, error) {
-	res, err := s.db.ExecContext(ctx,
+func (s *Store) NewTaskID(ctx context.Context) (id string, err error) {
+	err = s.write(ctx, func(tx *sql.Tx) error {
+		id, err = newTaskID(ctx, tx)
+		return err
+	})
+	return id, err
+}
+
+func newTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
+	res, err := tx.ExecContext(ctx,
 		"INSERT INTO `task_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
 	if err != nil {
 		return "", fmt.Errorf("allocating a task id: %w", err)
@@ -170,9 +307,17 @@ func (s *Store) NewTaskID(ctx context.Context) (string, error) {
 // id the store assigned it -- which a caller recording an outstanding
 // question needs, since Observation.PendingQuestionCommentID names one of
 // these.
-func (s *Store) AddComment(ctx context.Context, c Comment) (int64, error) {
+func (s *Store) AddComment(ctx context.Context, c Comment) (id int64, err error) {
+	err = s.write(ctx, func(tx *sql.Tx) error {
+		id, err = addComment(ctx, tx, c)
+		return err
+	})
+	return id, err
+}
+
+func addComment(ctx context.Context, tx *sql.Tx, c Comment) (int64, error) {
 	behalf := c.Author.OnBehalfOf
-	res, err := s.db.ExecContext(ctx, "INSERT INTO `task_comment` ("+
+	res, err := tx.ExecContext(ctx, "INSERT INTO `task_comment` ("+
 		"`task_id`, `author_kind`, `author_id`, `author_behalf_kind`, `author_behalf_id`, "+
 		"`body`, `created_at`) VALUES (?,?,?,?,?,?,?)",
 		c.TaskID, string(c.Author.Actor.Kind), c.Author.Actor.ID,
@@ -222,7 +367,11 @@ func (s *Store) Comments(ctx context.Context, taskID string) ([]Comment, error) 
 
 // GetTask returns a task, or nil if there is none with that ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
-	t, err := scanTask(s.db.QueryRowContext(ctx,
+	return getTask(ctx, s.db, id)
+}
+
+func getTask(ctx context.Context, q querier, id string) (*Task, error) {
+	t, err := scanTask(q.QueryRowContext(ctx,
 		"SELECT "+taskColumns+" FROM `task` WHERE `id` = ?", id).Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -230,7 +379,7 @@ func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 		}
 		return nil, err
 	}
-	if err := s.hydrate(ctx, &t); err != nil {
+	if err := hydrate(ctx, q, &t); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -327,7 +476,7 @@ func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
 	rows.Close()
 
 	for i := range out {
-		if err := s.hydrate(ctx, &out[i]); err != nil {
+		if err := hydrate(ctx, s.db, &out[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -351,35 +500,8 @@ func (s *Store) States(ctx context.Context) (map[string]State, error) {
 	return out, err
 }
 
-// ObserveField reads a task's current observation (or starts a fresh one
-// if it has none), applies set, and writes it back with ObservedAt
-// stamped.
-//
-// Observe REPLACEs the whole row rather than patching one column, so
-// every caller changing one field without erasing the others has to
-// read-modify-write. That read-modify-write lives here rather than in
-// each caller, because there is now more than one: the orchestrator
-// closing a task out, and a person closing one from the CLI or the UI.
-func (s *Store) ObserveField(ctx context.Context, taskID string, now time.Time,
-	set func(*Observation)) error {
-
-	obs, err := s.GetObservation(ctx, taskID)
-	if err != nil {
-		return fmt.Errorf("reading observation for %s: %w", taskID, err)
-	}
-	if obs == nil {
-		obs = &Observation{TaskID: taskID}
-	}
-	set(obs)
-	obs.ObservedAt = &now
-	if err := s.Observe(ctx, *obs); err != nil {
-		return fmt.Errorf("observing %s: %w", taskID, err)
-	}
-	return nil
-}
-
-func (s *Store) hydrate(ctx context.Context, t *Task) error {
-	if err := each(ctx, s.db,
+func hydrate(ctx context.Context, q querier, t *Task) error {
+	if err := each(ctx, q,
 		"SELECT `owner`,`name` FROM `task_read` WHERE `task_id` = ? ORDER BY `owner`,`name`",
 		t.ID, func(rows *sql.Rows) error {
 			var r RepoRef
@@ -391,12 +513,12 @@ func (s *Store) hydrate(ctx context.Context, t *Task) error {
 		}); err != nil {
 		return err
 	}
-	grants, err := s.grantsOf(ctx, t.ID)
+	grants, err := grantsOf(ctx, q, t.ID)
 	if err != nil {
 		return err
 	}
 	t.Grants = grants
-	if err := each(ctx, s.db,
+	if err := each(ctx, q,
 		"SELECT `kind`,`target` FROM `task_link` WHERE `task_id` = ? ORDER BY `kind`,`target`",
 		t.ID, func(rows *sql.Rows) error {
 			var l Link
@@ -410,7 +532,7 @@ func (s *Store) hydrate(ctx context.Context, t *Task) error {
 		}); err != nil {
 		return err
 	}
-	return each(ctx, s.db,
+	return each(ctx, q,
 		"SELECT `tag` FROM `task_tag` WHERE `task_id` = ? ORDER BY `tag`",
 		t.ID, func(rows *sql.Rows) error {
 			var tag string
@@ -424,8 +546,71 @@ func (s *Store) hydrate(ctx context.Context, t *Task) error {
 
 // Approve records who approved a task — the whole difference between
 // proposed and queued, and what withdrawing would cancel.
+// UpdateTask reads a task, applies mutate, and writes it back -- all in
+// one stamped transaction, retried from the top if another writer wins.
+//
+// This is the way to change a task. mutate may run more than once, on a
+// task freshly read inside each attempt, so it must be a function of the
+// task it is handed rather than of anything captured earlier -- that is
+// what makes the retry build on the winner's state rather than rewrite
+// over it.
+func (s *Store) UpdateTask(ctx context.Context, id string, mutate func(*Task) error) error {
+	var missing bool
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		missing = false
+		task, err := getTask(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if task == nil {
+			missing = true
+			return nil
+		}
+		if err := mutate(task); err != nil {
+			return err
+		}
+		return putTask(ctx, tx, *task)
+	})
+	if err != nil {
+		return err
+	}
+	if missing {
+		return fmt.Errorf("updating task %s: no such task", id)
+	}
+	return nil
+}
+
+// ObserveField reads a task's observation (or starts a fresh one),
+// applies set, and writes it back with ObservedAt stamped.
+//
+// Observe REPLACEs the whole row rather than patching one column, so a
+// caller changing one field has to read the row first or erase the
+// others. That read-modify-write lives here rather than in every caller,
+// inside the same transaction as the write, for the reason UpdateTask
+// gives.
+func (s *Store) ObserveField(ctx context.Context, taskID string, now time.Time,
+	set func(*Observation)) error {
+
+	return s.write(ctx, func(tx *sql.Tx) error {
+		obs, err := getObservation(ctx, tx, taskID)
+		if err != nil {
+			return fmt.Errorf("reading observation for %s: %w", taskID, err)
+		}
+		if obs == nil {
+			obs = &Observation{TaskID: taskID}
+		}
+		set(obs)
+		obs.ObservedAt = &now
+		return observe(ctx, tx, *obs)
+	})
+}
+
 func (s *Store) Approve(ctx context.Context, taskID string, a Attribution) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.write(ctx, func(tx *sql.Tx) error { return approve(ctx, tx, taskID, a) })
+}
+
+func approve(ctx context.Context, tx *sql.Tx, taskID string, a Attribution) error {
+	_, err := tx.ExecContext(ctx,
 		"UPDATE `task` SET `approval_actor_kind` = ?, `approval_actor_id` = ?, "+
 			"`approval_behalf_kind` = ?, `approval_behalf_id` = ? WHERE `id` = ?",
 		string(a.Actor.Kind), a.Actor.ID, kindOf(a.OnBehalfOf), idOf(a.OnBehalfOf), taskID)
@@ -434,7 +619,13 @@ func (s *Store) Approve(ctx context.Context, taskID string, a Attribution) error
 
 // Observe records what grain has seen about a task.
 func (s *Store) Observe(ctx context.Context, o Observation) error {
-	_, err := s.db.ExecContext(ctx,
+	return s.write(ctx, func(tx *sql.Tx) error { return observe(ctx, tx, o) })
+}
+
+// observe is Observe's body, against whatever transaction it is running
+// in -- so ObserveField can read and write in the same one.
+func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
+	_, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
 			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`) "+
 			"VALUES (?,?,?,?,?,?,?)",
@@ -445,7 +636,11 @@ func (s *Store) Observe(ctx context.Context, o Observation) error {
 }
 
 func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation, error) {
-	row := s.db.QueryRowContext(ctx,
+	return getObservation(ctx, s.db, taskID)
+}
+
+func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
+	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
 			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
@@ -465,17 +660,12 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 }
 
 // StartRun records a run and its leases together.
-func (s *Store) StartRun(ctx context.Context, r Run) (err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	if _, err = tx.ExecContext(ctx,
+func (s *Store) StartRun(ctx context.Context, r Run) error {
+	return s.write(ctx, func(tx *sql.Tx) error { return startRun(ctx, tx, r) })
+}
+
+func startRun(ctx context.Context, tx *sql.Tx, r Run) error {
+	if _, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_run` (`id`,`task_id`,`slot`,`sandbox`,`unit`,`attempt`,"+
 			"`started_at`,`finished_at`,`outcome`) VALUES (?,?,?,?,?,?,?,?,?)",
 		r.ID, r.TaskID, r.Slot, r.Sandbox, nullable(r.Unit), r.Attempt,
@@ -483,7 +673,7 @@ func (s *Store) StartRun(ctx context.Context, r Run) (err error) {
 		return err
 	}
 	for _, l := range r.Leases {
-		if _, err = tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			"REPLACE INTO `lease` (`run_id`,`capability`,`resource`,`minted_by`,"+
 				"`issued_at`,`expires_at`) VALUES (?,?,?,?,?,?)",
 			r.ID, l.Capability, l.Resource, l.MintedBy.Name,
@@ -491,14 +681,16 @@ func (s *Store) StartRun(ctx context.Context, r Run) (err error) {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outcome string) error {
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE `task_run` SET `finished_at` = ?, `outcome` = ? WHERE `id` = ?",
-		at.UTC(), outcome, runID)
-	return err
+	return s.write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `finished_at` = ?, `outcome` = ? WHERE `id` = ?",
+			at.UTC(), outcome, runID)
+		return err
+	})
 }
 
 // DropLease forgets a lease once its resource is actually revoked.
@@ -506,10 +698,12 @@ func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outco
 // which is what lets release and the expiry reaper both reach the same
 // lease without coordinating.
 func (s *Store) DropLease(ctx context.Context, runID, capability, resource string) error {
-	_, err := s.db.ExecContext(ctx,
-		"DELETE FROM `lease` WHERE `run_id` = ? AND `capability` = ? AND `resource` = ?",
-		runID, capability, resource)
-	return err
+	return s.write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"DELETE FROM `lease` WHERE `run_id` = ? AND `capability` = ? AND `resource` = ?",
+			runID, capability, resource)
+		return err
+	})
 }
 
 // Attempts is how many times a task has been run — answerable because
@@ -661,7 +855,7 @@ func (s *Store) GitCredentialOverride(ctx context.Context, sandbox string) (name
 	if err != nil || !live {
 		return "", false, err
 	}
-	grants, err := s.grantsOf(ctx, taskID)
+	grants, err := grantsOf(ctx, s.db, taskID)
 	if err != nil {
 		return "", false, fmt.Errorf("reading grants of task %s: %w", taskID, err)
 	}
@@ -689,9 +883,9 @@ func (s *Store) liveTaskID(ctx context.Context, sandbox string) (taskID string, 
 // grantsOf is a task's Grants, read straight off task_grant -- shared by
 // hydrate (a full Task) and GitCredentialOverride (which needs only
 // these, and without ever paying for the rest of the task).
-func (s *Store) grantsOf(ctx context.Context, taskID string) ([]Grant, error) {
+func grantsOf(ctx context.Context, q querier, taskID string) ([]Grant, error) {
 	var grants []Grant
-	err := each(ctx, s.db,
+	err := each(ctx, q,
 		"SELECT `capability`,`via`,`folder` FROM `task_grant` WHERE `task_id` = ? ORDER BY `capability`",
 		taskID, func(rows *sql.Rows) error {
 			var g Grant
@@ -755,7 +949,7 @@ func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 
 // --- helpers ---------------------------------------------------------
 
-func each(ctx context.Context, db *sql.DB, query string, args any,
+func each(ctx context.Context, q querier, query string, args any,
 	scan func(*sql.Rows) error) error {
 	var list []any
 	switch a := args.(type) {
@@ -765,7 +959,7 @@ func each(ctx context.Context, db *sql.DB, query string, args any,
 	default:
 		list = []any{a}
 	}
-	rows, err := db.QueryContext(ctx, query, list...)
+	rows, err := q.QueryContext(ctx, query, list...)
 	if err != nil {
 		return err
 	}

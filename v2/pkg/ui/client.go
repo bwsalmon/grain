@@ -225,23 +225,12 @@ type UpdateTaskRequest struct {
 // needs no read-modify-write of a body with directives embedded in it:
 // each field is a column, so leaving one alone means not setting it.
 func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskRequest) (Task, error) {
-	task, err := c.Store.GetTask(ctx, id)
-	if err != nil {
-		return Task{}, err
-	}
-	if task == nil {
-		return Task{}, &NotFoundError{ID: id}
-	}
-
-	if req.Title != nil {
-		if strings.TrimSpace(*req.Title) == "" {
-			return Task{}, validationErrorf("title cannot be empty")
-		}
-		task.Title = *req.Title
-	}
-	if req.Description != nil {
-		task.Body = *req.Description
-	}
+	// Validated once, up front. Only the applying half runs inside the
+	// store's closure, which may run more than once if another writer
+	// wins: validating in there would repeat work whose answer cannot
+	// change, and would make the error a caller sees depend on how many
+	// times the retry happened to run.
+	var target *model.RepoRef
 	if req.Repo != nil {
 		if strings.TrimSpace(*req.Repo) == "" {
 			return Task{}, validationErrorf("repo cannot be empty: a task with no target cannot be dispatched")
@@ -250,19 +239,47 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		if err != nil {
 			return Task{}, &ValidationError{err: err}
 		}
-		task.Target = &parsed
+		target = &parsed
 	}
-	if req.Base != nil {
-		task.Base = *req.Base
-	}
-	if req.AutoMerge != nil {
-		task.AutoMerge = *req.AutoMerge
+	if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
+		return Task{}, validationErrorf("title cannot be empty")
 	}
 
-	if err := c.Store.PutTask(ctx, *task); err != nil {
+	if err := c.mutate(ctx, id, func(task *model.Task) error {
+		if req.Title != nil {
+			task.Title = *req.Title
+		}
+		if req.Description != nil {
+			task.Body = *req.Description
+		}
+		if target != nil {
+			task.Target = target
+		}
+		if req.Base != nil {
+			task.Base = *req.Base
+		}
+		if req.AutoMerge != nil {
+			task.AutoMerge = *req.AutoMerge
+		}
+		return nil
+	}); err != nil {
 		return Task{}, err
 	}
 	return c.Task(ctx, id)
+}
+
+// mutate wraps Store.UpdateTask so a missing task reports as this
+// package's own NotFoundError -- which the server turns into a 404 --
+// rather than as the store's own "no such task" string.
+func (c *Client) mutate(ctx context.Context, id string, apply func(*model.Task) error) error {
+	task, err := c.Store.GetTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return &NotFoundError{ID: id}
+	}
+	return c.Store.UpdateTask(ctx, id, apply)
 }
 
 // SetCapability attaches or detaches one capability grant. Detaching one
@@ -272,25 +289,22 @@ func (c *Client) SetCapability(ctx context.Context, id, capabilityID string, att
 	if _, ok := c.capabilityByID(capabilityID); !ok {
 		return validationErrorf("unknown capability %s", capabilityID)
 	}
-	task, err := c.Store.GetTask(ctx, id)
-	if err != nil {
-		return err
-	}
-	if task == nil {
-		return &NotFoundError{ID: id}
-	}
-
-	kept := make([]model.Grant, 0, len(task.Grants)+1)
-	for _, g := range task.Grants {
-		if g.Capability != capabilityID {
-			kept = append(kept, g)
+	// Rebuilding the grant set inside the closure is what lets two people
+	// attach two different capabilities without one losing: a retry runs
+	// again against the set the winner already wrote.
+	return c.mutate(ctx, id, func(task *model.Task) error {
+		kept := make([]model.Grant, 0, len(task.Grants)+1)
+		for _, g := range task.Grants {
+			if g.Capability != capabilityID {
+				kept = append(kept, g)
+			}
 		}
-	}
-	if attach {
-		kept = append(kept, model.Grant{Capability: capabilityID, Via: model.GrantByLabel})
-	}
-	task.Grants = kept
-	return c.Store.PutTask(ctx, *task)
+		if attach {
+			kept = append(kept, model.Grant{Capability: capabilityID, Via: model.GrantByLabel})
+		}
+		task.Grants = kept
+		return nil
+	})
 }
 
 // Approve records approval on a proposed task, which is what makes it
