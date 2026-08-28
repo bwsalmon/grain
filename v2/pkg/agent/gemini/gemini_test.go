@@ -8,7 +8,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/bwsalmon/grain/v2/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent"
 )
 
 // fakeGenerator scripts a sequence of responses, one per call to

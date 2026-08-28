@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 type stubScopeLookup struct {

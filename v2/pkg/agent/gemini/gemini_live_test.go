@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent"
 )
 
 // TestLiveRunEndToEnd exercises the real Gemini API, the same way v1's

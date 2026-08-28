@@ -15,7 +15,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/bwsalmon/grain/v2/mcp"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 func main() {

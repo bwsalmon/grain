@@ -3,7 +3,7 @@ package gemini
 import (
 	"google.golang.org/genai"
 
-	"github.com/bwsalmon/grain/v2/mcp"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 // toFunctionDeclarations translates an MCP tools/list response into the

@@ -17,8 +17,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/bwsalmon/grain/v2/agent"
-	"github.com/bwsalmon/grain/v2/mcp"
+	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 const (

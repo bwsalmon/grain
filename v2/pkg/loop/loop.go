@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // Dispatch is one decision a cycle made: task TaskID was started in slot

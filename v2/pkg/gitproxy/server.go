@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // NewHandler wraps proxy as an http.Handler: split the path and query,

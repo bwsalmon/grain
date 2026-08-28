@@ -30,7 +30,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // KeyPath is where a minted key lands in the sandbox -- fixed, not

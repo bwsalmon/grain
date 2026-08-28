@@ -4,33 +4,35 @@ The rewrite, in Go. `grain/` is v1 and still the thing that runs; nothing
 here is wired into it.
 
 ```
-model/          the task model of ../docs/data-model.md
-model/dolt/     opening an embedded Dolt database — the only package that
+pkg/model/      the task model of ../docs/data-model.md
+pkg/model/dolt/ opening an embedded Dolt database — the only package that
                 imports Dolt
-loop/           the state transition loop: what one cycle decides to do
+pkg/loop/       the state transition loop: what one cycle decides to do
                 with the store, with no side effect beyond that decision
-mcp/            a port of grain/automation/mcp_server.py: a newline-
+pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
                 propose_task, add_review_comment)
-mcp/cmd/mcpserver/  the server as a standalone stdio binary
-agent/          the Framework interface an agent driver implements
-agent/gemini/   Framework via the Gemini API, talking to its own in-process
-                mcp/ server
-capability/geminikey/  a MINT model.CapabilityProvider: mints, places and
-                revokes a Gemini API key, direct against the API Keys API
-gcpkey/         the gcp-key capability: a real MINT model.CapabilityProvider
-                that mints/revokes a per-task GCP service-account key
-                against the IAM API directly (google.golang.org/api/iam/v1,
-                no gcloud subprocess), plus Reap, a standalone safety net
-                that deletes anything GCP itself reports as older than 24h
-                regardless of whether a Lease survived to say so
-secrets/        a model.CredentialResolver reading a directory shaped like
+cmd/mcpserver/  the server as a standalone stdio binary
+pkg/agent/      the Framework interface an agent driver implements
+pkg/agent/gemini/  Framework via the Gemini API, talking to its own
+                in-process pkg/mcp/ server
+pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
+                and revokes a Gemini API key, direct against the API Keys
+                API
+pkg/capability/gcpkey/  the gcp-key capability: a real MINT
+                model.CapabilityProvider that mints/revokes a per-task GCP
+                service-account key against the IAM API directly
+                (google.golang.org/api/iam/v1, no gcloud subprocess), plus
+                Reap, a standalone safety net that deletes anything GCP
+                itself reports as older than 24h regardless of whether a
+                Lease survived to say so
+pkg/secrets/    a model.CredentialResolver reading a directory shaped like
                 a Kubernetes Secret volume mount (<dir>/<secret>/<key>) --
                 the production implementation CapabilityContext.Credentials
                 had none of until now
-gitproxy/       a port of grain/proxy: the only path from a sandbox to
+pkg/gitproxy/   a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
                 instead of a hand-edited allowlist file; credential
@@ -46,6 +48,13 @@ e2e/            issues filed the way a user would, carried through
                 See "What this does not have yet" below for where it
                 stops.
 ```
+
+`pkg/` holds every package here that a `cmd/` binary or another package
+imports; `cmd/` holds `main` packages only, per the standard Go project
+layout. `capability/` is the folder every model.CapabilityProvider lives
+under, `gcpkey` included — before this rename it sat at the top level
+instead, which is exactly the inconsistency bwsalmon/agents#248 asked to
+fix.
 
 ```sh
 cd v2 && go test ./...
@@ -127,7 +136,7 @@ git proxy authorizes straight off `Task.Target`/`Reads` instead, which
 serves the same fail-closed purpose without depending on that field being
 populated first.
 
-The capability provider contract exists now too (`model/capability.go`),
+The capability provider contract exists now too (`pkg/model/capability.go`),
 though nothing here ported it — `docs/data-model.md`'s design was never
 built in v1 either. `CapabilityProvider`'s four methods — `Resolve`,
 `Materialize`, `PromptSection`, `Revoke` — plus `Placement`, the
@@ -154,11 +163,11 @@ correct, per "Two things the port corrected" above. `DeleteExpired` is
 the "clean up after 24 hours if leaked" safety net, mirroring
 `delete_expired_keys`.
 
-`gcpkey.Provider` (`gcpkey/`) is now a real `MINT` provider too —
+`gcpkey.Provider` (`pkg/capability/gcpkey/`) is now a real `MINT` provider too —
 `gcp-key`, ported from `grain/automation/gcp_keys.py` but talking to the
 IAM API directly rather than shelling to `gcloud`, and authenticated
 through `CapabilityContext.Credentials` rather than a Runner, so it needed
-no controller of its own to build. `model.Reaper` (`model/capability.go`)
+no controller of its own to build. `model.Reaper` (`pkg/model/capability.go`)
 is new alongside it: an optional interface for a provider whose minted
 resource can outlive the `Lease` that recorded it, matching
 `docs/data-model.md`'s description of `gcp_keys.py`'s own
@@ -182,7 +191,7 @@ live deployment, applies a `Placement` to a sandbox, or calls
 still waiting on above.
 
 `CapabilityContext.Credentials` (`model.CredentialResolver`) had no
-production implementation until `secrets/`: a `Store` reading a
+production implementation until `pkg/secrets/`: a `Store` reading a
 directory shaped like a Kubernetes Secret volume mount, so
 `gcp-key`'s minter credential (and any future capability's) resolves
 against real material rather than only the fakes `gcpkey_test.go` and
@@ -220,6 +229,6 @@ close the gap above, since nothing there is wired to run on its own yet.
 
 Embedded Dolt permits one writer, which suits a cron-driven controller
 and does not suit a controller plus a UI plus a human at a CLI. When that
-becomes real the answer is a Dolt SQL server, `model/dolt` grows a second
+becomes real the answer is a Dolt SQL server, `pkg/model/dolt` grows a second
 constructor, and nothing above it changes — which is why `Store` takes a
 `*sql.DB` and imports no driver.

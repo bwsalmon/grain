@@ -39,12 +39,12 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/bwsalmon/grain/v2/agent"
-	"github.com/bwsalmon/grain/v2/agent/gemini"
-	"github.com/bwsalmon/grain/v2/gitproxy"
-	"github.com/bwsalmon/grain/v2/mcp"
-	"github.com/bwsalmon/grain/v2/model"
-	"github.com/bwsalmon/grain/v2/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
+	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 // scriptedGenerator replays one response per call -- gemini_test.go's own

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/loop"
-	"github.com/bwsalmon/grain/v2/model"
+	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // fileIssue puts a task the way a real user or automation filing an

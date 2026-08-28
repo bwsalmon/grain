@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/loop"
-	"github.com/bwsalmon/grain/v2/model"
-	"github.com/bwsalmon/grain/v2/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/loop"
+	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 var (
