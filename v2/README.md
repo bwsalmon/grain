@@ -18,6 +18,12 @@ mcp/cmd/mcpserver/  the server as a standalone stdio binary
 agent/          the Framework interface an agent driver implements
 agent/gemini/   Framework via the Gemini API, talking to its own in-process
                 mcp/ server
+gcpkey/         the gcp-key capability: a real MINT model.CapabilityProvider
+                that mints/revokes a per-task GCP service-account key
+                against the IAM API directly (google.golang.org/api/iam/v1,
+                no gcloud subprocess), plus Reap, a standalone safety net
+                that deletes anything GCP itself reports as older than 24h
+                regardless of whether a Lease survived to say so
 gitproxy/       a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -129,11 +135,21 @@ correct once a Runner exists. `ResolveGrants`, `MaterializeGrants` and
 `PromptSections` walk a task's `Grant`s against a `CapabilityRegistry`
 in registration order, honouring `docs/data-model.md`'s rule that a
 half-materialized capability is never described to the agent as
-present. What it does not yet have: a real `MINT` provider
-(`gemini-key`, `gcp-key`) — minting needs standing credentials and a
-controller v2 has neither of — or an executor that actually applies a
-`Placement` to a sandbox, which needs the same host adapter
-`loop.Cycle` is still waiting on above.
+present. `gcpkey.Provider` (`gcpkey/`) is now a real `MINT` provider —
+`gcp-key`, ported from `grain/automation/gcp_keys.py` but talking to the
+IAM API directly rather than shelling to `gcloud`, and authenticated
+through `CapabilityContext.Credentials` rather than a Runner, so it needed
+no controller of its own to build. `model.Reaper` (`model/capability.go`)
+is new alongside it: an optional interface for a provider whose minted
+resource can outlive the `Lease` that recorded it, matching
+`docs/data-model.md`'s description of `gcp_keys.py`'s own
+`delete_expired_keys` as a backstop independent of any task record —
+`gcpkey.Provider.Reap` implements it by asking GCP's own key listing for
+the answer, not grain's store. Neither `Provider.Revoke` nor `Reap` is
+called from anywhere yet: there is still no executor to apply a `Placement`
+to a sandbox or call `Revoke` when a run ends, and no periodic sweep calls
+`Reap` — both need the same host adapter `loop.Cycle` is still waiting on
+above. `gemini-key` remains unbuilt.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
 it just has nothing to call it yet outside a test. There is no host
