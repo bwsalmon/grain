@@ -97,6 +97,12 @@ pkg/ui/         a JSON API, and the static frontend it serves, for
                 store or an orchestrator
 cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
                 listener, opening the system's default browser
+cmd/grain/      a CLI over pkg/ui.Client -- the same model code cmd/ui's
+                Server wraps in JSON and HTTP, driven from a terminal
+                instead: list/get/create/update a task, approve, attach
+                or detach a capability, comment, close ("delete" -- a
+                GitHub issue has no such endpoint through an ordinary
+                token) or reopen one (bwsalmon/agents#271)
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package

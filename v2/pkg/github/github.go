@@ -362,6 +362,7 @@ type Client interface {
 	RemoveLabel(owner, repo string, number int, label string) error
 	CloseIssue(owner, repo string, number int) error
 	ReopenIssue(owner, repo string, number int) error
+	UpdateIssue(owner, repo string, number int, title, body *string) error
 	BranchExists(owner, repo, branch string) (bool, error)
 	GetBranchHead(owner, repo, branch string) (*BranchHead, error)
 	CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error)
@@ -597,6 +598,34 @@ func (c *RESTClient) CloseIssue(owner, repo string, number int) error {
 // "done" work may come back with a follow-up comment instead of
 // relabelling it, and this is the other half of CloseIssue, just the
 // other state value.
+// UpdateIssue edits an issue's title and/or body in place, leaving
+// anything else about it (labels, state) untouched -- a caller wanting
+// to close or relabel too makes those calls separately. Both nil is the
+// caller's own mistake to avoid; this method sends whichever of the two
+// it is given, since GitHub's PATCH endpoint leaves an omitted field as
+// it was.
+func (c *RESTClient) UpdateIssue(owner, repo string, number int, title, body *string) error {
+	fields := map[string]string{}
+	if title != nil {
+		fields["title"] = *title
+	}
+	if body != nil {
+		fields["body"] = *body
+	}
+	data, _ := json.Marshal(fields)
+	resp, err := c.Transport.Request(
+		"PATCH", fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, number),
+		c.headers(owner, repo, true), data,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
 func (c *RESTClient) ReopenIssue(owner, repo string, number int) error {
 	return c.setIssueState(owner, repo, number, "open")
 }
@@ -1028,6 +1057,11 @@ func (d DryRunClient) CloseIssue(owner, repo string, number int) error {
 
 func (d DryRunClient) ReopenIssue(owner, repo string, number int) error {
 	fmt.Printf("+ reopen issue %s/%s#%d\n", owner, repo, number)
+	return nil
+}
+
+func (d DryRunClient) UpdateIssue(owner, repo string, number int, title, body *string) error {
+	fmt.Printf("+ update issue %s/%s#%d (title set: %t, body set: %t)\n", owner, repo, number, title != nil, body != nil)
 	return nil
 }
 

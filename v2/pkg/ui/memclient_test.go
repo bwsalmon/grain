@@ -88,6 +88,20 @@ func (m *memClient) ReopenIssue(owner, repo string, number int) error {
 	return nil
 }
 
+func (m *memClient) UpdateIssue(owner, repo string, number int, title, body *string) error {
+	iss, ok := m.issues[number]
+	if !ok {
+		return &github.Error{Status: 404}
+	}
+	if title != nil {
+		iss.Title = *title
+	}
+	if body != nil {
+		iss.Body = *body
+	}
+	return nil
+}
+
 func (m *memClient) CreateIssue(owner, repo, title, body string, labels []string) (github.Issue, error) {
 	number := m.nextNumber
 	m.nextNumber++

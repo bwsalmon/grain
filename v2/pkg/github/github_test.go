@@ -244,6 +244,38 @@ func TestReopenIssuePatchesTheIssueOpen(t *testing.T) {
 	}
 }
 
+func TestUpdateIssuePatchesOnlyTheFieldsGiven(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte("{}")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	title := "new title"
+	if err := client.UpdateIssue("o", "r", 1, &title, nil); err != nil {
+		t.Fatal(err)
+	}
+	call := transport.Calls[0]
+	if call.Method != "PATCH" || call.Path != "/repos/o/r/issues/1" {
+		t.Fatalf("got %+v", call)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(call.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["title"] != "new title" {
+		t.Fatalf("got %+v", body)
+	}
+	if _, ok := body["body"]; ok {
+		t.Fatalf("body field should be omitted when nil, got %+v", body)
+	}
+}
+
+func TestUpdateIssueRaisesOnANon200(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 500, Body: []byte("boom")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	body := "new body"
+	if err := client.UpdateIssue("o", "r", 1, nil, &body); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
 func TestAnonymousClientSendsNoAuthorizationHeader(t *testing.T) {
 	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte("[]")})
 	client := NewClient(transport, nil)
