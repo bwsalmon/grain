@@ -64,7 +64,19 @@ func runOne(ctx context.Context, deps Deps, d loop.Dispatch, now time.Time) erro
 		return err
 	}
 
-	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), *task, d, tools, now)
+	var sandboxRoot string
+	if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
+		rooted, ok := deps.Sandboxes.(rootedSandboxes)
+		if !ok {
+			return fmt.Errorf("orchestrator: task %s requests capabilities but slot %s's sandbox has no local directory to place them in", task.ID, d.Slot)
+		}
+		sandboxRoot, err = rooted.RootFor(d.Slot)
+		if err != nil {
+			return err
+		}
+	}
+
+	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
 	if err != nil {
 		return err
 	}
