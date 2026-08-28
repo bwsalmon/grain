@@ -10,11 +10,13 @@ import (
 // --- test capabilities -------------------------------------------------
 //
 // One provider per Provision, plus one that refuses and one that fails
-// during Materialize, standing in for the real gemini-key/gcp-key/
-// self-debug/grain-github-<name> providers docs/data-model.md describes
-// -- none of which v2 can build yet, since minting a real credential
-// needs a controller v2 does not have (see v2/README.md). These are
-// enough to exercise the contract on its own.
+// during Materialize, standing in for the real gcp-key/self-debug/
+// grain-github-<name> providers docs/data-model.md describes -- none of
+// which v2 can build yet, since minting a real credential needs a
+// controller v2 does not have (see v2/README.md). gemini-key is the one
+// exception: capability/geminikey/ is a real MINT provider now, tested
+// against its own fakes rather than these. These stand-ins are enough to
+// exercise the contract on its own.
 
 type mintCapability struct {
 	BaseCapability

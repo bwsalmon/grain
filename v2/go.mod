@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/dolthub/driver v1.88.1
+	golang.org/x/oauth2 v0.34.0
 	google.golang.org/api v0.241.0
 	google.golang.org/genai v1.70.0
 )
@@ -148,7 +149,6 @@ require (
 	golang.org/x/exp v0.0.0-20240205201215-2c58cdc269a3 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260209163413-e7419c687ee4 // indirect
