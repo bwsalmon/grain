@@ -38,6 +38,16 @@ gitproxy/       a port of grain/proxy: the only path from a sandbox to
                 file-based ladders grain/proxy uses. live_test.go proves
                 the whole thing end to end against a local git server —
                 see "What this actually verifies" below.
+github/         a port of grain/automation/github.go: the GitHub REST
+                calls a deployment needs (list/label issues, branches,
+                pull requests, review comments, draft reviews) behind a
+                Transport seam, the one layer up from gitproxy's own git
+                transport.
+github/githubsim/  a port of tests/test_live_issue_to_pr.py's
+                RealGitHubMock -- a stateful github.Transport backed by a
+                real bare git repo, for a live end-to-end test to wire a
+                real github.RESTClient against instead of the real
+                network.
 e2e/            issues filed the way a user would, carried through
                 loop.Cycle, a real agent/gemini run, and a real gitproxy
                 push, against a real embedded Dolt store and a local git
@@ -102,13 +112,13 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## What this does not have yet
 
-`TrackedPullRequest`, folders, and anything that reads or writes
-GitHub's REST API. `loop.Cycle` decides
-which task takes which slot and calls `StartRun`, and nothing past that:
-no sandbox gets created, no agent runs. Actually dispatching, and the
-host adapter, are still v1 Python — 15,903 lines of it, with 1,239 tests.
-Those tests are the asset in a rewrite; the assertions port, the harness
-does not.
+`TrackedPullRequest`, folders, and anything that decides *when* to call
+GitHub's REST API from a running cycle. `loop.Cycle` decides which task
+takes which slot and calls `StartRun`, and nothing past that: no sandbox
+gets created, no agent runs, and nothing polls a PR's state back into the
+store. Actually dispatching, and the host adapter, are still v1 Python —
+15,903 lines of it, with 1,239 tests. Those tests are the asset in a
+rewrite; the assertions port, the harness does not.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
@@ -126,6 +136,31 @@ around dispatch. `loop.Cycle` also mints no leases yet — a run's
 git proxy authorizes straight off `Task.Target`/`Reads` instead, which
 serves the same fail-closed purpose without depending on that field being
 populated first.
+
+The GitHub client has moved too (`github/`, above) — a straight port of
+`grain/automation/github.py`'s `GitHubClient`: every method (list/get/
+close/reopen an issue, add/remove a label, branch existence and its head
+commit, create/find a pull request, `default_branch`, review comments,
+check runs, the plain comment thread, `create_comment`, and
+`create_review`'s always-draft PR review) behind the same `Transport`
+seam the Python version uses, so `github_test.go` proves the same path
+building, pagination, and status handling against `FakeTransport` a unit
+test would, and `DryRunClient` makes the same "reads pass through,
+mutations print" split `gitproxy`'s dry-run tooling and `run.py`'s
+`DryRunRunner` both make elsewhere in this project. `github/githubsim/`
+is the "replicate v1's simulator" half: a port of
+`tests/test_live_issue_to_pr.py`'s `RealGitHubMock` as a stateful
+`github.Transport`, so a live end-to-end test gets the same trick that
+file's own docstring describes — every real `GitHubClient` behaviour
+(path building, JSON field extraction) still runs, with only the network
+call underneath swapped for an in-memory stand-in — and `BranchExists`
+answers from a real bare git repo via `git show-ref` rather than its own
+bookkeeping, since that check is the one a live test can't afford to
+fake. Nothing here decides when to call any of it, though: no
+`Orchestrator` equivalent exists yet to poll issues, dispatch, or close
+out a finished PR — that, `TrackedPullRequest`, and wiring `github/` into
+`loop.Cycle` are still open, waiting on the same host adapter the
+paragraph above and "What this actually verifies" describe.
 
 The capability provider contract exists now too (`model/capability.go`),
 though nothing here ported it — `docs/data-model.md`'s design was never

@@ -1,0 +1,1084 @@
+// Package github is the GitHub REST calls a grain deployment needs to run
+// GitHub-driven work: list labelled issues, move labels, confirm a branch
+// exists, open a PR, read a PR's own data and its review comments, relay a
+// human's reply. Ported from grain/automation/github.py -- see that file's
+// own module docstring for the design history (docs/roadmap.md items 2, 8,
+// 9, 12, 13, and bwsalmon/agents#154's create_review) this port carries
+// forward unchanged; nothing here revisits those decisions.
+//
+// Still no sandbox-side access -- docs/design.md's split surface
+// ("Orchestrator: API operations... sandboxes: git transport only") holds
+// exactly as it did in v1. Only the thing that calls this package changes
+// once v2 has an executor to call it from; the package itself does not
+// know or care who its caller is.
+//
+// create_review posts a **draft** review: the request body carries no
+// event key, which is what keeps GitHub from submitting it (GitHub's own
+// "Create a review for a pull request" reference -- omitting event leaves
+// the review PENDING, visible only to the credential that created it,
+// until a human opens it on github.com and submits it themselves). An
+// agent posting a *submitted* review of its own code would be marking its
+// own homework; a draft is a human's opinion of what an agent found,
+// waiting on that same human's sign-off before anyone else sees it.
+//
+// Field shapes below (head.ref/head.sha, base.ref, and the review-comment
+// object's id/user.login/body/path/line) are pinned against GitHub's own
+// REST reference (GET .../pulls/{number}, GET .../pulls/{number}/comments),
+// not guessed.
+package github
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+// ApiResponse is one HTTP response, decoupled from net/http so a Transport
+// can be satisfied by something that never opens a socket (FakeTransport,
+// githubsim.Sim).
+type ApiResponse struct {
+	Status  int
+	Headers map[string]string
+	Body    []byte
+}
+
+// Transport sends one already-built request and returns the raw response.
+// The seam GitHubClient's own logic (path building, pagination, status
+// handling, JSON field extraction) is testable through, with no real call
+// to api.github.com -- the same shape gitproxy.Forwarder wraps http.Client
+// in one layer down.
+type Transport interface {
+	Request(method, path string, headers map[string]string, body []byte) (ApiResponse, error)
+}
+
+// RealTransport talks to the GitHub API over HTTPS by default. UseTLS
+// false exists for a Client pointed at a local mock server for a live
+// end-to-end test -- a mock has no clean answer for a self-signed cert,
+// and this package already treats "point it at a mock" as a first-class
+// test seam (Transport itself, FakeTransport, githubsim.Sim) rather than
+// something to fake with disabled certificate verification.
+type RealTransport struct {
+	Host   string
+	UseTLS bool
+	Client *http.Client
+}
+
+// NewRealTransport returns a transport aimed at host over HTTPS.
+func NewRealTransport(host string) *RealTransport {
+	return &RealTransport{Host: host, UseTLS: true}
+}
+
+func (t *RealTransport) Request(method, path string, headers map[string]string, body []byte) (ApiResponse, error) {
+	scheme := "https"
+	if !t.UseTLS {
+		scheme = "http"
+	}
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, scheme+"://"+t.Host+path, bodyReader)
+	if err != nil {
+		return ApiResponse{}, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	client := t.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ApiResponse{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ApiResponse{}, err
+	}
+	respHeaders := map[string]string{}
+	for k := range resp.Header {
+		respHeaders[k] = resp.Header.Get(k)
+	}
+	return ApiResponse{Status: resp.StatusCode, Headers: respHeaders, Body: data}, nil
+}
+
+// FakeCall is one recorded call to FakeTransport.Request.
+type FakeCall struct {
+	Method  string
+	Path    string
+	Headers map[string]string
+	Body    []byte
+}
+
+// FakeTransport replays scripted responses in order. For unit tests,
+// including pagination -- a call site that needs more than one page
+// queues one response per page. Default answers every call once
+// Responses is empty, rather than erroring, so a test that doesn't care
+// about a particular call's answer need not script one.
+type FakeTransport struct {
+	Responses []ApiResponse
+	Default   ApiResponse
+	Calls     []FakeCall
+}
+
+// NewFakeTransport returns a FakeTransport whose Default is an empty JSON
+// array -- the common case for a list endpoint a test doesn't care about.
+func NewFakeTransport(responses ...ApiResponse) *FakeTransport {
+	return &FakeTransport{Responses: responses, Default: ApiResponse{Status: 200, Body: []byte("[]")}}
+}
+
+func (t *FakeTransport) Request(method, path string, headers map[string]string, body []byte) (ApiResponse, error) {
+	t.Calls = append(t.Calls, FakeCall{Method: method, Path: path, Headers: headers, Body: body})
+	if len(t.Responses) > 0 {
+		resp := t.Responses[0]
+		t.Responses = t.Responses[1:]
+		return resp, nil
+	}
+	return t.Default, nil
+}
+
+// TokenSource resolves the API token to use for one repo. A structural
+// interface, not a named implementation grain/proxy's credential ladder
+// has to declare conformance to -- anything with this method satisfies it.
+type TokenSource interface {
+	TokenFor(owner, repo string) *string
+}
+
+// StaticToken is one token regardless of repo -- what NewClient wraps a
+// bare *string in when a caller has no per-repo ladder to consult.
+type StaticToken struct {
+	Token *string
+}
+
+func (s StaticToken) TokenFor(owner, repo string) *string { return s.Token }
+
+// Error is the error a non-2xx GitHub response is reported as.
+type Error struct {
+	Status int
+	Body   []byte
+}
+
+func (e *Error) Error() string {
+	body := e.Body
+	if len(body) > 200 {
+		body = body[:200]
+	}
+	return fmt.Sprintf("GitHub API error %d: %q", e.Status, body)
+}
+
+// Issue is one issue or pull request from the issues endpoint (GitHub
+// unifies the two; ListIssues filters pull requests out itself).
+type Issue struct {
+	Number  int
+	Title   string
+	Body    string
+	HTMLURL string
+	Labels  map[string]struct{}
+	// State is GitHub's own field, "open" or "closed" -- read by a
+	// cancel-on-close poll to tell a task issue a human closed early from
+	// one still open.
+	State string
+}
+
+// HasLabel reports whether name is one of Issue's labels.
+func (i Issue) HasLabel(name string) bool {
+	_, ok := i.Labels[name]
+	return ok
+}
+
+func labelSet(names ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set
+}
+
+// PullRequest is a freshly created (or found) pull request -- just enough
+// to record and log. PullRequestDetail (below) is the wider shape a
+// dispatch against an existing PR needs.
+type PullRequest struct {
+	Number  int
+	HTMLURL string
+}
+
+// BranchHead is the tip of a branch: its sha and that commit's own
+// message -- so a freshly opened PR's body can be seeded with the agent's
+// own account of its change, the commit message it already wrote to
+// explain the diff, rather than a generic, content-free line.
+type BranchHead struct {
+	SHA     string
+	Message string
+}
+
+// PullRequestDetail is enough of a PR object to dispatch against it --
+// title/body for the prompt, HeadRef for the branch to check out and push
+// back to. Deliberately a separate type from PullRequest: widening that
+// one would ripple into every existing call site for no benefit, since
+// nothing there needs the extra fields.
+type PullRequestDetail struct {
+	Number  int
+	Title   string
+	Body    string
+	HTMLURL string
+	HeadRef string
+	BaseRef string
+	// State is GitHub's own field, "open" or "closed" -- "closed" covers
+	// both merged and closed-without-merging, which a caller closing out
+	// finished PRs treats the same way: either one means nobody is going
+	// to push more commits to this PR.
+	State string
+	// Mergeable is GitHub's own field: true/false once it has finished
+	// computing whether this PR can merge cleanly against its base, nil
+	// while that computation is still in flight -- GitHub does this
+	// asynchronously, so a request right after a push can legitimately see
+	// nil for a cycle or two. A caller should read nil the same as "don't
+	// know yet, check again next cycle," never as either a conflict or a
+	// clean merge, since guessing either way could file a needless fix or
+	// auto-merge something broken.
+	Mergeable *bool
+}
+
+// Comment is a plain top-level comment on an issue or PR -- GitHub's own
+// /issues/{number}/comments endpoint serves both, since a PR is a special
+// kind of issue in its data model. Distinct from ReviewComment: those are
+// inline, diff-attached; this is the ordinary conversation thread -- where
+// a human's reply to an agent's ask_question call actually lands.
+type Comment struct {
+	ID int
+	// User is the commenting account's login.
+	User string
+	Body string
+	// AuthorAssociation is GitHub's own field ("OWNER", "MEMBER",
+	// "COLLABORATOR", "CONTRIBUTOR", "NONE", ...) -- what lets a caller
+	// tell a trusted reply from an arbitrary public comment before acting
+	// on it, the same trust tier as "can apply a label." A random
+	// commenter on a public repo must not be able to redispatch the agent
+	// with content of their choosing -- that would reopen the exact
+	// prompt-injection gate the trigger label exists to close.
+	AuthorAssociation string
+}
+
+// ReviewComment is one inline (diff-attached) review comment -- GitHub's
+// own term for what GET .../pulls/{number}/comments returns, distinct
+// from a plain top-level issue/PR comment. Line is nil for a comment
+// GitHub considers outdated (the API returns original_line instead in
+// that case) -- left nil here rather than falling back to original_line,
+// since telling the agent "line N" about a line the diff has since moved
+// past would be actively misleading.
+type ReviewComment struct {
+	ID   int
+	User string
+	Body string
+	Path string
+	Line *int
+}
+
+// NewReviewComment is one inline comment to attach to a draft review
+// (Client.CreateReview) -- the input shape for what ReviewComment above
+// is the output shape of. A separate type rather than reusing
+// ReviewComment itself: ID and User are GitHub's to assign once the
+// review is created, never a caller's to supply.
+//
+// Line is the line number in the file's *new* version (the right-hand
+// side of the diff) that GitHub's own reviews API expects a comments[]
+// entry to name -- the same "new" side ReviewComment.Line already reads
+// back once a comment exists.
+type NewReviewComment struct {
+	Path string
+	Line int
+	Body string
+}
+
+// CheckRun is one check run against a commit -- GitHub's own shape for CI
+// results (a GitHub Actions job, or any third-party check that posts
+// through the Checks API), read to decide whether an open PR's tests are
+// failing.
+//
+// Status is GitHub's own lifecycle field: "queued", "in_progress", or
+// "completed" -- only "completed" has a meaningful Conclusion at all,
+// which is why a caller checks Status before ever looking at it.
+// Conclusion is nil until then, and one of "success", "failure",
+// "neutral", "cancelled", "skipped", "timed_out", or "action_required"
+// once it is -- GitHub's own enum, not narrowed here, since which of
+// those count as "broken" is a policy decision for the caller, not this
+// package.
+type CheckRun struct {
+	Name       string
+	Status     string
+	Conclusion *string
+}
+
+// nextPagePath is the path+query of the rel="next" link, or "" on the
+// last page.
+//
+// GitHub paginates via a full Link header URL rather than an opaque
+// cursor; Transport.Request takes a path against a fixed host, so only
+// the path and query survive the hop.
+func nextPagePath(linkHeader string) string {
+	if linkHeader == "" {
+		return ""
+	}
+	for _, part := range strings.Split(linkHeader, ",") {
+		segment := strings.TrimSpace(part)
+		if !strings.Contains(segment, `rel="next"`) {
+			continue
+		}
+		start := strings.Index(segment, "<")
+		end := strings.Index(segment, ">")
+		if start == -1 || end == -1 || end < start {
+			continue
+		}
+		u, err := url.Parse(segment[start+1 : end])
+		if err != nil {
+			continue
+		}
+		if u.RawQuery != "" {
+			return u.Path + "?" + u.RawQuery
+		}
+		return u.Path
+	}
+	return ""
+}
+
+// Client is the GitHub operations a grain deployment needs. RESTClient is
+// the real implementation, talking through a Transport; DryRunClient
+// wraps one, printing instead of firing every mutation.
+type Client interface {
+	ListIssues(owner, repo, label string) ([]Issue, error)
+	GetIssue(owner, repo string, number int) (Issue, error)
+	AddLabel(owner, repo string, number int, label string) error
+	RemoveLabel(owner, repo string, number int, label string) error
+	CloseIssue(owner, repo string, number int) error
+	ReopenIssue(owner, repo string, number int) error
+	BranchExists(owner, repo, branch string) (bool, error)
+	GetBranchHead(owner, repo, branch string) (*BranchHead, error)
+	CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error)
+	FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error)
+	CreateIssue(owner, repo, title, body string, labels []string) (Issue, error)
+	MergePullRequest(owner, repo string, number int) error
+	GetPullRequest(owner, repo string, number int) (PullRequestDetail, error)
+	DefaultBranch(owner, repo string) (string, error)
+	ListReviewComments(owner, repo string, number int) ([]ReviewComment, error)
+	ListCheckRuns(owner, repo, ref string) ([]CheckRun, error)
+	ListComments(owner, repo string, number int) ([]Comment, error)
+	CreateComment(owner, repo string, number int, body string) (int, error)
+	CreateReview(owner, repo string, number int, body string, comments []NewReviewComment) (int, error)
+}
+
+// RESTClient is Client talking to a real (or faked-at-the-Transport-level)
+// GitHub REST API.
+type RESTClient struct {
+	Transport Transport
+	Tokens    TokenSource
+}
+
+// NewClient returns a RESTClient. tokens may be nil, meaning every
+// request goes out unauthenticated -- a fine, deliberate credential shape
+// for a public repo, not an error case.
+func NewClient(transport Transport, tokens TokenSource) *RESTClient {
+	return &RESTClient{Transport: transport, Tokens: tokens}
+}
+
+func (c *RESTClient) headers(owner, repo string, jsonBody bool) map[string]string {
+	headers := map[string]string{
+		"Accept":               "application/vnd.github+json",
+		"User-Agent":           "grain-automation",
+		"X-GitHub-Api-Version": "2022-11-28",
+	}
+	var token *string
+	if c.Tokens != nil {
+		token = c.Tokens.TokenFor(owner, repo)
+	}
+	if token != nil {
+		headers["Authorization"] = "token " + *token
+	}
+	if jsonBody {
+		headers["Content-Type"] = "application/json"
+	}
+	return headers
+}
+
+func (c *RESTClient) get(owner, repo, path string) (ApiResponse, error) {
+	return c.Transport.Request("GET", path, c.headers(owner, repo, false), nil)
+}
+
+// ListIssues returns the open issues carrying label. Filters out pull
+// requests -- the issues endpoint returns both, distinguished only by the
+// presence of a pull_request key on the item.
+func (c *RESTClient) ListIssues(owner, repo, label string) ([]Issue, error) {
+	var issues []Issue
+	path := fmt.Sprintf("/repos/%s/%s/issues?labels=%s&state=open&per_page=100",
+		owner, repo, url.QueryEscape(label))
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return nil, err
+		}
+		for _, raw := range items {
+			if _, isPR := raw["pull_request"]; isPR {
+				continue
+			}
+			issue, err := decodeIssue(raw)
+			if err != nil {
+				return nil, err
+			}
+			issues = append(issues, issue)
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return issues, nil
+}
+
+type issueJSON struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Labels  []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+func decodeIssue(raw map[string]json.RawMessage) (Issue, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return Issue{}, err
+	}
+	var parsed issueJSON
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return Issue{}, err
+	}
+	names := make([]string, len(parsed.Labels))
+	for i, l := range parsed.Labels {
+		names[i] = l.Name
+	}
+	state := parsed.State
+	if state == "" {
+		state = "open"
+	}
+	return Issue{
+		Number: parsed.Number, Title: parsed.Title, Body: parsed.Body,
+		HTMLURL: parsed.HTMLURL, Labels: labelSet(names...), State: state,
+	}, nil
+}
+
+// GetIssue fetches a single issue fresh -- used to read an issue's
+// current title when it isn't otherwise on hand (e.g. PR creation, which
+// only carries the issue number, not its title).
+func (c *RESTClient) GetIssue(owner, repo string, number int) (Issue, error) {
+	resp, err := c.get(owner, repo, fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, number))
+	if err != nil {
+		return Issue{}, err
+	}
+	if resp.Status != 200 {
+		return Issue{}, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Body, &raw); err != nil {
+		return Issue{}, err
+	}
+	return decodeIssue(raw)
+}
+
+func (c *RESTClient) AddLabel(owner, repo string, number int, label string) error {
+	body, _ := json.Marshal(map[string][]string{"labels": {label}})
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/issues/%d/labels", owner, repo, number),
+		c.headers(owner, repo, true), body,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 && resp.Status != 201 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
+// quoteKeepSlash percent-encodes s the way Python's urllib.parse.quote
+// does with its default safe="/": every reserved character except "/"
+// itself. url.PathEscape encodes "/" too (it's meant for a single
+// segment), so this escapes segment-by-segment instead.
+func quoteKeepSlash(s string) string {
+	parts := strings.Split(s, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
+// quoteAll percent-encodes s the way Python's urllib.parse.quote(s,
+// safe="") does: every byte except the unreserved set (ASCII letters,
+// digits, and "_.-~") is escaped -- including "/" and ":", which
+// url.PathEscape leaves alone since it allows both within a single path
+// segment per RFC 3986. Needed wherever a call builds a qualified
+// owner:branch value, since a literal ":" there would otherwise reach
+// GitHub unescaped.
+func quoteAll(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '.' || c == '-' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+func (c *RESTClient) RemoveLabel(owner, repo string, number int, label string) error {
+	resp, err := c.Transport.Request(
+		"DELETE", fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", owner, repo, number, quoteKeepSlash(label)),
+		c.headers(owner, repo, false), nil,
+	)
+	if err != nil {
+		return err
+	}
+	// 404 means the label is already off the issue -- a fine outcome, not
+	// an error, since the caller's intent ("this label should not be on
+	// there") is already satisfied.
+	if resp.Status != 200 && resp.Status != 404 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
+func (c *RESTClient) setIssueState(owner, repo string, number int, state string) error {
+	body, _ := json.Marshal(map[string]string{"state": state})
+	resp, err := c.Transport.Request(
+		"PATCH", fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, number),
+		c.headers(owner, repo, true), body,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
+// CloseIssue closes a task issue directly. A fully qualified "Closes
+// owner/repo#N" in a PR body only auto-closes within the *same* repo it's
+// opened in -- across repos (the task/target split's normal case) it just
+// links, never closes -- so a caller closes the task issue itself rather
+// than relying on the PR body text to do it.
+func (c *RESTClient) CloseIssue(owner, repo string, number int) error {
+	return c.setIssueState(owner, repo, number, "closed")
+}
+
+// ReopenIssue reopens a task issue GitHub had closed -- a human reviewing
+// "done" work may come back with a follow-up comment instead of
+// relabelling it, and this is the other half of CloseIssue, just the
+// other state value.
+func (c *RESTClient) ReopenIssue(owner, repo string, number int) error {
+	return c.setIssueState(owner, repo, number, "open")
+}
+
+func (c *RESTClient) getBranch(owner, repo, branch string) (ApiResponse, error) {
+	// GitHub's branch-get endpoint requires "/" within the branch name
+	// itself percent-encoded (%2F), not left as a path separator --
+	// quoteAll is what does that.
+	return c.get(owner, repo, fmt.Sprintf("/repos/%s/%s/branches/%s", owner, repo, quoteAll(branch)))
+}
+
+// BranchExists reports whether branch is really on the remote.
+//
+// The design decision behind why this exists at all: a dispatch tells the
+// agent exactly what branch to push to, but the prompt it received came
+// from untrusted issue content, so the caller confirms the branch is real
+// via the API before opening a PR against it rather than trusting the
+// agent's own report of what it did.
+func (c *RESTClient) BranchExists(owner, repo, branch string) (bool, error) {
+	resp, err := c.getBranch(owner, repo, branch)
+	if err != nil {
+		return false, err
+	}
+	if resp.Status == 200 {
+		return true, nil
+	}
+	if resp.Status == 404 {
+		return false, nil
+	}
+	return false, &Error{Status: resp.Status, Body: resp.Body}
+}
+
+// GetBranchHead returns branch's tip commit, or nil if the branch doesn't
+// exist -- the same GET BranchExists makes, kept as its own method rather
+// than folded into it since most callers only ever need the boolean and
+// this one's response also carries the head commit's own message, which
+// only a fresh-PR path needs, to seed a real description instead of a
+// generic one.
+func (c *RESTClient) GetBranchHead(owner, repo, branch string) (*BranchHead, error) {
+	resp, err := c.getBranch(owner, repo, branch)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status == 404 {
+		return nil, nil
+	}
+	if resp.Status != 200 {
+		return nil, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		Commit struct {
+			SHA    string `json:"sha"`
+			Commit struct {
+				Message string `json:"message"`
+			} `json:"commit"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return nil, err
+	}
+	return &BranchHead{SHA: data.Commit.SHA, Message: data.Commit.Commit.Message}, nil
+}
+
+func (c *RESTClient) CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"title": title, "head": head, "base": base, "body": body,
+	})
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/pulls", owner, repo),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	if resp.Status != 201 {
+		return PullRequest{}, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return PullRequest{}, err
+	}
+	return PullRequest{Number: data.Number, HTMLURL: data.HTMLURL}, nil
+}
+
+// FindOpenPullRequestForBranch returns the open PR whose head is branch,
+// if there is one.
+//
+// GitHub allows at most one open PR per head branch, so this is either
+// exactly one or none -- used to recognise "the PR for this task already
+// exists" after a CreatePullRequest 422, rather than failing a finish
+// that has in fact already succeeded.
+//
+// head is qualified owner:branch the way GitHub's own filter requires;
+// grain only ever pushes to branches in the target repo itself (never a
+// fork), so the head owner is always owner.
+func (c *RESTClient) FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls?state=open&head=%s",
+		owner, repo, quoteAll(owner+":"+branch))
+	resp, err := c.get(owner, repo, path)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != 200 {
+		return nil, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var items []struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return &PullRequest{Number: items[0].Number, HTMLURL: items[0].HTMLURL}, nil
+}
+
+// CreateIssue files a new issue on the task repo. labels lets it land
+// already carrying a needs-approval label in the same request, rather
+// than a second AddLabel call that could fail partway and leave the issue
+// unlabelled.
+func (c *RESTClient) CreateIssue(owner, repo, title, body string, labels []string) (Issue, error) {
+	payload := map[string]any{"title": title, "body": body}
+	if len(labels) > 0 {
+		payload["labels"] = labels
+	}
+	data, _ := json.Marshal(payload)
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/issues", owner, repo),
+		c.headers(owner, repo, true), data,
+	)
+	if err != nil {
+		return Issue{}, err
+	}
+	if resp.Status != 201 {
+		return Issue{}, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Body, &raw); err != nil {
+		return Issue{}, err
+	}
+	return decodeIssue(raw)
+}
+
+// MergePullRequest merges a PR directly, rather than leaving it for a
+// human to click. A 405 (not mergeable -- GitHub's own answer if
+// Mergeable went stale between the read and this call) or 409 (base
+// branch moved underneath it) is left for the caller to decide whether to
+// retry next cycle via the returned *Error's Status; only a genuinely
+// unexpected status is a surprise here.
+func (c *RESTClient) MergePullRequest(owner, repo string, number int) error {
+	resp, err := c.Transport.Request(
+		"PUT", fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, repo, number),
+		c.headers(owner, repo, true), []byte("{}"),
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
+func (c *RESTClient) GetPullRequest(owner, repo string, number int) (PullRequestDetail, error) {
+	resp, err := c.get(owner, repo, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	if err != nil {
+		return PullRequestDetail{}, err
+	}
+	if resp.Status != 200 {
+		return PullRequestDetail{}, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		State   string `json:"state"`
+		Head    struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+		Mergeable *bool `json:"mergeable"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return PullRequestDetail{}, err
+	}
+	state := data.State
+	if state == "" {
+		state = "open"
+	}
+	return PullRequestDetail{
+		Number: data.Number, Title: data.Title, Body: data.Body, HTMLURL: data.HTMLURL,
+		HeadRef: data.Head.Ref, BaseRef: data.Base.Ref, State: state, Mergeable: data.Mergeable,
+	}, nil
+}
+
+// DefaultBranch is the target repo's own default branch -- the base a PR
+// opened there should target when a task's own directive doesn't say
+// otherwise.
+//
+// Read from GitHub rather than configured: with one repo per deployment a
+// single configured base branch was a fair guess, but a task repo
+// dispatching into many target repos would need an operator to keep a
+// per-repo table of "main" vs "master" vs "trunk" correct, and GitHub
+// already knows.
+func (c *RESTClient) DefaultBranch(owner, repo string) (string, error) {
+	resp, err := c.get(owner, repo, fmt.Sprintf("/repos/%s/%s", owner, repo))
+	if err != nil {
+		return "", err
+	}
+	if resp.Status != 200 {
+		return "", &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return "", err
+	}
+	return data.DefaultBranch, nil
+}
+
+// ListReviewComments returns the inline review comments on a PR -- the
+// context a dispatch needs to tell the agent what feedback it's
+// addressing. Paginates the same way ListIssues does; GitHub's REST API
+// paginates every list endpoint via the same Link header convention, not
+// something specific to the issues endpoint.
+func (c *RESTClient) ListReviewComments(owner, repo string, number int) ([]ReviewComment, error) {
+	var comments []ReviewComment
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, number)
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var items []struct {
+			ID   int    `json:"id"`
+			Body string `json:"body"`
+			Path string `json:"path"`
+			Line *int   `json:"line"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			comments = append(comments, ReviewComment{
+				ID: item.ID, User: item.User.Login, Body: item.Body,
+				Path: item.Path, Line: item.Line,
+			})
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return comments, nil
+}
+
+// ListCheckRuns returns the check runs against ref -- a branch name works
+// fine here, GitHub resolves it to that branch's current tip itself, so a
+// caller never needs a commit sha in hand. Paginates the same Link-header
+// way every other list endpoint here does, but the response body itself
+// is shaped differently -- {"total_count": N, "check_runs": [...]}, not a
+// bare array, which is GitHub's own shape for this one endpoint.
+func (c *RESTClient) ListCheckRuns(owner, repo, ref string) ([]CheckRun, error) {
+	var runs []CheckRun
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, repo, url.PathEscape(ref))
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var data struct {
+			CheckRuns []struct {
+				Name       string  `json:"name"`
+				Status     string  `json:"status"`
+				Conclusion *string `json:"conclusion"`
+			} `json:"check_runs"`
+		}
+		if err := json.Unmarshal(resp.Body, &data); err != nil {
+			return nil, err
+		}
+		for _, item := range data.CheckRuns {
+			runs = append(runs, CheckRun{Name: item.Name, Status: item.Status, Conclusion: item.Conclusion})
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return runs, nil
+}
+
+// ListComments returns the plain top-level conversation on an issue or PR
+// -- where a human's reply to an agent's ask_question call lands. Same
+// shared issues-comments endpoint and pagination shape ListReviewComments
+// uses for its own (inline) endpoint.
+func (c *RESTClient) ListComments(owner, repo string, number int) ([]Comment, error) {
+	var comments []Comment
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, number)
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var items []struct {
+			ID                int    `json:"id"`
+			Body              string `json:"body"`
+			AuthorAssociation string `json:"author_association"`
+			User              struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			assoc := item.AuthorAssociation
+			if assoc == "" {
+				assoc = "NONE"
+			}
+			comments = append(comments, Comment{
+				ID: item.ID, User: item.User.Login, Body: item.Body, AuthorAssociation: assoc,
+			})
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return comments, nil
+}
+
+// CreateComment posts a top-level comment. Not something the agent can
+// reach directly: the only caller relays an ask_question call to a human.
+//
+// Returns the new comment's id -- recorded as the baseline for "has a
+// trusted reply arrived after this," since a comment's own id is the one
+// thing that can't be spoofed by editing an earlier comment's body.
+func (c *RESTClient) CreateComment(owner, repo string, number int, body string) (int, error) {
+	payload, _ := json.Marshal(map[string]string{"body": body})
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if resp.Status != 201 {
+		return 0, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return 0, err
+	}
+	return data.ID, nil
+}
+
+// CreateReview creates a draft review on a pull request -- see the
+// package doc comment for why it is always a draft. Returns the new
+// review's id, kept for the same reason CreateComment returns one: cheap,
+// and the pattern every other creation call here already follows.
+func (c *RESTClient) CreateReview(owner, repo string, number int, body string, comments []NewReviewComment) (int, error) {
+	payloadComments := make([]map[string]any, len(comments))
+	for i, cm := range comments {
+		payloadComments[i] = map[string]any{"path": cm.Path, "line": cm.Line, "body": cm.Body}
+	}
+	payload, _ := json.Marshal(map[string]any{"body": body, "comments": payloadComments})
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if resp.Status != 200 {
+		return 0, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return 0, err
+	}
+	return data.ID, nil
+}
+
+// DryRunClient wraps a Client: reads pass through, mutations print
+// instead of firing. Same split a dry-run command runner makes for local
+// commands -- "read-only commands still execute."
+type DryRunClient struct {
+	Inner Client
+}
+
+func (d DryRunClient) ListIssues(owner, repo, label string) ([]Issue, error) {
+	return d.Inner.ListIssues(owner, repo, label)
+}
+
+func (d DryRunClient) GetIssue(owner, repo string, number int) (Issue, error) {
+	return d.Inner.GetIssue(owner, repo, number)
+}
+
+func (d DryRunClient) AddLabel(owner, repo string, number int, label string) error {
+	fmt.Printf("+ add label %q to %s/%s#%d\n", label, owner, repo, number)
+	return nil
+}
+
+func (d DryRunClient) RemoveLabel(owner, repo string, number int, label string) error {
+	fmt.Printf("+ remove label %q from %s/%s#%d\n", label, owner, repo, number)
+	return nil
+}
+
+func (d DryRunClient) CloseIssue(owner, repo string, number int) error {
+	fmt.Printf("+ close issue %s/%s#%d\n", owner, repo, number)
+	return nil
+}
+
+func (d DryRunClient) ReopenIssue(owner, repo string, number int) error {
+	fmt.Printf("+ reopen issue %s/%s#%d\n", owner, repo, number)
+	return nil
+}
+
+func (d DryRunClient) BranchExists(owner, repo, branch string) (bool, error) {
+	return d.Inner.BranchExists(owner, repo, branch)
+}
+
+func (d DryRunClient) GetBranchHead(owner, repo, branch string) (*BranchHead, error) {
+	return d.Inner.GetBranchHead(owner, repo, branch)
+}
+
+func (d DryRunClient) FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error) {
+	return d.Inner.FindOpenPullRequestForBranch(owner, repo, branch)
+}
+
+func (d DryRunClient) CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error) {
+	fmt.Printf("+ open PR %s/%s: %q -> %q (%q)\n", owner, repo, head, base, title)
+	return PullRequest{Number: 0, HTMLURL: fmt.Sprintf("(dry run) %s/%s: %s -> %s", owner, repo, head, base)}, nil
+}
+
+func (d DryRunClient) CreateIssue(owner, repo, title, body string, labels []string) (Issue, error) {
+	fmt.Printf("+ file issue %s/%s: %q %v\n", owner, repo, title, labels)
+	return Issue{Number: 0, Title: title, Body: body, HTMLURL: fmt.Sprintf("(dry run) %s/%s", owner, repo), Labels: labelSet(labels...)}, nil
+}
+
+func (d DryRunClient) MergePullRequest(owner, repo string, number int) error {
+	fmt.Printf("+ merge PR %s/%s#%d\n", owner, repo, number)
+	return nil
+}
+
+func (d DryRunClient) GetPullRequest(owner, repo string, number int) (PullRequestDetail, error) {
+	return d.Inner.GetPullRequest(owner, repo, number)
+}
+
+func (d DryRunClient) DefaultBranch(owner, repo string) (string, error) {
+	return d.Inner.DefaultBranch(owner, repo)
+}
+
+func (d DryRunClient) ListReviewComments(owner, repo string, number int) ([]ReviewComment, error) {
+	return d.Inner.ListReviewComments(owner, repo, number)
+}
+
+func (d DryRunClient) ListCheckRuns(owner, repo, ref string) ([]CheckRun, error) {
+	return d.Inner.ListCheckRuns(owner, repo, ref)
+}
+
+func (d DryRunClient) ListComments(owner, repo string, number int) ([]Comment, error) {
+	return d.Inner.ListComments(owner, repo, number)
+}
+
+func (d DryRunClient) CreateComment(owner, repo string, number int, body string) (int, error) {
+	fmt.Printf("+ comment on %s/%s#%d: %q\n", owner, repo, number, body)
+	return 0, nil
+}
+
+func (d DryRunClient) CreateReview(owner, repo string, number int, body string, comments []NewReviewComment) (int, error) {
+	fmt.Printf("+ draft review on %s/%s#%d: %q (%d inline comment(s))\n", owner, repo, number, body, len(comments))
+	return 0, nil
+}
+
+var _ Client = (*RESTClient)(nil)
+var _ Client = DryRunClient{}
