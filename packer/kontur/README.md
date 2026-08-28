@@ -122,16 +122,26 @@ hand-picked here.
 
 **What isn't settled here**: the exact flag `kontur vm create` takes to
 point at a built image. `orchestrator.KonturConfig.CreateArgs`
-(bwsalmon/agents#262) exists as the passthrough a deployment would use --
-whatever `kontur vm create`'s own image flag turns out to be named goes in
-there, e.g. `CreateArgs: []string{"-image", "gs://.../kontur-guest-....qcow2"}`
--- but that flag's name and shape are owned entirely by bwsalmon/kontur's
-own CLI, a repo this one has no build or vendor relationship with (`pkg/
-kontur`'s own doc comment: "pulling in kontur's module graph ... would be a
-strange trade") and that wasn't reachable from this sandbox to confirm
-against. A deployment wiring `CreateArgs` for the first time should check
-bwsalmon/kontur's own `kontur vm create -h` (or its `internal/cli`) for the
-actual flag before assuming the placeholder above.
+(bwsalmon/agents#262) exists as the passthrough a deployment would use, and
+`cmd/graind` now constructs a real `KonturSandboxes`/`KonturConfig` from it
+(bwsalmon/agents#274) via `-kontur-vm-name-prefix` and a repeatable
+`-kontur-create-arg` flag -- e.g.
+`-kontur-create-arg=-image -kontur-create-arg=gs://.../kontur-guest-....qcow2`
+-- rather than this repo guessing at and hard-coding a flag name. That
+name and shape are still owned entirely by bwsalmon/kontur's own CLI, a
+repo this one has no build or vendor relationship with (`pkg/kontur`'s own
+doc comment: "pulling in kontur's module graph ... would be a strange
+trade") and that has not been reachable from any sandbox this task has run
+in yet (both `github.com/bwsalmon/kontur` and its API endpoint 404 from
+here, same as bwsalmon/agents#267 found). A deployment wiring
+`-kontur-create-arg` for the first time should check bwsalmon/kontur's own
+`kontur vm create -h` (or its `internal/cli`) for the actual flag, and
+pass whichever of this directory's two outputs that flag expects -- a
+`gs://` URL if kontur fetches the image itself, or a path on the kontur
+host's own disk (this repo's `build.sh` always leaves the built qcow2 at
+`output/<image-name>-<version>/<image-name>.qcow2` locally, in addition to
+publishing it, for exactly that case) -- since nothing here can tell which
+of the two without seeing that flag's own documented semantics.
 
 ## One image, uniform
 

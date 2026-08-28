@@ -219,21 +219,30 @@ alone used, is deleted — `Store.OpenPullRequestLinks` (below) already
 covered the same "which pull request should grain still be watching"
 question, more precisely, so keeping both was pure duplication.
 
-`graind` still runs against the same "no host adapter" stand-in every
-other package here does by default: one slot, one local directory doing
-sandbox duty (`orchestrator.HostSandboxes`). `orchestrator.KonturSandboxes`
+`graind` still defaults to the same "no host adapter" stand-in every
+other package here does: one local directory per slot doing sandbox duty
+(`orchestrator.HostSandboxes`). `orchestrator.KonturSandboxes`
 (bwsalmon/agents#262) is the real alternative `Deps.Sandboxes` also
 accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached over
 SSH via `mcp.NewSSHSandboxTools` instead of a local directory, created
 via `kontur.Create` on first use and reused across cycles the same way
-`HostSandboxes` reuses its directories — but `cmd/graind` still only ever
-constructs a `HostSandboxes`; nothing wires `KonturSandboxes` in as its
-actual `Deps.Sandboxes` outside its own tests yet, so today it is a
-capability `pkg/orchestrator` exposes rather than one the reconcile loop
-drives by default. A kontur VM's own guest image is still expected to
-arrive already carrying the operator's SSH key and a running sshd, the
-same assumption v1's own sandbox provisioning stood in for and still no
-successor here builds — provisioning one is still open. The
+`HostSandboxes` reuses its directories — and `cmd/graind` can now be
+pointed at it for real: `-kontur-vm-name-prefix` opts a deployment in,
+with `-kontur-ssh-user`/`-kontur-ssh-key`/`-kontur-workspace` for the SSH
+side and repeatable `-kontur-create-arg` flags building
+`KonturConfig.CreateArgs` (bwsalmon/agents#274) — a deployment's own
+`kontur vm create -h` decides what those are, most importantly whichever
+flag points at a built guest image (`../packer/kontur/`, below), since
+that flag's name is owned by bwsalmon/kontur's own CLI and still hasn't
+been reachable to confirm from this repo. `KonturSandboxes.
+ConfigureGitCredentials` (new alongside the flags) is the SSH equivalent
+of the `mcp.ConfigureGitCredentials` call `graind` already made once per
+slot for `HostSandboxes` — over `mcp.ConfigureGitCredentialsOverSSH`
+instead of `os.WriteFile`, since an SSH-backed slot has no local directory
+for `graind` to write into. A kontur VM's own guest image is still
+expected to arrive already carrying the operator's SSH key and a running
+sshd, the same assumption v1's own sandbox provisioning stood in for —
+`../packer/kontur/` is that successor (bwsalmon/agents#267). The
 `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
 `propose_task`, `add_review_comment`) `agent/gemini.Framework.Run` wires
 internally are still discarded rather than posted anywhere real while a
@@ -462,12 +471,14 @@ build time rather than injected per-VM the way `LibvirtAdapter.create()`
 does it for v1, and for what's still unresolved there (the exact `kontur
 vm create` flag a deployment's own `KonturConfig.CreateArgs` above would
 pass the built image's location through as, owned by bwsalmon/kontur's
-own CLI and not confirmed from this repo). `cmd/graind` still wires
-`Deps.Sandboxes` to `HostSandboxes` by default, so today `KonturSandboxes`
-is a capability `orchestrator.RunCycle` can drive but nothing outside its
-own tests asks it to yet — reconciling `pkg/orchestrate` into
-`pkg/orchestrator` (bwsalmon/agents#263) removed the other package that
-would otherwise have needed its own equivalent.
+own CLI and still not confirmed from this repo — bwsalmon/agents#274).
+`cmd/graind` still defaults `Deps.Sandboxes` to `HostSandboxes`, but
+`-kontur-vm-name-prefix` (and the rest of its `-kontur-*`/
+`-cri-runtime-endpoint` flags, see "What this does not have yet" above)
+now opts a real deployment into `KonturSandboxes` instead — the flag that
+picks the image lives in `-kontur-create-arg`, repeated once per
+`kontur vm create` flag/value pair a deployment's own `kontur vm create
+-h` calls for, rather than a name this repo guesses at.
 
 A real `github.RESTClient` exists and is wired into `graind` too, driving
 every call `pkg/orchestrator` makes (issue listing/labelling, branch and

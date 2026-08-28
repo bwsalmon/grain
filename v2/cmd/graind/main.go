@@ -2,15 +2,14 @@
 // RunCycle in the background on a timer, until SIGINT/SIGTERM, against
 // one real embedded Dolt store.
 //
-// bwsalmon/agents#254 asked for exactly this, with one simplification: v2
-// has no host adapter yet (v2/README.md), so there is no fleet of real
-// sandbox VMs to dispatch onto. graind assumes what that issue grants --
-// the MCP server's sandbox tools are confined to a local directory, and
-// one slot is the whole concurrency pool -- rather than inventing a fleet
-// this deployment shape has nowhere to run. -slots accepts a comma list
-// for the day a host adapter exists to give a second slot somewhere real
-// to point at; nothing above pkg/orchestrator.Deps needs to change to
-// serve more than one.
+// bwsalmon/agents#254 asked for exactly this, with one simplification: by
+// default, sandboxing is still local -- the MCP server's sandbox tools
+// confined to a directory on this host, no isolation -- rather than a
+// fleet this deployment shape has nowhere to run. -kontur-vm-name-prefix
+// is the opt in to the real alternative (bwsalmon/agents#274):
+// orchestrator.KonturSandboxes, one real bwsalmon/kontur-managed VM per
+// slot, reached over SSH. -slots accepts a comma list either way; nothing
+// above pkg/orchestrator.Deps needs to change to serve more than one.
 //
 // graind originally drove pkg/orchestrate, a package built independently
 // of, and in parallel with, pkg/orchestrator (bwsalmon/agents#249) --
@@ -42,12 +41,26 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
+	"github.com/bwsalmon/grain/v2/pkg/kontur"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
+
+// stringSliceFlag collects every occurrence of a repeatable flag, in
+// order, into a []string -- flag.String only ever keeps the last one,
+// which -kontur-create-arg (an ordered sequence of flag/value pairs
+// passed straight through to `kontur vm create`) can't use.
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string { return strings.Join(*s, " ") }
+
+func (s *stringSliceFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 func main() {
 	dataDir := flag.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
@@ -68,6 +81,34 @@ func main() {
 
 	gcpProject := flag.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both")
 	gcpServiceAccountEmail := flag.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+
+	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
+	// host, no isolation) exactly as it always has -- see run()'s own
+	// comment on sandboxes below. -kontur-vm-name-prefix is the opt in to
+	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
+	// managed VM per dispatch slot, reached over SSH.
+	konturVMNamePrefix := flag.String("kontur-vm-name-prefix", "",
+		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
+			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
+	konturStateDir := flag.String("kontur-state-dir", kontur.DefaultStateDir,
+		"kontur's VM state directory (only used with -kontur-vm-name-prefix)")
+	criRuntimeEndpoint := flag.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
+		"containerd CRI socket, used to resolve a kontur VM's pod IP via crictl (only used with -kontur-vm-name-prefix)")
+	konturSSHUser := flag.String("kontur-ssh-user", "",
+		"username to SSH into each kontur VM as (required with -kontur-vm-name-prefix)")
+	konturSSHKey := flag.String("kontur-ssh-key", "",
+		"path to the SSH private key to authenticate to each kontur VM with (required with -kontur-vm-name-prefix)")
+	konturWorkspace := flag.String("kontur-workspace", "",
+		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
+	var konturCreateArgs stringSliceFlag
+	flag.Var(&konturCreateArgs, "kontur-create-arg",
+		"one argument appended verbatim to `kontur vm create <name> -state-dir <dir>` when a slot's VM does not "+
+			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `kontur vm create -h` calls for "+
+			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
+			"-kontur-create-arg=-image -kontur-create-arg=gs://bucket/kontur-guest-....qcow2 to point at "+
+			"packer/kontur/build.sh's published output using whatever flag bwsalmon/kontur's own CLI turns out "+
+			"to call that (see packer/kontur/README.md, \"What isn't settled here\"). Only used with "+
+			"-kontur-vm-name-prefix.")
 	flag.Parse()
 
 	if *dataDir == "" {
@@ -82,6 +123,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "graind: -gemini-api-key-file is required")
 		os.Exit(2)
 	}
+	if *konturVMNamePrefix != "" {
+		if *konturSSHUser == "" {
+			fmt.Fprintln(os.Stderr, "graind: -kontur-ssh-user is required with -kontur-vm-name-prefix")
+			os.Exit(2)
+		}
+		if *konturSSHKey == "" {
+			fmt.Fprintln(os.Stderr, "graind: -kontur-ssh-key is required with -kontur-vm-name-prefix")
+			os.Exit(2)
+		}
+		if *konturWorkspace == "" {
+			fmt.Fprintln(os.Stderr, "graind: -kontur-workspace is required with -kontur-vm-name-prefix")
+			os.Exit(2)
+		}
+	}
 	slots := strings.Split(*slotList, ",")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -93,6 +148,9 @@ func main() {
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
+		konturVMNamePrefix: *konturVMNamePrefix, konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
+		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
+		konturCreateArgs: konturCreateArgs,
 	}); err != nil {
 		log.Fatalf("graind: %v", err)
 	}
@@ -116,6 +174,18 @@ type config struct {
 
 	gcpProject             string
 	gcpServiceAccountEmail string
+
+	// konturVMNamePrefix selects orchestrator.KonturSandboxes over the
+	// default orchestrator.HostSandboxes when non-empty; the rest of the
+	// kontur* fields are only consulted then. See run()'s own comment on
+	// sandboxes.
+	konturVMNamePrefix string
+	konturStateDir     string
+	criRuntimeEndpoint string
+	konturSSHUser      string
+	konturSSHKey       string
+	konturWorkspace    string
+	konturCreateArgs   []string
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -141,6 +211,34 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer db.Close()
 
+	// Sandboxing defaults to orchestrator.HostSandboxes -- one local
+	// directory per slot, no isolation -- exactly as it always has;
+	// -kontur-vm-name-prefix opts into orchestrator.KonturSandboxes
+	// instead: one real bwsalmon/kontur-managed VM per slot, reached over
+	// SSH (pkg/orchestrator's own doc comment: "Sandboxing defaults to
+	// 'execute on the host,' deliberately, for now, with a real host
+	// adapter available as an opt in"). Exactly one of hostSandboxes/
+	// konturSandboxes is non-nil below; sandboxes is Deps.Sandboxes
+	// either way.
+	var sandboxes orchestrator.Sandboxes
+	var hostSandboxes *orchestrator.HostSandboxes
+	var konturSandboxes *orchestrator.KonturSandboxes
+	if cfg.konturVMNamePrefix != "" {
+		konturSandboxes = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+			NamePrefix:      cfg.konturVMNamePrefix,
+			StateDir:        cfg.konturStateDir,
+			RuntimeEndpoint: cfg.criRuntimeEndpoint,
+			CreateArgs:      cfg.konturCreateArgs,
+			SSHUser:         cfg.konturSSHUser,
+			SSHKey:          cfg.konturSSHKey,
+			Workspace:       cfg.konturWorkspace,
+		})
+		sandboxes = konturSandboxes
+	} else {
+		hostSandboxes = orchestrator.NewHostSandboxes(filepath.Join(cfg.dataDir, "sandbox"))
+		sandboxes = hostSandboxes
+	}
+
 	// Mint every slot's sandbox token, and only then start the git proxy
 	// -- BuildProxy's own doc comment on gitproxy.LoadSandboxTokens says
 	// the proxy "loads the map once at startup and only ever looks
@@ -153,20 +251,21 @@ func run(ctx context.Context, cfg config) error {
 	// required" for the rest of the process's life. cmd/graind/live_test.go's
 	// TestRunLiveDispatchesAndOpensAPullRequest caught this live: a real
 	// dispatched agent's push was rejected by the proxy every time.
-	sandboxes := orchestrator.NewHostSandboxes(filepath.Join(cfg.dataDir, "sandbox"))
 	roots := map[string]string{}
 	slotTokens := map[string]string{}
 	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(cfg.dataDir, "secrets", "sandbox-tokens.json"))
 	for _, slot := range cfg.slots {
-		root, err := sandboxes.RootFor(slot)
-		if err != nil {
-			return fmt.Errorf("preparing sandbox for %s: %w", slot, err)
+		if hostSandboxes != nil {
+			root, err := hostSandboxes.RootFor(slot)
+			if err != nil {
+				return fmt.Errorf("preparing sandbox for %s: %w", slot, err)
+			}
+			roots[slot] = root
 		}
 		token, err := tokens.EnsureToken(slot)
 		if err != nil {
 			return fmt.Errorf("minting sandbox token for %s: %w", slot, err)
 		}
-		roots[slot] = root
 		slotTokens[slot] = token
 	}
 
@@ -181,8 +280,19 @@ func run(ctx context.Context, cfg config) error {
 		// not a per-task one -- git-credential-store matches on
 		// protocol+host, not path, so this single line covers every repo
 		// this slot will ever be pointed at through the proxy. See
-		// mcp/git_credentials.go's own doc comment.
-		if err := mcp.ConfigureGitCredentials(roots[slot], proxyURL+"/placeholder/placeholder.git", slotTokens[slot]); err != nil {
+		// mcp/git_credentials.go's own doc comment. For a kontur-backed
+		// slot this also creates that slot's VM, the same way ToolsFor's
+		// first call would have -- doing it here instead means a slot's
+		// VM is up, and reachable, before RunCycle ever tries to dispatch
+		// onto it.
+		remoteURL := proxyURL + "/placeholder/placeholder.git"
+		if hostSandboxes != nil {
+			if err := mcp.ConfigureGitCredentials(roots[slot], remoteURL, slotTokens[slot]); err != nil {
+				return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
+			}
+			continue
+		}
+		if err := konturSandboxes.ConfigureGitCredentials(ctx, slot, remoteURL, slotTokens[slot]); err != nil {
 			return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
 		}
 	}
