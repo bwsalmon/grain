@@ -251,9 +251,33 @@ also files today without resolving a same-run local `id` to the real issue
 number GitHub assigned it — each proposal lands as its own issue, with
 `depends_on` printed into nothing yet, since resolving it needs holding a
 whole batch open and rewriting cross-references after every one is filed.
-Filing a fix task when a PR goes red (`SyncPullRequests`, and
-`docs/data-model.md`'s own stated reason `TrackedPullRequest` exists) is
-unbuilt for the same `propose_task`-numbering reason.
+
+Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
+`SyncPullRequests` runs a merge queue, one per target repo, over every
+task that asked for `/auto-merge` and still has a PR open. Only the
+queue's head — the earliest submitted, per repo — is ever acted on in a
+cycle; a fix filed for the second task while the first is still being
+repaired would likely need refiling the moment the first merges and
+changes what the second is based against, so everything behind the head
+just waits. A conflicted or failing head gets a fix task filed straight
+into the store already approved (`Task.Approval` set by
+`PrincipalAutomation`, `LinkFixTask` recording which one) rather than
+`core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
+issue and waited for a human to apply the trigger label or comment
+`/lgtm` — bwsalmon/agents#283 asked for exactly that human step to go
+away. The fix task carries `/base` the original PR's own branch and
+`/auto-merge true`, the same stacked-branch trick `_suggest_fix` used, so
+it dispatches on the very next `loop.Cycle` with no approval in between
+and, once clean, merges straight back into the branch it repairs. If it
+finishes and the original PR is still broken, `SyncPullRequests` gives up
+automatically rather than refiling: it comments explaining why, sets
+`Observation.MergeQueueBlockedAt`, and the queue moves on to the next
+task in that repo — a blocked task still merges the moment a human's own
+push makes it clean, it just stops being anyone's queue head, so it can
+no longer hold up what's behind it. No new record was needed for the
+queue itself: `queueHeads` derives head-of-queue from `Task.CreatedAt`
+and `Task.AutoMerge` fresh every cycle, the same "derive it, don't store
+it" discipline `TaskState` already holds to.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder

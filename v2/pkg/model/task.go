@@ -251,6 +251,13 @@ const (
 	LinkMergeWith  LinkKind = "merge-with"  // blocks the merge, not the run
 	LinkAddresses  LinkKind = "addresses"   // -> a review thread
 	LinkProposedBy LinkKind = "proposed-by" // provenance only
+	// LinkFixTask records the task the merge queue automatically filed to
+	// repair this task's own PR (-> the fix task's ID), so a later cycle
+	// knows one is already in flight rather than filing a second, and can
+	// tell whether it has finished. It does not block dispatch -- the
+	// fix task runs on its own the moment loop.Cycle sees it ready,
+	// independent of this task's own state.
+	LinkFixTask LinkKind = "fix-task"
 )
 
 // Blocks reports whether a link holds a task back from dispatch.
@@ -334,7 +341,17 @@ type Observation struct {
 	// a fresh read is compared. Losing one degrades rather than corrupts.
 	PendingQuestionCommentID *int64
 	BaselineCommentID        *int64
-	ObservedAt               *time.Time
+	// MergeQueueBlockedAt is set once the merge queue has tried and failed
+	// to fix this task's own PR automatically (a LinkFixTask task ran and
+	// closed, but the PR is still conflicted or failing) -- see
+	// orchestrator.SyncPullRequests. A non-nil value means the merge queue
+	// has stopped driving this task: it no longer counts as any repo's
+	// queue head (so a stuck PR cannot block the ones behind it) and gets
+	// no second automatic fix, but it is still merged the moment it reads
+	// clean, the same as a fix task itself, in case a human pushes the
+	// fix by hand.
+	MergeQueueBlockedAt *time.Time
+	ObservedAt          *time.Time
 }
 
 // Run is one attempt. A live run is a Run with no FinishedAt.
