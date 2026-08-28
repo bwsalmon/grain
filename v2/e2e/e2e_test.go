@@ -3,12 +3,22 @@ package e2e
 // bwsalmon/agents#233 asked for a test that files issues the way a user
 // would and checks that they complete -- branches made, merged, and the
 // issue's own state transitioning the way a human watching the tracker
-// would expect. The three tests below are that, fixed rather than
+// would expect. The first three tests below are that, fixed rather than
 // randomized (simulate_test.go is the randomized counterpart): one happy
 // path from queued through running, completed and closed with a real
 // branch pushed and a real merge landed; one that parks on a question
 // and resumes; and one where a first attempt is denied by the proxy and
 // a retry succeeds.
+//
+// bwsalmon/agents#319 then asked for the same whole-pipeline coverage
+// extended to more than one run in flight at once. TestConcurrentRuns
+// DenyCrossRepoPushWithoutTouchingTheOtherRun (bwsalmon/agents#322) is
+// the first of that family: two tasks dispatched into two slots at the
+// same time, one of them scripted to push against the other's repo
+// instead of its own, proving gitproxy authorizes per-run/per-slot with
+// a second, genuinely live run in play -- not just against a repo no
+// live run happens to target, which TestFailedRunReturnsTaskToQueueFor
+// Retry above already covers.
 
 import (
 	"testing"
@@ -139,6 +149,99 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	assertState(w, "iss-1", model.StateClosed, false)
 }
 
+// TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos proves the
+// same decision pkg/dispatch/dispatch_test.go's
+// TestCycleRespectsTheSlotCount pins down at the store level -- one
+// Cycle call filling two free slots at once -- all the way through two
+// real pushes, each in its own sandbox-stand-in directory, against two
+// different repos, and checks that running both dispatches within the
+// same cycle left neither slot's bookkeeping corrupted.
+func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
+	const slotA = "sandbox-bd453be9-a"
+	const slotB = "sandbox-bd453be9-b"
+	w := newWorld(t, []string{slotA, slotB})
+	w.newRepo("acme", "widgets")
+	w.newRepo("acme", "gadgets")
+
+	clock := baseTime
+	fileIssue(w, "iss-a", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
+	fileIssue(w, "iss-b", human("bob"), model.RepoRef{Owner: "acme", Name: "gadgets"})
+	assertState(w, "iss-a", model.StateQueued, false)
+	assertState(w, "iss-b", model.StateQueued, false)
+
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatches) != 2 {
+		t.Fatalf("Cycle dispatched %+v, want exactly two", dispatches)
+	}
+	byTask := map[string]dispatch.Dispatch{}
+	for _, d := range dispatches {
+		byTask[d.TaskID] = d
+	}
+	dA, ok := byTask["iss-a"]
+	if !ok {
+		t.Fatalf("Cycle did not dispatch iss-a: %+v", dispatches)
+	}
+	dB, ok := byTask["iss-b"]
+	if !ok {
+		t.Fatalf("Cycle did not dispatch iss-b: %+v", dispatches)
+	}
+	if dA.Slot == dB.Slot {
+		t.Fatalf("both dispatches landed on slot %q, want distinct slots", dA.Slot)
+	}
+	assertState(w, "iss-a", model.StateRunning, true)
+	assertState(w, "iss-b", model.StateRunning, true)
+
+	branchA := model.BranchName("iss-a")
+	branchB := model.BranchName("iss-b")
+	clock = clock.Add(time.Minute)
+	resultA := w.runDispatch(dA, pushScript(w.remote("acme", "widgets"), branchA, "iss-a"), clock)
+	if !pushedOK(resultA) {
+		t.Fatalf("iss-a's agent run did not push cleanly: %+v", resultA.ToolCalls)
+	}
+	resultB := w.runDispatch(dB, pushScript(w.remote("acme", "gadgets"), branchB, "iss-b"), clock)
+	if !pushedOK(resultB) {
+		t.Fatalf("iss-b's agent run did not push cleanly: %+v", resultB.ToolCalls)
+	}
+
+	if got := w.log1("acme", "widgets", branchA, "%s"); got != "agent commit for iss-a" {
+		t.Fatalf("iss-a pushed branch tip = %q, want the agent's commit", got)
+	}
+	if got := w.log1("acme", "gadgets", branchB, "%s"); got != "agent commit for iss-b" {
+		t.Fatalf("iss-b pushed branch tip = %q, want the agent's commit", got)
+	}
+	if w.branchExists("acme", "widgets", branchB) {
+		t.Fatalf("iss-b's branch must not have landed in acme/widgets")
+	}
+	if w.branchExists("acme", "gadgets", branchA) {
+		t.Fatalf("iss-a's branch must not have landed in acme/gadgets")
+	}
+
+	assertState(w, "iss-a", model.StateQueued, false)
+	assertState(w, "iss-b", model.StateQueued, false)
+	if occ, _ := w.store.OccupiedSlots(w.ctx); len(occ) != 0 {
+		t.Fatalf("occupied slots after both finish = %v, want none", occ)
+	}
+	if n, err := w.store.Attempts(w.ctx, "iss-a"); err != nil || n != 1 {
+		t.Fatalf("Attempts(iss-a) = %d (%v), want 1", n, err)
+	}
+	if n, err := w.store.Attempts(w.ctx, "iss-b"); err != nil || n != 1 {
+		t.Fatalf("Attempts(iss-b) = %d (%v), want 1", n, err)
+	}
+
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-a", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-b", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "iss-a", model.StateCompleted, false)
+	assertState(w, "iss-b", model.StateCompleted, false)
+}
+
 func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	const slot = "sandbox-bd453be9-2"
 	w := newWorld(t, []string{slot})
@@ -212,6 +315,163 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	if got := w.log1("acme", "gadgets", branch, "%s"); got != "agent commit for iss-2" {
 		t.Fatalf("pushed branch tip = %q, want the agent's commit", got)
 	}
+}
+
+// TestParentBlockedUntilChildrenClose exercises model.LinkChildOf per
+// docs/data-model.md's "A parent is not complete while a child is open"
+// rule: "an open child is an unresolved blocking link" -- meaning the
+// *parent* holds one ChildOf link per child (mirroring how a blocked
+// task holds DependsOn links, per dispatch_test.go's
+// TestCycleSkipsBlockedTasksUntilTheirDependencyCloses), not the other
+// way around. LinkKind.Blocks (task.go) and IsBlocked (state.go) block
+// whoever holds the link, keyed on whether the link's target has closed,
+// so a child's own ChildOf link back at its parent would block the
+// child on the parent instead -- the opposite of what "a parent is not
+// complete while a child is open" needs, and briefly a deadlock if both
+// directions were linked at once.
+//
+// Blocked is deliberately not a State (task.go's docstring: "a blocked
+// task is still queued"), and nothing in dispatch or store.Observe
+// refuses to mark a blocked task completed or closed outright -- see
+// model/state.go's StateOf and IsBlocked, and pkg/model/store.go's
+// Ready, none of which cross-check each other. The one real, observable
+// effect blocking has today is dispatch eligibility: store.Ready's
+// underlying task_ready view (schema.go) excludes a task with any open
+// blocking link, so dispatch.Cycle never selects it, however many free
+// slots there are, until every blocker closes. That is what this test
+// asserts -- not that the parent literally "cannot be closed" (nothing
+// stops that directly), but that it can never reach closed through the
+// normal dispatch/push/complete/merge/close pipeline while blocked,
+// because that pipeline starts with a dispatch it never gets.
+func TestParentBlockedUntilChildrenClose(t *testing.T) {
+	// A third slot, kept unused until the parent's own dispatch: pushScript
+	// clones into a fixed "work" directory under its slot's sandbox root,
+	// so reusing slotA or slotB for the parent after a child already
+	// cloned there would collide with that leftover directory.
+	const slotA, slotB, slotC = "sandbox-bd453be9-4a", "sandbox-bd453be9-4b", "sandbox-bd453be9-4c"
+	w := newWorld(t, []string{slotA, slotB, slotC})
+	w.newRepo("acme", "widgets")
+	w.newRepo("acme", "other")
+	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
+	other := model.RepoRef{Owner: "acme", Name: "other"}
+
+	clock := baseTime
+	// Children first: task_blocked's join against task_link.target only
+	// counts a link once its target row exists, so filing them before the
+	// parent is what makes the parent's ChildOf links actually block.
+	fileIssue(w, "kid-a", human("dana"), widgets)
+	fileIssue(w, "kid-b", human("dana"), other)
+	fileIssue(w, "par", human("dana"), widgets,
+		model.Link{Kind: model.LinkChildOf, Target: "kid-a"},
+		model.Link{Kind: model.LinkChildOf, Target: "kid-b"},
+	)
+	assertState(w, "par", model.StateQueued, false)
+
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byTask := map[string]dispatch.Dispatch{}
+	for _, d := range dispatches {
+		byTask[d.TaskID] = d
+	}
+	if len(dispatches) != 2 || byTask["kid-a"].TaskID == "" || byTask["kid-b"].TaskID == "" {
+		t.Fatalf("Cycle dispatched %+v, want exactly kid-a and kid-b, parent still blocked", dispatches)
+	}
+
+	// Drive both children through a real dispatch/push/complete cycle,
+	// each against its own repo so their merges below cannot collide on
+	// the same file.
+	for _, spec := range []struct{ id, owner, name string }{
+		{"kid-a", "acme", "widgets"},
+		{"kid-b", "acme", "other"},
+	} {
+		d := byTask[spec.id]
+		branch := model.BranchName(spec.id)
+		clock = clock.Add(time.Minute)
+		result := w.runDispatch(d, pushScript(w.remote(spec.owner, spec.name), branch, spec.id), clock)
+		if !pushedOK(result) {
+			t.Fatalf("%s: agent run did not push cleanly: %+v", spec.id, result.ToolCalls)
+		}
+		clock = clock.Add(time.Minute)
+		if err := w.store.Observe(w.ctx, model.Observation{TaskID: spec.id, CompletedAt: &clock}); err != nil {
+			t.Fatal(err)
+		}
+		assertState(w, spec.id, model.StateCompleted, false)
+	}
+
+	// Completed is not closed -- task_blocked reads closed_at, not
+	// completed_at, so the parent must still be excluded from every
+	// cycle with both children merely completed.
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillBlocked) != 0 {
+		t.Fatalf("Cycle dispatched a still-blocked parent: %+v", stillBlocked)
+	}
+
+	// GitHub merges kid-a's PR and its "Closes #N" convention closes it --
+	// one of the two blockers gone, one still open.
+	w.mergeBranchIntoDefault("acme", "widgets", model.BranchName("kid-a"), "main")
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "kid-a", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "kid-a", model.StateClosed, false)
+
+	oneOpen, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oneOpen) != 0 {
+		t.Fatalf("Cycle dispatched the parent with kid-b still open: %+v", oneOpen)
+	}
+
+	// Close kid-b, the last blocker.
+	w.mergeBranchIntoDefault("acme", "other", model.BranchName("kid-b"), "main")
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "kid-b", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "kid-b", model.StateClosed, false)
+
+	// Both children closed -- the parent is unblocked and dispatches on
+	// the very next cycle, with nothing re-applied to it. Only slotC is
+	// offered here: slotA and slotB each already hold a child's cloned
+	// "work" directory from pushScript above, and the parent's own push
+	// below needs a clean slot to clone into.
+	freed, err := dispatch.Cycle(w.ctx, w.store, []string{slotC}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freed) != 1 || freed[0].TaskID != "par" {
+		t.Fatalf("Cycle after both children closed = %+v, want exactly par", freed)
+	}
+	assertState(w, "par", model.StateRunning, true)
+
+	// Carry the parent itself through the same real push/complete/merge/
+	// close cycle iss-1 gets in TestIssueCompletesEndToEnd, so the test
+	// proves not just that the parent becomes eligible but that it can
+	// actually reach closed once it does.
+	branch := model.BranchName("par")
+	clock = clock.Add(time.Minute)
+	result := w.runDispatch(freed[0], pushScript(w.remote("acme", "widgets"), branch, "par"), clock)
+	if !pushedOK(result) {
+		t.Fatalf("parent's agent run did not push cleanly: %+v", result.ToolCalls)
+	}
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "par", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "par", model.StateCompleted, false)
+
+	w.mergeBranchIntoDefault("acme", "widgets", branch, "main")
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "par", CompletedAt: &clock, ClosedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "par", model.StateClosed, false)
 }
 
 func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
@@ -381,4 +641,79 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 		t.Fatal(err)
 	}
 	assertState(w, "iss-b", model.StateClosed, false)
+}
+
+// TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun is
+// TestFailedRunReturnsTaskToQueueForRetry's scenario above, but with a
+// second, genuinely live run in another slot standing in for "the wrong
+// repo" instead of a repo nothing has ever touched -- proving gitproxy
+// authorizes per-run/per-slot rather than "any repo any live run
+// happens to target."
+func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T) {
+	const slotA = "sandbox-bd453be9-4"
+	const slotB = "sandbox-bd453be9-5"
+	w := newWorld(t, []string{slotA, slotB})
+	w.newRepo("acme", "widgets")
+	w.newRepo("acme", "gadgets")
+
+	clock := baseTime
+	fileIssue(w, "iss-4a", human("dave"), model.RepoRef{Owner: "acme", Name: "widgets"})
+	fileIssue(w, "iss-4b", human("erin"), model.RepoRef{Owner: "acme", Name: "gadgets"})
+
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatches) != 2 {
+		t.Fatalf("Cycle dispatched %+v, want both tasks started", dispatches)
+	}
+	var dA, dB dispatch.Dispatch
+	for _, d := range dispatches {
+		switch d.TaskID {
+		case "iss-4a":
+			dA = d
+		case "iss-4b":
+			dB = d
+		}
+	}
+	if dA.Slot != slotA || dB.Slot != slotB {
+		t.Fatalf("expected iss-4a on %s and iss-4b on %s, got %+v", slotA, slotB, dispatches)
+	}
+	assertState(w, "iss-4a", model.StateRunning, true)
+	assertState(w, "iss-4b", model.StateRunning, true)
+
+	branchA := model.BranchName("iss-4a")
+	branchB := model.BranchName("iss-4b")
+
+	// Slot A's agent targets slot B's repo -- acme/gadgets, a second run's
+	// legitimate target right now, not merely a repo nothing has touched.
+	// The harness's runDispatch is synchronous, so this and B's push below
+	// cannot literally interleave, but both runs are live (StartRun has
+	// happened for both, neither has finished) exactly as they would be if
+	// they had.
+	clock = clock.Add(time.Minute)
+	badResult := w.runDispatch(dA, pushScript(w.remote("acme", "gadgets"), branchA, "iss-4a"), clock)
+	if pushedOK(badResult) {
+		t.Fatalf("expected slot A's push against slot B's repo to be denied, got: %+v", badResult.ToolCalls)
+	}
+	if w.branchExists("acme", "widgets", branchA) || w.branchExists("acme", "gadgets", branchA) {
+		t.Fatalf("a denied push must land nowhere")
+	}
+	assertState(w, "iss-4a", model.StateQueued, false)
+
+	// B's own legitimate push to its own repo, run right after, must
+	// succeed untouched by A's denied attempt against that same repo.
+	clock = clock.Add(time.Minute)
+	goodResult := w.runDispatch(dB, pushScript(w.remote("acme", "gadgets"), branchB, "iss-4b"), clock)
+	if !pushedOK(goodResult) {
+		t.Fatalf("slot B's legitimate push failed: %+v", goodResult.ToolCalls)
+	}
+	assertState(w, "iss-4b", model.StateQueued, false)
+
+	if got := w.log1("acme", "gadgets", branchB, "%s"); got != "agent commit for iss-4b" {
+		t.Fatalf("pushed branch tip = %q, want B's own commit", got)
+	}
+	if w.branchExists("acme", "gadgets", branchA) {
+		t.Fatalf("A's denied branch must still not exist in acme/gadgets after B's own push landed")
+	}
 }
