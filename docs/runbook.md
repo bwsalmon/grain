@@ -468,8 +468,8 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   recreate" — today that's aspirational, not implemented. Recreating a
   sandbox does *not* rotate its token; do that as a separate, manual step.
 - **`cluster.toml`**: written by `configure_cluster`
-  (`grain/automation/configure.py`) on every `grain host bootstrap` run, not
-  just the first — the host's own `--cluster-file` never leaves the host,
+  (`grain/automation/configure.py`) on every `grain host bootstrap` **and
+  every `grain controller configure`** run, not just the first — the host's own `--cluster-file` never leaves the host,
   so without this copy `grain-automation.service`'s `--cluster-file
   /data/config/cluster.toml` (`provision/controller.sh`) would resolve to
   nothing and `Cluster.load` would silently fall back to its bare defaults
@@ -480,6 +480,23 @@ reads it"** (`docs/design.md`, "Operations") — nothing here watches
   host-side-only concern. Takes effect on the next `automation run-once`
   tick (every 2 min); no restart needed, since it's a oneshot invoked fresh
   each time, not a long-lived process holding a stale copy in memory.
+  `controller configure` writes it for the same reason it writes
+  `automation.json`: that command is the documented way to reconfigure a
+  *live* deployment, and bootstrap being its only writer meant raising
+  `sandbox_count` on the host and re-running `controller configure` left
+  the controller dispatching to the old sandbox names indefinitely — the
+  symptom being a four-sandbox deployment that only ever schedules two. Both
+  commands read the *host*'s own `--cluster-file` (plus `--sandboxes`), so
+  that file stays the deployment's truth and this is a sync of it.
+  Note that the controller's copy lives at `/data/config/cluster.toml`
+  while `--cluster-file`'s default is the host-side
+  `/var/lib/grain/cluster.toml`: `grain-automation.service` passes the
+  right path explicitly, but a hand-run `automation run-once`/`status`
+  **on the controller** does not, and `Cluster.load` falls back to its
+  bare defaults rather than complaining. On a deployment with more than
+  two sandboxes, pass `--cluster-file /data/config/cluster.toml` when
+  running either by hand, or you are debugging a different cluster from
+  the one the timer dispatches with.
 - **The controller SSH key**: generated once, on the controller, by
   `provision/controller.sh` (idempotently — it will not touch an existing
   `/data/secrets/controller-ssh`). `grain host recreate controller

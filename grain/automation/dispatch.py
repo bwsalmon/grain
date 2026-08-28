@@ -156,7 +156,7 @@ from enum import Enum
 from urllib.parse import urlsplit
 
 from .github import Comment, Issue, PullRequestDetail, ReviewComment
-from ..run import Runner
+from ..run import CommandError, Runner
 
 # Fixed across every dispatch to a sandbox — long-lived sandboxes reuse the
 # same checkout rather than getting a fresh one per task; see
@@ -1073,6 +1073,11 @@ def _start_task(sandbox_runner: Runner, controller_runner: Runner, sandbox: str,
                                 self_repair=self_repair),
     )
     out_path = transcript_path(unit)
+    # Immediately before `systemd-run`, not earlier: everything above is
+    # setup that can still fail, and a unit's own state is the only record
+    # a `grain automation status`/`systemctl status` pair has to disagree
+    # over while it does. See `reap_stale`'s docstring.
+    reap_stale(controller_runner, unit)
     start_unit(
         controller_runner, unit,
         # The token is read from CONTROLLER_AGENT_TOKEN_PATH into this
@@ -1277,3 +1282,51 @@ def reap(runner: Runner, unit: str) -> None:
     """
     runner.run(["sudo", "systemctl", "stop", unit], check=False)
     runner.run(["sudo", "systemctl", "reset-failed", unit], check=False)
+
+
+def reap_stale(runner: Runner, unit: str) -> None:
+    """Clears a *leftover* unit of this name, immediately before starting
+    the next one — `_start_task`'s own guard against a name collision it
+    can otherwise never recover from on its own.
+
+    `unit_name()` is fixed per sandbox and reused across dispatches, and
+    `--property=RemainAfterExit=yes` (see this module's docstring) means a
+    finished unit keeps its name loaded rather than auto-unloading — on
+    success as much as on failure. `systemd-run --unit=` refuses a name
+    that is still loaded, so a leftover unit fails the next dispatch to
+    that sandbox outright with "Unit grain-task-<sandbox>.service was
+    already loaded or has a fragment file."
+
+    `reap()` normally prevents that, but it is only ever reached from
+    `sweeper.py`, which finds a unit through the `Assignment` that names
+    it. A unit that outlives its assignment — state reset by hand, a sweep
+    that died before reaching it, a unit started manually while debugging
+    — is therefore never reaped by anything, and that sandbox stops being
+    dispatchable *permanently*: `core.py`'s `_dispatch` logs the
+    `CommandError` as "dispatch failed", leaves the sandbox free and the
+    issue's trigger label in place, and retries the identical failure every
+    cycle until an operator stops the unit by hand. Found live, exactly
+    that way. Clearing the name here makes the collision structurally
+    impossible rather than dependent on the sweep having got there first.
+
+    An `ACTIVE` unit is deliberately *not* reaped: that is a task still
+    running, and stopping it would kill a live agent mid-dispatch to make
+    room for a second one. `_dispatch` only ever dispatches to a sandbox
+    with no assignment, so reaching this with a running unit means state
+    and reality already disagree — a `CommandError` (the same type
+    `systemd-run`'s own refusal raises, and the one `_dispatch` already
+    treats as "log it and leave both the sandbox and the issue alone")
+    reports that without destroying the evidence.
+    """
+    state = unit_status(runner, unit)
+    if state is UnitState.ABSENT:
+        return
+    if state is UnitState.ACTIVE:
+        raise CommandError(
+            ["systemd-run", f"--unit={unit}"], 1,
+            f"{unit} is still active: a task is running on this sandbox with "
+            "no assignment tracking it. Refusing to stop it to start another; "
+            "check `grain automation status` against `systemctl status "
+            f"{unit}` and stop it by hand if it really is orphaned.",
+        )
+    reap(runner, unit)

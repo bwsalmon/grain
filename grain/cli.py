@@ -29,10 +29,10 @@ from .automation.audit import FileAuditLog
 from .automation.cleanup import cleanup
 from .automation.config import AutomationConfig
 from .automation.configure import (
-    configure_agent_gcp_key, configure_claude_token, configure_gcp_key_minter,
-    configure_gemini_key, configure_github_credential, configure_janitor,
-    configure_named_github_key, configure_repo, configure_scheduled_job,
-    configure_scratch_repo, credential_repos,
+    configure_agent_gcp_key, configure_claude_token, configure_cluster,
+    configure_gcp_key_minter, configure_gemini_key, configure_github_credential,
+    configure_janitor, configure_named_github_key, configure_repo,
+    configure_scheduled_job, configure_scratch_repo, credential_repos,
 )
 from .automation.core import Orchestrator
 from .automation.credential_audit import Verdict, audit_secrets_dir
@@ -546,9 +546,30 @@ def _read_scheduled_jobs(entries: list[str]) -> dict[str, str]:
 def cmd_controller_configure(args: argparse.Namespace) -> int:
     """`grain controller configure` -- docs/bootstrap.md Phase 3's third
     missing verb: writes `/data/config/automation.json`,
-    `repo-allowlist.json`, and, if supplied, the GitHub token/credential
-    mapping and the Claude Code OAuth token. See
+    `repo-allowlist.json`, `cluster.toml`, and, if supplied, the GitHub
+    token/credential mapping and the Claude Code OAuth token. See
     `grain/automation/configure.py`.
+
+    `cluster.toml` is written here and not only by `host bootstrap`
+    (`bootstrap.py`'s stage 8, which was its sole caller) because this is
+    the documented way to reconfigure a *live* deployment, and until now
+    it could not change the one number that decides how much of that
+    deployment the orchestrator can actually use. Raising `sandbox_count`
+    on the host and re-running this command updated `automation.json` and
+    left `/data/config/cluster.toml` at whatever the last bootstrap wrote,
+    so `grain-automation.service` -- the only caller that passes
+    `--cluster-file /data/config/cluster.toml` (`provision/controller.sh`)
+    -- kept dispatching to the old sandbox names, silently, since
+    `Cluster.load` falls back to its bare defaults rather than failing
+    when a field or the whole file is missing. The symptom is a
+    four-sandbox deployment that only ever schedules two. It is a sync,
+    not a create, and takes effect on the next `run-once` tick with no
+    restart, exactly as it does from bootstrap.
+
+    `cluster` here is the *host*'s own `--cluster-file` (plus any
+    `--sandboxes` override), the same source bootstrap reads -- this
+    command runs from the host, over SSH, so that file is the deployment's
+    truth and the controller's copy is downstream of it.
 
     Restarts `grain-git-proxy.service` afterward -- once, after every write
     below rather than right after `configure_repo`: `build_proxy`
@@ -572,6 +593,9 @@ def cmd_controller_configure(args: argparse.Namespace) -> int:
                     github_host=args.github_host,
                     git_forward_host=args.git_forward_host,
                     github_use_tls=not args.github_insecure_http)
+    # The same unconditional sync `host bootstrap`'s stage 8 does, for the
+    # same reason -- see this function's docstring, and `configure_cluster`'s.
+    configure_cluster(ssh, cluster)
     if args.github_token_file:
         token = (
             sys.stdin.read() if args.github_token_file == "-"

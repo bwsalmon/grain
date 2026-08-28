@@ -1,14 +1,16 @@
 import json
 
+import pytest
+
 from grain.automation.dispatch import (
     CONTROLLER_AGENT_TOKEN_PATH, CONTROLLER_AGENT_USER, GCP_KEY_PATH, GEMINI_KEY_PATH,
     SandboxTarget, UnitState, agent_id, branch_name, configure_gcp_key,
     configure_gemini_key, configure_git_credentials,
-    dispatch, dispatch_pr, dispatch_review, ensure_workspace, reap, transcript_path,
-    unit_name, unit_status,
+    dispatch, dispatch_pr, dispatch_review, ensure_workspace, reap, reap_stale,
+    transcript_path, unit_name, unit_status,
 )
 from grain.automation.github import Comment, Issue, PullRequestDetail, ReviewComment
-from grain.run import FakeRunner
+from grain.run import CommandError, FakeRunner
 
 REMOTE_URL = "http://10.100.0.2:8080/o/r.git"
 TOKEN = "sandbox-token"
@@ -504,6 +506,96 @@ def test_reap_stops_and_clears_failed_state():
     reap(runner, "grain-task-sandbox-0")
     assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
     assert runner.ran("sudo systemctl reset-failed grain-task-sandbox-0")
+
+
+# --- reap_stale: the leftover-unit collision -----------------------------
+#
+# `unit_name()` is fixed per sandbox and RemainAfterExit=yes keeps a
+# finished unit loaded, so `systemd-run --unit=` refuses the name until
+# something clears it. `reap()` only ever runs from the sweeper, via an
+# Assignment; a unit that outlives its assignment is reaped by nothing and
+# wedges that sandbox permanently. See `reap_stale`'s own docstring.
+
+def test_reap_stale_clears_a_finished_unit():
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\n",
+    )
+    reap_stale(runner, "grain-task-sandbox-0")
+    assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
+    assert runner.ran("sudo systemctl reset-failed grain-task-sandbox-0")
+
+
+def test_reap_stale_clears_a_failed_unit():
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=failed\nResult=exit-code\n",
+    )
+    reap_stale(runner, "grain-task-sandbox-0")
+    assert runner.ran("sudo systemctl stop grain-task-sandbox-0")
+
+
+def test_reap_stale_leaves_an_absent_unit_alone():
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=not-found\nActiveState=inactive\n")
+    reap_stale(runner, "grain-task-sandbox-0")
+    assert not runner.ran("sudo systemctl stop")
+    assert not runner.ran("sudo systemctl reset-failed")
+
+
+def test_reap_stale_refuses_to_stop_a_unit_that_is_still_running():
+    # A task still running with no assignment tracking it: stopping it
+    # would kill a live agent to make room for another. Report it as the
+    # CommandError `_dispatch` already logs and moves on from, rather than
+    # destroying the evidence.
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n",
+    )
+    with pytest.raises(CommandError) as caught:
+        reap_stale(runner, "grain-task-sandbox-0")
+    assert "still active" in str(caught.value)
+    assert not runner.ran("sudo systemctl stop")
+
+
+def test_dispatch_clears_a_leftover_unit_before_starting_the_next_one():
+    # The whole point: without this, the second dispatch to a sandbox whose
+    # unit was never reaped fails with "Unit grain-task-sandbox-0.service
+    # was already loaded or has a fragment file" -- every cycle, forever.
+    runner = FakeRunner()
+    runner.expect(
+        "systemctl show",
+        stdout="LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\n",
+    )
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    stop_index = next(
+        i for i, c in enumerate(runner.commands)
+        if c.startswith("sudo systemctl stop grain-task-sandbox-0")
+    )
+    reset_index = next(
+        i for i, c in enumerate(runner.commands)
+        if c.startswith("sudo systemctl reset-failed grain-task-sandbox-0")
+    )
+    start_index = next(
+        i for i, c in enumerate(runner.commands) if "systemd-run" in c
+    )
+    assert stop_index < start_index
+    assert reset_index < start_index
+
+
+def test_dispatch_does_not_touch_systemctl_when_no_unit_is_left_over():
+    # The ordinary path -- a sandbox whose last unit the sweeper already
+    # reaped -- must not gain two pointless privileged calls per dispatch.
+    runner = FakeRunner()
+    runner.expect("systemctl show", stdout="LoadState=not-found\nActiveState=inactive\n")
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    assert not runner.ran("sudo systemctl stop")
+    assert not runner.ran("sudo systemctl reset-failed")
 
 
 # --- ensure_workspace's branch parameter (docs/roadmap.md item 9) ---------
