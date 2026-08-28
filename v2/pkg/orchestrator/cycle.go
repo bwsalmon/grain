@@ -62,7 +62,7 @@ func runOne(ctx context.Context, deps Deps, d loop.Dispatch, now time.Time) erro
 		return err
 	}
 
-	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), *task, d, root, now)
+	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, root, now)
 	if err != nil {
 		return err
 	}

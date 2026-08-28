@@ -63,7 +63,9 @@ pkg/github/githubsim/  a port of tests/test_live_issue_to_pr.py's
                 network.
 pkg/orchestrator/  v1's core.py/Orchestrator equivalent: polls a task
                 repo's labelled issues into model.Store tasks, runs
-                loop.Cycle's own dispatches, turns a finished run's tool
+                loop.Cycle's own dispatches (resolving and materializing
+                each one's capabilities first, and revoking what was
+                minted once it finishes), turns a finished run's tool
                 calls into real GitHub effects (a comment, a pull
                 request, a filed follow-up task), and closes out a
                 pull request once GitHub reports it merged or closed.
@@ -76,15 +78,8 @@ e2e/            issues filed the way a user would, carried through
                 randomized multi-user simulation (bwsalmon/agents#233).
                 See "What this does not have yet" below for where it
                 stops.
-pkg/orchestrate/  the side-effecting counterpart loop.Cycle's own doc
-                comment says a later change would give it
-                (bwsalmon/agents#254): for each Dispatch, resolve and
-                materialize the task's capabilities, run the agent for
-                real, open the pull request a successful push implies,
-                revoke what was minted, and poll GitHub for what changed
-                on every task still worth asking about
-cmd/graind/     the daemon: pkg/orchestrate's reconcile loop run on a
-                timer against one real embedded Dolt store, until
+cmd/graind/     the daemon: pkg/orchestrator's RunCycle run on a timer
+                against one real embedded Dolt store, until
                 SIGINT/SIGTERM, with an in-process gitproxy and a real
                 github.RESTClient wired in
 ```
@@ -151,56 +146,44 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## What this does not have yet
 
-A real host adapter. Two independent packages now decide *when* to call
+A real host adapter, primarily. There used to be a second gap here too:
+two independent packages, `pkg/orchestrate` (bwsalmon/agents#254) and
+`pkg/orchestrator` (bwsalmon/agents#249), each decided *when* to call
 GitHub's REST API from a running `loop.Cycle`, built in parallel without
-either knowing about the other, and reconciling them into one is still
-open (see the note at the end of this section):
+either knowing about the other. bwsalmon/agents#263 reconciled them —
+`pkg/orchestrator` kept its own name and its more complete GitHub-facing
+half (issue intake via `PollIssues`, a finished run's tool calls turned
+into a comment/PR/follow-up issue via `ProcessResult`, and closing out a
+merged or closed PR via `SyncPullRequests`/`Store.OpenPullRequestLinks`),
+and gained what only `pkg/orchestrate` had: `RunDispatch` now resolves and
+materializes a dispatched task's capabilities, applies every placement
+under its sandbox root, and revokes what was minted once the run
+finishes, the same as `pkg/orchestrate`'s own `runDispatch` did — ported
+onto `orchestrator.Config`'s new `Capabilities`/`Credentials`/
+`MaxAgentTurns` fields. `cmd/graind` now drives `pkg/orchestrator` instead
+(a small non-overlapping ticker around `RunCycle`, the same discipline
+`pkg/orchestrate`'s own `Reconciler.Run` held to), and `pkg/orchestrate`
+itself, along with the `model.TrackedTarget`/`Store.TrackedTargets` it
+alone used, is deleted — `Store.OpenPullRequestLinks` (below) already
+covered the same "which pull request should grain still be watching"
+question, more precisely, so keeping both was pure duplication.
 
-`pkg/orchestrate` (bwsalmon/agents#254), driven by `cmd/graind` on a
-timer, re-derives "is there still an open PR for this branch" from GitHub
-on every pass (`github.FindOpenPullRequestForBranch`) rather than
-remembering a PR number anywhere, which costs an extra request per
-tracked task but needs no schema of its own — and because GitHub's REST
-API exposes no separate "merged" bit at the list level, a PR that was
-open and is not anymore reads as closed, not distinguished from merged,
-matching `model.Observation`'s own vocabulary (`ClosedAt`/`CompletedAt`,
-no merged flag). `graind` also still runs against the same "no host
-adapter" stand-in every other package here does: one slot, one local
-directory doing sandbox duty (bwsalmon/agents#254's own explicit
-simplification), and the `mcp.NewMockTools` escape hatches
+`graind` still runs against the same "no host adapter" stand-in every
+other package here does: one slot, one local directory doing sandbox duty
+(bwsalmon/agents#254's own explicit simplification, inherited by
+`orchestrator.HostSandboxes`), and the `mcp.NewMockTools` escape hatches
 (`ask_question`, `comment_on_issue`, `propose_task`, `add_review_comment`)
 `agent/gemini.Framework.Run` wires internally are still discarded rather
-than posted anywhere real — `orchestrate` only ever inspects
-`agent.Result.ToolCalls` after a run finishes (to decide success/failure
-and to seed a PR's body from the agent's own final answer), not while it
-is live. Turning GitHub issues carrying a trigger label into `Task` rows
-in the first place (v1's own intake, `dispatch.py`'s `directives.py`/label
-handling) is also still open — this deployment shape assumes tasks
-already exist in the store by the time `graind` looks.
-
-`pkg/orchestrator/` (bwsalmon/agents#249) goes further on that last point
-— polling a task repo's labelled issues, running `loop.Cycle`'s own
-dispatches, turning a finished run's tool calls into a comment/PR/
-follow-up issue, and closing out a merged or closed PR — but the sandbox
-each dispatch runs against is still a plain directory on whatever host
-this process itself runs on (`orchestrator.HostSandboxes`), the same
-stand-in `pkg/mcp`'s own tools and `e2e/` already used, promoted from
-test-only code to something `orchestrator.RunCycle` actually calls, and
-it has no `cmd/` entry point of its own yet.
-
-Neither package's sandbox stand-in carries any real isolation: a real
-deployment still needs the actual host adapter (creating a real VM/
-container per task and running commands in it over something better than
-"this process's own filesystem"), which remains v1 Python — 15,903 lines
-of it, with 1,239 tests. Those tests are the asset in a rewrite; the
-assertions port, the harness does not. `orchestrator.Deps.Sandboxes`/
-`.Framework` are exactly the two seams a real host adapter and a real
-dispatched-agent connection would replace, without changing anything
-about `RunCycle`'s own shape — `pkg/orchestrate`'s equivalent seams would
-need the same treatment. Which of the two packages `cmd/graind` should
-end up driving, and what happens to the other, is unresolved; both are
-kept for now rather than one being deleted out from under the task that
-is still relying on it.
+than posted anywhere real while a run is live — `ProcessResult` only ever
+inspects `agent.Result.ToolCalls` after a run finishes. This carries no
+real isolation at all: a real deployment still needs the actual host
+adapter (creating a real VM/container per task and running commands in it
+over something better than "this process's own filesystem"), which
+remains v1 Python — 15,903 lines of it, with 1,239 tests. Those tests are
+the asset in a rewrite; the assertions port, the harness does not.
+`orchestrator.Deps.Sandboxes`/`.Framework` are exactly the two seams a
+real host adapter and a real dispatched-agent connection would replace,
+without changing anything about `RunCycle`'s own shape.
 
 `TrackedPullRequest` (`model.PullRequestRef`/`model.PrHealth`/
 `model.TrackedPullRequest`, `pkg/model/pullrequest.go`) turned out not to
@@ -269,19 +252,16 @@ file's own docstring describes — every real `GitHubClient` behaviour
 call underneath swapped for an in-memory stand-in — and `BranchExists`
 answers from a real bare git repo via `git show-ref` rather than its own
 bookkeeping, since that check is the one a live test can't afford to
-fake. Two packages decide when to call any of it, built independently of
-each other: `pkg/orchestrate` (bwsalmon/agents#254) opens a pull request
-after a successful dispatch and polls `FindOpenPullRequestForBranch` to
-close one out, driven by `cmd/graind` on a timer, though it still polls
-issues for nothing, since turning a labelled GitHub issue into a `Task`
-row is not wired to `loop.Cycle` from that package. `pkg/orchestrator/`
-(below) does that intake too; its `live_test.go` drives the same two
+fake. `pkg/orchestrator` decides when to call any of it: it polls a
+labelled issue into a `Task` row, dispatches it through `loop.Cycle`,
+opens or reuses a pull request once a run pushes, and closes one out once
+GitHub reports it merged or closed. Its `live_test.go` drives the same two
 scenarios `e2e/e2e_test.go` already proved by hand (a push that becomes a
 merged, closed PR; a question that parks a task and a labelled reply that
 resumes it) through `orchestrator.RunCycle` and a real `github.Client`
-against `githubsim` instead. See "What this does not have yet" below for
-the shape of what is still open, including which of the two this project
-ends up keeping.
+against `githubsim` instead. This absorbed a second, independently-built
+package that once did a narrower version of the same job — see "What this
+does not have yet" below.
 
 The capability provider contract exists now too (`pkg/model/capability.go`),
 though nothing here ported it — `docs/data-model.md`'s design was never
@@ -332,7 +312,9 @@ MinterCredential` are each just a name resolved through
 `CapabilityContext.Credentials`, so an operator wires them to the same
 one to get bwsalmon/agents#239's "This can share the same account from
 the gcp capability" — `cmd/graind` is now the executor that does that
-wiring (`-gcp-project`/`-gcp-agent-service-account`, bwsalmon/agents#254):
+wiring (`-gcp-project`/`-gcp-agent-service-account`, bwsalmon/agents#254,
+now driving `pkg/orchestrator.RunDispatch` rather than the original
+`pkg/orchestrate` package it shipped against, per bwsalmon/agents#263):
 it constructs a real `CapabilityContext` per dispatch, applies every
 `SideSandbox` `Placement` under the dispatch's sandbox root, and calls
 `Revoke` once the run finishes. `Reap` is still uncalled from any binary
@@ -353,10 +335,10 @@ resolves through that resolver -- which `gcpkey.Provider.Spec()` and
 section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today,
-and `cmd/graind` now calls it for real from `pkg/orchestrate`'s dispatch
-loop rather than only from a test — `orchestrator.HostSandboxes` (below)
-is the only other thing `loop.Cycle`'s own dispatch path drives, and
-neither hands it more than a local directory to confine itself to yet
+and `cmd/graind` now calls it for real from `pkg/orchestrator`'s dispatch
+loop rather than only from a test — `orchestrator.HostSandboxes` is the
+only other thing `loop.Cycle`'s own dispatch path drives, and neither
+hands it more than a local directory to confine itself to yet
 (`mcp.ConfigureGitCredentials` sets that directory's git credentials up
 the same way v1's `configure_git_credentials` sets a real sandbox's up,
 once per slot at `graind` startup). `cmd/mcpserver` itself can now be
@@ -371,21 +353,20 @@ under a real kubelet instead of a local directory (a kontur VM's own
 image is expected to arrive with git already configured, the same
 assumption v1's sandbox provisioning makes, so `ConfigureGitCredentials`
 has nothing to do there) — bwsalmon/agents#256. Neither
-`orchestrator.HostSandboxes`/`RunCycle` nor `pkg/orchestrate`'s own
-dispatch calls that instead of the local stand-in yet, so today this is a
-capability `cmd/mcpserver` has standalone rather than one either
-reconcile loop drives.
+`orchestrator.HostSandboxes` nor `RunCycle` calls that instead of the
+local stand-in yet, so today this is a capability `cmd/mcpserver` has
+standalone rather than one the reconcile loop drives.
 
-A real `github.RESTClient` exists and is wired into `graind` too, but
-only for `orchestrate`'s own two calls (`FindOpenPullRequestForBranch`/
-`CreatePullRequest`), not for the agent's own `ask_question`/
-`comment_on_issue`/`propose_task`/`add_review_comment` calls:
-`gemini.Framework.Run` still wires those to a `mcp.MockSink` it builds
-and discards internally on every call, so they still just record what
-they were asked to do rather than posting it anywhere real. `orchestrate`
-only sees them after the fact, through the `agent.Result` `Run` returns,
-not while the run is live. Giving `Framework.Run` (or its caller) a way
-to inject a real sink is still open.
+A real `github.RESTClient` exists and is wired into `graind` too, driving
+every call `pkg/orchestrator` makes (issue listing/labelling, branch and
+pull-request state, check runs, comments) — but not the agent's own
+`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
+calls: `gemini.Framework.Run` still wires those to a `mcp.MockSink` it
+builds and discards internally on every call, so they still just record
+what they were asked to do rather than posting it anywhere real.
+`ProcessResult` only sees them after the fact, through the `agent.Result`
+`Run` returns, not while the run is live. Giving `Framework.Run` (or its
+caller) a way to inject a real sink is still open.
 
 `e2e/` is that whole chain driven by hand, in a test, rather than by
 `loop.Cycle` itself: it calls `loop.Cycle` to decide what runs, then
