@@ -141,13 +141,21 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer db.Close()
 
-	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP)
-	if err != nil {
-		return fmt.Errorf("starting git proxy: %w", err)
-	}
-	defer stopProxy(context.Background())
-
+	// Mint every slot's sandbox token, and only then start the git proxy
+	// -- BuildProxy's own doc comment on gitproxy.LoadSandboxTokens says
+	// the proxy "loads the map once at startup and only ever looks
+	// tokens up," never re-reading sandbox-tokens.json afterward. Doing
+	// this the other way around (as an earlier version of this function
+	// did) starts the proxy against whatever tokens already happened to
+	// be on disk -- none, on a fresh -data-dir -- so every token minted
+	// afterward is one the running proxy can never recognize, and every
+	// git push through it fails closed with 401 "authentication
+	// required" for the rest of the process's life. cmd/graind/live_test.go's
+	// TestRunLiveDispatchesAndOpensAPullRequest caught this live: a real
+	// dispatched agent's push was rejected by the proxy every time.
 	sandboxes := orchestrator.NewHostSandboxes(filepath.Join(cfg.dataDir, "sandbox"))
+	roots := map[string]string{}
+	slotTokens := map[string]string{}
 	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(cfg.dataDir, "secrets", "sandbox-tokens.json"))
 	for _, slot := range cfg.slots {
 		root, err := sandboxes.RootFor(slot)
@@ -158,12 +166,23 @@ func run(ctx context.Context, cfg config) error {
 		if err != nil {
 			return fmt.Errorf("minting sandbox token for %s: %w", slot, err)
 		}
+		roots[slot] = root
+		slotTokens[slot] = token
+	}
+
+	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP)
+	if err != nil {
+		return fmt.Errorf("starting git proxy: %w", err)
+	}
+	defer stopProxy(context.Background())
+
+	for _, slot := range cfg.slots {
 		// Configuring git credentials is a one-time, per-slot setup step,
 		// not a per-task one -- git-credential-store matches on
 		// protocol+host, not path, so this single line covers every repo
 		// this slot will ever be pointed at through the proxy. See
 		// mcp/git_credentials.go's own doc comment.
-		if err := mcp.ConfigureGitCredentials(root, proxyURL+"/placeholder/placeholder.git", token); err != nil {
+		if err := mcp.ConfigureGitCredentials(roots[slot], proxyURL+"/placeholder/placeholder.git", slotTokens[slot]); err != nil {
 			return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
 		}
 	}
