@@ -1,18 +1,19 @@
 package main
 
-// TestRunConfiguresAKonturBackedSlotUsingCreateArgs is the cmd/graind-level
+// TestRunConfiguresAKonturBackedSlotUsingCreateArgs is the daemon-level
 // counterpart to pkg/orchestrator/kontur_sandboxes_test.go's own coverage
 // of KonturSandboxes.ConfigureGitCredentials: that file proves the method
 // itself does the right thing over SSH; this proves run() -- the exact
-// function main() calls -- actually reaches it when -kontur-vm-name-prefix
-// is set, with -kontur-create-arg's values landing in the real
-// `kontur vm create` invocation verbatim. That plumbing (flags into a real
-// KonturConfig.CreateArgs, in a binary that actually constructs
-// orchestrator.KonturSandboxes) is what bwsalmon/agents#274 asked this
-// repo to wire up, once bwsalmon/kontur's own image flag was reachable to
-// confirm -- it still wasn't, from this sandbox, so -kontur-create-arg
-// carries whatever flag/value a deployment's operator confirms against
-// bwsalmon/kontur's own `-h` output, rather than a guess baked in here.
+// function daemon() (daemon.go) calls -- actually reaches it when
+// -kontur-vm-name-prefix is set, with -kontur-create-arg's values landing
+// in the real `kontur vm create` invocation verbatim. That plumbing
+// (flags into a real KonturConfig.CreateArgs, in a binary that actually
+// constructs orchestrator.KonturSandboxes) is what bwsalmon/agents#274
+// asked this repo to wire up, once bwsalmon/kontur's own image flag was
+// reachable to confirm -- it still wasn't, from this sandbox, so
+// -kontur-create-arg carries whatever flag/value a deployment's operator
+// confirms against bwsalmon/kontur's own `-h` output, rather than a guess
+// baked in here.
 //
 // It fakes `kontur`, `crictl` and `ssh` on PATH (the same style
 // kontur_sandboxes_test.go's own writeFakeKontur/writeFakeCrictl use, plus

@@ -11,7 +11,7 @@ package main
 // afterward -- i.e. every token any real deployment would ever have --
 // was one the proxy could never recognize, so every git push through it
 // failed closed with 401 "authentication required," for the entire
-// life of the process. cmd/graind/live_test.go's
+// life of the process. daemon_live_test.go's
 // TestRunLiveDispatchesAndOpensAPullRequest is what actually caught this
 // (a live dispatched agent's push was rejected every time); this test
 // isolates the same mechanism without a live Gemini key, so it runs in

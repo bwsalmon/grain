@@ -1,7 +1,7 @@
 # The kontur guest image
 
 `v2/pkg/kontur`'s own package doc comment, and `v2/README.md`'s
-`cmd/mcpserver -kontur-vm` section, both state the same assumption: a
+`grain mcpserver -kontur-vm` section, both state the same assumption: a
 kontur-managed VM's guest image already carries the operator's SSH key and
 a running sshd (and, per `v2/README.md`, git) before this repo ever tries
 to reach it. Nothing in this repo built that image -- v1 has an equivalent
@@ -123,7 +123,7 @@ hand-picked here.
 **What isn't settled here**: the exact flag `kontur vm create` takes to
 point at a built image. `orchestrator.KonturConfig.CreateArgs`
 (bwsalmon/agents#262) exists as the passthrough a deployment would use, and
-`cmd/graind` now constructs a real `KonturSandboxes`/`KonturConfig` from it
+`grain daemon` now constructs a real `KonturSandboxes`/`KonturConfig` from it
 (bwsalmon/agents#274) via `-kontur-vm-name-prefix` and a repeatable
 `-kontur-create-arg` flag -- e.g.
 `-kontur-create-arg=-image -kontur-create-arg=gs://.../kontur-guest-....qcow2`

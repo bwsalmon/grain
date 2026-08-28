@@ -1,9 +1,12 @@
-// Command mcpserver is the standalone form of the v2/mcp server: it serves
-// the sandbox tools and the mocked GitHub-shaped escape hatches over its
-// own stdin/stdout, so anything that can spawn a subprocess and speak MCP
-// -- not just v2/agent/gemini's in-process client -- can drive it. Real
-// MCP clients (an actual `claude` or `gemini` CLI's --mcp-config, for
-// instance) can point at this binary directly.
+// mcpserver.go implements `grain mcpserver`, formerly its own
+// cmd/mcpserver binary before bwsalmon/agents#313 combined every mode
+// into one: it serves the sandbox tools and the mocked GitHub-shaped
+// escape hatches over its own stdin/stdout, so anything that can spawn a
+// subprocess and speak MCP -- not just v2/agent/gemini's in-process
+// client -- can drive it. Real MCP clients (an actual `claude` or
+// `gemini` CLI's --mcp-config, for instance) can point at this same
+// grain binary, "mcpserver" and its own flags as the configured args, as
+// pkg/agent/claude does.
 //
 // Its sandbox tools run against one of two backends: a local directory
 // (-sandbox-root, unchanged since before bwsalmon/agents#256 -- what
@@ -30,40 +33,41 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
-func main() {
-	root := flag.String("sandbox-root", "",
+func mcpserver(args []string) {
+	fs := flag.NewFlagSet("grain mcpserver", flag.ExitOnError)
+	root := fs.String("sandbox-root", "",
 		"directory the local sandbox tools are confined to (mutually exclusive with -kontur-vm)")
 
-	konturVM := flag.String("kontur-vm", "",
+	konturVM := fs.String("kontur-vm", "",
 		"name of a kontur-managed VM (bwsalmon/kontur) to run the sandbox tools against over SSH, "+
 			"instead of a local directory (mutually exclusive with -sandbox-root)")
-	konturStateDir := flag.String("kontur-state-dir", kontur.DefaultStateDir,
+	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
 		"kontur's VM state directory, used to look up -kontur-vm's external port")
-	criRuntimeEndpoint := flag.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
+	criRuntimeEndpoint := fs.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
 		"containerd CRI socket, used to resolve -kontur-vm's pod IP via crictl")
-	konturHost := flag.String("kontur-host", "",
+	konturHost := fs.String("kontur-host", "",
 		"override the address -kontur-vm resolves to, skipping the crictl pod-IP lookup")
-	sshUser := flag.String("ssh-user", "", "username to SSH into -kontur-vm as (required with -kontur-vm)")
-	sshKey := flag.String("ssh-key", "", "path to the SSH private key to authenticate to -kontur-vm with (required with -kontur-vm)")
-	workspace := flag.String("workspace", "",
+	sshUser := fs.String("ssh-user", "", "username to SSH into -kontur-vm as (required with -kontur-vm)")
+	sshKey := fs.String("ssh-key", "", "path to the SSH private key to authenticate to -kontur-vm with (required with -kontur-vm)")
+	workspace := fs.String("workspace", "",
 		"working directory run_command/read_file/edit_file/write_file operate in on -kontur-vm (required with -kontur-vm)")
-	flag.Parse()
+	fs.Parse(args)
 
 	var tools []mcp.Tool
 	switch {
 	case *konturVM != "" && *root != "":
-		fmt.Fprintln(os.Stderr, "mcpserver: -sandbox-root and -kontur-vm are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "grain mcpserver: -sandbox-root and -kontur-vm are mutually exclusive")
 		os.Exit(2)
 	case *konturVM != "":
 		tools = mustSSHSandboxTools(*konturVM, *konturStateDir, *criRuntimeEndpoint, *konturHost, *sshUser, *sshKey, *workspace)
 	case *root != "":
 		if info, err := os.Stat(*root); err != nil || !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "mcpserver: -sandbox-root %q is not a directory: %v\n", *root, err)
+			fmt.Fprintf(os.Stderr, "grain mcpserver: -sandbox-root %q is not a directory: %v\n", *root, err)
 			os.Exit(2)
 		}
 		tools = mcp.NewSandboxTools(*root)
 	default:
-		fmt.Fprintln(os.Stderr, "mcpserver: exactly one of -sandbox-root or -kontur-vm is required")
+		fmt.Fprintln(os.Stderr, "grain mcpserver: exactly one of -sandbox-root or -kontur-vm is required")
 		os.Exit(2)
 	}
 
@@ -78,7 +82,7 @@ func main() {
 	// Serve returns io.EOF once its caller closes the write end of our
 	// stdin -- the ordinary way a client signals "done", not a failure.
 	if err := mcp.Serve(registry, bufio.NewReader(os.Stdin), bufio.NewWriter(os.Stdout)); err != nil && !errors.Is(err, io.EOF) {
-		log.Fatalf("mcpserver: %v", err)
+		log.Fatalf("grain mcpserver: %v", err)
 	}
 }
 
@@ -89,28 +93,28 @@ func main() {
 // that can't reach the sandbox it was told to run against.
 func mustSSHSandboxTools(konturVM, stateDir, criRuntimeEndpoint, konturHost, sshUser, sshKey, workspace string) []mcp.Tool {
 	if sshUser == "" {
-		fmt.Fprintln(os.Stderr, "mcpserver: -ssh-user is required with -kontur-vm")
+		fmt.Fprintln(os.Stderr, "grain mcpserver: -ssh-user is required with -kontur-vm")
 		os.Exit(2)
 	}
 	if sshKey == "" {
-		fmt.Fprintln(os.Stderr, "mcpserver: -ssh-key is required with -kontur-vm")
+		fmt.Fprintln(os.Stderr, "grain mcpserver: -ssh-key is required with -kontur-vm")
 		os.Exit(2)
 	}
 	if workspace == "" {
-		fmt.Fprintln(os.Stderr, "mcpserver: -workspace is required with -kontur-vm")
+		fmt.Fprintln(os.Stderr, "grain mcpserver: -workspace is required with -kontur-vm")
 		os.Exit(2)
 	}
 
 	port, err := kontur.Port(stateDir, konturVM)
 	if err != nil {
-		log.Fatalf("mcpserver: %v", err)
+		log.Fatalf("grain mcpserver: %v", err)
 	}
 
 	host := konturHost
 	if host == "" {
 		host, err = kontur.PodIP(context.Background(), criRuntimeEndpoint, konturVM)
 		if err != nil {
-			log.Fatalf("mcpserver: %v", err)
+			log.Fatalf("grain mcpserver: %v", err)
 		}
 	}
 

@@ -1,19 +1,20 @@
 package main
 
-// TestRunLiveDispatchesAndOpensAPullRequest is graind's own version of
-// e2e/live_test.go's TestLiveIssueCompletesEndToEnd and
+// TestRunLiveDispatchesAndOpensAPullRequest is the daemon's own version
+// of e2e/live_test.go's TestLiveIssueCompletesEndToEnd and
 // pkg/orchestrator/live_test.go's TestRunCycleCompletesEndToEnd: the
-// closest thing to actually running the daemon this repo can check in.
-// It calls run() itself -- the exact function cmd/graind's main() calls,
-// not a stand-in -- against a real embedded Dolt store, a real
-// in-process git proxy, a real *github.RESTClient pointed at a local
-// server standing in for GitHub (git smart-HTTP plus the handful of REST
-// endpoints orchestrate.openPullRequest needs, served by githubsim.Sim),
-// and the real Gemini API. Gated on GEMINI_API_KEY exactly like the
-// other two, so it runs nowhere without a live key (including CI) and
-// costs nothing when skipped:
+// closest thing to actually running `grain daemon` this repo can check
+// in. It calls run() itself -- the exact function daemon() (daemon.go,
+// what main() calls for a "daemon" argv[1]) calls, not a stand-in --
+// against a real embedded Dolt store, a real in-process git proxy, a
+// real *github.RESTClient pointed at a local server standing in for
+// GitHub (git smart-HTTP plus the handful of REST endpoints
+// orchestrate.openPullRequest needs, served by githubsim.Sim), and the
+// real Gemini API. Gated on GEMINI_API_KEY exactly like the other two,
+// so it runs nowhere without a live key (including CI) and costs nothing
+// when skipped:
 //
-//	GEMINI_API_KEY=... go test ./cmd/graind/... -run TestRunLiveDispatchesAndOpensAPullRequest -v
+//	GEMINI_API_KEY=... go test ./cmd/grain/... -run TestRunLiveDispatchesAndOpensAPullRequest -v
 //
 // One gap this test works around rather than hides: neither
 // pkg/orchestrate.prepare() nor pkg/orchestrator.BuildPrompt tells a
@@ -22,10 +23,10 @@ package main
 // nothing puts in the prompt (see both e2e/live_test.go's and
 // pkg/orchestrator/live_test.go's own prompts, which hardcode the remote
 // they built themselves for the same reason). Filed as its own issue
-// rather than fixed here, since cmd/graind is what this file tests, not
-// pkg/orchestrate's prompt-building. The prompt below routes around it
-// exactly the way a real dispatched agent would have to today: by
-// reading its own ~/.git-credentials to discover the one host it has
+// rather than fixed here, since the daemon's run() is what this file
+// tests, not pkg/orchestrate's prompt-building. The prompt below routes
+// around it exactly the way a real dispatched agent would have to today:
+// by reading its own ~/.git-credentials to discover the one host it has
 // been handed a credential for.
 
 import (
@@ -55,7 +56,7 @@ import (
 // carries no lock of its own, which is fine for every other test in this
 // codebase (one goroutine driving it directly), but this test drives it
 // from an httptest.Server's own request-handling goroutines -- the
-// running graind's REST calls, plus this test's own polling reads --
+// running daemon's REST calls, plus this test's own polling reads --
 // concurrently.
 type syncedSim struct {
 	mu  sync.Mutex
@@ -185,7 +186,7 @@ func runLive(t *testing.T, dir, name string, args ...string) {
 func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
-		t.Skip("GEMINI_API_KEY not set; skipping live graind integration test")
+		t.Skip("GEMINI_API_KEY not set; skipping live grain daemon integration test")
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")

@@ -3,7 +3,7 @@
 # instructions kept in sync by hand.
 
 BIN := bin
-CMDS := grain graind mcpserver ui
+CMDS := grain
 
 # --- ICU linkage ------------------------------------------------------
 #
@@ -15,9 +15,10 @@ CMDS := grain graind mcpserver ui
 # silently couples the machine that builds a binary to the machine that
 # runs it, and the failure lands at exec time on the target, not at build
 # time where someone would see it. Linking ICU's static archives instead
-# removes the coupling for about +31 MB (graind: 148 MB -> 179 MB, almost
-# all of it libicudata.a). libstdc++, libgcc and libc stay dynamic, which
-# a Debian host provides anyway.
+# removes the coupling for about +31 MB (grain: 148 MB -> 179 MB, almost
+# all of it libicudata.a -- unchanged since bwsalmon/agents#313 folded
+# graind, ui and mcpserver into this one binary too). libstdc++, libgcc
+# and libc stay dynamic, which a Debian host provides anyway.
 #
 # The archives are named by absolute path rather than with -Wl,-Bstatic
 # because ld64 (macOS) does not understand -Bstatic, while both linkers

@@ -1,6 +1,7 @@
-// Command graind is the grain daemon: it runs pkg/orchestrator's
-// RunCycle in the background on a timer, until SIGINT/SIGTERM, against
-// one real embedded Dolt store.
+// daemon.go implements `grain daemon`, formerly its own cmd/graind
+// binary before bwsalmon/agents#313 combined every mode into one: it
+// runs pkg/orchestrator's RunCycle in the background on a timer, until
+// SIGINT/SIGTERM, against one real embedded Dolt store.
 //
 // bwsalmon/agents#254 asked for exactly this, with one simplification: by
 // default, sandboxing is still local -- the MCP server's sandbox tools
@@ -62,46 +63,47 @@ func (s *stringSliceFlag) Set(v string) error {
 	return nil
 }
 
-func main() {
-	dataDir := flag.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
-	slotList := flag.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills")
-	pollInterval := flag.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
+func daemon(args []string) {
+	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
+	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills")
+	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
 
-	storeAddr := flag.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- required to share the store with a UI or a CLI")
-	storeDatabase := flag.String("store-database", "grain", "database name on -store-addr")
-	storeUser := flag.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := flag.String("store-password-file", "", "file holding the password for -store-user")
+	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- required to share the store with a UI or a CLI")
+	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
+	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
+	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
 
-	geminiAPIKeyFile := flag.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
-	geminiModel := flag.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
-	maxAgentTurns := flag.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
+	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
+	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
+	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
 
-	githubHost := flag.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing")
-	githubInsecureHTTP := flag.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)")
+	githubHost := fs.String("github-host", "github.com", "GitHub API host -- override to point at a mock for local testing")
+	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)")
 
-	gcpProject := flag.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both")
-	gcpServiceAccountEmail := flag.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both")
+	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
 
 	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
 	// host, no isolation) exactly as it always has -- see run()'s own
 	// comment on sandboxes below. -kontur-vm-name-prefix is the opt in to
 	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
-	// managed VM per dispatch slot, reached over SSH.
-	konturVMNamePrefix := flag.String("kontur-vm-name-prefix", "",
+	// managed VM per slot, reached over SSH.
+	konturVMNamePrefix := fs.String("kontur-vm-name-prefix", "",
 		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
-	konturStateDir := flag.String("kontur-state-dir", kontur.DefaultStateDir,
+	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
 		"kontur's VM state directory (only used with -kontur-vm-name-prefix)")
-	criRuntimeEndpoint := flag.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
+	criRuntimeEndpoint := fs.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
 		"containerd CRI socket, used to resolve a kontur VM's pod IP via crictl (only used with -kontur-vm-name-prefix)")
-	konturSSHUser := flag.String("kontur-ssh-user", "",
+	konturSSHUser := fs.String("kontur-ssh-user", "",
 		"username to SSH into each kontur VM as (required with -kontur-vm-name-prefix)")
-	konturSSHKey := flag.String("kontur-ssh-key", "",
+	konturSSHKey := fs.String("kontur-ssh-key", "",
 		"path to the SSH private key to authenticate to each kontur VM with (required with -kontur-vm-name-prefix)")
-	konturWorkspace := flag.String("kontur-workspace", "",
+	konturWorkspace := fs.String("kontur-workspace", "",
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
-	flag.Var(&konturCreateArgs, "kontur-create-arg",
+	fs.Var(&konturCreateArgs, "kontur-create-arg",
 		"one argument appended verbatim to `kontur vm create <name> -state-dir <dir>` when a slot's VM does not "+
 			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `kontur vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
@@ -109,27 +111,27 @@ func main() {
 			"packer/kontur/build.sh's published output using whatever flag bwsalmon/kontur's own CLI turns out "+
 			"to call that (see packer/kontur/README.md, \"What isn't settled here\"). Only used with "+
 			"-kontur-vm-name-prefix.")
-	flag.Parse()
+	fs.Parse(args)
 
 	if *dataDir == "" {
-		fmt.Fprintln(os.Stderr, "graind: -data-dir is required")
+		fmt.Fprintln(os.Stderr, "grain daemon: -data-dir is required")
 		os.Exit(2)
 	}
 	if *geminiAPIKeyFile == "" {
-		fmt.Fprintln(os.Stderr, "graind: -gemini-api-key-file is required")
+		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
 	}
 	if *konturVMNamePrefix != "" {
 		if *konturSSHUser == "" {
-			fmt.Fprintln(os.Stderr, "graind: -kontur-ssh-user is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-user is required with -kontur-vm-name-prefix")
 			os.Exit(2)
 		}
 		if *konturSSHKey == "" {
-			fmt.Fprintln(os.Stderr, "graind: -kontur-ssh-key is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-key is required with -kontur-vm-name-prefix")
 			os.Exit(2)
 		}
 		if *konturWorkspace == "" {
-			fmt.Fprintln(os.Stderr, "graind: -kontur-workspace is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-workspace is required with -kontur-vm-name-prefix")
 			os.Exit(2)
 		}
 	}
@@ -149,7 +151,7 @@ func main() {
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
 		konturCreateArgs: konturCreateArgs,
 	}); err != nil {
-		log.Fatalf("graind: %v", err)
+		log.Fatalf("grain daemon: %v", err)
 	}
 }
 
@@ -320,7 +322,7 @@ func run(ctx context.Context, cfg config) error {
 		},
 		Slots: cfg.slots,
 	}
-	log.Printf("graind: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
+	log.Printf("grain daemon: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
 	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
 }
@@ -337,7 +339,7 @@ func run(ctx context.Context, cfg config) error {
 func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Duration) {
 	tick := func() {
 		if err := orchestrator.RunCycle(ctx, deps, time.Now().UTC()); err != nil {
-			log.Printf("graind: reconcile cycle: %v", err)
+			log.Printf("grain daemon: reconcile cycle: %v", err)
 		}
 	}
 	tick()
@@ -431,7 +433,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 	srv := &http.Server{Handler: gitproxy.NewHandler(proxy)}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("graind: git proxy: %v", err)
+			log.Printf("grain daemon: git proxy: %v", err)
 		}
 	}()
 	return "http://" + ln.Addr().String(), srv.Shutdown, nil
