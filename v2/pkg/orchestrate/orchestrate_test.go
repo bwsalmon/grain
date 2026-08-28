@@ -176,6 +176,9 @@ func (f *fakeGitHub) AddLabel(owner, repo string, n int, label string) error    
 func (f *fakeGitHub) RemoveLabel(owner, repo string, n int, label string) error { return nil }
 func (f *fakeGitHub) CloseIssue(owner, repo string, n int) error                { return nil }
 func (f *fakeGitHub) ReopenIssue(owner, repo string, n int) error               { return nil }
+func (f *fakeGitHub) UpdateIssue(owner, repo string, n int, title, body *string) error {
+	return nil
+}
 func (f *fakeGitHub) GetBranchHead(owner, repo, branch string) (*github.BranchHead, error) {
 	return nil, nil
 }
