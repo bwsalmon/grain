@@ -812,6 +812,23 @@ caller of the same `/api/*` surface `cmd/ui`'s own frontend
 (`pkg/ui/static/`, plain HTML/CSS/JS, no build step) already uses, with
 nothing about the server to rewrite.
 
+**`-demo` (bwsalmon/agents#276) for trying out the frontend on its own.**
+`cmd/ui` normally needs a real store — embedded or a Dolt SQL server — and
+a real deployment's tasks to look at anything. `-demo` opens a throwaway
+embedded store in a fresh temp directory instead and seeds it with fake
+tasks, one in each `model.State` (`cmd/ui/demo.go`), through the same
+`ui.Client`/`model.Store` writes a human clicking through the UI would
+make — no fake `Store` standing in, matching the "real embedded Dolt, not
+a fake" discipline every test in this repo already holds to
+(`pkg/ui/client_test.go`). That makes it a real server exercising the real
+frontend code, with fake data as the only difference from a real
+deployment — useful for checking a frontend change renders every state
+correctly without an orchestrator, a sandbox, a Gemini key, or a git repo
+anywhere behind it. `-store-addr`/`-data-dir` are rejected alongside it,
+since a throwaway store and a real one talking to the same flags would be
+a UI showing one deployment's fake tasks in some other deployment's data
+directory.
+
 **Freshness, not a cache.** Every mutation in the frontend
 (`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
 than assuming its own optimistic update is now true, matching the

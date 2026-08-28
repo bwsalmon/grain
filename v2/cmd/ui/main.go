@@ -37,7 +37,22 @@ func main() {
 	defaultTargetRepo := flag.String("default-target-repo", "",
 		"owner/name a task with no repo of its own targets")
 	open := flag.Bool("open", true, "open the UI in the system's default browser once it's listening")
+	demo := flag.Bool("demo", false,
+		"seed a throwaway store with fake tasks instead of opening a real one -- "+
+			"for trying out the UI with no orchestrator, sandbox or repo behind it")
 	flag.Parse()
+
+	if *demo && (*storeAddr != "" || *dataDir != "") {
+		fmt.Fprintln(os.Stderr, "ui: -demo seeds its own throwaway store; -store-addr/-data-dir must be unset")
+		os.Exit(2)
+	}
+	if *demo {
+		dir, err := os.MkdirTemp("", "grain-ui-demo-")
+		if err != nil {
+			log.Fatalf("ui: creating a throwaway store for -demo: %v", err)
+		}
+		*dataDir = dir
+	}
 
 	server, err := serverConfig(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile)
 	if err != nil {
@@ -65,6 +80,16 @@ func main() {
 			os.Exit(2)
 		}
 		cfg.DefaultTarget = &repo
+	}
+	if *demo {
+		if cfg.DefaultTarget == nil {
+			repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+			cfg.DefaultTarget = &repo
+		}
+		if err := seedDemo(context.Background(), store, cfg); err != nil {
+			log.Fatalf("ui: seeding -demo data: %v", err)
+		}
+		log.Printf("ui: -demo mode -- serving fake tasks from a throwaway store at %s, nothing here is real", *dataDir)
 	}
 	srv := ui.NewServer(cfg, store)
 
