@@ -191,6 +191,21 @@ function renderDetail(t) {
   }
   if (t.state === "closed") {
     actions.appendChild(el("button", { class: "secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id) }, ["Reopen"]));
+  } else if (t.state === "running") {
+    // Closing a running task already stops it from ever being
+    // re-dispatched or opened as a pull request (orchestrator.ProcessResult,
+    // e2e/close_while_live_test.go) -- that is what "kills the underlying
+    // job" means today, since nothing here preempts a sandbox already in
+    // flight. Cancel is that same close call, surfaced under a name that
+    // matches what a running task's close button actually does instead of
+    // the generic "Close" label every other state uses.
+    actions.appendChild(el("button", {
+      class: "danger secondary",
+      onclick: () => {
+        if (!confirm("Cancel this job? Its run will be abandoned: no pull request will be opened for it.")) return;
+        act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id);
+      },
+    }, ["Cancel"]));
   } else {
     actions.appendChild(el("button", { class: "danger secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id) }, ["Close"]));
   }
