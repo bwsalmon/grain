@@ -112,6 +112,16 @@ type CapabilitySpec struct {
 	// revoked regardless of its own ExpiresAt -- see Lease.Expired. Zero
 	// for a GRANT or SELECT capability, which mint nothing to expire.
 	MaxLease time.Duration
+	// Requires names every secret this capability resolves through
+	// CapabilityContext.Credentials -- docs/data-model.md's `requires`
+	// field, widened from one name to every name a provider actually
+	// calls Resolve with (gcp-key already needs a minter credential
+	// distinct from the key it mints). A name here is never material:
+	// it is exactly what a deployment's secret store (see v2/secrets)
+	// must have configured for this capability to materialize, so this
+	// field is what a checked-in listing of capability requirements can
+	// show without showing a single value.
+	Requires []string
 }
 
 // CapabilityProvider is the contract a capability implements.

@@ -184,6 +184,11 @@ func (p *Provider) Spec() model.CapabilitySpec {
 		Source:      model.GrantByLabel,
 		Provision:   model.ProvisionMint,
 		MaxLease:    p.maxKeyAge(),
+		// The minter credential is resolved fresh on every
+		// Materialize/Revoke/Reap (this package's doc comment) --
+		// never ServiceAccountEmail/ProjectID, which are deployment
+		// config, not secret material.
+		Requires: []string{p.minterCredential()},
 	}
 }
 

@@ -24,6 +24,10 @@ gcpkey/         the gcp-key capability: a real MINT model.CapabilityProvider
                 no gcloud subprocess), plus Reap, a standalone safety net
                 that deletes anything GCP itself reports as older than 24h
                 regardless of whether a Lease survived to say so
+secrets/        a model.CredentialResolver reading a directory shaped like
+                a Kubernetes Secret volume mount (<dir>/<secret>/<key>) --
+                the production implementation CapabilityContext.Credentials
+                had none of until now
 gitproxy/       a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -150,6 +154,17 @@ called from anywhere yet: there is still no executor to apply a `Placement`
 to a sandbox or call `Revoke` when a run ends, and no periodic sweep calls
 `Reap` — both need the same host adapter `loop.Cycle` is still waiting on
 above. `gemini-key` remains unbuilt.
+
+`CapabilityContext.Credentials` (`model.CredentialResolver`) had no
+production implementation until `secrets/`: a `Store` reading a
+directory shaped like a Kubernetes Secret volume mount, so
+`gcp-key`'s minter credential (and any future capability's) resolves
+against real material rather than only the fakes `gcpkey_test.go` and
+`model/capability_test.go` supply. `CapabilitySpec` grew a `Requires`
+field alongside it -- the names, never the values, a capability
+resolves through that resolver -- which `gcpkey.Provider.Spec()` now
+sets, and which `docs/data-model.md`'s new "secret store is a folder,
+not a table" section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
 it just has nothing to call it yet outside a test. There is no host
