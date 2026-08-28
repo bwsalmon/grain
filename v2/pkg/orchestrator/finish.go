@@ -63,7 +63,7 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 func ProcessResult(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, result *agent.Result, now time.Time) error {
 
-	repo, number, err := parseExternalRef(task.ExternalRef)
+	repo, number, err := model.ParseExternalRef(task.ExternalRef)
 	if err != nil {
 		return fmt.Errorf("orchestrator: processing result for %s: %w", task.ID, err)
 	}

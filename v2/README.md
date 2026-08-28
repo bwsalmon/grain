@@ -167,16 +167,34 @@ matching `model.Observation`'s own vocabulary (`ClosedAt`/`CompletedAt`,
 no merged flag). `graind` also still runs against the same "no host
 adapter" stand-in every other package here does: one slot, one local
 directory doing sandbox duty (bwsalmon/agents#254's own explicit
-simplification), and the `mcp.NewMockTools` escape hatches
-(`ask_question`, `comment_on_issue`, `propose_task`, `add_review_comment`)
-`agent/gemini.Framework.Run` wires internally are still discarded rather
-than posted anywhere real — `orchestrate` only ever inspects
-`agent.Result.ToolCalls` after a run finishes (to decide success/failure
-and to seed a PR's body from the agent's own final answer), not while it
-is live. Turning GitHub issues carrying a trigger label into `Task` rows
-in the first place (v1's own intake, `dispatch.py`'s `directives.py`/label
-handling) is also still open — this deployment shape assumes tasks
-already exist in the store by the time `graind` looks.
+simplification). Three of the `mcp.NewMockTools` escape hatches
+(`ask_question`, `comment_on_issue`, `propose_task`) are wired to real
+GitHub effects now (`pkg/orchestrate/effects.go`'s `reportOutcome`,
+called once a dispatch's run returns, the same after-the-fact reading of
+`agent.Result.ToolCalls` — not a live sink inside `agent/gemini.Framework.
+Run` itself — `pkg/orchestrator`'s own `ProcessResult` already used):
+`ask_question` posts to `Task.ExternalRef`'s tracking issue and parks the
+task on a `PendingQuestionCommentID` Observation instead of leaving it
+silently "succeeded", `comment_on_issue` posts a closing comment and
+closes the task out (skipping the "completed, wait for a PR to
+disappear" state a comment-only task, having no PR, would never leave),
+and `propose_task` files a real (unlabelled) issue alongside whatever else
+the run did. `model.ExternalRef`/`model.ParseExternalRef` is the format
+convention both packages now share for reading which GitHub issue a
+`Task` was filed from — moved out of `pkg/orchestrator` (where it
+started as a private detail of its own intake) since `orchestrate` needed
+to agree with it, not invent a second one. A task with no parseable
+`ExternalRef` still gets its pull request opened exactly as before; there
+is just nothing to relay a question, comment, or proposal to. `graind`
+still has no `PollIssues` equivalent of its own to produce that
+`ExternalRef` in the first place — turning GitHub issues carrying a
+trigger label into `Task` rows (v1's own intake, `dispatch.py`'s
+`directives.py`/label handling) is still open for this package, and
+`add_review_comment` is still recorded and nothing more, the same
+"nothing yet dispatches with review intent for one to attach to" gap
+`pkg/orchestrator` has (below) — this deployment shape still assumes
+tasks already exist in the store, with an `ExternalRef` already stamped
+on by whatever put them there, by the time `graind` looks.
 
 `pkg/orchestrator/` (bwsalmon/agents#249) goes further on that last point
 — polling a task repo's labelled issues, running `loop.Cycle`'s own
