@@ -30,30 +30,44 @@ const (
 // (see runCommandTool) authenticates through remoteURL's host as sandbox,
 // using token as the password half of HTTP Basic auth.
 func ConfigureGitCredentials(root, remoteURL, token string) error {
-	parsed, err := url.Parse(remoteURL)
+	line, gitconfig, err := gitCredentialFiles(remoteURL, token)
 	if err != nil {
-		return fmt.Errorf("gitcredentials: parsing %q: %w", remoteURL, err)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("gitcredentials: %q is not an absolute URL", remoteURL)
+		return err
 	}
 
 	// git-credential-store matches on protocol+host, not path, so one
 	// line covers every repo this sandbox might be pointed at through the
 	// same proxy.
-	line := fmt.Sprintf("%s://sandbox:%s@%s\n", parsed.Scheme, token, parsed.Host)
 	credentialsPath := filepath.Join(root, ".git-credentials")
 	if err := os.WriteFile(credentialsPath, []byte(line), 0o600); err != nil {
 		return fmt.Errorf("gitcredentials: writing %s: %w", credentialsPath, err)
 	}
 
-	gitconfig := fmt.Sprintf(
-		"[credential]\n\thelper = store\n[user]\n\tname = %s\n\temail = %s\n",
-		gitIdentityName, gitIdentityEmail,
-	)
 	gitconfigPath := filepath.Join(root, ".gitconfig")
 	if err := os.WriteFile(gitconfigPath, []byte(gitconfig), 0o600); err != nil {
 		return fmt.Errorf("gitcredentials: writing %s: %w", gitconfigPath, err)
 	}
 	return nil
+}
+
+// gitCredentialFiles renders the two files ConfigureGitCredentials (and
+// ConfigureGitCredentialsOverSSH, ssh_git_credentials.go) write, without
+// committing to how or where they land -- a local directory's
+// os.WriteFile for the former, a remote host's $HOME over SSH for the
+// latter.
+func gitCredentialFiles(remoteURL, token string) (credentials, gitconfig string, err error) {
+	parsed, err := url.Parse(remoteURL)
+	if err != nil {
+		return "", "", fmt.Errorf("gitcredentials: parsing %q: %w", remoteURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", "", fmt.Errorf("gitcredentials: %q is not an absolute URL", remoteURL)
+	}
+
+	credentials = fmt.Sprintf("%s://sandbox:%s@%s\n", parsed.Scheme, token, parsed.Host)
+	gitconfig = fmt.Sprintf(
+		"[credential]\n\thelper = store\n[user]\n\tname = %s\n\temail = %s\n",
+		gitIdentityName, gitIdentityEmail,
+	)
+	return credentials, gitconfig, nil
 }

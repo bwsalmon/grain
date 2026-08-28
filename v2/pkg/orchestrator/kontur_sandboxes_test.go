@@ -80,6 +80,70 @@ esac
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// writeFakeSSH installs a shell script named "ssh" on PATH that ignores
+// every connection flag SSHRunner.Run passes and just runs its trailing
+// shell-quoted command (SSHRunner.Run's own doc comment: "one shell-
+// quoted string") against homeDir, standing in for "the directory a real
+// SSH session starts a fresh login in" (ssh_tools_test.go's own
+// localExecRunner doc comment) -- letting
+// KonturSandboxes.ConfigureGitCredentials' real *mcp.SSHRunner exercise
+// the exact code path a real deployment does, without a real sshd for it
+// to connect to.
+func writeFakeSSH(t *testing.T, homeDir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/bash
+cd %q && exec bash -c "${@: -1}"
+`, homeDir)
+	path := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	home := t.TempDir()
+	writeFakeSSH(t, home)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix: "grain-test-",
+		StateDir:   stateDir,
+		SSHUser:    "debian",
+		SSHKey:     "/key",
+		Workspace:  "/workspace",
+	})
+
+	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".git-credentials"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "http://sandbox:secret-token@10.100.0.1:8080\n"; string(data) != want {
+		t.Errorf(".git-credentials = %q, want %q", data, want)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gitconfig")); err != nil {
+		t.Errorf(".gitconfig was not written on the VM: %v", err)
+	}
+
+	// A second call for the same slot must not create a second VM --
+	// ConfigureGitCredentials shares ensure()/resolveEndpoint() with
+	// ToolsFor, so it gets that reuse for free; this just confirms it
+	// actually took effect end to end.
+	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "second-token"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestKonturSandboxesCreatesVMOnFirstUseAndReusesAfter(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")

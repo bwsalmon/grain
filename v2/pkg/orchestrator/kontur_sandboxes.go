@@ -153,6 +153,31 @@ func (k *KonturSandboxes) ensure(ctx context.Context, name string) error {
 	return nil
 }
 
+// ConfigureGitCredentials ensures slot's VM exists and points its git at
+// remoteURL via token, the same one-time, per-slot setup a deployment
+// does for a HostSandboxes slot directly via mcp.ConfigureGitCredentials
+// (root/.gitconfig -- see that func's own doc comment) -- SSH, over the
+// same endpoint ToolsFor resolves, is KonturSandboxes' only path to a
+// slot's VM filesystem, so this is that setup's equivalent for this
+// backend. Safe to call before any ToolsFor call for slot: like ToolsFor,
+// it creates the VM on first use and waits out cfg.readyTimeout for it to
+// become reachable.
+func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, remoteURL, token string) error {
+	name := k.VMNameFor(slot)
+	if err := k.ensure(ctx, name); err != nil {
+		return err
+	}
+	host, port, err := k.resolveEndpoint(ctx, name)
+	if err != nil {
+		return err
+	}
+	runner := &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}
+	if err := mcp.ConfigureGitCredentialsOverSSH(runner, remoteURL, token); err != nil {
+		return fmt.Errorf("orchestrator: configuring git credentials on kontur VM %q: %w", name, err)
+	}
+	return nil
+}
+
 // resolveEndpoint reads name's assigned port and polls PodIP until it
 // resolves or cfg.readyTimeout runs out -- a VM this process just created
 // takes real wall-clock time to boot, get scheduled, and reach Ready
