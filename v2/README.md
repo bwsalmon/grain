@@ -18,6 +18,8 @@ mcp/cmd/mcpserver/  the server as a standalone stdio binary
 agent/          the Framework interface an agent driver implements
 agent/gemini/   Framework via the Gemini API, talking to its own in-process
                 mcp/ server
+capability/geminikey/  a MINT model.CapabilityProvider: mints, places and
+                revokes a Gemini API key, direct against the API Keys API
 gitproxy/       a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -129,10 +131,25 @@ correct once a Runner exists. `ResolveGrants`, `MaterializeGrants` and
 `PromptSections` walk a task's `Grant`s against a `CapabilityRegistry`
 in registration order, honouring `docs/data-model.md`'s rule that a
 half-materialized capability is never described to the agent as
-present. What it does not yet have: a real `MINT` provider
-(`gemini-key`, `gcp-key`) — minting needs standing credentials and a
-controller v2 has neither of — or an executor that actually applies a
-`Placement` to a sandbox, which needs the same host adapter
+present.
+
+`capability/geminikey/` is now a real `MINT` provider
+(bwsalmon/agents#239), porting `grain/automation/gemini_keys.py`'s
+`gemini-key` capability: it mints a Gemini API key scoped to the
+Generative Language API, places it at `/home/debian/.gemini-api-key`,
+and revokes it, calling the API Keys API directly through its Go client
+library rather than shelling out to `gcloud` the way the Python version
+has to — one of the two things `google.golang.org/api` was expected to
+correct, per "Two things the port corrected" above. `DeleteExpired` is
+the "clean up after 24 hours if leaked" safety net, mirroring
+`delete_expired_keys`. What is still missing is not this provider's own
+logic but the same wiring `gcp-key` also lacks: nothing constructs a
+real `CapabilityContext` against a live deployment yet, and there is no
+`gcp-key` provider for `geminikey`'s `Credential` to actually share an
+account with (bwsalmon/agents#239's "This can share the same account
+from the gcp capability") — both need standing credentials and a
+controller v2 does not yet have — and there is still no executor that
+applies a `Placement` to a sandbox, which needs the same host adapter
 `loop.Cycle` is still waiting on above.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
