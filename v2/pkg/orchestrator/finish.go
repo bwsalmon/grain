@@ -198,19 +198,22 @@ func finishWithPullRequest(ctx context.Context, store *model.Store, client githu
 		return fmt.Errorf("orchestrator: opening a pull request for %s: %w", task.ID, err)
 	}
 
+	// Through UpdateTask rather than writing back the task this function
+	// was handed: that copy was read at the top of the cycle, and a person
+	// editing it from the UI in between would lose their edit to this
+	// write. Re-checking the link inside the closure is also what makes it
+	// idempotent across a retry.
 	ref := model.PullRequestRef{Repo: *task.Target, Number: pr.Number}
-	linked := false
-	for _, l := range task.Links {
-		if l.Kind == model.LinkFixes && l.Target == ref.String() {
-			linked = true
-			break
+	if err := store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+		for _, l := range t.Links {
+			if l.Kind == model.LinkFixes && l.Target == ref.String() {
+				return nil
+			}
 		}
-	}
-	if !linked {
-		task.Links = append(task.Links, model.Link{Kind: model.LinkFixes, Target: ref.String()})
-		if err := store.PutTask(ctx, task); err != nil {
-			return fmt.Errorf("orchestrator: linking %s to %s: %w", task.ID, ref, err)
-		}
+		t.Links = append(t.Links, model.Link{Kind: model.LinkFixes, Target: ref.String()})
+		return nil
+	}); err != nil {
+		return fmt.Errorf("orchestrator: linking %s to %s: %w", task.ID, ref, err)
 	}
 
 	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })

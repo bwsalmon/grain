@@ -363,8 +363,11 @@ func fileFixTask(ctx context.Context, store *model.Store,
 		return fmt.Errorf("orchestrator: filing fix task %s: %w", fixTask.ID, err)
 	}
 
-	task.Links = append(task.Links, model.Link{Kind: model.LinkFixTask, Target: fixTask.ID})
-	if err := store.PutTask(ctx, task); err != nil {
+	// Through UpdateTask, for the reason finishWithPullRequest gives.
+	if err := store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+		t.Links = append(t.Links, model.Link{Kind: model.LinkFixTask, Target: fixTask.ID})
+		return nil
+	}); err != nil {
 		return fmt.Errorf("orchestrator: linking %s to its fix task %s: %w", task.ID, fixTask.ID, err)
 	}
 

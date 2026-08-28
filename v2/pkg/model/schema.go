@@ -31,7 +31,7 @@ package model
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -167,6 +167,31 @@ var Tables = []string{
   ` + "`number`" + `    BIGINT      NOT NULL AUTO_INCREMENT,
   ` + "`issued_at`" + ` DATETIME(6) NOT NULL,
   PRIMARY KEY (` + "`number`" + `)
+)`,
+
+	// One row, rewritten by every mutation, which is the whole of grain's
+	// concurrency control.
+	//
+	// Two writers that overlap both stamp this cell, disagree about what
+	// it should say, and Dolt reports a serialization failure to whichever
+	// commits second -- aborting its entire transaction, not just the
+	// stamp. That is what makes "start the operation over" correct: the
+	// loser's work is rolled back whole, including the delete-and-reinsert
+	// of a task's child rows.
+	//
+	// It is deliberately one row for the entire store rather than one per
+	// task. Per-task versioning only conflicts when two writers touch the
+	// same task, which sounds better and is much harder to be sure of:
+	// Dolt merges concurrent writes cell by cell, so whether two
+	// overlapping operations are actually safe depends on which columns
+	// and which child tables each touched. A single shared cell makes
+	// every overlap a conflict, so that question never has to be answered.
+	// The cost is that unrelated writes conflict too, which for a
+	// deployment with one developer and occasional edits is not a cost.
+	`CREATE TABLE IF NOT EXISTS ` + "`grain_write`" + ` (
+  ` + "`id`" + `    INT         NOT NULL,
+  ` + "`token`" + ` VARCHAR(64) NOT NULL,
+  PRIMARY KEY (` + "`id`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (
