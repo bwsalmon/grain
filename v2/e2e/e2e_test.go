@@ -139,6 +139,99 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	assertState(w, "iss-1", model.StateClosed, false)
 }
 
+// TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos proves the
+// same decision pkg/dispatch/dispatch_test.go's
+// TestCycleRespectsTheSlotCount pins down at the store level -- one
+// Cycle call filling two free slots at once -- all the way through two
+// real pushes, each in its own sandbox-stand-in directory, against two
+// different repos, and checks that running both dispatches within the
+// same cycle left neither slot's bookkeeping corrupted.
+func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
+	const slotA = "sandbox-bd453be9-a"
+	const slotB = "sandbox-bd453be9-b"
+	w := newWorld(t, []string{slotA, slotB})
+	w.newRepo("acme", "widgets")
+	w.newRepo("acme", "gadgets")
+
+	clock := baseTime
+	fileIssue(w, "iss-a", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
+	fileIssue(w, "iss-b", human("bob"), model.RepoRef{Owner: "acme", Name: "gadgets"})
+	assertState(w, "iss-a", model.StateQueued, false)
+	assertState(w, "iss-b", model.StateQueued, false)
+
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatches) != 2 {
+		t.Fatalf("Cycle dispatched %+v, want exactly two", dispatches)
+	}
+	byTask := map[string]dispatch.Dispatch{}
+	for _, d := range dispatches {
+		byTask[d.TaskID] = d
+	}
+	dA, ok := byTask["iss-a"]
+	if !ok {
+		t.Fatalf("Cycle did not dispatch iss-a: %+v", dispatches)
+	}
+	dB, ok := byTask["iss-b"]
+	if !ok {
+		t.Fatalf("Cycle did not dispatch iss-b: %+v", dispatches)
+	}
+	if dA.Slot == dB.Slot {
+		t.Fatalf("both dispatches landed on slot %q, want distinct slots", dA.Slot)
+	}
+	assertState(w, "iss-a", model.StateRunning, true)
+	assertState(w, "iss-b", model.StateRunning, true)
+
+	branchA := model.BranchName("iss-a")
+	branchB := model.BranchName("iss-b")
+	clock = clock.Add(time.Minute)
+	resultA := w.runDispatch(dA, pushScript(w.remote("acme", "widgets"), branchA, "iss-a"), clock)
+	if !pushedOK(resultA) {
+		t.Fatalf("iss-a's agent run did not push cleanly: %+v", resultA.ToolCalls)
+	}
+	resultB := w.runDispatch(dB, pushScript(w.remote("acme", "gadgets"), branchB, "iss-b"), clock)
+	if !pushedOK(resultB) {
+		t.Fatalf("iss-b's agent run did not push cleanly: %+v", resultB.ToolCalls)
+	}
+
+	if got := w.log1("acme", "widgets", branchA, "%s"); got != "agent commit for iss-a" {
+		t.Fatalf("iss-a pushed branch tip = %q, want the agent's commit", got)
+	}
+	if got := w.log1("acme", "gadgets", branchB, "%s"); got != "agent commit for iss-b" {
+		t.Fatalf("iss-b pushed branch tip = %q, want the agent's commit", got)
+	}
+	if w.branchExists("acme", "widgets", branchB) {
+		t.Fatalf("iss-b's branch must not have landed in acme/widgets")
+	}
+	if w.branchExists("acme", "gadgets", branchA) {
+		t.Fatalf("iss-a's branch must not have landed in acme/gadgets")
+	}
+
+	assertState(w, "iss-a", model.StateQueued, false)
+	assertState(w, "iss-b", model.StateQueued, false)
+	if occ, _ := w.store.OccupiedSlots(w.ctx); len(occ) != 0 {
+		t.Fatalf("occupied slots after both finish = %v, want none", occ)
+	}
+	if n, err := w.store.Attempts(w.ctx, "iss-a"); err != nil || n != 1 {
+		t.Fatalf("Attempts(iss-a) = %d (%v), want 1", n, err)
+	}
+	if n, err := w.store.Attempts(w.ctx, "iss-b"); err != nil || n != 1 {
+		t.Fatalf("Attempts(iss-b) = %d (%v), want 1", n, err)
+	}
+
+	clock = clock.Add(time.Minute)
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-a", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.Observe(w.ctx, model.Observation{TaskID: "iss-b", CompletedAt: &clock}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(w, "iss-a", model.StateCompleted, false)
+	assertState(w, "iss-b", model.StateCompleted, false)
+}
+
 func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	const slot = "sandbox-bd453be9-2"
 	w := newWorld(t, []string{slot})
