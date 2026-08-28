@@ -29,6 +29,14 @@ pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
 pkg/agent/      the Framework interface an agent driver implements
 pkg/agent/gemini/  Framework via the Gemini API, talking to its own
                 in-process pkg/mcp/ server
+pkg/agent/claude/  Framework via the real `claude` CLI, run as a
+                subprocess on the controller (bwsalmon/agents#255) --
+                unlike agent/gemini there is no in-process API to drive, so
+                this points --mcp-config at a built cmd/mcpserver binary
+                the same way v1's dispatch.py pointed it at
+                `python3 -m grain.automation.mcp_server`, and parses the
+                resulting --output-format stream-json transcript back into
+                an agent.Result
 pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
                 and revokes a Gemini API key, direct against the API Keys
                 API
