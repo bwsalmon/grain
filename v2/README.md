@@ -161,8 +161,32 @@ that test.
 result dynamically links `libicu`, `libstdc++` and `libgcc` at ~145 MB.
 An earlier claim in this project's notes — that Go would take the
 controller's package list to zero — was wrong. It shrinks (no `python3`,
-and the GCP Go SDK would retire the `gcloud` exception) but `libicu74`
-and the C++ runtime take their place.
+and the GCP Go SDK would retire the `gcloud` exception) but the C++
+runtime takes its place.
+
+Building therefore needs ICU's *headers*, not just the runtime library:
+`libicu-dev` on Debian/Ubuntu (what `tests.yml` installs), `libicu-devel`
+on Fedora, `brew install icu4c` on macOS — where it is keg-only, so
+`CGO_CFLAGS=-I$(brew --prefix icu4c)/include` and the matching
+`CGO_LDFLAGS=-L.../lib` are needed too. Without them the build dies in
+cgo on `fatal error: unicode/uregex.h: No such file or directory`, some
+way down a wall of `go: downloading` lines.
+
+ICU itself is linked **statically** by the Makefile's binary targets.
+Dynamically linked, the binary records versioned SONAMEs
+(`libicui18n.so.74`) and will not start against a host whose ICU major
+differs — Bookworm ships 72, Trixie and Ubuntu 24.04 ship 74 — which
+couples the machine that builds to the machine that runs, and fails at
+exec time on the target rather than at build time where someone would
+see it. Static ICU costs about +31 MB (`graind`: 148 MB → 179 MB, nearly
+all of it `libicudata.a`) and leaves `libstdc++`/`libgcc`/`libc` dynamic,
+which a Debian host has anyway. `make test`/`make vet` deliberately stay
+dynamic so they keep mirroring `tests.yml`; `ICU_STATIC=0` opts the
+binaries out, and a machine without the static archives gets a warning
+and a dynamic link rather than a failure. Verified by linking all four
+commands, confirming `ldd` reports no `libicu*.so` on any of them, and
+running the ICU regex engine (including case-insensitive matching, which
+needs ICU's data) out of the resulting binary.
 
 **Embedded Dolt serves one database per directory**, so naming it in the
 DSN before it exists fails with "database not found". `Open` therefore
