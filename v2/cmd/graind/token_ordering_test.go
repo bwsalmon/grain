@@ -31,9 +31,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
-	"github.com/bwsalmon/grain/v2/pkg/loop"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
@@ -94,7 +94,7 @@ func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
 	}
 	// gitproxy's Authorizer reads the sandbox's live dispatched task, so
 	// this slot needs a real Dispatch on record, not just a queued task.
-	if dispatches, err := loop.Cycle(context.Background(), store, []string{slot}, time.Now().UTC()); err != nil || len(dispatches) != 1 {
+	if dispatches, err := dispatch.Cycle(context.Background(), store, []string{slot}, time.Now().UTC()); err != nil || len(dispatches) != 1 {
 		t.Fatalf("expected exactly one dispatch, got %v (err=%v)", dispatches, err)
 	}
 
