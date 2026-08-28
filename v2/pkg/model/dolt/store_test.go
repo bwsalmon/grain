@@ -465,6 +465,118 @@ func TestObservationBaselinesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTrackedTargetsCoversRunningAndCompletedWithATarget(t *testing.T) {
+	store, ctx := open(t)
+
+	// Running: approved, a live run, no observation yet.
+	if err := store.PutTask(ctx, task("running", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "running", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Completed: a PR is open, per an earlier Observe.
+	if err := store.PutTask(ctx, task("completed", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe(ctx, model.Observation{TaskID: "completed", CompletedAt: &now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Closed: nothing left to poll GitHub about.
+	if err := store.PutTask(ctx, task("closed", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe(ctx, model.Observation{TaskID: "closed", CompletedAt: &now, ClosedAt: &now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Proposed: never approved, so still task_state's "proposed" -- and
+	// task() always sets the same target, so this also proves the state
+	// filter is doing the work, not the target one.
+	if err := store.PutTask(ctx, task("proposed", false)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.TrackedTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, tt := range got {
+		ids = append(ids, tt.TaskID)
+		if tt.Target.String() != "owner/payments-api" {
+			t.Errorf("%s: target = %q, want owner/payments-api", tt.TaskID, tt.Target)
+		}
+	}
+	want := []string{"completed", "running"} // ORDER BY task_id
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("TrackedTargets task ids = %v, want %v", ids, want)
+	}
+}
+
+func TestTrackedTargetsIncludesAFinishedRunBackInTheQueueButNotANeverDispatchedOne(t *testing.T) {
+	store, ctx := open(t)
+
+	// Finished once, nothing observed yet -- reads as queued again, and
+	// is exactly the task a sync pass must still check: its run may have
+	// pushed a branch nothing has looked for yet.
+	if err := store.PutTask(ctx, task("finished-once", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "finished-once", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Minute), "failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also queued, but never dispatched -- nothing on GitHub could
+	// possibly correspond to it yet.
+	if err := store.PutTask(ctx, task("never-dispatched", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.TrackedTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TaskID != "finished-once" {
+		t.Fatalf("TrackedTargets = %+v, want exactly finished-once", got)
+	}
+}
+
+func TestTrackedTargetsExcludesATaskWithNoTarget(t *testing.T) {
+	store, ctx := open(t)
+	tk := task("no-target", true)
+	tk.Target = nil
+	tk.Binding = model.BindingScratch
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "no-target", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.TrackedTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("TrackedTargets = %+v, want none for a targetless task", got)
+	}
+}
+
 func TestDoltCommitMakesAKnownGoodPoint(t *testing.T) {
 	// The durability boundary is a Dolt commit, not a transaction: this
 	// is what a data diff is later taken against.
