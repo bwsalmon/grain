@@ -241,7 +241,13 @@ the container need not own the tree (rootless podman maps the invoking
 user to the container's root; Docker with userns-remap remaps it too),
 and git refusing a repository it reads as someone else's stops the build
 outright with `error obtaining VCS status: exit status 128` rather than
-merely leaving the stamp off. It is
+merely leaving the stamp off. Go reports every failure of the git it
+shells out to under that one message, so if it appears anyway the cause
+is something else git cannot get past -- an unreadable index, a worktree
+or submodule whose real gitdir is outside the mount -- and
+`make container-build BUILDVCS=false` (or `make build BUILDVCS=false`,
+which it forwards) gets the build moving at the cost of the stamp, and
+of nothing else. It is
 not the default -- `make build` needs no container engine, is what
 `tests.yml` runs, and on a host that agrees with itself produces the same
 binary.
