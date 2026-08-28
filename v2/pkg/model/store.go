@@ -521,6 +521,48 @@ func (s *Store) grantsOf(ctx context.Context, taskID string) ([]Grant, error) {
 	return grants, err
 }
 
+// TrackedTarget is a task worth polling GitHub about: one with a known
+// write target and a state that has not reached closed yet. Backed by
+// task_state rather than a second copy of "is this task still live" --
+// a task drops out of TrackedTargets the moment an Observe call closes it,
+// with no separate bookkeeping (a tracked-PR table, a cleared flag) to
+// keep in step with that.
+type TrackedTarget struct {
+	TaskID string
+	Target RepoRef
+}
+
+// TrackedTargets is every task a GitHub-sync pass should check the state
+// of: running or completed always qualify (state.go's StateOf can only
+// reach either by way of a real run or a real Observation), and queued
+// qualifies too, but only once the task has actually been dispatched --
+// a run that finished with nothing yet observed about it reads as queued
+// again (no active run, no Observation, "approved means queued"), which
+// is exactly the moment a push might have landed a PR that nothing has
+// checked for yet. The EXISTS clause is what tells that apart from a task
+// that is merely queued because it has never been dispatched at all,
+// which has nothing on GitHub yet to correspond to.
+func (s *Store) TrackedTargets(ctx context.Context) ([]TrackedTarget, error) {
+	var out []TrackedTarget
+	err := each(ctx, s.db,
+		"SELECT `t`.`id`, `t`.`target_owner`, `t`.`target_name` "+
+			"FROM `task_state` `ts` JOIN `task` `t` ON `t`.`id` = `ts`.`task_id` "+
+			"WHERE `t`.`target_owner` IS NOT NULL AND ("+
+			"  `ts`.`state` IN ('running','completed')"+
+			"  OR (`ts`.`state` = 'queued' AND EXISTS ("+
+			"    SELECT 1 FROM `task_run` `tr` WHERE `tr`.`task_id` = `t`.`id`))"+
+			") ORDER BY `t`.`id`", nil,
+		func(rows *sql.Rows) error {
+			var tt TrackedTarget
+			if err := rows.Scan(&tt.TaskID, &tt.Target.Owner, &tt.Target.Name); err != nil {
+				return err
+			}
+			out = append(out, tt)
+			return nil
+		})
+	return out, err
+}
+
 // OpenBlockers is how many unclosed tasks stand in front of this one.
 func (s *Store) OpenBlockers(ctx context.Context, taskID string) (int, error) {
 	var n int
