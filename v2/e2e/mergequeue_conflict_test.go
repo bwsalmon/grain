@@ -1,0 +1,311 @@
+package e2e
+
+// TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead is
+// bwsalmon/agents#328's own scenario: the one merge-queue flow
+// pkg/orchestrator/mergequeue_test.go cannot prove by itself, because that
+// file's own TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead
+// stops at filing the fix -- it never dispatches it, so it never has to
+// resolve anything. Here the conflict is a genuine one: an AutoMerge
+// task's branch and a commit pushed straight to main both add the same
+// file with different content, so a real `git merge` between them really
+// fails. SyncPullRequests notices that (through a Mergeable flag this test
+// computes with a real merge attempt, not one it simply asserts), files a
+// stacked fix task the same way the orchestrator package's own unit test
+// checks, and then a second, scripted agent run actually merges main into
+// the fix branch and pushes it. The payoff this file adds is checking that
+// the real content that lands on main afterward is the one the fix
+// resolved to -- not just that some merge commit exists.
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"google.golang.org/genai"
+
+	"github.com/bwsalmon/grain/v2/pkg/github"
+	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
+	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
+)
+
+// worldSandboxes adapts world's own already-credentialed slot directories
+// (newWorld already pointed each one's git config at this world's real
+// gitproxy) into the orchestrator.Sandboxes interface RunCycle wants --
+// orchestrator.HostSandboxes hands out fresh, uncredentialed directories,
+// which is the wrong tool here since this test needs every push RunCycle
+// makes, including the fix task's own, to actually go through the proxy.
+type worldSandboxes struct{ w *world }
+
+func (s worldSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
+	root, ok := s.w.roots[slot]
+	if !ok {
+		return nil, fmt.Errorf("mergequeue conflict test: no sandbox configured for slot %q", slot)
+	}
+	return mcp.NewSandboxTools(root), nil
+}
+
+// configPushScript is the scripted turn the original task's own agent
+// takes: push a branch that adds CONFIG.md with content, the file this
+// whole test's conflict is built around.
+func configPushScript(remote, branch, content string) []*genai.GenerateContentResponse {
+	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
+		"git checkout -b " + branch + " && " +
+		"echo '" + content + "' > CONFIG.md && " +
+		"git add CONFIG.md && git commit -q -m 'agent commit for " + branch + "' && " +
+		"git push origin " + branch
+	return []*genai.GenerateContentResponse{
+		toolCall("run_command", map[string]any{"command": cmd}),
+		finalText("pushed " + branch),
+	}
+}
+
+// resolveScript is the scripted turn the fix task's own agent takes: check
+// out baseBranch -- the conflicted task's own branch, per fileFixTask's
+// doc comment on why a fix task's Base is the branch it repairs rather
+// than main -- branch off it, and really merge main into it, favoring
+// baseBranch's own side of the conflict SyncPullRequests detected. This is
+// a real git merge that has to resolve a real conflict, not a canned file
+// write standing in for one.
+func resolveScript(remote, baseBranch, fixBranch string) []*genai.GenerateContentResponse {
+	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
+		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
+		"git checkout -b " + fixBranch + " && " +
+		"git fetch origin main && " +
+		"git merge origin/main -X ours -m 'resolve conflict with main' && " +
+		"git push origin " + fixBranch
+	return []*genai.GenerateContentResponse{
+		toolCall("run_command", map[string]any{"command": cmd}),
+		finalText("resolved the conflict and pushed " + fixBranch),
+	}
+}
+
+// setMergeable sets the Mergeable field of the pull request whose head is
+// head. It is always called just after realConflict has actually checked,
+// never with a value the test simply asserts -- githubsim.Sim's own doc
+// comment says it has no merge engine of its own, so this is a caller
+// telling it what a real GitHub would have computed.
+func setMergeable(sim *githubsim.Sim, head string, mergeable bool) {
+	for i := range sim.PullRequests {
+		if sim.PullRequests[i].Head == head {
+			sim.PullRequests[i].Mergeable = &mergeable
+			return
+		}
+	}
+}
+
+// realConflict reports whether merging branch into base would genuinely
+// conflict, by actually attempting that merge against a throwaway clone of
+// owner/name's bare repo -- the same git machinery a real GitHub would run
+// to compute its own Mergeable field, rather than a value this test simply
+// declares.
+func (w *world) realConflict(owner, name, base, branch string) bool {
+	w.t.Helper()
+	bare := filepath.Join(w.upstreamDir, owner, name+".git")
+	dir := w.t.TempDir()
+	run(w.t, dir, "git", "clone", bare, "check")
+	wd := filepath.Join(dir, "check")
+	run(w.t, wd, "git", "config", "user.email", "mergecheck@example.com")
+	run(w.t, wd, "git", "config", "user.name", "merge check")
+	run(w.t, wd, "git", "fetch", "-q", "origin", base, branch)
+	run(w.t, wd, "git", "checkout", "-q", "-B", "check-base", "origin/"+base)
+	cmd := exec.Command("git", "merge", "--no-commit", "--no-ff", "origin/"+branch)
+	cmd.Dir = wd
+	return cmd.Run() != nil
+}
+
+// pushConflictingCommit pushes a commit straight to branch, bypassing any
+// pull request, standing in for the unrelated change the scenario asks
+// for: something that lands on main out from under an already-open PR.
+func (w *world) pushConflictingCommit(owner, name, branch, path, content, message string) {
+	w.t.Helper()
+	bare := filepath.Join(w.upstreamDir, owner, name+".git")
+	dir := w.t.TempDir()
+	run(w.t, dir, "git", "clone", bare, "conflict")
+	wd := filepath.Join(dir, "conflict")
+	run(w.t, wd, "git", "config", "user.email", "human@example.com")
+	run(w.t, wd, "git", "config", "user.name", "human")
+	run(w.t, wd, "git", "checkout", branch)
+	if err := os.WriteFile(filepath.Join(wd, path), []byte(content+"\n"), 0o644); err != nil {
+		w.t.Fatal(err)
+	}
+	run(w.t, wd, "git", "add", path)
+	run(w.t, wd, "git", "commit", "-q", "-m", message)
+	run(w.t, wd, "git", "push", "origin", branch)
+}
+
+// fileAt reads path's real content at ref in owner/name's bare repo --
+// this test's only way to confirm what actually landed, independent of
+// anything the store or the sim believes happened.
+func (w *world) fileAt(owner, name, ref, path string) string {
+	w.t.Helper()
+	bare := filepath.Join(w.upstreamDir, owner, name+".git")
+	return strings.TrimSpace(runOutput(w.t, w.upstreamDir, "git", "--git-dir", bare, "show", ref+":"+path))
+}
+
+func TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead(t *testing.T) {
+	const slot = "sandbox-6b07cbf7-1"
+	w := newWorld(t, []string{slot})
+	const owner, repoName = "acme", "widgets"
+	w.newRepo(owner, repoName)
+	repo := model.RepoRef{Owner: owner, Name: repoName}
+
+	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
+	sim := githubsim.New(owner, repoName, bare, "main")
+	client := github.NewClient(sim, nil)
+
+	deps := orchestrator.Deps{
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+	}
+
+	task1 := model.Task{
+		ID:     "t1",
+		Intent: model.IntentImplement,
+		Title:  "add config",
+		Body:   "please add CONFIG.md",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: human("alice")},
+			Reason:      model.ReasonDirect,
+		},
+		Approval:  &model.Attribution{Actor: human("alice")},
+		Target:    &repo,
+		Binding:   model.BindingDirective,
+		AutoMerge: true,
+		CreatedAt: &baseTime,
+	}
+	if err := w.store.PutTask(w.ctx, task1); err != nil {
+		t.Fatal(err)
+	}
+
+	branch1 := model.BranchName(task1.ID)
+	clock := baseTime
+
+	// Step 1: the agent pushes task1's branch and grain opens its PR.
+	deps.Framework = scriptedFramework(configPushScript(w.remote(owner, repoName), branch1, "setting: from-task1"))
+	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
+		t.Fatalf("RunCycle (task1 push): %v", err)
+	}
+	if st, err := w.store.State(w.ctx, task1.ID); err != nil || st != model.StateCompleted {
+		t.Fatalf("task1 state = %q (%v), want completed", st, err)
+	}
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("expected one pull request, got %+v", sim.PullRequests)
+	}
+	if got := w.fileAt(owner, repoName, branch1, "CONFIG.md"); got != "setting: from-task1" {
+		t.Fatalf("CONFIG.md on %s = %q, want the agent's own content", branch1, got)
+	}
+
+	// Step 2: before anyone merges it, an unrelated commit lands straight
+	// on main and genuinely conflicts with task1's branch -- a real git
+	// conflict, not a scripted PullRequest.Mergeable.
+	w.pushConflictingCommit(owner, repoName, "main", "CONFIG.md", "setting: from-main", "unrelated change conflicting with t1")
+	if !w.realConflict(owner, repoName, "main", branch1) {
+		t.Fatal("expected a genuine git conflict between main and task1's branch")
+	}
+	setMergeable(sim, branch1, false)
+
+	// Step 3: SyncPullRequests notices the real conflict and files a
+	// stacked fix task for it.
+	clock = clock.Add(time.Minute)
+	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
+		t.Fatalf("RunCycle (files the fix): %v", err)
+	}
+	got, err := w.store.GetTask(w.ctx, task1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTaskID, hasFix := "", false
+	for _, l := range got.Links {
+		if l.Kind == model.LinkFixTask {
+			fixTaskID, hasFix = l.Target, true
+		}
+	}
+	if !hasFix {
+		t.Fatalf("expected a LinkFixTask on %+v", got.Links)
+	}
+	fixTask, err := w.store.GetTask(w.ctx, fixTaskID)
+	if err != nil || fixTask == nil {
+		t.Fatalf("GetTask(fix task): %v", err)
+	}
+	if fixTask.Base != branch1 {
+		t.Fatalf("fix task base = %q, want %q (task1's own branch)", fixTask.Base, branch1)
+	}
+	if !fixTask.AutoMerge {
+		t.Fatal("fix task should carry auto-merge")
+	}
+	if fixTask.Approval == nil {
+		t.Fatal("fix task should be pre-approved, needing no human")
+	}
+	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateQueued {
+		t.Fatalf("fix task state = %q (%v), want queued", st, err)
+	}
+
+	// Step 4: dispatch the fix task with a scripted agent that actually
+	// resolves the conflict -- merges main into task1's own branch, for
+	// real, and pushes.
+	fixBranch := model.BranchName(fixTaskID)
+	deps.Framework = scriptedFramework(resolveScript(w.remote(owner, repoName), branch1, fixBranch))
+	clock = clock.Add(time.Minute)
+	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
+		t.Fatalf("RunCycle (dispatches the fix): %v", err)
+	}
+	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateCompleted {
+		t.Fatalf("fix task state = %q (%v), want completed", st, err)
+	}
+	if len(sim.PullRequests) != 2 {
+		t.Fatalf("expected the fix's own pull request too, got %+v", sim.PullRequests)
+	}
+
+	// Step 5: GitHub -- played by the test, the same way
+	// mergeBranchIntoDefault always has to for the git side of any merge in
+	// this harness -- actually merges the fix's PR into task1's own
+	// branch, and then task1's own branch into main.
+	w.mergeBranchIntoDefault(owner, repoName, fixBranch, branch1)
+	if got := w.fileAt(owner, repoName, branch1, "CONFIG.md"); got != "setting: from-task1" {
+		t.Fatalf("CONFIG.md on %s after the real fix merge = %q, want the resolved content", branch1, got)
+	}
+	setMergeable(sim, fixBranch, true)
+
+	if w.realConflict(owner, repoName, "main", branch1) {
+		t.Fatal("expected task1's branch to be genuinely mergeable into main once the fix landed")
+	}
+	w.mergeBranchIntoDefault(owner, repoName, branch1, "main")
+	setMergeable(sim, branch1, true)
+
+	// Step 6: SyncPullRequests closes both the fix and the original task
+	// out, having really merged -- no human ever needed to step in.
+	clock = clock.Add(time.Minute)
+	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
+		t.Fatalf("RunCycle (closes out): %v", err)
+	}
+	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateClosed {
+		t.Fatalf("fix task state = %q (%v), want closed", st, err)
+	}
+	if st, err := w.store.State(w.ctx, task1.ID); err != nil || st != model.StateClosed {
+		t.Fatalf("task1 state = %q (%v), want closed", st, err)
+	}
+
+	obs, err := w.store.GetObservation(w.ctx, task1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs != nil && obs.MergeQueueBlockedAt != nil {
+		t.Fatal("task1 should never have been escalated to a human -- the automatic fix genuinely resolved it")
+	}
+	comments, err := w.store.Comments(w.ctx, task1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected exactly the one fix-filed comment (no escalation), got %d: %+v", len(comments), comments)
+	}
+
+	if got := w.fileAt(owner, repoName, "main", "CONFIG.md"); got != "setting: from-task1" {
+		t.Fatalf("CONFIG.md on main = %q, want the conflict resolved to task1's own content", got)
+	}
+}
