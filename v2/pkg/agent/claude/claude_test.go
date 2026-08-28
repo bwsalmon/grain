@@ -173,7 +173,7 @@ func TestRunFailsWithoutSandboxRoot(t *testing.T) {
 func TestRunFailsWithoutMCPServerPath(t *testing.T) {
 	f := newFramework(&fakeRunner{}, "")
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err == nil {
-		t.Fatal("expected an error for a missing mcpServerPath")
+		t.Fatal("expected an error for a missing grainBinaryPath")
 	}
 }
 
@@ -234,7 +234,7 @@ func TestRunCleansUpTheMCPConfigFile(t *testing.T) {
 func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
 	root := t.TempDir()
-	f := newFramework(fake, "/path/to/mcpserver")
+	f := newFramework(fake, "/path/to/grain")
 
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: root}); err != nil {
 		t.Fatal(err)
@@ -252,10 +252,13 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	if !ok {
 		t.Fatalf("mcp-config missing grain-sandbox server: %+v", cfg)
 	}
-	if server.Command != "/path/to/mcpserver" {
+	if server.Command != "/path/to/grain" {
 		t.Errorf("command = %q", server.Command)
 	}
-	if len(server.Args) != 2 || server.Args[0] != "-sandbox-root" || server.Args[1] != root {
+	// "mcpserver" comes first: claude forks this exact command, and the
+	// grain binary itself dispatches on that leading argument (main.go)
+	// to run as an MCP server rather than the task CLI.
+	if len(server.Args) != 3 || server.Args[0] != "mcpserver" || server.Args[1] != "-sandbox-root" || server.Args[2] != root {
 		t.Errorf("args = %v", server.Args)
 	}
 }

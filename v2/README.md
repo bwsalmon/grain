@@ -13,8 +13,9 @@ pkg/model/dolt/ opening the Dolt database — the only package that imports
                 them from a deployment's flags
 pkg/dispatch/   which task takes which slot: what one cycle decides to
                 do with the store, with no side effect beyond that
-                decision. It does not loop itself -- cmd/graind's timer
-                does, through pkg/orchestrator -- and it carries no
+                decision. It does not loop itself -- cmd/grain's "daemon"
+                subcommand's timer does, through pkg/orchestrator -- and
+                it carries no
                 scheduling policy: it drains task_ready into free slots
 pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
@@ -25,9 +26,6 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 (SSHRunner) runs the same four tools over SSH against a
                 real remote host instead, the transport a kontur-managed
                 sandbox VM needs
-cmd/mcpserver/  the server as a standalone stdio binary -- -sandbox-root
-                for NewSandboxTools, or -kontur-vm (plus pkg/kontur, below)
-                for NewSSHSandboxTools against a real kontur-managed VM
 pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
                 external port kontur itself persisted at "kontur vm
                 create" time, plus the pod IP that port answers on, asked
@@ -39,8 +37,9 @@ pkg/agent/gemini/  Framework via the Gemini API, talking to its own
 pkg/agent/claude/  Framework via the real `claude` CLI, run as a
                 subprocess on the controller (bwsalmon/agents#255) --
                 unlike agent/gemini there is no in-process API to drive, so
-                this points --mcp-config at a built cmd/mcpserver binary
-                the same way v1's dispatch.py pointed it at
+                this points --mcp-config at this same grain binary's own
+                "mcpserver" subcommand (cmd/grain/mcpserver.go), the same
+                way v1's dispatch.py pointed it at
                 `python3 -m grain.automation.mcp_server`, and parses the
                 resulting --output-format stream-json transcript back into
                 an agent.Result
@@ -96,28 +95,37 @@ e2e/            tasks filed the way a user would, carried through
                 randomized multi-user simulation (bwsalmon/agents#233).
                 See "What this does not have yet" below for where it
                 stops.
-cmd/graind/     the daemon: pkg/orchestrator's RunCycle run on a timer
-                against one real Dolt store (embedded, or a SQL server
-                via -store-addr so a UI and a CLI can write it too),
-                until SIGINT/SIGTERM, with an in-process gitproxy and a
-                real github.RESTClient wired in
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237). It reads and writes
                 model.Store: creating a task here IS filing it, with no
                 GitHub issue and no poll in between -- see "Input is a
                 model update, not a GitHub issue" below
-cmd/ui/         the UI as one binary: pkg/ui.Server behind a local HTTP
-                listener, opening the system's default browser. Takes
-                -store-addr (a Dolt SQL server) or -data-dir (embedded),
-                and no GitHub credentials at all
-cmd/grain/      a CLI over pkg/ui.Client -- the same model code cmd/ui's
+cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
+                combined what used to be four): with no subcommand, or
+                one of the task-management verbs, main.go is a CLI over
+                pkg/ui.Client -- the same model code the "ui" subcommand's
                 Server wraps in JSON and HTTP, driven from a terminal
                 instead: list/get/create/update a task, approve, attach
                 or detach a capability, comment (which also answers a
                 parked question), close ("delete" -- a task that ran is a
                 record of a dispatch that happened) or reopen one
-                (bwsalmon/agents#271). Same store flags as cmd/ui
+                (bwsalmon/agents#271). "daemon" (daemon.go, formerly
+                cmd/graind) runs pkg/orchestrator's RunCycle on a timer
+                against one real Dolt store (embedded, or a SQL server
+                via -store-addr so a UI and a CLI can write it too),
+                until SIGINT/SIGTERM, with an in-process gitproxy and a
+                real github.RESTClient wired in. "ui" (ui.go, formerly
+                cmd/ui) serves pkg/ui.Server behind a local HTTP
+                listener, opening the system's default browser -- same
+                store flags as the CLI, and no GitHub credentials at
+                all. "mcpserver" (mcpserver.go, formerly cmd/mcpserver)
+                is the server as a standalone stdio mode -- -sandbox-root
+                for NewSandboxTools, or -kontur-vm (plus pkg/kontur,
+                above) for NewSSHSandboxTools against a real kontur-
+                managed VM -- what a running daemon (via pkg/agent/claude)
+                forks *this same binary* to get, rather than needing a
+                second one on disk
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -188,15 +196,17 @@ Dynamically linked, the binary records versioned SONAMEs
 differs — Bookworm ships 72, Trixie and Ubuntu 24.04 ship 74 — which
 couples the machine that builds to the machine that runs, and fails at
 exec time on the target rather than at build time where someone would
-see it. Static ICU costs about +31 MB (`graind`: 148 MB → 179 MB, nearly
-all of it `libicudata.a`) and leaves `libstdc++`/`libgcc`/`libc` dynamic,
-which a Debian host has anyway. `make test`/`make vet` deliberately stay
-dynamic so they keep mirroring `tests.yml`; `ICU_STATIC=0` opts the
-binaries out, and a machine without the static archives gets a warning
-and a dynamic link rather than a failure. Verified by linking all four
-commands, confirming `ldd` reports no `libicu*.so` on any of them, and
-running the ICU regex engine (including case-insensitive matching, which
-needs ICU's data) out of the resulting binary.
+see it. Static ICU costs about +31 MB (`grain`: 148 MB → 179 MB, nearly
+all of it `libicudata.a` — unchanged since bwsalmon/agents#313 folded
+`graind`, the UI and `mcpserver` into this one binary) and leaves
+`libstdc++`/`libgcc`/`libc` dynamic, which a Debian host has anyway.
+`make test`/`make vet` deliberately stay dynamic so they keep mirroring
+`tests.yml`; `ICU_STATIC=0` opts the binary out, and a machine without
+the static archives gets a warning and a dynamic link rather than a
+failure. Verified by linking the binary, confirming `ldd` reports no
+`libicu*.so` on it, and running the ICU regex engine (including
+case-insensitive matching, which needs ICU's data) out of the resulting
+binary.
 
 **Embedded Dolt serves one database per directory**, so naming it in the
 DSN before it exists fails with "database not found". `Open` therefore
@@ -222,7 +232,7 @@ request a run produces, which tasks are still synced against
 go away entirely rather than staying on as a mirror, because a mirror is
 just the two-writer problem in a new shape: a second place a task's state
 lives, with nothing reconciling the two (the same objection the "The UI"
-section below already raises against `pkg/ui` and `graind` both writing
+section below already raises against `pkg/ui` and the daemon both writing
 the same issue today).
 
 What that costs, stated plainly: the conversation, the audit trail and
@@ -276,8 +286,9 @@ and become grain's, which means grain has to render them. That is what
   poll would notice — and forgetting the second left the task parked
   forever.
 - `dolt.Connect`/`dolt.OpenOrConnect` and the `-store-addr`/`-data-dir`
-  flags on `cmd/grain` and `cmd/ui`; see "Single writer" below, which
-  stops being a caveat and becomes the deployment.
+  flags on both the CLI and the "ui" subcommand of `cmd/grain`; see
+  "Single writer" below, which stops being a caveat and becomes the
+  deployment.
 - `Store` grew `ListTasks`, `States` and `ObserveField`. The last is
   `pkg/orchestrator`'s own `observeField` promoted: `Observe` REPLACEs the
   whole observation row, so changing one field means reading it first,
@@ -315,7 +326,7 @@ and become grain's, which means grain has to render them. That is what
   `orchestrator.Config` loses `TaskRepo`, `TriggerLabel` and
   `DefaultTarget`: there is no task repo to list, no label to look for,
   and a task arrives with its `Target` already set because whatever wrote
-  it set one. `graind` loses the matching flags and gains the
+  it set one. The daemon loses the matching flags and gains the
   `-store-addr` family.
 
 GitHub is still reached, for exactly what is genuinely GitHub's: the
@@ -423,7 +434,7 @@ build used to abandon the dispatches `dispatch.Cycle` had already
 durably recorded runs for, idling those slots for a tick over a failure
 that was not theirs. Each of those loops now collects its failures and
 keeps going, and `RunCycle` joins the lot (`errors.Join`, so `errors.Is`
-still answers for any one of them) into the single line `graind` logs
+still answers for any one of them) into the single line the daemon logs
 per tick.
 
 Two places deliberately do **not** isolate, and the reasoning is worth
@@ -457,7 +468,7 @@ below is already honest that there is more than one), and a real watch,
 for which Dolt is an unusually good substrate and currently an unused
 one — a commit hash is a `resourceVersion` and `dolt_diff` is a change
 feed with history, but `dolt.Commit` has no caller outside its own test
-and `graind` never commits. Note the ordering: a watch is a latency
+and the daemon never commits. Note the ordering: a watch is a latency
 optimization over level-triggered reconciliation, never a replacement
 for it, so it is worth having only once the reconcilers it would wake are
 independent and safe to run concurrently.
@@ -481,22 +492,23 @@ materializes a dispatched task's capabilities, applies every placement
 under its sandbox root, and revokes what was minted once the run
 finishes, the same as `pkg/orchestrate`'s own `runDispatch` did — ported
 onto `orchestrator.Config`'s new `Capabilities`/`Credentials`/
-`MaxAgentTurns` fields. `cmd/graind` now drives `pkg/orchestrator` instead
-(a small non-overlapping ticker around `RunCycle`, the same discipline
+`MaxAgentTurns` fields. `cmd/grain`'s daemon subcommand now drives
+`pkg/orchestrator` instead (a small non-overlapping ticker around
+`RunCycle`, the same discipline
 `pkg/orchestrate`'s own `Reconciler.Run` held to), and `pkg/orchestrate`
 itself, along with the `model.TrackedTarget`/`Store.TrackedTargets` it
 alone used, is deleted — `Store.OpenPullRequestLinks` (below) already
 covered the same "which pull request should grain still be watching"
 question, more precisely, so keeping both was pure duplication.
 
-`graind` still defaults to the same "no host adapter" stand-in every
+The daemon still defaults to the same "no host adapter" stand-in every
 other package here does: one local directory per slot doing sandbox duty
 (`orchestrator.HostSandboxes`). `orchestrator.KonturSandboxes`
 (bwsalmon/agents#262) is the real alternative `Deps.Sandboxes` also
 accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached over
 SSH via `mcp.NewSSHSandboxTools` instead of a local directory, created
 via `kontur.Create` on first use and reused across cycles the same way
-`HostSandboxes` reuses its directories — and `cmd/graind` can now be
+`HostSandboxes` reuses its directories — and the daemon can now be
 pointed at it for real: `-kontur-vm-name-prefix` opts a deployment in,
 with `-kontur-ssh-user`/`-kontur-ssh-key`/`-kontur-workspace` for the SSH
 side and repeatable `-kontur-create-arg` flags building
@@ -506,10 +518,10 @@ flag points at a built guest image (`../packer/kontur/`, below), since
 that flag's name is owned by bwsalmon/kontur's own CLI and still hasn't
 been reachable to confirm from this repo. `KonturSandboxes.
 ConfigureGitCredentials` (new alongside the flags) is the SSH equivalent
-of the `mcp.ConfigureGitCredentials` call `graind` already made once per
-slot for `HostSandboxes` — over `mcp.ConfigureGitCredentialsOverSSH`
+of the `mcp.ConfigureGitCredentials` call the daemon already made once
+per slot for `HostSandboxes` — over `mcp.ConfigureGitCredentialsOverSSH`
 instead of `os.WriteFile`, since an SSH-backed slot has no local directory
-for `graind` to write into. A kontur VM's own guest image is still
+for the daemon to write into. A kontur VM's own guest image is still
 expected to arrive already carrying the operator's SSH key and a running
 sshd, the same assumption v1's own sandbox provisioning stood in for —
 `../packer/kontur/` is that successor (bwsalmon/agents#267). The
@@ -685,7 +697,7 @@ Both providers can now point at the same standing credential —
 MinterCredential` are each just a name resolved through
 `CapabilityContext.Credentials`, so an operator wires them to the same
 one to get bwsalmon/agents#239's "This can share the same account from
-the gcp capability" — `cmd/graind` is now the executor that does that
+the gcp capability" — the daemon is now the executor that does that
 wiring (`-gcp-project`/`-gcp-agent-service-account`, bwsalmon/agents#254,
 now driving `pkg/orchestrator.RunDispatch` rather than the original
 `pkg/orchestrate` package it shipped against, per bwsalmon/agents#263):
@@ -709,21 +721,21 @@ resolves through that resolver -- which `gcpkey.Provider.Spec()` and
 section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today,
-and `cmd/graind` now calls it for real from `pkg/orchestrator`'s dispatch
+and the daemon now calls it for real from `pkg/orchestrator`'s dispatch
 loop rather than only from a test — `orchestrator.HostSandboxes` is the
 only other thing `dispatch.Cycle`'s own dispatch path drives, and
 neither
 hands it more than a local directory to confine itself to yet
 (`mcp.ConfigureGitCredentials` sets that directory's git credentials up
 the same way v1's `configure_git_credentials` sets a real sandbox's up,
-once per slot at `graind` startup). `cmd/mcpserver` itself can now be
-pointed at a real remote VM instead — `-kontur-vm` resolves a
+once per slot at daemon startup). The `mcpserver` subcommand itself can
+now be pointed at a real remote VM instead — `-kontur-vm` resolves a
 bwsalmon/kontur-managed VM's SSH endpoint (`pkg/kontur`: the external port
 kontur persisted at `kontur vm create` time, plus the pod IP that port
 answers on, asked of containerd via `crictl` since kontur has no
 apiserver to have recorded it anywhere itself), `mcp.NewSSHSandboxTools`
 runs the same four tools — `run_command`/`read_file`/`edit_file`/
-`write_file` — against it instead of a local directory (`cmd/mcpserver`
+`write_file` — against it instead of a local directory (`grain mcpserver`
 can already be pointed at one by hand via `-kontur-vm`,
 bwsalmon/agents#256), and `orchestrator.KonturSandboxes`
 (bwsalmon/agents#262) is `Deps.Sandboxes`' real alternative to
@@ -742,7 +754,7 @@ does it for v1, and for what's still unresolved there (the exact `kontur
 vm create` flag a deployment's own `KonturConfig.CreateArgs` above would
 pass the built image's location through as, owned by bwsalmon/kontur's
 own CLI and still not confirmed from this repo — bwsalmon/agents#274).
-`cmd/graind` still defaults `Deps.Sandboxes` to `HostSandboxes`, but
+The daemon still defaults `Deps.Sandboxes` to `HostSandboxes`, but
 `-kontur-vm-name-prefix` (and the rest of its `-kontur-*`/
 `-cri-runtime-endpoint` flags, see "What this does not have yet" above)
 now opts a real deployment into `KonturSandboxes` instead — the flag that
@@ -750,7 +762,7 @@ picks the image lives in `-kontur-create-arg`, repeated once per
 `kontur vm create` flag/value pair a deployment's own `kontur vm create
 -h` calls for, rather than a name this repo guesses at.
 
-A real `github.RESTClient` exists and is wired into `graind` too, driving
+A real `github.RESTClient` exists and is wired into the daemon too, driving
 every call `pkg/orchestrator` makes (issue listing/labelling, branch and
 pull-request state, check runs, comments) — but not the agent's own
 `ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
@@ -774,7 +786,7 @@ close the gap above, since nothing there is wired to run on its own yet.
 
 ## The UI
 
-`pkg/ui`/`cmd/ui` (bwsalmon/agents#237) is
+`pkg/ui`/`cmd/grain`'s "ui" subcommand (bwsalmon/agents#237) is
 [`docs/data-model.md`'s "first-party UI"
 direction](../docs/data-model.md#direction-a-first-party-ui): create a
 task, approve a proposed one, attach or remove a capability, comment,
@@ -785,41 +797,42 @@ from a form instead of a body of directive lines and a label picker.
 not a fourth record" rule is now satisfied outright rather than argued
 around: there is one record, and this reads and writes it. The two
 independent paths that used to touch the same GitHub issue — an operator
-working through `pkg/ui`, and `graind`'s own reconcile loop — are one
+working through `pkg/ui`, and the daemon's own reconcile loop — are one
 path to one store. `State` still comes from a derivation rather than a
 column, but it is `model.StateOf`'s own view now instead of a second
 label-shaped copy.
 
 **No OAuth, and now nothing to authenticate to.** The direction document
 calls for GitHub OAuth plus `author_association` as the permission gate.
-`cmd/ui` takes no GitHub credential at all any more — it takes `-as`,
-naming the principal it acts as, defaulting to the OS user. This is a
+The "ui" subcommand takes no GitHub credential at all any more — it
+takes `-as`, naming the principal it acts as, defaulting to the OS user.
+This is a
 single-operator tool run locally against a store that operator already
 reaches; a real permission gate is worth building the day this runs
 anywhere other than one person's own machine (bwsalmon/agents#237's
 follow-up), and it would gate store writes rather than API calls.
 
 **Why a local web server, not Electron/Tauri/a native app.** `go build`
-already produces one dependency-free binary per OS `cmd/ui` runs on (Mac,
-Linux today); a `net/http` server that opens the system's default browser
-gets "runs standalone on Mac and Linux" for free, in the one language
+already produces one dependency-free binary per OS `cmd/grain` runs on
+(Mac, Linux today); a `net/http` server that opens the system's default
+browser gets "runs standalone on Mac and Linux" for free, in the one language
 every other substrate here already commits to (see "Why Go" above), with
 no second toolchain (Node, Rust, Xcode) for this repo to carry. "Set up
 to run on iOS/Android in the future" is what shapes `pkg/ui` into an
 HTTP+JSON API in the first place rather than server-rendered pages: a
 future mobile client — native, or a thin webview shell — is just another
-caller of the same `/api/*` surface `cmd/ui`'s own frontend
+caller of the same `/api/*` surface the "ui" subcommand's own frontend
 (`pkg/ui/static/`, plain HTML/CSS/JS, no build step) already uses, with
 nothing about the server to rewrite.
 
 **`-demo` (bwsalmon/agents#276) for trying out the frontend on its own.**
-`cmd/ui` normally needs a real store — embedded or a Dolt SQL server — and
-a real deployment's tasks to look at anything. `-demo` opens a throwaway
-embedded store in a fresh temp directory instead and seeds it with fake
-tasks, one in each `model.State` (`cmd/ui/demo.go`), through the same
-`ui.Client`/`model.Store` writes a human clicking through the UI would
-make — no fake `Store` standing in, matching the "real embedded Dolt, not
-a fake" discipline every test in this repo already holds to
+`grain ui` normally needs a real store — embedded or a Dolt SQL server —
+and a real deployment's tasks to look at anything. `-demo` opens a
+throwaway embedded store in a fresh temp directory instead and seeds it
+with fake tasks, one in each `model.State` (`cmd/grain/demo.go`), through
+the same `ui.Client`/`model.Store` writes a human clicking through the UI
+would make — no fake `Store` standing in, matching the "real embedded
+Dolt, not a fake" discipline every test in this repo already holds to
 (`pkg/ui/client_test.go`). That makes it a real server exercising the real
 frontend code, with fake data as the only difference from a real
 deployment — useful for checking a frontend change renders every state

@@ -1,16 +1,19 @@
 package main
 
-// cmd/graind had no tests at all before bwsalmon/agents#265 -- every
-// other binary here (cmd/mcpserver, cmd/ui) is the same "no test files"
-// gap, but graind is the one this issue asks about: the process that
-// wires a real embedded Dolt store, a real in-process git proxy, a real
-// Gemini client and the capability registry together and runs them on a
-// timer. These tests cover the small pieces of that wiring run() itself
-// does not delegate to an already-tested package -- readTrimmedFile,
-// credentialTokenSource, capabilityProviders, openStore and
-// startGitProxy -- against real temp-directory material, the same
-// "real embedded Dolt, not a fake" discipline pkg/model/dolt's own tests
-// hold to. live_test.go covers run() itself, end to end, against a real
+// cmd/graind (this file's original home, before bwsalmon/agents#313
+// folded it into cmd/grain as the "daemon" subcommand) had no tests at
+// all before bwsalmon/agents#265 -- every other binary here (cmd/
+// mcpserver, cmd/ui, now mcpserver.go and ui.go for the same reason) was
+// the same "no test files" gap, but graind was the one that issue asked
+// about: the process that wires a real embedded Dolt store, a real
+// in-process git proxy, a real Gemini client and the capability registry
+// together and runs them on a timer. These tests cover the small pieces
+// of that wiring run() itself does not delegate to an already-tested
+// package -- readTrimmedFile, credentialTokenSource,
+// capabilityProviders, openStore and startGitProxy -- against real
+// temp-directory material, the same "real embedded Dolt, not a fake"
+// discipline pkg/model/dolt's own tests hold to.
+// daemon_live_test.go covers run() itself, end to end, against a real
 // Gemini API key.
 
 import (

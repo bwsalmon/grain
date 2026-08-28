@@ -3,7 +3,4 @@ __pycache__/
 .pytest_cache/
 .claude/settings.local.json
 v2/bin/
-v2/ui
 v2/grain
-v2/graind
-v2/mcpserver

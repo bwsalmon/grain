@@ -1,15 +1,28 @@
-// Command grain is a standalone CLI over pkg/ui's Client -- the same
-// model code cmd/ui's Server wraps in JSON and HTTP, driven straight
-// from a terminal instead. It connects to the task store and lets the
-// caller do what a human does to a task: create one, edit its fields,
-// attach or detach a capability, accept (approve) a proposal, comment,
-// and close (grain's own stand-in for "delete" -- see Client.Close's own
-// doc comment for why) or reopen one.
+// Command grain is the one binary this repo builds (bwsalmon/agents#313):
+// given no recognized subcommand, or one of the task-management verbs
+// below, it is a standalone CLI over pkg/ui's Client -- the same model
+// code the "ui" subcommand's Server wraps in JSON and HTTP, driven
+// straight from a terminal instead. It connects to the task store and
+// lets the caller do what a human does to a task: create one, edit its
+// fields, attach or detach a capability, accept (approve) a proposal,
+// comment, and close (grain's own stand-in for "delete" -- see
+// Client.Close's own doc comment for why) or reopen one.
 //
-// It takes no GitHub credentials at all any more. A task used to be a
-// GitHub issue, so this command needed a token and a task repo to file
-// one; a task is a store row now, and creating one is a write to the
-// store (README, "Input is a model update, not a GitHub issue").
+// Three other subcommands -- daemon, ui, mcpserver -- select entirely
+// different modes, each what used to be its own cmd/graind, cmd/ui or
+// cmd/mcpserver binary before #313 combined them: the daemon runs
+// pkg/orchestrator's RunCycle on a timer, ui serves pkg/ui's JSON API and
+// static frontend, and mcpserver speaks MCP over stdin/stdout against the
+// sandbox tools. daemon.go, ui.go and mcpserver.go carry each one's own
+// doc comment. A running daemon forks mcpserver instances of itself --
+// this same binary, re-invoked with "mcpserver" as argv[1] -- rather than
+// needing a second binary on disk; see pkg/agent/claude's own doc comment
+// for the one place that matters today.
+//
+// The task CLI itself takes no GitHub credentials at all. A task used to
+// be a GitHub issue, so this command needed a token and a task repo to
+// file one; a task is a store row now, and creating one is a write to
+// the store (README, "Input is a model update, not a GitHub issue").
 //
 // Folder and repo *management* (docs/data-model.md's Folder tree, the
 // containment structure a capability's `offers` are attached to) is
@@ -33,14 +46,39 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
+// main dispatches on argv[1] before parsing anything else: "daemon",
+// "ui" and "mcpserver" are modes with their own, unrelated flag sets, so
+// they are matched exactly and handed the rest of argv verbatim rather
+// than folded into runCLI's own flag.FlagSet. Anything else -- including
+// no arguments at all, or a leading global flag like -json -- falls
+// through to the task CLI exactly as it always has, so a task command
+// itself is never allowed to collide with one of the three mode names
+// above (none of the ones below do).
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "daemon":
+			daemon(args[1:])
+			return
+		case "ui":
+			uiServe(args[1:])
+			return
+		case "mcpserver":
+			mcpserver(args[1:])
+			return
+		}
+	}
+	if err := runCLI(args); err != nil {
 		fmt.Fprintln(os.Stderr, "grain: "+err.Error())
 		os.Exit(1)
 	}
 }
 
 const usage = `usage: grain [global flags] <command> [args]
+       grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer (see daemon.go)
+       grain ui [flags]        serve the task UI on localhost (see ui.go)
+       grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
 
 Global flags (must come before the command):
   -store-addr string           host:port of a Dolt SQL server holding the task store
@@ -66,7 +104,7 @@ Commands:
   config                               show the capabilities this deployment offers
 `
 
-func run(args []string) error {
+func runCLI(args []string) error {
 	fs := flag.NewFlagSet("grain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store")

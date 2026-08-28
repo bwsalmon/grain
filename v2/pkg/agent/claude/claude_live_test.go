@@ -12,8 +12,8 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 )
 
-// TestLiveRunEndToEnd exercises the real claude binary and a real
-// cmd/mcpserver build, the same way agent/gemini's own
+// TestLiveRunEndToEnd exercises the real claude binary and a real grain
+// binary's "mcpserver" subcommand, the same way agent/gemini's own
 // TestLiveRunEndToEnd gates on a credential and skips otherwise -- this
 // runs in CI (where CLAUDE_CODE_OAUTH_TOKEN is unset, and no claude binary
 // is installed) without failing, but can be run for real wherever both are
@@ -30,12 +30,12 @@ func TestLiveRunEndToEnd(t *testing.T) {
 		t.Skip("claude binary not found on PATH; skipping live claude integration test")
 	}
 
-	mcpServerPath := buildMCPServer(t)
+	grainBinaryPath := buildGrainBinary(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	f := New(claudePath, mcpServerPath, WithOAuthToken(token))
+	f := New(claudePath, grainBinaryPath, WithOAuthToken(token))
 
 	root := t.TempDir()
 	result, err := f.Run(ctx, agent.RunConfig{
@@ -72,16 +72,17 @@ func TestLiveRunEndToEnd(t *testing.T) {
 	}
 }
 
-// buildMCPServer compiles v2/cmd/mcpserver into t.TempDir() so the live
-// test above can point a real claude --mcp-config at it, the same binary a
-// real deployment would build once and reuse across every dispatch.
-func buildMCPServer(t *testing.T) string {
+// buildGrainBinary compiles v2/cmd/grain into t.TempDir() so the live
+// test above can point a real claude --mcp-config at its "mcpserver"
+// subcommand, the same binary a real deployment would build once and
+// reuse across every dispatch (as the daemon, the UI, or the CLI too).
+func buildGrainBinary(t *testing.T) string {
 	t.Helper()
-	out := filepath.Join(t.TempDir(), "mcpserver")
-	cmd := exec.Command("go", "build", "-o", out, "github.com/bwsalmon/grain/v2/cmd/mcpserver")
+	out := filepath.Join(t.TempDir(), "grain")
+	cmd := exec.Command("go", "build", "-o", out, "github.com/bwsalmon/grain/v2/cmd/grain")
 	cmd.Dir = repoRoot(t)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building cmd/mcpserver: %v\n%s", err, output)
+		t.Fatalf("building cmd/grain: %v\n%s", err, output)
 	}
 	return out
 }
