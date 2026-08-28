@@ -3,6 +3,7 @@ package geminikey
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -146,6 +147,16 @@ func TestSpec(t *testing.T) {
 	}
 	if spec.MaxLease != 24*time.Hour {
 		t.Errorf("MaxLease = %v, want 24h", spec.MaxLease)
+	}
+	if want := []string{"cred"}; !reflect.DeepEqual(spec.Requires, want) {
+		t.Errorf("Requires = %v, want %v", spec.Requires, want)
+	}
+}
+
+func TestSpecRequiresOmitsAnUnconfiguredCredential(t *testing.T) {
+	c := New("p", model.CredentialRef{})
+	if got := c.Spec().Requires; got != nil {
+		t.Errorf("Requires = %v, want nil for a Capability with no standing credential configured", got)
 	}
 }
 

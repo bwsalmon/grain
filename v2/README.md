@@ -188,9 +188,10 @@ directory shaped like a Kubernetes Secret volume mount, so
 against real material rather than only the fakes `gcpkey_test.go` and
 `model/capability_test.go` supply. `CapabilitySpec` grew a `Requires`
 field alongside it -- the names, never the values, a capability
-resolves through that resolver -- which `gcpkey.Provider.Spec()` now
-sets, and which `docs/data-model.md`'s new "secret store is a folder,
-not a table" section is the checked-in listing of, per capability.
+resolves through that resolver -- which `gcpkey.Provider.Spec()` and
+`geminikey.Capability.Spec()` both set now, and which
+`docs/data-model.md`'s new "secret store is a folder, not a table"
+section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
 it just has nothing to call it yet outside a test. There is no host

@@ -121,7 +121,7 @@ func (c *Capability) apiTargetService() string {
 }
 
 func (c *Capability) Spec() model.CapabilitySpec {
-	return model.CapabilitySpec{
+	spec := model.CapabilitySpec{
 		Name:        "gemini-key",
 		Label:       "grain-gemini-key",
 		Description: "Mint a short-lived Gemini API key for this task",
@@ -129,6 +129,18 @@ func (c *Capability) Spec() model.CapabilitySpec {
 		Provision:   model.ProvisionMint,
 		MaxLease:    maxLease,
 	}
+	// The standing credential Materialize/Revoke mint under (this
+	// package's doc comment: "there is no separate minter identity
+	// here") is resolved through CapabilityContext.Credentials, so it
+	// belongs here the same way gcpkey.Provider.Spec() lists its own
+	// minter credential. Omitted, not the empty string, when this
+	// Capability was never configured with one -- Resolve already
+	// refuses that case, and an unconfigured deployment has no name to
+	// require.
+	if c.Credential.Name != "" {
+		spec.Requires = []string{c.Credential.Name}
+	}
+	return spec
 }
 
 // Resolve refuses when this Capability was never configured with a

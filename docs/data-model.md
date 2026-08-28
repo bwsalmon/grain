@@ -2058,6 +2058,7 @@ table, with nothing here or in git ever answering *what the value is*.
 | Capability | `Requires` |
 |---|---|
 | `gcp-key` | the minter credential (`gcp-key-minter` by default) — never the agent account's own key, see `gcpkey`'s doc comment |
+| `gemini-key` | the standing credential it mints under, named by `geminikey.Capability.Credential` — no built-in default, see `geminikey`'s doc comment on why it can share `gcp-key`'s own minter account |
 | `self-debug`, `self-repair` | none — `GRANT`, no credential of any kind |
 
 ### `TaskLink` — relationships, including sub-tasks
