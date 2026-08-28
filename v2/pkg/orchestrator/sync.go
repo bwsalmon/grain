@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -121,7 +122,24 @@ func SyncPullRequests(ctx context.Context, store *model.Store, client github.Cli
 		return fmt.Errorf("orchestrator: reading open pull request links: %w", err)
 	}
 
+	// The gather loop is not isolated per entry the way the act loop
+	// below is, and deliberately so: queueHeads decides who is at the
+	// front of each repo's queue by comparing entries against each other,
+	// so acting on a set with an entry silently missing from it could
+	// promote the task behind the real head and merge two changes in the
+	// wrong order. A store read failing here is systemic anyway (the same
+	// database answers every one of these), so the whole reconciler backs
+	// off to the next tick rather than advancing a queue it cannot see all
+	// of.
+	//
+	// A link whose ref will not parse is the one exception, because it is
+	// not a transient failure: nothing can ever be done with a pull
+	// request whose repo and number are unreadable, so it can never be
+	// anyone's head, and letting one malformed row wedge every other
+	// repo's queue forever is strictly worse than skipping it and
+	// reporting it every cycle.
 	entries := make([]queueEntry, 0, len(links))
+	var errs []error
 	for _, link := range links {
 		task, err := store.GetTask(ctx, link.TaskID)
 		if err != nil {
@@ -136,18 +154,29 @@ func SyncPullRequests(ctx context.Context, store *model.Store, client github.Cli
 		}
 		ref, err := model.ParsePullRequestRef(link.PullRequest)
 		if err != nil {
-			return fmt.Errorf("orchestrator: task %s: %w", link.TaskID, err)
+			errs = append(errs, fmt.Errorf("orchestrator: task %s: %w", link.TaskID, err))
+			continue
 		}
 		entries = append(entries, queueEntry{task: *task, obs: obs, ref: ref})
 	}
 
+	// Acting on one entry is isolated, because head-of-queue was already
+	// decided above against the complete set: an entry that fails here
+	// cannot make another entry merge that would not have merged anyway
+	// (syncEntry merges an ordinary queue member only when it is its
+	// repo's head), so the worst a failure costs the others is a cycle of
+	// latency -- which is what returning early used to cost all of them.
 	heads := queueHeads(entries)
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if err := syncEntry(ctx, store, client, e, heads, now); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // syncEntry is SyncPullRequests' per-task decision: refresh e's PR health,

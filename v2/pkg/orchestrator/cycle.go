@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,28 +27,110 @@ type Deps struct {
 	Slots     []string
 }
 
+// Reconciler is one independent unit of a cycle: a named function that
+// reads current state, does whatever that state implies, and reports
+// what went wrong without deciding anything about the rest of the cycle.
+//
+// Each one is level-triggered and idempotent — it re-reads the store and
+// GitHub every time rather than acting on a change it was handed — so
+// running one is always safe, and skipping one costs latency rather than
+// correctness. That is what makes them independent: a reconciler that
+// fails this cycle has done nothing the next cycle cannot redo, so no
+// other reconciler has any reason to be held back by it.
+type Reconciler struct {
+	Name      string
+	Reconcile func(ctx context.Context, deps Deps, now time.Time) error
+}
+
+// Reconcilers returns the cycle's reconcilers, in the order RunCycle runs
+// them.
+//
+// The order is a latency preference, not a dependency: polling first lets
+// an issue filed since the last tick dispatch on this one instead of
+// waiting for the next, and syncing last lets a pull request opened
+// moments ago by this very cycle be picked up without a tick's delay.
+// Every one of them still reads its own inputs from the store, so any
+// other order produces the same state one cycle later — which is exactly
+// why one failing does not invalidate the ones after it.
+func Reconcilers() []Reconciler {
+	return []Reconciler{
+		{Name: "poll", Reconcile: reconcilePoll},
+		{Name: "dispatch", Reconcile: reconcileDispatch},
+		{Name: "sync", Reconcile: reconcileSync},
+	}
+}
+
 // RunCycle is v2's whole Orchestrator.run_once equivalent: poll the task
 // repo, let dispatch.Cycle decide what runs, actually run it, turn each
 // result into the GitHub effect it implies, and refresh every pull
 // request grain is still watching. A deployment's own timer calls this
 // once per tick; nothing here loops on its own.
+//
+// **Every reconciler runs, whatever the ones before it did.** A cycle is
+// not a pipeline: a GitHub outage during intake used to return early and
+// take dispatch and pull-request sync down with it, so a merge that was
+// ready and a queue that needed advancing waited on a failure they had
+// nothing to do with. Each Reconcilers() entry now runs on its own and
+// its error is collected rather than returned, so what a cycle achieves
+// degrades to whichever parts of the world are reachable rather than to
+// the first one that isn't. The returned error joins everything that
+// failed (errors.Join, so errors.Is still answers for any of them);
+// graind logs it and ticks again.
+//
+// Cancellation is the one thing that does stop a cycle early, since a
+// cancelled context means the daemon is shutting down rather than that
+// one reconciler has a problem the others might not.
 func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
-	if err := PollIssues(ctx, deps.Store, deps.Client, deps.Config, now); err != nil {
-		return err
+	var errs []error
+	for _, r := range Reconcilers() {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		if err := r.Reconcile(ctx, deps, now); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
+		}
 	}
+	return errors.Join(errs...)
+}
 
+// reconcilePoll brings the task repo's labelled issues into the store.
+func reconcilePoll(ctx context.Context, deps Deps, now time.Time) error {
+	return PollIssues(ctx, deps.Store, deps.Client, deps.Config, now)
+}
+
+// reconcileSync refreshes every pull request grain is still watching.
+func reconcileSync(ctx context.Context, deps Deps, now time.Time) error {
+	return SyncPullRequests(ctx, deps.Store, deps.Client, now)
+}
+
+// reconcileDispatch lets dispatch.Cycle decide what runs, then runs each
+// dispatch it decided on.
+//
+// One dispatch failing does not abandon the others. Every Dispatch
+// dispatch.Cycle returns already has its own durable store row (its own
+// doc comment: "the store write is already durable by the time a Dispatch
+// is returned"), so a slot whose run fails here is a slot whose task is
+// recorded as attempted either way — dropping the remaining dispatches on
+// the floor would leave their slots idle for a tick without changing
+// anything about the one that failed.
+func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.Slots, now)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
 
+	var errs []error
 	for _, d := range dispatches {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if err := runOne(ctx, deps, d, now); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-
-	return SyncPullRequests(ctx, deps.Store, deps.Client, now)
+	return errors.Join(errs...)
 }
 
 func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) error {
