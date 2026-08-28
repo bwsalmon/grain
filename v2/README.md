@@ -90,8 +90,8 @@ be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## What this does not have yet
 
-`TrackedPullRequest`, folders, the capability provider contract, and
-anything that reads or writes GitHub's REST API. `loop.Cycle` decides
+`TrackedPullRequest`, folders, and anything that reads or writes
+GitHub's REST API. `loop.Cycle` decides
 which task takes which slot and calls `StartRun`, and nothing past that:
 no sandbox gets created, no agent runs. Actually dispatching, and the
 host adapter, are still v1 Python — 15,903 lines of it, with 1,239 tests.
@@ -109,6 +109,26 @@ with no override path. `loop.Cycle` also mints no leases yet — a run's
 git proxy authorizes straight off `Task.Target`/`Reads` instead, which
 serves the same fail-closed purpose without depending on that field being
 populated first.
+
+The capability provider contract exists now too (`model/capability.go`),
+though nothing here ported it — `docs/data-model.md`'s design was never
+built in v1 either. `CapabilityProvider`'s four methods — `Resolve`,
+`Materialize`, `PromptSection`, `Revoke` — plus `Placement`, the
+vocabulary a provider returns rather than performs so material moves
+declaratively and never through a shell or a prompt. A provider here is
+handed no Runner at all, unlike the Python contract `docs/data-model.md`
+describes — v2 has no host adapter yet for one to run commands against,
+so starting from the declarative-only half of that design (the half a
+containerised provider is restricted to) costs nothing now and stays
+correct once a Runner exists. `ResolveGrants`, `MaterializeGrants` and
+`PromptSections` walk a task's `Grant`s against a `CapabilityRegistry`
+in registration order, honouring `docs/data-model.md`'s rule that a
+half-materialized capability is never described to the agent as
+present. What it does not yet have: a real `MINT` provider
+(`gemini-key`, `gcp-key`) — minting needs standing credentials and a
+controller v2 has neither of — or an executor that actually applies a
+`Placement` to a sandbox, which needs the same host adapter
+`loop.Cycle` is still waiting on above.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today —
 it just has nothing to call it yet outside a test. There is no host
