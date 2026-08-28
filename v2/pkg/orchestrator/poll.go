@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -49,25 +50,57 @@ func PollIssues(ctx context.Context, store *model.Store, client github.Client, c
 		return fmt.Errorf("orchestrator: listing labelled issues: %w", err)
 	}
 
+	// One issue that cannot be taken in does not hold up the rest of the
+	// batch. Intake is per-issue already -- each one is filed, or
+	// re-queued, or parked, entirely on its own -- so the only thing
+	// returning early ever achieved was leaving the issues behind it
+	// labelled and unfiled until a later tick happened to reach them. An
+	// issue that fails here keeps its trigger label (see pollIssue), so
+	// the next tick lists it again and retries it.
+	var errs []error
 	for _, issue := range issues {
-		id := TaskID(cfg.TaskRepo, issue.Number)
-		existing, err := store.GetTask(ctx, id)
-		if err != nil {
-			return fmt.Errorf("orchestrator: reading task %s: %w", id, err)
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
 		}
+		if err := pollIssue(ctx, store, client, cfg, issue, now); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
 
-		if existing == nil {
-			if err := fileTask(ctx, store, client, cfg, issue, id, now); err != nil {
-				return err
-			}
-		} else if err := requeueIfAwaitingReply(ctx, store, id, now); err != nil {
+// pollIssue takes one labelled issue in: file it, re-queue it, or park
+// it, and only then take the trigger label off.
+//
+// The ordering inside one issue is not negotiable the way the ordering
+// between issues is. The label comes off last, and only if everything
+// before it succeeded, because removing it is the irreversible half:
+// persist first, then drop the thing that would make a second tick redo
+// the work (see PollIssues' own doc comment on that ordering, and
+// docs/next-session.md on finding a real bug from getting it backwards).
+// A failure here therefore leaves the issue exactly as it was found --
+// labelled, and picked up again next tick.
+func pollIssue(ctx context.Context, store *model.Store, client github.Client, cfg Config,
+	issue github.Issue, now time.Time) error {
+
+	id := TaskID(cfg.TaskRepo, issue.Number)
+	existing, err := store.GetTask(ctx, id)
+	if err != nil {
+		return fmt.Errorf("orchestrator: reading task %s: %w", id, err)
+	}
+
+	if existing == nil {
+		if err := fileTask(ctx, store, client, cfg, issue, id, now); err != nil {
 			return err
 		}
+	} else if err := requeueIfAwaitingReply(ctx, store, id, now); err != nil {
+		return err
+	}
 
-		if err := client.RemoveLabel(cfg.TaskRepo.Owner, cfg.TaskRepo.Name, issue.Number, cfg.TriggerLabel); err != nil {
-			return fmt.Errorf("orchestrator: removing trigger label from %s#%d: %w",
-				cfg.TaskRepo, issue.Number, err)
-		}
+	if err := client.RemoveLabel(cfg.TaskRepo.Owner, cfg.TaskRepo.Name, issue.Number, cfg.TriggerLabel); err != nil {
+		return fmt.Errorf("orchestrator: removing trigger label from %s#%d: %w",
+			cfg.TaskRepo, issue.Number, err)
 	}
 	return nil
 }
@@ -113,8 +146,7 @@ func fileTask(ctx context.Context, store *model.Store, client github.Client, cfg
 }
 
 // parkIssue leaves a labelled issue un-dispatched: a comment explaining
-// why, and the label removed by PollIssues' own caller right after this
-// returns.
+// why, and the label removed by pollIssue right after this returns.
 func parkIssue(client github.Client, cfg Config, issueNumber int, reason string) error {
 	comment := "Cannot dispatch this task: " + reason
 	if _, err := client.CreateComment(cfg.TaskRepo.Owner, cfg.TaskRepo.Name, issueNumber, comment); err != nil {

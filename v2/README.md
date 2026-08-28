@@ -81,8 +81,10 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: polls a task
                 calls into real GitHub effects (a comment, a pull
                 request, a filed follow-up task), and closes out a
                 pull request once GitHub reports it merged or closed.
-                See "What this does not have yet" below for what it
-                still stops short of.
+                RunCycle runs those as three independent reconcilers
+                rather than one pipeline -- see "Reconcilers, not a
+                pipeline" below. See "What this does not have yet" for
+                what it still stops short of.
 e2e/            issues filed the way a user would, carried through
                 dispatch.Cycle, a real agent/gemini run, and a real
                 gitproxy push, against a real embedded Dolt store and a
@@ -193,6 +195,78 @@ DSN before it exists fails with "database not found". `Open` therefore
 connects twice: once with no database selected purely to create it, then
 again for real. Not a `CREATE`-then-`USE` on one connection, which would
 be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
+
+## Reconcilers, not a pipeline
+
+`RunCycle` runs three independent reconcilers — `poll`, `dispatch`,
+`sync` — and every one of them runs whatever the ones before it did.
+
+It used to be a pipeline: poll, and return on error; dispatch, and return
+on error; sync. That reads naturally and is wrong for the same reason
+edge-triggered controllers are wrong. Intake talks to GitHub's issues
+API, and a cycle that could not reach it also refused to advance a merge
+queue, close out a pull request GitHub had already merged, or run a
+dispatch whose task and slot were both sitting right there in the store.
+None of that work depended on the poll; it was just standing behind it.
+A GitHub blip during intake became a cycle in which grain did nothing at
+all.
+
+The reason those three can be reordered or skipped freely is that each is
+level-triggered and idempotent — it re-reads the store and GitHub every
+tick rather than acting on a change it was handed. Nothing is delivered
+to a reconciler, so nothing is lost by not running one: skipping costs a
+tick of latency and never correctness. Their order in `Reconcilers()` is
+a latency preference (an issue filed since the last tick dispatches on
+this one; a pull request opened moments ago by this very cycle is picked
+up without waiting), not a dependency.
+
+The same argument applies one level down, to the items inside each
+reconciler, and that is where it bites hardest in practice. One
+unparseable issue used to leave every issue behind it in the batch
+labelled and unfiled. One pull request GitHub would not answer for used
+to strand every other task's close-out. One slot whose sandbox failed to
+build used to abandon the dispatches `dispatch.Cycle` had already
+durably recorded runs for, idling those slots for a tick over a failure
+that was not theirs. Each of those loops now collects its failures and
+keeps going, and `RunCycle` joins the lot (`errors.Join`, so `errors.Is`
+still answers for any one of them) into the single line `graind` logs
+per tick.
+
+Two places deliberately do **not** isolate, and the reasoning is worth
+keeping:
+
+- **Inside one issue, intake still stops at the first error.** The
+  trigger label comes off last and only if the store write succeeded, so
+  a failure leaves the issue exactly as it was found — labelled, and
+  retried next tick. Isolating *within* an issue would mean removing the
+  label for work that did not land, which is the
+  persistence-before-irreversible-effect ordering `docs/next-session.md`
+  records finding a real bug from getting backwards once already.
+- **`SyncPullRequests`' gather loop still returns early on a store
+  error.** `queueHeads` decides which task is at the front of each repo's
+  merge queue by comparing entries against each other, so acting on a set
+  with one silently missing could promote the task behind the real head
+  and merge two changes in the wrong order. A store read failing there is
+  systemic anyway. Its *act* loop is isolated, because head-of-queue was
+  already settled against the complete set — an entry failing there
+  cannot make another entry merge that would not have merged regardless.
+
+`isolation_test.go` pins all of it down: each test fails one specific
+thing and asserts the unrelated work still landed. All five fail against
+the pipeline version, with the state assertion naming what it stranded.
+
+This is the first of the three steps toward the Kubernetes-shaped model
+the design is converging on. The other two are not built: optimistic
+concurrency on `Store`'s mutators (`task` has no version column, and
+`PutTask` is last-write-wins — fine for one writer, and "Single writer"
+below is already honest that there is more than one), and a real watch,
+for which Dolt is an unusually good substrate and currently an unused
+one — a commit hash is a `resourceVersion` and `dolt_diff` is a change
+feed with history, but `dolt.Commit` has no caller outside its own test
+and `graind` never commits. Note the ordering: a watch is a latency
+optimization over level-triggered reconciliation, never a replacement
+for it, so it is worth having only once the reconcilers it would wake are
+independent and safe to run concurrently.
 
 ## What this does not have yet
 
