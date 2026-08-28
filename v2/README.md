@@ -29,6 +29,14 @@ pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
 pkg/agent/      the Framework interface an agent driver implements
 pkg/agent/gemini/  Framework via the Gemini API, talking to its own
                 in-process pkg/mcp/ server
+pkg/agent/claude/  Framework via the real `claude` CLI, run as a
+                subprocess on the controller (bwsalmon/agents#255) --
+                unlike agent/gemini there is no in-process API to drive, so
+                this points --mcp-config at a built cmd/mcpserver binary
+                the same way v1's dispatch.py pointed it at
+                `python3 -m grain.automation.mcp_server`, and parses the
+                resulting --output-format stream-json transcript back into
+                an agent.Result
 pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
                 and revokes a Gemini API key, direct against the API Keys
                 API
@@ -167,16 +175,34 @@ matching `model.Observation`'s own vocabulary (`ClosedAt`/`CompletedAt`,
 no merged flag). `graind` also still runs against the same "no host
 adapter" stand-in every other package here does: one slot, one local
 directory doing sandbox duty (bwsalmon/agents#254's own explicit
-simplification), and the `mcp.NewMockTools` escape hatches
-(`ask_question`, `comment_on_issue`, `propose_task`, `add_review_comment`)
-`agent/gemini.Framework.Run` wires internally are still discarded rather
-than posted anywhere real — `orchestrate` only ever inspects
-`agent.Result.ToolCalls` after a run finishes (to decide success/failure
-and to seed a PR's body from the agent's own final answer), not while it
-is live. Turning GitHub issues carrying a trigger label into `Task` rows
-in the first place (v1's own intake, `dispatch.py`'s `directives.py`/label
-handling) is also still open — this deployment shape assumes tasks
-already exist in the store by the time `graind` looks.
+simplification). Three of the `mcp.NewMockTools` escape hatches
+(`ask_question`, `comment_on_issue`, `propose_task`) are wired to real
+GitHub effects now (`pkg/orchestrate/effects.go`'s `reportOutcome`,
+called once a dispatch's run returns, the same after-the-fact reading of
+`agent.Result.ToolCalls` — not a live sink inside `agent/gemini.Framework.
+Run` itself — `pkg/orchestrator`'s own `ProcessResult` already used):
+`ask_question` posts to `Task.ExternalRef`'s tracking issue and parks the
+task on a `PendingQuestionCommentID` Observation instead of leaving it
+silently "succeeded", `comment_on_issue` posts a closing comment and
+closes the task out (skipping the "completed, wait for a PR to
+disappear" state a comment-only task, having no PR, would never leave),
+and `propose_task` files a real (unlabelled) issue alongside whatever else
+the run did. `model.ExternalRef`/`model.ParseExternalRef` is the format
+convention both packages now share for reading which GitHub issue a
+`Task` was filed from — moved out of `pkg/orchestrator` (where it
+started as a private detail of its own intake) since `orchestrate` needed
+to agree with it, not invent a second one. A task with no parseable
+`ExternalRef` still gets its pull request opened exactly as before; there
+is just nothing to relay a question, comment, or proposal to. `graind`
+still has no `PollIssues` equivalent of its own to produce that
+`ExternalRef` in the first place — turning GitHub issues carrying a
+trigger label into `Task` rows (v1's own intake, `dispatch.py`'s
+`directives.py`/label handling) is still open for this package, and
+`add_review_comment` is still recorded and nothing more, the same
+"nothing yet dispatches with review intent for one to attach to" gap
+`pkg/orchestrator` has (below) — this deployment shape still assumes
+tasks already exist in the store, with an `ExternalRef` already stamped
+on by whatever put them there, by the time `graind` looks.
 
 `pkg/orchestrator/` (bwsalmon/agents#249) goes further on that last point
 — polling a task repo's labelled issues, running `loop.Cycle`'s own
@@ -374,17 +400,25 @@ bwsalmon/agents#256), and `orchestrator.KonturSandboxes`
 that type's own doc comment). A kontur VM's own image is still expected to
 arrive already carrying the operator's SSH key and a running sshd, the
 same assumption v1's sandbox image build stood in for and still no
-successor here builds — provisioning one is still open. So is a real
-`github.RESTClient` for the agent's own
-`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
-calls: `gemini.Framework.Run` still wires those to a `mcp.MockSink` it
-builds and discards internally on every call, so they still just record
-what they were asked to do rather than posting it anywhere real, and
-neither `orchestrate` nor `orchestrator` sees them until the run is
-already over, through the `agent.Result` `Run` returns. Giving
-`Framework.Run` (or its caller) a way to inject a real sink is still open,
-same as reconciling `pkg/orchestrate` and `pkg/orchestrator` into one
-dispatch path instead of two side by side.
+successor here builds — provisioning one is still open. Nothing wires
+`KonturSandboxes` in as `orchestrator.RunCycle`'s `Deps.Sandboxes` outside
+its own tests yet, and `pkg/orchestrate`'s dispatch loop has no
+equivalent alternative to its own local-directory stand-in either, so
+today this is a capability `pkg/orchestrator` exposes rather than one
+either reconcile loop drives by default.
+
+A real `github.RESTClient` exists and is wired into `graind` too, but
+only for `orchestrate`'s own two calls (`FindOpenPullRequestForBranch`/
+`CreatePullRequest`), not for the agent's own `ask_question`/
+`comment_on_issue`/`propose_task`/`add_review_comment` calls:
+`gemini.Framework.Run` still wires those to a `mcp.MockSink` it builds
+and discards internally on every call, so they still just record what
+they were asked to do rather than posting it anywhere real, and neither
+`orchestrate` nor `orchestrator` sees them until the run is already over,
+through the `agent.Result` `Run` returns. Giving `Framework.Run` (or its
+caller) a way to inject a real sink is still open, same as reconciling
+`pkg/orchestrate` and `pkg/orchestrator` into one dispatch path instead
+of two side by side.
 
 `e2e/` is that whole chain driven by hand, in a test, rather than by
 `loop.Cycle` itself: it calls `loop.Cycle` to decide what runs, then

@@ -33,8 +33,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
@@ -75,31 +73,6 @@ type Config struct {
 // is unambiguous with no escaping.
 func TaskID(taskRepo model.RepoRef, issueNumber int) string {
 	return fmt.Sprintf("%s/%s/%d", taskRepo.Owner, taskRepo.Name, issueNumber)
-}
-
-// externalRef is the ExternalRef a polled task is stamped with — "where
-// this task appears for humans," per Task's own doc comment — formatted
-// so parseExternalRef can read the originating task-repo issue back off
-// of a Task with nothing else in hand.
-func externalRef(taskRepo model.RepoRef, issueNumber int) string {
-	return fmt.Sprintf("%s#%d", taskRepo, issueNumber)
-}
-
-// parseExternalRef reverses externalRef.
-func parseExternalRef(s string) (repo model.RepoRef, number int, err error) {
-	repoPart, numPart, ok := strings.Cut(s, "#")
-	if !ok {
-		return model.RepoRef{}, 0, fmt.Errorf("external ref must be owner/name#number, got %q", s)
-	}
-	repo, err = model.ParseRepo(repoPart)
-	if err != nil {
-		return model.RepoRef{}, 0, fmt.Errorf("external ref %q: %w", s, err)
-	}
-	number, err = strconv.Atoi(numPart)
-	if err != nil {
-		return model.RepoRef{}, 0, fmt.Errorf("external ref %q: bad issue number: %w", s, err)
-	}
-	return repo, number, nil
 }
 
 // HostSandboxes hands out one directory per slot, on the host this
