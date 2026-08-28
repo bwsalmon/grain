@@ -13,8 +13,19 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment)
-cmd/mcpserver/  the server as a standalone stdio binary
+                propose_task, add_review_comment). NewSandboxTools runs
+                those four locally, confined to a directory; NewSSHSandboxTools
+                (SSHRunner) runs the same four tools over SSH against a
+                real remote host instead, the transport a kontur-managed
+                sandbox VM needs
+cmd/mcpserver/  the server as a standalone stdio binary -- -sandbox-root
+                for NewSandboxTools, or -kontur-vm (plus pkg/kontur, below)
+                for NewSSHSandboxTools against a real kontur-managed VM
+pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
+                external port kontur itself persisted at "kontur vm
+                create" time, plus the pod IP that port answers on, asked
+                of containerd directly via crictl since kontur has no
+                apiserver to have recorded it anywhere itself
 pkg/agent/      the Framework interface an agent driver implements
 pkg/agent/gemini/  Framework via the Gemini API, talking to its own
                 in-process pkg/mcp/ server
@@ -343,22 +354,35 @@ section is the checked-in listing of, per capability.
 
 `agent/gemini` can run an agent end to end against `mcp/`'s tools today,
 and `cmd/graind` now calls it for real from `pkg/orchestrate`'s dispatch
-loop rather than only from a test. There is still no host adapter to hand
-it a real sandbox directory, so `mcp/`'s `run_command`/`read_file`/
-`edit_file`/`write_file` are confined to a local directory rather than the
-remote VM v1's versions of them SSH into (`mcp.ConfigureGitCredentials`
-sets that local directory's git credentials up the same way v1's
-`configure_git_credentials` sets a real sandbox's up, once per slot at
-`graind` startup) — and a real `github.RESTClient` exists and is wired
-into `graind` too, but only for `orchestrate`'s own two calls
-(`FindOpenPullRequestForBranch`/`CreatePullRequest`), not for the agent's
-own `ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
+loop rather than only from a test. `pkg/orchestrate`/`cmd/graind` still
+only ever hands it a local directory (`mcp.ConfigureGitCredentials` sets
+that directory's git credentials up once per slot at `graind` startup) —
+`orchestrator.RunCycle` (below), `pkg/orchestrate`'s not-yet-wired-to-
+anything sibling, is the one that can now reach a real remote VM instead.
+`pkg/kontur` resolves a bwsalmon/kontur-managed VM's SSH endpoint (the
+external port kontur persisted at `kontur vm create` time, plus the pod IP
+that port answers on, asked of containerd via `crictl` since kontur has no
+apiserver to have recorded it anywhere itself), and `mcp.NewSSHSandboxTools`
+runs the same four tools — `run_command`/`read_file`/`edit_file`/
+`write_file` — against it instead of a local directory. `cmd/mcpserver`
+can be pointed at one by hand via `-kontur-vm` (bwsalmon/agents#256), and
+`orchestrator.KonturSandboxes` (bwsalmon/agents#262) does the same thing
+`RunCycle` itself now drives: one kontur VM per dispatch slot, created on
+first use and reused across cycles the same way `HostSandboxes` reuses its
+directories, torn down by nothing here (see that type's own doc comment).
+A kontur VM's own image is still expected to arrive already carrying the
+operator's SSH key and a running sshd, the same assumption v1's sandbox
+image build stood in for and still no successor here builds — provisioning
+one is still open. So is a real `github.RESTClient` for the agent's own
+`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
 calls: `gemini.Framework.Run` still wires those to a `mcp.MockSink` it
 builds and discards internally on every call, so they still just record
-what they were asked to do rather than posting it anywhere real.
-`orchestrate` only sees them after the fact, through the `agent.Result`
-`Run` returns, not while the run is live. Giving `Framework.Run` (or its
-caller) a way to inject a real sink is still open.
+what they were asked to do rather than posting it anywhere real, and
+neither `orchestrate` nor `orchestrator` sees them until the run is
+already over, through the `agent.Result` `Run` returns. Giving
+`Framework.Run` (or its caller) a way to inject a real sink is still open,
+same as reconciling `pkg/orchestrate` and `pkg/orchestrator` into one
+dispatch path instead of two side by side.
 
 `e2e/` is that whole chain driven by hand, in a test, rather than by
 `loop.Cycle` itself: it calls `loop.Cycle` to decide what runs, then
