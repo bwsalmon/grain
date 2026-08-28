@@ -93,8 +93,19 @@ e2e/            tasks filed the way a user would, carried through
                 local git
                 server standing in for GitHub — fixed scenarios plus a
                 randomized multi-user simulation (bwsalmon/agents#233).
-                See "What this does not have yet" below for where it
-                stops.
+                random_test.go (bwsalmon/agents#338) is a second, higher-
+                layer randomized cluster test: the real grain CLI binary
+                (an operator), a real orchestrator.RunCycle against a real
+                githubsim.Sim (GitHub) and a scripted agent each choosing
+                among their own valid moves every round, checking after
+                each one that no slot stays stuck occupied and that
+                nothing pushed or merged ever silently disappears.
+                TestRandomizedClusterEndToEnd is the short, fixed-seed
+                version `go test ./...` always runs;
+                TestRandomizedClusterLong is the same driver run for much
+                longer by hand (its own doc comment says how) and does
+                nothing unless asked to. See "What this does not have
+                yet" below for where it stops.
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237). It reads and writes
