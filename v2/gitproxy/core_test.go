@@ -224,6 +224,106 @@ func (erroringAuthorizer) Authorize(context.Context, string, string, string, str
 	return false, errors.New("model store unreachable")
 }
 
+// stubCredentialOverrides answers a fixed (name, ok) for every sandbox --
+// core_test.go's own concern is what GitProxy.Handle does with the
+// answer, not how a real one resolves it (model.Store.GitCredentialOverride
+// and its own dolt-backed tests cover that).
+type stubCredentialOverrides struct {
+	name string
+	ok   bool
+}
+
+func (s stubCredentialOverrides) GitCredentialOverride(context.Context, string) (string, bool, error) {
+	return s.name, s.ok, nil
+}
+
+type erroringCredentialOverrides struct{}
+
+func (erroringCredentialOverrides) GitCredentialOverride(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("model store unreachable")
+}
+
+func TestHandleUsesTheOverrideCredentialWhenTheTaskAsksForOne(t *testing.T) {
+	p, forwarder, audit := newTestProxy(t)
+	credsDir := writeCredentialSet(t, map[string]string{"*": "bot"},
+		map[string]string{"bot": "bot-token", "workflow": "workflow-token"})
+	credentials, err := LoadCredentialSet(credsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Credentials = credentials
+	p.CredentialOverrides = stubCredentialOverrides{name: "workflow", ok: true}
+
+	headers := merge(gitHeaders, map[string]string{"Authorization": basicAuthHeader("tok0")})
+	resp := p.Handle(context.Background(), "GET", "/owner/repo.git/info/refs",
+		"service=git-upload-pack", headers, nil)
+	if resp.Status != 200 {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	call := forwarder.Calls[0]
+	if call.Token == nil || *call.Token != "workflow-token" {
+		t.Errorf("token = %v, want workflow-token -- the override should bypass the owner/repo ladder entirely", call.Token)
+	}
+	if audit.Entries[0].Credential != "workflow" {
+		t.Errorf("audit credential = %q, want workflow", audit.Entries[0].Credential)
+	}
+}
+
+func TestHandleFallsBackToTheLadderWithNoOverride(t *testing.T) {
+	p, forwarder, _ := newTestProxy(t)
+	p.CredentialOverrides = stubCredentialOverrides{ok: false}
+
+	headers := merge(gitHeaders, map[string]string{"Authorization": basicAuthHeader("tok0")})
+	resp := p.Handle(context.Background(), "GET", "/owner/repo.git/info/refs",
+		"service=git-upload-pack", headers, nil)
+	if resp.Status != 200 {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	call := forwarder.Calls[0]
+	if call.Token == nil || *call.Token != "bot-token" {
+		t.Errorf("token = %v, want bot-token from the ordinary ladder", call.Token)
+	}
+}
+
+func TestHandleOverrideNamingAnUnconfiguredCredentialIs500NotForwarded(t *testing.T) {
+	p, forwarder, audit := newTestProxy(t)
+	p.CredentialOverrides = stubCredentialOverrides{name: "nonexistent", ok: true}
+
+	headers := merge(gitHeaders, map[string]string{"Authorization": basicAuthHeader("tok0")})
+	resp := p.Handle(context.Background(), "GET", "/owner/repo.git/info/refs",
+		"service=git-upload-pack", headers, nil)
+	if resp.Status != 500 {
+		t.Errorf("status = %d, want 500", resp.Status)
+	}
+	if !strings.Contains(string(resp.Body), `"nonexistent"`) {
+		t.Errorf("body = %q, want a legible reason naming the missing credential", resp.Body)
+	}
+	if len(forwarder.Calls) != 0 {
+		t.Error("expected no forward call")
+	}
+	if audit.Entries[0].Outcome != `error: no credential named "nonexistent" configured` {
+		t.Errorf("outcome = %q", audit.Entries[0].Outcome)
+	}
+}
+
+func TestHandleSurfacesACredentialOverrideLookupErrorAs500(t *testing.T) {
+	p, forwarder, audit := newTestProxy(t)
+	p.CredentialOverrides = erroringCredentialOverrides{}
+
+	headers := merge(gitHeaders, map[string]string{"Authorization": basicAuthHeader("tok0")})
+	resp := p.Handle(context.Background(), "GET", "/owner/repo.git/info/refs",
+		"service=git-upload-pack", headers, nil)
+	if resp.Status != 500 {
+		t.Errorf("status = %d, want 500", resp.Status)
+	}
+	if len(forwarder.Calls) != 0 {
+		t.Error("expected no forward call")
+	}
+	if len(audit.Entries) != 1 {
+		t.Fatalf("Entries = %+v", audit.Entries)
+	}
+}
+
 func merge(a, b map[string]string) map[string]string {
 	out := make(map[string]string, len(a)+len(b))
 	for k, v := range a {

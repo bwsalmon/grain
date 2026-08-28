@@ -399,6 +399,55 @@ func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
 	}
 }
 
+func TestGitCredentialOverrideFollowsTheLiveRunOnASandbox(t *testing.T) {
+	store, ctx := open(t)
+	tk := task("a1b2", true)
+	tk.Grants = []model.Grant{model.GitCredentialGrant("workflow")}
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	name, ok, err := store.GitCredentialOverride(ctx, "sandbox-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || name != "workflow" {
+		t.Errorf("name=%q ok=%v, want %q true", name, ok, "workflow")
+	}
+}
+
+func TestGitCredentialOverrideIsAbsentWithoutAGitCredentialGrant(t *testing.T) {
+	store, ctx := open(t)
+	tk := task("a1b2", true)
+	tk.Grants = []model.Grant{{Capability: "gemini-key", Via: model.GrantByLabel}}
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := store.GitCredentialOverride(ctx, "sandbox-0"); err != nil || ok {
+		t.Errorf("ok=%v err=%v, want false, nil -- an unrelated grant should not override", ok, err)
+	}
+}
+
+func TestGitCredentialOverrideIsAbsentWithNoLiveRunOnTheSandbox(t *testing.T) {
+	store, ctx := open(t)
+	if _, ok, err := store.GitCredentialOverride(ctx, "sandbox-0"); err != nil || ok {
+		t.Errorf("ok=%v err=%v, want false, nil for an idle sandbox", ok, err)
+	}
+}
+
 func TestObservationBaselinesRoundTrip(t *testing.T) {
 	store, ctx := open(t)
 	id := int64(12345)
