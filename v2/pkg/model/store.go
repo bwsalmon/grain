@@ -254,20 +254,23 @@ func (s *Store) Approve(ctx context.Context, taskID string, a Attribution) error
 func (s *Store) Observe(ctx context.Context, o Observation) error {
 	_, err := s.db.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
-			"`pending_question_comment_id`,`baseline_comment_id`,`observed_at`) VALUES (?,?,?,?,?,?)",
+			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`) "+
+			"VALUES (?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
-		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID), timeOf(o.ObservedAt))
+		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
+		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt))
 	return err
 }
 
 func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation, error) {
 	row := s.db.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`observed_at` FROM `task_observation` WHERE `task_id` = ?", taskID)
+			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at` "+
+			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
-	var closed, completed, observed sql.NullTime
+	var closed, completed, blocked, observed sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &observed); err != nil {
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -275,6 +278,7 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 	}
 	o.ClosedAt, o.CompletedAt, o.ObservedAt = timePtr(closed), timePtr(completed), timePtr(observed)
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
+	o.MergeQueueBlockedAt = timePtr(blocked)
 	return &o, nil
 }
 
@@ -519,48 +523,6 @@ func (s *Store) grantsOf(ctx context.Context, taskID string) ([]Grant, error) {
 			return nil
 		})
 	return grants, err
-}
-
-// TrackedTarget is a task worth polling GitHub about: one with a known
-// write target and a state that has not reached closed yet. Backed by
-// task_state rather than a second copy of "is this task still live" --
-// a task drops out of TrackedTargets the moment an Observe call closes it,
-// with no separate bookkeeping (a tracked-PR table, a cleared flag) to
-// keep in step with that.
-type TrackedTarget struct {
-	TaskID string
-	Target RepoRef
-}
-
-// TrackedTargets is every task a GitHub-sync pass should check the state
-// of: running or completed always qualify (state.go's StateOf can only
-// reach either by way of a real run or a real Observation), and queued
-// qualifies too, but only once the task has actually been dispatched --
-// a run that finished with nothing yet observed about it reads as queued
-// again (no active run, no Observation, "approved means queued"), which
-// is exactly the moment a push might have landed a PR that nothing has
-// checked for yet. The EXISTS clause is what tells that apart from a task
-// that is merely queued because it has never been dispatched at all,
-// which has nothing on GitHub yet to correspond to.
-func (s *Store) TrackedTargets(ctx context.Context) ([]TrackedTarget, error) {
-	var out []TrackedTarget
-	err := each(ctx, s.db,
-		"SELECT `t`.`id`, `t`.`target_owner`, `t`.`target_name` "+
-			"FROM `task_state` `ts` JOIN `task` `t` ON `t`.`id` = `ts`.`task_id` "+
-			"WHERE `t`.`target_owner` IS NOT NULL AND ("+
-			"  `ts`.`state` IN ('running','completed')"+
-			"  OR (`ts`.`state` = 'queued' AND EXISTS ("+
-			"    SELECT 1 FROM `task_run` `tr` WHERE `tr`.`task_id` = `t`.`id`))"+
-			") ORDER BY `t`.`id`", nil,
-		func(rows *sql.Rows) error {
-			var tt TrackedTarget
-			if err := rows.Scan(&tt.TaskID, &tt.Target.Owner, &tt.Target.Name); err != nil {
-				return err
-			}
-			out = append(out, tt)
-			return nil
-		})
-	return out, err
 }
 
 // TaskPullRequestLink is one task_link row of kind LinkFixes, belonging to

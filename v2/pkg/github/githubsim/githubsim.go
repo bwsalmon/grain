@@ -9,14 +9,18 @@
 // before it, the same as talking to real GitHub across a real
 // orchestration run would.
 //
-// Sim implements exactly the endpoints github.RESTClient calls
-// (list/get issue, comments, default branch, add/remove label,
-// branch existence, create pull request) -- nothing GitHub's API exposes
-// beyond that, since nothing here needs it. Wired in as a
-// github.Transport, github.RESTClient's own logic (path building,
-// pagination via the shape of a response's own Link header where it
-// applies, status-code handling, JSON field extraction) runs completely
-// unmodified; only the network call underneath is swapped.
+// Sim implements every endpoint github.Client's real implementation
+// (github.RESTClient) calls: list/get/create issues, close/reopen/update
+// an issue, add/remove a label, default branch, branch existence,
+// create/find/get/merge a pull request, the plain comment thread, inline
+// review comments and draft reviews, and check runs -- the whole surface
+// github.go's Client interface names, so a live end-to-end test never
+// has to fall back to github.FakeTransport partway through for an
+// endpoint Sim doesn't yet answer. Wired in as a github.Transport,
+// github.RESTClient's own logic (path building, pagination via the shape
+// of a response's own Link header where it applies, status-code
+// handling, JSON field extraction) runs completely unmodified; only the
+// network call underneath is swapped.
 //
 // BranchExists is the one endpoint that would be dishonest as a canned
 // answer: whether a branch is "real" is exactly the question a live
@@ -43,15 +47,17 @@ var (
 	// repoRe: the target repo's own default branch, read once per
 	// dispatch so the PR base comes from the repo itself rather than a
 	// single configured base branch.
-	repoRe        = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)$`)
-	issuesRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues$`)
-	labelsPostRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels$`)
-	labelDeleteRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels/([^/]+)$`)
-	branchRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/branches/(.+)$`)
-	pullsRe       = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls$`)
-	pullRe        = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)$`)
-	pullMergeRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/merge$`)
-	checkRunsRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/commits/([^/]+)/check-runs$`)
+	repoRe         = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)$`)
+	issuesRe       = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues$`)
+	labelsPostRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels$`)
+	labelDeleteRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels/([^/]+)$`)
+	branchRe       = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/branches/(.+)$`)
+	pullsRe        = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls$`)
+	pullRe         = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)$`)
+	pullMergeRe    = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/merge$`)
+	pullCommentsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/comments$`)
+	pullReviewsRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews$`)
+	checkRunsRe    = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/commits/([^/]+)/check-runs$`)
 )
 
 // Issue is one seeded or created fake issue -- Sim's own bookkeeping, not
@@ -66,6 +72,17 @@ type Issue struct {
 	// value, which issueJSON below treats as "open", the same fallback
 	// github.decodeIssue applies to a real response with no state field.
 	State string
+}
+
+// Review is one draft review Sim recorded through CreateReview -- kept
+// separately from ReviewComments (below), the same way real GitHub keeps
+// a pending review's own comments invisible through the review-comments
+// endpoint until a human submits it on github.com (github.go's own
+// package doc comment on why create_review only ever posts a draft).
+type Review struct {
+	Number   int
+	Body     string
+	Comments []github.NewReviewComment
 }
 
 // PullRequest is one pull request Sim recorded through CreatePullRequest.
@@ -120,9 +137,21 @@ type Sim struct {
 	// name or a sha, matching whatever ListCheckRuns is called with, since
 	// Sim has no real commit graph to resolve one into the other.
 	CheckRuns map[string][]github.CheckRun
+	// ReviewComments is every inline review comment on a PR, keyed by PR
+	// number -- what ListReviewComments reads back. Seeded directly by a
+	// test standing in for a human reviewer's own comments, since
+	// CreateReview's own draft reviews never land here (see Review's doc
+	// comment above).
+	ReviewComments map[int][]github.ReviewComment
+	// Reviews is every draft review CreateReview has recorded, in call
+	// order -- Sim's own bookkeeping for a test to assert what an
+	// add_review_comment call produced, the same append-only shape
+	// PullRequests already uses.
+	Reviews []Review
 
 	nextCommentID int
 	nextIssue     int
+	nextReviewID  int
 }
 
 // New returns a Sim seeded with no issues and no pull requests, answering
@@ -132,11 +161,13 @@ type Sim struct {
 func New(owner, repo, bareRepo, defaultBranch string) *Sim {
 	return &Sim{
 		Owner: owner, Repo: repo, BareRepo: bareRepo, DefaultBranch: defaultBranch,
-		Issues:        map[int]*Issue{},
-		Comments:      map[int][]github.Comment{},
-		CheckRuns:     map[string][]github.CheckRun{},
-		nextCommentID: 1000,
-		nextIssue:     8000,
+		Issues:         map[int]*Issue{},
+		Comments:       map[int][]github.Comment{},
+		CheckRuns:      map[string][]github.CheckRun{},
+		ReviewComments: map[int][]github.ReviewComment{},
+		nextCommentID:  1000,
+		nextIssue:      8000,
+		nextReviewID:   5000,
 	}
 }
 
@@ -206,6 +237,11 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
 			}
 			return jsonResponse(200, pullRequestDetailJSON(pr)), nil
+		}
+		if m := pullCommentsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			number := mustAtoi(m[3])
+			return jsonResponse(200, reviewCommentsJSON(s.ReviewComments[number])), nil
 		}
 		if m := checkRunsRe.FindStringSubmatch(p); m != nil {
 			s.mustOwn(m[1], m[2])
@@ -326,6 +362,28 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 				"head": pr.Head, "base": pr.Base, "html_url": pr.HTMLURL,
 			}), nil
 		}
+		if m := pullReviewsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			number := mustAtoi(m[3])
+			var payload struct {
+				Body     string `json:"body"`
+				Comments []struct {
+					Path string `json:"path"`
+					Line int    `json:"line"`
+					Body string `json:"body"`
+				} `json:"comments"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			comments := make([]github.NewReviewComment, len(payload.Comments))
+			for i, c := range payload.Comments {
+				comments[i] = github.NewReviewComment{Path: c.Path, Line: c.Line, Body: c.Body}
+			}
+			s.nextReviewID++
+			s.Reviews = append(s.Reviews, Review{Number: number, Body: payload.Body, Comments: comments})
+			return jsonResponse(200, map[string]any{"id": s.nextReviewID}), nil
+		}
 	}
 
 	if method == "PATCH" {
@@ -431,6 +489,20 @@ func commentsJSON(comments []github.Comment) []map[string]any {
 	for i, c := range comments {
 		out[i] = map[string]any{
 			"id": c.ID, "body": c.Body, "author_association": c.AuthorAssociation,
+			"user": map[string]string{"login": c.User},
+		}
+	}
+	return out
+}
+
+// reviewCommentsJSON is the shape github.RESTClient.ListReviewComments
+// decodes -- id/user.login/body/path/line, the inline (diff-attached)
+// shape distinct from commentsJSON's plain conversation-thread one.
+func reviewCommentsJSON(comments []github.ReviewComment) []map[string]any {
+	out := make([]map[string]any, len(comments))
+	for i, c := range comments {
+		out[i] = map[string]any{
+			"id": c.ID, "body": c.Body, "path": c.Path, "line": c.Line,
 			"user": map[string]string{"login": c.User},
 		}
 	}

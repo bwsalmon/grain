@@ -1,16 +1,24 @@
-// Command graind is the grain daemon: it runs pkg/orchestrate's reconcile
-// loop in the background on a timer, until SIGINT/SIGTERM, against one
-// real embedded Dolt store.
+// Command graind is the grain daemon: it runs pkg/orchestrator's
+// RunCycle in the background on a timer, until SIGINT/SIGTERM, against
+// one real embedded Dolt store.
 //
-// bwsalmon/agents#254 asks for exactly this, with one simplification: v2
+// bwsalmon/agents#254 asked for exactly this, with one simplification: v2
 // has no host adapter yet (v2/README.md), so there is no fleet of real
 // sandbox VMs to dispatch onto. graind assumes what that issue grants --
 // the MCP server's sandbox tools are confined to a local directory, and
 // one slot is the whole concurrency pool -- rather than inventing a fleet
 // this deployment shape has nowhere to run. -slots accepts a comma list
 // for the day a host adapter exists to give a second slot somewhere real
-// to point at; nothing above pkg/orchestrate.Config needs to change to
+// to point at; nothing above pkg/orchestrator.Deps needs to change to
 // serve more than one.
+//
+// graind originally drove pkg/orchestrate, a package built independently
+// of, and in parallel with, pkg/orchestrator (bwsalmon/agents#249) --
+// bwsalmon/agents#263 reconciled the two, keeping pkg/orchestrator (issue
+// intake, directive parsing, and PR-health sync were all already wired to
+// loop.Cycle there) and porting pkg/orchestrate's own capability
+// resolution/materialization and reconcile-loop shape onto it. See
+// v2/README.md for what that merge kept and dropped.
 package main
 
 import (
@@ -28,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
@@ -36,7 +45,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
-	"github.com/bwsalmon/grain/v2/pkg/orchestrate"
+	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
 
@@ -44,6 +53,11 @@ func main() {
 	dataDir := flag.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
 	slotList := flag.String("slots", "local", "comma-separated slot names -- the concurrency pool loop.Cycle fills")
 	pollInterval := flag.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle")
+
+	taskRepo := flag.String("task-repo", "", "owner/name of the repo whose labelled issues become tasks (required)")
+	triggerLabel := flag.String("trigger-label", "grain-agent", "label that marks an issue ready to dispatch")
+	defaultTargetRepo := flag.String("default-target-repo", "",
+		"owner/name used when a task's issue carries no /repo directive (optional)")
 
 	geminiAPIKeyFile := flag.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := flag.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls")
@@ -60,6 +74,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "graind: -data-dir is required")
 		os.Exit(2)
 	}
+	if *taskRepo == "" {
+		fmt.Fprintln(os.Stderr, "graind: -task-repo is required")
+		os.Exit(2)
+	}
 	if *geminiAPIKeyFile == "" {
 		fmt.Fprintln(os.Stderr, "graind: -gemini-api-key-file is required")
 		os.Exit(2)
@@ -71,6 +89,7 @@ func main() {
 
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
+		taskRepo: *taskRepo, triggerLabel: *triggerLabel, defaultTargetRepo: *defaultTargetRepo,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -84,6 +103,10 @@ type config struct {
 	slots        []string
 	pollInterval time.Duration
 
+	taskRepo          string
+	triggerLabel      string
+	defaultTargetRepo string
+
 	geminiAPIKeyFile string
 	geminiModel      string
 	maxAgentTurns    int
@@ -95,10 +118,23 @@ type config struct {
 	gcpServiceAccountEmail string
 }
 
-// run wires every piece pkg/orchestrate needs from real, on-disk material
+// run wires every piece pkg/orchestrator needs from real, on-disk material
 // under cfg.dataDir and starts the reconcile loop; it returns only once
 // ctx is cancelled (or setup itself fails).
 func run(ctx context.Context, cfg config) error {
+	taskRepo, err := model.ParseRepo(cfg.taskRepo)
+	if err != nil {
+		return fmt.Errorf("parsing -task-repo: %w", err)
+	}
+	var defaultTarget *model.RepoRef
+	if cfg.defaultTargetRepo != "" {
+		dt, err := model.ParseRepo(cfg.defaultTargetRepo)
+		if err != nil {
+			return fmt.Errorf("parsing -default-target-repo: %w", err)
+		}
+		defaultTarget = &dt
+	}
+
 	store, db, err := openStore(cfg.dataDir)
 	if err != nil {
 		return err
@@ -117,13 +153,14 @@ func run(ctx context.Context, cfg config) error {
 	// required" for the rest of the process's life. cmd/graind/live_test.go's
 	// TestRunLiveDispatchesAndOpensAPullRequest caught this live: a real
 	// dispatched agent's push was rejected by the proxy every time.
+	sandboxes := orchestrator.NewHostSandboxes(filepath.Join(cfg.dataDir, "sandbox"))
 	roots := map[string]string{}
 	slotTokens := map[string]string{}
 	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(cfg.dataDir, "secrets", "sandbox-tokens.json"))
 	for _, slot := range cfg.slots {
-		root := filepath.Join(cfg.dataDir, "sandbox", slot)
-		if err := os.MkdirAll(root, 0o755); err != nil {
-			return fmt.Errorf("creating sandbox root for %s: %w", slot, err)
+		root, err := sandboxes.RootFor(slot)
+		if err != nil {
+			return fmt.Errorf("preparing sandbox for %s: %w", slot, err)
 		}
 		token, err := tokens.EnsureToken(slot)
 		if err != nil {
@@ -169,17 +206,48 @@ func run(ctx context.Context, cfg config) error {
 
 	registry := model.NewCapabilityRegistry(capabilityProviders(cfg)...)
 
-	r := orchestrate.New(orchestrate.Config{
-		Store: store, Slots: cfg.slots, Roots: roots,
-		Agent:         agentFramework,
-		Capabilities:  registry,
-		Credentials:   secrets.New(filepath.Join(cfg.dataDir, "secrets")),
-		MaxAgentTurns: cfg.maxAgentTurns,
-		GitHub:        githubClient,
-	})
-	log.Printf("graind: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
-	r.Run(ctx, cfg.pollInterval)
+	deps := orchestrator.Deps{
+		Store: store, Client: githubClient, Sandboxes: sandboxes,
+		Framework: func() agent.Framework { return agentFramework },
+		Config: orchestrator.Config{
+			TaskRepo: taskRepo, TriggerLabel: cfg.triggerLabel, DefaultTarget: defaultTarget,
+			Capabilities:  registry,
+			Credentials:   secrets.New(filepath.Join(cfg.dataDir, "secrets")),
+			MaxAgentTurns: cfg.maxAgentTurns,
+		},
+		Slots: cfg.slots,
+	}
+	log.Printf("graind: reconciling every %s across slots %v for task repo %s", cfg.pollInterval, cfg.slots, taskRepo)
+	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
+}
+
+// reconcile calls orchestrator.RunCycle every interval until ctx is done,
+// logging (never panicking on) whatever it returns -- one bad cycle must
+// not take the whole daemon down, since the next tick gets another chance
+// at whatever failed. Ticks are not overlapped: reconcile waits for one
+// RunCycle to return before the next interval starts, so a slow GitHub
+// poll simply delays the next dispatch rather than racing it. Ported from
+// pkg/orchestrate's own Reconciler.Run (bwsalmon/agents#254) when that
+// package merged into pkg/orchestrator, which -- being "a library, not a
+// binary" (its own doc comment) -- has no timer loop of its own.
+func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Duration) {
+	tick := func() {
+		if err := orchestrator.RunCycle(ctx, deps, time.Now().UTC()); err != nil {
+			log.Printf("graind: reconcile cycle: %v", err)
+		}
+	}
+	tick()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tick()
+		}
+	}
 }
 
 // capabilityProviders builds every capability provider this deployment
@@ -202,10 +270,10 @@ func capabilityProviders(cfg config) []model.CapabilityProvider {
 }
 
 // credentialTokenSource adapts gitproxy's own owner/repo credential
-// ladder into a github.TokenSource, so the REST client polling PR state
-// and the git proxy pushing to it authenticate off the one ladder an
-// operator configures under secrets/github/, rather than a second copy
-// of the same decision.
+// ladder into a github.TokenSource, so the REST client polling issues and
+// pull requests and the git proxy pushing to it authenticate off the one
+// ladder an operator configures under secrets/github/, rather than a
+// second copy of the same decision.
 type credentialTokenSource struct{ credentials *gitproxy.CredentialSet }
 
 func (c credentialTokenSource) TokenFor(owner, repo string) *string {
