@@ -47,6 +47,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tasks/{id}", s.handleGetTask)
 	s.mux.HandleFunc("POST /api/tasks/{id}/capabilities", s.handleSetCapability)
 	s.mux.HandleFunc("POST /api/tasks/{id}/approve", s.handleApprove)
+	s.mux.HandleFunc("POST /api/tasks/{id}/submit", s.handleSubmit)
 	s.mux.HandleFunc("POST /api/tasks/{id}/comments", s.handleAddComment)
 	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)

@@ -298,6 +298,42 @@ func TestApproveMakesAProposalDispatchable(t *testing.T) {
 	}
 }
 
+func TestSubmitOptsIntoTheMergeQueue(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := c.Submit(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AutoMerge {
+		t.Fatalf("autoMerge = %v, want true after Submit", got.AutoMerge)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.AutoMerge {
+		t.Fatalf("stored autoMerge = %v, want true", stored.AutoMerge)
+	}
+	// Submitting an already-submitted task is a no-op rather than an error.
+	if err := c.Submit(ctx, task.ID); err != nil {
+		t.Fatalf("submitting twice: %v", err)
+	}
+}
+
+func TestSubmitNotFound(t *testing.T) {
+	c, _, ctx := testClient(t)
+	err := c.Submit(ctx, "404")
+	var nf *ui.NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("error = %v, want a NotFoundError", err)
+	}
+}
+
 func TestAddCommentAppendsToTheConversation(t *testing.T) {
 	c, _, ctx := testClient(t)
 	task := create(t, c, ctx)

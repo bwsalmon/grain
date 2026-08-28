@@ -182,6 +182,13 @@ function renderDetail(t) {
   if (t.state === "proposed") {
     actions.appendChild(el("button", { class: "primary", onclick: () => act(() => api(`/api/tasks/${t.id}/approve`, { method: "POST" }), t.id) }, ["Approve"]));
   }
+  // Once a task's run has produced a pull request, submitting is what
+  // puts it on the merge queue for automatic conflict resolution and
+  // merging -- see orchestrator.isQueueMember. Already-submitted tasks
+  // (autoMerge already true) have nothing left for this button to do.
+  if (t.pullRequest && !t.autoMerge) {
+    actions.appendChild(el("button", { class: "primary", onclick: () => act(() => api(`/api/tasks/${t.id}/submit`, { method: "POST" }), t.id) }, ["Submit"]));
+  }
   if (t.state === "closed") {
     actions.appendChild(el("button", { class: "secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id) }, ["Reopen"]));
   } else {
