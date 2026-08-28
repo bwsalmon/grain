@@ -820,6 +820,33 @@ the store rather than presenting a stale value as current. There is
 nowhere here for staleness to hide since nothing is ever cached across
 one request.
 
+**And it refreshes itself.** A task changes state when `graind`
+dispatches it, when a run finishes, and when a pull request merges —
+none of which the browser is told about, so without a poll the screen
+only moves when somebody clicks. `app.js` re-reads every three seconds,
+skipping the tick entirely while the tab is hidden and never overlapping
+itself.
+
+Two details keep that useful rather than annoying. A poll that finds the
+payload unchanged renders *nothing*, so an idle screen never flickers,
+loses focus, or resets its scroll; and when the open task does change, an
+unsent comment is carried across the re-render, because `renderDetail`
+rebuilds the whole pane including the textarea somebody may be halfway
+through typing into. Both were checked by driving the real UI in a
+browser, which is also how the second one was found.
+
+Polling rather than a change feed is deliberate, and it is the one place
+this project declines something the substrate offers. Dolt is a versioned
+database: `dolt_log` hands out commit hashes that would serve as a
+`resourceVersion`, and `dolt_diff_task` reports `added`/`modified`/
+`removed` with before-and-after values. Using it would mean a Dolt commit
+per write, a diff joined across six tables to answer "what changed about
+this task" (a capability toggle changes `task_grant`, a comment changes
+`task_comment`), unbounded history to garbage-collect, and a story for a
+cursor that has aged out. That is a real feature; this is fifteen lines
+with nothing to get wrong, and for one operator watching a handful of
+tasks on the same machine the two are indistinguishable.
+
 ## Single writer
 
 Embedded Dolt permits one writer, which suited a cron-driven controller
