@@ -22,14 +22,13 @@ type Config struct {
 	Capabilities []Capability
 }
 
-// Server is the JSON API plus the static frontend it serves, over
-// GitHub's own REST API through client -- no store, no database of its
-// own. See the package doc comment for why: a task issue is the record,
-// and this is a view onto it, not a fourth one.
+// Server is the JSON API plus the static frontend it serves, a thin HTTP
+// shim over a Client -- no store, no database of its own. See the
+// package doc comment for why: a task issue is the record, and this is a
+// view onto it, not a fourth one.
 type Server struct {
-	cfg    Config
-	client github.Client
-	mux    *http.ServeMux
+	tasks *Client
+	mux   *http.ServeMux
 }
 
 // NewServer builds a Server. client is deliberately the github.Client
@@ -38,7 +37,7 @@ type Server struct {
 // githubsim.Sim the same way every other v2 package that takes a Client
 // can, e.g. for a demo run against no real GitHub token at all.
 func NewServer(cfg Config, client github.Client) *Server {
-	s := &Server{cfg: cfg, client: client, mux: http.NewServeMux()}
+	s := &Server{tasks: NewClient(cfg, client), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }

@@ -173,7 +173,7 @@ func TestSimCreatePullRequestRecordsThePR(t *testing.T) {
 }
 
 func TestSimPanicsOnAnUnhandledRequest(t *testing.T) {
-	sim, client := newSim(t, "main")
+	sim, _ := newSim(t, "main")
 	sim.Issues[1] = &Issue{Title: "t", Body: "b", Labels: map[string]struct{}{}}
 
 	defer func() {
@@ -185,15 +185,90 @@ func TestSimPanicsOnAnUnhandledRequest(t *testing.T) {
 			t.Fatalf("got panic %v", r)
 		}
 	}()
-	// CreateReview is real GitHub API surface Sim still doesn't implement
-	// (bwsalmon/agents#249 wired MergePullRequest/GetPullRequest/
-	// ListCheckRuns/CreateComment/CloseIssue/CreateIssue/
-	// FindOpenPullRequestForBranch in for the orchestrator's own close-out
-	// path, but nothing exercises a draft review yet -- see
-	// pkg/orchestrator/finish.go's own note on why) -- a test that
-	// exercised it in error should fail loudly, the same as v1's own
-	// RealGitHubMock raising AssertionError.
-	client.CreateReview("acme", "widgets", 1, "looks good", nil)
+	// Closing a PR without merging it (PATCH .../pulls/{number}, state:
+	// closed) is real GitHub API surface neither Sim nor github.Client
+	// implements yet -- nothing in this project declines a PR today, only
+	// merges one (MergePullRequest) -- so this is called directly against
+	// Sim rather than through client, which has no method for it. A test
+	// exercising an endpoint this double doesn't yet answer for should
+	// fail loudly, the same as v1's own RealGitHubMock raising
+	// AssertionError.
+	sim.Request("PATCH", "/repos/acme/widgets/pulls/1", nil, []byte(`{"state":"closed"}`))
+}
+
+func TestSimListReviewCommentsReadsSeededComments(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pr, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "main", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	comments, err := client.ListReviewComments("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("expected no review comments before seeding, got %+v", comments)
+	}
+
+	line := 42
+	sim.ReviewComments[pr.Number] = []github.ReviewComment{
+		{ID: 1, User: "alice", Body: "nit: rename this", Path: "main.go", Line: &line},
+	}
+	comments, err = client.ListReviewComments("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].User != "alice" || comments[0].Path != "main.go" ||
+		comments[0].Line == nil || *comments[0].Line != 42 {
+		t.Fatalf("got %+v", comments)
+	}
+}
+
+func TestSimCreateReviewRecordsADraftReviewNotVisibleThroughListReviewComments(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pr, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "main", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := client.CreateReview("acme", "widgets", pr.Number, "looks good overall", []github.NewReviewComment{
+		{Path: "main.go", Line: 10, Body: "consider a guard clause here"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == 0 {
+		t.Fatal("expected a non-zero review id")
+	}
+	if len(sim.Reviews) != 1 {
+		t.Fatalf("got %+v", sim.Reviews)
+	}
+	recorded := sim.Reviews[0]
+	if recorded.Number != pr.Number || recorded.Body != "looks good overall" || len(recorded.Comments) != 1 ||
+		recorded.Comments[0].Path != "main.go" || recorded.Comments[0].Line != 10 {
+		t.Fatalf("got %+v", recorded)
+	}
+
+	// A draft review's own comments aren't visible through the ordinary
+	// review-comments endpoint until a human submits it -- see Review's
+	// doc comment on why CreateReview never writes to ReviewComments.
+	comments, err := client.ListReviewComments("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("expected a draft review's comments to stay invisible, got %+v", comments)
+	}
+
+	// A second review gets a distinct, incrementing id.
+	id2, err := client.CreateReview("acme", "widgets", pr.Number, "one more pass", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 == id {
+		t.Fatalf("expected a distinct review id, got %d twice", id)
+	}
 }
 
 func TestSimPanicsWhenAskedAboutARepoItIsNotConfiguredFor(t *testing.T) {

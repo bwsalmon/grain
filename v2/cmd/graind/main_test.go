@@ -151,11 +151,11 @@ func TestOpenStore(t *testing.T) {
 		t.Fatal("openStore returned a nil store alongside a nil error")
 	}
 	// A fresh store has applied its schema, not merely opened a
-	// connection: any read against it -- TrackedTargets is the one
-	// pkg/orchestrate itself calls every tick -- must succeed rather
-	// than error on a missing table.
-	if _, err := store.TrackedTargets(context.Background()); err != nil {
-		t.Fatalf("TrackedTargets against a freshly opened store: %v", err)
+	// connection: any read against it -- Ready is the one loop.Cycle
+	// itself calls every tick -- must succeed rather than error on a
+	// missing table.
+	if _, err := store.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready against a freshly opened store: %v", err)
 	}
 }
 
