@@ -406,8 +406,16 @@ bwsalmon/agents#256), and `orchestrator.KonturSandboxes`
 `HostSandboxes` reuses its directories, torn down by nothing here (see
 that type's own doc comment). A kontur VM's own image is still expected to
 arrive already carrying the operator's SSH key and a running sshd, the
-same assumption v1's sandbox image build stood in for and still no
-successor here builds — provisioning one is still open. Nothing wires
+same assumption v1's sandbox image build stood in for — `../packer/kontur/`
+is now that successor (bwsalmon/agents#267): a Packer template producing
+a qcow2 pre-baked with the operator's SSH key, a running sshd, and the
+same package list `provision/sandbox.sh` gives v1's own sandbox base —
+see that directory's README.md for why the key and sshd are baked in at
+build time rather than injected per-VM the way `LibvirtAdapter.create()`
+does it for v1, and for what's still unresolved there (the exact `kontur
+vm create` flag a deployment's own `KonturConfig.CreateArgs` above would
+pass the built image's location through as, owned by bwsalmon/kontur's
+own CLI and not confirmed from this repo). Nothing wires
 `KonturSandboxes` in as `orchestrator.RunCycle`'s `Deps.Sandboxes` outside
 its own tests yet, and `pkg/orchestrate`'s dispatch loop has no
 equivalent alternative to its own local-directory stand-in either, so
