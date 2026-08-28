@@ -233,7 +233,15 @@ read back out of `go.mod` rather than written down twice, and
 naming both versions instead of a silent toolchain download. The tree is
 bind-mounted rather than copied in, so both paths build from one copy of
 the rules; `.container-cache/` keeps the module and build caches, so only
-the first run is cold, and `make clean` removes it with `bin/`. It is
+the first run is cold, and `make clean` removes it with `bin/`. The whole
+checkout is mounted, not just `v2/`, because `go build` stamps the binary
+with the commit and reads that from the `.git` at the root -- and it is
+mounted with git's `safe.directory` set for it, because the uid inside
+the container need not own the tree (rootless podman maps the invoking
+user to the container's root; Docker with userns-remap remaps it too),
+and git refusing a repository it reads as someone else's stops the build
+outright with `error obtaining VCS status: exit status 128` rather than
+merely leaving the stamp off. It is
 not the default -- `make build` needs no container engine, is what
 `tests.yml` runs, and on a host that agrees with itself produces the same
 binary.
