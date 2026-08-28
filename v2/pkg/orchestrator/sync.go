@@ -110,7 +110,7 @@ func syncOne(ctx context.Context, store *model.Store, client github.Client,
 		return nil
 	}
 
-	repo, number, err := parseExternalRef(task.ExternalRef)
+	repo, number, err := model.ParseExternalRef(task.ExternalRef)
 	if err != nil {
 		return fmt.Errorf("orchestrator: closing out %s: %w", link.TaskID, err)
 	}

@@ -14,11 +14,13 @@ import (
 // Deps is everything one RunCycle call needs. Framework is a factory, not
 // a shared instance: a real deployment gives every dispatch its own agent
 // conversation, the way gemini.Framework.Run's own in-process MCP server
-// is scoped to one RunConfig.SandboxRoot at a time.
+// is scoped to one run's own tools at a time. Sandboxes is HostSandboxes
+// for the local-directory stand-in, or KonturSandboxes for a real
+// bwsalmon/kontur-managed VM per slot — see the package doc comment.
 type Deps struct {
 	Store     *model.Store
 	Client    github.Client
-	Sandboxes *HostSandboxes
+	Sandboxes Sandboxes
 	Framework func() agent.Framework
 	Config    Config
 	Slots     []string
@@ -57,12 +59,24 @@ func runOne(ctx context.Context, deps Deps, d loop.Dispatch, now time.Time) erro
 		return fmt.Errorf("orchestrator: loop.Cycle dispatched unknown task %s", d.TaskID)
 	}
 
-	root, err := deps.Sandboxes.RootFor(d.Slot)
+	tools, err := deps.Sandboxes.ToolsFor(ctx, d.Slot)
 	if err != nil {
 		return err
 	}
 
-	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, root, now)
+	var sandboxRoot string
+	if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
+		rooted, ok := deps.Sandboxes.(rootedSandboxes)
+		if !ok {
+			return fmt.Errorf("orchestrator: task %s requests capabilities but slot %s's sandbox has no local directory to place them in", task.ID, d.Slot)
+		}
+		sandboxRoot, err = rooted.RootFor(d.Slot)
+		if err != nil {
+			return err
+		}
+	}
+
+	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
 	if err != nil {
 		return err
 	}

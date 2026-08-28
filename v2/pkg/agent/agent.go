@@ -8,13 +8,26 @@
 // v2/README.md).
 package agent
 
-import "context"
+import (
+	"context"
 
-// RunConfig is what one agent run needs to start: a prompt and a directory
-// its sandbox tools are confined to.
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
+)
+
+// RunConfig is what one agent run needs to start: a prompt and where its
+// sandbox tools should reach. Exactly one of SandboxRoot or Tools is
+// expected to be set. SandboxRoot is the original, simpler shape --
+// confine the run to a local directory, which a Framework turns into
+// mcp.NewSandboxTools itself. Tools is the more general seam a caller that
+// already has a real sandbox to hand over uses instead -- an
+// orchestrator.KonturSandboxes-built mcp.NewSSHSandboxTools set, for
+// instance -- letting a Framework stay agnostic about what backs a run's
+// tool calls rather than only ever knowing how to build the local-
+// directory kind itself.
 type RunConfig struct {
 	Prompt      string
 	SandboxRoot string
+	Tools       []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
 	// before Run gives up and returns an error, guarding against a run
 	// that never stops asking for tools. Zero means the framework's own

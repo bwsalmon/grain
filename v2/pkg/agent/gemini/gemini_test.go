@@ -9,6 +9,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 // fakeGenerator scripts a sequence of responses, one per call to
@@ -108,10 +109,53 @@ func TestRunAdvertisesAllEightToolsToTheModel(t *testing.T) {
 	}
 }
 
-func TestRunFailsWithoutSandboxRoot(t *testing.T) {
+func TestRunFailsWithoutSandboxRootOrTools(t *testing.T) {
 	f := newFramework(&fakeGenerator{})
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x"}); err == nil {
-		t.Fatal("expected an error for a missing SandboxRoot")
+		t.Fatal("expected an error for a missing SandboxRoot and Tools")
+	}
+}
+
+// TestRunUsesToolsDirectlyWhenProvided proves a caller that already built
+// its own tool set -- orchestrator.KonturSandboxes' mcp.NewSSHSandboxTools,
+// in production -- gets exactly that set registered, with no
+// mcp.NewSandboxTools/SandboxRoot involved at all.
+func TestRunUsesToolsDirectlyWhenProvided(t *testing.T) {
+	called := false
+	tool := mcp.Tool{
+		Name:        "custom_tool",
+		Description: "a tool only present because RunConfig.Tools supplied it",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(map[string]any) mcp.Result {
+			called = true
+			return mcp.Result{Text: "done"}
+		},
+	}
+	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{
+		toolCallResponse("custom_tool", map[string]any{}),
+		textResponse("ok"),
+	}}
+	f := newFramework(fake)
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", Tools: []mcp.Tool{tool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Error("custom_tool's handler was never invoked")
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].IsError {
+		t.Fatalf("ToolCalls = %+v", result.ToolCalls)
+	}
+	// Only custom_tool plus the mocked escape hatches should have been
+	// advertised -- no run_command/read_file/edit_file/write_file, since
+	// Tools being set skips mcp.NewSandboxTools entirely.
+	if len(fake.gotTools) == 0 || len(fake.gotTools[0]) != 1 {
+		t.Fatalf("gotTools = %+v", fake.gotTools)
+	}
+	decls := fake.gotTools[0][0].FunctionDeclarations
+	if len(decls) != 5 {
+		t.Fatalf("got %d function declarations, want 5 (custom_tool + 4 escape hatches): %+v", len(decls), decls)
 	}
 }
 

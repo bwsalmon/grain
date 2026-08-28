@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>grain</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>grain</h1>
+  <span id="repo-name" class="repo-name"></span>
+  <div class="spacer"></div>
+  <button id="new-task-button" class="primary">+ New task</button>
+</header>
+
+<nav id="state-filter" class="filters"></nav>
+
+<main>
+  <ul id="task-list" class="task-list"></ul>
+  <p id="empty-state" class="empty hidden">No tasks in this state.</p>
+</main>
+
+<div id="error-banner" class="error-banner hidden"></div>
+
+<!-- Task detail -->
+<div id="detail-overlay" class="overlay hidden">
+  <div class="panel">
+    <button class="close" data-close="detail">&times;</button>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<!-- New task form -->
+<div id="new-task-overlay" class="overlay hidden">
+  <div class="panel">
+    <button class="close" data-close="new-task">&times;</button>
+    <h2>New task</h2>
+    <form id="new-task-form">
+      <label>Title
+        <input name="title" required autocomplete="off">
+      </label>
+      <label>Description
+        <textarea name="description" rows="5"></textarea>
+      </label>
+      <label>Target repo <span class="hint">owner/name, optional</span>
+        <input name="repo" placeholder="owner/name" autocomplete="off">
+      </label>
+      <label>Base branch <span class="hint">optional</span>
+        <input name="base" placeholder="main" autocomplete="off">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="autoMerge">
+        Auto-merge once checks pass
+      </label>
+      <fieldset id="new-task-capabilities">
+        <legend>Capabilities</legend>
+      </fieldset>
+      <label class="checkbox">
+        <input type="checkbox" name="approved">
+        Queue immediately (unchecked files it as a proposal, needing approval)
+      </label>
+      <div class="form-actions">
+        <button type="submit" class="primary">Create task</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

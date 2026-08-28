@@ -121,15 +121,15 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 	}
 
 	root := t.TempDir()
-	var gotPrompt, gotRoot string
+	var gotPrompt string
 	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
-		gotPrompt, gotRoot = cfg.Prompt, cfg.SandboxRoot
+		gotPrompt = cfg.Prompt
 		return pushed(), nil
 	})
 	cap := &fakeCapability{name: "keyed", path: "/home/debian/.secret", content: "sh-sh-sh"}
 	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
 
-	result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, root, baseTime)
+	result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, root, baseTime)
 	if err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
@@ -137,9 +137,6 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 		t.Fatal("expected a result")
 	}
 
-	if gotRoot != root {
-		t.Errorf("agent ran against root %q, want %q", gotRoot, root)
-	}
 	if want := "capability keyed is ready"; !strings.Contains(gotPrompt, want) {
 		t.Errorf("prompt %q does not mention %q", gotPrompt, want)
 	}
@@ -182,7 +179,7 @@ func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T)
 	cap := &fakeCapability{name: "locked", refuse: "not for you"}
 	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
 
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, t.TempDir(), baseTime); err == nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err == nil {
 		t.Fatal("expected RunDispatch to report the refusal")
 	}
 	if ran {
@@ -223,7 +220,7 @@ func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 		return &agent.Result{FinalText: "nothing to do here"}, nil
 	})
 
-	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, t.TempDir(), baseTime)
+	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime)
 	if err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
