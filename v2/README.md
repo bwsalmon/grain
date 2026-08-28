@@ -241,7 +241,13 @@ the container need not own the tree (rootless podman maps the invoking
 user to the container's root; Docker with userns-remap remaps it too),
 and git refusing a repository it reads as someone else's stops the build
 outright with `error obtaining VCS status: exit status 128` rather than
-merely leaving the stamp off. It is
+merely leaving the stamp off. Go reports every failure of the git it
+shells out to under that one message, so if it appears anyway the cause
+is something else git cannot get past -- an unreadable index, a worktree
+or submodule whose real gitdir is outside the mount -- and
+`make container-build BUILDVCS=false` (or `make build BUILDVCS=false`,
+which it forwards) gets the build moving at the cost of the stamp, and
+of nothing else. It is
 not the default -- `make build` needs no container engine, is what
 `tests.yml` runs, and on a host that agrees with itself produces the same
 binary.
@@ -972,6 +978,53 @@ for history that grows without bound, and handling for a cursor that has
 aged out. That is a real feature; this is fifteen lines with nothing to
 get wrong, and for one operator watching a handful of tasks on the same
 machine the two are indistinguishable.
+
+## Deployment configuration lives in the store too
+
+bwsalmon/agents#320 asked the same "the store is the record" question
+"Input is a model update, not a GitHub issue" (above) already answered
+for tasks, aimed at the daemon's own flags this time: `-slots`,
+`-poll-interval`, `-gemini-model`, `-max-agent-turns`, `-github-host`,
+`-github-insecure-http`, `-gcp-project` and `-gcp-agent-service-account`
+used to be the only way to set any of these, which meant changing one
+meant restarting the daemon with a different command line, and there was
+nothing a UI could show a human short of re-parsing that command line
+somehow.
+
+`model.Config` (`pkg/model/config.go`) and `Store.GetConfig`/`PutConfig`
+are the store-backed answer: one row in `grain_config`, the same
+one-row-per-deployment shape `grain_write` and `grain_schema` already
+use. `cmd/grain`'s "daemon" subcommand's own `loadConfig` (`daemon.go`)
+reads it once at startup — before `RunCycle` starts, never again while
+running, since bwsalmon/agents#320 explicitly did not ask for graceful
+in-flight reloading — and writes those flags into it as a one-time seed
+the first time a deployment's store has no row yet, so a fresh
+`-data-dir` still starts from a real command line and a UI or a CLI
+always has something to read from its very first request. Every start
+after that reads the stored row back instead, discarding whatever the
+flags on that particular invocation said: the same "a flag that silently
+matters differently depending on how many times this has already run
+would be a worse surprise than one that is simply ignored after the
+first" call every store-backed field elsewhere in this project already
+makes. What stays flags-only either has to be reachable before there is
+a store to read from at all (`-data-dir`, the `-store-*` family) or
+names secret material rather than being configuration itself
+(`-gemini-api-key-file`, `-kontur-ssh-key`) — bwsalmon/agents#320's own
+"but not the secrets."
+
+`pkg/ui.Settings`/`UpdateSettingsRequest` (`pkg/ui/settings.go`) and
+`GET`/`PUT /api/settings` are what actually let something change it:
+partial updates, the same nil-means-leave-this-one-alone convention
+`UpdateTaskRequest` already uses for a task's own fields, applied as a
+read-modify-write against whatever `grain_config` currently holds (or
+the zero `model.Config`, the first time). `grain settings` is the CLI
+side of the same `Client` methods — no flags prints what is stored (or
+that nothing is, yet); any flags apply just those, the way `grain
+update` already treats a task's own flags. Neither is wired into
+`pkg/ui/static/`'s frontend yet — a settings panel there is real,
+sizable work that needs a browser to check the way this project's own
+"UI or frontend changes" testing discipline calls for, and is still
+open.
 
 ## Single writer
 

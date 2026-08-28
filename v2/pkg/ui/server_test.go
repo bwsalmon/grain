@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -171,6 +172,41 @@ func TestConfigEndpointReportsActorAndCapabilities(t *testing.T) {
 	// shape along with the labels themselves.
 	if strings.Contains(rec.Body.String(), "grain-gemini-key") {
 		t.Fatalf("config still reports a GitHub label: %s", rec.Body)
+	}
+}
+
+func TestSettingsRoutesReadAndWrite(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/settings", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if got := decode[ui.Settings](t, rec); got.Configured {
+		t.Fatalf("settings = %+v, want Configured false on a fresh store", got)
+	}
+
+	rec = do(t, srv, http.MethodPut, "/api/settings",
+		`{"pollInterval":"1m","slots":["a","b"],"geminiModel":"gemini-2.5-pro","githubHost":"github.com"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	saved := decode[ui.Settings](t, rec)
+	if !saved.Configured || saved.PollInterval != "1m0s" {
+		t.Fatalf("saved settings = %+v", saved)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/settings", "")
+	if got := decode[ui.Settings](t, rec); !reflect.DeepEqual(got, saved) {
+		t.Fatalf("get after put = %+v, want %+v", got, saved)
+	}
+}
+
+func TestSettingsRejectionsAre400(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPut, "/api/settings", `{"pollInterval":"not-a-duration"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
 	}
 }
 

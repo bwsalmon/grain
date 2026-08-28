@@ -20,16 +20,39 @@ func setupBareRepoWithBranch(t *testing.T, branch string) string {
 	}
 	dir := t.TempDir()
 	bare := filepath.Join(dir, "repo.git")
-	run(t, dir, "git", "init", "--bare", "-q", bare)
+	// -b branch, not the default-named branch renamed after the fact: a
+	// bare repo's own HEAD symref is set once at init and a later push of
+	// a differently-named branch does not move it, which used to leave
+	// HEAD pointing at a branch that was never pushed at all -- harmless
+	// as long as nothing ever cloned this repo for real, which changed
+	// once mergeIntoBase started doing exactly that.
+	run(t, dir, "git", "init", "--bare", "-q", "-b", branch, bare)
 
 	seed := filepath.Join(dir, "seed")
 	run(t, dir, "git", "clone", "-q", bare, seed)
 	run(t, seed, "git", "config", "user.email", "seed@example.com")
 	run(t, seed, "git", "config", "user.name", "seed")
 	run(t, seed, "git", "commit", "-q", "--allow-empty", "-m", "seed")
-	run(t, seed, "git", "branch", "-M", branch)
 	run(t, seed, "git", "push", "-q", "origin", branch)
 	return bare
+}
+
+// pushBranch pushes an empty commit on branch straight to bare, standing
+// in for a real dispatch's own git push -- restated here (package-private,
+// deliberately duplicated -- see v2/e2e/harness_test.go's own comment on
+// why) from pkg/orchestrator's own helper of the same name, since a Sim
+// test that merges a pull request now needs the head branch to actually
+// exist for mergeIntoBase to merge.
+func pushBranch(t *testing.T, bare, branch string) {
+	t.Helper()
+	dir := t.TempDir()
+	wd := filepath.Join(dir, "work")
+	run(t, dir, "git", "clone", "-q", bare, wd)
+	run(t, wd, "git", "config", "user.email", "agent@example.com")
+	run(t, wd, "git", "config", "user.name", "agent")
+	run(t, wd, "git", "checkout", "-q", "-b", branch)
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit")
+	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
 func run(t *testing.T, dir string, name string, args ...string) {

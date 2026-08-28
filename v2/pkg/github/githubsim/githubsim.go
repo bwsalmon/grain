@@ -33,7 +33,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -174,6 +176,54 @@ func New(owner, repo, bareRepo, defaultBranch string) *Sim {
 func (s *Sim) branchExists(branch string) bool {
 	cmd := exec.Command("git", "--git-dir", s.BareRepo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
+}
+
+// mergeIntoBase performs pr's merge for real, at the git level, against
+// BareRepo -- real GitHub's own PUT .../merge endpoint moves commits into
+// the base branch as a side effect, not just github.PullRequestDetail's
+// State; a Sim that only flipped State to "closed" would let a caller
+// believe a merge landed when the base branch never actually moved, which
+// is exactly the gap an end-to-end test asserting on the base branch's
+// own git log (v2/e2e's own harness already does this for a human's
+// merge via mergeBranchIntoDefault) would otherwise never catch for the
+// auto-merge path, where nothing else performs the git side of the merge
+// on grain's behalf.
+func (s *Sim) mergeIntoBase(pr PullRequest) error {
+	dir, err := os.MkdirTemp("", "githubsim-merge-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	wd := filepath.Join(dir, "work")
+	if err := runGit(dir, "git", "clone", "-q", s.BareRepo, wd); err != nil {
+		return err
+	}
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "github@example.com"},
+		{"git", "config", "user.name", "github (simulated merge)"},
+		{"git", "fetch", "-q", "origin", pr.Head},
+		{"git", "checkout", "-q", pr.Base},
+		{"git", "merge", "--no-ff", "origin/" + pr.Head, "-m", fmt.Sprintf("Merge pull request #%d from %s", pr.Number, pr.Head)},
+		{"git", "push", "-q", "origin", pr.Base},
+	} {
+		if err := runGit(wd, args[0], args[1:]...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runGit runs a git command in dir, folding its combined output into the
+// returned error so a merge conflict or missing branch -- the only ways
+// this can fail -- is diagnosable from the *github.Error mergeIntoBase's
+// caller turns it into, the same as a real 405 response body would be.
+func runGit(dir, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("githubsim: %s %s: %w\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return nil
 }
 
 func splitPathQuery(path string) (string, url.Values) {
@@ -410,6 +460,9 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			number := mustAtoi(m[3])
 			for i := range s.PullRequests {
 				if s.PullRequests[i].Number == number {
+					if err := s.mergeIntoBase(s.PullRequests[i]); err != nil {
+						return github.ApiResponse{Status: 405, Body: []byte(err.Error())}, nil
+					}
 					s.PullRequests[i].State = "closed"
 					return github.ApiResponse{Status: 200, Body: []byte("{}")}, nil
 				}

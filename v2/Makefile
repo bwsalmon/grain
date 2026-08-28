@@ -37,6 +37,7 @@ CMDS := grain
 # ICU_STATIC=0 opts out. If the archives are missing (libicu-dev on
 # Debian/Ubuntu, libicu-devel on Fedora, `brew install icu4c` on macOS)
 # the build says so and falls back to dynamic rather than failing.
+BUILDVCS ?= auto
 ICU_STATIC ?= 1
 ICU_LIBDIR ?= $(shell pkg-config --variable=libdir icu-uc 2>/dev/null \
 	|| { brew --prefix icu4c 2>/dev/null && echo /lib; } | tr -d '\n')
@@ -101,8 +102,23 @@ all: vet test build
 
 build: $(CMDS)
 
+# BUILDVCS is passed explicitly rather than left to `go build`'s default
+# (which is this same `auto`) so that turning it off is a documented word
+# on the command line -- `make build BUILDVCS=false`, and likewise
+# `make container-build BUILDVCS=false`, which forwards it -- rather than
+# an edit to this file.
+#
+# It is worth reaching for exactly once: when `go build` stops with
+# "error obtaining VCS status: exit status 128". Go reports every failure
+# of the git it shells out to under that one message, and the underlying
+# reason is usually ownership (see container-build's safe.directory) but
+# can be a .git the build cannot read at all -- an unreadable index, or a
+# worktree or submodule whose real gitdir is outside the mount. What is
+# lost is the commit stamp: `go version -m bin/grain` stops reporting
+# vcs.revision, and nothing else changes.
 $(CMDS):
-	CGO_LDFLAGS="$(ICU_LDFLAGS)" go build $(ICU_TAGS) -o $(BIN)/$@ ./cmd/$@
+	CGO_LDFLAGS="$(ICU_LDFLAGS)" go build $(ICU_TAGS) \
+		-buildvcs=$(BUILDVCS) -o $(BIN)/$@ ./cmd/$@
 
 builder:
 	$(CONTAINER_ENGINE) build \
@@ -136,7 +152,7 @@ container-build: builder
 		-e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
 		-e GIT_CONFIG_COUNT=1 \
 		-e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
-		-w /src/v2 $(BUILDER_IMAGE) make build
+		-w /src/v2 $(BUILDER_IMAGE) make build BUILDVCS=$(BUILDVCS)
 
 test:
 	go test ./...
