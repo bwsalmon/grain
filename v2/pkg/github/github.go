@@ -185,6 +185,10 @@ type Issue struct {
 	// cancel-on-close poll to tell a task issue a human closed early from
 	// one still open.
 	State string
+	// Author is the issue's own opening account's login -- who a poll
+	// attributes a freshly filed model.Task to, since nothing else names
+	// the actor a labelled issue's own filing should be credited to.
+	Author string
 }
 
 // HasLabel reports whether name is one of Issue's labels.
@@ -453,6 +457,9 @@ type issueJSON struct {
 	Labels  []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
 }
 
 func decodeIssue(raw map[string]json.RawMessage) (Issue, error) {
@@ -475,6 +482,7 @@ func decodeIssue(raw map[string]json.RawMessage) (Issue, error) {
 	return Issue{
 		Number: parsed.Number, Title: parsed.Title, Body: parsed.Body,
 		HTMLURL: parsed.HTMLURL, Labels: labelSet(names...), State: state,
+		Author: parsed.User.Login,
 	}, nil
 }
 

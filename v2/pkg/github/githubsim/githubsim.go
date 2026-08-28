@@ -49,6 +49,9 @@ var (
 	labelDeleteRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels/([^/]+)$`)
 	branchRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/branches/(.+)$`)
 	pullsRe       = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls$`)
+	pullRe        = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)$`)
+	pullMergeRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/merge$`)
+	checkRunsRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/commits/([^/]+)/check-runs$`)
 )
 
 // Issue is one seeded or created fake issue -- Sim's own bookkeeping, not
@@ -57,7 +60,12 @@ var (
 type Issue struct {
 	Title  string
 	Body   string
+	Author string
 	Labels map[string]struct{}
+	// State is GitHub's own open/closed field -- defaults to the zero
+	// value, which issueJSON below treats as "open", the same fallback
+	// github.decodeIssue applies to a real response with no state field.
+	State string
 }
 
 // PullRequest is one pull request Sim recorded through CreatePullRequest.
@@ -68,6 +76,16 @@ type PullRequest struct {
 	Head    string
 	Base    string
 	HTMLURL string
+	// State is GitHub's own open/closed field. Defaults to "open" at
+	// creation; MergePullRequest (below) sets it to "closed" the same way
+	// a real merge does, and a test can set it directly to stand in for
+	// GitHub's own merge button the way v2/e2e's mergeBranchIntoDefault
+	// does for the git side of a merge.
+	State string
+	// Mergeable stands in for GitHub's own asynchronously computed field
+	// -- nil (unknown) unless a test sets it, since Sim has no real merge
+	// engine to compute it with.
+	Mergeable *bool
 }
 
 // Call is one request Sim answered, kept for tests that want to assert on
@@ -93,6 +111,18 @@ type Sim struct {
 	Issues       map[int]*Issue
 	PullRequests []PullRequest
 	Calls        []Call
+
+	// Comments is every posted top-level comment, by issue/PR number --
+	// GitHub's own issues-comments endpoint serves both, per Comment's own
+	// doc comment in github.go.
+	Comments map[int][]github.Comment
+	// CheckRuns is keyed by whatever ref a test seeds it under -- a branch
+	// name or a sha, matching whatever ListCheckRuns is called with, since
+	// Sim has no real commit graph to resolve one into the other.
+	CheckRuns map[string][]github.CheckRun
+
+	nextCommentID int
+	nextIssue     int
 }
 
 // New returns a Sim seeded with no issues and no pull requests, answering
@@ -102,7 +132,11 @@ type Sim struct {
 func New(owner, repo, bareRepo, defaultBranch string) *Sim {
 	return &Sim{
 		Owner: owner, Repo: repo, BareRepo: bareRepo, DefaultBranch: defaultBranch,
-		Issues: map[int]*Issue{},
+		Issues:        map[int]*Issue{},
+		Comments:      map[int][]github.Comment{},
+		CheckRuns:     map[string][]github.CheckRun{},
+		nextCommentID: 1000,
+		nextIssue:     8000,
 	}
 }
 
@@ -127,10 +161,15 @@ func issueJSON(number int, owner, repo string, issue *Issue) map[string]any {
 	for i, l := range labels {
 		labelObjs[i] = map[string]string{"name": l}
 	}
+	state := issue.State
+	if state == "" {
+		state = "open"
+	}
 	return map[string]any{
 		"number": number, "title": issue.Title, "body": issue.Body,
 		"html_url": fmt.Sprintf("https://github.example/%s/%s/issues/%d", owner, repo, number),
-		"labels":   labelObjs,
+		"labels":   labelObjs, "state": state,
+		"user": map[string]string{"login": issue.Author},
 	}
 }
 
@@ -152,9 +191,29 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 
 	if method == "GET" {
 		if m := issueCommentsRe.FindStringSubmatch(p); m != nil {
-			// No conversation on any seeded issue; the caller renders the
-			// blank state plainly, so an empty list is a real answer.
-			return github.ApiResponse{Status: 200, Body: []byte("[]")}, nil
+			number := mustAtoi(m[3])
+			return jsonResponse(200, commentsJSON(s.Comments[number])), nil
+		}
+		if m := pullsRe.FindStringSubmatch(p); m != nil && qs.Get("head") != "" {
+			s.mustOwn(m[1], m[2])
+			return jsonResponse(200, s.findOpenPullRequestsForHead(qs.Get("head"))), nil
+		}
+		if m := pullRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			number := mustAtoi(m[3])
+			pr, ok := s.pullRequest(number)
+			if !ok {
+				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
+			}
+			return jsonResponse(200, pullRequestDetailJSON(pr)), nil
+		}
+		if m := checkRunsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			ref, err := url.PathUnescape(m[3])
+			if err != nil {
+				ref = m[3]
+			}
+			return jsonResponse(200, checkRunsJSON(s.CheckRuns[ref])), nil
 		}
 		if m := issueRe.FindStringSubmatch(p); m != nil {
 			number := mustAtoi(m[3])
@@ -201,6 +260,35 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 	}
 
 	if method == "POST" {
+		if m := issueCommentsRe.FindStringSubmatch(p); m != nil {
+			number := mustAtoi(m[3])
+			var payload struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			s.nextCommentID++
+			comment := github.Comment{ID: s.nextCommentID, User: "grain-agent", Body: payload.Body, AuthorAssociation: "NONE"}
+			s.Comments[number] = append(s.Comments[number], comment)
+			return jsonResponse(201, map[string]any{"id": comment.ID, "body": comment.Body}), nil
+		}
+		if m := issuesRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			var payload struct {
+				Title  string   `json:"title"`
+				Body   string   `json:"body"`
+				Labels []string `json:"labels"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			s.nextIssue++
+			number := s.nextIssue
+			issue := &Issue{Title: payload.Title, Body: payload.Body, Labels: labelSetFrom(payload.Labels)}
+			s.Issues[number] = issue
+			return jsonResponse(201, issueJSON(number, s.Owner, s.Repo, issue)), nil
+		}
 		if m := labelsPostRe.FindStringSubmatch(p); m != nil {
 			number := mustAtoi(m[3])
 			var payload struct {
@@ -229,7 +317,7 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			number := 9000 + len(s.PullRequests)
 			pr := PullRequest{
 				Number: number, Title: payload.Title, Body: payload.Body,
-				Head: payload.Head, Base: payload.Base,
+				Head: payload.Head, Base: payload.Base, State: "open",
 				HTMLURL: fmt.Sprintf("https://github.example/%s/%s/pull/%d", s.Owner, s.Repo, number),
 			}
 			s.PullRequests = append(s.PullRequests, pr)
@@ -237,6 +325,38 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 				"number": pr.Number, "title": pr.Title, "body": pr.Body,
 				"head": pr.Head, "base": pr.Base, "html_url": pr.HTMLURL,
 			}), nil
+		}
+	}
+
+	if method == "PATCH" {
+		if m := issueRe.FindStringSubmatch(p); m != nil {
+			number := mustAtoi(m[3])
+			var payload struct {
+				State string `json:"state"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			issue, ok := s.Issues[number]
+			if !ok {
+				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
+			}
+			issue.State = payload.State
+			return jsonResponse(200, issueJSON(number, s.Owner, s.Repo, issue)), nil
+		}
+	}
+
+	if method == "PUT" {
+		if m := pullMergeRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			number := mustAtoi(m[3])
+			for i := range s.PullRequests {
+				if s.PullRequests[i].Number == number {
+					s.PullRequests[i].State = "closed"
+					return github.ApiResponse{Status: 200, Body: []byte("{}")}, nil
+				}
+			}
+			return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
 		}
 	}
 
@@ -253,6 +373,86 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 	}
 
 	panic(fmt.Sprintf("githubsim: unhandled request %s %s", method, path))
+}
+
+// pullRequest returns the pull request numbered number, if Sim has one.
+func (s *Sim) pullRequest(number int) (PullRequest, bool) {
+	for _, pr := range s.PullRequests {
+		if pr.Number == number {
+			return pr, true
+		}
+	}
+	return PullRequest{}, false
+}
+
+// findOpenPullRequestsForHead answers GET .../pulls?head=owner:branch --
+// github.RESTClient.FindOpenPullRequestForBranch's own request shape.
+// GitHub allows at most one open PR per head branch, but this returns a
+// list either way, matching the real endpoint's own shape (a filtered
+// list, never a single object).
+func (s *Sim) findOpenPullRequestsForHead(head string) []map[string]any {
+	_, branch, ok := strings.Cut(head, ":")
+	if !ok {
+		branch = head
+	}
+	var out []map[string]any
+	for _, pr := range s.PullRequests {
+		if pr.Head == branch && pr.State == "open" {
+			out = append(out, map[string]any{
+				"number": pr.Number, "title": pr.Title, "body": pr.Body,
+				"head": pr.Head, "base": pr.Base, "html_url": pr.HTMLURL,
+			})
+		}
+	}
+	return out
+}
+
+// pullRequestDetailJSON is the shape github.RESTClient.GetPullRequest
+// decodes -- head/base as nested {"ref": ...} objects, not the bare
+// strings CreatePullRequest's own response uses, matching GitHub's own
+// (inconsistent, but real) shape between the two endpoints.
+func pullRequestDetailJSON(pr PullRequest) map[string]any {
+	state := pr.State
+	if state == "" {
+		state = "open"
+	}
+	return map[string]any{
+		"number": pr.Number, "title": pr.Title, "body": pr.Body, "html_url": pr.HTMLURL,
+		"state":     state,
+		"head":      map[string]string{"ref": pr.Head},
+		"base":      map[string]string{"ref": pr.Base},
+		"mergeable": pr.Mergeable,
+	}
+}
+
+// commentsJSON is the shape github.RESTClient.ListComments decodes.
+func commentsJSON(comments []github.Comment) []map[string]any {
+	out := make([]map[string]any, len(comments))
+	for i, c := range comments {
+		out[i] = map[string]any{
+			"id": c.ID, "body": c.Body, "author_association": c.AuthorAssociation,
+			"user": map[string]string{"login": c.User},
+		}
+	}
+	return out
+}
+
+// checkRunsJSON is the shape github.RESTClient.ListCheckRuns decodes --
+// GitHub's own "not a bare array" response for this one endpoint.
+func checkRunsJSON(runs []github.CheckRun) map[string]any {
+	items := make([]map[string]any, len(runs))
+	for i, r := range runs {
+		items[i] = map[string]any{"name": r.Name, "status": r.Status, "conclusion": r.Conclusion}
+	}
+	return map[string]any{"total_count": len(items), "check_runs": items}
+}
+
+func labelSetFrom(names []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set
 }
 
 func (s *Sim) mustOwn(owner, repo string) {

@@ -12,13 +12,16 @@
 // v2/README.md's "What this does not have yet" section is why this
 // package stops where it does: no host adapter means no real sandbox VM
 // (NewSandboxTools' root stands in, as it does everywhere else in v2 —
-// see world.roots), and no GitHub client means "the PR opened" and "the
-// issue closed" are simulated with the same store.Observe calls
-// model/simulate_test.go's GitHub-sync helpers already use, rather than
-// a real API response. A merge is simulated the same way: the test
-// itself merges the pushed branch with a plain `git merge`, standing in
-// for GitHub's own merge button, since nothing in v2 owns that action
-// yet either.
+// see world.roots), and this harness builds no github.Client at all, so
+// "the PR opened" and "the issue closed" are simulated with the same
+// store.Observe calls model/simulate_test.go's GitHub-sync helpers
+// already use, rather than a real API response. A merge is simulated the
+// same way: the test itself merges the pushed branch with a plain `git
+// merge`, standing in for GitHub's own merge button. pkg/orchestrator/
+// live_test.go is the same two scenarios this file proves by hand, driven
+// instead through a real github.Client against githubsim -- a real
+// CreatePullRequest, and a real close-out once githubsim reports the PR
+// merged, rather than either being simulated here.
 package e2e
 
 import (
