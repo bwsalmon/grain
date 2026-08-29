@@ -135,6 +135,7 @@ container-build: builder
 # nothing but .gitkeep.
 test: frontend
 	go test ./...
+	cd pkg/ui/frontend && npm test
 
 vet: frontend
 	go vet ./...

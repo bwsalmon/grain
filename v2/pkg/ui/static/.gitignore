@@ -3,6 +3,17 @@
 # outDir) -- not checked in, so a stale build can never ship instead of a
 # real one. .gitkeep keeps the directory itself present on a fresh
 # checkout, since go:embed fails to compile if it's missing outright.
+#
+# That alone isn't enough, though: go:embed's default directory pattern
+# also excludes dotfiles, so a fresh checkout -- which has only .gitkeep
+# and .gitignore here -- embeds zero files and `go build` fails outright,
+# not just at run time. placeholder.html is tracked for exactly that
+# case: a non-dotfile so the embed pattern has something to match. It
+# can never ship in place of a real build, because `make frontend` (the
+# prerequisite for `make build`/`test`/`vet`, and for the container
+# build) deletes everything here except .gitignore and .gitkeep before
+# running `npm run build` -- this file included.
 *
 !.gitignore
 !.gitkeep
+!placeholder.html

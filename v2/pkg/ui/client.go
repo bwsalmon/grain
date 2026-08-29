@@ -55,9 +55,25 @@ func validationErrorf(format string, a ...any) error {
 // NotFoundError marks a task ID with no task behind it. Server maps this
 // to a 404 -- the one case where the caller's mistake and the store's own
 // trouble need telling apart, which github.Error's status used to answer.
-type NotFoundError struct{ ID string }
+//
+// message overrides the default "no task "+ID rendering when set --
+// HTTPClient's own httpError (httpclient.go) only ever has the server's
+// already-formatted message text to reconstruct this from, not a bare
+// ID, and formatting that message through Error() a second time doubled
+// it into "no task no task <id>" for every 404 an HTTPClient caller (the
+// CLI, and the browser frontend, which displays the JSON body's "error"
+// field verbatim) ever saw.
+type NotFoundError struct {
+	ID      string
+	message string
+}
 
-func (e *NotFoundError) Error() string { return "no task " + e.ID }
+func (e *NotFoundError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return "no task " + e.ID
+}
 
 func (c *Client) capabilityByID(id string) (Capability, bool) {
 	for _, capability := range c.Config.Capabilities {
@@ -247,7 +263,67 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err := c.Store.PutTask(ctx, task); err != nil {
 		return Task{}, err
 	}
+	if !targetAllowed(c.Config.TargetRepos, *target) {
+		if err := c.parkOffAllowlist(ctx, id, *target, now); err != nil {
+			return Task{}, err
+		}
+	}
 	return c.Task(ctx, id)
+}
+
+// targetAllowed reports whether target may be dispatched into: always,
+// when allowed is empty (Config.TargetRepos' own "unrestricted" zero
+// value, v1's target_repos "leave empty for a single-repo deployment"),
+// otherwise only when target is one of allowed.
+func targetAllowed(allowed []string, target model.RepoRef) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	repo := target.String()
+	for _, a := range allowed {
+		if a == repo {
+			return true
+		}
+	}
+	return false
+}
+
+// parkOffAllowlist is CreateTask's counterpart to a run's own
+// ask_question parking (finish.go's relayComment/PendingQuestionCommentID):
+// a task naming a repo outside Config.TargetRepos is filed exactly as
+// asked -- Target still names it, so fixing this needs no re-entering
+// anything -- but StateOf reads PendingQuestionCommentID before Approval,
+// so it never reaches task_ready, and so is never dispatched, until an
+// operator widens TargetRepos and replies -- AddComment's own doc
+// comment on clearing PendingQuestionCommentID is what requeues it then,
+// the same "reply reopens" un-park every other awaiting_reply task
+// already uses.
+//
+// v1 enforced the same restriction twice, matching API-side and
+// transport-side: core.py's own Orchestrator._resolve_target against
+// the same repo-allowlist.json the git proxy checked
+// (grain/proxy/allowlist.py). v2's gitproxy package deliberately checks
+// a live task's own Target instead of a second allowlist
+// (pkg/gitproxy/authorize.go's own doc comment), so this is the one
+// place this boundary is decided now.
+func (c *Client) parkOffAllowlist(ctx context.Context, taskID string, target model.RepoRef, now time.Time) error {
+	reason := fmt.Sprintf(
+		"`%s` is not on this deployment's target repo list, so nothing here "+
+			"can clone, push to, or open a pull request against it. An operator "+
+			"widens targetRepos under Settings, then replies here to let this "+
+			"task run.", target)
+	commentID, err := c.Store.AddComment(ctx, model.Comment{
+		TaskID:    taskID,
+		Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+		Body:      reason,
+		CreatedAt: now,
+	})
+	if err != nil {
+		return fmt.Errorf("ui: parking %s off the target repo list: %w", taskID, err)
+	}
+	return c.Store.ObserveField(ctx, taskID, now, func(o *model.Observation) {
+		o.PendingQuestionCommentID = &commentID
+	})
 }
 
 // grantsFor turns capability ids into model.Grants, rejecting any this

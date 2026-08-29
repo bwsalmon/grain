@@ -104,6 +104,9 @@ func main() {
 		case "sync":
 			syncCmd(args[1:])
 			return
+		case "schema-version":
+			schemaVersionCmd(args[1:])
+			return
 		}
 	}
 	if err := runCLI(args); err != nil {
@@ -120,6 +123,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
        grain setup gcp [flags] bootstrap external GCP infrastructure for a new installation (see setup.go)
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
+       grain schema-version    print pkg/model.SchemaVersion and exit (see schemaversion.go)
 
 Global flags (must come before the command):
   -server string  base URL of a running "grain daemon"'s UI/API (default "http://127.0.0.1:8420")
@@ -472,6 +476,7 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS")
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -503,6 +508,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "gcp-agent-service-account":
 			v := *gcpServiceAccountEmail
 			req.GCPServiceAccountEmail = &v
+		case "target-repos":
+			v := splitRepoList(*targetRepos)
+			req.TargetRepos = &v
 		}
 	})
 
@@ -520,6 +528,16 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	}
 	out.settings(settings)
 	return nil
+}
+
+// splitRepoList parses a comma-separated owner/name list -- "" means
+// none, unlike strings.Split's own [""], since an empty -target-repos is
+// how an operator clears the restriction back to unrestricted.
+func splitRepoList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 // printer renders CLI output either as a human-readable table (the
@@ -598,6 +616,11 @@ func (p *printer) settings(s ui.Settings) {
 	}
 	if s.GCPServiceAccountEmail != "" {
 		fmt.Printf("gcp agent service account: %s\n", s.GCPServiceAccountEmail)
+	}
+	if len(s.TargetRepos) > 0 {
+		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
+	} else {
+		fmt.Println("target repos:   unrestricted")
 	}
 }
 

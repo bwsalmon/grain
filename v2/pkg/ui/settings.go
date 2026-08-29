@@ -33,6 +33,9 @@ type Settings struct {
 	GitHubInsecureHTTP     bool     `json:"githubInsecureHttp"`
 	GCPProject             string   `json:"gcpProject"`
 	GCPServiceAccountEmail string   `json:"gcpServiceAccountEmail"`
+	// TargetRepos restricts which repos a task's Repo may name -- empty
+	// means unrestricted. model.Config's own field of the same name.
+	TargetRepos []string `json:"targetRepos"`
 }
 
 func settingsFrom(c model.Config) Settings {
@@ -46,6 +49,7 @@ func settingsFrom(c model.Config) Settings {
 		GitHubInsecureHTTP:     c.GitHubInsecureHTTP,
 		GCPProject:             c.GCPProject,
 		GCPServiceAccountEmail: c.GCPServiceAccountEmail,
+		TargetRepos:            c.TargetRepos,
 	}
 }
 
@@ -81,6 +85,7 @@ type UpdateSettingsRequest struct {
 	GitHubInsecureHTTP     *bool     `json:"githubInsecureHttp"`
 	GCPProject             *string   `json:"gcpProject"`
 	GCPServiceAccountEmail *string   `json:"gcpServiceAccountEmail"`
+	TargetRepos            *[]string `json:"targetRepos"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -94,10 +99,10 @@ type UpdateSettingsRequest struct {
 // a caller that much on the way in, so writing a config that could not
 // be told apart from one somebody actually chose is worse than asking
 // for the field up front. MaxAgentTurns, GitHubInsecureHTTP,
-// GCPProject and GCPServiceAccountEmail have real, meaningful zero
-// values (the framework's own default, HTTPS, and "no GCP capability
-// configured" respectively -- daemon.go's own flag defaults), so nothing
-// here demands them.
+// GCPProject, GCPServiceAccountEmail and TargetRepos have real,
+// meaningful zero values (the framework's own default, HTTPS, "no GCP
+// capability configured", and "unrestricted" respectively -- daemon.go's
+// own flag defaults), so nothing here demands them.
 func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) (Settings, error) {
 	current, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -151,6 +156,14 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	}
 	if req.GCPServiceAccountEmail != nil {
 		cfg.GCPServiceAccountEmail = *req.GCPServiceAccountEmail
+	}
+	if req.TargetRepos != nil {
+		for _, r := range *req.TargetRepos {
+			if _, err := model.ParseRepo(r); err != nil {
+				return Settings{}, validationErrorf("targetRepos: %v", err)
+			}
+		}
+		cfg.TargetRepos = *req.TargetRepos
 	}
 
 	if firstTime {

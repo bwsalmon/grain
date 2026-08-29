@@ -25,16 +25,34 @@
 #      this buys reproducibility -- one pinned Go toolchain regardless of
 #      what is or isn't installed on this machine -- rather than working
 #      around any host-specific linkage problem.
-#   3. installs it to /usr/local/bin/grain
-#   4. creates an unprivileged system user to run it as
-#   5. lays out $GRAIN_DATA_DIR (secrets, the sandbox root, the embedded
-#      SQLite store) and seeds secrets from environment variables -- only
-#      if they are not already there, so a second run never overwrites a
-#      credential placed by the first one or by hand
-#   6. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
+#   3. installs it to $GRAIN_DATA_DIR/bin/grain, with a stable
+#      /usr/local/bin/grain symlink to that path for an operator's own
+#      shell
+#   4. creates an unprivileged system user to run it as, gives it
+#      ownership of $GRAIN_SRC_DIR and membership in the docker group,
+#      and grants it a single, narrow NOPASSWD sudo rule -- exactly
+#      enough, and no more, for the UI's own Upgrade button
+#      (bwsalmon/agents#396, v2/pkg/upgrade) to check out a different
+#      branch, rebuild, install, and restart grain-daemon.service later
+#      with no further privilege of its own
+#   5. lays out the rest of $GRAIN_DATA_DIR (secrets, the sandbox root,
+#      the embedded SQLite store) and seeds secrets from environment
+#      variables -- only if they are not already there, so a second run
+#      never overwrites a credential placed by the first one or by hand
+#   6. compares the freshly built binary's schema version (`grain
+#      schema-version`) against the version recorded in
+#      $GRAIN_DATA_DIR/.schema_version from the last run of this script,
+#      and moves $GRAIN_DATA_DIR/store aside -- never deletes it -- if
+#      they differ, so grain starts a fresh, empty store rather than an
+#      existing one Store.Init cannot safely bring up to date column-wise
+#      (bwsalmon/agents#394; see reformat_store_if_schema_changed below).
+#      A schema version that has not changed since the last run leaves
+#      the store exactly as it was: this is what "preserve state across
+#      updates, but reformat on a breaking change" means in practice.
+#   7. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
 #      empty commit so grain has a branch to work from ("format" it --
 #      grain always branches off an existing ref, never creates one)
-#   7. writes and enables grain-daemon.service, so it comes back on
+#   8. writes and enables grain-daemon.service, so it comes back on
 #      reboot, and restarts it (not just "enable --now") so a second
 #      run's new binary and new config actually take effect -- see
 #      docs/next-session.md item 3's "Update" for why
@@ -95,6 +113,7 @@ GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="${GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE:-}"
 
 GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
+GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
 usage() {
   cat <<'EOF'
@@ -137,6 +156,11 @@ Recognized variables:
                              no repo of its own, and the repo this script pushes
                              one empty commit to if it has no commits yet
   GRAIN_TARGET_BRANCH       branch to create there if formatting it (default: main)
+  GRAIN_TARGET_REPOS        comma-separated owner/name list a task's repo may
+                             name (default: empty, meaning unrestricted) -- the
+                             daemon's own -target-repos, the allowlist a task
+                             naming anything else is parked with a comment
+                             rather than dispatched against
 EOF
 }
 
@@ -190,12 +214,24 @@ sync_repo() {
 }
 
 # --- 2/3. build and install the binary ----------------------------------
+#
+# The real binary lives at $GRAIN_DATA_DIR/bin/grain -- inside the
+# directory ensure_self_upgrade below gives $GRAIN_USER ownership of --
+# rather than /usr/local/bin/grain directly, so a later upgrade this same
+# unprivileged account drives (v2/pkg/upgrade.Upgrader.install) can
+# overwrite it with no sudo of its own. /usr/local/bin/grain is a
+# symlink to that path instead: an operator's shell still finds `grain`
+# on PATH, and the symlink itself never has to change again once
+# created, so it needs no further privilege past this first run either.
+REAL_BIN="$GRAIN_DATA_DIR/bin/grain"
 
 build_and_install() {
   log "Building bin/grain (make container-build -- needs only docker, not a host Go toolchain)"
   make -C "$GRAIN_SRC_DIR/v2" container-build
-  install -m0755 "$GRAIN_SRC_DIR/v2/bin/grain" /usr/local/bin/grain
-  log "Installed /usr/local/bin/grain"
+  mkdir -p "$(dirname "$REAL_BIN")"
+  install -m0755 "$GRAIN_SRC_DIR/v2/bin/grain" "$REAL_BIN"
+  ln -sf "$REAL_BIN" /usr/local/bin/grain
+  log "Installed $REAL_BIN (linked from /usr/local/bin/grain)"
 }
 
 # --- 4. the unprivileged account grain runs as --------------------------
@@ -205,6 +241,35 @@ ensure_user() {
     log "Creating system user $GRAIN_USER"
     useradd --system --no-create-home --shell /usr/sbin/nologin "$GRAIN_USER"
   fi
+}
+
+# ensure_self_upgrade gives $GRAIN_USER everything the UI's own Upgrade
+# button (bwsalmon/agents#396) needs and nothing beyond it: ownership of
+# its own checkout (so it can fetch/checkout/build there), membership in
+# the docker group (so `make container-build` needs no sudo of its own),
+# and one exact, NOPASSWD sudoers line to restart its own service --
+# never a wildcard, matching provision/controller.sh's own "software
+# gate, not infra gate" self-repair grant. It cannot restart anything
+# else, and it cannot reboot the host; "restart the host if needed" from
+# that issue is satisfied by bringing grain-daemon.service back up with
+# the binary this same run just built, not by an actual reboot.
+#
+# Run after ensure_user (the account has to exist) and again on every
+# re-run: chown -R is cheap against an already-correctly-owned tree, and
+# a previous run's build_and_install (root, via sudo) would otherwise
+# leave $GRAIN_SRC_DIR's freshly fetched/built files root-owned again on
+# every single upgrade.
+ensure_self_upgrade() {
+  chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_SRC_DIR"
+  if getent group docker >/dev/null 2>&1; then
+    usermod -aG docker "$GRAIN_USER"
+  fi
+
+  cat > /etc/sudoers.d/grain-daemon-upgrade <<SUDOERS
+$GRAIN_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-daemon.service
+SUDOERS
+  chmod 0440 /etc/sudoers.d/grain-daemon-upgrade
+  visudo -cf /etc/sudoers.d/grain-daemon-upgrade
 }
 
 # --- 5. data directory and secrets --------------------------------------
@@ -228,6 +293,13 @@ seed_secret() {
 setup_data_dir() {
   log "Laying out $GRAIN_DATA_DIR"
   install -d -m0750 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR"
+  # build_and_install (root, above) may have just (re-)created this on a
+  # fresh -data-dir before this function ever ran; re-asserting
+  # ownership here is what lets $GRAIN_USER overwrite its own binary on
+  # every later upgrade with no sudo of its own -- install -d re-applies
+  # -o/-g even against a directory that already exists (this file's own
+  # comment on sync_repo's mkdir-vs-install-d distinction).
+  install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/bin"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/sandbox"
@@ -280,7 +352,60 @@ seed_gcp_minter_key() {
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
 }
 
-# --- 6. format the target repo, if it is empty --------------------------
+# --- 6. reformat the store if a breaking schema change shipped ---------
+#
+# pkg/model.SchemaVersion's own doc comment: bumped exactly when Tables
+# or Views change in a way Store.Init's `CREATE TABLE IF NOT EXISTS`
+# cannot safely reconcile an existing database into -- Init only adds a
+# table that is missing outright, never a column on one that already
+# exists, so a build newer than the database it finds would otherwise
+# start silently against stale columns instead of refusing or fixing
+# anything. `grain schema-version` (cmd/grain/schemaversion.go) is that
+# same constant, printed by the binary this run just installed, so this
+# function never has to duplicate pkg/model's own definition of
+# "breaking" by parsing source.
+#
+# $GRAIN_DATA_DIR/.schema_version is the marker this function itself
+# maintains, recording the schema version the store on disk was last
+# known to agree with. No marker yet -- a brand new $GRAIN_DATA_DIR, or
+# an upgrade from before this function existed -- never wipes anything:
+# it just records the current version and moves on, since there is
+# nothing to safely compare against and "assume compatible, preserve the
+# data" is the safer of the two guesses. A marker that disagrees with the
+# fresh build moves $GRAIN_DATA_DIR/store aside to a timestamped backup
+# -- never deletes it outright, so a mistaken schema bump is recoverable
+# by hand -- and grain's own sqlite.Open (pkg/model/sqlite) recreates an
+# empty one, with the new schema, the next time grain-daemon.service
+# starts.
+reformat_store_if_schema_changed() {
+  local marker="$GRAIN_DATA_DIR/.schema_version"
+  local store_dir="$GRAIN_DATA_DIR/store"
+  local new_version
+  new_version="$(/usr/local/bin/grain schema-version)"
+
+  if [ ! -s "$marker" ]; then
+    log "No schema-version marker yet -- recording schema $new_version, not touching any existing store"
+    printf '%s\n' "$new_version" > "$marker"
+    return
+  fi
+
+  local old_version
+  old_version="$(cat "$marker")"
+  if [ "$old_version" = "$new_version" ]; then
+    return
+  fi
+
+  if [ -d "$store_dir" ]; then
+    local backup="${store_dir}.schema${old_version}-$(date +%Y%m%d%H%M%S)"
+    log "Schema changed ($old_version -> $new_version) -- moving $store_dir aside to $backup so grain starts a fresh store"
+    mv "$store_dir" "$backup"
+  else
+    log "Schema changed ($old_version -> $new_version) -- no existing store to move aside"
+  fi
+  printf '%s\n' "$new_version" > "$marker"
+}
+
+# --- 7. format the target repo, if it is empty --------------------------
 #
 # Every dispatch grain runs branches off an existing ref -- it never
 # creates the first one (v2/e2e's own harness always seeds one commit
@@ -322,7 +447,7 @@ format_target_repo_if_empty() {
   git -C "$tmp" push --quiet "$url" "HEAD:refs/heads/$GRAIN_TARGET_BRANCH"
 }
 
-# --- 7. the systemd unit ---------------------------------------------------
+# --- 8. the systemd unit ---------------------------------------------------
 
 write_systemd_units() {
   log "Writing grain-daemon.service"
@@ -335,12 +460,21 @@ write_systemd_units() {
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -github-host "$GRAIN_GITHUB_HOST"
     -ui-addr "$GRAIN_UI_ADDR"
+    # bwsalmon/agents#396: the UI's own Upgrade button. Safe to wire up
+    # unconditionally -- ensure_self_upgrade (above) is what actually
+    # gives $GRAIN_USER the ownership and the one sudoers line this
+    # needs, run every time this script is, so the feature works the
+    # same whether this is a first install or the hundredth re-run.
+    -upgrade-src-dir "$GRAIN_SRC_DIR"
+    -upgrade-install-path "$REAL_BIN"
+    -upgrade-restart-cmd sudo -upgrade-restart-cmd systemctl -upgrade-restart-cmd restart -upgrade-restart-cmd grain-daemon.service
   )
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
   [ -n "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL" ] && daemon_args+=(-gcp-agent-service-account "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL")
   [ -n "$GRAIN_TARGET_REPO" ] && daemon_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
+  [ -n "$GRAIN_TARGET_REPOS" ] && daemon_args+=(-target-repos "$GRAIN_TARGET_REPOS")
 
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
 [Unit]
@@ -400,7 +534,9 @@ main() {
   sync_repo
   build_and_install
   ensure_user
+  ensure_self_upgrade
   setup_data_dir
+  reformat_store_if_schema_changed
   format_target_repo_if_empty
   write_systemd_units
   enable_services
