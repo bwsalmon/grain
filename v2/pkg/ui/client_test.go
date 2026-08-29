@@ -113,6 +113,83 @@ func TestCreateTaskUnapprovedFilesAsAProposal(t *testing.T) {
 	}
 }
 
+// A repo outside Config.TargetRepos is filed exactly as asked, but
+// parked awaiting reply -- v1's "a task naming anything else is parked
+// with a comment rather than dispatched" -- so it never reaches
+// task_ready.
+func TestCreateTaskOffTargetRepoListParksAwaitingReply(t *testing.T) {
+	c, store, ctx := testClient(t)
+	c.Config.TargetRepos = []string{"acme/widgets", "acme/gadgets"}
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "fix the other thing", Repo: "someone-else/unrelated", Approved: true,
+	})
+	if err != nil {
+		t.Fatalf("creating a task off the allowlist: %v", err)
+	}
+	if task.Repo != "someone-else/unrelated" {
+		t.Fatalf("repo = %q, want the requested repo -- parking must not rewrite Target", task.Repo)
+	}
+	if task.State != model.StateAwaitingReply {
+		t.Fatalf("state = %q, want awaiting_reply", task.State)
+	}
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 0 {
+		t.Fatalf("ready = %v, want nothing: a parked task is not dispatchable", ready)
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Comments) != 1 {
+		t.Fatalf("comments = %v, want exactly one explaining the park", detail.Comments)
+	}
+	if got := detail.Comments[0].Body; got == "" {
+		t.Fatal("park comment has no body")
+	}
+
+	// Replying is how an operator un-parks it, the same as any other
+	// awaiting_reply task -- AddComment's own doc comment.
+	if err := c.AddComment(ctx, task.ID, "widened targetRepos, this can run now"); err != nil {
+		t.Fatal(err)
+	}
+	requeued, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.State != model.StateQueued {
+		t.Fatalf("state after reply = %q, want queued", requeued.State)
+	}
+}
+
+// An empty Config.TargetRepos is v1's own "leave empty for a
+// single-repo deployment": nothing is restricted.
+func TestCreateTaskEmptyTargetRepoListAllowsAnyRepo(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "fix it", Repo: "someone-else/unrelated", Approved: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State != model.StateQueued {
+		t.Fatalf("state = %q, want queued: an empty target repo list restricts nothing", task.State)
+	}
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 1 {
+		t.Fatalf("ready = %v, want just the new task", ready)
+	}
+}
+
 func TestCreateTaskCarriesCapabilityGrants(t *testing.T) {
 	c, store, ctx := testClient(t)
 
@@ -830,6 +907,34 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
+// Unlike Slots, an empty TargetRepos is meaningful (unrestricted) rather
+// than rejected -- v1's target_repos "leave empty for a single-repo
+// deployment."
+func TestUpdateSettingsTargetReposRoundTripsIncludingEmpty(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	repos := []string{"acme/widgets", "acme/gadgets"}
+	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{TargetRepos: &repos})
+	if err != nil {
+		t.Fatalf("setting target repos: %v", err)
+	}
+	if !reflect.DeepEqual(got.TargetRepos, repos) {
+		t.Fatalf("targetRepos = %v, want %v", got.TargetRepos, repos)
+	}
+
+	empty := []string{}
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{TargetRepos: &empty})
+	if err != nil {
+		t.Fatalf("clearing target repos: %v", err)
+	}
+	if len(got.TargetRepos) != 0 {
+		t.Fatalf("targetRepos = %v, want cleared", got.TargetRepos)
+	}
+}
+
 func TestUpdateSettingsValidates(t *testing.T) {
 	c, _, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
@@ -840,12 +945,14 @@ func TestUpdateSettingsValidates(t *testing.T) {
 	empty := ""
 	negative := -1
 	noSlots := []string{}
+	badRepo := []string{"not-owner-slash-name"}
 	cases := map[string]ui.UpdateSettingsRequest{
 		"unparseable poll interval": {PollInterval: &bad},
 		"zero-length slots":         {Slots: &noSlots},
 		"blank gemini model":        {GeminiModel: &empty},
 		"blank github host":         {GitHubHost: &empty},
 		"negative max agent turns":  {MaxAgentTurns: &negative},
+		"malformed target repo":     {TargetRepos: &badRepo},
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -41,6 +41,7 @@ GRAIN_REF="$(cfg grain_ref)"
 GITHUB_HOST="$(cfg github_host)"
 CREDENTIAL_NAME="$(cfg credential_name)"
 DEFAULT_TARGET_REPO="$(cfg default_target_repo)"
+TARGET_REPOS="$(cfg target_repos)"
 UI_PORT="$(cfg ui_port)"
 SLOTS="$(cfg slots)"
 POLL_INTERVAL="$(cfg poll_interval)"
@@ -106,4 +107,5 @@ env \
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="$GCP_AGENT_SERVICE_ACCOUNT" \
   GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="$MINTER_KEY_FILE" \
   GRAIN_TARGET_REPO="$DEFAULT_TARGET_REPO" \
+  GRAIN_TARGET_REPOS="$TARGET_REPOS" \
   "$SRC_DIR/v2/scripts/setup.sh"

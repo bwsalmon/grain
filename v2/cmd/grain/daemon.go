@@ -34,7 +34,8 @@
 //
 // Most of this file's own flags (-slots, -poll-interval, -gemini-model,
 // -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
-// -gcp-agent-service-account) are store-backed now (bwsalmon/agents#320):
+// -gcp-agent-service-account, -target-repos) are store-backed now
+// (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
 // time a deployment's store has none, and reads them back out of it on
 // every start after that, so a UI or a CLI editing model.Config changes
@@ -109,6 +110,7 @@ func daemon(args []string) {
 	uiOpen := fs.Bool("ui-open", false, "open the UI in the system's default browser once it's listening")
 	actor := fs.String("as", "", "principal the UI/API attributes tasks and comments it creates to (defaults to the OS user)")
 	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task created through the UI/API with no repo of its own targets")
+	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any"+seedOnly)
 
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
@@ -199,6 +201,10 @@ func daemon(args []string) {
 		}
 	}
 	slots := strings.Split(*slotList, ",")
+	var targetReposList []string
+	if strings.TrimSpace(*targetRepos) != "" {
+		targetReposList = strings.Split(*targetRepos, ",")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -206,6 +212,7 @@ func daemon(args []string) {
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
+		targetRepos:      targetReposList,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -233,6 +240,10 @@ type config struct {
 	uiOpen            bool
 	actor             string
 	defaultTargetRepo string
+	// targetRepos is store-backed (model.Config.TargetRepos), unlike
+	// defaultTargetRepo above -- see loadConfig/toModelConfig/
+	// withModelConfig. Empty allows a task's repo to name anything.
+	targetRepos []string
 
 	geminiAPIKeyFile string
 	geminiModel      string
@@ -540,6 +551,7 @@ func (c config) toModelConfig() model.Config {
 		GeminiModel: c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
 		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
 		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
+		TargetRepos: c.targetRepos,
 	}
 }
 
@@ -555,6 +567,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.githubInsecureHTTP = mc.GitHubInsecureHTTP
 	c.gcpProject = mc.GCPProject
 	c.gcpServiceAccountEmail = mc.GCPServiceAccountEmail
+	c.targetRepos = mc.TargetRepos
 	return c
 }
 
@@ -676,6 +689,7 @@ func startUIServer(cfg config, store *model.Store) (stop func(context.Context) e
 		Actor:        ui.DefaultActor(actorID(cfg.actor)),
 		Capabilities: ui.DefaultCapabilities(),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
+		TargetRepos:  cfg.targetRepos,
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

@@ -44,4 +44,14 @@ type Config struct {
 	// GCPServiceAccountEmail is the narrow agent service account gcp-key
 	// mints keys for.
 	GCPServiceAccountEmail string
+	// TargetRepos restricts which repos a task's Repo may name, mirroring
+	// v1's terraform/gcp/variables.tf target_repos -- "the allowlist the
+	// git proxy enforces, so a task naming anything else is parked with a
+	// comment rather than dispatched." Empty means unrestricted, the same
+	// "leave empty for a single-repo deployment" default that variable
+	// documents. Enforced in (*ui.Client).CreateTask, the one place a
+	// task's target repo is resolved now that a task has no directive
+	// line for it to be parsed from (see orchestrator.ParseDirectives'
+	// own doc comment).
+	TargetRepos []string
 }
