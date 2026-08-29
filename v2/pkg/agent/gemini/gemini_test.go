@@ -126,7 +126,7 @@ func TestRunUsesToolsDirectlyWhenProvided(t *testing.T) {
 		Name:        "custom_tool",
 		Description: "a tool only present because RunConfig.Tools supplied it",
 		InputSchema: map[string]any{"type": "object"},
-		Handler: func(map[string]any) mcp.Result {
+		Handler: func(context.Context, map[string]any) mcp.Result {
 			called = true
 			return mcp.Result{Text: "done"}
 		},

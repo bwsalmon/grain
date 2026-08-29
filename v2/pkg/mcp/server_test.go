@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestClient(t *testing.T, root string) *Client {
@@ -15,7 +16,7 @@ func newTestClient(t *testing.T, root string) *Client {
 	registry.Register(NewSandboxTools(root)...)
 	sink := &MockSink{}
 	registry.Register(NewMockTools(sink)...)
-	client := NewInProcess(registry)
+	client := NewInProcess(context.Background(), registry)
 	t.Cleanup(func() { client.Close() })
 	return client
 }
@@ -180,6 +181,51 @@ func TestRunCommandRunsInsideSandboxRoot(t *testing.T) {
 	}
 }
 
+// TestRunCommandIsKilledWhenItsCallersCtxIsCancelled is bwsalmon/agents#346's
+// own regression test for the wiring gap it closed: every Tool.Handler
+// used to build its own context.Background() internally, so cancelling
+// the ctx driving an agent's run had no way to reach a run_command call
+// already in flight. NewInProcess now binds Serve to the ctx it was
+// constructed with, and run_command's Handler now runs its
+// exec.CommandContext against the ctx it's actually called with instead
+// of a fresh one -- this proves both links of that chain by cancelling a
+// real, currently-sleeping `sleep 30` from outside the call that started
+// it and checking it dies promptly rather than running to completion.
+func TestRunCommandIsKilledWhenItsCallersCtxIsCancelled(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not installed")
+	}
+	root := t.TempDir()
+	registry := NewRegistry()
+	registry.Register(NewSandboxTools(root)...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := NewInProcess(ctx, registry)
+	defer client.Close()
+
+	callDone := make(chan struct{})
+	go func() {
+		defer close(callDone)
+		client.CallTool(ctx, "run_command", map[string]any{"command": "sleep 30"})
+	}()
+
+	// Give run_command a moment to actually exec `sleep` before cancelling
+	// -- cancelling too early would just stop it from ever starting,
+	// which proves nothing about killing one already running.
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	select {
+	case <-callDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run_command did not return within 10s of its ctx being cancelled -- the sleep it started was never killed")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("run_command took %s to die after cancellation, want near-instant, not close to the full 30s sleep", elapsed)
+	}
+}
+
 func TestRunCommandSeesGitCredentialsConfiguredForItsSandboxRoot(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -217,9 +263,9 @@ func TestMockToolsRecordWithoutAnyNetworkEffect(t *testing.T) {
 	registry.Register(NewSandboxTools(root)...)
 	sink := &MockSink{}
 	registry.Register(NewMockTools(sink)...)
-	client := NewInProcess(registry)
-	defer client.Close()
 	ctx := context.Background()
+	client := NewInProcess(ctx, registry)
+	defer client.Close()
 
 	if _, err := client.CallTool(ctx, "ask_question", map[string]any{"question": "which branch?"}); err != nil {
 		t.Fatal(err)

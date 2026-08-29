@@ -192,13 +192,15 @@ function renderDetail(t) {
   if (t.state === "closed") {
     actions.appendChild(el("button", { class: "secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id) }, ["Reopen"]));
   } else if (t.state === "running") {
-    // Closing a running task already stops it from ever being
-    // re-dispatched or opened as a pull request (orchestrator.ProcessResult,
-    // e2e/close_while_live_test.go) -- that is what "kills the underlying
-    // job" means today, since nothing here preempts a sandbox already in
-    // flight. Cancel is that same close call, surfaced under a name that
-    // matches what a running task's close button actually does instead of
-    // the generic "Close" label every other state uses.
+    // Closing a running task stops it from ever being re-dispatched or
+    // opened as a pull request (orchestrator.ProcessResult), and --
+    // bwsalmon/agents#346 -- orchestrator.RunDispatch itself now watches
+    // for exactly this and cancels the ctx driving the agent and its own
+    // tool calls the moment it notices, killing whatever sandbox process
+    // that run's tool calls were driving too (e2e/close_while_live_test.go).
+    // Cancel is that same close call, surfaced under a name that matches
+    // what a running task's close button actually does instead of the
+    // generic "Close" label every other state uses.
     actions.appendChild(el("button", {
       class: "danger secondary",
       onclick: () => {

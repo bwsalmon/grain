@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"io"
 )
 
@@ -14,15 +15,21 @@ import (
 // can only take actions within the sandbox using the MCP tools" true by
 // construction rather than by convention.
 //
+// ctx is Serve's own ctx (see its doc comment) -- a caller that builds one
+// NewInProcess per agent.Framework.Run call (agent/gemini's Run does)
+// should pass that Run's own ctx, so cancelling it reaches every tool call
+// this Client ever drives against registry, including one already in
+// flight.
+//
 // A real subprocess remains available for cases that want an actual process
 // boundary (see mcp/cmd/mcpserver) -- NewClient works identically over its
 // Stdin/Stdout pipes.
-func NewInProcess(registry *Registry) *Client {
+func NewInProcess(ctx context.Context, registry *Registry) *Client {
 	clientReadsFromServer, serverWritesToClient := io.Pipe()
 	serverReadsFromClient, clientWritesToServer := io.Pipe()
 
 	go func() {
-		_ = Serve(registry, bufio.NewReader(serverReadsFromClient), bufio.NewWriter(serverWritesToClient))
+		_ = Serve(ctx, registry, bufio.NewReader(serverReadsFromClient), bufio.NewWriter(serverWritesToClient))
 		serverWritesToClient.Close()
 	}()
 

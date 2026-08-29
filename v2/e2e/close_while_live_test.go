@@ -1,4 +1,4 @@
-// TestClosingATaskWhileItsRunIsStillLiveNeverReDispatchesOrOpensAPullRequest
+// TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensAPullRequest
 // is bwsalmon/agents#332's own scenario, filed by bwsalmon/agents#319 as
 // one of a dozen siblings extending v2/e2e's whole-pipeline coverage to
 // model/state.go's StateOf: a task closed while its run is still live.
@@ -6,15 +6,20 @@
 // Running already proves, at the store level, that such a task reads
 // closed even though its slot stays occupied until FinishRun actually
 // runs. What no store-level test can check is what happens to the run
-// itself once it does finish: this drives a real `grain close` through
-// the CLI binary while a dispatch's slot is still claimed, lets the
-// scripted agent's turn actually push a branch and RunDispatch call
-// FinishRun (a real sandbox would not be killed mid-flight just because
-// someone closed the issue), and then proves both that dispatch.Cycle
-// never re-dispatches the now-freed slot to it and that
-// orchestrator.ProcessResult never turns that push into a real pull
-// request -- closing a task means nobody wants its work merged, whatever
-// its already-live run went on to do.
+// itself once it does finish.
+//
+// bwsalmon/agents#346 changed what that is: this used to drive a real
+// `grain close` through the CLI binary, let the scripted agent's turn
+// actually push a branch, and assert RunDispatch let it, on the theory
+// that "a real sandbox would not be killed mid-flight just because
+// someone closed the issue." That was the gap #346 asked to close --
+// orchestrator.RunDispatch now watches store for exactly this race and
+// cancels the ctx driving both the agent and its tool calls the moment it
+// sees the task closed, so this test now asserts the opposite: the
+// scripted agent's own run_command call (a real clone/commit/push against
+// this test's own bare upstream repo, over pkg/mcp's real
+// exec.CommandContext-backed sandbox tools -- nothing mocked below the
+// MCP layer) never gets to run at all, and no branch ever lands upstream.
 package e2e
 
 import (
@@ -23,13 +28,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
-	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -37,7 +41,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
-func TestClosingATaskWhileItsRunIsStillLiveNeverReDispatchesOrOpensAPullRequest(t *testing.T) {
+func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensAPullRequest(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -139,11 +143,14 @@ func TestClosingATaskWhileItsRunIsStillLiveNeverReDispatchesOrOpensAPullRequest(
 		t.Fatalf("state after grain close = %q, want closed even with a run still live", closedTask.State)
 	}
 
-	// Let the scripted agent's run actually finish and push its branch --
-	// a real sandbox would not be killed mid-flight just because someone
-	// closed the issue -- and let RunDispatch call FinishRun exactly as it
-	// would for any other run.
-	var result *agent.Result
+	// RunDispatch runs next, exactly as it would for any other claimed
+	// slot -- but the task is already closed by the time it starts, so
+	// bwsalmon/agents#346's own synchronous checkTaskClosed call (see
+	// RunDispatch's own doc comment) must cancel the agent's ctx before
+	// framework.Run is ever invoked, stopping the scripted agent's
+	// run_command call from ever reaching the real sandbox tools behind
+	// it. It should return quickly -- no wall-clock reliance on
+	// CancelPollInterval -- with a non-nil result-less error.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
 		st, err := store.State(ctx, task.ID)
 		if err != nil {
@@ -158,12 +165,17 @@ func TestClosingATaskWhileItsRunIsStillLiveNeverReDispatchesOrOpensAPullRequest(
 
 		fw := gemini.NewForTest(&scriptedGenerator{responses: pushScript(remote, branch, task.ID)})
 		tools := mcp.NewSandboxTools(root)
-		result, err = orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, fullTask, d, tools, root, baseTime.Add(time.Minute))
-		if err != nil {
-			t.Fatalf("RunDispatch: %v", err)
+
+		start := time.Now()
+		result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, fullTask, d, tools, root, baseTime.Add(time.Minute))
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("RunDispatch took %s for an already-closed task, want near-instant cancellation", elapsed)
 		}
-		if !pushedOK(result) {
-			t.Fatalf("agent run did not push cleanly: %+v", result.ToolCalls)
+		if result != nil {
+			t.Fatalf("RunDispatch result = %+v, want nil: a task closed before its run started must never let the agent touch a real sandbox", result)
+		}
+		if err == nil || !strings.Contains(err.Error(), "closed") {
+			t.Fatalf("RunDispatch err = %v, want an error naming the task's closure", err)
 		}
 
 		st, err = store.State(ctx, task.ID)
@@ -174,7 +186,7 @@ func TestClosingATaskWhileItsRunIsStillLiveNeverReDispatchesOrOpensAPullRequest(
 			t.Fatalf("state after FinishRun = %q, want still closed", st)
 		}
 		if occ, err := store.OccupiedSlots(ctx); err != nil || len(occ) != 0 {
-			t.Fatalf("occupied slots after FinishRun = %v (%v), want none: FinishRun frees the slot", occ, err)
+			t.Fatalf("occupied slots after FinishRun = %v (%v), want none: FinishRun still frees the slot even for a cancelled run", occ, err)
 		}
 	})
 
@@ -192,24 +204,19 @@ func TestClosingATaskWhileItsRunIsStillLiveNeverReDispatchesOrOpensAPullRequest(
 		}
 	})
 
-	// The part no store-level test can check: ProcessResult must never
-	// open a pull request for the since-closed task's push, even though
-	// the branch really is there -- the point of closing is that nobody
-	// wants that work merged.
-	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		client := github.NewClient(sim, nil)
-		if err := orchestrator.ProcessResult(ctx, store, client, fullTask, result, baseTime.Add(2*time.Minute)); err != nil {
-			t.Fatalf("ProcessResult: %v", err)
-		}
-	})
-	if n := sim.pullRequestCount(); n != 0 {
-		t.Fatalf("ProcessResult opened %d pull request(s) for a since-closed task, want none", n)
+	// Cancelling the run this early means the agent's own commit/push
+	// never happened at all -- unlike a task closed only after its work
+	// already landed (which #346 leaves untouched: revoking a push
+	// already accepted upstream is not "kill the sandbox process," and
+	// orchestrator.ProcessResult already refuses to open a pull request
+	// for a since-closed task's push either way, per this test's own
+	// pre-#346 history), so no branch reaches the upstream repo, and
+	// there is no result for ProcessResult to even be called with.
+	if branchExistsInBare(t, bare, branch) {
+		t.Fatalf("branch %q exists in the upstream repo, want none: closing before the run started should have cancelled it before its first tool call", branch)
 	}
-
-	// Closing a task does not undo work already in flight -- only that
-	// nobody turns it into a merge -- so the pushed branch is still there.
-	if !branchExistsInBare(t, bare, branch) {
-		t.Fatalf("expected the agent's branch %q to exist in the upstream repo even though no PR was opened", branch)
+	if n := sim.pullRequestCount(); n != 0 {
+		t.Fatalf("%d pull request(s) exist for a cancelled, since-closed task, want none", n)
 	}
 
 	// Confirm the loop stayed closed the way an operator would actually
