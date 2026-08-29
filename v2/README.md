@@ -1073,6 +1073,49 @@ message (a bad duration string, an empty required field the first
 time) surfaces through the same error banner task creation's own
 validation errors already use.
 
+## Write-only secrets access when colocated
+
+`pkg/secrets.Store` (above, "no secret store in the model") was
+read-only until bwsalmon/agents#357: `Resolve` was the whole surface,
+since nothing except a dispatch resolving a capability's credential had
+any reason to touch it. A UI or a CLI running on the same host as the
+server is a different caller with a different need — an operator who
+wants to set a GitHub token or rotate a Gemini key without hand-editing
+files under `-data-dir/secrets` over SSH — and "same host" here is not a
+runtime check of anything, it's just what "-data-dir is a local
+filesystem path" already implies: pointing one at the server's own
+`-data-dir` only works from where that directory actually lives.
+
+`Store.Set`, `DeleteKey`, `DeleteSecret` and `List` are the added
+surface. `List` reports `SecretInfo{Name, Keys}` for everything on
+disk — names and key names, never a value — which is what lets a caller
+show which secrets are set without this package ever handing one back
+outside of `Resolve` itself. `Set`/`DeleteKey`/`DeleteSecret` now also
+validate every path segment they're given (no `.`, `..`, or separator),
+tightened onto `Resolve` too: it used to let a key contain `/` and
+resolve wherever that led, which nothing exercised on purpose but which
+writing a caller-supplied string to disk can no longer risk.
+
+`pkg/ui`'s `Config.Secrets` is nil unless the deployment says otherwise
+— `grain ui`'s `-server-data-dir` names the *server's* `-data-dir`, which
+is a different thing from `-data-dir` on `ui.go` itself (that one is the
+UI's own embedded task store, used only when `-store-addr` is unset).
+`GET /api/secrets` reports `{enabled, secrets}` either way, so the
+frontend's secrets pane can hide its controls behind a note rather than
+show ones that would only ever 404; `PUT`/`DELETE
+/api/secrets/{secret}/{key}` and `DELETE /api/secrets/{secret}` are the
+set/delete-one-key/delete-the-whole-secret surface, each answering with
+the refreshed `{enabled, secrets}` the same way a mutating task route
+answers with the task. `grain secrets` (`cmd/grain/secrets.go`) is the
+CLI side, a fourth mode alongside `daemon`/`ui`/`mcpserver` rather than a
+`runCLI` verb, since it has nothing to do with the task store and
+opening one for it would be pure overhead: `-data-dir` here means what
+`grain daemon`'s own `-data-dir` does (secrets live at
+`<data-dir>/secrets`), `list`/`set`/`delete` mirror the API one-to-one,
+and `set` takes its value from `-value-file` or, left unset, from
+stdin — deliberately never from an argv flag, which any other process
+on the same host could read back out of this one's own command line.
+
 ## Single writer
 
 Embedded Dolt permits one writer, which suited a cron-driven controller

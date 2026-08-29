@@ -8,19 +8,21 @@
 // comment, and close (grain's own stand-in for "delete" -- see
 // Client.Close's own doc comment for why) or reopen one.
 //
-// Four other subcommands -- daemon, ui, mcpserver, controller -- select
-// entirely different modes, each what used to be its own cmd/graind,
-// cmd/ui or cmd/mcpserver binary before #313 combined them: the daemon
-// runs pkg/orchestrator's RunCycle on a timer, ui serves pkg/ui's JSON API
-// and static frontend, mcpserver speaks MCP over stdin/stdout against the
-// sandbox tools, and controller runs one-time interactive setup verbs
+// Five other subcommands -- daemon, ui, mcpserver, secrets, controller --
+// select entirely different modes, each what used to be its own
+// cmd/graind, cmd/ui or cmd/mcpserver binary before #313 combined them
+// (secrets is new, bwsalmon/agents#357): the daemon runs
+// pkg/orchestrator's RunCycle on a timer, ui serves pkg/ui's JSON API and
+// static frontend, mcpserver speaks MCP over stdin/stdout against the
+// sandbox tools, secrets sets/deletes/lists a colocated server's secrets
+// directly on disk, and controller runs one-time interactive setup verbs
 // (currently just bootstrap-github-app) against an operator's own
-// machine, never a running daemon. daemon.go, ui.go, mcpserver.go and
-// controller.go carry each one's own doc comment. A running daemon forks
-// mcpserver instances of itself -- this same binary, re-invoked with
-// "mcpserver" as argv[1] -- rather than needing a second binary on disk;
-// see pkg/agent/claude's own doc comment for the one place that matters
-// today.
+// machine, never a running daemon. daemon.go, ui.go, mcpserver.go,
+// secrets.go and controller.go carry each one's own doc comment. A
+// running daemon forks mcpserver instances of itself -- this same binary,
+// re-invoked with "mcpserver" as argv[1] -- rather than needing a second
+// binary on disk; see pkg/agent/claude's own doc comment for the one
+// place that matters today.
 //
 // The task CLI itself takes no GitHub credentials at all. A task used to
 // be a GitHub issue, so this command needed a token and a task repo to
@@ -50,13 +52,13 @@ import (
 )
 
 // main dispatches on argv[1] before parsing anything else: "daemon",
-// "ui" and "mcpserver" are modes with their own, unrelated flag sets, so
-// they are matched exactly and handed the rest of argv verbatim rather
-// than folded into runCLI's own flag.FlagSet. Anything else -- including
-// no arguments at all, or a leading global flag like -json -- falls
-// through to the task CLI exactly as it always has, so a task command
-// itself is never allowed to collide with one of the three mode names
-// above (none of the ones below do).
+// "ui", "mcpserver", "secrets" and "controller" are modes with their own,
+// unrelated flag sets, so they are matched exactly and handed the rest of
+// argv verbatim rather than folded into runCLI's own flag.FlagSet.
+// Anything else -- including no arguments at all, or a leading global
+// flag like -json -- falls through to the task CLI exactly as it always
+// has, so a task command itself is never allowed to collide with one of
+// the five mode names above (none of the ones below do).
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -69,6 +71,9 @@ func main() {
 			return
 		case "mcpserver":
 			mcpserver(args[1:])
+			return
+		case "secrets":
+			secretsCmd(args[1:])
 			return
 		case "controller":
 			controller(args[1:])
@@ -85,6 +90,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer (see daemon.go)
        grain ui [flags]        serve the task UI on localhost (see ui.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
+       grain secrets [flags]   set/delete/list a colocated server's secrets on disk (see secrets.go)
        grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
 
 Global flags (must come before the command):

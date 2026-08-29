@@ -8,6 +8,14 @@
 // binary that runs on a developer's Mac or Linux box today is exactly the
 // API surface a future iOS/Android client would speak to, with nothing
 // about the server itself to rebuild.
+//
+// -server-data-dir is the opt in to bwsalmon/agents#357: when this UI
+// runs on the same host as a `grain daemon`, pointing it at that
+// daemon's own -data-dir lets the UI set and delete the secrets under
+// its secrets/ directory directly on disk -- no RPC to the daemon, since
+// pkg/secrets.Store already reads fresh off disk on every call. It is
+// write/list only: nothing in pkg/ui ever resolves a secret's value, so
+// there is no path through this UI that reads one back.
 package main
 
 import (
@@ -19,10 +27,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -34,6 +44,11 @@ func uiServe(args []string) {
 	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
 	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
 	dataDir := fs.String("data-dir", "", "root directory of an embedded store, used when -store-addr is unset -- single writer, so nothing else may be running against it")
+	serverDataDir := fs.String("server-data-dir", "",
+		"the -data-dir a colocated `grain daemon` was started with, so this UI can set/delete/list its secrets "+
+			"(under <server-data-dir>/secrets) without ever reading one back (bwsalmon/agents#357). This is "+
+			"unrelated to -data-dir above, which names this UI's own embedded task store, not the server's -- "+
+			"leave it unset when this UI does not run on the same host as the server.")
 	actor := fs.String("as", "", "principal to attribute tasks created here to (defaults to the OS user)")
 	defaultTargetRepo := fs.String("default-target-repo", "",
 		"owner/name a task with no repo of its own targets")
@@ -73,6 +88,9 @@ func uiServe(args []string) {
 	cfg := ui.Config{
 		Actor:        ui.DefaultActor(actorID(*actor)),
 		Capabilities: ui.DefaultCapabilities(),
+	}
+	if *serverDataDir != "" {
+		cfg.Secrets = secrets.New(filepath.Join(*serverDataDir, "secrets"))
 	}
 	if *defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(*defaultTargetRepo)
