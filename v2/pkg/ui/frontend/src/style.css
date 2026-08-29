@@ -177,21 +177,36 @@ button.danger:hover { background: rgba(var(--error-rgb), 0.08); }
 main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
 
 .task-list { list-style: none; margin: 0; padding: 0; }
-.task-list li {
+.task-list > li {
   background: var(--surface);
   border: 1px solid var(--outline-variant);
   border-radius: 12px;
   padding: 0.9rem 1.1rem;
   margin-bottom: 0.6rem;
+  transition: box-shadow 120ms ease, border-color 120ms ease;
+}
+.task-list > li:hover {
+  box-shadow: var(--elevation-1);
+  border-color: transparent;
+}
+.task-row {
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 0.85rem;
-  transition: box-shadow 120ms ease, border-color 120ms ease;
 }
-.task-list li:hover {
-  box-shadow: var(--elevation-1);
-  border-color: transparent;
+/* A stacked task (bwsalmon/agents#378) nests under the task that
+   generated it rather than getting a row of its own -- indented and
+   set off by a rule from the parent's own row, so it reads as a
+   continuation of the same change rather than a separate task. */
+.task-sublist {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0.75rem 0 0 1.5rem;
+  border-top: 1px solid var(--outline-variant);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 .task-number {
   color: var(--on-surface-variant);

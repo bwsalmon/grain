@@ -665,6 +665,73 @@ func TestGeneratedFromReadsOffTheProposedByLink(t *testing.T) {
 	}
 }
 
+// Stacked is true only for a task whose Origin.Reason is model.ReasonFix
+// -- the merge queue's own automatic fix for another task's pull
+// request (bwsalmon/agents#378) -- and false for an ordinary
+// propose_task child, even though both carry a GeneratedFrom link. The
+// frontend nests the former under the task named by GeneratedFrom and
+// leaves the latter as a task of its own.
+func TestStackedIsTrueOnlyForAFixTask(t *testing.T) {
+	c, store, ctx := testClient(t)
+	source := create(t, c, ctx)
+
+	fixID, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTask := model.Task{
+		ID:     fixID,
+		Intent: model.IntentImplement,
+		Title:  "fix",
+		Body:   "filed by the merge queue",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}},
+			Reason:      model.ReasonFix,
+		},
+		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: source.ID}},
+		CreatedAt: &baseTime,
+	}
+	if err := store.PutTask(ctx, fixTask); err != nil {
+		t.Fatal(err)
+	}
+
+	proposalID, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := model.Task{
+		ID:     proposalID,
+		Intent: model.IntentImplement,
+		Title:  "proposed child",
+		Body:   "filed by the parent's own run",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+			Reason:      model.ReasonDirect,
+		},
+		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: source.ID}},
+		CreatedAt: &baseTime,
+	}
+	if err := store.PutTask(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+
+	gotFix, err := c.Task(ctx, fixID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotFix.Stacked {
+		t.Fatalf("fix task Stacked = false, want true")
+	}
+
+	gotProposal, err := c.Task(ctx, proposalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProposal.Stacked {
+		t.Fatalf("proposed child Stacked = true, want false")
+	}
+}
+
 func TestTaskNotFound(t *testing.T) {
 	c, _, ctx := testClient(t)
 	_, err := c.Task(ctx, "404")
