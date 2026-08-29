@@ -20,8 +20,8 @@ var (
 
 func stateView() string {
 	for _, v := range Views {
-		if strings.Contains(v, "`task_state`") {
-			return v
+		if v.Name == "task_state" {
+			return v.DDL
 		}
 	}
 	panic("no task_state view")

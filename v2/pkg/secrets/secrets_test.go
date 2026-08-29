@@ -2,32 +2,26 @@ package secrets
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
 
-// writeSecret writes one Kubernetes-style secret directory: dir/name/key
-// for each key in data, holding its raw bytes -- the same shape kubelet
-// writes for a mounted Secret volume.
-func writeSecret(t *testing.T, root, name string, data map[string]string) {
+// seedSecret writes every key in data into name via Store.Set -- the
+// only way material ever gets into this package's database, now that it
+// is not a directory tree a test can seed by writing files directly.
+func seedSecret(t *testing.T, store *Store, name string, data map[string]string) {
 	t.Helper()
-	dir := filepath.Join(root, name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	for key, value := range data {
-		if err := os.WriteFile(filepath.Join(dir, key), []byte(value), 0o600); err != nil {
-			t.Fatal(err)
+		if err := store.Set(name, key, []byte(value)); err != nil {
+			t.Fatalf("seeding %s/%s: %v", name, key, err)
 		}
 	}
 }
 
 func TestResolveExplicitKeyInMultiKeySecret(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app", "password": "hunter2"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app", "password": "hunter2"})
 
 	got, err := store.Resolve(context.Background(), "db/password")
 	if err != nil {
@@ -39,9 +33,8 @@ func TestResolveExplicitKeyInMultiKeySecret(t *testing.T) {
 }
 
 func TestResolveBareNameForSingleKeySecret(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "gcp-key-minter", map[string]string{"key.json": `{"type":"service_account"}`})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "gcp-key-minter", map[string]string{"key.json": `{"type":"service_account"}`})
 
 	got, err := store.Resolve(context.Background(), "gcp-key-minter")
 	if err != nil {
@@ -53,9 +46,8 @@ func TestResolveBareNameForSingleKeySecret(t *testing.T) {
 }
 
 func TestResolveBareNameForMultiKeySecretFailsAmbiguous(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app", "password": "hunter2"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app", "password": "hunter2"})
 
 	if _, err := store.Resolve(context.Background(), "db"); err == nil {
 		t.Fatal("expected an error for an ambiguous bare name")
@@ -70,9 +62,8 @@ func TestResolveMissingSecretFailsClosed(t *testing.T) {
 }
 
 func TestResolveMissingKeyFailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app"})
 	if _, err := store.Resolve(context.Background(), "db/password"); err == nil {
 		t.Fatal("expected an error for a missing key")
 	}
@@ -86,9 +77,8 @@ func TestResolveEmptyNameFailsClosed(t *testing.T) {
 }
 
 func TestResolveDoesNotTrimValue(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "token", map[string]string{"value": "  padded\n"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "token", map[string]string{"value": "  padded\n"})
 
 	got, err := store.Resolve(context.Background(), "token/value")
 	if err != nil {
@@ -100,12 +90,8 @@ func TestResolveDoesNotTrimValue(t *testing.T) {
 }
 
 func TestResolveRejectsPathTraversalInKey(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(t.TempDir(), "outside"), []byte("nope"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	writeSecret(t, dir, "secret", map[string]string{"key": "value"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "secret", map[string]string{"key": "value"})
 
 	if _, err := store.Resolve(context.Background(), "secret/../../etc/passwd"); err == nil {
 		t.Fatal("expected an error for a traversal attempt in the key")
@@ -113,10 +99,9 @@ func TestResolveRejectsPathTraversalInKey(t *testing.T) {
 }
 
 func TestListReportsNamesAndKeysNotValues(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app", "password": "hunter2"})
-	writeSecret(t, dir, "token", map[string]string{"value": "abc"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app", "password": "hunter2"})
+	seedSecret(t, store, "token", map[string]string{"value": "abc"})
 
 	got, err := store.List()
 	if err != nil {
@@ -131,8 +116,8 @@ func TestListReportsNamesAndKeysNotValues(t *testing.T) {
 	}
 }
 
-func TestListOnMissingDirReturnsNoSecrets(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "does-not-exist"))
+func TestListOnFreshDatabaseReturnsNoSecrets(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "does-not-exist-yet"))
 	got, err := store.List()
 	if err != nil {
 		t.Fatal(err)
@@ -143,8 +128,7 @@ func TestListOnMissingDirReturnsNoSecrets(t *testing.T) {
 }
 
 func TestSetThenResolve(t *testing.T) {
-	dir := t.TempDir()
-	store := New(dir)
+	store := New(t.TempDir())
 
 	if err := store.Set("github", "token", []byte("ghp_abc123")); err != nil {
 		t.Fatal(err)
@@ -159,9 +143,8 @@ func TestSetThenResolve(t *testing.T) {
 }
 
 func TestSetOverwritesExistingValue(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"password": "old"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"password": "old"})
 
 	if err := store.Set("db", "password", []byte("new")); err != nil {
 		t.Fatal(err)
@@ -186,9 +169,8 @@ func TestSetRejectsTraversalNames(t *testing.T) {
 }
 
 func TestDeleteKeyRemovesJustThatKey(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app", "password": "hunter2"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app", "password": "hunter2"})
 
 	if err := store.DeleteKey("db", "password"); err != nil {
 		t.Fatal(err)
@@ -202,10 +184,9 @@ func TestDeleteKeyRemovesJustThatKey(t *testing.T) {
 	}
 }
 
-func TestDeleteKeyRemovesEmptySecretDirectory(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "token", map[string]string{"value": "abc"})
-	store := New(dir)
+func TestDeleteKeyRemovesEmptySecretFromList(t *testing.T) {
+	store := New(t.TempDir())
+	seedSecret(t, store, "token", map[string]string{"value": "abc"})
 
 	if err := store.DeleteKey("token", "value"); err != nil {
 		t.Fatal(err)
@@ -220,18 +201,16 @@ func TestDeleteKeyRemovesEmptySecretDirectory(t *testing.T) {
 }
 
 func TestDeleteKeyMissingFailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app"})
 	if err := store.DeleteKey("db", "password"); err == nil {
 		t.Fatal("expected an error for a missing key")
 	}
 }
 
 func TestDeleteSecretRemovesEveryKey(t *testing.T) {
-	dir := t.TempDir()
-	writeSecret(t, dir, "db", map[string]string{"username": "app", "password": "hunter2"})
-	store := New(dir)
+	store := New(t.TempDir())
+	seedSecret(t, store, "db", map[string]string{"username": "app", "password": "hunter2"})
 
 	if err := store.DeleteSecret("db"); err != nil {
 		t.Fatal(err)

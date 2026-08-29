@@ -1,20 +1,19 @@
 // daemon.go implements `grain daemon`, formerly its own cmd/graind
 // binary before bwsalmon/agents#313 combined every mode into one: it
 // runs pkg/orchestrator's RunCycle in the background on a timer, until
-// SIGINT/SIGTERM, against one real embedded Dolt store, and -- unless
+// SIGINT/SIGTERM, against one real embedded SQLite store, and -- unless
 // -ui-addr is emptied out -- also serves pkg/ui's JSON API and static
 // frontend directly over that same store (bwsalmon/agents#363). That
 // used to be a separate "ui" subcommand (formerly its own cmd/ui binary),
-// opening the store a second time -- embedded Dolt is single-writer, so a
-// real deployment running both needed a Dolt SQL server instead
-// (v2/README.md's old "Single writer" section) just to let a daemon and a
-// UI coexist. Folding UI serving into the same process this dispatch
-// loop already runs in removes that requirement entirely: there is one
-// process, one store connection, one thing to run behind Tailscale or
-// IAP (the issue's own "so the server ui/api does not need auth on its
-// own"), and cmd/grain's own task CLI is a REST client of the API this
-// serves (main.go's own doc comment) rather than a second direct store
-// writer.
+// opening the store a second time -- SQLite's own file locking is what
+// makes a daemon and a UI both writing that same file at once safe
+// (pkg/model/sqlite's own doc comment). Folding UI serving into the same
+// process this dispatch loop already runs in removes the need for a
+// second process entirely: there is one process, one store connection,
+// one thing to run behind Tailscale or IAP (the issue's own "so the
+// server ui/api does not need auth on its own"), and cmd/grain's own
+// task CLI is a REST client of the API this serves (main.go's own doc
+// comment) rather than a second direct store writer.
 //
 // bwsalmon/agents#254 asked for exactly this, with one simplification: by
 // default, sandboxing is still local -- the MCP server's sandbox tools
@@ -40,8 +39,8 @@
 // time a deployment's store has none, and reads them back out of it on
 // every start after that, so a UI or a CLI editing model.Config changes
 // what the next restart runs with. What stays flags-only either has to
-// be known before there is a store to read it from (-data-dir, -store-*)
-// or names secret material rather than being configuration itself
+// be known before there is a store to read it from (-data-dir) or names
+// secret material rather than being configuration itself
 // (-gemini-api-key-file, -kontur-ssh-key) -- bwsalmon/agents#320's own
 // "but not the secrets."
 package main
@@ -73,7 +72,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/kontur"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
@@ -94,21 +93,16 @@ func (s *stringSliceFlag) Set(v string) error {
 
 func daemon(args []string) {
 	// seedOnly marks a flag loadConfig only consults the first time this
-	// -data-dir/-store-addr has ever seen a daemon: it seeds grain_config,
-	// and every start after that reads the stored value back instead,
-	// silently ignoring whatever this flag says -- see loadConfig's own
-	// doc comment for why.
+	// -data-dir has ever seen a daemon: it seeds grain_config, and every
+	// start after that reads the stored value back instead, silently
+	// ignoring whatever this flag says -- see loadConfig's own doc
+	// comment for why.
 	const seedOnly = " (bwsalmon/agents#320: seeds the stored configuration on first use; ignored once one exists -- see loadConfig)"
 
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
 	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills"+seedOnly)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
-
-	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store, instead of the embedded database under -data-dir")
-	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
-	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
 
 	uiAddr := fs.String("ui-addr", "127.0.0.1:8420", "address to serve the UI/API on, in-process, over this same store -- empty disables it")
 	uiOpen := fs.Bool("ui-open", false, "open the UI in the system's default browser once it's listening")
@@ -188,8 +182,6 @@ func daemon(args []string) {
 
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
-		storeAddr: *storeAddr, storeDatabase: *storeDatabase,
-		storeUser: *storeUser, storePasswordFile: *storePasswordFile,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
@@ -207,11 +199,6 @@ type config struct {
 	dataDir      string
 	slots        []string
 	pollInterval time.Duration
-
-	storeAddr         string
-	storeDatabase     string
-	storeUser         string
-	storePasswordFile string
 
 	// uiAddr, uiOpen, actor and defaultTargetRepo configure the in-process
 	// pkg/ui.Server this daemon serves alongside RunCycle (bwsalmon/agents#363);
@@ -252,15 +239,7 @@ type config struct {
 // ctx is cancelled (or setup itself fails).
 func run(ctx context.Context, cfg config) error {
 
-	server := dolt.ServerConfig{Addr: cfg.storeAddr, Database: cfg.storeDatabase, User: cfg.storeUser}
-	if cfg.storePasswordFile != "" {
-		password, err := readTrimmedFile(cfg.storePasswordFile)
-		if err != nil {
-			return fmt.Errorf("reading -store-password-file: %w", err)
-		}
-		server.Password = password
-	}
-	store, db, err := openStore(cfg.dataDir, server)
+	store, db, err := openStore(cfg.dataDir)
 	if err != nil {
 		return err
 	}
@@ -501,10 +480,10 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 // for graceful in-flight reloading, so run() does not attempt it.
 //
 // Only the fields with no bearing on reaching the store in the first
-// place move through here: -data-dir, the -store-* family and
-// -gemini-api-key-file (a secret, not configuration -- bwsalmon/
-// agents#320's own "but not the secrets") stay flags-only, read by run()
-// before loadConfig has a store to call.
+// place move through here: -data-dir and -gemini-api-key-file (a
+// secret, not configuration -- bwsalmon/agents#320's own "but not the
+// secrets") stay flags-only, read by run() before loadConfig has a store
+// to call.
 func loadConfig(ctx context.Context, store *model.Store, flagCfg config) (config, error) {
 	stored, err := store.GetConfig(ctx)
 	if err != nil {
@@ -594,16 +573,16 @@ func (c credentialTokenSource) TokenFor(owner, repo string) *string {
 
 // openStore returns both the Store and the *sql.DB behind it, so run can
 // close the connection on the way out -- model.Store itself has no
-// Close, deliberately: it imports no driver (pkg/model/dolt's own doc
+// Close, deliberately: it imports no driver (pkg/model/sqlite's own doc
 // comment), so closing is the caller's job.
 //
-// -store-addr points at a Dolt SQL server, which is what a deployment
-// running a UI or a CLI alongside this daemon needs: embedded Dolt is a
-// single writer, and those are writers now (README, "Single writer").
-// Without it, the embedded database under -data-dir is used, and nothing
-// else may be running against it.
-func openStore(dataDir string, server dolt.ServerConfig) (*model.Store, *sql.DB, error) {
-	db, err := dolt.OpenOrConnect(filepath.Join(dataDir, "store"), server)
+// -data-dir/store is a plain SQLite database file, and a UI or a CLI
+// pointed at the same -data-dir opens that same file directly -- no
+// server to run alongside this daemon, and no separate flag to address
+// one: SQLite's own file locking is what lets a daemon, a UI and a CLI
+// all write to it at once (pkg/model/sqlite's own doc comment).
+func openStore(dataDir string) (*model.Store, *sql.DB, error) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(filepath.Join(dataDir, "store")))
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the task store: %w", err)
 	}
@@ -647,7 +626,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // returning a shutdown func the same shape startGitProxy's own is.
 // Running it in-process rather than as a separate "ui" binary/service is
 // exactly what bwsalmon/agents#363 asked for: one store connection, no
-// Dolt SQL server needed just to let a daemon and a UI coexist (see this
+// second process needed just to let a daemon and a UI coexist (see this
 // file's own doc comment).
 //
 // uiCfg.Secrets always points at this same process's own secrets

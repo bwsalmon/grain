@@ -2606,7 +2606,7 @@ of `run_once`. A `version` field and the established
 ## Implementation status
 
 `v2/` holds the first of this, in Go: the model types, the schema, and a
-Dolt-backed store. See [`v2/README.md`](../v2/README.md).
+SQLite-backed store. See [`v2/README.md`](../v2/README.md).
 
 | File | What it is |
 |---|---|
@@ -2614,7 +2614,7 @@ Dolt-backed store. See [`v2/README.md`](../v2/README.md).
 | `model/state.go` | the derivations, for code holding a `Task` and no store |
 | `model/schema.go` | the same model as DDL, with the derivations as **views** |
 | `model/store.go` | the store, over any `*sql.DB` — parameterised, transactional |
-| `model/dolt/` | opening an embedded Dolt database; the only package importing it |
+| `model/sqlite/` | opening an embedded SQLite database; the only package importing it |
 
 Two decisions in this document are enforced by that code rather than
 restated by it. `TaskState` is a **view**, so there is no column any
@@ -2626,7 +2626,7 @@ The state derivation exists twice on purpose — once in SQL for the store,
 once in Go for code holding a `Task` and no database — and
 `model/state_test.go` holds the two to the same precedence, since two
 implementations of one rule is a drift risk worth paying for
-deliberately. The store's own tests run against a real embedded Dolt
+deliberately. The store's own tests run against a real embedded SQLite
 database, so the DDL and the views are verified rather than only
 generated.
 

@@ -15,11 +15,13 @@
 // dispatch.Cycle must pick it up, and it runs a normal push/PR/merge/close
 // cycle of its own, exactly like any other task.
 //
-// The embedded Dolt store is single-writer (cli_test.go's own withStore
-// doc comment), so the CLI subprocess and this test's own dispatch/
-// ProcessResult calls take turns owning storeDir rather than holding it
-// open for the whole test, the same discipline
-// TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt already holds to.
+// The CLI subprocess and this test's own dispatch/ProcessResult calls
+// take turns owning storeDir rather than holding it open for the whole
+// test, the same discipline TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt
+// already holds to (cli_test.go's own withStore doc comment) -- not
+// because the embedded SQLite store requires it, but because taking
+// turns is what proves the handoff between the two writers goes through
+// the store rather than through anything held in memory.
 // This test reuses that file's rig (syncedSim, githubHostServer, a plain
 // HostSandboxes root credentialed directly against the git/REST stand-in)
 // rather than harness_test.go's gitproxy-fronted world, since gitproxy

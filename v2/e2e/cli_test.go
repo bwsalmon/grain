@@ -47,7 +47,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
@@ -157,9 +157,9 @@ func runCLI(t *testing.T, bin string, args ...string) string {
 // exactly the way daemon.go's own startUIServer does, runs the CLI
 // subprocess against that server, and tears both down again before
 // returning -- reusing withStore's own "take turns" discipline, since
-// embedded Dolt permits one writer and the test's own orchestrator.RunCycle
-// calls (driven directly in this process, not through this server) are
-// the other one.
+// embedded SQLite is what the test's own orchestrator.RunCycle calls
+// (driven directly in this process, not through this server) take turns
+// with.
 func runCLIStore(t *testing.T, bin, storeDir string, args ...string) string {
 	t.Helper()
 	var out string
@@ -172,22 +172,23 @@ func runCLIStore(t *testing.T, bin, storeDir string, args ...string) string {
 	return out
 }
 
-// withStore opens the shared embedded Dolt store, hands it to fn, and
+// withStore opens the shared embedded SQLite store, hands it to fn, and
 // closes it again.
 //
-// Opening and closing around every step is the point, not ceremony.
-// Embedded Dolt permits one writer, and this test has two: the grain CLI,
-// which runs as a real subprocess, and the orchestrator running in the
-// test process. A deployment that genuinely wants both at once runs a
-// Dolt SQL server instead (README, "Single writer"); a test that only
-// needs them to take turns can simply take turns, and doing so proves the
-// handoff is through the store rather than through anything held in
-// memory.
+// This test has two writers: the grain CLI, which runs as a real
+// subprocess, and the orchestrator running in the test process --
+// exactly the "daemon plus a CLI" case a real deployment has too, and
+// which SQLite (pkg/model/sqlite's own doc comment) is built to let
+// write to the same file at once. Opening and closing around every step
+// here is not a workaround for that -- SQLite would tolerate a store
+// held open across both -- it is what proves the handoff between the two
+// writers actually goes through the store rather than through anything
+// held in memory.
 func withStore(t *testing.T, dir string, fn func(*model.Store, context.Context)) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(dir))
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	defer db.Close()
 	store := model.New(db)

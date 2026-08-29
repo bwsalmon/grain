@@ -18,17 +18,18 @@
 # What this script does, every time it runs (safe to re-run -- this is
 # the installer AND the updater):
 #   1. clones or updates this repo under $GRAIN_SRC_DIR
-#   2. builds bin/grain with `make container-build` (v2/Makefile) --
-#      the containerised build, not the host toolchain, which is the
-#      one thing this script assumes: a working `docker`. That sidesteps
-#      the whole ICU/glibc version-coupling problem the Makefile's own
-#      comments describe, without asking this script to know anything
-#      about the host's package manager.
+#   2. builds bin/grain with `make container-build` (v2/Makefile) -- the
+#      containerised build, not the host toolchain, which is the one
+#      thing this script assumes: a working `docker`. grain is pure Go
+#      (bwsalmon/agents#366 removed the one dependency that wasn't), so
+#      this buys reproducibility -- one pinned Go toolchain regardless of
+#      what is or isn't installed on this machine -- rather than working
+#      around any host-specific linkage problem.
 #   3. installs it to /usr/local/bin/grain
 #   4. creates an unprivileged system user to run it as
 #   5. lays out $GRAIN_DATA_DIR (secrets, the sandbox root, the embedded
-#      store) and seeds secrets from environment variables -- only if
-#      they are not already there, so a second run never overwrites a
+#      SQLite store) and seeds secrets from environment variables -- only
+#      if they are not already there, so a second run never overwrites a
 #      credential placed by the first one or by hand
 #   6. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
 #      empty commit so grain has a branch to work from ("format" it --
@@ -45,13 +46,14 @@
 # and a re-run to pick up a repo update is `sudo ./setup.sh` with no
 # arguments at all. Run with -h/--help for the full list.
 #
-# There used to be a second service (grain-ui.service) and a `dolt
-# sql-server` container behind it: embedded Dolt is single-writer, and a
+# There used to be a second service (grain-ui.service) and, before
+# bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt
+# sql-server` container behind it: embedded Dolt was single-writer, and a
 # daemon plus a UI on the same store both used to need to write.
 # bwsalmon/agents#363 removed the second writer -- the daemon now serves
 # the UI/API itself, in-process, over the store it already has open (see
 # v2/cmd/grain/daemon.go's own doc comment) -- so this script installs
-# one service, needs no Dolt server container, and no longer requires
+# one service, needs no separate store container, and no longer requires
 # `docker` at runtime (only at build time, for `make container-build`).
 #
 # The UI is bound to 127.0.0.1 on the plain HTTP port (80) and nowhere
@@ -99,10 +101,10 @@ usage() {
 Usage: sudo ./setup.sh
 
 Installs or updates a v2 grain deployment on this machine: clones/builds
-the binary, lays out /var/lib/grain (including its embedded task store),
-and installs grain-daemon.service, which runs the dispatch loop and
-serves the UI/API itself. Every setting is an environment variable; all
-have defaults, so a bare `sudo ./setup.sh` re-run is the update path.
+the binary, lays out /var/lib/grain (including its embedded SQLite task
+store), and installs grain-daemon.service, which runs the dispatch loop
+and serves the UI/API itself. Every setting is an environment variable;
+all have defaults, so a bare `sudo ./setup.sh` re-run is the update path.
 Recognized variables:
 
   GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
@@ -229,11 +231,11 @@ setup_data_dir() {
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/sandbox"
-  # grain-daemon.service's own -data-dir/store, embedded Dolt -- the one
-  # process that ever opens it now (this file's own header on
-  # bwsalmon/agents#363), so no separate sql-server container or
-  # directory layout is needed for it beyond what openStore creates on
-  # its own the first time the daemon starts.
+  # grain-daemon.service's own -data-dir/store, embedded SQLite -- the
+  # one process that ever opens it now (this file's own header on
+  # bwsalmon/agents#363), so no separate store container or directory
+  # layout is needed for it beyond what openStore creates on its own the
+  # first time the daemon starts.
 
   # GitHub credential ladder (v2/pkg/gitproxy/credentials.go): a pattern
   # file plus one <name>.token per credential. "*" is the catch-all every
@@ -248,15 +250,34 @@ setup_data_dir() {
 
   seed_secret "$GRAIN_DATA_DIR/secrets/gemini-api-key" "$GRAIN_GEMINI_API_KEY"
 
-  if [ -n "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" ] && [ ! -s "$GRAIN_DATA_DIR/secrets/gcp-key-minter/key.json" ]; then
-    install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/gcp-key-minter"
-    install -m0600 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" "$GRAIN_DATA_DIR/secrets/gcp-key-minter/key.json"
-  fi
+  seed_gcp_minter_key
 
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ]; then
     log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN and re-run, or place"
     log "  $GRAIN_DATA_DIR/secrets/github/credentials.json and a matching .token file by hand"
   fi
+}
+
+# seed_gcp_minter_key writes the GCP minter's key into gcp-key-minter/key.json
+# in the (SQLite-backed, v2/pkg/secrets's own doc comment) secrets database
+# -- through the just-installed `grain secrets` CLI rather than a raw file
+# write, since that database is no longer a directory tree this script can
+# lay files into directly. `grain secrets list` is checked first so a
+# re-run never overwrites a key an earlier run (or an operator's own
+# `grain secrets set`) already placed, the same never-overwrite rule
+# seed_secret gives every plain-file secret above; chown afterward because
+# the CLI, run here as root, otherwise leaves the database it creates
+# owned by root, unreadable by grain-daemon.service's own $GRAIN_USER.
+seed_gcp_minter_key() {
+  if [ -z "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" ]; then
+    return
+  fi
+  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^gcp-key-minter:'; then
+    return
+  fi
+  /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" set \
+    -value-file "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" gcp-key-minter key.json
+  chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
 }
 
 # --- 6. format the target repo, if it is empty --------------------------
@@ -369,7 +390,7 @@ print_summary() {
   echo
   log "Done."
   echo "    UI:      http://${GRAIN_UI_ADDR} -- reach it with: ssh -L 8080:localhost:${GRAIN_UI_ADDR##*:} <this-host>, then open http://localhost:8080"
-  echo "    Store:   embedded Dolt under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
+  echo "    Store:   embedded SQLite under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
   echo "    Logs:    journalctl -u grain-daemon.service -f"
   echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts the service"

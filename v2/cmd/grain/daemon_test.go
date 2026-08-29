@@ -6,14 +6,14 @@ package main
 // mcpserver, cmd/ui, now mcpserver.go and, before bwsalmon/agents#363
 // folded it into daemon.go, ui.go) was the same "no test files" gap, but
 // graind was the one that issue asked about: the process that wires a
-// real embedded Dolt store, a real
+// real embedded SQLite store, a real
 // in-process git proxy, a real Gemini client and the capability registry
 // together and runs them on a timer. These tests cover the small pieces
 // of that wiring run() itself does not delegate to an already-tested
 // package -- readTrimmedFile, credentialTokenSource,
 // capabilityProviders, openStore and startGitProxy -- against real
-// temp-directory material, the same "real embedded Dolt, not a fake"
-// discipline pkg/model/dolt's own tests hold to.
+// temp-directory material, the same "real embedded SQLite, not a fake"
+// discipline pkg/model/sqlite's own tests hold to.
 // daemon_live_test.go covers run() itself, end to end, against a real
 // Gemini API key.
 
@@ -32,7 +32,6 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 func TestReadTrimmedFile(t *testing.T) {
@@ -149,7 +148,7 @@ func TestCapabilityProviders(t *testing.T) {
 }
 
 func TestOpenStore(t *testing.T) {
-	store, db, err := openStore(t.TempDir(), dolt.ServerConfig{})
+	store, db, err := openStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}
@@ -168,16 +167,14 @@ func TestOpenStore(t *testing.T) {
 
 // TestOpenStorePersistsAcrossReopen simulates a graind restart: the same
 // -data-dir opened a second time, after the first connection closed,
-// must still see what the first one wrote. v2/README.md's "Two things
-// the port corrected" flags embedded Dolt's own "database not found on
-// a fresh directory" trap; this is the same openStore call exercised a
-// second time against a directory that already has a database, which is
-// the shape every real restart takes and the fresh-directory case alone
-// does not cover.
+// must still see what the first one wrote -- the same openStore call
+// exercised a second time against a directory that already has a
+// database, which is the shape every real restart takes and
+// TestOpenStore's fresh-directory case alone does not cover.
 func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 
-	store1, db1, err := openStore(dir, dolt.ServerConfig{})
+	store1, db1, err := openStore(dir)
 	if err != nil {
 		t.Fatalf("openStore (first): %v", err)
 	}
@@ -195,7 +192,7 @@ func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("closing the first connection: %v", err)
 	}
 
-	store2, db2, err := openStore(dir, dolt.ServerConfig{})
+	store2, db2, err := openStore(dir)
 	if err != nil {
 		t.Fatalf("openStore (second, same dir): %v", err)
 	}
@@ -213,7 +210,7 @@ func TestOpenStorePersistsAcrossReopen(t *testing.T) {
 // has written grain_config yet, so loadConfig both returns the flags
 // untouched and writes them as the seed a UI or a CLI would read next.
 func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
-	store, db, err := openStore(t.TempDir(), dolt.ServerConfig{})
+	store, db, err := openStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}
@@ -248,7 +245,7 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 // start must run with that rather than whatever the flags on this
 // particular invocation happen to say.
 func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
-	store, db, err := openStore(t.TempDir(), dolt.ServerConfig{})
+	store, db, err := openStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}
@@ -289,7 +286,7 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 
 func TestStartGitProxyServesAndStops(t *testing.T) {
 	dataDir := t.TempDir()
-	store, db, err := openStore(dataDir, dolt.ServerConfig{})
+	store, db, err := openStore(dataDir)
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}

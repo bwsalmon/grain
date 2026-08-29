@@ -2,9 +2,7 @@ package model
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,18 +11,20 @@ import (
 )
 
 // Store is the model's read and write surface over any database/sql
-// database. It imports no driver: opening an embedded Dolt database lives
-// in the dolt subpackage, so this file — and everything above it — stays
-// free of that dependency and testable against anything that speaks SQL.
+// database. It imports no driver: opening an embedded SQLite database
+// lives in the sqlite subpackage, so this file — and everything above
+// it — stays free of that dependency and testable against anything that
+// speaks SQL.
 //
 // Every statement here is parameterised. That is the whole of what the
 // language change bought at this layer: a Python controller cannot embed
-// Dolt, so it had to shell out to the CLI, and a CLI has no bind
-// parameters — which meant hand-rendering every untrusted issue title and
-// comment body into a statement and getting MySQL's escaping rules right
-// without a server to check against. That module does not exist here.
-// Writes are also real transactions rather than a best-effort batch, so a
-// task and its child rows land together or not at all.
+// SQLite the way Go can, so an earlier version of this store shelled out
+// to a CLI with no bind parameters — which meant hand-rendering every
+// untrusted issue title and comment body into a statement and getting
+// escaping rules right with no server to check against. That module does
+// not exist here. Writes are also real transactions rather than a
+// best-effort batch, so a task and its child rows land together or not
+// at all.
 type Store struct {
 	db *sql.DB
 }
@@ -73,48 +73,46 @@ func (s *Store) Init(ctx context.Context) error {
 	return nil
 }
 
-// ErrConflict reports that an operation lost a race and could not be
-// completed even after retrying. A caller seeing it should tell whoever
-// asked that their change did not land.
+// ErrConflict reports that an operation could not get a write in even
+// after retrying -- the store stayed busy with some other writer for
+// longer than it was willing to wait. A caller seeing it should tell
+// whoever asked that their change did not land.
 var ErrConflict = errors.New("conflict: the store kept changing under this operation")
 
-// maxWriteAttempts bounds write's retry loop. A handful is plenty:
-// conflicts need two writers overlapping in the same instant, and a
-// caller losing this many races in a row is contending with something
-// that is not going to stop.
+// maxWriteAttempts bounds write's retry loop. A handful is plenty: the
+// sqlite package's own busy_timeout already gives a blocked writer
+// several seconds to get in on its own; a caller still losing this many
+// attempts after that is contending with something that is not going to
+// stop.
 const maxWriteAttempts = 5
 
-// write runs a mutation in one transaction, stamped so that any other
-// mutation overlapping it is rejected, and starts the whole thing over if
-// this one is the loser.
+// write runs a mutation in one transaction, retrying it if the attempt
+// could not get the store's write lock in time.
 //
-// The stamp is the entire mechanism. Every mutation rewrites the single
-// row of grain_write, so two overlapping transactions disagree about what
-// that cell should say and the database reports a serialization failure
-// to whichever commits second -- rolling its work back whole. There is no
-// per-row version to compare and no lock to hold, so there is nothing to
-// leak: a process that dies mid-write leaves an aborted transaction and
-// nothing else.
-//
-// **The stamp must be unique per operation, never a counter.** Dolt
-// merges concurrent writes cell by cell and only reports a conflict when
-// the two disagree, so two writers that both read version N and both
-// write N+1 agree, merge silently, and both commit -- with the child-row
-// rewrites of each silently unioned. A counter is the obvious
-// implementation and it is the broken one;
-// dolt/store_test.go's TestACounterStampWouldNotConflict pins that down
-// so nobody optimises this into a counter later.
+// Locking, not merging, is the whole mechanism now. sqlite.Open's
+// _txlock=immediate takes SQLite's write lock at BEGIN rather than at
+// the transaction's first write statement, so two overlapping mutations
+// are serialised at the same point every time -- one proceeds, and the
+// other either waits out busy_timeout or fails outright, in both cases
+// before either has touched a row. That is a stronger guarantee than the
+// store had against Dolt, which merged concurrent writers cell by cell
+// and only reported a conflict when two of them touched the same cell
+// with different values (dolt/store_test.go's now-deleted
+// TestACounterStampWouldNotConflict pinned exactly that hazard); SQLite
+// admits only one writer at a time, full stop, so there is nothing left
+// for an artificial per-write marker to catch that the lock itself does
+// not already catch.
 //
 // fn may run more than once, on a fresh transaction each time. It must
 // therefore read what it needs through the querier it is handed rather
 // than relying on anything read before write was called -- that is what
-// makes the retry see the winner's state instead of rewriting over it.
+// makes a retry see the previous attempt's own result rather than
+// rewriting over it.
 func (s *Store) write(ctx context.Context, what string, fn func(*sql.Tx) error) error {
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
 		err := s.writeOnce(ctx, fn)
 		if err == nil {
-			commitHistory(ctx, s.db, what)
 			return nil
 		}
 		if !isSerializationFailure(err) {
@@ -122,117 +120,36 @@ func (s *Store) write(ctx context.Context, what string, fn func(*sql.Tx) error) 
 		}
 		lastErr = err
 	}
-	return fmt.Errorf("%w after %d attempts: %v", ErrConflict, maxWriteAttempts, lastErr)
+	return fmt.Errorf("%w after %d attempts (%s): %v", ErrConflict, maxWriteAttempts, what, lastErr)
 }
-
-// commitHistory records the write that just landed as a Dolt commit, so
-// the store keeps a real history rather than only a current state: what
-// grain did and when, a data diff per change, and a point the deployment
-// can be reset to.
-//
-// It runs after the SQL transaction rather than inside it, because the
-// transaction is what makes the change atomic and the commit is what
-// makes it a named point in history -- two different boundaries, and
-// conflating them would put a commit in the path of the write's own
-// success.
-//
-// **Its error is deliberately dropped, and that is safe rather than
-// sloppy.** The write has already landed by this point, so failing the
-// call would tell a caller their change did not happen when it did --
-// and a retry of, say, AddComment would post it twice. A missed commit
-// costs nothing but a coarser history: the next write stages everything
-// outstanding (`-A`), so the change is recorded in the commit after it
-// rather than its own. History gaps close themselves.
-//
-// A commit under concurrent writers can therefore contain more than the
-// change its message names -- another writer's transaction that landed in
-// between is swept in by `-A`, which TestACommitSweepsUpWhateverElseLanded
-// pins down. Nothing is ever lost; the boundaries are approximate. With
-// one writer, which is what an embedded deployment has by construction,
-// they are exact.
-//
-// This is the one statement in the package that assumes Dolt rather than
-// SQL in general. The property that actually matters -- that pkg/model
-// imports no driver, so the same Store runs embedded or over the wire --
-// is untouched.
-func commitHistory(ctx context.Context, db *sql.DB, what string) {
-	// CALL rather than SELECT: DOLT_COMMIT is a procedure. -A stages every
-	// table so this does not have to enumerate them, and --allow-empty
-	// keeps a write whose tables happen to be unchanged from being an
-	// error to special-case.
-	//
-	// --author is not decoration. Without it Dolt attributes the commit to
-	// the connected database user, which for an embedded store is whoever
-	// started the process -- so a history of grain's own work reads as
-	// having been done by "root". The connection's configured author
-	// applies only to creating the database, which is measurable and was
-	// measured.
-	_, _ = db.ExecContext(ctx,
-		"CALL DOLT_COMMIT('-A', '--allow-empty', '-m', ?, '--author', ?)",
-		"grain: "+what, historyAuthor)
-}
-
-// historyAuthor is who grain's own commits are by.
-//
-// It says grain rather than which principal asked, because Store.write
-// does not know that and threading it through every mutator would be a
-// lot of plumbing for a field the message already covers ("approve task
-// 2" is the interesting half). If per-principal attribution is ever
-// wanted, this is where it hooks in.
-//
-// Kept in step with dolt.DefaultConfig's own author, which names the same
-// identity for the commit that creates the database.
-const historyAuthor = "grain-automation <grain-automation@localhost>"
 
 func (s *Store) writeOnce(ctx context.Context, fn func(*sql.Tx) error) error {
+	// BeginTx is where a lost race shows up: sqlite.Open's DSN puts every
+	// transaction in immediate mode, so this is where SQLite's write lock
+	// is actually acquired (or waited for, or refused) rather than at the
+	// first write statement inside fn.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
-	}
-	if err := stamp(ctx, tx); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	// The commit is where a lost race is reported, not the statement, so
-	// this return is the load-bearing one.
 	return tx.Commit()
 }
 
-// stamp writes a value unique to this attempt into grain_write's single
-// row. REPLACE rather than UPDATE so the first write to a fresh database
-// creates the row instead of silently affecting nothing -- which would
-// leave that operation unguarded.
-func stamp(ctx context.Context, tx *sql.Tx) error {
-	var token [16]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return fmt.Errorf("generating a write stamp: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		"REPLACE INTO `grain_write` (`id`, `token`) VALUES (1, ?)",
-		hex.EncodeToString(token[:])); err != nil {
-		return fmt.Errorf("stamping the write: %w", err)
-	}
-	return nil
-}
-
 // isSerializationFailure reports whether the database is telling us this
-// transaction lost a race and should be tried again.
+// attempt could not get the write lock and should be tried again.
 //
-// Dolt says "Error 1213: serialization failure: this transaction
-// conflicts with a committed transaction from another client, try
-// restarting transaction" -- measured, and pinned by
-// dolt/store_test.go's TestDoltReportsASerializationFailure. MySQL uses
-// 1213 for a deadlock and 1205 for a lock-wait timeout, which mean the
-// same thing to a caller.
+// modernc.org/sqlite reports SQLite's own SQLITE_BUSY as "database is
+// locked (5) (SQLITE_BUSY)" -- measured directly, in sqlite/store_test.go's
+// TestSQLiteReportsABusyDatabase, which is what this matches against
+// rather than a hard-coded error code from the driver's own package (that
+// package imports no driver, on purpose -- pkg/model/sqlite's own doc
+// comment).
 //
-// Matching message text is not how anyone would choose to do this; the
-// alternative is importing a driver to type-assert its error, and this
-// package imports no driver on purpose (pkg/model/dolt's own doc
-// comment). A miss costs a pointless surfaced error rather than a wrong
+// A miss here costs a pointless surfaced error rather than a wrong
 // answer, and the pinning test is there to catch a reword.
 func isSerializationFailure(err error) bool {
 	if err == nil {
@@ -240,9 +157,8 @@ func isSerializationFailure(err error) bool {
 	}
 	msg := err.Error()
 	for _, marker := range []string{
-		"serialization failure",
-		"try restarting transaction",
-		"Deadlock found",
+		"database is locked",
+		"SQLITE_BUSY",
 	} {
 		if strings.Contains(msg, marker) {
 			return true

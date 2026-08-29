@@ -36,7 +36,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
@@ -127,9 +127,9 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 	const owner, repoName = "acme", "widgets"
 	repo := model.RepoRef{Owner: owner, Name: repoName}
 
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

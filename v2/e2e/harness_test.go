@@ -2,7 +2,7 @@
 // filed the way a human would, dispatch.Cycle deciding when it runs, an agent
 // (agent/gemini) actually driving it, and gitproxy actually authorizing
 // and forwarding the git push that results -- against a real embedded
-// Dolt store and a real (local, git http-backend) stand-in for GitHub.
+// SQLite store and a real (local, git http-backend) stand-in for GitHub.
 // That is the same discipline gitproxy/live_test.go already holds to one
 // layer down; what this package adds is dispatch.Cycle's own dispatch
 // decision, more than one task/run, and the state transitions that
@@ -49,7 +49,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
@@ -80,9 +80,9 @@ func newWorld(t *testing.T, slots []string) *world {
 		t.Skip("git not installed")
 	}
 
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

@@ -1,7 +1,7 @@
 package main
 
 // sync_test.go exercises cmdSync's "settings" path end to end against a
-// real embedded Dolt store -- the same "nothing here is a fake standing
+// real embedded SQLite store -- the same "nothing here is a fake standing
 // in for the store" discipline demo_test.go already holds cmd/grain's
 // own tests to. The "gcp" path is pkg/gcpsetup's own, covered network-
 // free by gcpsetup_test.go; syncGCP itself is exercised for its
@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -67,9 +67,9 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
-	db, err := dolt.Open(dolt.DefaultConfig(dataDir))
+	db, err := sqlite.Open(sqlite.DefaultConfig(dataDir))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	defer db.Close()
 	store := model.New(db)

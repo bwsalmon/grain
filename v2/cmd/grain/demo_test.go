@@ -1,6 +1,6 @@
 package main
 
-// Against a real embedded Dolt store, same discipline as pkg/ui's own
+// Against a real embedded SQLite store, same discipline as pkg/ui's own
 // tests (pkg/ui/client_test.go: "Nothing here is a fake standing in for
 // the store").
 
@@ -9,14 +9,14 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
 func TestSeedDemoCoversEveryState(t *testing.T) {
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

@@ -1,14 +1,14 @@
 // demo.go implements `grain demo`, formerly `grain ui -demo` before
 // bwsalmon/agents#363 folded the real UI into `grain daemon` and left
-// nothing standalone for the CLI's own store flags (-store-addr,
-// -data-dir) to attach to. This mode never needed those anyway -- its
-// whole point, unchanged, is a throwaway store nothing else is
-// connected to (this file's own seedDemo doc comment) -- so it is its
-// own small subcommand now rather than a flag on a mode that no longer
-// exists: a real pkg/ui.Server, over a real embedded Dolt database in a
-// fresh temp directory, seeded with fake tasks, for trying out the
-// frontend with no daemon, no orchestrator, no sandbox, no Gemini key and
-// no real git repo behind any of it.
+// nothing standalone for the CLI's own store flag (-data-dir) to attach
+// to. This mode never needed that anyway -- its whole point, unchanged,
+// is a throwaway store nothing else is connected to (this file's own
+// seedDemo doc comment) -- so it is its own small subcommand now rather
+// than a flag on a mode that no longer exists: a real pkg/ui.Server, over
+// a real embedded SQLite database in a fresh temp directory, seeded with
+// fake tasks, for trying out the frontend with no daemon, no
+// orchestrator, no sandbox, no Gemini key and no real git repo behind any
+// of it.
 package main
 
 import (
@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -49,7 +49,7 @@ func demo(args []string) {
 	if err != nil {
 		log.Fatalf("grain demo: creating a throwaway store: %v", err)
 	}
-	db, err := dolt.Open(dolt.DefaultConfig(dir))
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
 	if err != nil {
 		log.Fatalf("grain demo: opening the throwaway store: %v", err)
 	}

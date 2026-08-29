@@ -9,7 +9,8 @@
 // and grants the IAM roles that let the minter account administer the
 // agent account's keys (and, with -enable-gemini-key, mint API keys
 // project-wide). scripts/setup.sh already does the *host* half of a new
-// install (build, install, systemd, the dolt store) but only ever seeds
+// install (build, install, systemd, laying out the SQLite store's
+// directory) but only ever seeds
 // an already-minted GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE -- v2/README.md's
 // own "Accepted limits" list says plainly that "GCP token minting has
 // never run against a real project," and this is what an operator runs

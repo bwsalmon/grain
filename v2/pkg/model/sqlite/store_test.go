@@ -1,15 +1,17 @@
-package dolt_test
+package sqlite_test
 
-// The store against a real embedded Dolt database. Unlike the model
-// tests, which check what grain generates, these prove Dolt accepts the
-// DDL and that the views answer — which is the thing that could not be
-// verified at all while the store shelled out to a CLI that was not
+// The store against a real embedded SQLite database. Unlike the model
+// tests, which check what grain generates, these prove SQLite accepts
+// the DDL and that the views answer -- which is the thing that could not
+// be verified at all while the store shelled out to a CLI that was not
 // installed.
 
 import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -19,7 +21,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 var (
@@ -28,11 +30,11 @@ var (
 	bot   = model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}
 )
 
-func open(t *testing.T) (*model.Store, context.Context) {
+func openStore(t *testing.T) (*model.Store, *sql.DB, context.Context) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)
@@ -40,7 +42,7 @@ func open(t *testing.T) (*model.Store, context.Context) {
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("applying schema: %v", err)
 	}
-	return store, ctx
+	return store, db, ctx
 }
 
 func task(id string, approved bool) model.Task {
@@ -61,7 +63,7 @@ func task(id string, approved bool) model.Task {
 }
 
 func TestSchemaAppliesAndIsIdempotent(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	// Init runs on every start; a second one must be a no-op, not an error.
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("re-initialising: %v", err)
@@ -69,7 +71,7 @@ func TestSchemaAppliesAndIsIdempotent(t *testing.T) {
 }
 
 func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	folder := model.FolderRef{Path: []string{"payments", "services/billing"}}
 	want := task("a1b2", true)
 	want.Body = "some body"
@@ -111,10 +113,13 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	if !got.AutoMerge {
 		t.Errorf("flags: %+v", got)
 	}
+	if got.CreatedAt == nil || !got.CreatedAt.Equal(now) {
+		t.Errorf("created_at did not survive: %+v, want %v", got.CreatedAt, now)
+	}
 }
 
 func TestPutTaskReplacesChildRowsRatherThanAccumulating(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	tk := task("a1b2", true)
 	tk.Tags = []string{"one", "two"}
 	if err := store.PutTask(ctx, tk); err != nil {
@@ -132,7 +137,7 @@ func TestPutTaskReplacesChildRowsRatherThanAccumulating(t *testing.T) {
 }
 
 func TestGetTaskReturnsNilWhenAbsent(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	got, err := store.GetTask(ctx, "nope")
 	if err != nil || got != nil {
 		t.Fatalf("want (nil, nil), got (%v, %v)", got, err)
@@ -143,7 +148,7 @@ func TestUntrustedTextIsStoredNotInterpreted(t *testing.T) {
 	// The reason bind parameters were worth a language change: this is a
 	// value, and there is no rendering step that could make it anything
 	// else.
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	tk := task("a1b2", true)
 	tk.Title = "'; DROP TABLE `task`; --"
 	tk.Body = "\\'; DELETE FROM `task_run`; -- \x00 🤖"
@@ -160,7 +165,7 @@ func TestUntrustedTextIsStoredNotInterpreted(t *testing.T) {
 }
 
 func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("a1b2", false)); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +224,7 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 }
 
 func TestReadyExcludesBlockedAndUnblocksItself(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	blocker := task("c3d4", true)
 	blocker.Title = "the blocker"
 	blocked := task("a1b2", true)
@@ -261,7 +266,7 @@ func TestANonTaskLinkTargetNeverBlocks(t *testing.T) {
 	// A link to a review thread or a pull request is not a task, so the
 	// join finds nothing and it cannot block — a property of the schema
 	// rather than a rule anybody wrote.
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	tk := task("a1b2", true)
 	tk.Links = []model.Link{{Kind: model.LinkAddresses, Target: "owner/repo#7:thread-3"}}
 	if err := store.PutTask(ctx, tk); err != nil {
@@ -273,7 +278,7 @@ func TestANonTaskLinkTargetNeverBlocks(t *testing.T) {
 }
 
 func TestLeasesAreQueryableByMintingCredential(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +318,7 @@ func TestLeasesAreQueryableByMintingCredential(t *testing.T) {
 
 func TestDroppingALeaseTwiceIsNotAnError(t *testing.T) {
 	// Release and the expiry reaper can both reach the same lease.
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	for i := 0; i < 2; i++ {
 		if err := store.DropLease(ctx, "r1", "gemini-key", "projects/p/keys/k"); err != nil {
 			t.Fatalf("drop %d: %v", i, err)
@@ -322,7 +327,7 @@ func TestDroppingALeaseTwiceIsNotAnError(t *testing.T) {
 }
 
 func TestAttemptsCountsRuns(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +350,7 @@ func TestAttemptsCountsRuns(t *testing.T) {
 }
 
 func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	tk := task("a1b2", true) // Target: owner/payments-api
 	tk.Reads = []model.RepoRef{{Owner: "owner", Name: "shared-lib"}}
 	if err := store.PutTask(ctx, tk); err != nil {
@@ -371,7 +376,7 @@ func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 }
 
 func TestGitScopeIsEmptyWithNoLiveRunOnTheSandbox(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	target, reads, err := store.GitScope(ctx, "sandbox-0")
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +387,7 @@ func TestGitScopeIsEmptyWithNoLiveRunOnTheSandbox(t *testing.T) {
 }
 
 func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +411,7 @@ func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
 }
 
 func TestGitCredentialOverrideFollowsTheLiveRunOnASandbox(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	tk := task("a1b2", true)
 	tk.Grants = []model.Grant{model.GitCredentialGrant("workflow")}
 	if err := store.PutTask(ctx, tk); err != nil {
@@ -429,7 +434,7 @@ func TestGitCredentialOverrideFollowsTheLiveRunOnASandbox(t *testing.T) {
 }
 
 func TestGitCredentialOverrideIsAbsentWithoutAGitCredentialGrant(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	tk := task("a1b2", true)
 	tk.Grants = []model.Grant{{Capability: "gemini-key", Via: model.GrantByLabel}}
 	if err := store.PutTask(ctx, tk); err != nil {
@@ -448,14 +453,14 @@ func TestGitCredentialOverrideIsAbsentWithoutAGitCredentialGrant(t *testing.T) {
 }
 
 func TestGitCredentialOverrideIsAbsentWithNoLiveRunOnTheSandbox(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if _, ok, err := store.GitCredentialOverride(ctx, "sandbox-0"); err != nil || ok {
 		t.Errorf("ok=%v err=%v, want false, nil for an idle sandbox", ok, err)
 	}
 }
 
 func TestObservationBaselinesRoundTrip(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	id := int64(12345)
 	if err := store.Observe(ctx, model.Observation{
 		TaskID: "a1b2", BaselineCommentID: &id, ObservedAt: &now,
@@ -471,163 +476,10 @@ func TestObservationBaselinesRoundTrip(t *testing.T) {
 	}
 }
 
-// --- history ------------------------------------------------------------
-
-// Every write is a Dolt commit, so the store keeps a history rather than
-// only a current state. Nothing used to commit at all: dolt_log showed
-// "Initialize data repository" and nothing else, however much grain had
-// done.
-func TestEveryWriteBecomesACommit(t *testing.T) {
-	store, db, ctx := openConcurrent(t, 1)
-
-	before := commitMessages(t, db)
-	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
-		tk.Title = "renamed"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AddComment(ctx, model.Comment{
-		TaskID: "a1b2", Author: model.Attribution{Actor: human}, Body: "hello", CreatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	got := commitMessages(t, db)
-	if len(got) <= len(before) {
-		t.Fatalf("no commits were made: %v", got)
-	}
-	// The messages say what happened, which is the point of keeping them
-	// -- a history of "grain: write" a dozen times would be no history.
-	for _, want := range []string{
-		"grain: put task a1b2",
-		"grain: update task a1b2",
-		"grain: comment on task a1b2",
-	} {
-		if !containsString(got, want) {
-			t.Fatalf("no commit says %q; log is %v", want, got)
-		}
-	}
-}
-
-// Commits are attributed to grain, not to whoever happens to be running
-// the process. Dolt otherwise credits the connected database user, so an
-// embedded deployment's history reads as having been done by "root".
-func TestCommitsAreAttributedToGrain(t *testing.T) {
-	store, db, ctx := openConcurrent(t, 1)
-	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
-		t.Fatal(err)
-	}
-
-	var committer, email string
-	if err := db.QueryRowContext(ctx,
-		"SELECT `committer`, `email` FROM `dolt_log` ORDER BY `date` DESC LIMIT 1").
-		Scan(&committer, &email); err != nil {
-		t.Fatal(err)
-	}
-	if committer != "grain-automation" {
-		t.Fatalf("committer = %q, want grain-automation -- the history reads as somebody else's work", committer)
-	}
-	if email != "grain-automation@localhost" {
-		t.Fatalf("email = %q, want grain-automation@localhost", email)
-	}
-}
-
-// A commit stages everything outstanding, so under concurrent writers one
-// commit can carry another's work. Nothing is lost; the boundaries are
-// approximate. Worth pinning so the doc comment on commitHistory stays
-// true.
-func TestACommitSweepsUpWhateverElseLanded(t *testing.T) {
-	_, db, ctx := openConcurrent(t, 4)
-	if _, err := db.ExecContext(ctx,
-		"CREATE TABLE `sweep` (`id` INT NOT NULL, `v` VARCHAR(32), PRIMARY KEY (`id`))"); err != nil {
-		t.Fatal(err)
-	}
-	other, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
-
-	// Another writer's change lands but is not itself committed yet.
-	if _, err := other.ExecContext(ctx, "INSERT INTO `sweep` VALUES (1, 'theirs')"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx,
-		"CALL DOLT_COMMIT('-A', '--allow-empty', '-m', ?)", "grain: someone else's write"); err != nil {
-		t.Fatal(err)
-	}
-
-	var n int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `sweep` AS OF 'HEAD'").Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("rows at HEAD = %d, want 1 -- the other writer's change was not swept in, "+
-			"so commitHistory's doc comment is wrong about the boundaries", n)
-	}
-}
-
-// A commit that fails costs a coarser history, never a lost change: the
-// next write stages everything outstanding.
-func TestAMissedCommitIsRecoveredByTheNextWrite(t *testing.T) {
-	store, db, ctx := openConcurrent(t, 1)
-
-	// Stand in for a commit that did not happen by writing straight to the
-	// tables, bypassing Store.write entirely.
-	if _, err := db.ExecContext(ctx,
-		"INSERT INTO `task_tag` (`task_id`, `tag`) VALUES ('orphan', 'uncommitted')"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
-		t.Fatal(err)
-	}
-
-	var n int
-	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM `task_tag` AS OF 'HEAD' WHERE `task_id` = 'orphan'").Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatal("the uncommitted change was not picked up by the next write's commit")
-	}
-}
-
-func commitMessages(t *testing.T, db *sql.DB) []string {
-	t.Helper()
-	rows, err := db.QueryContext(context.Background(),
-		"SELECT `message` FROM `dolt_log` ORDER BY `date` DESC, `commit_hash`")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var m string
-		if err := rows.Scan(&m); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, m)
-	}
-	return out
-}
-
-func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
-}
-
 // --- task identity and the conversation --------------------------------
 
 func TestNewTaskIDAllocatesDistinctIncreasingIDs(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 
 	seen := map[string]bool{}
 	var previous int64
@@ -657,7 +509,7 @@ func TestNewTaskIDAllocatesDistinctIncreasingIDs(t *testing.T) {
 // A task can be created with nothing but a store -- the whole point of
 // allocating identity here rather than borrowing a GitHub issue number.
 func TestATaskCanBeFiledWithNoGitHubIssueAtAll(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 
 	id, err := store.NewTaskID(ctx)
 	if err != nil {
@@ -684,7 +536,7 @@ func TestATaskCanBeFiledWithNoGitHubIssueAtAll(t *testing.T) {
 }
 
 func TestCommentsRoundTripInWriteOrder(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("t1", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -728,7 +580,7 @@ func TestCommentsRoundTripInWriteOrder(t *testing.T) {
 }
 
 func TestCommentsAreScopedToTheirTask(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	for _, id := range []string{"t1", "t2"} {
 		if err := store.PutTask(ctx, task(id, true)); err != nil {
 			t.Fatal(err)
@@ -752,7 +604,7 @@ func TestCommentsAreScopedToTheirTask(t *testing.T) {
 // The id AddComment returns is the one an Observation names, which is how
 // "a question is outstanding" survives without a GitHub comment id.
 func TestAPendingQuestionNamesAStoredComment(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("t1", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +643,7 @@ func TestAPendingQuestionNamesAStoredComment(t *testing.T) {
 // Comment bodies are untrusted text, the same as titles and task bodies
 // (see TestUntrustedTextIsStoredNotInterpreted above).
 func TestAnUntrustedCommentBodyIsStoredNotInterpreted(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("t1", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -816,34 +668,24 @@ func TestAnUntrustedCommentBodyIsStoredNotInterpreted(t *testing.T) {
 	}
 }
 
-// --- concurrency: the write stamp ---------------------------------------
-
-// openConcurrent opens a store that permits more than one connection.
+// --- concurrency: SQLite's own single-writer lock -----------------------
 //
-// dolt.Open pins the pool to one because embedded Dolt is a single
-// writer; these tests raise it precisely to make two writers race, which
-// is the situation a Dolt SQL server deployment has for real.
-func openConcurrent(t *testing.T, conns int) (*model.Store, *sql.DB, context.Context) {
-	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	db.SetMaxOpenConns(conns)
-	store := model.New(db)
-	ctx := context.Background()
-	if err := store.Init(ctx); err != nil {
-		t.Fatal(err)
-	}
-	return store, db, ctx
-}
+// Dolt merged concurrent writers cell by cell and only reported a
+// conflict when two of them touched the same cell with different values
+// -- which is why the deleted dolt/store_test.go needed a random write
+// stamp and a test (TestACounterStampWouldNotConflict) proving a plain
+// counter would not have caught every overlap. SQLite admits only one
+// writer at a time, full stop (sqlite.Open's _txlock=immediate), so
+// there is no equivalent hazard to guard against here: two writers
+// either take turns, serialised by the lock itself, or one of them fails
+// outright with SQLITE_BUSY. The tests below exercise both outcomes
+// instead.
 
 // Two writers changing different fields of the same task at the same
-// time: one wins, the other conflicts, retries on the winner's state, and
-// both changes end up present.
+// time: SQLite's write lock makes one wait for the other, and both
+// changes end up present once each has had its turn.
 func TestConcurrentUpdatesBothLand(t *testing.T) {
-	store, _, ctx := openConcurrent(t, 4)
+	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
@@ -888,11 +730,12 @@ func TestConcurrentUpdatesBothLand(t *testing.T) {
 	}
 }
 
-// A conflict rolls the loser's transaction back whole, child rows
-// included. Without the stamp, two writers each doing PutTask's
-// delete-and-reinsert of a task's tags had their sets silently unioned.
+// One writer's transaction rolls back whole, child rows included, if it
+// loses the race for the write lock and has to retry -- without that,
+// two writers each doing PutTask's delete-and-reinsert of a task's tags
+// could see their sets silently unioned.
 func TestAConflictRollsBackChildRowsToo(t *testing.T) {
-	store, _, ctx := openConcurrent(t, 4)
+	store, _, ctx := openStore(t)
 	base := task("a1b2", true)
 	base.Tags = []string{"keep"}
 	if err := store.PutTask(ctx, base); err != nil {
@@ -933,154 +776,84 @@ func TestAConflictRollsBackChildRowsToo(t *testing.T) {
 	}
 }
 
-// The trap the stamp has to avoid, stated as a test so nobody optimises
-// the random token into a counter.
-//
-// Dolt merges concurrent writes cell by cell and reports a conflict only
-// when the two disagree. Two writers that both read version N and both
-// write N+1 agree, so the merge succeeds and neither is told anything --
-// which is exactly the lost update the stamp exists to prevent.
-func TestACounterStampWouldNotConflict(t *testing.T) {
-	_, db, ctx := openConcurrent(t, 4)
-	for _, q := range []string{
-		"CREATE TABLE `counter_probe` (`id` INT NOT NULL, `n` INT NOT NULL, PRIMARY KEY (`id`))",
-		"INSERT INTO `counter_probe` VALUES (1, 0)",
-	} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	a, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tx := range []*sql.Tx{a, b} {
-		var n int
-		if err := tx.QueryRowContext(ctx,
-			"SELECT `n` FROM `counter_probe` WHERE `id`=1").Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		// Both read 0 and both write 1: the same value.
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE `counter_probe` SET `n` = ? WHERE `id`=1", n+1); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := a.Commit(); err != nil {
-		t.Fatalf("first commit: %v", err)
-	}
-	if err := b.Commit(); err != nil {
-		_ = b.Rollback()
-		t.Skipf("this Dolt build conflicts even on equal values (%v) -- "+
-			"a counter stamp would work here, but the random token is still correct", err)
-	}
-	t.Log("confirmed: two writers landing the same value merge silently, " +
-		"so a counter stamp would not have caught this overlap")
-}
-
 // The wording model.isSerializationFailure matches on, asserted against
 // the real engine rather than assumed. pkg/model's own stamp_test.go
-// pins the same string, so a Dolt reword fails both together.
-func TestDoltReportsASerializationFailure(t *testing.T) {
-	_, db, ctx := openConcurrent(t, 4)
-	for _, q := range []string{
-		"CREATE TABLE `probe` (`id` INT NOT NULL, `v` VARCHAR(64) NOT NULL, PRIMARY KEY (`id`))",
-		"INSERT INTO `probe` VALUES (1, 'v0')",
-	} {
-		if _, err := db.ExecContext(ctx, q); err != nil {
-			t.Fatal(err)
-		}
+// pins the same string, so a driver reword fails both together.
+func TestSQLiteReportsABusyDatabase(t *testing.T) {
+	db, cleanup := openWithBusyTimeout(t, 200*time.Millisecond)
+	defer cleanup()
+	if _, err := db.Exec(
+		"CREATE TABLE `probe` (`id` INTEGER NOT NULL, `v` TEXT NOT NULL, PRIMARY KEY (`id`))"); err != nil {
+		t.Fatal(err)
 	}
 
-	a, err := db.BeginTx(ctx, nil)
+	ctx := context.Background()
+	holder, err := db.BeginTx(ctx, nil) // takes SQLite's one write lock and holds it
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tx := range []*sql.Tx{a, b} {
-		var v string
-		if err := tx.QueryRowContext(ctx, "SELECT `v` FROM `probe` WHERE `id`=1").Scan(&v); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Different values, which is what the stamp guarantees.
-	if _, err := a.ExecContext(ctx, "UPDATE `probe` SET `v`='a' WHERE `id`=1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.ExecContext(ctx, "UPDATE `probe` SET `v`='b' WHERE `id`=1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Commit(); err != nil {
-		t.Fatalf("first commit: %v", err)
-	}
-	err = b.Commit()
+	defer holder.Rollback()
+
+	_, err = db.BeginTx(ctx, nil) // must wait out busy_timeout, then fail
 	if err == nil {
-		_ = b.Rollback()
-		t.Fatal("the second commit succeeded: Dolt no longer reports a lost race, " +
-			"so the write stamp catches nothing")
+		t.Fatal("a second writer started while the first was still open")
 	}
-	if !strings.Contains(err.Error(), "serialization failure") &&
-		!strings.Contains(err.Error(), "try restarting transaction") {
-		t.Fatalf("Dolt reports a lost race as %q, which model.isSerializationFailure "+
+	if !strings.Contains(err.Error(), "database is locked") && !strings.Contains(err.Error(), "SQLITE_BUSY") {
+		t.Fatalf("SQLite reports a busy database as %q, which model.isSerializationFailure "+
 			"does not recognise -- update the markers there and in pkg/model/stamp_test.go", err)
 	}
-	t.Logf("Dolt reports a lost race as: %v", err)
+	t.Logf("SQLite reports a busy database as: %v", err)
 }
 
-// The retry path, forced rather than raced for: the mutate closure makes
-// a competing write the first time it runs, so its own commit loses and
-// the whole operation starts over on the winner's state.
-func TestARetryComposesOnTheWinnersState(t *testing.T) {
-	store, _, ctx := openConcurrent(t, 4)
+// The retry path, forced deterministically with a short busy_timeout
+// rather than raced for: a competing transaction holds the write lock
+// past that timeout, so the first attempt or two are refused with
+// SQLITE_BUSY before the lock frees up and Store.write's retry loop
+// succeeds.
+func TestARetryRecoversFromABusyDatabase(t *testing.T) {
+	db, cleanup := openWithBusyTimeout(t, 100*time.Millisecond)
+	defer cleanup()
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
 
-	competed := false
+	blocker, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		// Held comfortably longer than one busy_timeout, so the update
+		// below is refused at least once before this releases the lock --
+		// exercising write's retry loop rather than hoping to catch it.
+		time.Sleep(350 * time.Millisecond)
+		_ = blocker.Rollback()
+	}()
+
 	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
-		if !competed {
-			competed = true
-			if err := store.UpdateTask(ctx, "a1b2", func(inner *model.Task) error {
-				inner.Base = "release"
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
 		tk.Title = "renamed"
 		return nil
 	}); err != nil {
-		t.Fatalf("UpdateTask: %v", err)
+		t.Fatalf("UpdateTask did not recover from a busy database: %v", err)
 	}
-	if !competed {
-		t.Fatal("the competing write never ran, so no conflict was forced")
-	}
-
 	got, err := store.GetTask(ctx, "a1b2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Title != "renamed" {
-		t.Fatalf("title = %q, want the retried change", got.Title)
-	}
-	if got.Base != "release" {
-		t.Fatalf("base = %q, want the competing change to have survived the retry", got.Base)
+		t.Fatalf("title = %q, want the retried write to have landed", got.Title)
 	}
 }
 
 // The answer to "what if it crashes mid-write": an operation that does
-// not reach commit leaves nothing behind. There is no lock to release and
-// no version to reconcile, so the failure needs no cleanup at all.
+// not reach commit leaves nothing behind. There is no lock left held and
+// no merge to reconcile, so the failure needs no cleanup at all.
 func TestAFailedWriteLeavesNothingBehind(t *testing.T) {
-	store, _, ctx := openConcurrent(t, 4)
+	store, _, ctx := openStore(t)
 	before := task("a1b2", true)
 	before.Tags = []string{"keep"}
 	if err := store.PutTask(ctx, before); err != nil {
@@ -1119,57 +892,8 @@ func TestAFailedWriteLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-// What the history is for: the store can now answer what changed, not
-// just what is true. This is also the thing a change feed would be built
-// on, so it is worth knowing it works before anyone needs it.
-func TestTheHistoryAnswersWhatChanged(t *testing.T) {
-	store, db, ctx := openConcurrent(t, 1)
-
-	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
-		tk.Title = "renamed"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	rows, err := db.QueryContext(ctx,
-		"SELECT `diff_type`, `from_title`, `to_title` FROM `dolt_diff_task` "+
-			"WHERE `to_id` = 'a1b2' OR `from_id` = 'a1b2' ORDER BY `to_commit_date` DESC")
-	if err != nil {
-		t.Fatalf("reading the task diff: %v", err)
-	}
-	defer rows.Close()
-
-	type change struct{ kind, from, to string }
-	var changes []change
-	for rows.Next() {
-		var kind string
-		var from, to sql.NullString
-		if err := rows.Scan(&kind, &from, &to); err != nil {
-			t.Fatal(err)
-		}
-		changes = append(changes, change{kind, from.String, to.String})
-	}
-	if len(changes) < 2 {
-		t.Fatalf("diff has %d entries, want the add and the rename: %+v", len(changes), changes)
-	}
-	if changes[0].kind != "modified" || changes[0].to != "renamed" {
-		t.Fatalf("newest change = %+v, want the rename with its new title", changes[0])
-	}
-	if changes[0].from != "Rename the endpoint" {
-		t.Fatalf("newest change lost the old value: %+v -- before-and-after is the "+
-			"whole reason a diff beats a snapshot", changes[0])
-	}
-	if changes[len(changes)-1].kind != "added" {
-		t.Fatalf("oldest change = %+v, want the task being added", changes[len(changes)-1])
-	}
-}
-
 func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	got, err := store.GetConfig(ctx)
 	if err != nil || got != nil {
 		t.Fatalf("want (nil, nil) before anything has written a config, got (%+v, %v)", got, err)
@@ -1186,7 +910,7 @@ func testConfig() model.Config {
 }
 
 func TestConfigRoundTrips(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	want := testConfig()
 	if err := store.PutConfig(ctx, want); err != nil {
 		t.Fatalf("put: %v", err)
@@ -1202,9 +926,9 @@ func TestConfigRoundTrips(t *testing.T) {
 
 // PutConfig replaces the single row wholesale rather than accumulating a
 // second one -- there is exactly one deployment configuration, the same
-// discipline grain_write and grain_schema hold to.
+// discipline grain_schema holds to.
 func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
-	store, ctx := open(t)
+	store, _, ctx := openStore(t)
 	if err := store.PutConfig(ctx, testConfig()); err != nil {
 		t.Fatalf("first put: %v", err)
 	}
@@ -1223,12 +947,24 @@ func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
 	}
 }
 
-func TestPutConfigIsACommit(t *testing.T) {
-	store, db, ctx := openConcurrent(t, 1)
-	if err := store.PutConfig(ctx, testConfig()); err != nil {
-		t.Fatal(err)
+// openWithBusyTimeout opens a database file with a shorter busy_timeout
+// than sqlite.Open's own (five seconds -- too long for a test to wait
+// out on purpose), so the two determinism tests above can force
+// SQLITE_BUSY on a bounded, predictable schedule instead of racing for
+// it.
+func openWithBusyTimeout(t *testing.T, timeout time.Duration) (*sql.DB, func()) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "grain.db")
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout("+strconv.FormatInt(timeout.Milliseconds(), 10)+")")
+	q.Set("_txlock", "immediate")
+	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	if err != nil {
+		t.Fatalf("opening sqlite with a custom busy_timeout: %v", err)
 	}
-	if !containsString(commitMessages(t, db), "grain: update config") {
-		t.Fatalf("no commit named the config write; log is %v", commitMessages(t, db))
+	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		db.Close()
+		t.Fatalf("enabling WAL: %v", err)
 	}
+	return db, func() { db.Close() }
 }

@@ -227,7 +227,7 @@ func (erroringAuthorizer) Authorize(context.Context, string, string, string, str
 // stubCredentialOverrides answers a fixed (name, ok) for every sandbox --
 // core_test.go's own concern is what GitProxy.Handle does with the
 // answer, not how a real one resolves it (model.Store.GitCredentialOverride
-// and its own dolt-backed tests cover that).
+// and its own sqlite-backed tests cover that).
 type stubCredentialOverrides struct {
 	name string
 	ok   bool

@@ -5,7 +5,7 @@ package e2e
 // several repos over many rounds, dispatch.Cycle deciding what runs when,
 // real gemini agent turns actually pushing branches through a real
 // gitproxy, and a GitHub-sync stand-in observing completion, questions,
-// and merges -- all against real embedded Dolt and real (local) git, the
+// and merges -- all against a real embedded SQLite store and real (local) git, the
 // same discipline model/simulate_test.go and dispatch/dispatch_test.go already
 // hold their own random tests to one layer down.
 //

@@ -11,20 +11,20 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 
-// openStore opens a real embedded Dolt store in a temp directory -- the
+// openStore opens a real embedded SQLite store in a temp directory -- the
 // same discipline every other package's own tests hold to (model/
 // simulate_test.go's own doc comment: "Nothing here is a fake standing in
 // for the store").
 func openStore(t *testing.T) (*model.Store, context.Context) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)
