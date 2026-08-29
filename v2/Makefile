@@ -46,7 +46,7 @@ CONTAINER_CACHE ?= $(CURDIR)/.container-cache
 # does that, and the flag disappears with it.
 CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 
-.PHONY: all build test vet fmt clean builder container-build frontend $(CMDS)
+.PHONY: all build test test-e2e vet fmt clean builder container-build frontend $(CMDS)
 
 all: vet test build
 
@@ -136,6 +136,19 @@ container-build: builder
 test: frontend
 	go test ./...
 	cd pkg/ui/frontend && npm test
+
+# pkg/ui/frontend/e2e (bwsalmon/agents#415) drives the real built
+# frontend through a real Chromium, over a real pkg/ui.Server
+# (playwright.config.js's webServer runs `go run ./cmd/grain demo`) --
+# unlike `test` above, that needs a real browser on the machine, which
+# `npx playwright install --with-deps` fetches and apt-installs itself.
+# Left out of `test`/`all` and its own target instead: forcing a ~300MB
+# browser download and a handful of apt packages (X11, fonts, codecs --
+# see playwright.config.js) on every `make test` would be a poor trade
+# for a checkout that just wants the unit suite; CI runs this as its own
+# job (../.github/workflows/tests.yml) so the coverage still exists.
+test-e2e: frontend
+	cd pkg/ui/frontend && npx playwright install --with-deps chromium && npm run test:e2e
 
 vet: frontend
 	go vet ./...
