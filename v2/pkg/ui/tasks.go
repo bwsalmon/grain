@@ -34,13 +34,22 @@ type Task struct {
 	// Reads is every repo this task's run may read but never push to --
 	// model.Task.Reads, rendered as owner/name strings the same way Repo
 	// renders its single Target.
-	Reads         []string   `json:"reads,omitempty"`
-	Base          string     `json:"base,omitempty"`
-	AutoMerge     bool       `json:"autoMerge"`
-	Capabilities  []string   `json:"capabilities"`
-	PullRequest   string     `json:"pullRequest,omitempty"`
-	GeneratedFrom string     `json:"generatedFrom,omitempty"`
-	CreatedAt     *time.Time `json:"createdAt,omitempty"`
+	Reads         []string `json:"reads,omitempty"`
+	Base          string   `json:"base,omitempty"`
+	AutoMerge     bool     `json:"autoMerge"`
+	Capabilities  []string `json:"capabilities"`
+	PullRequest   string   `json:"pullRequest,omitempty"`
+	GeneratedFrom string   `json:"generatedFrom,omitempty"`
+	// Stacked is true for a task the merge queue filed automatically to
+	// repair another task's own pull request (model.ReasonFix) -- built
+	// on that task's own branch and merged straight back into it once
+	// green. Paired with GeneratedFrom, it is what tells the frontend
+	// to nest a task under the one that generated it (bwsalmon/agents#378)
+	// rather than list it as a separate task: unlike an ordinary
+	// propose_task child, a stacked task is not new work, just a
+	// continuation of the same change.
+	Stacked   bool       `json:"stacked,omitempty"`
+	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,
 	// resolved or not -- the definition. Blocked and BlockedBy are the
 	// signal: whether any of it (or a child-of link) is still open right
@@ -90,6 +99,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool) Task {
 		Base:         t.Base,
 		AutoMerge:    t.AutoMerge,
 		Capabilities: []string{},
+		Stacked:      t.Origin.Reason == model.ReasonFix,
 		CreatedAt:    t.CreatedAt,
 	}
 	if t.Target != nil {

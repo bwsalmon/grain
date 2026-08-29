@@ -56,6 +56,16 @@ func task(id string, approved bool, links ...model.Link) model.Task {
 	return tk
 }
 
+// fixTask builds a task the merge queue would file to repair a stuck
+// queue head (Origin.Reason == ReasonFix) -- see orchestrator/sync.go's
+// fileFixTask. Dispatch order is the only thing distinguishing it from
+// an ordinary task here, so nothing else about it needs to differ.
+func fixTask(id string) model.Task {
+	tk := task(id, true)
+	tk.Origin.Reason = model.ReasonFix
+	return tk
+}
+
 func putTasks(t *testing.T, store *model.Store, ctx context.Context, tasks ...model.Task) {
 	t.Helper()
 	for _, tk := range tasks {
@@ -200,6 +210,26 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].TaskID != "blocked" {
 		t.Fatalf("expected the formerly-blocked task dispatched after its dependency closed, got %+v", got)
+	}
+}
+
+// TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks is bwsalmon/
+// agents#389: a fix task the merge queue filed for a stuck repo head
+// must take a free slot ahead of ordinary new work, even one that has
+// been ready longer and would otherwise win task_ready's own tiebreak
+// (task ID) -- otherwise the repair sits behind unrelated tasks while
+// the branch it targets keeps moving, and has to be refiled once it
+// finally runs.
+func TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, task("a-new-work", true), fixTask("z-fix"))
+
+	got, err := dispatch.Cycle(ctx, store, []string{"slot-1"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TaskID != "z-fix" {
+		t.Fatalf("dispatched %+v, want the fix task despite sorting after the other task by ID", got)
 	}
 }
 

@@ -80,7 +80,8 @@ export default function NewTaskOverlay({ tasks, config, onClose, onCreated, show
             </label>
           ))}
         </fieldset>
-        <label>Depends on <span className="hint">optional</span>
+        <fieldset>
+          <legend>Depends on <span className="hint">optional</span></legend>
           {dependsOn.length > 0 && (
             <div className="chips dependency-chips">
               {dependsOn.map((t) => (
@@ -104,7 +105,7 @@ export default function NewTaskOverlay({ tasks, config, onClose, onCreated, show
             onPick={addDependency}
             placeholder="Search tasks to depend on…"
           />
-        </label>
+        </fieldset>
         <label className="checkbox">
           <input type="checkbox" name="approved" />
           Queue immediately (unchecked files it as a proposal, needing approval)
