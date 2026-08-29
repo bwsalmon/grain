@@ -126,6 +126,7 @@ function renderList(tasks) {
   for (const t of visible) {
     const chips = [];
     if (t.repo) chips.push(el("span", { class: "chip", text: t.repo }));
+    for (const repo of t.reads || []) chips.push(el("span", { class: "chip chip-read", title: "read-only", text: `${repo} (read)` }));
     for (const id of t.capabilities) chips.push(el("span", { class: "chip", text: capabilityName(id) }));
     const badges = [el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state })];
     if (t.blocked) {
@@ -209,6 +210,7 @@ function renderDetail(t) {
   const declaredParts = [];
   if (t.repo) declaredParts.push(`repo ${t.repo}`);
   if (t.base) declaredParts.push(`base ${t.base}`);
+  if (t.reads && t.reads.length > 0) declaredParts.push(`reads ${t.reads.join(", ")}`);
   declaredParts.push(`auto-merge ${t.autoMerge}`);
   container.appendChild(el("div", { class: "declared", text: declaredParts.join("  ") }));
 
@@ -382,6 +384,10 @@ async function submitNewTask(evt) {
     .split(",")
     .map((id) => id.trim())
     .filter((id) => id !== "");
+  const reads = (data.get("reads") || "")
+    .split(",")
+    .map((repo) => repo.trim())
+    .filter((repo) => repo !== "");
   const payload = {
     title: data.get("title"),
     description: data.get("description") || "",
@@ -390,6 +396,7 @@ async function submitNewTask(evt) {
     autoMerge: form.elements.autoMerge.checked,
     capabilities,
     dependsOn,
+    reads,
     approved: form.elements.approved.checked,
   };
   try {
