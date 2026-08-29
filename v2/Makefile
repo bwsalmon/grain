@@ -46,11 +46,27 @@ CONTAINER_CACHE ?= $(CURDIR)/.container-cache
 # does that, and the flag disappears with it.
 CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 
-.PHONY: all build test vet fmt clean builder container-build $(CMDS)
+.PHONY: all build test vet fmt clean builder container-build frontend $(CMDS)
 
 all: vet test build
 
-build: $(CMDS)
+build: frontend $(CMDS)
+
+# pkg/ui/frontend (bwsalmon/agents#356) is React+Vite, built into
+# pkg/ui/static -- the directory server.go embeds -- rather than
+# checked in itself, so this has to run before `go build`/`go vet`/`go
+# test` can see real content there. `npm ci` rather than `npm install`:
+# a reproducible install from package-lock.json, the same reason `go
+# build` trusts go.sum over re-resolving go.mod.
+#
+# The find clears out a previous build first rather than leaving Vite's
+# own emptyOutDir to do it: that would also take ../static/.gitignore
+# and .gitkeep with it, the two files that let go:embed compile against
+# this generated directory on a fresh checkout that has never run
+# `npm run build` at all.
+frontend:
+	find pkg/ui/static -mindepth 1 -not -name '.gitignore' -not -name '.gitkeep' -delete
+	cd pkg/ui/frontend && npm ci && npm run build
 
 # BUILDVCS is passed explicitly rather than left to `go build`'s default
 # (which is this same `auto`) so that turning it off is a documented word
@@ -114,10 +130,13 @@ container-build: builder
 		-e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
 		-w /src/v2 $(BUILDER_IMAGE) make build BUILDVCS=$(BUILDVCS)
 
-test:
+# Both need pkg/ui/static populated first, same as build: go:embed
+# fails to compile -- not just to run -- against a static/ holding
+# nothing but .gitkeep.
+test: frontend
 	go test ./...
 
-vet:
+vet: frontend
 	go vet ./...
 
 # CI has no equivalent fmt check; this just fails the way `go vet` does

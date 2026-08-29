@@ -30,4 +30,13 @@ FROM ${GO_IMAGE}:${GO_VERSION}-bookworm
 # bumped apart).
 ENV GOTOOLCHAIN=local
 
+# pkg/ui/frontend (bwsalmon/agents#356) needs a JS toolchain of its own
+# now: `make build` runs `npm ci && npm run build` there before `go
+# build`, so this image carries one too rather than leaving
+# container-build unable to reproduce it. Debian 12's own nodejs/npm
+# packages are recent enough for the pinned Vite version pkg/ui/frontend
+# builds with -- no NodeSource repo to add just for this.
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+	&& rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src/v2

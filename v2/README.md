@@ -919,15 +919,33 @@ already produces one dependency-free binary per OS `cmd/grain` runs on
 (Mac, Linux today); a `net/http` server that opens the system's default
 browser gets "runs standalone on Mac and Linux" for free, in the one language
 every other substrate here already commits to (see "Why Go" above), with
-no second toolchain (Node, Rust, Xcode) for this repo to carry. "Set up
-to run on iOS/Android in the future" is what shapes `pkg/ui` into an
-HTTP+JSON API in the first place rather than server-rendered pages: a
+no second *runtime* — Node, Rust, Xcode — for a deployed binary to carry.
+"Set up to run on iOS/Android in the future" is what shapes `pkg/ui` into
+an HTTP+JSON API in the first place rather than server-rendered pages: a
 future mobile client — native, or a thin webview shell — is just another
 caller of the same `/api/*` surface the daemon's own embedded frontend
-(`pkg/ui/static/`, plain HTML/CSS/JS, no build step) already uses, with
-nothing about the server to rewrite — the same surface `pkg/ui.HTTPClient`
-gives `cmd/grain`'s own CLI (see "The UI and the CLI talk to the daemon
-over REST" below).
+already uses, with nothing about the server to rewrite — the same surface
+`pkg/ui.HTTPClient` gives `cmd/grain`'s own CLI (see "The UI and the CLI
+talk to the daemon over REST" below).
+
+The frontend itself (`pkg/ui/frontend/`, bwsalmon/agents#356) is React
+built with Vite, not the plain HTML/CSS/JS this section used to describe
+— that earlier no-framework, no-build-step choice bought a repo `go
+build` alone could produce, at the cost of every UI change being DOM
+plumbing by hand (`el()`, manual diffing against `lastList`/`lastDetail`
+to avoid stealing focus on a poll) in a ~1200-line file with nowhere to
+grow. React and its ecosystem — component boundaries, hooks, the wider
+supply of libraries a task UI eventually wants (routing, richer forms,
+charts) — buys back the extensibility that file was starting to cost,
+and is worth a real toolchain now that one is already needed to build
+it. What survives from "why a local web server" is the deployment shape,
+not the build step: `npm run build` (wired into `make build`/`test`/
+`vet` and the `go-test` CI job, and into `Dockerfile.build` for
+`container-build`) has to run before `go build` can see real content in
+`pkg/ui/static/` — the directory it `//go:embed`s — but that step runs
+once, at build time; the artifact `cmd/grain` ships is still the one
+dependency-free Go binary this section opened with, with the built
+frontend baked into it rather than a Node runtime tagging along.
 
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
@@ -947,8 +965,8 @@ there is no real store to point it at by mistake, only the throwaway one
 it creates and seeds itself.
 
 **Freshness, not a cache.** Every mutation in the frontend
-(`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
-than assuming its own optimistic update is now true, matching the
+(`pkg/ui/frontend/src/App.jsx`'s `act`) re-fetches the task afterward
+rather than assuming its own optimistic update is now true, matching the
 direction document's "it shows freshness for anything" — read live from
 the store rather than presenting a stale value as current. There is
 nowhere here for staleness to hide since nothing is ever cached across
@@ -957,17 +975,22 @@ one request.
 **And it refreshes itself.** A task changes state when `graind`
 dispatches it, when a run finishes, and when a pull request merges —
 none of which the browser is told about, so without a poll the screen
-only moves when somebody clicks. `app.js` re-reads every three seconds,
+only moves when somebody clicks. `App.jsx` re-reads every three seconds,
 skipping the tick entirely while the tab is hidden and never overlapping
 itself.
 
-Two details keep that useful rather than annoying. A poll that finds the
-payload unchanged renders *nothing*, so an idle screen never flickers,
-loses focus, or resets its scroll; and when the open task does change, an
-unsent comment is carried across the re-render, because `renderDetail`
-rebuilds the whole pane including the textarea somebody may be halfway
-through typing into. Both were checked by driving the real UI in a
-browser, which is also how the second one was found.
+Two details keep that useful rather than annoying. React's own
+reconciliation already skips DOM writes for output that hasn't actually
+changed, so an idle screen polled every three seconds never flickers,
+loses focus, or resets its scroll — the vanilla-JS frontend this
+replaced had to do that by hand, diffing a poll's JSON against
+`lastList`/`lastDetail` before deciding whether to re-render at all, and
+this needs none of it. And when the open task does change, an unsent
+comment survives the re-render because `DetailOverlay.jsx`'s comment box
+is an uncontrolled input: React never touches a `<textarea>`'s own DOM
+value on a re-render, only on mount, so a reply someone is halfway
+through typing is untouched by newer comments arriving underneath it.
+Both behaviors were checked by driving the real UI in a browser.
 
 Polling rather than a change feed is deliberate, and unlike when this
 store ran on Dolt, there is no longer a substrate underneath it to
@@ -1024,8 +1047,8 @@ side of the same `Client` methods — no flags prints what is stored (or
 that nothing is, yet); any flags apply just those, the way `grain
 update` already treats a task's own flags.
 
-`pkg/ui/static/`'s frontend (bwsalmon/agents#333) now has a settings
-panel too — the topbar's "Settings" button opens a form reading `GET
+`pkg/ui/frontend/` (bwsalmon/agents#333) now has a settings panel too —
+the topbar's "Settings" button opens a form reading `GET
 /api/settings`, distinguishing `configured: false` (nothing saved yet,
 before any daemon has started or any value set) from a populated one
 the same way `grain settings` (no flags) already does. Saving sends
