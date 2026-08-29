@@ -53,7 +53,7 @@ func newSSHTestClient(t *testing.T, workspace string) *Client {
 	t.Helper()
 	registry := NewRegistry()
 	registry.Register(NewSSHSandboxTools(localExecRunner{dir: workspace}, workspace)...)
-	client := NewInProcess(registry)
+	client := NewInProcess(context.Background(), registry)
 	t.Cleanup(func() { client.Close() })
 	return client
 }

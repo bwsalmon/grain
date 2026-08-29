@@ -81,7 +81,12 @@ func mcpserver(args []string) {
 
 	// Serve returns io.EOF once its caller closes the write end of our
 	// stdin -- the ordinary way a client signals "done", not a failure.
-	if err := mcp.Serve(registry, bufio.NewReader(os.Stdin), bufio.NewWriter(os.Stdout)); err != nil && !errors.Is(err, io.EOF) {
+	// This process's own lifetime is the cancellation boundary: whatever
+	// spawned it (claude -p's own --mcp-config fork, in production) is
+	// killed as a whole when a run is cancelled, which takes this stdio
+	// server down with it -- see Serve's own doc comment on why that
+	// makes context.Background() the right ctx here, not a derived one.
+	if err := mcp.Serve(context.Background(), registry, bufio.NewReader(os.Stdin), bufio.NewWriter(os.Stdout)); err != nil && !errors.Is(err, io.EOF) {
 		log.Fatalf("grain mcpserver: %v", err)
 	}
 }

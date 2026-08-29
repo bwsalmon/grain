@@ -99,7 +99,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	registry := mcp.NewRegistry()
 	registry.Register(sandboxTools...)
 	registry.Register(mcp.NewMockTools(&mcp.MockSink{})...)
-	client := mcp.NewInProcess(registry)
+	client := mcp.NewInProcess(ctx, registry)
 	defer client.Close()
 
 	toolInfos, err := client.ListTools(ctx)
