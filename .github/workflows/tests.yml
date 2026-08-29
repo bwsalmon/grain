@@ -106,3 +106,68 @@ jobs:
       - name: Test frontend
         working-directory: v2/pkg/ui/frontend
         run: npm test
+
+  # The two Terraform modules -- v1's controller-plus-sandbox-pool
+  # (terraform/gcp) and v2's staging environment (terraform/gcp-v2) --
+  # had no machine check of any kind until this job. Nothing else in this
+  # workflow reads a .tf file, so a typo'd variable reference or an
+  # unformatted block could sit on main indefinitely and only surface at
+  # `terraform apply` time, in front of a real project. That is the worst
+  # possible place to find it: gcp-v2 in particular has never been
+  # applied, so every error it holds is still undiscovered.
+  #
+  # `init -backend=false` is what keeps this job as credential-free as
+  # the two above it. Both modules declare `backend "gcs" {}` and expect
+  # an operator to fill it in with -backend-config; -backend=false skips
+  # backend initialization outright, so this installs the provider plugins
+  # and nothing more -- no GCS bucket, no service account, no `contents:
+  # read` exception. Validation is entirely local after that: `validate`
+  # checks syntax, references and types against the provider schema
+  # without contacting GCP or reading state.
+  #
+  # Note that gcp-v2's `google_iap_brand` deprecation (see that module's
+  # README, "Get an IAP OAuth client") surfaces here as a *warning*, which
+  # `validate` does not fail on. It stays visible in the log rather than
+  # becoming a red build for a resource `create_iap_brand = false` does
+  # not even create by default.
+  terraform:
+    name: terraform (${{ matrix.module }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Same reasoning as the pytest matrix: one module failing is a fact
+      # worth having about the other, especially while v2's module is the
+      # one under active development.
+      fail-fast: false
+      matrix:
+        module: [terraform/gcp, terraform/gcp-v2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # A constraint, not an exact version: this tracks the current 1.13
+      # patch release the way the pytest job pins a major line, so a
+      # patch release cannot turn CI red on a commit that touched
+      # nothing, and a deliberate bump moves the whole floor at once.
+      # Both modules' versions.tf already require >= 1.6.0.
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.13.0"
+          # The wrapper re-execs terraform to capture stdout/stderr as step
+          # outputs. Nothing here consumes those, and it only obscures
+          # `fmt -diff`'s own output.
+          terraform_wrapper: false
+
+      # -diff so a formatting failure shows what to change, rather than
+      # just naming the file and leaving the reader to run fmt locally.
+      - name: Format
+        working-directory: ${{ matrix.module }}
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init
+        working-directory: ${{ matrix.module }}
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: ${{ matrix.module }}
+        run: terraform validate
