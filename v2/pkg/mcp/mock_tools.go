@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
@@ -103,7 +104,7 @@ func askQuestionTool(sink *MockSink) Tool {
 			},
 			"required": []string{"question"},
 		},
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			question, ok := argString(args, "question")
 			if !ok || question == "" {
 				return Result{Text: "question is required", IsError: true}
@@ -137,7 +138,7 @@ func commentOnIssueTool(sink *MockSink) Tool {
 			},
 			"required": []string{"comment"},
 		},
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			comment, ok := argString(args, "comment")
 			if !ok || comment == "" {
 				return Result{Text: "comment is required", IsError: true}
@@ -188,7 +189,7 @@ func proposeTaskTool(sink *MockSink) Tool {
 			},
 			"required": []string{"title", "body"},
 		},
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			title, hasTitle := argString(args, "title")
 			body, hasBody := argString(args, "body")
 			if !hasTitle || !hasBody {
@@ -240,7 +241,7 @@ func addReviewCommentTool(sink *MockSink) Tool {
 			},
 			"required": []string{"body"},
 		},
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			body, ok := argString(args, "body")
 			if !ok || body == "" {
 				return Result{Text: "body is required", IsError: true}

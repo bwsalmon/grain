@@ -243,3 +243,127 @@ func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 		t.Errorf("state = %q, want %q (a failed run with nothing observed is eligible for retry)", state, model.StateQueued)
 	}
 }
+
+// closeTask marks id closed by writing task_observation directly, the
+// same effect ui.Client.Close has -- restated here rather than importing
+// pkg/ui, matching orchestrator_test.go's own "duplicated per file" style
+// note on newSim.
+func closeTask(t *testing.T, ctx context.Context, store *model.Store, id string, at time.Time) {
+	t.Helper()
+	if err := store.ObserveField(ctx, id, at, func(o *model.Observation) { o.ClosedAt = &at }); err != nil {
+		t.Fatalf("closing task %s: %v", id, err)
+	}
+}
+
+// TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight is
+// bwsalmon/agents#346's own scenario: a task closed while its run is
+// still live must actually stop that run's agent, not just prevent
+// dispatch.Cycle from starting another one and ProcessResult from opening
+// a pull request for it (e2e/close_while_live_test.go already covered
+// those two). fw here blocks on the very ctx RunDispatch hands
+// framework.Run until it is cancelled, so this test only passes if
+// closing the task mid-run actually reaches that ctx -- proving
+// watchForTaskClosed's store-polled cancellation signal works end to end,
+// deterministically and fast (CancelPollInterval is set to a few
+// milliseconds), rather than relying on a real subprocess's own timing.
+func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	started := make(chan struct{})
+	fw := agentFunc(func(runCtx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		close(started)
+		<-runCtx.Done()
+		return nil, runCtx.Err()
+	})
+	cfg := orchestrator.Config{CancelPollInterval: 5 * time.Millisecond}
+
+	type runOutcome struct {
+		result *agent.Result
+		err    error
+	}
+	done := make(chan runOutcome, 1)
+	go func() {
+		result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime)
+		done <- runOutcome{result, err}
+	}()
+
+	<-started
+	closeTask(t, ctx, store, "t1", baseTime)
+
+	select {
+	case out := <-done:
+		if out.result != nil {
+			t.Errorf("result = %+v, want nil for a run cancelled mid-flight", out.result)
+		}
+		if out.err == nil || !strings.Contains(out.err.Error(), "closed") {
+			t.Errorf("RunDispatch err = %v, want an error naming the task's closure", out.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunDispatch did not return after its task was closed mid-flight -- the agent's ctx was never cancelled")
+	}
+
+	occupied, err := store.OccupiedSlots(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(occupied) != 0 {
+		t.Errorf("occupied slots after a cancelled run = %v, want none: FinishRun still frees the slot", occupied)
+	}
+}
+
+// TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall is the
+// race e2e/close_while_live_test.go itself exercises: dispatch.Cycle
+// claims a slot while a task is still running, the task is closed before
+// RunDispatch ever gets called for that already-claimed run, and only
+// then does RunDispatch actually run. Leaving this to
+// watchForTaskClosed's own polling ticker would make whether the agent's
+// first tool call ever reaches a real sandbox a race against
+// CancelPollInterval; RunDispatch instead checks synchronously, before
+// framework.Run is ever invoked, which this proves by using the default
+// (multi-second) CancelPollInterval and still finishing fast, and by
+// checking that framework.Run's own ctx already reads cancelled the
+// instant it starts.
+func TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+	closeTask(t, ctx, store, "t1", baseTime)
+
+	sawCancelledCtx := false
+	fw := agentFunc(func(runCtx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		sawCancelledCtx = runCtx.Err() != nil
+		return nil, runCtx.Err()
+	})
+
+	start := time.Now()
+	// Config{} leaves CancelPollInterval at its multi-second default --
+	// deliberately, so this test can only pass quickly because of the
+	// synchronous check, not because a short poll interval happened to
+	// win a race.
+	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("RunDispatch took %s against an already-closed task, want near-instant (no waiting on CancelPollInterval)", elapsed)
+	}
+
+	if result != nil {
+		t.Errorf("result = %+v, want nil for a task closed before its run ever started", result)
+	}
+	if err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Errorf("err = %v, want an error naming the task's closure", err)
+	}
+	if !sawCancelledCtx {
+		t.Error("framework.Run's own ctx was not already cancelled when it started -- an already-closed task's first tool call could still reach a real sandbox")
+	}
+}

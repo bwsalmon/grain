@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 )
@@ -19,11 +20,18 @@ type Result struct {
 // TOOLS list uses, so it can be handed to any client -- Gemini's function
 // declarations are a straightforward translation of it, and so would
 // Claude's or anything else's be.
+//
+// Handler receives the ctx the call arrived under -- bwsalmon/agents#346's
+// own wiring gap: every Handler used to build its own context.Background()
+// internally, so cancelling the agent.Framework.Run call driving it had no
+// way to reach whatever exec.CommandContext a Handler started. A Handler
+// that shells out (run_command, sshRunCommandTool) must pass ctx straight
+// through so that killing it is actually possible from outside.
 type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
-	Handler     func(args map[string]any) Result
+	Handler     func(ctx context.Context, args map[string]any) Result
 }
 
 // Registry holds the tools one server run advertises and answers the three
@@ -56,7 +64,7 @@ func (r *Registry) Register(tools ...Tool) {
 // and returns the response line to write back, or nil for a notification
 // (no id) that has no response at all -- notifications/initialized is the
 // only one a client sends here.
-func (r *Registry) Handle(line []byte) []byte {
+func (r *Registry) Handle(ctx context.Context, line []byte) []byte {
 	var req rpcRequest
 	if err := json.Unmarshal(line, &req); err != nil {
 		return mustMarshalLine(rpcResponse{
@@ -90,7 +98,7 @@ func (r *Registry) Handle(line []byte) []byte {
 		}
 		return mustMarshalLine(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": list}})
 	case "tools/call":
-		return r.handleCall(req.ID, req.Params)
+		return r.handleCall(ctx, req.ID, req.Params)
 	default:
 		if len(req.ID) == 0 {
 			return nil
@@ -102,7 +110,7 @@ func (r *Registry) Handle(line []byte) []byte {
 	}
 }
 
-func (r *Registry) handleCall(id json.RawMessage, params json.RawMessage) []byte {
+func (r *Registry) handleCall(ctx context.Context, id json.RawMessage, params json.RawMessage) []byte {
 	var p struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -128,7 +136,7 @@ func (r *Registry) handleCall(id json.RawMessage, params json.RawMessage) []byte
 	if args == nil {
 		args = map[string]any{}
 	}
-	result := t.Handler(args)
+	result := t.Handler(ctx, args)
 	return mustMarshalLine(rpcResponse{
 		JSONRPC: "2.0", ID: id,
 		Result: map[string]any{

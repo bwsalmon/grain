@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -77,6 +78,22 @@ type Config struct {
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
 	// agent framework's own default in place.
 	MaxAgentTurns int
+	// CancelPollInterval is how often RunDispatch re-reads its task's
+	// state from store while a run is live, to notice the task being
+	// closed out from under it -- bwsalmon/agents#346's own store-polled
+	// cancellation signal, needed because grain daemon (running the run)
+	// and grain ui (where a close actually lands) are separate processes
+	// sharing only the store. 2 seconds if zero; a test that wants to
+	// prove cancellation happens promptly, without waiting seconds for
+	// real, sets this to something much smaller.
+	CancelPollInterval time.Duration
+}
+
+func (c Config) cancelPollInterval() time.Duration {
+	if c.CancelPollInterval > 0 {
+		return c.CancelPollInterval
+	}
+	return 2 * time.Second
 }
 
 // HostSandboxes hands out one directory per slot, on the host this

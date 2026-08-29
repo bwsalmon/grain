@@ -35,6 +35,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
+	"github.com/bwsalmon/grain/v2/pkg/procgroup"
 )
 
 const (
@@ -62,6 +63,12 @@ type execRunner struct {
 
 func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []string) (string, error) {
 	cmd := exec.CommandContext(ctx, r.claudePath, args...)
+	// claude forks its own mcpserver child once it loads --mcp-config (see
+	// this file's own doc comment); a plain exec.CommandContext cancel
+	// only kills claude itself and leaves that child (and anything
+	// run_command's own `bash -c` spawned under it) running as an orphan.
+	// procgroup.Prepare makes cancelling ctx kill that whole tree instead.
+	procgroup.Prepare(cmd)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = append(os.Environ(), env...)
 	var stdout, stderr bytes.Buffer

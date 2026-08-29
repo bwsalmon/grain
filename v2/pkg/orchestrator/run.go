@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,68 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
+
+// errTaskClosed is what context.Cause(runCtx) reads once
+// watchForTaskClosed has cancelled a run -- RunDispatch checks for it by
+// identity (errors.Is) to tell "this run was killed because its task got
+// closed" apart from any other reason framework.Run might return an
+// error, and to record outcome "cancelled" rather than "failed" for
+// exactly that case.
+var errTaskClosed = errors.New("orchestrator: task closed while its run was still live")
+
+// checkTaskClosed reads store.State(taskID) once and calls
+// cancel(errTaskClosed) if it reads model.StateClosed, reporting whether
+// it did. A store error is treated as "not closed" rather than
+// propagated: watchForTaskClosed's own caller retries on the next tick
+// regardless, so a transient read failure costs one interval of latency,
+// not the ability to ever notice a close for the rest of the run.
+func checkTaskClosed(ctx context.Context, store *model.Store, taskID string, cancel context.CancelCauseFunc) bool {
+	st, err := store.State(ctx, taskID)
+	if err != nil {
+		return false
+	}
+	if st == model.StateClosed {
+		cancel(errTaskClosed)
+		return true
+	}
+	return false
+}
+
+// watchForTaskClosed polls store.State(taskID) every interval and calls
+// cancel(errTaskClosed) the moment it reads model.StateClosed -- the
+// store-polled cancellation signal RunDispatch needs because grain daemon
+// (running the agent) and grain ui (where a close actually lands) are
+// separate processes sharing only the store, per bwsalmon/agents#346.
+//
+// It does not check immediately on entry: RunDispatch itself already
+// calls checkTaskClosed synchronously, before framework.Run is ever
+// invoked, which is what makes a task already closed by the time
+// RunDispatch runs -- dispatch.Cycle claimed the slot before the close
+// write landed, and RunDispatch only got around to running it after --
+// stop that run's first tool call from ever reaching a real sandbox,
+// deterministically, rather than racing this goroutine's own first tick
+// against a real subprocess. See RunDispatch's own doc comment.
+//
+// queryCtx, not runCtx, bounds the store reads: runCtx is what this func
+// is about to cancel, so querying with it would make the very last read
+// racy against its own effect. It returns as soon as runCtx.Done() fires
+// for any reason, which is what bounds this goroutine's lifetime to the
+// run's: RunDispatch cancels runCtx itself the moment framework.Run
+// returns.
+func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, taskID string, interval time.Duration, cancel context.CancelCauseFunc) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-runCtx.Done():
+			return
+		case <-ticker.C:
+			if checkTaskClosed(queryCtx, store, taskID, cancel) {
+				return
+			}
+		}
+	}
+}
 
 // BuildPrompt is the prompt a dispatched run receives — deliberately
 // plain: the task's own title and body plus exactly the two facts that
@@ -55,6 +118,16 @@ type rootedSandboxes interface {
 // kept separate the same way v2/e2e's own runDispatch and its caller are,
 // since deciding what a run produced is a different question from
 // deciding what to do about it.
+//
+// While the agent runs, a background watchForTaskClosed goroutine polls
+// store for this task being closed and cancels the ctx the agent itself
+// (and every tool call it makes) was given the moment it sees that --
+// bwsalmon/agents#346's "actually terminate a running task's sandbox
+// process on cancel": a task closed through `grain ui`'s Cancel button
+// reaches this run, in whatever separate grain daemon process is
+// actually running it, only because both share the one store. A run
+// killed this way finishes with outcome "cancelled", distinct from
+// "failed", and returns a non-nil error wrapping errTaskClosed.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
 	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot string, at time.Time) (*agent.Result, error) {
 
@@ -70,10 +143,32 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	case prepErr != nil:
 		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, prepErr)
 	default:
-		result, runErr = framework.Run(ctx, agent.RunConfig{Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns})
-		if runErr != nil {
+		// runCtx, not ctx, is what framework.Run actually gets: it is
+		// what watchForTaskClosed cancels the instant it sees this task
+		// closed, which is what makes cancelling this run from outside
+		// the process running it possible at all -- see that func's own
+		// doc comment. cancelRun(nil) once framework.Run returns is what
+		// stops the watcher goroutine either way, whether or not it was
+		// the one that ended the run.
+		runCtx, cancelRun := context.WithCancelCause(ctx)
+		checkTaskClosed(ctx, store, task.ID, cancelRun)
+		watcherDone := make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
+		}()
+
+		result, runErr = framework.Run(runCtx, agent.RunConfig{Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns})
+		cancelRun(nil)
+		<-watcherDone
+
+		switch {
+		case runErr != nil && errors.Is(context.Cause(runCtx), errTaskClosed):
+			outcome = "cancelled"
+			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errTaskClosed)
+		case runErr != nil:
 			runErr = fmt.Errorf("orchestrator: running %s: %w", d.RunID, runErr)
-		} else {
+		default:
 			outcome = outcomeOf(result)
 		}
 	}
