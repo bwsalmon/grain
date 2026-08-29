@@ -1117,3 +1117,57 @@ end, not the embedded one. Safe to re-run: it is the installer and the
 updater both, seeding a secret or a config value only the first time and
 leaving anything already on disk alone every time after. `./setup.sh
 --help` lists every setting.
+
+`scripts/setup.sh` only ever *seeds* an already-minted
+`GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE` — until bwsalmon/agents#358, nothing
+in this repo minted one. `grain setup gcp` (`cmd/grain/setup.go`,
+`pkg/gcpsetup`) is that missing piece: it creates the agent and minter
+service accounts the gcp-key/gemini-key capabilities need, grants the
+minter `roles/iam.serviceAccountKeyAdmin` on the agent account (and, with
+`-enable-gemini-key`, `roles/serviceusage.apiKeysAdmin` on the project),
+enables the APIs both calls need, and — with `-mint-key -key-out <path>`
+— mints the minter's own key, ready to feed straight into `setup.sh` as
+`GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE`. It authenticates with Application
+Default Credentials by default, or `-credentials-file` for a specific
+operator identity. Every step is get-or-create: running it again is a
+no-op wherever the first run already succeeded. A step the credential it
+ran as can't perform (typically an IAM grant, needing more than Editor)
+is printed as a `gcloud` command to run by hand instead of aborting the
+whole run — re-running `grain setup gcp` afterward picks up right there.
+`pkg/gcpsetup/gcpsetup_test.go` covers the ordering, the idempotency, and
+the manual-step fallback against a fake `Admin`, no real project involved
+(the same bar `pkg/capability/gcpkey`'s own tests hold to); nobody has
+run it against a real project yet — the "Accepted limits" list above
+still says as much about GCP token minting generally, and this is a
+bootstrap for that gap, not a live-verified closing of it.
+
+`grain sync -config <path>` (`cmd/grain/sync.go`) is the reconfiguration
+half: the command a GitHub Action calls whenever a config repo's checked-
+in configuration changes. It reads one JSON file with up to two
+independent sections — `"settings"`, unmarshaled straight into
+`ui.UpdateSettingsRequest` and applied through the same
+`Client.UpdateSettings` `grain settings` already calls by hand, and
+`"gcp"`, which re-runs the exact `pkg/gcpsetup.EnsureInfrastructure` logic
+`grain setup gcp` uses, so IAM drift (a binding removed by hand, a newly
+enabled gemini-key rollout that needs a grant it didn't before) gets
+repaired on every sync rather than only at install time. It never mints a
+new minter key on a `sync` run — that stays a deliberate,
+`grain setup gcp -mint-key` action. Reachability is the part this command
+does not solve: the store `"settings"` writes to is bound to loopback only
+(this section's own security note, above), so a workflow needs either a
+self-hosted runner that *is* the deployment host (the simplest shape: the
+workflow step becomes `grain sync -config deploy/grain.json -data-dir
+/var/lib/grain`, no network hop at all) or an SSH tunnel to
+`-store-addr`. A `"gcp"`-only sync needs neither — just a GCP credential,
+the same Workload Identity Federation `templates/gcp/.github/workflows/
+deploy.yml` already uses for v1 works here too, with no static key in the
+workflow. `cmd/grain/sync_test.go` covers both sections' validation and,
+for `"settings"`, a real embedded-store round trip including a second,
+no-op sync run.
+
+Neither command invokes an agent to walk an operator through a manual
+step — printing the exact command was judged enough for a first version;
+see bwsalmon/agents#358's own "If there is enough we need to automate
+manually we may want to invoke an agent" for the option this leaves open,
+should the list of manual steps grow long enough on a real project to be
+worth it.

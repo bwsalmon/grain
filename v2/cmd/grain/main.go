@@ -8,16 +8,24 @@
 // comment, and close (grain's own stand-in for "delete" -- see
 // Client.Close's own doc comment for why) or reopen one.
 //
-// Three other subcommands -- daemon, ui, mcpserver -- select entirely
-// different modes, each what used to be its own cmd/graind, cmd/ui or
-// cmd/mcpserver binary before #313 combined them: the daemon runs
-// pkg/orchestrator's RunCycle on a timer, ui serves pkg/ui's JSON API and
-// static frontend, and mcpserver speaks MCP over stdin/stdout against the
-// sandbox tools. daemon.go, ui.go and mcpserver.go carry each one's own
-// doc comment. A running daemon forks mcpserver instances of itself --
-// this same binary, re-invoked with "mcpserver" as argv[1] -- rather than
-// needing a second binary on disk; see pkg/agent/claude's own doc comment
-// for the one place that matters today.
+// Other subcommands -- daemon, ui, mcpserver, setup, sync -- select
+// entirely different modes. daemon, ui and mcpserver are each what used
+// to be its own cmd/graind, cmd/ui or cmd/mcpserver binary before #313
+// combined them: the daemon runs pkg/orchestrator's RunCycle on a timer,
+// ui serves pkg/ui's JSON API and static frontend, and mcpserver speaks
+// MCP over stdin/stdout against the sandbox tools. daemon.go, ui.go and
+// mcpserver.go carry each one's own doc comment. A running daemon forks
+// mcpserver instances of itself -- this same binary, re-invoked with
+// "mcpserver" as argv[1] -- rather than needing a second binary on disk;
+// see pkg/agent/claude's own doc comment for the one place that matters
+// today. setup and sync (bwsalmon/agents#358, setup.go and sync.go) are
+// newer and unrelated to any of that: setup bootstraps external GCP
+// infrastructure for a new installation, and sync reconciles a live
+// deployment's settings and/or that same GCP infrastructure from a
+// config file, the way a GitHub Action calls it whenever a config repo
+// changes. Both are modes rather than runCLI commands for the same
+// reason as the three above -- see buildClient's own doc comment for why
+// that matters specifically for sync.
 //
 // The task CLI itself takes no GitHub credentials at all. A task used to
 // be a GitHub issue, so this command needed a token and a task repo to
@@ -67,6 +75,12 @@ func main() {
 		case "mcpserver":
 			mcpserver(args[1:])
 			return
+		case "setup":
+			setupCmd(args[1:])
+			return
+		case "sync":
+			syncCmd(args[1:])
+			return
 		}
 	}
 	if err := runCLI(args); err != nil {
@@ -79,6 +93,8 @@ const usage = `usage: grain [global flags] <command> [args]
        grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer (see daemon.go)
        grain ui [flags]        serve the task UI on localhost (see ui.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
+       grain setup gcp [flags] bootstrap external GCP infrastructure for a new installation (see setup.go)
+       grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
 
 Global flags (must come before the command):
   -store-addr string           host:port of a Dolt SQL server holding the task store
@@ -126,34 +142,12 @@ func runCLI(args []string) error {
 		return errors.New("a command is required")
 	}
 
-	server, err := serverConfig(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile)
+	ctx := context.Background()
+	c, closeStore, err := buildClient(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile, *dataDir, *actor, *defaultTargetRepo)
 	if err != nil {
 		return err
 	}
-	db, err := dolt.OpenOrConnect(*dataDir, server)
-	if err != nil {
-		return fmt.Errorf("opening the task store: %w", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	store := model.New(db)
-	if err := store.Init(ctx); err != nil {
-		return fmt.Errorf("applying the schema: %w", err)
-	}
-
-	cfg := ui.Config{
-		Actor:        ui.DefaultActor(actorID(*actor)),
-		Capabilities: ui.DefaultCapabilities(),
-	}
-	if *defaultTargetRepo != "" {
-		repo, err := model.ParseRepo(*defaultTargetRepo)
-		if err != nil {
-			return fmt.Errorf("-default-target-repo: %w", err)
-		}
-		cfg.DefaultTarget = &repo
-	}
-	c := ui.NewClient(cfg, store)
+	defer closeStore()
 	out := &printer{json: *jsonOutput}
 
 	cmd, cmdArgs := rest[0], rest[1:]
@@ -184,6 +178,47 @@ func runCLI(args []string) error {
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+// buildClient opens the task store (embedded, or a Dolt SQL server, per
+// the same -store-*/-data-dir flags every store-backed command accepts)
+// and wraps it in a *ui.Client -- the common setup runCLI's own commands
+// share, factored out so sync.go's `grain sync` can build one too without
+// going through runCLI's own flag set, since a sync run that only
+// reconciles GCP infrastructure (sync.go's own doc comment) has no
+// business requiring store flags at all. The returned close func is
+// always safe to defer, even on an error return before the store was
+// ever opened.
+func buildClient(storeAddr, storeDatabase, storeUser, storePasswordFile, dataDir, actor, defaultTargetRepo string) (*ui.Client, func() error, error) {
+	server, err := serverConfig(storeAddr, storeDatabase, storeUser, storePasswordFile)
+	if err != nil {
+		return nil, func() error { return nil }, err
+	}
+	db, err := dolt.OpenOrConnect(dataDir, server)
+	if err != nil {
+		return nil, func() error { return nil }, fmt.Errorf("opening the task store: %w", err)
+	}
+
+	ctx := context.Background()
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		db.Close()
+		return nil, func() error { return nil }, fmt.Errorf("applying the schema: %w", err)
+	}
+
+	cfg := ui.Config{
+		Actor:        ui.DefaultActor(actorID(actor)),
+		Capabilities: ui.DefaultCapabilities(),
+	}
+	if defaultTargetRepo != "" {
+		repo, err := model.ParseRepo(defaultTargetRepo)
+		if err != nil {
+			db.Close()
+			return nil, func() error { return nil }, fmt.Errorf("-default-target-repo: %w", err)
+		}
+		cfg.DefaultTarget = &repo
+	}
+	return ui.NewClient(cfg, store), db.Close, nil
 }
 
 // serverConfig assembles a dolt.ServerConfig from the -store-* flags. An
