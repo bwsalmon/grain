@@ -75,7 +75,12 @@ type Config struct {
 	// mirroring orchestrator.Config.DefaultTarget so a single-repo
 	// deployment need not repeat itself on every task.
 	DefaultTarget *model.RepoRef
-	Capabilities  []Capability
+	// TargetRepos restricts which repos a task's Repo (explicit or
+	// defaulted) may name -- model.Config's own field of the same name,
+	// mirrored here the way DefaultTarget already is. Empty means
+	// unrestricted. CreateTask enforces it.
+	TargetRepos  []string
+	Capabilities []Capability
 	// Secrets is set only when this UI runs on the same host as the
 	// server whose secrets directory it names -- nil means it does not,
 	// and the secrets pane and its API routes report themselves

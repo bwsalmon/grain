@@ -18,9 +18,10 @@ deployer_member = "user:CHANGE-ME@example.com"
 # -- Which repos this staging deployment works on ---------------------
 #
 # The scoped PAT you push with push-secrets.sh should be a GitHub
-# fine-grained token limited to exactly these repositories -- see
-# variables.tf's own test_repos for why Terraform/grain do not enforce
-# this list themselves yet.
+# fine-grained token limited to exactly these repositories. This is also
+# wired into the daemon's own -target-repos allow-list -- see
+# variables.tf's own test_repos and this module's README, "Repo
+# enforcement."
 test_repos = [
   # "CHANGE-ME/test-repo-one",
   # "CHANGE-ME/test-repo-two",

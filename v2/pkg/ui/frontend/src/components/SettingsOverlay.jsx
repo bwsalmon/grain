@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
-function parseSlots(value) {
-  return value.split(",").map((slot) => slot.trim()).filter((slot) => slot !== "");
+function parseCommaList(value) {
+  return value.split(",").map((item) => item.trim()).filter((item) => item !== "");
 }
 
 export default function SettingsOverlay({ config, onClose, showError }) {
@@ -32,7 +32,7 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || "")) payload.pollInterval = pollInterval;
 
-    const slots = parseSlots(form.elements.slots.value);
+    const slots = parseCommaList(form.elements.slots.value);
     if (JSON.stringify(slots) !== JSON.stringify(settings.slots || [])) payload.slots = slots;
 
     const geminiModel = form.elements.geminiModel.value.trim();
@@ -55,6 +55,9 @@ export default function SettingsOverlay({ config, onClose, showError }) {
 
     const gcpServiceAccountEmail = form.elements.gcpServiceAccountEmail.value.trim();
     if (gcpServiceAccountEmail !== (settings.gcpServiceAccountEmail || "")) payload.gcpServiceAccountEmail = gcpServiceAccountEmail;
+
+    const targetRepos = parseCommaList(form.elements.targetRepos.value);
+    if (JSON.stringify(targetRepos) !== JSON.stringify(settings.targetRepos || [])) payload.targetRepos = targetRepos;
 
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
@@ -116,6 +119,9 @@ export default function SettingsOverlay({ config, onClose, showError }) {
         </label>
         <label>GCP service account email <span className="hint">optional</span>
           <input name="gcpServiceAccountEmail" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" />
+        </label>
+        <label>Target repos <span className="hint">comma-separated owner/name; empty allows any</span>
+          <input name="targetRepos" defaultValue={(settings.targetRepos || []).join(", ")} placeholder="owner/repo, owner/other" autoComplete="off" />
         </label>
         <div className="form-actions">
           <button type="submit" className="primary">Save</button>

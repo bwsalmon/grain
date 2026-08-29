@@ -48,7 +48,12 @@ type Task struct {
 	// rather than list it as a separate task: unlike an ordinary
 	// propose_task child, a stacked task is not new work, just a
 	// continuation of the same change.
-	Stacked   bool       `json:"stacked,omitempty"`
+	Stacked bool `json:"stacked,omitempty"`
+	// Scheduled is true for a task a schedule filed automatically
+	// (model.ReasonSchedule) -- a UI badge, the same treatment Stacked
+	// already gives model.ReasonFix, so a task that appeared with nobody
+	// having filed it by hand reads as expected rather than as a mystery.
+	Scheduled bool       `json:"scheduled,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,
 	// resolved or not -- the definition. Blocked and BlockedBy are the
@@ -100,6 +105,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool) Task {
 		AutoMerge:    t.AutoMerge,
 		Capabilities: []string{},
 		Stacked:      t.Origin.Reason == model.ReasonFix,
+		Scheduled:    t.Origin.Reason == model.ReasonSchedule,
 		CreatedAt:    t.CreatedAt,
 	}
 	if t.Target != nil {
@@ -366,6 +372,11 @@ func writeClientError(w http.ResponseWriter, err error) {
 	}
 	var nf *NotFoundError
 	if errors.As(err, &nf) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var snf *scheduleNotFoundError
+	if errors.As(err, &snf) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}

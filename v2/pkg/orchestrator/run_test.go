@@ -276,6 +276,109 @@ func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 	}
 }
 
+// TestRunDispatchIncludesTheCommentThreadOnARedispatch is
+// bwsalmon/agents#402's own scenario: a run parks on ask_question,
+// ProcessResult relays that question into the store the same way a real
+// dispatch would, a human answers it exactly as `grain comment` or the UI
+// would, and the task's second dispatch must see both -- otherwise the
+// redispatched agent has no way to know its question was already
+// answered and asks it again, forever. This drives two full RunDispatch
+// calls (with a real ProcessResult and a real store-backed comment
+// between them) rather than calling BuildPrompt directly, since the bug
+// this reproduces was in what RunDispatch's caller never did, not in
+// BuildPrompt itself.
+func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	_ = sim
+	task := dispatchTask(t, ctx, store, "t1")
+	task.Target = &model.RepoRef{Owner: "acme", Name: "widgets"}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("re-filing task with a real target: %v", err)
+	}
+
+	d1 := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d1, baseTime)
+
+	const question = "should the new field be snake_case or camelCase?"
+	fw1 := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return &agent.Result{ToolCalls: []agent.ToolCall{
+			{Name: "ask_question", Arguments: map[string]any{"question": question}},
+		}}, nil
+	})
+	got, err := store.GetTask(ctx, "t1")
+	if err != nil || got == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+	result1, err := orchestrator.RunDispatch(ctx, store, fw1, orchestrator.Config{}, *got, d1, nil, t.TempDir(), baseTime)
+	if err != nil {
+		t.Fatalf("first RunDispatch: %v", err)
+	}
+	if err := orchestrator.ProcessResult(ctx, store, client, *got, result1, baseTime); err != nil {
+		t.Fatalf("ProcessResult after the question: %v", err)
+	}
+
+	const answer = "snake_case, to match the rest of the schema"
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID:    "t1",
+		Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalHuman, ID: "alice"}},
+		Body:      answer,
+		CreatedAt: baseTime.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("answering the question: %v", err)
+	}
+
+	d2 := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r2", Attempt: 2}
+	startRun(t, ctx, store, d2, baseTime.Add(2*time.Minute))
+	got2, err := store.GetTask(ctx, "t1")
+	if err != nil || got2 == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	var gotPrompt string
+	fw2 := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPrompt = cfg.Prompt
+		return pushed(), nil
+	})
+	if _, err := orchestrator.RunDispatch(ctx, store, fw2, orchestrator.Config{}, *got2, d2, nil, t.TempDir(), baseTime.Add(2*time.Minute)); err != nil {
+		t.Fatalf("second RunDispatch: %v", err)
+	}
+
+	if !strings.Contains(gotPrompt, question) {
+		t.Errorf("second prompt does not contain the question it asked itself: %q", gotPrompt)
+	}
+	if !strings.Contains(gotPrompt, answer) {
+		t.Errorf("second prompt does not contain the human's answer: %q", gotPrompt)
+	}
+}
+
+// TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch checks that a
+// task's first dispatch, with no conversation yet, gets exactly
+// BuildPrompt's own prompt back -- no empty "conversation so far" section
+// tacked onto every prompt whether or not there is anything to say.
+func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	var gotPrompt string
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPrompt = cfg.Prompt
+		return pushed(), nil
+	})
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+	if gotPrompt != orchestrator.BuildPrompt(*task) {
+		t.Errorf("prompt = %q, want exactly BuildPrompt's own prompt with no conversation yet", gotPrompt)
+	}
+}
+
 // closeTask marks id closed by writing task_observation directly, the
 // same effect ui.Client.Close has -- restated here rather than importing
 // pkg/ui, matching orchestrator_test.go's own "duplicated per file" style

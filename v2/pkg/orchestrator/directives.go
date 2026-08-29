@@ -19,6 +19,15 @@ import (
 // RunDispatch's own single-Intent limitation.
 var directiveRe = regexp.MustCompile(`^\s*/(repo|base|auto-merge|reads)\s+(\S+)\s*$`)
 
+// bareAutoMergeRe matches a `/auto-merge` line with no value at all --
+// the natural thing to type for anyone used to bare-flag bot commands
+// like `/lgtm`, and how the CLI's own `-auto-merge` bool flag already
+// behaves (bwsalmon/agents#404: without this, such a line matched
+// neither directiveRe nor anything else, so it was silently treated as
+// ordinary prose instead of the one clear typo it invites). Equivalent
+// to `/auto-merge true`.
+var bareAutoMergeRe = regexp.MustCompile(`^\s*/auto-merge\s*$`)
+
 // Directives is the subset of grain/automation/directives.py's parsed
 // fields this package reads out of a task issue's body.
 type Directives struct {
@@ -45,6 +54,9 @@ func ParseDirectives(body string) (Directives, error) {
 	for _, line := range strings.Split(body, "\n") {
 		m := directiveRe.FindStringSubmatch(line)
 		if m == nil {
+			if bareAutoMergeRe.MatchString(line) {
+				d.AutoMerge = true
+			}
 			continue
 		}
 		name, value := m[1], m[2]

@@ -328,12 +328,15 @@ variable "test_repos" {
     (bwsalmon/agents#394) means in practice: the PAT itself (pushed by
     push-secrets.sh, never a Terraform input) is a GitHub fine-grained
     token scoped, on GitHub's side, to exactly these repositories, which
-    is the actual enforcement boundary today. v2 has no target_repos
-    allow-list of its own yet the way v1's terraform/gcp/variables.tf
-    documents -- see this module's README, "What this does not enforce
-    yet" -- so this variable is documentation and a source for
-    default_target_repo's own validation below, not something Terraform
-    or grain itself checks a task's /repo directive against.
+    is one enforcement boundary. This is now also the source of the
+    daemon's own -target-repos allow-list (v2/pkg/model.Config.TargetRepos,
+    bwsalmon/agents#399), the same "allowlist a task naming anything else
+    is parked with a comment rather than dispatched against" v1's
+    terraform/gcp/variables.tf target_repos documents -- so a task
+    naming a repo outside this list is refused by grain itself, not
+    just by GitHub declining the PAT's own reach. Empty leaves the
+    daemon's own allow-list empty too, i.e. unrestricted, the same
+    default_target_repo's own validation below already treats it.
   EOT
   default     = []
 }

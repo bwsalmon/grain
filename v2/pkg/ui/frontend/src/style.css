@@ -516,6 +516,12 @@ main { padding: 0 0 2.5rem; }
   margin: -0.5rem 0 1rem;
 }
 
+.candidate-current { background: var(--canvas); border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0 0 1rem; }
+.candidate-current p { margin: 0.2rem 0; }
+.candidate-error { color: var(--danger, #c0392b); }
+.candidate-history { list-style: none; margin: 0 0 1rem; padding: 0; }
+.candidate-history li { padding: 0.35rem 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+
 .secrets-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .secret-row {
   display: flex;
@@ -547,6 +553,24 @@ main { padding: 0 0 2.5rem; }
   padding: 0.1rem 0.3rem;
 }
 .secret-key-delete:hover { color: var(--danger); }
+
+.schedules-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+.schedule-row {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.schedule-summary { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.schedule-title { font-weight: 500; }
+.schedule-meta { margin: 0.25rem 0 0.4rem; }
+
+/* A schedule-filed task is not the write target and not read-only either
+   -- .chip-read's own "distinct shape" reasoning applies again, this time
+   as a tinted fill rather than an outline, so it reads as its own
+   category of annotation rather than either of those. */
+.chip-scheduled {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
 
 form label { display: block; margin-bottom: 1rem; font-weight: 500; font-size: 0.9rem; }
 form label.checkbox { display: flex; align-items: center; gap: 0.5rem; font-weight: normal; }
