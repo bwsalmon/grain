@@ -181,6 +181,28 @@ type Grant struct {
 	Folder     *FolderRef
 }
 
+// GrantsSubsetOf reports whether every capability in grants also appears
+// in allowed, comparing by Capability name alone -- Via and Folder record
+// how a grant was come by, not what it lets a task do, so two grants for
+// the same capability compare equal here regardless of either.
+//
+// This is the guard docs/data-model.md's "sub-tasks are tasks" section
+// asks for before relaxing any trust gate for a proposed child: a task
+// that asks for nothing beyond what its parent already held cannot turn
+// one human grant into a wider one just by being proposed.
+func GrantsSubsetOf(grants, allowed []Grant) bool {
+	have := make(map[string]bool, len(allowed))
+	for _, g := range allowed {
+		have[g.Capability] = true
+	}
+	for _, g := range grants {
+		if !have[g.Capability] {
+			return false
+		}
+	}
+	return true
+}
+
 // gitCredentialGrantPrefix marks a Grant as bwsalmon/agents#52's per-task
 // git credential override: the named credential (gitproxy's
 // CredentialSet.Get) a sandbox's git proxy requests should use in place

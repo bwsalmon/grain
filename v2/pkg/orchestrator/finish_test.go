@@ -243,3 +243,94 @@ func TestProcessResultFilesAProposedTaskIntoTheStore(t *testing.T) {
 		t.Fatalf("links = %+v, want proposed-by the task that asked", proposal.Links)
 	}
 }
+
+// TestProcessResultProposedTaskInheritsAutoMergeFromItsParent covers
+// bwsalmon/agents#345: a task proposed by an auto-merge job should
+// itself be an auto-merge job, since propose_task's own input schema has
+// no way to request a capability the parent lacked -- see
+// model.GrantsSubsetOf.
+func TestProcessResultProposedTaskInheritsAutoMergeFromItsParent(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.AutoMerge = true
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("marking t1 auto-merge: %v", err)
+	}
+
+	result := toolResult(agent.ToolCall{
+		Name: "propose_task",
+		Arguments: map[string]any{
+			"title": "follow-up work", "body": "do more of this",
+		},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposal *model.Task
+	for i := range tasks {
+		if tasks[i].ID != task.ID {
+			proposal = &tasks[i]
+		}
+	}
+	if proposal == nil {
+		t.Fatal("the proposed task was never filed")
+	}
+	if !proposal.AutoMerge {
+		t.Error("AutoMerge = false, want true -- an auto-merge job's own proposal should inherit it")
+	}
+
+	// Inheriting AutoMerge is not auto-approval: the proposal still needs
+	// a human before it ever runs.
+	state, err := store.State(ctx, proposal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != model.StateProposed {
+		t.Fatalf("state = %q, want proposed -- inheriting AutoMerge must not skip approval", state)
+	}
+}
+
+// TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent
+// is TestProcessResultFilesAProposedTaskIntoTheStore's own default case,
+// made explicit: a task proposed by a job that was not itself an
+// auto-merge job stays out of the merge queue.
+func TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	result := toolResult(agent.ToolCall{
+		Name: "propose_task",
+		Arguments: map[string]any{
+			"title": "follow-up work", "body": "do more of this",
+		},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposal *model.Task
+	for i := range tasks {
+		if tasks[i].ID != task.ID {
+			proposal = &tasks[i]
+		}
+	}
+	if proposal == nil {
+		t.Fatal("the proposed task was never filed")
+	}
+	if proposal.AutoMerge {
+		t.Error("AutoMerge = true, want false -- nothing here opted this proposal into the merge queue")
+	}
+}
