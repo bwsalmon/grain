@@ -407,6 +407,14 @@ func run(ctx context.Context, cfg config) error {
 
 	registry := model.NewCapabilityRegistry(capabilityProviders(cfg)...)
 
+	// Recovering any run a previous process left running (bwsalmon/agents#425)
+	// has to happen here, once, before reconcile's first tick -- see
+	// orchestrator.RecoverOrphanedRuns's own doc comment for why it is a
+	// startup pass rather than something reconcile also runs on a timer.
+	if err := orchestrator.RecoverOrphanedRuns(ctx, store, githubClient, time.Now().UTC()); err != nil {
+		log.Printf("grain daemon: recovering orphaned runs: %v", err)
+	}
+
 	deps := orchestrator.Deps{
 		Store: store, Client: githubClient, Sandboxes: sandboxes,
 		Framework: func() agent.Framework { return agentFramework },
