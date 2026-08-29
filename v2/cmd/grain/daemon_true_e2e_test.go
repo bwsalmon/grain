@@ -28,6 +28,15 @@ package main
 // than the fake VM's home directory, that lookup would miss the
 // credentials ConfigureGitCredentialsOverSSH just wrote.
 //
+// Beyond confirming the pull request itself, this also closes the loop a
+// real deployment cares about: a simulated human merges it (a real git
+// merge over the same bare repo, plus a real HTTP PUT to githubsim's own
+// merge endpoint from a second, independent github.Client -- the same
+// technique e2e/cli_test.go uses for the scripted-agent version of this
+// story), and the test then waits for the daemon's own next reconcile
+// tick to notice the merge and close the task out, confirmed, again,
+// through the REST API rather than the store.
+//
 // Gated on GEMINI_API_KEY exactly like the other three live tests, so it
 // runs nowhere without a live key (including CI) and costs nothing when
 // skipped:
@@ -46,10 +55,23 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
+
+// firstPullRequestNumber returns sim's first pull request's number --
+// added on this file's own copy of syncedSim (daemon_live_test.go), since
+// this is the one test in this package that needs a second, independent
+// github.Client to act on a pull request sim's own dispatch already
+// opened, the same way e2e/cli_test.go's own syncedSim does for its
+// scripted-agent equivalent of this test.
+func (s *syncedSim) firstPullRequestNumber() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sim.PullRequests[0].Number
+}
 
 // installFakeSSHBinaryWithHome installs a fake `ssh` on PATH, the same
 // shape writeFakeSSHBinary (daemon_kontur_wiring_test.go) uses -- run its
@@ -266,6 +288,56 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 		}
 		time.Sleep(1 * time.Second)
 	}
+	if !prOpened {
+		cancel()
+		<-done
+		t.Fatalf("branch %s was pushed but the REST API never reported a pull request for task %s", branch, task.ID)
+	}
+	if sim.pullRequestCount() == 0 {
+		cancel()
+		<-done
+		t.Fatalf("REST API reported a pull request for task %s but githubsim has none", task.ID)
+	}
+	prNumber := sim.firstPullRequestNumber()
+
+	// A simulated human merges the pull request: a real git merge over
+	// the same bare repo, plus a real HTTP PUT to githubsim's own merge
+	// endpoint from a second, independent github.Client, standing in for
+	// a person clicking "Merge pull request" on GitHub the way the REST
+	// API already stood in for one filing the task in the first place.
+	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
+	mergeDir := filepath.Join(t.TempDir(), "merge")
+	runLive(t, t.TempDir(), "git", "clone", remote, mergeDir)
+	runLive(t, mergeDir, "git", "config", "user.email", "github@example.com")
+	runLive(t, mergeDir, "git", "config", "user.name", "github (simulated merge)")
+	runLive(t, mergeDir, "git", "fetch", "origin", branch)
+	runLive(t, mergeDir, "git", "checkout", "main")
+	runLive(t, mergeDir, "git", "merge", "--no-ff", "origin/"+branch, "-m", "Merge "+branch)
+	runLive(t, mergeDir, "git", "push", "origin", "main")
+
+	userTransport := github.NewRealTransport(githubHost)
+	userTransport.UseTLS = false
+	userClient := github.NewClient(userTransport, nil)
+	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("submitting (merging) the pull request: %v", err)
+	}
+
+	// The daemon's own next reconcile tick syncs the now-merged pull
+	// request and closes the task out -- confirmed, once more, through
+	// the REST API rather than the store, so this test's whole final
+	// assertion is exactly what an operator watching the same API would
+	// see: the task they filed, dispatched, and had merged reads closed.
+	closed := false
+	for closeDeadline := time.Now().Add(60 * time.Second); time.Now().Before(closeDeadline); {
+		got, err := client.Task(ctx, task.ID)
+		if err == nil && got.State == model.StateClosed {
+			closed = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
 
 	cancel()
 	select {
@@ -277,10 +349,10 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 		t.Fatal("run() did not return within 30s of its context being cancelled")
 	}
 
-	if !prOpened {
-		t.Fatalf("branch %s was pushed but the REST API never reported a pull request for task %s", branch, task.ID)
+	if !closed {
+		t.Fatalf("task %s never read back as closed over the REST API after its pull request was merged", task.ID)
 	}
-	if sim.pullRequestCount() == 0 {
-		t.Fatalf("REST API reported a pull request for task %s but githubsim has none", task.ID)
+	if len(sim.sim.Issues) != 0 {
+		t.Fatalf("expected no GitHub issues at all, got %+v", sim.sim.Issues)
 	}
 }
