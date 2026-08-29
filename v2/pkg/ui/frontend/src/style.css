@@ -600,6 +600,21 @@ fieldset legend {
 fieldset label.checkbox { margin-bottom: 0.4rem; font-size: 0.9rem; font-weight: normal; }
 .form-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 0.5rem; }
 
+.overlay-hint { color: var(--text-secondary); font-size: 0.85rem; margin: -0.5rem 0 1rem; }
+
+.upgrade-status {
+  margin: 1rem 0 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 0.75rem;
+  font-size: 0.85rem;
+}
+.upgrade-status dt { color: var(--text-tertiary); font-weight: 500; }
+.upgrade-status dd { margin: 0; word-break: break-word; }
+.upgrade-phase-running { color: var(--accent); }
+.upgrade-phase-ok { color: var(--state-completed); }
+.upgrade-phase-failed { color: var(--danger); }
+
 .detail-layout { display: flex; gap: 1.75rem; align-items: flex-start; }
 .detail-main { flex: 1; min-width: 0; }
 .detail-side { width: 240px; flex: none; }
