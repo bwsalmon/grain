@@ -6,6 +6,7 @@ package ui_test
 // and nothing more.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -301,5 +303,146 @@ func TestStaticFrontendIsServed(t *testing.T) {
 	rec := do(t, srv, http.MethodGet, "/", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+// --- secrets ----------------------------------------------------------
+//
+// bwsalmon/agents#357: a UI colocated with the server can set and delete
+// secrets, and list which ones exist, but the API surface never hands a
+// value back -- these assert on both halves, the presence of names/keys
+// and the total absence of any value anywhere in a response body.
+
+func testServerWithSecrets(t *testing.T) (*ui.Server, *secrets.Store) {
+	t.Helper()
+	_, store, _ := testClient(t)
+	secretStore := secrets.New(t.TempDir())
+	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.DefaultCapabilities(), Secrets: secretStore}
+	return ui.NewServer(cfg, store), secretStore
+}
+
+func TestSecretsDisabledByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodGet, "/api/secrets", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	got := decode[map[string]any](t, rec)
+	if got["enabled"] != false {
+		t.Fatalf("enabled = %v, want false", got["enabled"])
+	}
+}
+
+func TestSecretsDisabledRejectsMutation(t *testing.T) {
+	srv, _ := testServer(t)
+	for _, call := range []struct{ method, path, body string }{
+		{http.MethodPut, "/api/secrets/db/password", `{"value":"hunter2"}`},
+		{http.MethodDelete, "/api/secrets/db/password", ""},
+		{http.MethodDelete, "/api/secrets/db", ""},
+	} {
+		rec := do(t, srv, call.method, call.path, call.body)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want 404: %s", call.method, call.path, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestSetSecretThenList(t *testing.T) {
+	srv, store := testServerWithSecrets(t)
+
+	rec := do(t, srv, http.MethodPut, "/api/secrets/db/password", `{"value":"hunter2"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "hunter2") {
+		t.Fatalf("response body leaked the secret value: %s", rec.Body)
+	}
+	got := decode[map[string]any](t, rec)
+	if got["enabled"] != true {
+		t.Fatalf("enabled = %v, want true", got["enabled"])
+	}
+
+	// Confirmed independently of the API surface, which never reads a
+	// value back: the value actually landed on disk.
+	value, err := store.Resolve(context.Background(), "db/password")
+	if err != nil || value != "hunter2" {
+		t.Fatalf("Resolve(db/password) = %q, %v", value, err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/secrets", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "hunter2") {
+		t.Fatalf("list response leaked the secret value: %s", rec.Body)
+	}
+	list := decode[map[string]any](t, rec)
+	secretsList, _ := list["secrets"].([]any)
+	if len(secretsList) != 1 {
+		t.Fatalf("secrets = %+v, want one entry", list["secrets"])
+	}
+}
+
+func TestSetSecretRequiresValue(t *testing.T) {
+	srv, _ := testServerWithSecrets(t)
+	rec := do(t, srv, http.MethodPut, "/api/secrets/db/password", `{"value":""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestSetSecretRejectsTraversalNames(t *testing.T) {
+	srv, _ := testServerWithSecrets(t)
+	rec := do(t, srv, http.MethodPut, "/api/secrets/..%2Fescape/key", `{"value":"x"}`)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = %d, want a non-2xx rejection: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestDeleteSecretKeyLeavesOtherKeys(t *testing.T) {
+	srv, store := testServerWithSecrets(t)
+	if err := store.Set("db", "username", []byte("app")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("db", "password", []byte("hunter2")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodDelete, "/api/secrets/db/password", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if _, err := store.Resolve(context.Background(), "db/password"); err == nil {
+		t.Fatal("expected password to be gone")
+	}
+	if v, err := store.Resolve(context.Background(), "db/username"); err != nil || v != "app" {
+		t.Fatalf("username should survive: %q, %v", v, err)
+	}
+}
+
+func TestDeleteWholeSecret(t *testing.T) {
+	srv, store := testServerWithSecrets(t)
+	if err := store.Set("db", "username", []byte("app")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodDelete, "/api/secrets/db", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	list, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("got %+v, want no secrets left", list)
+	}
+}
+
+func TestDeleteMissingSecretIs404(t *testing.T) {
+	srv, _ := testServerWithSecrets(t)
+	rec := do(t, srv, http.MethodDelete, "/api/secrets/nope", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }

@@ -1099,6 +1099,55 @@ message (a bad duration string, an empty required field the first
 time) surfaces through the same error banner task creation's own
 validation errors already use.
 
+## Write-only secrets access when colocated
+
+`pkg/secrets.Store` (above, "no secret store in the model") was
+read-only until bwsalmon/agents#357: `Resolve` was the whole surface,
+since nothing except a dispatch resolving a capability's credential had
+any reason to touch it. A UI running alongside the server is a
+different caller with a different need — an operator who wants to set a
+GitHub token or rotate a Gemini key without hand-editing files under
+`-data-dir/secrets` over SSH.
+
+`Store.Set`, `DeleteKey`, `DeleteSecret` and `List` are the added
+surface. `List` reports `SecretInfo{Name, Keys}` for everything on
+disk — names and key names, never a value — which is what lets a caller
+show which secrets are set without this package ever handing one back
+outside of `Resolve` itself. `Set`/`DeleteKey`/`DeleteSecret` now also
+validate every path segment they're given (no `.`, `..`, or separator),
+tightened onto `Resolve` too: it used to let a key contain `/` and
+resolve wherever that led, which nothing exercised on purpose but which
+writing a caller-supplied string to disk can no longer risk.
+
+`pkg/ui`'s `Config.Secrets` is nil unless the deployment says otherwise.
+Before bwsalmon/agents#363, that meant naming the *server's* `-data-dir`
+from a second process — the standalone `grain ui`'s own `-server-data-dir`
+flag, only useful when that UI happened to run on the same host as the
+server it pointed at. Now that the UI only ever runs inside the daemon
+that owns the store (`cmd/grain/daemon.go`'s own `startUIServer`, "The UI
+and the CLI talk to the daemon over REST" below), it always has that
+directory to hand and wires it up unconditionally — there is no longer a
+cross-process case where it would not, and no flag to set. `grain demo`'s
+own throwaway UI is the one caller that still leaves it nil, on purpose:
+a fake store seeded with fake tasks has no real secrets to manage either.
+`GET /api/secrets` reports `{enabled, secrets}` either way, so the
+frontend's secrets pane can hide its controls behind a note rather than
+show ones that would only ever 404; `PUT`/`DELETE
+/api/secrets/{secret}/{key}` and `DELETE /api/secrets/{secret}` are the
+set/delete-one-key/delete-the-whole-secret surface, each answering with
+the refreshed `{enabled, secrets}` the same way a mutating task route
+answers with the task. `grain secrets` (`cmd/grain/secrets.go`) is the
+CLI side, a mode of its own alongside `daemon`/`mcpserver` rather than a
+`runCLI` verb, since it has nothing to do with the task store and
+opening one for it would be pure overhead: `-data-dir` here means what
+`grain daemon`'s own `-data-dir` does (secrets live at
+`<data-dir>/secrets`), `list`/`set`/`delete` mirror the API one-to-one,
+and `set` takes its value from `-value-file` or, left unset, from
+stdin — deliberately never from an argv flag, which any other process
+on the same host could read back out of this one's own command line.
+Unlike the UI, it never goes through the daemon's own REST API: it edits
+the files directly, so it works even when no daemon is running.
+
 ## The UI and the CLI talk to the daemon over REST
 
 Embedded Dolt permits one writer, which suited a cron-driven controller
@@ -1163,3 +1212,59 @@ either, only to build. Safe to re-run: it is the installer and the
 updater both, seeding a secret or a config value only the first time and
 leaving anything already on disk alone every time after. `./setup.sh
 --help` lists every setting.
+
+`scripts/setup.sh` only ever *seeds* an already-minted
+`GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE` — until bwsalmon/agents#358, nothing
+in this repo minted one. `grain setup gcp` (`cmd/grain/setup.go`,
+`pkg/gcpsetup`) is that missing piece: it creates the agent and minter
+service accounts the gcp-key/gemini-key capabilities need, grants the
+minter `roles/iam.serviceAccountKeyAdmin` on the agent account (and, with
+`-enable-gemini-key`, `roles/serviceusage.apiKeysAdmin` on the project),
+enables the APIs both calls need, and — with `-mint-key -key-out <path>`
+— mints the minter's own key, ready to feed straight into `setup.sh` as
+`GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE`. It authenticates with Application
+Default Credentials by default, or `-credentials-file` for a specific
+operator identity. Every step is get-or-create: running it again is a
+no-op wherever the first run already succeeded. A step the credential it
+ran as can't perform (typically an IAM grant, needing more than Editor)
+is printed as a `gcloud` command to run by hand instead of aborting the
+whole run — re-running `grain setup gcp` afterward picks up right there.
+`pkg/gcpsetup/gcpsetup_test.go` covers the ordering, the idempotency, and
+the manual-step fallback against a fake `Admin`, no real project involved
+(the same bar `pkg/capability/gcpkey`'s own tests hold to); nobody has
+run it against a real project yet — the "Accepted limits" list above
+still says as much about GCP token minting generally, and this is a
+bootstrap for that gap, not a live-verified closing of it.
+
+`grain sync -config <path>` (`cmd/grain/sync.go`) is the reconfiguration
+half: the command a GitHub Action calls whenever a config repo's checked-
+in configuration changes. It reads one JSON file with up to two
+independent sections — `"settings"`, unmarshaled straight into
+`ui.UpdateSettingsRequest` and applied through `HTTPClient.UpdateSettings`
+against `-server`, the same running daemon `grain settings` itself talks
+to (bwsalmon/agents#363: there is no store flag here any more), and
+`"gcp"`, which re-runs the exact `pkg/gcpsetup.EnsureInfrastructure` logic
+`grain setup gcp` uses, so IAM drift (a binding removed by hand, a newly
+enabled gemini-key rollout that needs a grant it didn't before) gets
+repaired on every sync rather than only at install time. It never mints a
+new minter key on a `sync` run — that stays a deliberate,
+`grain setup gcp -mint-key` action. Reachability is the part this command
+does not solve: the daemon's UI/API is bound to loopback only by default
+(this section's own security note, above), so a workflow needs either a
+self-hosted runner that *is* the deployment host (the simplest shape: the
+workflow step becomes `grain sync -config deploy/grain.json`, `-server`'s
+own default already pointing at loopback, no network hop at all) or a
+tunnel of some kind — SSH, Tailscale, IAP — to wherever `-ui-addr` actually
+listens. A `"gcp"`-only sync needs neither — just a GCP credential, the
+same Workload Identity Federation `templates/gcp/.github/workflows/
+deploy.yml` already uses for v1 works here too, with no static key in the
+workflow. `cmd/grain/sync_test.go` covers both sections' validation and,
+for `"settings"`, a real round trip against an `httptest.Server` wrapping
+an embedded store, including a second, no-op sync run.
+
+Neither command invokes an agent to walk an operator through a manual
+step — printing the exact command was judged enough for a first version;
+see bwsalmon/agents#358's own "If there is enough we need to automate
+manually we may want to invoke an agent" for the option this leaves open,
+should the list of manual steps grow long enough on a real project to be
+worth it.

@@ -3,9 +3,10 @@ package main
 // cmd/graind (this file's original home, before bwsalmon/agents#313
 // folded it into cmd/grain as the "daemon" subcommand) had no tests at
 // all before bwsalmon/agents#265 -- every other binary here (cmd/
-// mcpserver, cmd/ui, now mcpserver.go and ui.go for the same reason) was
-// the same "no test files" gap, but graind was the one that issue asked
-// about: the process that wires a real embedded Dolt store, a real
+// mcpserver, cmd/ui, now mcpserver.go and, before bwsalmon/agents#363
+// folded it into daemon.go, ui.go) was the same "no test files" gap, but
+// graind was the one that issue asked about: the process that wires a
+// real embedded Dolt store, a real
 // in-process git proxy, a real Gemini client and the capability registry
 // together and runs them on a timer. These tests cover the small pieces
 // of that wiring run() itself does not delegate to an already-tested

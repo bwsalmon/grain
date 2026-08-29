@@ -20,21 +20,36 @@
 // Tailscale, IAP. -server names it; there is no GitHub credential and no
 // store flag here at all any more.
 //
-// Three other subcommands -- daemon, mcpserver, controller -- select
-// entirely different modes, each what used to be its own cmd/graind,
-// cmd/ui or cmd/mcpserver binary before #313 combined them: the daemon
-// runs pkg/orchestrator's RunCycle on a timer and serves the UI/API,
-// mcpserver speaks MCP over stdin/stdout against the sandbox tools, and
-// controller runs one-time interactive setup verbs (currently just
-// bootstrap-github-app) against an operator's own machine, never a
-// running daemon. daemon.go, mcpserver.go and controller.go carry each
-// one's own doc comment. A running daemon forks mcpserver instances of
-// itself -- this same binary, re-invoked with "mcpserver" as argv[1] --
-// rather than needing a second binary on disk; see pkg/agent/claude's own
-// doc comment for the one place that matters today. "demo" (demo.go) is a
-// fourth, smaller mode: a throwaway UI server over fake data, for trying
+// Other subcommands -- daemon, mcpserver, secrets, controller, setup,
+// sync -- select entirely different modes, each what used to be its own
+// binary, its own flag or store carve-out, or a later addition with no
+// business touching the task store at all. daemon (daemon.go, formerly
+// cmd/graind) runs pkg/orchestrator's RunCycle on a timer and, unless
+// -ui-addr is emptied out, serves the UI/API in-process too -- the
+// standalone "ui" subcommand this project used to have is gone,
+// folded into daemon by #363 rather than kept as a second way to open
+// the same store. mcpserver (mcpserver.go, formerly cmd/mcpserver)
+// speaks MCP over stdin/stdout against the sandbox tools; a running
+// daemon forks mcpserver instances of itself -- this same binary,
+// re-invoked with "mcpserver" as argv[1] -- rather than needing a second
+// binary on disk (see pkg/agent/claude's own doc comment for the one
+// place that matters today). secrets (bwsalmon/agents#357, secrets.go)
+// sets/deletes/lists a colocated server's secrets directly on disk, no
+// store or RPC involved. controller (controller.go) runs one-time
+// interactive setup verbs (currently just bootstrap-github-app) against
+// an operator's own machine, never a running daemon. setup and sync
+// (bwsalmon/agents#358, setup.go and sync.go) bootstrap and reconcile a
+// deployment's external GCP infrastructure and, for sync, its stored
+// settings too -- sync reaches those over the same REST API this CLI
+// does now, rather than opening the store itself. "demo" (demo.go) is a
+// smaller mode still: a throwaway UI server over fake data, for trying
 // out the frontend with no daemon, no store and no deployment behind it
 // at all.
+//
+// The task CLI itself takes no GitHub credentials at all. A task used to
+// be a GitHub issue, so this command needed a token and a task repo to
+// file one; a task is a store row now, and creating one is a write to
+// the store (README, "Input is a model update, not a GitHub issue").
 //
 // Folder and repo *management* (docs/data-model.md's Folder tree, the
 // containment structure a capability's `offers` are attached to) is
@@ -57,13 +72,13 @@ import (
 )
 
 // main dispatches on argv[1] before parsing anything else: "daemon",
-// "demo" and "mcpserver" are modes with their own, unrelated flag sets, so
-// they are matched exactly and handed the rest of argv verbatim rather
-// than folded into runCLI's own flag.FlagSet. Anything else -- including
-// no arguments at all, or a leading global flag like -json -- falls
-// through to the task CLI exactly as it always has, so a task command
-// itself is never allowed to collide with one of the mode names above
-// (none of the ones below do).
+// "demo", "mcpserver", "secrets", "controller", "setup" and "sync" are
+// modes with their own, unrelated flag sets, so they are matched exactly
+// and handed the rest of argv verbatim rather than folded into runCLI's
+// own flag.FlagSet. Anything else -- including no arguments at all, or a
+// leading global flag like -json -- falls through to the task CLI
+// exactly as it always has, so a task command itself is never allowed to
+// collide with one of the mode names above (none of the ones below do).
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -77,8 +92,17 @@ func main() {
 		case "mcpserver":
 			mcpserver(args[1:])
 			return
+		case "secrets":
+			secretsCmd(args[1:])
+			return
 		case "controller":
 			controller(args[1:])
+			return
+		case "setup":
+			setupCmd(args[1:])
+			return
+		case "sync":
+			syncCmd(args[1:])
 			return
 		}
 	}
@@ -92,7 +116,10 @@ const usage = `usage: grain [global flags] <command> [args]
        grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer, and serve the UI/API (see daemon.go)
        grain demo [flags]      serve the task UI on localhost over a throwaway store of fake tasks (see demo.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
+       grain secrets [flags]   set/delete/list a colocated server's secrets on disk (see secrets.go)
        grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
+       grain setup gcp [flags] bootstrap external GCP infrastructure for a new installation (see setup.go)
+       grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
 
 Global flags (must come before the command):
   -server string  base URL of a running "grain daemon"'s UI/API (default "http://127.0.0.1:8420")
