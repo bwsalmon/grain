@@ -191,6 +191,10 @@ function renderDetail(t) {
     freshness.appendChild(document.createTextNode(" · "));
     freshness.appendChild(el("span", { text: t.pullRequest }));
   }
+  if (t.generatedFrom) {
+    freshness.appendChild(document.createTextNode(" · generated from "));
+    freshness.appendChild(el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTask(t.generatedFrom); } }, [t.generatedFrom]));
+  }
   container.appendChild(freshness);
 
   // Real columns on the task now, not directive lines parsed out of a

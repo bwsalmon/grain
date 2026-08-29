@@ -555,6 +555,47 @@ func TestListTasksCarriesEveryTaskWithItsState(t *testing.T) {
 	}
 }
 
+// GeneratedFrom is read off the task's own LinkProposedBy link -- the
+// same provenance relayProposedTasks (pkg/orchestrator/finish.go) sets
+// automatically on every task a propose_task call files, surfaced here
+// for the UI rather than left for a human to dig out of the store.
+func TestGeneratedFromReadsOffTheProposedByLink(t *testing.T) {
+	c, store, ctx := testClient(t)
+	source := create(t, c, ctx)
+
+	id, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := model.Task{
+		ID:     id,
+		Intent: model.IntentImplement,
+		Title:  "proposed child",
+		Body:   "filed by the parent's own run",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+			Reason:      model.ReasonDirect,
+		},
+		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: source.ID}},
+		CreatedAt: &baseTime,
+	}
+	if err := store.PutTask(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Task(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GeneratedFrom != source.ID {
+		t.Fatalf("GeneratedFrom = %q, want %q", got.GeneratedFrom, source.ID)
+	}
+
+	if source.GeneratedFrom != "" {
+		t.Fatalf("source task GeneratedFrom = %q, want empty: nothing proposed it", source.GeneratedFrom)
+	}
+}
+
 func TestTaskNotFound(t *testing.T) {
 	c, _, ctx := testClient(t)
 	_, err := c.Task(ctx, "404")

@@ -83,6 +83,15 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 	if fixTask.Base != "grain/task-"+task.ID {
 		t.Fatalf("fix task base = %q, want the original PR's own branch", fixTask.Base)
 	}
+	proposedBy, hasProposedBy := "", false
+	for _, l := range fixTask.Links {
+		if l.Kind == model.LinkProposedBy {
+			proposedBy, hasProposedBy = l.Target, true
+		}
+	}
+	if !hasProposedBy || proposedBy != task.ID {
+		t.Fatalf("fix task LinkProposedBy = (%q, %v), want (%q, true): the UI's generated-from reads it", proposedBy, hasProposedBy, task.ID)
+	}
 	fixState, err := store.State(ctx, fixTaskID)
 	if err != nil {
 		t.Fatal(err)
