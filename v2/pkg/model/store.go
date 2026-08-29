@@ -869,6 +869,31 @@ func (s *Store) OccupiedSlots(ctx context.Context) ([]string, error) {
 	return out, err
 }
 
+// LiveRuns is every task_run row with no `finished_at` -- the same rows
+// OccupiedSlots counts, in full, for a caller (orchestrator.
+// RecoverOrphanedRuns) that needs to know which task and run each one
+// belongs to rather than just which slots they occupy. A daemon calls
+// this exactly once, at startup, before it has driven any run of its
+// own: at that point every row here can only be left over from a
+// process that is no longer around to finish it -- see that func's own
+// doc comment for why a run still legitimately in flight is never
+// mistaken for one of these.
+func (s *Store) LiveRuns(ctx context.Context) ([]Run, error) {
+	var out []Run
+	err := each(ctx, s.db,
+		"SELECT `id`,`task_id`,`slot`,`sandbox`,`attempt`,`started_at` "+
+			"FROM `task_run` WHERE `finished_at` IS NULL ORDER BY `id`", nil,
+		func(rows *sql.Rows) error {
+			var r Run
+			if err := rows.Scan(&r.ID, &r.TaskID, &r.Slot, &r.Sandbox, &r.Attempt, &r.StartedAt); err != nil {
+				return err
+			}
+			out = append(out, r)
+			return nil
+		})
+	return out, err
+}
+
 // GitScope is what a sandbox's currently live run may touch through the
 // git proxy: the write target of the task it is running, and its
 // read-only repos. Nil target and an empty slice mean the sandbox has no
