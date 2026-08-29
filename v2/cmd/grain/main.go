@@ -8,24 +8,28 @@
 // comment, and close (grain's own stand-in for "delete" -- see
 // Client.Close's own doc comment for why) or reopen one.
 //
-// Other subcommands -- daemon, ui, mcpserver, setup, sync -- select
-// entirely different modes. daemon, ui and mcpserver are each what used
-// to be its own cmd/graind, cmd/ui or cmd/mcpserver binary before #313
-// combined them: the daemon runs pkg/orchestrator's RunCycle on a timer,
-// ui serves pkg/ui's JSON API and static frontend, and mcpserver speaks
-// MCP over stdin/stdout against the sandbox tools. daemon.go, ui.go and
-// mcpserver.go carry each one's own doc comment. A running daemon forks
-// mcpserver instances of itself -- this same binary, re-invoked with
-// "mcpserver" as argv[1] -- rather than needing a second binary on disk;
-// see pkg/agent/claude's own doc comment for the one place that matters
-// today. setup and sync (bwsalmon/agents#358, setup.go and sync.go) are
-// newer and unrelated to any of that: setup bootstraps external GCP
+// Other subcommands -- daemon, ui, mcpserver, secrets, controller, setup,
+// sync -- select entirely different modes. daemon, ui and mcpserver are
+// each what used to be its own cmd/graind, cmd/ui or cmd/mcpserver binary
+// before #313 combined them: the daemon runs pkg/orchestrator's RunCycle
+// on a timer, ui serves pkg/ui's JSON API and static frontend, and
+// mcpserver speaks MCP over stdin/stdout against the sandbox tools.
+// daemon.go, ui.go and mcpserver.go carry each one's own doc comment. A
+// running daemon forks mcpserver instances of itself -- this same binary,
+// re-invoked with "mcpserver" as argv[1] -- rather than needing a second
+// binary on disk; see pkg/agent/claude's own doc comment for the one
+// place that matters today. secrets (bwsalmon/agents#357, secrets.go)
+// sets/deletes/lists a colocated server's secrets directly on disk.
+// controller (controller.go) runs one-time interactive setup verbs
+// (currently just bootstrap-github-app) against an operator's own
+// machine, never a running daemon. setup and sync (bwsalmon/agents#358,
+// setup.go and sync.go) are newer still: setup bootstraps external GCP
 // infrastructure for a new installation, and sync reconciles a live
 // deployment's settings and/or that same GCP infrastructure from a
 // config file, the way a GitHub Action calls it whenever a config repo
-// changes. Both are modes rather than runCLI commands for the same
-// reason as the three above -- see buildClient's own doc comment for why
-// that matters specifically for sync.
+// changes. All of these are modes rather than runCLI commands for the
+// same reason as the first three -- see buildClient's own doc comment
+// for why that matters specifically for sync.
 //
 // The task CLI itself takes no GitHub credentials at all. A task used to
 // be a GitHub issue, so this command needed a token and a task repo to
@@ -55,13 +59,14 @@ import (
 )
 
 // main dispatches on argv[1] before parsing anything else: "daemon",
-// "ui" and "mcpserver" are modes with their own, unrelated flag sets, so
-// they are matched exactly and handed the rest of argv verbatim rather
-// than folded into runCLI's own flag.FlagSet. Anything else -- including
-// no arguments at all, or a leading global flag like -json -- falls
-// through to the task CLI exactly as it always has, so a task command
-// itself is never allowed to collide with one of the three mode names
-// above (none of the ones below do).
+// "ui", "mcpserver", "secrets", "controller", "setup" and "sync" are
+// modes with their own, unrelated flag sets, so they are matched exactly
+// and handed the rest of argv verbatim rather than folded into runCLI's
+// own flag.FlagSet. Anything else -- including no arguments at all, or a
+// leading global flag like -json -- falls through to the task CLI
+// exactly as it always has, so a task command itself is never allowed to
+// collide with one of the seven mode names above (none of the ones below
+// do).
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -74,6 +79,12 @@ func main() {
 			return
 		case "mcpserver":
 			mcpserver(args[1:])
+			return
+		case "secrets":
+			secretsCmd(args[1:])
+			return
+		case "controller":
+			controller(args[1:])
 			return
 		case "setup":
 			setupCmd(args[1:])
@@ -93,6 +104,8 @@ const usage = `usage: grain [global flags] <command> [args]
        grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer (see daemon.go)
        grain ui [flags]        serve the task UI on localhost (see ui.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
+       grain secrets [flags]   set/delete/list a colocated server's secrets on disk (see secrets.go)
+       grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
        grain setup gcp [flags] bootstrap external GCP infrastructure for a new installation (see setup.go)
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
 
@@ -326,6 +339,8 @@ func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	fs.BoolVar(&autoMerge, "auto-merge", false, "merge this task's pull request automatically once it reads clean")
 	var capabilities stringList
 	fs.Var(&capabilities, "capability", "capability ID to attach (repeatable)")
+	var reads stringList
+	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable)")
 	approve := fs.Bool("approve", false, "queue the task immediately instead of filing it as a proposal awaiting approval")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -333,7 +348,7 @@ func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, Base: *base,
-		AutoMerge: autoMerge, Capabilities: capabilities, Approved: *approve,
+		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
 	}
 
 	task, err := c.CreateTask(ctx, req)
@@ -352,6 +367,8 @@ func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	base := fs.String("base", "", "new base branch")
 	var autoMerge bool
 	fs.BoolVar(&autoMerge, "auto-merge", false, "whether the task auto-merges once clean")
+	var reads stringList
+	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable) -- replaces the whole set")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -378,6 +395,9 @@ func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 		case "auto-merge":
 			v := autoMerge
 			req.AutoMerge = &v
+		case "read":
+			v := []string(reads)
+			req.Reads = &v
 		}
 	})
 
@@ -659,6 +679,9 @@ func taskBlock(t ui.Task) string {
 	}
 	if t.Base != "" {
 		fmt.Fprintf(&b, "base:       %s\n", t.Base)
+	}
+	if len(t.Reads) > 0 {
+		fmt.Fprintf(&b, "reads:      %s\n", strings.Join(t.Reads, ", "))
 	}
 	fmt.Fprintf(&b, "auto-merge: %t\n", t.AutoMerge)
 	if len(t.Capabilities) > 0 {

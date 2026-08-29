@@ -126,6 +126,7 @@ function renderList(tasks) {
   for (const t of visible) {
     const chips = [];
     if (t.repo) chips.push(el("span", { class: "chip", text: t.repo }));
+    for (const repo of t.reads || []) chips.push(el("span", { class: "chip chip-read", title: "read-only", text: `${repo} (read)` }));
     for (const id of t.capabilities) chips.push(el("span", { class: "chip", text: capabilityName(id) }));
     const badges = [el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state })];
     if (t.blocked) {
@@ -209,6 +210,7 @@ function renderDetail(t) {
   const declaredParts = [];
   if (t.repo) declaredParts.push(`repo ${t.repo}`);
   if (t.base) declaredParts.push(`base ${t.base}`);
+  if (t.reads && t.reads.length > 0) declaredParts.push(`reads ${t.reads.join(", ")}`);
   declaredParts.push(`auto-merge ${t.autoMerge}`);
   container.appendChild(el("div", { class: "declared", text: declaredParts.join("  ") }));
 
@@ -382,6 +384,10 @@ async function submitNewTask(evt) {
     .split(",")
     .map((id) => id.trim())
     .filter((id) => id !== "");
+  const reads = (data.get("reads") || "")
+    .split(",")
+    .map((repo) => repo.trim())
+    .filter((repo) => repo !== "");
   const payload = {
     title: data.get("title"),
     description: data.get("description") || "",
@@ -390,6 +396,7 @@ async function submitNewTask(evt) {
     autoMerge: form.elements.autoMerge.checked,
     capabilities,
     dependsOn,
+    reads,
     approved: form.elements.approved.checked,
   };
   try {
@@ -481,6 +488,98 @@ async function submitSettings(evt) {
   }
 }
 
+// --- secrets ----------------------------------------------------------------
+//
+// bwsalmon/agents#357: this pane can set and delete secrets on a server
+// this UI shares a host with, and report which ones exist, but it never
+// asks for -- or gets back -- a value. GET /api/secrets' own "enabled"
+// flag says whether that colocation is configured at all; when it isn't,
+// the list and form are hidden behind secrets-disabled-note instead of
+// showing controls that could only ever 404.
+
+async function openSecrets() {
+  try {
+    await refreshSecrets();
+    document.getElementById("secrets-overlay").classList.remove("hidden");
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function refreshSecrets() {
+  const resp = await api("/api/secrets");
+  document.getElementById("secrets-disabled-note").classList.toggle("hidden", resp.enabled);
+  document.getElementById("secrets-list-wrapper").classList.toggle("hidden", !resp.enabled);
+  document.getElementById("secrets-set-form").classList.toggle("hidden", !resp.enabled);
+  renderSecretsList(resp.secrets || []);
+}
+
+function renderSecretsList(secrets) {
+  const list = document.getElementById("secrets-list");
+  const empty = document.getElementById("secrets-empty");
+  list.innerHTML = "";
+  empty.classList.toggle("hidden", secrets.length > 0);
+  for (const s of secrets) {
+    const keys = el("span", { class: "secret-keys" });
+    for (const key of s.keys) {
+      keys.appendChild(el("span", { class: "secret-key" }, [
+        key,
+        el("button", {
+          class: "secret-key-delete",
+          type: "button",
+          title: `delete ${s.name}/${key}`,
+          onclick: () => deleteSecretKey(s.name, key),
+        }, ["×"]),
+      ]));
+    }
+    list.appendChild(el("li", { class: "secret-row" }, [
+      el("span", { class: "secret-name", text: s.name }),
+      keys,
+      el("button", {
+        class: "secondary secret-delete",
+        type: "button",
+        onclick: () => deleteSecret(s.name),
+      }, ["Delete secret"]),
+    ]));
+  }
+}
+
+async function deleteSecretKey(secret, key) {
+  try {
+    await api(`/api/secrets/${encodeURIComponent(secret)}/${encodeURIComponent(key)}`, { method: "DELETE" });
+    await refreshSecrets();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function deleteSecret(secret) {
+  try {
+    await api(`/api/secrets/${encodeURIComponent(secret)}`, { method: "DELETE" });
+    await refreshSecrets();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function submitSecret(evt) {
+  evt.preventDefault();
+  const form = evt.target;
+  const secret = form.elements.secret.value.trim();
+  const key = form.elements.key.value.trim();
+  const value = form.elements.value.value;
+  try {
+    await api(`/api/secrets/${encodeURIComponent(secret)}/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    });
+    form.reset();
+    await refreshSecrets();
+  } catch (err) {
+    showError(err);
+  }
+}
+
 // --- wiring ---------------------------------------------------------------
 
 function closeOverlay(name) {
@@ -554,6 +653,8 @@ async function main() {
   });
   document.getElementById("settings-form").addEventListener("submit", submitSettings);
   document.getElementById("settings-button").addEventListener("click", openSettings);
+  document.getElementById("secrets-set-form").addEventListener("submit", submitSecret);
+  document.getElementById("secrets-button").addEventListener("click", openSecrets);
 
   try {
     config = await api("/api/config");

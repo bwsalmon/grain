@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -184,6 +185,37 @@ func TestCreateTaskCarriesDependsOnAndBlockedSignal(t *testing.T) {
 	}
 }
 
+// A read-only repo is stored and rendered as owner/name, and -- the
+// design doc's "the single most important rule in this subsection" --
+// naming one grants nothing: only Capabilities produce a Grant.
+func TestCreateTaskCarriesReadOnlyRepos(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "needs a shared lib", Approved: true,
+		Reads: []string{"acme/shared-lib", "acme/schema"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The store does not promise to preserve the order of a set with no
+	// ordering column of its own (task_read's primary key is (task_id,
+	// owner, name)), so this compares membership, not order.
+	got := append([]string(nil), task.Reads...)
+	sort.Strings(got)
+	want := []string{"acme/schema", "acme/shared-lib"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reads = %v, want %v", task.Reads, want)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 0 {
+		t.Fatalf("grants = %+v, want none: a read-only repo must grant nothing", stored.Grants)
+	}
+}
+
 func TestCreateTaskValidates(t *testing.T) {
 	c, _, ctx := testClient(t)
 
@@ -192,6 +224,7 @@ func TestCreateTaskValidates(t *testing.T) {
 		"unknown capability": {Title: "t", Capabilities: []string{"nope"}},
 		"unparseable repo":   {Title: "t", Repo: "not-a-repo"},
 		"unknown dependency": {Title: "t", DependsOn: []string{"404"}},
+		"unparseable read":   {Title: "t", Reads: []string{"not-a-repo"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.CreateTask(ctx, req)
@@ -239,14 +272,49 @@ func TestUpdateTaskEditsEveryField(t *testing.T) {
 	task := create(t, c, ctx)
 
 	repo, base, autoMerge := "other/repo", "release", true
+	reads := []string{"acme/shared-lib"}
 	got, err := c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{
-		Repo: &repo, Base: &base, AutoMerge: &autoMerge,
+		Repo: &repo, Base: &base, AutoMerge: &autoMerge, Reads: &reads,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Repo != "other/repo" || got.Base != "release" || !got.AutoMerge {
 		t.Fatalf("task = %+v, want the edited fields", got)
+	}
+	if !reflect.DeepEqual(got.Reads, reads) {
+		t.Fatalf("reads = %v, want %v", got.Reads, reads)
+	}
+}
+
+// Reads has no attach/detach endpoint of its own (unlike Capabilities and
+// DependsOn): a given Reads always replaces the whole set rather than
+// adding to it.
+func TestUpdateTaskReadsReplacesRatherThanAdds(t *testing.T) {
+	c, _, ctx := testClient(t)
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "t", Approved: true, Reads: []string{"acme/shared-lib"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := []string{"acme/schema"}
+	got, err := c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Reads: &replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Reads, replacement) {
+		t.Fatalf("reads = %v, want %v (replaced, not appended)", got.Reads, replacement)
+	}
+
+	cleared := []string{}
+	got, err = c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Reads: &cleared})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Reads) != 0 {
+		t.Fatalf("reads = %v, want none: an explicit empty slice clears the set", got.Reads)
 	}
 }
 
@@ -262,6 +330,7 @@ func TestUpdateTaskValidates(t *testing.T) {
 		// rather than an optional directive line that could just be absent.
 		"empty repo":       {Repo: &blank},
 		"unparseable repo": {Repo: &bad},
+		"unparseable read": {Reads: &[]string{"not-a-repo"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.UpdateTask(ctx, task.ID, req)
