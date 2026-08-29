@@ -18,6 +18,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
+	"github.com/bwsalmon/grain/v2/pkg/upgrade"
 )
 
 func testServer(t *testing.T) (*ui.Server, *ui.Client) {
@@ -509,5 +510,100 @@ func TestDeleteMissingSecretIs404(t *testing.T) {
 	rec := do(t, srv, http.MethodDelete, "/api/secrets/nope", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}
+
+// --- upgrade ------------------------------------------------------------
+//
+// bwsalmon/agents#396: fakeUpgrader stands in for a real
+// *upgrade.Upgrader (which would need a real git checkout, docker
+// daemon, and restart command behind it) so these can assert on the
+// route wiring -- disabled-by-default, the branch/status shape, and
+// error mapping -- without any of that. pkg/upgrade's own tests already
+// cover the checkout/build/install/restart pipeline itself.
+
+type fakeUpgrader struct {
+	startErr error
+	status   upgrade.Status
+	started  string
+}
+
+func (f *fakeUpgrader) Start(branch string) error {
+	if f.startErr != nil {
+		return f.startErr
+	}
+	f.started = branch
+	f.status.Branch = branch
+	f.status.Phase = upgrade.PhaseRunning
+	return nil
+}
+
+func (f *fakeUpgrader) Status() (upgrade.Status, error) { return f.status, nil }
+
+func testServerWithUpgrader(t *testing.T, up ui.Upgrader) *ui.Server {
+	t.Helper()
+	_, store, _ := testClient(t)
+	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.DefaultCapabilities(), Upgrader: up}
+	return ui.NewServer(cfg, store)
+}
+
+func TestUpgradeDisabledByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/upgrade", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	got := decode[map[string]any](t, rec)
+	if got["enabled"] != false {
+		t.Fatalf("enabled = %v, want false", got["enabled"])
+	}
+
+	rec = do(t, srv, http.MethodPost, "/api/upgrade", `{"branch":"main"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("post status = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestStartUpgradeRoute(t *testing.T) {
+	fake := &fakeUpgrader{}
+	srv := testServerWithUpgrader(t, fake)
+
+	rec := do(t, srv, http.MethodPost, "/api/upgrade", `{"branch":"grain/issue-396"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body)
+	}
+	if fake.started != "grain/issue-396" {
+		t.Fatalf("Start was called with %q, want %q", fake.started, "grain/issue-396")
+	}
+	got := decode[map[string]any](t, rec)
+	if got["enabled"] != true || got["branch"] != "grain/issue-396" || got["phase"] != "running" {
+		t.Fatalf("response = %+v", got)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/upgrade", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	got = decode[map[string]any](t, rec)
+	if got["phase"] != "running" {
+		t.Fatalf("status phase = %v, want running", got["phase"])
+	}
+}
+
+func TestStartUpgradeRequiresBranch(t *testing.T) {
+	srv := testServerWithUpgrader(t, &fakeUpgrader{})
+	rec := do(t, srv, http.MethodPost, "/api/upgrade", `{"branch":""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestStartUpgradeRejectsWhenAlreadyRunning(t *testing.T) {
+	fake := &fakeUpgrader{startErr: upgrade.ErrUpgradeInProgress}
+	srv := testServerWithUpgrader(t, fake)
+	rec := do(t, srv, http.MethodPost, "/api/upgrade", `{"branch":"main"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
 	}
 }

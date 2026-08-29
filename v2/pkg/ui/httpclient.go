@@ -101,7 +101,7 @@ func httpError(resp *http.Response) error {
 	}
 	switch resp.StatusCode {
 	case http.StatusNotFound:
-		return &NotFoundError{ID: message}
+		return &NotFoundError{message: message}
 	case http.StatusBadRequest:
 		return validationErrorf("%s", message)
 	default:

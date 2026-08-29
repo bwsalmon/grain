@@ -158,6 +158,16 @@ func TestHTTPClientTaskNotFoundIsNotFoundError(t *testing.T) {
 	if !errors.As(err, &nf) {
 		t.Fatalf("GetTask on an unknown id: err = %v, want a *ui.NotFoundError", err)
 	}
+	// The server already formats its 404 body as "no task <id>" (see
+	// Client's own NotFoundError.Error()); httpError used to wrap that
+	// whole message back into NotFoundError{ID: message}, whose own
+	// Error() prepended "no task " a second time, so every HTTPClient
+	// caller -- the CLI, and the browser frontend, which displays the
+	// JSON body's "error" field verbatim -- saw "no task no task
+	// does-not-exist" instead of "no task does-not-exist".
+	if got := nf.Error(); got != "no task does-not-exist" {
+		t.Errorf("NotFoundError.Error() = %q, want %q", got, "no task does-not-exist")
+	}
 }
 
 func TestHTTPClientCreateValidationErrorIsValidationError(t *testing.T) {
