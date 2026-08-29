@@ -102,3 +102,7 @@ jobs:
       - name: Test
         working-directory: v2
         run: go test ./...
+
+      - name: Test frontend
+        working-directory: v2/pkg/ui/frontend
+        run: npm test
