@@ -9,6 +9,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 )
 
@@ -52,13 +53,22 @@ func mustMarshalLine(v any) []byte {
 // registry, and writes any response to w -- the same framing v1's Python
 // server uses (a bare readline()/write() loop, no Content-Length headers),
 // which also happens to be real MCP stdio framing.
-func Serve(registry *Registry, r *bufio.Reader, w *bufio.Writer) error {
+//
+// ctx is handed to every registry.Handle call unchanged for the life of
+// this Serve loop, not derived fresh per request -- callers that want a
+// tool's own exec.CommandContext to die when a run is cancelled (see
+// Tool.Handler's own doc comment) pass a per-run cancellable ctx here,
+// exactly once, rather than Serve trying to guess one per line. A ctx
+// whose only job is "until this process exits" (mcpserver.go's stdio
+// server) can just pass context.Background(): killing that process is
+// how that server is stopped, not cancelling this ctx.
+func Serve(ctx context.Context, registry *Registry, r *bufio.Reader, w *bufio.Writer) error {
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
 			trimmed := bytes.TrimSpace(line)
 			if len(trimmed) > 0 {
-				if resp := registry.Handle(trimmed); resp != nil {
+				if resp := registry.Handle(ctx, trimmed); resp != nil {
 					if _, werr := w.Write(resp); werr != nil {
 						return werr
 					}

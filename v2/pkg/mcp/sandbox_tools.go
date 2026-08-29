@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bwsalmon/grain/v2/pkg/procgroup"
 )
 
 // NewSandboxTools returns the four tools v1 runs over SSH against a real
@@ -110,13 +112,12 @@ func runCommandTool(root string) Tool {
 		Name:        "run_command",
 		Description: "Run a shell command in your assigned sandbox workspace.",
 		InputSchema: runCommandInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(ctx context.Context, args map[string]any) Result {
 			command, ok := argString(args, "command")
 			if !ok || command == "" {
 				return Result{Text: "command is required", IsError: true}
 			}
 
-			ctx := context.Background()
 			if ms, ok := argFloat(args, "timeout"); ok {
 				seconds := int(ms / 1000)
 				if seconds < 1 {
@@ -131,6 +132,7 @@ func runCommandTool(root string) Tool {
 			}
 
 			cmd := exec.CommandContext(ctx, "bash", "-c", command)
+			procgroup.Prepare(cmd)
 			cmd.Dir = root
 			// HOME=root, not whatever this process's own HOME is, so that
 			// anything a command reads or writes there -- notably
@@ -210,7 +212,7 @@ func readFileTool(root string) Tool {
 		Name:        "read_file",
 		Description: "Read a file from your assigned sandbox workspace.",
 		InputSchema: readFileInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			fp, _ := argString(args, "file_path")
 			full, err := resolvePath(root, fp)
 			if err != nil {
@@ -231,7 +233,7 @@ func writeFileTool(root string) Tool {
 		Name:        "write_file",
 		Description: "Write (create or overwrite) a file in your assigned sandbox workspace.",
 		InputSchema: writeFileInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			fp, _ := argString(args, "file_path")
 			content, ok := argString(args, "content")
 			if !ok {
@@ -257,7 +259,7 @@ func editFileTool(root string) Tool {
 		Name:        "edit_file",
 		Description: "Replace an exact string in a file in your assigned sandbox workspace.",
 		InputSchema: editFileInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(_ context.Context, args map[string]any) Result {
 			fp, _ := argString(args, "file_path")
 			oldStr, hasOld := argString(args, "old_string")
 			newStr, hasNew := argString(args, "new_string")

@@ -40,7 +40,7 @@ func sshRunCommandTool(runner remoteRunner, workspace string) Tool {
 		Name:        "run_command",
 		Description: "Run a shell command in your assigned sandbox workspace.",
 		InputSchema: runCommandInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(ctx context.Context, args map[string]any) Result {
 			command, ok := argString(args, "command")
 			if !ok || command == "" {
 				return Result{Text: "command is required", IsError: true}
@@ -64,7 +64,7 @@ func sshRunCommandTool(runner remoteRunner, workspace string) Tool {
 				shell = fmt.Sprintf("timeout %d bash -c %s", seconds, shellQuote(shell))
 			}
 
-			stdout, stderr, exitCode := runner.Run(context.Background(), []string{"bash", "-c", shell}, "")
+			stdout, stderr, exitCode := runner.Run(ctx, []string{"bash", "-c", shell}, "")
 			text := fmt.Sprintf("exit=%d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)
 			return Result{Text: text, IsError: exitCode != 0}
 		},
@@ -99,12 +99,12 @@ func sshReadFileTool(runner remoteRunner) Tool {
 		Name:        "read_file",
 		Description: "Read a file from your assigned sandbox workspace.",
 		InputSchema: readFileInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(ctx context.Context, args map[string]any) Result {
 			fp, _ := argString(args, "file_path")
 			if fp == "" {
 				return Result{Text: "file_path is required", IsError: true}
 			}
-			content, errResult := sshReadRemote(context.Background(), runner, fp)
+			content, errResult := sshReadRemote(ctx, runner, fp)
 			if errResult != nil {
 				return *errResult
 			}
@@ -118,7 +118,7 @@ func sshWriteFileTool(runner remoteRunner) Tool {
 		Name:        "write_file",
 		Description: "Write (create or overwrite) a file in your assigned sandbox workspace.",
 		InputSchema: writeFileInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(ctx context.Context, args map[string]any) Result {
 			fp, _ := argString(args, "file_path")
 			content, ok := argString(args, "content")
 			if !ok {
@@ -128,7 +128,6 @@ func sshWriteFileTool(runner remoteRunner) Tool {
 				return Result{Text: "file_path is required", IsError: true}
 			}
 
-			ctx := context.Background()
 			parent := path.Dir(fp)
 			_, stderr, exitCode := runner.Run(ctx, []string{"mkdir", "-p", parent}, "")
 			if exitCode != 0 {
@@ -144,7 +143,7 @@ func sshEditFileTool(runner remoteRunner) Tool {
 		Name:        "edit_file",
 		Description: "Replace an exact string in a file in your assigned sandbox workspace.",
 		InputSchema: editFileInputSchema,
-		Handler: func(args map[string]any) Result {
+		Handler: func(ctx context.Context, args map[string]any) Result {
 			fp, _ := argString(args, "file_path")
 			oldStr, hasOld := argString(args, "old_string")
 			newStr, hasNew := argString(args, "new_string")
@@ -153,7 +152,6 @@ func sshEditFileTool(runner remoteRunner) Tool {
 			}
 			replaceAll, _ := argBool(args, "replace_all")
 
-			ctx := context.Background()
 			content, errResult := sshReadRemote(ctx, runner, fp)
 			if errResult != nil {
 				return *errResult

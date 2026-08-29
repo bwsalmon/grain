@@ -221,6 +221,39 @@ main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
 .badge-proposed { background: var(--badge-approval-bg); color: var(--badge-approval-fg); }
 .badge-completed { background: var(--badge-completed-bg); color: var(--badge-completed-fg); }
 .badge-closed { background: var(--badge-neutral-bg); color: var(--badge-neutral-fg); }
+/* Blocked is an annotation next to the state pill, not a state of its
+   own (docs/data-model.md) -- a distinct shape (outline, not a solid
+   fill) keeps it from reading as a second, competing state. */
+.badge-blocked {
+  background: transparent;
+  color: var(--on-surface-variant);
+  border: 1px solid var(--outline);
+}
+
+.dependency-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.dependency-chip.chip-blocking {
+  border: 1px solid var(--outline);
+  color: var(--on-surface-variant);
+}
+.chip-remove {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0;
+}
+.dependency-add { display: flex; gap: 0.4rem; padding: 0.6rem; align-items: center; }
+.dependency-add input {
+  flex: 1;
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--outline-variant);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+}
 
 .empty { color: var(--on-surface-variant); padding: 1rem 0; }
 .hidden { display: none !important; }

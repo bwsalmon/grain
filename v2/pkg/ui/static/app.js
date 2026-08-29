@@ -82,7 +82,11 @@ async function refreshList() {
 
 function renderFilters(tasks) {
   const counts = {};
-  for (const t of tasks) counts[t.state] = (counts[t.state] || 0) + 1;
+  let blocked = 0;
+  for (const t of tasks) {
+    counts[t.state] = (counts[t.state] || 0) + 1;
+    if (t.blocked) blocked += 1;
+  }
   const nav = document.getElementById("state-filter");
   nav.innerHTML = "";
   const makeButton = (id, label) => {
@@ -98,23 +102,38 @@ function renderFilters(tasks) {
     if (!counts[s]) continue;
     makeButton(s, `${STATE_LABELS[s]} (${counts[s]})`);
   }
+  // Blocked is not a state (docs/data-model.md) so it gets its own filter
+  // alongside the state ones rather than a slot in STATE_ORDER -- a task
+  // stays under its own state filter too, this is just a faster way to
+  // find what dispatch is currently skipping over.
+  if (blocked) makeButton("blocked", `Blocked (${blocked})`);
 }
 
 function renderList(tasks) {
   const list = document.getElementById("task-list");
   const empty = document.getElementById("empty-state");
   list.innerHTML = "";
-  const visible = stateFilter === "all" ? tasks : tasks.filter((t) => t.state === stateFilter);
+  const visible = stateFilter === "all" ? tasks
+    : stateFilter === "blocked" ? tasks.filter((t) => t.blocked)
+    : tasks.filter((t) => t.state === stateFilter);
   empty.classList.toggle("hidden", visible.length > 0);
   for (const t of visible) {
     const chips = [];
     if (t.repo) chips.push(el("span", { class: "chip", text: t.repo }));
     for (const id of t.capabilities) chips.push(el("span", { class: "chip", text: capabilityName(id) }));
+    const badges = [el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state })];
+    if (t.blocked) {
+      badges.push(el("span", {
+        class: "badge badge-blocked",
+        title: `Waiting on ${t.blockedBy.join(", ")}`,
+        text: "Blocked",
+      }));
+    }
     list.appendChild(el("li", { onclick: () => openTask(t.id) }, [
       el("span", { class: "task-number", text: t.id }),
       el("span", { class: "task-title", text: t.title }),
       el("span", { class: "chips" }, chips),
-      el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state }),
+      ...badges,
     ]));
   }
 }
@@ -156,9 +175,16 @@ function renderDetail(t) {
   const container = document.getElementById("detail-body");
   container.innerHTML = "";
 
+  const headerBadges = [el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state })];
+  // Blocked reads as an annotation beside the state pill, not a
+  // replacement for it -- a blocked task is still queued
+  // (docs/data-model.md).
+  if (t.blocked) {
+    headerBadges.push(el("span", { class: "badge badge-blocked", text: "Blocked" }));
+  }
   container.appendChild(el("div", { class: "detail-header" }, [
     el("h2", { text: `${t.id} ${t.title}` }),
-    el("span", { class: `badge badge-${t.state}`, text: STATE_LABELS[t.state] || t.state }),
+    ...headerBadges,
   ]));
   const freshness = el("div", { class: "freshness", text: "as of just now" });
   if (t.pullRequest) {
@@ -196,13 +222,15 @@ function renderDetail(t) {
   if (t.state === "closed") {
     actions.appendChild(el("button", { class: "secondary", onclick: () => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id) }, ["Reopen"]));
   } else if (t.state === "running") {
-    // Closing a running task already stops it from ever being
-    // re-dispatched or opened as a pull request (orchestrator.ProcessResult,
-    // e2e/close_while_live_test.go) -- that is what "kills the underlying
-    // job" means today, since nothing here preempts a sandbox already in
-    // flight. Cancel is that same close call, surfaced under a name that
-    // matches what a running task's close button actually does instead of
-    // the generic "Close" label every other state uses.
+    // Closing a running task stops it from ever being re-dispatched or
+    // opened as a pull request (orchestrator.ProcessResult), and --
+    // bwsalmon/agents#346 -- orchestrator.RunDispatch itself now watches
+    // for exactly this and cancels the ctx driving the agent and its own
+    // tool calls the moment it notices, killing whatever sandbox process
+    // that run's tool calls were driving too (e2e/close_while_live_test.go).
+    // Cancel is that same close call, surfaced under a name that matches
+    // what a running task's close button actually does instead of the
+    // generic "Close" label every other state uses.
     actions.appendChild(el("button", {
       class: "danger secondary",
       onclick: () => {
@@ -216,7 +244,59 @@ function renderDetail(t) {
   container.appendChild(actions);
 
   container.appendChild(renderCapabilityToggles(t));
+  container.appendChild(renderDependencies(t));
   container.appendChild(renderComments(t));
+}
+
+// renderDependencies is the "definition" and "signal" this whole feature
+// is about, together: what a task has declared it depends on (chips,
+// removable), which of those are still open (the "blocked" styling on a
+// chip and the count above it), and a way to add another -- attach/detach
+// through /depends-on, the same shape renderCapabilityToggles already
+// uses for capabilities.
+function renderDependencies(t) {
+  const fs = el("fieldset", {}, [el("legend", { text: "Depends on" })]);
+  const dependsOn = t.dependsOn || [];
+  const blockedBy = new Set(t.blockedBy || []);
+  if (dependsOn.length === 0) {
+    fs.appendChild(el("p", { class: "hint", text: "No dependencies." }));
+  }
+  const chips = el("div", { class: "chips dependency-chips" });
+  for (const id of dependsOn) {
+    const blocking = blockedBy.has(id);
+    chips.appendChild(el("span", { class: `chip dependency-chip${blocking ? " chip-blocking" : ""}` }, [
+      el("span", { onclick: () => openTask(id), text: `${id}${blocking ? " (open)" : ""}` }),
+      el("button", {
+        type: "button",
+        class: "chip-remove",
+        title: `Remove dependency on ${id}`,
+        onclick: (evt) => {
+          evt.stopPropagation();
+          act(() => api(`/api/tasks/${t.id}/depends-on`, {
+            method: "POST",
+            body: JSON.stringify({ id, attach: false }),
+          }), t.id);
+        },
+      }, ["×"]),
+    ]));
+  }
+  fs.appendChild(chips);
+
+  const input = el("input", { type: "text", placeholder: "task id" });
+  const add = el("button", {
+    type: "button",
+    class: "secondary",
+    onclick: () => {
+      const id = input.value.trim();
+      if (!id) return;
+      act(() => api(`/api/tasks/${t.id}/depends-on`, {
+        method: "POST",
+        body: JSON.stringify({ id, attach: true }),
+      }), t.id).then(() => { input.value = ""; });
+    },
+  }, ["Add"]);
+  fs.appendChild(el("div", { class: "dependency-add" }, [input, add]));
+  return fs;
 }
 
 function renderCapabilityToggles(t) {
@@ -292,6 +372,10 @@ async function submitNewTask(evt) {
   const capabilities = (config.capabilities || [])
     .filter((c) => form.elements["cap-" + c.id] && form.elements["cap-" + c.id].checked)
     .map((c) => c.id);
+  const dependsOn = (data.get("dependsOn") || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id !== "");
   const payload = {
     title: data.get("title"),
     description: data.get("description") || "",
@@ -299,6 +383,7 @@ async function submitNewTask(evt) {
     base: data.get("base") || "",
     autoMerge: form.elements.autoMerge.checked,
     capabilities,
+    dependsOn,
     approved: form.elements.approved.checked,
   };
   try {
