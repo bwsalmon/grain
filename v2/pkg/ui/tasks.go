@@ -25,18 +25,22 @@ import (
 // whose propose_task call filed this one, provenance only, empty for a
 // task nobody proposed.
 type Task struct {
-	ID            string      `json:"id"`
-	Title         string      `json:"title"`
-	Description   string      `json:"description"`
-	Author        string      `json:"author"`
-	State         model.State `json:"state"`
-	Repo          string      `json:"repo,omitempty"`
-	Base          string      `json:"base,omitempty"`
-	AutoMerge     bool        `json:"autoMerge"`
-	Capabilities  []string    `json:"capabilities"`
-	PullRequest   string      `json:"pullRequest,omitempty"`
-	GeneratedFrom string      `json:"generatedFrom,omitempty"`
-	CreatedAt     *time.Time  `json:"createdAt,omitempty"`
+	ID          string      `json:"id"`
+	Title       string      `json:"title"`
+	Description string      `json:"description"`
+	Author      string      `json:"author"`
+	State       model.State `json:"state"`
+	Repo        string      `json:"repo,omitempty"`
+	// Reads is every repo this task's run may read but never push to --
+	// model.Task.Reads, rendered as owner/name strings the same way Repo
+	// renders its single Target.
+	Reads         []string   `json:"reads,omitempty"`
+	Base          string     `json:"base,omitempty"`
+	AutoMerge     bool       `json:"autoMerge"`
+	Capabilities  []string   `json:"capabilities"`
+	PullRequest   string     `json:"pullRequest,omitempty"`
+	GeneratedFrom string     `json:"generatedFrom,omitempty"`
+	CreatedAt     *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,
 	// resolved or not -- the definition. Blocked and BlockedBy are the
 	// signal: whether any of it (or a child-of link) is still open right
@@ -90,6 +94,9 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool) Task {
 	}
 	if t.Target != nil {
 		out.Repo = t.Target.String()
+	}
+	for _, r := range t.Reads {
+		out.Reads = append(out.Reads, r.String())
 	}
 	for _, g := range t.Grants {
 		out.Capabilities = append(out.Capabilities, g.Capability)

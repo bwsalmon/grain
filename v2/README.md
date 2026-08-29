@@ -690,8 +690,14 @@ anywhere, which is what its own `ObservedAt` field is for. Folders are
 still unbuilt; nothing here needed them.
 
 `orchestrator`'s own directive parser (`ParseDirectives`) is deliberately
-narrower than `grain/automation/directives.py`: `/repo`, `/base` and
-`/auto-merge` only. `/pr` (continue an existing PR), `/review` (post a
+narrower than `grain/automation/directives.py`: `/repo`, `/base`,
+`/auto-merge` and `/reads` only (bwsalmon/agents#352 added the last —
+repeatable, adding a repo to `Task.Reads` per line rather than replacing
+it, per docs/data-model.md's "One write target, many read targets"; a
+`Reads` entry is cloned read-only alongside the target and mentioned in
+`BuildPrompt`'s own prompt, but grants nothing — `gitproxy`'s authorizer,
+not this package, is what actually refuses a push to one). `/pr`
+(continue an existing PR), `/review` (post a
 review instead of pushing) and `/depends` (cross-task ordering) all need a
 dispatch shape `RunDispatch`/`BuildPrompt` don't build yet — every task
 today is `IntentImplement`, fresh branch, no continuation — and are listed
