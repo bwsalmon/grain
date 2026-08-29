@@ -182,6 +182,10 @@ func (c *HTTPClient) Reopen(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/reopen", nil, nil)
 }
 
+func (c *HTTPClient) Retry(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/retry", nil, nil)
+}
+
 // Config reads the deployment's fixed configuration -- who the daemon
 // attributes every task and comment written through this API to, its
 // default target repo, and the capabilities it offers. Unlike the

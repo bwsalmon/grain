@@ -57,7 +57,7 @@ func TestProcessResultOpensAPullRequestForAPushedBranch(t *testing.T) {
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	result := toolResult(agent.ToolCall{Name: "run_command", Text: "pushed"})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestProcessResultReusesAnAlreadyOpenPullRequest(t *testing.T) {
 	}
 
 	result := toolResult(agent.ToolCall{Name: "run_command", Text: "pushed"})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 	if len(sim.PullRequests) != 1 {
@@ -125,7 +125,7 @@ func TestProcessResultRelaysAQuestionAndParksTheTask(t *testing.T) {
 	result := toolResult(agent.ToolCall{
 		Name: "ask_question", Arguments: map[string]any{"question": "which config file?"},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	result := toolResult(agent.ToolCall{
 		Name: "comment_on_issue", Arguments: map[string]any{"comment": "the answer is 4"},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -184,6 +184,61 @@ func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	}
 }
 
+// TestProcessResultCorrectsARunThatProducedNothingToActOn is
+// bwsalmon/agents#403: RunDispatch's own outcomeOf calls a run
+// "succeeded" the moment the agent makes one harmless tool call, with no
+// way to know yet whether that call amounted to a push, a question, or a
+// closing comment. A run_command call that touches neither git nor either
+// escape hatch is exactly that gap -- ProcessResult must correct
+// task_run's own outcome once it has actually ruled all three out, or a
+// run that never did anything useful would keep reading "succeeded"
+// forever and never count toward FailureStreak's own cap.
+func TestProcessResultCorrectsARunThatProducedNothingToActOn(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	runID := "t1-r1"
+	if err := store.StartRun(ctx, model.Run{
+		ID: runID, TaskID: task.ID, Slot: "s1", Sandbox: "s1", Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := store.FinishRun(ctx, runID, baseTime, "succeeded", ""); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	result := toolResult(agent.ToolCall{Name: "run_command", Text: "ran something, pushed nothing"})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, runID, baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	streak, err := store.FailureStreak(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("FailureStreak: %v", err)
+	}
+	if streak == nil || streak.Count != 1 {
+		t.Fatalf("failure streak = %+v, want a single counted failure", streak)
+	}
+	if streak.LastOutcome != "no_action" {
+		t.Fatalf("last outcome = %q, want no_action", streak.LastOutcome)
+	}
+	if streak.LastDetail == "" {
+		t.Fatal("last detail is empty, want an explanation a human could read")
+	}
+
+	// Still queued, not completed and not failed outright -- one
+	// unproductive run is not the cap.
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateQueued {
+		t.Fatalf("state = %q, want queued", st)
+	}
+}
+
 func TestProcessResultFilesAProposedTaskIntoTheStore(t *testing.T) {
 	store, ctx := openStore(t)
 	_, client := newSim(t, "acme", "widgets", "main")
@@ -196,7 +251,7 @@ func TestProcessResultFilesAProposedTaskIntoTheStore(t *testing.T) {
 			"title": "follow-up work", "body": "do more of this",
 		},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -265,7 +320,7 @@ func TestProcessResultProposedTaskInheritsAutoMergeFromItsParent(t *testing.T) {
 			"title": "follow-up work", "body": "do more of this",
 		},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -313,7 +368,7 @@ func TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent
 			"title": "follow-up work", "body": "do more of this",
 		},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 

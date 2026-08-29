@@ -208,5 +208,5 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	if runErr != nil {
 		return errors.Join(runErr, recreateErr)
 	}
-	return errors.Join(ProcessResult(ctx, deps.Store, deps.Client, *task, result, now), recreateErr)
+	return errors.Join(ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now), recreateErr)
 }

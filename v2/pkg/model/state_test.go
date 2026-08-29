@@ -49,12 +49,13 @@ func goPrecedence() []string {
 	approved := task(true)
 	unapproved := task(false)
 	got := []State{
-		StateOf(approved, &Observation{ClosedAt: &now}, true),
-		StateOf(approved, &Observation{CompletedAt: &now}, true),
-		StateOf(approved, &Observation{PendingQuestionCommentID: &id}, true),
-		StateOf(approved, nil, true),
-		StateOf(unapproved, nil, false),
-		StateOf(approved, nil, false),
+		StateOf(approved, &Observation{ClosedAt: &now}, true, 0),
+		StateOf(approved, &Observation{CompletedAt: &now}, true, 0),
+		StateOf(approved, &Observation{PendingQuestionCommentID: &id}, true, 0),
+		StateOf(approved, nil, true, 0),
+		StateOf(approved, nil, false, MaxConsecutiveFailures),
+		StateOf(unapproved, nil, false, 0),
+		StateOf(approved, nil, false, 0),
 	}
 	out := make([]string, len(got))
 	for i, s := range got {
@@ -93,7 +94,7 @@ func TestEveryStateIsReachable(t *testing.T) {
 		seen[s] = true
 	}
 	for _, s := range []State{StateProposed, StateQueued, StateRunning,
-		StateAwaitingReply, StateCompleted, StateClosed} {
+		StateAwaitingReply, StateFailed, StateCompleted, StateClosed} {
 		if !seen[string(s)] {
 			t.Errorf("state %q is not reachable from the derivation", s)
 		}
@@ -132,7 +133,7 @@ func TestDeclarationAndObservationAreSeparateTables(t *testing.T) {
 			taskTable = table
 		}
 	}
-	for _, observed := range []string{"closed_at", "completed_at", "baseline_comment_id"} {
+	for _, observed := range []string{"closed_at", "completed_at", "baseline_comment_id", "retry_requested_at"} {
 		if strings.Contains(taskTable, observed) {
 			t.Errorf("observation column %q leaked into the task table", observed)
 		}

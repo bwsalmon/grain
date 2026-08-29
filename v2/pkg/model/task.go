@@ -316,8 +316,16 @@ const (
 	StateQueued        State = "queued"
 	StateRunning       State = "running"
 	StateAwaitingReply State = "awaiting_reply"
-	StateCompleted     State = "completed"
-	StateClosed        State = "closed"
+	// StateFailed means MaxConsecutiveFailures runs in a row ended
+	// without succeeding, and none of them has succeeded since -- see
+	// StateOf and task_streak (schema.go). Unlike the other states, a
+	// task does not leave this one on its own: task_ready only ever
+	// selects 'queued', so nothing here retries automatically, and a
+	// human has to set Observation.RetryRequestedAt (Store.Retry) before
+	// it is eligible for another attempt.
+	StateFailed    State = "failed"
+	StateCompleted State = "completed"
+	StateClosed    State = "closed"
 )
 
 // Task is the declared half: what a human, or grain proposing, asked for.
@@ -371,6 +379,15 @@ type Observation struct {
 	// fix by hand.
 	MergeQueueBlockedAt *time.Time
 	ObservedAt          *time.Time
+	// RetryRequestedAt is a human's "clear the failure streak and let it
+	// try again" signal (Store.Retry) -- the only way a task stuck in
+	// StateFailed becomes dispatchable again, since nothing else ever
+	// resets task_streak's own count once it reaches MaxConsecutiveFailures.
+	// It also bounds task_streak going forward: a failed run only counts
+	// toward the streak if it started after the later of this and the
+	// task's last succeeded run, so asking for a retry and then failing
+	// again does not instantly re-cap the task on the very next attempt.
+	RetryRequestedAt *time.Time
 }
 
 // Run is one attempt. A live run is a Run with no FinishedAt.
@@ -386,7 +403,16 @@ type Run struct {
 	StartedAt  time.Time
 	FinishedAt *time.Time
 	Outcome    string
-	Leases     []Lease
+	// Detail is a short, human-readable explanation of how Outcome was
+	// reached -- the agent framework's own error text ("exceeded max
+	// turns (20) without a final answer"), a tool error, or
+	// ProcessResult's own "finished without pushing, asking, or
+	// commenting" -- recorded so an operator (or the person who filed the
+	// task) can see why a run failed from `grain get` without reading
+	// graind's own stdout, which per README's security design is not
+	// necessarily somewhere they can reach at all.
+	Detail string
+	Leases []Lease
 }
 
 // --- conversation ----------------------------------------------------

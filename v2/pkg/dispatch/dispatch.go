@@ -13,12 +13,13 @@
 // to change shape when it did, since a Dispatch already says everything
 // that side effect needs to know.
 //
-// There is no scheduling policy here, deliberately: no fairness, no
-// preemption, no notion of time beyond the now a caller passes in.
-// Ordering is whatever task_ready yields, and Cycle takes its prefix. The
-// one exception is Store.Ready's own: a fix task the merge queue filed
-// for a repo's stuck head sorts before ordinary ready tasks (task ID is
-// still the tiebreak within each group), which is a fact about task_ready
+// There is almost no scheduling policy here: no fairness, no preemption.
+// Ordering is whatever task_ready yields, and Cycle takes its prefix,
+// skipping over (never reordering past its own turn) a task still backing
+// off after a recently failed run -- see retryEligible. The one other
+// exception is Store.Ready's own: a fix task the merge queue filed for a
+// repo's stuck head sorts before ordinary ready tasks (task ID is still
+// the tiebreak within each group), which is a fact about task_ready
 // rather than a policy Cycle itself makes -- see Store.Ready's doc
 // comment (bwsalmon/agents#389) for why. A package that ranked ready
 // tasks against each other on some richer notion of priority would be a
@@ -53,10 +54,63 @@ func RunID(taskID string, attempt int) string {
 	return fmt.Sprintf("%s-r%d", taskID, attempt)
 }
 
-// Cycle is one pass: fill every free slot with the next ready task, in
-// task_ready's own order, and start nothing else. It is the entire
-// dispatch decision for now — no polling, no completion detection, no
-// side effect beyond the store writes StartRun already makes durable.
+// baseRetryBackoff and maxRetryBackoff bound how long Cycle waits after a
+// task's run ends without succeeding before offering it a free slot
+// again: baseRetryBackoff after the first such run in a row, doubling
+// each further one, capped at maxRetryBackoff -- so a task whose agent
+// hits a transient failure gets a handful of prompt retries, while one
+// that is wrong in a way no retry fixes stops hammering a real API and a
+// real sandbox every single poll interval (bwsalmon/agents#403).
+//
+// baseRetryBackoff sits below the default poll interval's own 30s
+// (cmd/grain daemon's own default) on purpose: the very first retry
+// after a failure should not itself add a visible delay on top of the
+// next tick, since a poll interval already spaces attempts out. It is
+// the doubling that does the real work, not the base.
+//
+// Once a task's own streak reaches model.MaxConsecutiveFailures,
+// task_state (schema.go) stops calling it 'queued' at all, so it drops
+// out of Ready before Cycle ever gets here -- these constants only ever
+// gate the streak counts below that cutoff.
+const (
+	baseRetryBackoff = 30 * time.Second
+	maxRetryBackoff  = 30 * time.Minute
+)
+
+// retryBackoff is how long Cycle waits after the streakCount'th run in a
+// row to end without succeeding before treating the task as ready again.
+// streakCount <= 0 (never failed, or succeeded most recently) needs no
+// wait at all.
+func retryBackoff(streakCount int) time.Duration {
+	if streakCount <= 0 {
+		return 0
+	}
+	backoff := baseRetryBackoff * time.Duration(uint64(1)<<uint(streakCount-1))
+	if backoff > maxRetryBackoff || backoff <= 0 {
+		return maxRetryBackoff
+	}
+	return backoff
+}
+
+// retryEligible reports whether taskID's own failure history lets it be
+// dispatched at now -- true outright for a task that has never finished a
+// run, or whose most recent one succeeded, and otherwise true only once
+// retryBackoff's own wait has elapsed since that run finished.
+func retryEligible(ctx context.Context, store *model.Store, taskID string, now time.Time) (bool, error) {
+	streak, err := store.FailureStreak(ctx, taskID)
+	if err != nil {
+		return false, fmt.Errorf("checking %s's failure streak: %w", taskID, err)
+	}
+	if streak == nil || streak.Count == 0 {
+		return true, nil
+	}
+	return !now.Before(streak.LastFinishedAt.Add(retryBackoff(streak.Count))), nil
+}
+
+// Cycle is one pass: fill every free slot with the next ready, backed-off
+// task, in task_ready's own order, and start nothing else. It is the
+// entire dispatch decision for now — no polling, no completion detection,
+// no side effect beyond the store writes StartRun already makes durable.
 //
 // slots is the whole concurrency pool, not just the free ones. Cycle
 // works out what is occupied itself, from the store, on every call,
@@ -68,7 +122,11 @@ func RunID(taskID string, attempt int) string {
 // A task already running never appears in Ready — task_ready requires
 // state = 'queued', and a live run makes the state 'running' — so Cycle
 // needs no check of its own to avoid dispatching one twice; that
-// invariant lives in the view, not here.
+// invariant lives in the view, not here. A task still backing off after a
+// failed run does appear in Ready (task_ready has no notion of time), so
+// Cycle itself skips it via retryEligible -- without consuming the free
+// slot it would otherwise have taken, so a task further down the ready
+// order is not made to wait behind one that is not actually eligible yet.
 func Cycle(ctx context.Context, store *model.Store, slots []string, now time.Time) ([]Dispatch, error) {
 	occupied, err := store.OccupiedSlots(ctx)
 	if err != nil {
@@ -94,11 +152,24 @@ func Cycle(ctx context.Context, store *model.Store, slots []string, now time.Tim
 	}
 
 	var out []Dispatch
-	for i, slot := range free {
-		if i >= len(ready) {
-			break
+	readyIdx := 0
+	for _, slot := range free {
+		var taskID string
+		for {
+			if readyIdx >= len(ready) {
+				return out, nil
+			}
+			candidate := ready[readyIdx]
+			readyIdx++
+			eligible, err := retryEligible(ctx, store, candidate, now)
+			if err != nil {
+				return nil, fmt.Errorf("dispatch: %w", err)
+			}
+			if eligible {
+				taskID = candidate
+				break
+			}
 		}
-		taskID := ready[i]
 
 		attempts, err := store.Attempts(ctx, taskID)
 		if err != nil {

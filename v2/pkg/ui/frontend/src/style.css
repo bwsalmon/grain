@@ -33,6 +33,7 @@
   --state-queued: #6d6f78;
   --state-running: #f0a020;
   --state-awaiting: #a855f7;
+  --state-failed: var(--danger);
   --state-completed: #1a9c53;
   --state-closed: #9a9ba4;
 
@@ -66,6 +67,7 @@
     --state-queued: #9799a3;
     --state-running: #f0ad3f;
     --state-awaiting: #c084fc;
+    --state-failed: var(--danger);
     --state-completed: #3ec573;
     --state-closed: #83848d;
 
@@ -222,6 +224,7 @@ body {
 .dot-queued { background: transparent; border: 1.5px solid var(--state-queued); }
 .dot-running { background: var(--state-running); }
 .dot-awaiting_reply { background: var(--state-awaiting); }
+.dot-failed { background: var(--state-failed); }
 .dot-completed { background: var(--state-completed); }
 .dot-closed { background: var(--state-closed); }
 .dot-blocked { background: var(--danger); }
@@ -343,6 +346,7 @@ main { padding: 0 0 2.5rem; }
 .badge-queued::before { background: transparent; border: 1.5px solid var(--state-queued); box-sizing: border-box; }
 .badge-running::before { background: var(--state-running); }
 .badge-awaiting_reply::before { background: var(--state-awaiting); }
+.badge-failed::before { background: var(--state-failed); }
 .badge-proposed::before { background: var(--state-proposed); }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
@@ -672,6 +676,15 @@ fieldset label.checkbox { margin-bottom: 0.4rem; font-size: 0.9rem; font-weight:
   border-radius: 8px;
   padding: 0.85rem 1rem;
   font-size: 0.9rem;
+}
+
+.failure-summary {
+  margin: 0 0 1rem;
+  background: var(--danger-subtle);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 0.65rem 1rem;
+  font-size: 0.85rem;
 }
 
 .detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }

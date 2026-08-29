@@ -176,7 +176,7 @@ func TestAgentSessionLeasesAreRevokedWhenARunFinishes(t *testing.T) {
 	// The view masks a finished run's leases immediately, before the
 	// session that held them ever calls DropLease -- the row is not gone,
 	// only no longer live.
-	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded"); err != nil {
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	if live, err := store.LiveLeases(ctx, ""); err != nil || len(live) != 0 {
@@ -252,7 +252,7 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 
 	// A sandbox is long-lived and recreated on demand, not per task: what
 	// frees it is the run finishing, not a reset the store knows about.
-	if err := store.FinishRun(ctx, "t0-r1", now.Add(time.Hour), "succeeded"); err != nil {
+	if err := store.FinishRun(ctx, "t0-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	if occ, _ := store.OccupiedSlots(ctx); len(occ) != 0 {
@@ -548,7 +548,7 @@ func askQuestion(t *testing.T, store *model.Store, ctx context.Context, id strin
 
 func finishRun(t *testing.T, store *model.Store, ctx context.Context, ts *taskState, outcome string, clock time.Time) {
 	t.Helper()
-	if err := store.FinishRun(ctx, ts.liveRunID, clock, outcome); err != nil {
+	if err := store.FinishRun(ctx, ts.liveRunID, clock, outcome, ""); err != nil {
 		t.Fatalf("FinishRun(%s): %v", ts.liveRunID, err)
 	}
 	// Revocation happens on every path that frees a slot -- the session
@@ -655,7 +655,16 @@ func checkModelInvariants(t *testing.T, store *model.Store, ctx context.Context,
 		}
 		active := ts.liveRunID != ""
 
-		want := model.StateOf(*gotTask, obs, active)
+		streak, err := store.FailureStreak(ctx, id)
+		if err != nil {
+			t.Fatalf("round %d: FailureStreak(%s): %v", round, id, err)
+		}
+		failureStreak := 0
+		if streak != nil {
+			failureStreak = streak.Count
+		}
+
+		want := model.StateOf(*gotTask, obs, active, failureStreak)
 		got, err := store.State(ctx, id)
 		if err != nil {
 			t.Fatalf("round %d: State(%s): %v", round, id, err)

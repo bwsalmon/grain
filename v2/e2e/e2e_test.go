@@ -79,7 +79,15 @@ func assertState(w *world, id string, want model.State, active bool) {
 	if err != nil {
 		w.t.Fatalf("GetObservation(%s): %v", id, err)
 	}
-	if derived := model.StateOf(*task, obs, active); derived != want {
+	streak, err := w.store.FailureStreak(w.ctx, id)
+	if err != nil {
+		w.t.Fatalf("FailureStreak(%s): %v", id, err)
+	}
+	failureStreak := 0
+	if streak != nil {
+		failureStreak = streak.Count
+	}
+	if derived := model.StateOf(*task, obs, active, failureStreak); derived != want {
 		w.t.Fatalf("%s: model.StateOf = %q, disagrees with the view's %q", id, derived, want)
 	}
 }
@@ -503,6 +511,11 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	}
 	assertState(w, "iss-3", model.StateQueued, false)
 
+	// Comfortably past dispatch's own retry backoff for a single failed
+	// attempt (bwsalmon/agents#403) -- this test is about a retry
+	// eventually succeeding once it targets the right repo, not about how
+	// soon after a failure that retry is allowed to happen.
+	clock = clock.Add(time.Minute)
 	second, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)

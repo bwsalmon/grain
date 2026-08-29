@@ -603,11 +603,11 @@ func (s *Store) Observe(ctx context.Context, o Observation) error {
 func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 	_, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
-			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`) "+
-			"VALUES (?,?,?,?,?,?,?)",
+			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,"+
+			"`retry_requested_at`) VALUES (?,?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
 		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
-		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt))
+		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt))
 	return err
 }
 
@@ -618,12 +618,12 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at` "+
+			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,`retry_requested_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
-	var closed, completed, blocked, observed sql.NullTime
+	var closed, completed, blocked, observed, retried sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed); err != nil {
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed, &retried); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -632,6 +632,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	o.ClosedAt, o.CompletedAt, o.ObservedAt = timePtr(closed), timePtr(completed), timePtr(observed)
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
 	o.MergeQueueBlockedAt = timePtr(blocked)
+	o.RetryRequestedAt = timePtr(retried)
 	return &o, nil
 }
 
@@ -660,11 +661,29 @@ func startRun(ctx context.Context, tx *sql.Tx, r Run) error {
 	return nil
 }
 
-func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outcome string) error {
+func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outcome, detail string) error {
 	return s.write(ctx, "finish run "+runID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"UPDATE `task_run` SET `finished_at` = ?, `outcome` = ? WHERE `id` = ?",
-			at.UTC(), outcome, runID)
+			"UPDATE `task_run` SET `finished_at` = ?, `outcome` = ?, `detail` = ? WHERE `id` = ?",
+			at.UTC(), outcome, nullable(detail), runID)
+		return err
+	})
+}
+
+// SetRunOutcome overrides a run's outcome and detail after FinishRun has
+// already recorded one -- the one case FinishRun's own caller cannot yet
+// know: RunDispatch judges outcome purely from whether the agent made a
+// harmless tool call at all (outcomeOf), before ProcessResult has checked
+// whether that tool call amounted to anything -- a push, a question, a
+// closing comment. A run that made only harmless calls but produced none
+// of those would otherwise read "succeeded" forever, which both
+// misreports what happened and would let it dodge FailureStreak's own
+// cap indefinitely (bwsalmon/agents#403).
+func (s *Store) SetRunOutcome(ctx context.Context, runID, outcome, detail string) error {
+	return s.write(ctx, "set run "+runID+" outcome", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `outcome` = ?, `detail` = ? WHERE `id` = ?",
+			outcome, nullable(detail), runID)
 		return err
 	})
 }
@@ -690,6 +709,63 @@ func (s *Store) Attempts(ctx context.Context, taskID string) (int, error) {
 	err := s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM `task_run` WHERE `task_id` = ?", taskID).Scan(&n)
 	return n, err
+}
+
+// FailureStreak is taskID's own task_streak.streak (Count), plus the most
+// recent finished run's own outcome/detail -- the two things task_streak
+// itself cannot carry (schema.go's own doc comment on that view: "the
+// view intentionally carries no more than the count task_state's cutoff
+// needs"), and the two things a real timestamp comparison against a
+// caller-supplied now needs that a view, re-evaluated against whatever
+// the wall clock says at query time, cannot give a deterministic test.
+//
+// nil, with no error, means taskID has never finished a run at all --
+// dispatch.Cycle's own retry backoff and Client.GetTask's own display
+// both treat that the same as "not currently failing".
+func (s *Store) FailureStreak(ctx context.Context, taskID string) (*FailureStreak, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `outcome`,`started_at`,`finished_at`,`detail` FROM `task_run` "+
+			"WHERE `task_id` = ? AND `finished_at` IS NOT NULL ORDER BY `started_at` DESC", taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var since time.Time
+	if obs, err := getObservation(ctx, s.db, taskID); err != nil {
+		return nil, err
+	} else if obs != nil && obs.RetryRequestedAt != nil {
+		since = *obs.RetryRequestedAt
+	}
+
+	var streak *FailureStreak
+	for rows.Next() {
+		var outcome string
+		var startedAt, finishedAt time.Time
+		var detail sql.NullString
+		if err := rows.Scan(&outcome, &startedAt, &finishedAt, &detail); err != nil {
+			return nil, err
+		}
+		if streak == nil {
+			streak = &FailureStreak{LastFinishedAt: finishedAt, LastOutcome: outcome, LastDetail: detail.String}
+		}
+		if outcome == "succeeded" || !since.IsZero() && !startedAt.After(since) {
+			break
+		}
+		streak.Count++
+	}
+	return streak, rows.Err()
+}
+
+// FailureStreak is one task's own retry history -- see Store.FailureStreak.
+type FailureStreak struct {
+	// Count is how many of the task's most recent runs, in a row, ended
+	// without succeeding -- 0 once the most recent run itself succeeded,
+	// or was requested more recently than the task's last retry request.
+	Count          int
+	LastFinishedAt time.Time
+	LastOutcome    string
+	LastDetail     string
 }
 
 // LiveLease is one outstanding lease, joined to the run holding it.

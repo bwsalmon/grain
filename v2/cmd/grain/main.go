@@ -67,6 +67,7 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
@@ -140,6 +141,7 @@ Commands:
   close <id>                           close a task (grain's "delete" -- see the package doc comment)
   delete <id>                          alias for close
   reopen <id>                          reopen a closed task
+  retry <id>                           clear a failed task's retry cap so it dispatches again
   config                               show the capabilities this deployment offers
   settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
 `
@@ -185,6 +187,8 @@ func runCLI(args []string) error {
 		return cmdClose(ctx, c, out, cmdArgs)
 	case "reopen":
 		return cmdReopen(ctx, c, out, cmdArgs)
+	case "retry":
+		return cmdRetry(ctx, c, out, cmdArgs)
 	case "config":
 		return cmdConfig(ctx, c, out, cmdArgs)
 	case "settings":
@@ -446,6 +450,24 @@ func cmdReopen(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	return respond(ctx, c, out, id)
 }
 
+// cmdRetry is `grain retry <id>`: the only way to clear a task's own
+// failure streak once it has reached model.MaxConsecutiveFailures and
+// state has stopped calling it "queued" at all (bwsalmon/agents#403).
+func cmdRetry(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
+	fs := flag.NewFlagSet("grain retry", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := taskID(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if err := c.Retry(ctx, id); err != nil {
+		return err
+	}
+	return respond(ctx, c, out, id)
+}
+
 func cmdConfig(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain config", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
@@ -570,6 +592,16 @@ func (p *printer) detail(d ui.TaskDetail) {
 		return
 	}
 	fmt.Print(taskBlock(d.Task))
+	if d.FailedAttempts > 0 {
+		fmt.Printf("failed attempts: %d in a row", d.FailedAttempts)
+		if d.LastFailureAt != nil {
+			fmt.Printf(" (last at %s)", d.LastFailureAt.Format(time.RFC3339))
+		}
+		fmt.Println()
+		if d.LastFailureReason != "" {
+			fmt.Printf("last failure:    %s\n", d.LastFailureReason)
+		}
+	}
 	for _, cm := range d.Comments {
 		who := cm.Author
 		if cm.OnBehalfOf != "" {

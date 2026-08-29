@@ -195,7 +195,7 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	}
 	assertState(model.StateRunning)
 
-	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded"); err != nil {
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	assertState(model.StateQueued)
@@ -308,7 +308,7 @@ func TestLeasesAreQueryableByMintingCredential(t *testing.T) {
 	}
 
 	// Finishing the run takes its leases out of the live view.
-	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded"); err != nil {
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	if live, _ = store.LiveLeases(ctx, ""); len(live) != 0 {
@@ -338,7 +338,7 @@ func TestAttemptsCountsRuns(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.FinishRun(ctx, id, now.Add(time.Hour), "requeued"); err != nil {
+		if err := store.FinishRun(ctx, id, now.Add(time.Hour), "requeued", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -397,7 +397,7 @@ func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded"); err != nil {
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 

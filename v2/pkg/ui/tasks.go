@@ -84,9 +84,26 @@ type Comment struct {
 // TaskDetail is one task plus its conversation -- what GET
 // /api/tasks/{id} returns, wider than the list shape since a list of many
 // tasks has no reason to pay for every conversation.
+//
+// FailedAttempts, LastFailureAt and LastFailureReason are model.Store.
+// FailureStreak's own fields, surfaced here rather than on Task: a list
+// of many tasks already shows enough to notice a 'failed' one (its own
+// state badge), and the reason it got there is a one-task question, the
+// same reasoning that keeps Comments off the list shape (bwsalmon/
+// agents#403 -- "a way for grain get/the UI to show N consecutive failed
+// attempts, last failure: reason").
 type TaskDetail struct {
 	Task
 	Comments []Comment `json:"comments"`
+	// FailedAttempts is 0 once the task's most recent run succeeded, or
+	// none has finished yet -- otherwise how many of its most recent runs,
+	// in a row, ended without succeeding.
+	FailedAttempts int        `json:"failedAttempts,omitempty"`
+	LastFailureAt  *time.Time `json:"lastFailureAt,omitempty"`
+	// LastFailureReason is that run's own task_run.detail -- a tool
+	// error, the agent framework's own error text, or ProcessResult's own
+	// "finished without pushing, asking, or commenting".
+	LastFailureReason string `json:"lastFailureReason,omitempty"`
 }
 
 // taskFrom projects a model.Task to its JSON shape. closed reports, for
@@ -328,6 +345,19 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.tasks.Reopen(r.Context(), id); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	s.respondWithTask(w, r, id)
+}
+
+// handleRetry is the UI's own "Retry" button (bwsalmon/agents#403): the
+// one way a human clears a task's own failure streak once it has reached
+// model.MaxConsecutiveFailures and task_state has stopped calling it
+// 'queued' at all, since nothing else ever resets that count.
+func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.tasks.Retry(r.Context(), id); err != nil {
 		writeClientError(w, err)
 		return
 	}

@@ -355,6 +355,11 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	// anything at all, so the task must be dispatchable again.
 	assertState(w, "iss-cap", model.StateQueued, false)
 
+	// Comfortably past dispatch's own retry backoff for a single failed
+	// attempt (bwsalmon/agents#403) -- this test is about a refused
+	// capability leaving the task requeueable, not about how soon after
+	// the refusal that requeue is allowed to happen.
+	clock = clock.Add(time.Minute)
 	second, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)

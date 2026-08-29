@@ -163,7 +163,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 			t.Fatalf("GetTask(%s): %v", parentID, err)
 		}
 		clock = clock.Add(time.Minute)
-		if err := orchestrator.ProcessResult(ctx, store, client, *parentTask, result, clock); err != nil {
+		if err := orchestrator.ProcessResult(ctx, store, client, *parentTask, result, dispatches[0].RunID, clock); err != nil {
 			t.Fatalf("ProcessResult: %v", err)
 		}
 
@@ -254,7 +254,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 			t.Fatalf("GetTask(%s): %v", proposalID, err)
 		}
 		clock = clock.Add(time.Minute)
-		if err := orchestrator.ProcessResult(ctx, store, client, *proposal, result, clock); err != nil {
+		if err := orchestrator.ProcessResult(ctx, store, client, *proposal, result, dispatches[0].RunID, clock); err != nil {
 			t.Fatalf("ProcessResult after approval: %v", err)
 		}
 		assertState(w, proposalID, model.StateCompleted, false)
