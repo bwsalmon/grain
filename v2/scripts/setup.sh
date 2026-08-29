@@ -31,10 +31,20 @@
 #      SQLite store) and seeds secrets from environment variables -- only
 #      if they are not already there, so a second run never overwrites a
 #      credential placed by the first one or by hand
-#   6. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
+#   6. compares the freshly built binary's schema version (`grain
+#      schema-version`) against the version recorded in
+#      $GRAIN_DATA_DIR/.schema_version from the last run of this script,
+#      and moves $GRAIN_DATA_DIR/store aside -- never deletes it -- if
+#      they differ, so grain starts a fresh, empty store rather than an
+#      existing one Store.Init cannot safely bring up to date column-wise
+#      (bwsalmon/agents#394; see reformat_store_if_schema_changed below).
+#      A schema version that has not changed since the last run leaves
+#      the store exactly as it was: this is what "preserve state across
+#      updates, but reformat on a breaking change" means in practice.
+#   7. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
 #      empty commit so grain has a branch to work from ("format" it --
 #      grain always branches off an existing ref, never creates one)
-#   7. writes and enables grain-daemon.service, so it comes back on
+#   8. writes and enables grain-daemon.service, so it comes back on
 #      reboot, and restarts it (not just "enable --now") so a second
 #      run's new binary and new config actually take effect -- see
 #      docs/next-session.md item 3's "Update" for why
@@ -280,7 +290,60 @@ seed_gcp_minter_key() {
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
 }
 
-# --- 6. format the target repo, if it is empty --------------------------
+# --- 6. reformat the store if a breaking schema change shipped ---------
+#
+# pkg/model.SchemaVersion's own doc comment: bumped exactly when Tables
+# or Views change in a way Store.Init's `CREATE TABLE IF NOT EXISTS`
+# cannot safely reconcile an existing database into -- Init only adds a
+# table that is missing outright, never a column on one that already
+# exists, so a build newer than the database it finds would otherwise
+# start silently against stale columns instead of refusing or fixing
+# anything. `grain schema-version` (cmd/grain/schemaversion.go) is that
+# same constant, printed by the binary this run just installed, so this
+# function never has to duplicate pkg/model's own definition of
+# "breaking" by parsing source.
+#
+# $GRAIN_DATA_DIR/.schema_version is the marker this function itself
+# maintains, recording the schema version the store on disk was last
+# known to agree with. No marker yet -- a brand new $GRAIN_DATA_DIR, or
+# an upgrade from before this function existed -- never wipes anything:
+# it just records the current version and moves on, since there is
+# nothing to safely compare against and "assume compatible, preserve the
+# data" is the safer of the two guesses. A marker that disagrees with the
+# fresh build moves $GRAIN_DATA_DIR/store aside to a timestamped backup
+# -- never deletes it outright, so a mistaken schema bump is recoverable
+# by hand -- and grain's own sqlite.Open (pkg/model/sqlite) recreates an
+# empty one, with the new schema, the next time grain-daemon.service
+# starts.
+reformat_store_if_schema_changed() {
+  local marker="$GRAIN_DATA_DIR/.schema_version"
+  local store_dir="$GRAIN_DATA_DIR/store"
+  local new_version
+  new_version="$(/usr/local/bin/grain schema-version)"
+
+  if [ ! -s "$marker" ]; then
+    log "No schema-version marker yet -- recording schema $new_version, not touching any existing store"
+    printf '%s\n' "$new_version" > "$marker"
+    return
+  fi
+
+  local old_version
+  old_version="$(cat "$marker")"
+  if [ "$old_version" = "$new_version" ]; then
+    return
+  fi
+
+  if [ -d "$store_dir" ]; then
+    local backup="${store_dir}.schema${old_version}-$(date +%Y%m%d%H%M%S)"
+    log "Schema changed ($old_version -> $new_version) -- moving $store_dir aside to $backup so grain starts a fresh store"
+    mv "$store_dir" "$backup"
+  else
+    log "Schema changed ($old_version -> $new_version) -- no existing store to move aside"
+  fi
+  printf '%s\n' "$new_version" > "$marker"
+}
+
+# --- 7. format the target repo, if it is empty --------------------------
 #
 # Every dispatch grain runs branches off an existing ref -- it never
 # creates the first one (v2/e2e's own harness always seeds one commit
@@ -322,7 +385,7 @@ format_target_repo_if_empty() {
   git -C "$tmp" push --quiet "$url" "HEAD:refs/heads/$GRAIN_TARGET_BRANCH"
 }
 
-# --- 7. the systemd unit ---------------------------------------------------
+# --- 8. the systemd unit ---------------------------------------------------
 
 write_systemd_units() {
   log "Writing grain-daemon.service"
@@ -401,6 +464,7 @@ main() {
   build_and_install
   ensure_user
   setup_data_dir
+  reformat_store_if_schema_changed
   format_target_repo_if_empty
   write_systemd_units
   enable_services

@@ -1,0 +1,148 @@
+locals {
+  agent_service_account_email = local.agent_account_needed ? google_service_account.agent[0].email : ""
+
+  # Empty together with gcp_agent_service_account above whenever no
+  # agent account exists at all, mirroring terraform/gcp/instance.tf's
+  # own gemini_project_id local: a -gcp-project daemon flag with no
+  # matching -gcp-agent-service-account is a combination nothing here
+  # has a reason to ever produce.
+  gcp_project = local.agent_account_needed ? var.project_id : ""
+
+  # Everything files/deploy.sh needs to run v2/scripts/setup.sh, and
+  # nothing it does not -- no secret value here, the same
+  # terraform/gcp/instance.tf precedent: the GitHub PAT and the minter's
+  # own key arrive separately, pushed straight into instance metadata by
+  # push-secrets.sh after `terraform apply` returns, never through
+  # Terraform.
+  grain_config = {
+    grain_repo_url            = var.grain_repo_url
+    grain_ref                 = var.grain_ref
+    github_host               = var.github_host
+    credential_name           = var.credential_name
+    default_target_repo       = var.default_target_repo
+    ui_port                   = var.ui_port
+    slots                     = var.slots
+    poll_interval             = var.poll_interval
+    gemini_model              = var.gemini_model
+    gcp_project               = local.gcp_project
+    gcp_agent_service_account = local.agent_service_account_email
+  }
+}
+
+# Holds v2's embedded SQLite store (pkg/model/sqlite), its secrets
+# database and credential files (pkg/secrets), and the sandbox working
+# directories orchestrator.HostSandboxes clones each task's repo into --
+# see v2/scripts/setup.sh's own GRAIN_DATA_DIR default, /var/lib/grain,
+# which is also where files/startup.sh mounts this disk, so no override
+# is needed for the two to agree.
+#
+# Separate from the boot disk specifically so the host VM can be
+# recreated -- a new boot_image, a bigger machine_type, a from-scratch
+# `terraform apply` after deleting the instance -- without losing any of
+# that state (bwsalmon/agents#394's own "so the entire VM can be
+# redeployed if needed without wiping the state").
+resource "google_compute_disk" "data" {
+  name   = "${var.name_prefix}-data"
+  type   = var.data_disk_type
+  zone   = var.zone
+  size   = var.data_disk_gb
+  labels = var.labels
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_compute_instance" "host" {
+  name         = "${var.name_prefix}-host"
+  machine_type = var.machine_type
+  zone         = var.zone
+  tags         = [local.host_tag]
+  labels       = var.labels
+
+  # Metadata updates (a new deploy_generation) apply to a running
+  # instance; a machine_type change needs a stop, and this permits it.
+  allow_stopping_for_update = true
+
+  boot_disk {
+    initialize_params {
+      image  = var.boot_image
+      size   = var.boot_disk_gb
+      type   = "pd-balanced"
+      labels = var.labels
+    }
+  }
+
+  attached_disk {
+    source      = google_compute_disk.data.id
+    device_name = "grain-v2-data"
+    mode        = "READ_WRITE"
+  }
+
+  network_interface {
+    network    = local.network_name
+    subnetwork = local.subnetwork_name
+
+    dynamic "access_config" {
+      for_each = var.assign_external_ip ? [1] : []
+      content {}
+    }
+  }
+
+  service_account {
+    email  = google_service_account.host.email
+    scopes = ["cloud-platform"]
+  }
+
+  scheduling {
+    on_host_maintenance = "TERMINATE"
+    automatic_restart   = true
+  }
+
+  dynamic "shielded_instance_config" {
+    for_each = var.enable_shielded_vm ? [1] : []
+    content {
+      enable_secure_boot          = true
+      enable_vtpm                 = true
+      enable_integrity_monitoring = true
+    }
+  }
+
+  metadata = {
+    enable-oslogin          = var.enable_os_login ? "TRUE" : "FALSE"
+    enable-guest-attributes = "TRUE"
+
+    startup-script = file("${path.module}/files/startup.sh")
+
+    # Shipped as metadata, not fetched from this repo at boot, so the
+    # host needs no credential for grain even if it were private --
+    # mirrors terraform/gcp/instance.tf's exact reasoning.
+    grain-config-sync-script = file("${path.module}/files/config-sync.sh")
+    grain-deploy-script      = file("${path.module}/files/deploy.sh")
+
+    grain-config = jsonencode(local.grain_config)
+
+    # Changing this is what triggers a rollout -- see variables.tf's
+    # deploy_generation.
+    grain-deploy-generation = var.deploy_generation
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !(var.enable_gemini_key || var.agent_can_manage_compute_instances || var.agent_can_manage_gke) || var.deployer_member != ""
+      error_message = "enable_gemini_key, agent_can_manage_compute_instances, and agent_can_manage_gke all need a real key on the agent account to do anything -- set deployer_member so push-secrets.sh can mint one after apply (see iam.tf's deployer_manages_minter_keys)."
+    }
+
+    # grain-github-token, grain-gemini-api-key, and grain-gcp-minter-key
+    # are never declared here -- push-secrets.sh adds them directly with
+    # `gcloud compute instances add-metadata` once this resource exists,
+    # so none of the three ever passes through Terraform or lands in the
+    # state file. Without this, the next apply would see them as drift
+    # and remove them.
+    ignore_changes = [
+      metadata["grain-github-token"],
+      metadata["grain-gemini-api-key"],
+      metadata["grain-gcp-minter-key"],
+    ]
+  }
+}
