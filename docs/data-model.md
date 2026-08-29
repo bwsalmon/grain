@@ -2019,6 +2019,18 @@ all for scoping a single deployment did not need. The model should
 express both. The deployment has already chosen simplicity once, with
 reasons written down.
 
+The `github-sandbox` capability (bwsalmon/agents#354, `v2/pkg/capability/
+githubsandbox`) reopens that choice deliberately, in v2's setting, where
+`bwsalmon/agents#186`'s two objections no longer hold: Go's
+`golang-jwt/jwt` signs the App JWT with no subprocess, and `app.go` is
+this capability's one minting call site, rebuilt fresh on every call the
+same way `gcpkey`'s own `NewMinter` is. `grain controller
+bootstrap-github-app` (`v2/cmd/grain/controller.go`) keeps setup close to
+the "username and password" the issue first asked for and this
+document's own PAT path would have needed anyway: one click, in a
+browser already logged into the bot account, no password ever reaching
+grain.
+
 #### What this deliberately does not add
 
 No secret store in the model, no material in the store or the UI, no
@@ -2059,6 +2071,7 @@ table, with nothing here or in git ever answering *what the value is*.
 |---|---|
 | `gcp-key` | the minter credential (`gcp-key-minter` by default) — never the agent account's own key, see `gcpkey`'s doc comment |
 | `gemini-key` | the standing credential it mints under, named by `geminikey.Capability.Credential` — no built-in default, see `geminikey`'s doc comment on why it can share `gcp-key`'s own minter account |
+| `github-sandbox` | a GitHub App's id and RSA private key (`github-app/app-id`, `github-app/private-key` by default) — the "PAT or GitHub App" section below's App path, finally built; see `githubsandbox`'s doc comment |
 | `self-debug`, `self-repair` | none — `GRANT`, no credential of any kind |
 
 ### `TaskLink` — relationships, including sub-tasks

@@ -52,6 +52,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
+	"github.com/bwsalmon/grain/v2/pkg/capability/githubsandbox"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/kontur"
@@ -359,30 +360,84 @@ func run(ctx context.Context, cfg config) error {
 	return nil
 }
 
-// reconcile calls orchestrator.RunCycle every interval until ctx is done,
-// logging (never panicking on) whatever it returns -- one bad cycle must
-// not take the whole daemon down, since the next tick gets another chance
-// at whatever failed. Ticks are not overlapped: reconcile waits for one
-// RunCycle to return before the next interval starts, so a slow GitHub
-// poll simply delays the next dispatch rather than racing it. Ported from
-// pkg/orchestrate's own Reconciler.Run (bwsalmon/agents#254) when that
-// package merged into pkg/orchestrator, which -- being "a library, not a
-// binary" (its own doc comment) -- has no timer loop of its own.
+// reapInterval is how often reconcile calls reapCapabilities -- not
+// configurable, since nothing about it needs to race a deployment's own
+// -poll-interval: it only has to run comfortably more often than the
+// shortest ReapAfter/DeleteExpired cutoff any registered
+// model.Reaper carries (24 hours, for both gcpkey.Reap and
+// githubsandbox.Provider.Reap) for "clean up after N hours if leaked" to
+// actually hold within roughly that bound, not "eventually".
+const reapInterval = time.Hour
+
+// reapCapabilities calls Reap on every registered capability provider
+// that implements model.Reaper, logging (never failing the sweep on)
+// whatever one provider's Reap returns -- the same "one bad cycle must
+// not take the whole daemon down" tolerance reconcile's own tick already
+// holds RunCycle to. This is the thing that actually makes "clean up
+// after N hours if leaked" true rather than merely documented: Reap
+// exists on gcpkey.Provider and githubsandbox.Provider today, but until
+// something calls it periodically it is dead code, reachable only from a
+// test -- this closes that gap for both, not just the capability
+// bwsalmon/agents#354 asked for it on. geminikey's own DeleteExpired
+// plays the same role but is a package-level function, not a
+// model.Reaper, so it is not reached here; wiring it in is a separate,
+// smaller follow-up (bwsalmon/agents#354's PR notes this explicitly).
+func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, creds model.CredentialResolver, now time.Time) {
+	if registry == nil {
+		return
+	}
+	for _, p := range registry.Providers() {
+		reaper, ok := p.(model.Reaper)
+		if !ok {
+			continue
+		}
+		deleted, err := reaper.Reap(ctx, creds, now)
+		if err != nil {
+			log.Printf("grain daemon: reaping capability %q: %v", p.Spec().Name, err)
+			continue
+		}
+		if len(deleted) > 0 {
+			log.Printf("grain daemon: reaped %d stale resource(s) for capability %q: %v", len(deleted), p.Spec().Name, deleted)
+		}
+	}
+}
+
+// reconcile calls orchestrator.RunCycle every interval, and
+// reapCapabilities every reapInterval, until ctx is done, logging (never
+// panicking on) whatever either returns -- one bad cycle must not take
+// the whole daemon down, since the next tick gets another chance at
+// whatever failed. RunCycle ticks are not overlapped: reconcile waits for
+// one to return before the next interval starts, so a slow GitHub poll
+// simply delays the next dispatch rather than racing it; a reap running
+// concurrently with a RunCycle tick is fine either way; the two touch
+// disjoint state (a reap only ever deletes a resource no live Lease
+// still names an outstanding run against). Ported from pkg/orchestrate's
+// own Reconciler.Run (bwsalmon/agents#254) when that package merged into
+// pkg/orchestrator, which -- being "a library, not a binary" (its own
+// doc comment) -- has no timer loop of its own.
 func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Duration) {
 	tick := func() {
 		if err := orchestrator.RunCycle(ctx, deps, time.Now().UTC()); err != nil {
 			log.Printf("grain daemon: reconcile cycle: %v", err)
 		}
 	}
+	reap := func() {
+		reapCapabilities(ctx, deps.Config.Capabilities, deps.Config.Credentials, time.Now().UTC())
+	}
 	tick()
+	reap()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	reapTicker := time.NewTicker(reapInterval)
+	defer reapTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			tick()
+		case <-reapTicker.C:
+			reap()
 		}
 	}
 }
@@ -453,21 +508,32 @@ func (c config) withModelConfig(mc model.Config) config {
 }
 
 // capabilityProviders builds every capability provider this deployment
-// has enough configuration for. Neither provider is required: a task
-// that grants "gcp-key" or "gemini-key" against a registry that never
-// registered one is refused, cleanly, by model.ResolveGrants -- not a
-// crash at startup.
+// has enough configuration for. No provider is required: a task that
+// grants a capability against a registry that never registered one is
+// refused, cleanly, by model.ResolveGrants -- not a crash at startup.
+//
+// gcp-key and gemini-key both need a GCP project to mint into, so both
+// stay gated on cfg.gcpProject exactly as before. github-sandbox needs
+// no equivalent deployment-level config -- its two secrets are all it
+// resolves, and FindInstallation asks GitHub itself which account to
+// act on (pkg/capability/githubsandbox's own doc comment) -- so it
+// registers unconditionally rather than sharing that gate; an operator
+// who never runs `grain controller bootstrap-github-app` simply leaves
+// its two secrets unresolvable, and Materialize fails closed the same
+// way any other missing secret does.
 func capabilityProviders(cfg config) []model.CapabilityProvider {
-	if cfg.gcpProject == "" {
-		return nil
-	}
 	var providers []model.CapabilityProvider
-	if cfg.gcpServiceAccountEmail != "" {
-		providers = append(providers, gcpkey.NewProvider(gcpkey.Config{
-			ProjectID: cfg.gcpProject, ServiceAccountEmail: cfg.gcpServiceAccountEmail,
-		}))
+	if cfg.gcpProject != "" {
+		if cfg.gcpServiceAccountEmail != "" {
+			providers = append(providers, gcpkey.NewProvider(gcpkey.Config{
+				ProjectID: cfg.gcpProject, ServiceAccountEmail: cfg.gcpServiceAccountEmail,
+			}))
+		}
+		providers = append(providers, geminikey.New(cfg.gcpProject, model.CredentialRef{Name: gcpkey.DefaultMinterCredential}))
 	}
-	providers = append(providers, geminikey.New(cfg.gcpProject, model.CredentialRef{Name: gcpkey.DefaultMinterCredential}))
+	providers = append(providers, githubsandbox.NewProvider(githubsandbox.Config{
+		Host: cfg.githubHost, InsecureHTTP: cfg.githubInsecureHTTP,
+	}))
 	return providers
 }
 
