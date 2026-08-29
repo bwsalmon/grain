@@ -705,8 +705,14 @@ func startUIServer(cfg config, store *model.Store) (stop func(context.Context) e
 			BuildCmd:    []string{"make", "container-build"},
 			BuiltBinary: filepath.Join(cfg.upgradeSrcDir, "v2", "bin", "grain"),
 			InstallPath: cfg.upgradeInstallPath,
-			RestartCmd:  cfg.upgradeRestartCmd,
-			StatusFile:  filepath.Join(cfg.dataDir, "upgrade-status.json"),
+			// "schema-version" (schemaversion.go) touches no store and
+			// needs no config, so running the newly installed binary
+			// with it is a cheap sanity check that the binary itself
+			// isn't broken outright before RestartCmd ever cuts over to
+			// it (bwsalmon/agents#418/#422).
+			HealthCheckArgs: []string{"schema-version"},
+			RestartCmd:      cfg.upgradeRestartCmd,
+			StatusFile:      filepath.Join(cfg.dataDir, "upgrade-status.json"),
 		})
 	}
 	srv := ui.NewServer(uiCfg, store)

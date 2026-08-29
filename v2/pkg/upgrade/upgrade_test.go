@@ -126,6 +126,160 @@ func TestUpgraderStartRunsCheckoutBuildInstallAndRestart(t *testing.T) {
 	}
 }
 
+// TestUpgraderRollsBackWhenHealthCheckFails is bwsalmon/agents#418/#422's
+// fix: a build that succeeds can still produce a binary that is broken
+// at runtime (a panic in some init(), a missing dynamic library, and so
+// on), so this builds and installs a "binary" that is a perfectly valid
+// executable -- checkout/build/install all genuinely succeed -- but
+// which always exits 1 instead of doing anything useful, with
+// HealthCheckArgs configured to actually run it. That should be caught
+// before ever handing off to RestartCmd: the install gets rolled back
+// to the binary that was there before (seeded here the way any upgrade
+// after the very first one finds one already in place), and Status
+// reports PhaseFailed rather than PhaseOK.
+func TestUpgraderRollsBackWhenHealthCheckFails(t *testing.T) {
+	_, checkout := newFixtureRepo(t, "feature")
+	v2Dir := filepath.Join(checkout, "v2")
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	built := filepath.Join(v2Dir, "bin", "grain")
+	installPath := filepath.Join(t.TempDir(), "grain")
+	statusFile := filepath.Join(t.TempDir(), "upgrade-status.json")
+	restartMarker := filepath.Join(t.TempDir(), "restarted")
+
+	if err := os.WriteFile(installPath, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	u := New(Config{
+		SrcDir: checkout,
+		// A fake "build" that produces a real, executable script -- so
+		// build and install both succeed -- but one that always exits 1
+		// instead of doing anything useful once it's actually run, the
+		// same way HealthCheckArgs will run it below.
+		BuildCmd:        []string{"sh", "-c", "mkdir -p bin && printf '#!/bin/sh\\nexit 1\\n' > bin/grain"},
+		BuiltBinary:     built,
+		InstallPath:     installPath,
+		HealthCheckArgs: []string{"schema-version"},
+		// Should never run: a failed health check must stop this before
+		// it ever hands off to RestartCmd.
+		RestartCmd: []string{"sh", "-c", "touch " + restartMarker},
+		StatusFile: statusFile,
+	})
+
+	if err := u.Start("feature"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	status := waitForPhase(t, u, PhaseFailed)
+	if status.Detail == "" {
+		t.Error("failed status carries no Detail")
+	}
+
+	// waitForPhase already only returns once the failure status -- which
+	// this package only ever writes after rollback and after deciding
+	// not to invoke RestartCmd -- is visible, so checking here (rather
+	// than polling) is enough.
+	if _, err := os.Stat(restartMarker); err == nil {
+		t.Error("RestartCmd ran despite a failed health check")
+	}
+
+	installed, err := os.ReadFile(installPath)
+	if err != nil {
+		t.Fatalf("reading installPath after rollback: %v", err)
+	}
+	if string(installed) != "previous-binary" {
+		t.Errorf("installPath after rollback = %q, want the previous binary restored", installed)
+	}
+	info, err := os.Stat(installPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("restored binary is not executable: mode %v", info.Mode())
+	}
+}
+
+// TestUpgraderRollsBackToNothingWhenNoPreviousBinaryExisted covers the
+// first-ever upgrade on a fresh deployment: there is nothing at
+// InstallPath yet for a failed health check to restore, so rollback
+// should remove the broken binary it just installed rather than leaving
+// it there for a future restart to pick up.
+func TestUpgraderRollsBackToNothingWhenNoPreviousBinaryExisted(t *testing.T) {
+	_, checkout := newFixtureRepo(t, "feature")
+	v2Dir := filepath.Join(checkout, "v2")
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	built := filepath.Join(v2Dir, "bin", "grain")
+	installPath := filepath.Join(t.TempDir(), "grain")
+	statusFile := filepath.Join(t.TempDir(), "upgrade-status.json")
+
+	u := New(Config{
+		SrcDir:          checkout,
+		BuildCmd:        []string{"sh", "-c", "mkdir -p bin && printf '#!/bin/sh\\nexit 1\\n' > bin/grain"},
+		BuiltBinary:     built,
+		InstallPath:     installPath,
+		HealthCheckArgs: []string{"schema-version"},
+		StatusFile:      statusFile,
+	})
+
+	if err := u.Start("feature"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitForPhase(t, u, PhaseFailed)
+
+	if _, err := os.Stat(installPath); !os.IsNotExist(err) {
+		t.Errorf("installPath after rollback with no previous binary: got err %v, want a not-exist error", err)
+	}
+	if _, err := os.Stat(installPath + ".prev"); !os.IsNotExist(err) {
+		t.Errorf("backup file left behind after rollback: got err %v, want a not-exist error", err)
+	}
+}
+
+// TestUpgraderRemovesBackupOnceHealthCheckPasses confirms the ".prev"
+// backup a passing health check no longer needs doesn't linger forever.
+func TestUpgraderRemovesBackupOnceHealthCheckPasses(t *testing.T) {
+	_, checkout := newFixtureRepo(t, "feature")
+	v2Dir := filepath.Join(checkout, "v2")
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	built := filepath.Join(v2Dir, "bin", "grain")
+	installPath := filepath.Join(t.TempDir(), "grain")
+	statusFile := filepath.Join(t.TempDir(), "upgrade-status.json")
+
+	if err := os.WriteFile(installPath, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	u := New(Config{
+		SrcDir: checkout,
+		// A fake "build" that produces a real, executable script that
+		// exits 0 -- a health check against it should pass.
+		BuildCmd:        []string{"sh", "-c", "mkdir -p bin && printf '#!/bin/sh\\nexit 0\\n' > bin/grain"},
+		BuiltBinary:     built,
+		InstallPath:     installPath,
+		HealthCheckArgs: []string{"schema-version"},
+		StatusFile:      statusFile,
+	})
+
+	if err := u.Start("feature"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitForPhase(t, u, PhaseOK)
+
+	if _, err := os.Stat(installPath + ".prev"); !os.IsNotExist(err) {
+		t.Errorf("backup file left behind after a passing health check: got err %v, want a not-exist error", err)
+	}
+}
+
 func TestUpgraderStartRejectsConcurrentUpgrade(t *testing.T) {
 	_, checkout := newFixtureRepo(t, "feature")
 	v2Dir := filepath.Join(checkout, "v2")
