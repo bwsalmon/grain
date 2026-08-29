@@ -11,6 +11,12 @@
 
 let config = null;
 let stateFilter = "all";
+// The settings last read from GET /api/settings, kept around so the
+// save handler can tell which fields an operator actually touched from
+// which just reflect what was already stored -- PUT only sends the
+// former, the same partial-update convention UpdateSettingsRequest
+// itself is built around.
+let currentSettings = null;
 // The task whose detail overlay is open, so a poll can refresh it too.
 let openTaskID = null;
 // The last payload rendered for the list and for the open task. A poll
@@ -396,6 +402,85 @@ async function submitNewTask(evt) {
   }
 }
 
+// --- settings --------------------------------------------------------------
+
+async function openSettings() {
+  try {
+    const settings = await api("/api/settings");
+    currentSettings = settings;
+    renderSettingsForm(settings);
+    document.getElementById("settings-overlay").classList.remove("hidden");
+  } catch (err) {
+    showError(err);
+  }
+}
+
+function renderSettingsForm(s) {
+  const form = document.getElementById("settings-form");
+  form.elements.pollInterval.value = s.pollInterval || "";
+  form.elements.slots.value = (s.slots || []).join(", ");
+  form.elements.geminiModel.value = s.geminiModel || "";
+  form.elements.maxAgentTurns.value = String(s.maxAgentTurns || 0);
+  form.elements.githubHost.value = s.githubHost || "";
+  form.elements.githubInsecureHttp.checked = !!s.githubInsecureHttp;
+  form.elements.gcpProject.value = s.gcpProject || "";
+  form.elements.gcpServiceAccountEmail.value = s.gcpServiceAccountEmail || "";
+  document.getElementById("settings-unconfigured").classList.toggle("hidden", s.configured);
+}
+
+function parseSlots(value) {
+  return value.split(",").map((slot) => slot.trim()).filter((slot) => slot !== "");
+}
+
+// submitSettings only puts a field in the request when it differs from
+// what openSettings last loaded, so an operator changing one field never
+// overwrites the rest -- the same nil-means-unchanged contract
+// UpdateSettingsRequest's pointer fields already give a PUT that leaves
+// a key out entirely.
+async function submitSettings(evt) {
+  evt.preventDefault();
+  const form = evt.target;
+  const payload = {};
+
+  const pollInterval = form.elements.pollInterval.value.trim();
+  if (pollInterval !== (currentSettings.pollInterval || "")) payload.pollInterval = pollInterval;
+
+  const slots = parseSlots(form.elements.slots.value);
+  if (JSON.stringify(slots) !== JSON.stringify(currentSettings.slots || [])) payload.slots = slots;
+
+  const geminiModel = form.elements.geminiModel.value.trim();
+  if (geminiModel !== (currentSettings.geminiModel || "")) payload.geminiModel = geminiModel;
+
+  const maxAgentTurnsRaw = form.elements.maxAgentTurns.value.trim();
+  if (maxAgentTurnsRaw !== "") {
+    const maxAgentTurns = parseInt(maxAgentTurnsRaw, 10);
+    if (maxAgentTurns !== (currentSettings.maxAgentTurns || 0)) payload.maxAgentTurns = maxAgentTurns;
+  }
+
+  const githubHost = form.elements.githubHost.value.trim();
+  if (githubHost !== (currentSettings.githubHost || "")) payload.githubHost = githubHost;
+
+  const githubInsecureHttp = form.elements.githubInsecureHttp.checked;
+  if (githubInsecureHttp !== !!currentSettings.githubInsecureHttp) payload.githubInsecureHttp = githubInsecureHttp;
+
+  const gcpProject = form.elements.gcpProject.value.trim();
+  if (gcpProject !== (currentSettings.gcpProject || "")) payload.gcpProject = gcpProject;
+
+  const gcpServiceAccountEmail = form.elements.gcpServiceAccountEmail.value.trim();
+  if (gcpServiceAccountEmail !== (currentSettings.gcpServiceAccountEmail || "")) payload.gcpServiceAccountEmail = gcpServiceAccountEmail;
+
+  try {
+    currentSettings = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+    closeOverlay("settings");
+  } catch (err) {
+    // Same banner task creation's own validation errors surface
+    // through -- writeClientError maps a ValidationError to a 400 whose
+    // body's "error" is that message, and api() already turns that into
+    // the Error showError renders here.
+    showError(err);
+  }
+}
+
 // --- wiring ---------------------------------------------------------------
 
 function closeOverlay(name) {
@@ -467,6 +552,8 @@ async function main() {
   document.getElementById("new-task-button").addEventListener("click", () => {
     document.getElementById("new-task-overlay").classList.remove("hidden");
   });
+  document.getElementById("settings-form").addEventListener("submit", submitSettings);
+  document.getElementById("settings-button").addEventListener("click", openSettings);
 
   try {
     config = await api("/api/config");

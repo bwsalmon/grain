@@ -11,6 +11,7 @@
   <h1>grain</h1>
   <span id="repo-name" class="repo-name"></span>
   <div class="spacer"></div>
+  <button id="settings-button" class="secondary">Settings</button>
   <button id="new-task-button" class="primary">+ New task</button>
 </header>
 
@@ -65,6 +66,45 @@
       </label>
       <div class="form-actions">
         <button type="submit" class="primary">Create task</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Settings -->
+<div id="settings-overlay" class="overlay hidden">
+  <div class="panel">
+    <button class="close" data-close="settings">&times;</button>
+    <h2>Settings</h2>
+    <p id="settings-unconfigured" class="unconfigured-note hidden">Not configured yet -- nothing has been saved for this deployment. Poll interval, slots, Gemini model and GitHub host are required the first time.</p>
+    <form id="settings-form">
+      <label>Poll interval <span class="hint">Go duration, e.g. 30s</span>
+        <input name="pollInterval" autocomplete="off">
+      </label>
+      <label>Slots <span class="hint">comma-separated slot names</span>
+        <input name="slots" placeholder="a, b, c" autocomplete="off">
+      </label>
+      <label>Gemini model
+        <input name="geminiModel" autocomplete="off">
+      </label>
+      <label>Max agent turns <span class="hint">0 = the agent framework's own default</span>
+        <input name="maxAgentTurns" type="number" min="0" step="1">
+      </label>
+      <label>GitHub host
+        <input name="githubHost" autocomplete="off">
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="githubInsecureHttp">
+        Speak plain HTTP to GitHub host <span class="hint">mock servers only</span>
+      </label>
+      <label>GCP project <span class="hint">optional -- enables the gcp-key/gemini-key capabilities</span>
+        <input name="gcpProject" autocomplete="off">
+      </label>
+      <label>GCP service account email <span class="hint">optional</span>
+        <input name="gcpServiceAccountEmail" autocomplete="off">
+      </label>
+      <div class="form-actions">
+        <button type="submit" class="primary">Save</button>
       </div>
     </form>
   </div>

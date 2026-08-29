@@ -1031,11 +1031,20 @@ read-modify-write against whatever `grain_config` currently holds (or
 the zero `model.Config`, the first time). `grain settings` is the CLI
 side of the same `Client` methods — no flags prints what is stored (or
 that nothing is, yet); any flags apply just those, the way `grain
-update` already treats a task's own flags. Neither is wired into
-`pkg/ui/static/`'s frontend yet — a settings panel there is real,
-sizable work that needs a browser to check the way this project's own
-"UI or frontend changes" testing discipline calls for, and is still
-open.
+update` already treats a task's own flags.
+
+`pkg/ui/static/`'s frontend (bwsalmon/agents#333) now has a settings
+panel too — the topbar's "Settings" button opens a form reading `GET
+/api/settings`, distinguishing `configured: false` (nothing saved yet,
+before any daemon has started or any value set) from a populated one
+the same way `grain settings` (no flags) already does. Saving sends
+only the fields an operator actually changed via `PUT`, leaving the
+rest out of the request entirely so they can't clobber what's already
+stored — the same partial-update contract `UpdateSettingsRequest`'s
+pointer fields already give a CLI caller. A 400's `ValidationError`
+message (a bad duration string, an empty required field the first
+time) surfaces through the same error banner task creation's own
+validation errors already use.
 
 ## Single writer
 
