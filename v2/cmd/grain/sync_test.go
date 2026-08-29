@@ -11,11 +11,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -64,25 +67,33 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
+	db, err := dolt.Open(dolt.DefaultConfig(dataDir))
+	if err != nil {
+		t.Fatalf("opening embedded dolt: %v", err)
+	}
+	defer db.Close()
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	srv := httptest.NewServer(ui.NewServer(ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.DefaultCapabilities()}, store))
+	defer srv.Close()
+
 	path := writeSyncConfig(t, dir, syncConfig{Settings: settingsRequest(pollInterval, slots, geminiModel, githubHost)})
 
-	if err := cmdSync(context.Background(), []string{"-config", path, "-data-dir", dataDir}); err != nil {
+	if err := cmdSync(context.Background(), []string{"-config", path, "-server", srv.URL}); err != nil {
 		t.Fatalf("cmdSync: %v", err)
 	}
 
 	// A second sync against the same, now-already-applied settings must
 	// succeed too -- the "safe to re-run, nothing to do if nothing
 	// changed" bar this file's own doc comment sets.
-	if err := cmdSync(context.Background(), []string{"-config", path, "-data-dir", dataDir}); err != nil {
+	if err := cmdSync(context.Background(), []string{"-config", path, "-server", srv.URL}); err != nil {
 		t.Fatalf("cmdSync (second run): %v", err)
 	}
 
-	c, closeStore, err := buildClient("", "grain", "root", "", dataDir, "", "")
-	if err != nil {
-		t.Fatalf("buildClient: %v", err)
-	}
-	defer closeStore()
-	settings, err := c.GetSettings(context.Background())
+	settings, err := ui.NewHTTPClient(srv.URL).GetSettings(context.Background())
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}

@@ -10,10 +10,10 @@
 # work as plain host directories (orchestrator.HostSandboxes), no VM
 # involved. So this script does the simpler thing the issue actually
 # asks for -- run the one `grain` binary directly on this machine, as a
-# pair of systemd services, with no controller VM anywhere in the
-# picture. Real sandbox isolation (a VM or container per task) is still
-# open and out of scope here; see v2/README.md's own "neither sandbox
-# stand-in carries any real isolation."
+# single systemd service, with no controller VM anywhere in the picture.
+# Real sandbox isolation (a VM or container per task) is still open and
+# out of scope here; see v2/README.md's own "neither sandbox stand-in
+# carries any real isolation."
 #
 # What this script does, every time it runs (safe to re-run -- this is
 # the installer AND the updater):
@@ -26,37 +26,44 @@
 #      about the host's package manager.
 #   3. installs it to /usr/local/bin/grain
 #   4. creates an unprivileged system user to run it as
-#   5. lays out $GRAIN_DATA_DIR (secrets, the sandbox root) and seeds
-#      secrets from environment variables -- only if they are not
-#      already there, so a second run never overwrites a credential
-#      placed by the first one or by hand
-#   6. runs (or updates) a `dolt sql-server` container: embedded Dolt is
-#      single-writer (v2/README.md, "Single writer"), and a daemon plus
-#      a UI on the same store both need to write, so this is the one
-#      place a controller-shaped background service is unavoidable --
-#      it runs as a container rather than a second native install
-#      because that is the other thing `docker` buys for free
-#   7. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
+#   5. lays out $GRAIN_DATA_DIR (secrets, the sandbox root, the embedded
+#      store) and seeds secrets from environment variables -- only if
+#      they are not already there, so a second run never overwrites a
+#      credential placed by the first one or by hand
+#   6. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
 #      empty commit so grain has a branch to work from ("format" it --
 #      grain always branches off an existing ref, never creates one)
-#   8. writes and enables grain-daemon.service and grain-ui.service, so
-#      both come back on reboot, and restarts them (not just "enable
-#      --now") so a second run's new binary and new config actually
-#      take effect -- see docs/next-session.md item 3's "Update" for
-#      why enable-without-restart was already a bug once in v1's own
-#      proxy service
+#   7. writes and enables grain-daemon.service, so it comes back on
+#      reboot, and restarts it (not just "enable --now") so a second
+#      run's new binary and new config actually take effect -- see
+#      docs/next-session.md item 3's "Update" for why
+#      enable-without-restart was already a bug once in v1's own proxy
+#      service
 #
 # Every setting is an environment variable, not a flag, so the common
 # case is `sudo GRAIN_GITHUB_TOKEN=... GRAIN_GEMINI_API_KEY=... ./setup.sh`
 # and a re-run to pick up a repo update is `sudo ./setup.sh` with no
 # arguments at all. Run with -h/--help for the full list.
 #
+# There used to be a second service (grain-ui.service) and a `dolt
+# sql-server` container behind it: embedded Dolt is single-writer, and a
+# daemon plus a UI on the same store both used to need to write.
+# bwsalmon/agents#363 removed the second writer -- the daemon now serves
+# the UI/API itself, in-process, over the store it already has open (see
+# v2/cmd/grain/daemon.go's own doc comment) -- so this script installs
+# one service, needs no Dolt server container, and no longer requires
+# `docker` at runtime (only at build time, for `make container-build`).
+#
 # The UI is bound to 127.0.0.1 on the plain HTTP port (80) and nowhere
 # else -- nothing here opens a firewall hole for it. Reach it by
 # forwarding that one port over SSH: `ssh -L 8080:localhost:80
-# <this-host>`, then open http://localhost:8080 locally. See
-# pkg/ui/README's own "single-operator tool" framing (v2/README.md, "The
-# UI") for why that is the whole access-control story today.
+# <this-host>`, then open http://localhost:8080 locally, or put it behind
+# Tailscale/IAP (the issue's own framing) instead of an SSH tunnel if the
+# deployment already has one of those. See pkg/ui/README's own
+# "single-operator tool" framing (v2/README.md, "The UI") for why that is
+# the whole access-control story today -- the API and the UI it serves
+# carry no auth of their own, so whatever reaches -ui-addr can act as the
+# deployment's one configured actor.
 
 set -euo pipefail
 
@@ -71,10 +78,6 @@ GRAIN_USER="${GRAIN_USER:-grain}"
 GRAIN_UI_ADDR="${GRAIN_UI_ADDR:-127.0.0.1:80}"
 GRAIN_SLOTS="${GRAIN_SLOTS:-local}"
 GRAIN_POLL_INTERVAL="${GRAIN_POLL_INTERVAL:-30s}"
-
-GRAIN_STORE_PORT="${GRAIN_STORE_PORT:-3306}"
-GRAIN_DOLT_IMAGE="${GRAIN_DOLT_IMAGE:-dolthub/dolt-sql-server:latest}"
-GRAIN_DOLT_CONTAINER="${GRAIN_DOLT_CONTAINER:-grain-dolt}"
 
 GRAIN_GITHUB_HOST="${GRAIN_GITHUB_HOST:-github.com}"
 GRAIN_GITHUB_INSECURE_HTTP="${GRAIN_GITHUB_INSECURE_HTTP:-0}"
@@ -96,10 +99,11 @@ usage() {
 Usage: sudo ./setup.sh
 
 Installs or updates a v2 grain deployment on this machine: clones/builds
-the binary, lays out /var/lib/grain, runs a dolt sql-server container for
-the task store, and installs grain-daemon.service/grain-ui.service.
-Every setting is an environment variable; all have defaults, so a bare
-`sudo ./setup.sh` re-run is the update path. Recognized variables:
+the binary, lays out /var/lib/grain (including its embedded task store),
+and installs grain-daemon.service, which runs the dispatch loop and
+serves the UI/API itself. Every setting is an environment variable; all
+have defaults, so a bare `sudo ./setup.sh` re-run is the update path.
+Recognized variables:
 
   GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
   GRAIN_REF                branch to build (default: main)
@@ -107,14 +111,11 @@ Every setting is an environment variable; all have defaults, so a bare
   GRAIN_DATA_DIR            secrets/store/sandbox root (default: /var/lib/grain)
   GRAIN_USER                unprivileged account grain runs as (default: grain)
 
-  GRAIN_UI_ADDR             UI bind address (default: 127.0.0.1:80 -- loopback
-                             only; reach it with `ssh -L 8080:localhost:80 host`)
+  GRAIN_UI_ADDR             UI/API bind address (default: 127.0.0.1:80 -- loopback
+                             only; reach it with `ssh -L 8080:localhost:80 host`,
+                             or put it behind Tailscale/IAP instead)
   GRAIN_SLOTS               comma-separated concurrency slots (default: local)
   GRAIN_POLL_INTERVAL       daemon reconcile-cycle interval (default: 30s)
-
-  GRAIN_STORE_PORT          loopback port for the dolt sql-server (default: 3306)
-  GRAIN_DOLT_IMAGE          dolt sql-server image (default: dolthub/dolt-sql-server:latest)
-  GRAIN_DOLT_CONTAINER      its container name (default: grain-dolt)
 
   GRAIN_GITHUB_HOST         GitHub API host (default: github.com)
   GRAIN_GITHUB_INSECURE_HTTP  1 to speak plain HTTP to it (mock servers only)
@@ -158,7 +159,7 @@ for cmd in git docker systemctl install useradd; do
   fi
 done
 if ! docker info >/dev/null 2>&1; then
-  echo "setup.sh: 'docker info' failed -- is the Docker daemon running?" >&2
+  echo "setup.sh: 'docker info' failed -- is the Docker daemon running? (only needed to build, via make container-build)" >&2
   exit 1
 fi
 
@@ -228,7 +229,11 @@ setup_data_dir() {
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/sandbox"
-  install -d -m0755 "$GRAIN_DATA_DIR/dolt"   # bind-mounted into the sql-server container, below
+  # grain-daemon.service's own -data-dir/store, embedded Dolt -- the one
+  # process that ever opens it now (this file's own header on
+  # bwsalmon/agents#363), so no separate sql-server container or
+  # directory layout is needed for it beyond what openStore creates on
+  # its own the first time the daemon starts.
 
   # GitHub credential ladder (v2/pkg/gitproxy/credentials.go): a pattern
   # file plus one <name>.token per credential. "*" is the catch-all every
@@ -254,74 +259,7 @@ setup_data_dir() {
   fi
 }
 
-# --- 6. the task store: a dolt sql-server container ---------------------
-#
-# Embedded Dolt is single-writer (v2/pkg/model/dolt's own doc comment);
-# grain-daemon.service and grain-ui.service are two processes both
-# writing the same store, so this deployment needs the server end
-# (dolt.Connect), not the embedded one -- see v2/README.md, "Single
-# writer". DOLT_ROOT_HOST=% (rather than the image's own "localhost"
-# default) is load-bearing: the daemon and the UI reach this container
-# over the published loopback port, which the server sees as a
-# container-network address, not literally "localhost" -- verified live
-# against the real image while writing this script; with the default,
-# root@localhost never matches and every connection is refused.
-
-ensure_dolt_container() {
-  log "Ensuring the dolt sql-server container ($GRAIN_DOLT_CONTAINER) is up to date and running"
-  docker pull --quiet "$GRAIN_DOLT_IMAGE" >/dev/null
-
-  local want_id
-  want_id="$(docker image inspect -f '{{.Id}}' "$GRAIN_DOLT_IMAGE")"
-
-  if docker container inspect "$GRAIN_DOLT_CONTAINER" >/dev/null 2>&1; then
-    local have_id
-    have_id="$(docker container inspect -f '{{.Image}}' "$GRAIN_DOLT_CONTAINER")"
-    if [ "$have_id" != "$want_id" ]; then
-      log "  new image pulled -- recreating the container (data under $GRAIN_DATA_DIR/dolt is untouched)"
-      docker rm -f "$GRAIN_DOLT_CONTAINER" >/dev/null
-    fi
-  fi
-
-  if ! docker container inspect "$GRAIN_DOLT_CONTAINER" >/dev/null 2>&1; then
-    docker run -d --name "$GRAIN_DOLT_CONTAINER" --restart unless-stopped \
-      -p "127.0.0.1:${GRAIN_STORE_PORT}:3306" \
-      -v "$GRAIN_DATA_DIR/dolt:/var/lib/dolt" \
-      -e DOLT_DATABASE=grain \
-      -e DOLT_ROOT_HOST=% \
-      "$GRAIN_DOLT_IMAGE" >/dev/null
-  elif [ "$(docker container inspect -f '{{.State.Running}}' "$GRAIN_DOLT_CONTAINER")" != "true" ]; then
-    docker start "$GRAIN_DOLT_CONTAINER" >/dev/null
-  fi
-
-  # So containers marked --restart unless-stopped actually come back
-  # after a host reboot, not just a docker-daemon restart.
-  systemctl enable --now docker.service >/dev/null 2>&1 || true
-}
-
-wait_for_store() {
-  # A TCP connect alone is not enough: the entrypoint's own
-  # dolt_server_initializer opens the port *before* it runs
-  # create_database_from_env (see this file's own account of that
-  # script, above) -- found live, testing this script, as a real "database
-  # not found: grain" failure from grain-daemon.service starting a beat
-  # too early. Polling `dolt sql` inside the container until the database
-  # it creates actually shows up is the only check that means what it
-  # says.
-  log "Waiting for the store, and its 'grain' database, to be ready"
-  local i=0
-  until docker exec "$GRAIN_DOLT_CONTAINER" dolt sql -r csv -q 'SHOW DATABASES;' 2>/dev/null | grep -qx grain; do
-    i=$((i + 1))
-    if [ "$i" -ge 60 ]; then
-      echo "setup.sh: store's 'grain' database did not appear within 60s -- last container logs:" >&2
-      docker logs --tail 40 "$GRAIN_DOLT_CONTAINER" >&2 || true
-      exit 1
-    fi
-    sleep 1
-  done
-}
-
-# --- 7. format the target repo, if it is empty --------------------------
+# --- 6. format the target repo, if it is empty --------------------------
 #
 # Every dispatch grain runs branches off an existing ref -- it never
 # creates the first one (v2/e2e's own harness always seeds one commit
@@ -363,73 +301,42 @@ format_target_repo_if_empty() {
   git -C "$tmp" push --quiet "$url" "HEAD:refs/heads/$GRAIN_TARGET_BRANCH"
 }
 
-# --- 8. systemd units -----------------------------------------------------
+# --- 7. the systemd unit ---------------------------------------------------
 
 write_systemd_units() {
-  log "Writing grain-daemon.service and grain-ui.service"
+  log "Writing grain-daemon.service"
 
   local daemon_args=(
     daemon
     -data-dir "$GRAIN_DATA_DIR"
     -slots "$GRAIN_SLOTS"
     -poll-interval "$GRAIN_POLL_INTERVAL"
-    -store-addr "127.0.0.1:${GRAIN_STORE_PORT}"
-    -store-database grain
-    -store-user root
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -github-host "$GRAIN_GITHUB_HOST"
+    -ui-addr "$GRAIN_UI_ADDR"
   )
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
   [ -n "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL" ] && daemon_args+=(-gcp-agent-service-account "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL")
-
-  local ui_args=(
-    ui
-    -addr "$GRAIN_UI_ADDR"
-    -store-addr "127.0.0.1:${GRAIN_STORE_PORT}"
-    -store-database grain
-    -store-user root
-    -open=false
-  )
-  [ -n "$GRAIN_TARGET_REPO" ] && ui_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
+  [ -n "$GRAIN_TARGET_REPO" ] && daemon_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
 
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
 [Unit]
-Description=grain daemon (task orchestrator)
-After=network-online.target docker.service
+Description=grain daemon (task orchestrator, UI and API)
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
-
-[Service]
-Type=simple
-User=${GRAIN_USER}
-Group=${GRAIN_USER}
-ExecStart=/usr/local/bin/grain ${daemon_args[*]}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  cat > /etc/systemd/system/grain-ui.service <<UNIT
-[Unit]
-Description=grain ui
-After=network-online.target docker.service
-Wants=network-online.target
-Requires=docker.service
 
 [Service]
 Type=simple
 User=${GRAIN_USER}
 Group=${GRAIN_USER}
 # CAP_NET_BIND_SERVICE, not root, is what lets an unprivileged process
-# bind -addr's port 80 -- see this script's own header on why that's the
-# port and why it's bound to loopback only.
+# bind -ui-addr's port 80 -- see this script's own header on why that's
+# the port and why it's bound to loopback only.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStart=/usr/local/bin/grain ${ui_args[*]}
+ExecStart=/usr/local/bin/grain ${daemon_args[*]}
 Restart=on-failure
 RestartSec=5
 
@@ -448,9 +355,6 @@ enable_services() {
   # git-proxy service (docs/next-session.md item 3's "Update"): restarting
   # an already-running unit is always safe, and starting a stopped one is
   # exactly what --now would have done anyway.
-  systemctl enable grain-ui.service >/dev/null
-  systemctl restart grain-ui.service
-
   systemctl enable grain-daemon.service >/dev/null
   if [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ]; then
     systemctl restart grain-daemon.service
@@ -465,10 +369,10 @@ print_summary() {
   echo
   log "Done."
   echo "    UI:      http://${GRAIN_UI_ADDR} -- reach it with: ssh -L 8080:localhost:${GRAIN_UI_ADDR##*:} <this-host>, then open http://localhost:8080"
-  echo "    Store:   dolt sql-server in container '${GRAIN_DOLT_CONTAINER}', data under ${GRAIN_DATA_DIR}/dolt"
+  echo "    Store:   embedded Dolt under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
-  echo "    Logs:    journalctl -u grain-daemon.service -f   /   journalctl -u grain-ui.service -f"
-  echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts both services"
+  echo "    Logs:    journalctl -u grain-daemon.service -f"
+  echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts the service"
 }
 
 main() {
@@ -476,8 +380,6 @@ main() {
   build_and_install
   ensure_user
   setup_data_dir
-  ensure_dolt_container
-  wait_for_store
   format_target_repo_if_empty
   write_systemd_units
   enable_services
