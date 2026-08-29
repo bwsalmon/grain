@@ -13,12 +13,16 @@
 // to change shape when it did, since a Dispatch already says everything
 // that side effect needs to know.
 //
-// There is no scheduling policy here, deliberately: no priority, no
-// fairness, no preemption, no notion of time beyond the now a caller
-// passes in. Ordering is whatever task_ready yields (Store.Ready sorts
-// by task ID, a stable tiebreak rather than a policy), and Cycle takes
-// its prefix. A package that ranked ready tasks against each other
-// would be a scheduler; this one drains a queue into free slots.
+// There is no scheduling policy here, deliberately: no fairness, no
+// preemption, no notion of time beyond the now a caller passes in.
+// Ordering is whatever task_ready yields, and Cycle takes its prefix. The
+// one exception is Store.Ready's own: a fix task the merge queue filed
+// for a repo's stuck head sorts before ordinary ready tasks (task ID is
+// still the tiebreak within each group), which is a fact about task_ready
+// rather than a policy Cycle itself makes -- see Store.Ready's doc
+// comment (bwsalmon/agents#389) for why. A package that ranked ready
+// tasks against each other on some richer notion of priority would be a
+// scheduler; this one drains a queue into free slots.
 package dispatch
 
 import (

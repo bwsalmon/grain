@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "./api.js";
-import TopBar from "./components/TopBar.jsx";
-import Filters from "./components/Filters.jsx";
+import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
+import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
@@ -28,6 +28,7 @@ export default function App() {
   const [showNewTask, setShowNewTask] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
   const showError = useCallback((err) => {
@@ -41,8 +42,36 @@ export default function App() {
   }, [error]);
 
   const refreshList = useCallback(async () => {
-    setTasks(await api("/api/tasks"));
+    const next = await api("/api/tasks");
+    setTasks(next);
+    // Drop any selected id the store no longer reports, so a stale
+    // selection never quietly outlives the task it named.
+    const ids = new Set(next.map((t) => t.id));
+    setSelected((prev) => {
+      const kept = new Set([...prev].filter((id) => ids.has(id)));
+      return kept.size === prev.size ? prev : kept;
+    });
   }, []);
+
+  const toggleSelect = useCallback((id) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const setSelection = useCallback((ids, checked) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (checked) next.add(id); else next.delete(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
 
   const openTask = useCallback(async (id) => {
     try {
@@ -71,6 +100,31 @@ export default function App() {
       showError(err);
     }
   }, [openTask, refreshList, showError]);
+
+  // actBatch is `act` (above) widened to many tasks at once: run one
+  // mutation per id, in parallel, then refresh the list a single time
+  // rather than once per task. Unlike `act` it never opens a detail
+  // overlay -- a batch action has no one task to show. Failures are
+  // collected rather than aborting the rest, since one bad id in a
+  // multi-select should not stop the others from going through; it
+  // reports whether every mutation landed so the caller can decide
+  // whether the selection that drove it is still worth keeping.
+  const actBatch = useCallback(async (ids, mutate) => {
+    const results = await Promise.allSettled(ids.map((id) => mutate(id)));
+    await refreshList();
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      showError(new Error(`${failed.length} of ${ids.length} task(s) failed: ${failed[0].reason?.message || failed[0].reason}`));
+    }
+    return failed.length === 0;
+  }, [refreshList, showError]);
+
+  // Only clears the selection once a batch action fully succeeds -- on a
+  // partial failure it stays as-is, so whoever is watching can see which
+  // rows are still selected and retry rather than having to re-pick them.
+  const runBatch = useCallback((mutate) => {
+    actBatch([...selected], mutate).then((ok) => { if (ok) clearSelection(); });
+  }, [actBatch, selected, clearSelection]);
 
   useEffect(() => {
     (async () => {
@@ -112,15 +166,28 @@ export default function App() {
   }, [openTaskId, refreshList]);
 
   return (
-    <>
-      <TopBar
+    <div className="app-shell">
+      <Sidebar
         config={config}
+        tasks={tasks}
+        stateFilter={stateFilter}
+        onSetFilter={setStateFilter}
         onOpenSecrets={() => setShowSecrets(true)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
-      <Filters tasks={tasks} stateFilter={stateFilter} onSetFilter={setStateFilter} />
-      <TaskList tasks={tasks} stateFilter={stateFilter} config={config} onOpenTask={openTask} />
+      <div className="main-column">
+        <TaskList
+          tasks={tasks}
+          stateFilter={stateFilter}
+          config={config}
+          onOpenTask={openTask}
+          selected={selected}
+          onToggleSelect={toggleSelect}
+          onSelectAll={setSelection}
+        />
+        <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
+      </div>
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
         <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} />
@@ -130,6 +197,6 @@ export default function App() {
       )}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
-    </>
+    </div>
   );
 }
