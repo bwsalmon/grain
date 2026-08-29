@@ -12,6 +12,7 @@ const tasks = [
 const noop = () => {};
 const baseProps = {
   stateFilter: "all",
+  onSetView: noop,
   onSetFilter: noop,
   onOpenSecrets: noop,
   onOpenSchedules: noop,
