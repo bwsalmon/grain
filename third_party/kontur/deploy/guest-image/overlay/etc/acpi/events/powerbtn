@@ -1,0 +1,4 @@
+# Matches both old- and new-style kernel event strings for the power
+# button (see /usr/share/doc/acpid/README.Debian in this image).
+event=button[ /]power
+action=/etc/acpi/powerbtn.sh

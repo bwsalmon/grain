@@ -1,0 +1,78 @@
+# Static pod manifest for the standalone kubelet set up by install.sh:
+# drop this file into /etc/kubernetes/manifests (or wherever
+# STATIC_POD_PATH points) and kubelet picks it up directly, no apiserver
+# or `kubectl apply` involved. Copy of deploy/k8s/pod-example.yaml's
+# single-VM shape, adjusted for that standalone environment:
+#
+#  - Images come from the local registry (localhost:5000) that
+#    local-registry.sh/build-and-push.sh set up, instead of ghcr.io.
+#  - No devices.kubevirt.io/kvm resource request: that's satisfied by a
+#    device plugin registering with the apiserver, which doesn't exist
+#    here. /dev/kvm is bind-mounted instead, same as the "without a
+#    device plugin" fallback described in deploy/k8s/pod-example.yaml.
+#  - restartPolicy: Always -- kubelet requires this for static pods, so
+#    unlike the ordinary example this VM restarts on exit rather than
+#    staying stopped. To actually stop it, remove this file from the
+#    static pod directory; kubelet then tears the pod down.
+#
+# Assumes disk images/kernel are already on the node under
+# /var/lib/vm-images, as in the ordinary example.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kontur-vm
+  labels:
+    app: kontur-vm
+spec:
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 40
+  initContainers:
+    - name: netshim
+      image: localhost:5000/kontur:latest
+      args: ["netshim"]
+      env:
+        - name: NETSHIM_VMS
+          value: "web:169.254.100.2:30080"
+        - name: NETSHIM_GUEST_PORT
+          value: "8080"
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN", "NET_RAW"]
+  containers:
+    - name: web
+      image: localhost:5000/kontur:latest
+      args: ["run"]
+      env:
+        - name: CHV_DISK_IMAGE
+          value: /images/disk.img
+        - name: CHV_DISK_READONLY
+          value: "true"
+        - name: CHV_KERNEL
+          value: /images/vmlinux
+        - name: CHV_CMDLINE
+          value: "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
+        - name: CHV_NET
+          value: "tap=tap-web"
+        - name: CHV_CPUS
+          value: "2"
+        - name: CHV_MEMORY_MB
+          value: "2048"
+        - name: CHV_SHUTDOWN_TIMEOUT
+          value: "20s"
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: images
+          mountPath: /images
+          readOnly: true
+        - name: kvm
+          mountPath: /dev/kvm
+  volumes:
+    - name: images
+      hostPath:
+        path: /var/lib/vm-images
+        type: Directory
+    - name: kvm
+      hostPath:
+        path: /dev/kvm
+        type: CharDevice
