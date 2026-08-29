@@ -13,53 +13,62 @@ package model
 //
 // Declaration and observation are separate tables, not columns on one
 // row. They answer to different records — a human authors the first,
-// grain writes the second — and keeping them apart is what would let a
-// declaration change land on a Dolt branch and be reviewed as a data diff
-// while observations keep being written to the trunk.
+// grain writes the second.
 //
-// On naming: every table is prefixed with its entity and every identifier
-// is backtick-quoted, because MySQL reserves GRANT, READ and READS, all
-// three of which are nouns this model wants.
+// On naming: every table is backtick-quoted. SQLite accepts backticks as
+// a MySQL-compatibility identifier quote, which is what lets this SQL
+// read the same regardless of which engine is behind Store -- no
+// identifier here needs it against SQLite's own much smaller reserved
+// word list, but keeping the quoting uniform means nothing has to
+// remember which columns happen to need it.
 //
-// On types: enums are VARCHAR rather than MySQL ENUM. A MySQL ENUM puts
-// the vocabulary in the schema, so adding a LinkKind becomes a migration;
-// a VARCHAR keeps it in task.go, where the model already says it lives.
-// The cost is that the database will not reject an unknown value, which
-// the Valid methods and schema_test.go cover instead.
+// On types: enums are TEXT rather than a constrained type. Keeping the
+// vocabulary in task.go rather than the schema is what lets a new
+// LinkKind ship without a migration; the cost is that the database will
+// not reject an unknown value, which the Valid methods and schema_test.go
+// cover instead. Timestamps keep DATETIME rather than MySQL's DATETIME(6):
+// SQLite has no timestamp storage class of its own, and this is what
+// tells modernc.org/sqlite (the driver pkg/model/sqlite opens) to hand a
+// column back as a time.Time rather than the TEXT it stores under the
+// hood -- store.go's sql.NullTime scanning and time.Time binding are
+// otherwise unchanged from what they were against Dolt. Booleans are
+// INTEGER (0/1) -- SQLite has no separate boolean storage class either,
+// and database/sql converts either direction without help from this
+// package (pinned by schema_test.go).
 
 // SchemaVersion is bumped whenever Tables or Views change in a way an
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
 	`CREATE TABLE IF NOT EXISTS ` + "`task`" + ` (
-  ` + "`id`" + `                    VARCHAR(64)  NOT NULL,
-  ` + "`intent`" + `                VARCHAR(32)  NOT NULL,
-  ` + "`title`" + `                 TEXT         NOT NULL,
-  ` + "`body`" + `                  LONGTEXT     NOT NULL,
+  ` + "`id`" + `                    TEXT    NOT NULL,
+  ` + "`intent`" + `                TEXT    NOT NULL,
+  ` + "`title`" + `                 TEXT    NOT NULL,
+  ` + "`body`" + `                  TEXT    NOT NULL,
 
-  ` + "`origin_actor_kind`" + `     VARCHAR(32)  NOT NULL,
-  ` + "`origin_actor_id`" + `       VARCHAR(255) NOT NULL,
-  ` + "`origin_behalf_kind`" + `    VARCHAR(32)  NULL,
-  ` + "`origin_behalf_id`" + `      VARCHAR(255) NULL,
-  ` + "`origin_reason`" + `         VARCHAR(32)  NOT NULL,
+  ` + "`origin_actor_kind`" + `     TEXT    NOT NULL,
+  ` + "`origin_actor_id`" + `       TEXT    NOT NULL,
+  ` + "`origin_behalf_kind`" + `    TEXT    NULL,
+  ` + "`origin_behalf_id`" + `      TEXT    NULL,
+  ` + "`origin_reason`" + `         TEXT    NOT NULL,
 
-  ` + "`approval_actor_kind`" + `   VARCHAR(32)  NULL,
-  ` + "`approval_actor_id`" + `     VARCHAR(255) NULL,
-  ` + "`approval_behalf_kind`" + `  VARCHAR(32)  NULL,
-  ` + "`approval_behalf_id`" + `    VARCHAR(255) NULL,
+  ` + "`approval_actor_kind`" + `   TEXT    NULL,
+  ` + "`approval_actor_id`" + `     TEXT    NULL,
+  ` + "`approval_behalf_kind`" + `  TEXT    NULL,
+  ` + "`approval_behalf_id`" + `    TEXT    NULL,
 
-  ` + "`target_owner`" + `          VARCHAR(255) NULL,
-  ` + "`target_name`" + `           VARCHAR(255) NULL,
-  ` + "`binding`" + `               VARCHAR(32)  NOT NULL,
-  ` + "`base`" + `                  VARCHAR(255) NULL,
-  ` + "`folder`" + `                VARCHAR(512) NULL,
+  ` + "`target_owner`" + `          TEXT    NULL,
+  ` + "`target_name`" + `           TEXT    NULL,
+  ` + "`binding`" + `               TEXT    NOT NULL,
+  ` + "`base`" + `                  TEXT    NULL,
+  ` + "`folder`" + `                TEXT    NULL,
 
-  ` + "`auto_merge`" + `            BOOLEAN      NOT NULL,
-  ` + "`created_at`" + `            DATETIME(6)  NULL,
+  ` + "`auto_merge`" + `            INTEGER  NOT NULL,
+  ` + "`created_at`" + `            DATETIME NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -68,17 +77,17 @@ var Tables = []string{
 	// structurally distinct from task.target is what stops a read target
 	// becoming a capability-laundering channel by accident.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_read`" + ` (
-  ` + "`task_id`" + ` VARCHAR(64)  NOT NULL,
-  ` + "`owner`" + `   VARCHAR(255) NOT NULL,
-  ` + "`name`" + `    VARCHAR(255) NOT NULL,
+  ` + "`task_id`" + ` TEXT NOT NULL,
+  ` + "`owner`" + `   TEXT NOT NULL,
+  ` + "`name`" + `    TEXT NOT NULL,
   PRIMARY KEY (` + "`task_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`task_grant`" + ` (
-  ` + "`task_id`" + `    VARCHAR(64)  NOT NULL,
-  ` + "`capability`" + ` VARCHAR(128) NOT NULL,
-  ` + "`via`" + `        VARCHAR(32)  NOT NULL,
-  ` + "`folder`" + `     VARCHAR(512) NULL,
+  ` + "`task_id`" + `    TEXT NOT NULL,
+  ` + "`capability`" + ` TEXT NOT NULL,
+  ` + "`via`" + `        TEXT NOT NULL,
+  ` + "`folder`" + `     TEXT NULL,
   PRIMARY KEY (` + "`task_id`" + `, ` + "`capability`" + `)
 )`,
 
@@ -86,145 +95,122 @@ var Tables = []string{
 	// be a plain join instead of hard-coding the kind vocabulary in two
 	// places where it could drift.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_link`" + ` (
-  ` + "`task_id`" + ` VARCHAR(64)  NOT NULL,
-  ` + "`kind`" + `    VARCHAR(32)  NOT NULL,
-  ` + "`target`" + `  VARCHAR(255) NOT NULL,
-  ` + "`blocks`" + `  BOOLEAN      NOT NULL,
+  ` + "`task_id`" + ` TEXT    NOT NULL,
+  ` + "`kind`" + `    TEXT    NOT NULL,
+  ` + "`target`" + `  TEXT    NOT NULL,
+  ` + "`blocks`" + `  INTEGER NOT NULL,
   PRIMARY KEY (` + "`task_id`" + `, ` + "`kind`" + `, ` + "`target`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`task_tag`" + ` (
-  ` + "`task_id`" + ` VARCHAR(64)  NOT NULL,
-  ` + "`tag`" + `     VARCHAR(255) NOT NULL,
+  ` + "`task_id`" + ` TEXT NOT NULL,
+  ` + "`tag`" + `     TEXT NOT NULL,
   PRIMARY KEY (` + "`task_id`" + `, ` + "`tag`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`task_observation`" + ` (
-  ` + "`task_id`" + `                     VARCHAR(64) NOT NULL,
-  ` + "`closed_at`" + `                   DATETIME(6) NULL,
-  ` + "`completed_at`" + `                DATETIME(6) NULL,
-  ` + "`pending_question_comment_id`" + ` BIGINT      NULL,
-  ` + "`baseline_comment_id`" + `         BIGINT      NULL,
-  ` + "`merge_queue_blocked_at`" + `      DATETIME(6) NULL,
-  ` + "`observed_at`" + `                 DATETIME(6) NULL,
+  ` + "`task_id`" + `                     TEXT     NOT NULL,
+  ` + "`closed_at`" + `                   DATETIME NULL,
+  ` + "`completed_at`" + `                DATETIME NULL,
+  ` + "`pending_question_comment_id`" + ` INTEGER  NULL,
+  ` + "`baseline_comment_id`" + `         INTEGER  NULL,
+  ` + "`merge_queue_blocked_at`" + `      DATETIME NULL,
+  ` + "`observed_at`" + `                 DATETIME NULL,
   PRIMARY KEY (` + "`task_id`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
-  ` + "`id`" + `          VARCHAR(64)  NOT NULL,
-  ` + "`task_id`" + `     VARCHAR(64)  NOT NULL,
-  ` + "`slot`" + `        VARCHAR(128) NOT NULL,
-  ` + "`sandbox`" + `     VARCHAR(128) NOT NULL,
-  ` + "`unit`" + `        VARCHAR(255) NULL,
-  ` + "`attempt`" + `     INT          NOT NULL,
-  ` + "`started_at`" + `  DATETIME(6)  NOT NULL,
-  ` + "`finished_at`" + ` DATETIME(6)  NULL,
-  ` + "`outcome`" + `     TEXT         NULL,
+  ` + "`id`" + `          TEXT     NOT NULL,
+  ` + "`task_id`" + `     TEXT     NOT NULL,
+  ` + "`slot`" + `        TEXT     NOT NULL,
+  ` + "`sandbox`" + `     TEXT     NOT NULL,
+  ` + "`unit`" + `        TEXT     NULL,
+  ` + "`attempt`" + `     INTEGER  NOT NULL,
+  ` + "`started_at`" + `  DATETIME NOT NULL,
+  ` + "`finished_at`" + ` DATETIME NULL,
+  ` + "`outcome`" + `     TEXT     NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`lease`" + ` (
-  ` + "`run_id`" + `     VARCHAR(64)  NOT NULL,
-  ` + "`capability`" + ` VARCHAR(128) NOT NULL,
-  ` + "`resource`" + `   VARCHAR(512) NOT NULL,
-  ` + "`minted_by`" + `  VARCHAR(128) NOT NULL,
-  ` + "`issued_at`" + `  DATETIME(6)  NOT NULL,
-  ` + "`expires_at`" + ` DATETIME(6)  NULL,
+  ` + "`run_id`" + `     TEXT     NOT NULL,
+  ` + "`capability`" + ` TEXT     NOT NULL,
+  ` + "`resource`" + `   TEXT     NOT NULL,
+  ` + "`minted_by`" + `  TEXT     NOT NULL,
+  ` + "`issued_at`" + `  DATETIME NOT NULL,
+  ` + "`expires_at`" + ` DATETIME NULL,
   PRIMARY KEY (` + "`run_id`" + `, ` + "`capability`" + `, ` + "`resource`" + `)
 )`,
 
 	// The conversation, as grain's own rows rather than a GitHub issue's
-	// comment thread. AUTO_INCREMENT because the id is both the ordering
-	// and the thing task_observation.pending_question_comment_id names:
-	// a caller that has just written a question needs its id back to
-	// record which question is outstanding.
+	// comment thread. INTEGER PRIMARY KEY is SQLite's own rowid alias, the
+	// AUTOINCREMENT that role needs: the id is both the ordering and the
+	// thing task_observation.pending_question_comment_id names, so a
+	// caller that has just written a question needs its id back to record
+	// which question is outstanding.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_comment`" + ` (
-  ` + "`id`" + `                 BIGINT       NOT NULL AUTO_INCREMENT,
-  ` + "`task_id`" + `            VARCHAR(64)  NOT NULL,
-  ` + "`author_kind`" + `        VARCHAR(32)  NOT NULL,
-  ` + "`author_id`" + `          VARCHAR(255) NOT NULL,
-  ` + "`author_behalf_kind`" + ` VARCHAR(32)  NULL,
-  ` + "`author_behalf_id`" + `   VARCHAR(255) NULL,
-  ` + "`body`" + `               LONGTEXT     NOT NULL,
-  ` + "`created_at`" + `         DATETIME(6)  NOT NULL,
-  PRIMARY KEY (` + "`id`" + `),
-  KEY ` + "`task_comment_task`" + ` (` + "`task_id`" + `)
+  ` + "`id`" + `                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`task_id`" + `            TEXT    NOT NULL,
+  ` + "`author_kind`" + `        TEXT    NOT NULL,
+  ` + "`author_id`" + `          TEXT    NOT NULL,
+  ` + "`author_behalf_kind`" + ` TEXT     NULL,
+  ` + "`author_behalf_id`" + `   TEXT     NULL,
+  ` + "`body`" + `               TEXT     NOT NULL,
+  ` + "`created_at`" + `         DATETIME NOT NULL
 )`,
+
+	`CREATE INDEX IF NOT EXISTS ` + "`task_comment_task`" + ` ON ` + "`task_comment`" + ` (` + "`task_id`" + `)`,
 
 	// Task identity, allocated here rather than borrowed from a GitHub
 	// issue number. A task used to be identified by the issue it was filed
 	// from ("owner/name/7"), which meant nothing could file a task without
 	// first creating an issue -- the coupling that made GitHub the input.
 	//
-	// A table with AUTO_INCREMENT rather than a counter column somebody
-	// reads and writes back: allocation has to stay correct with a
-	// controller, a UI and a CLI all writing at once (README's "Single
-	// writer"), and INSERT ... LAST_INSERT_ID() is atomic where
+	// INTEGER PRIMARY KEY rather than a counter column somebody reads and
+	// writes back: allocation has to stay correct with a daemon, a UI and
+	// a CLI all writing at once (README's "Single writer, many openers"),
+	// and an INSERT that lets SQLite assign the rowid is atomic where
 	// read-modify-write is a race. The row it leaves behind is also a
 	// record of when each id was handed out, which a bare counter throws
 	// away.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_sequence`" + ` (
-  ` + "`number`" + `    BIGINT      NOT NULL AUTO_INCREMENT,
-  ` + "`issued_at`" + ` DATETIME(6) NOT NULL,
-  PRIMARY KEY (` + "`number`" + `)
-)`,
-
-	// One row, rewritten by every mutation, which is the whole of grain's
-	// concurrency control.
-	//
-	// Two writers that overlap both stamp this cell, disagree about what
-	// it should say, and Dolt reports a serialization failure to whichever
-	// commits second -- aborting its entire transaction, not just the
-	// stamp. That is what makes "start the operation over" correct: the
-	// loser's work is rolled back whole, including the delete-and-reinsert
-	// of a task's child rows.
-	//
-	// It is deliberately one row for the entire store rather than one per
-	// task. Per-task versioning only conflicts when two writers touch the
-	// same task, which sounds better and is much harder to be sure of:
-	// Dolt merges concurrent writes cell by cell, so whether two
-	// overlapping operations are actually safe depends on which columns
-	// and which child tables each touched. A single shared cell makes
-	// every overlap a conflict, so that question never has to be answered.
-	// The cost is that unrelated writes conflict too, which for a
-	// deployment with one developer and occasional edits is not a cost.
-	`CREATE TABLE IF NOT EXISTS ` + "`grain_write`" + ` (
-  ` + "`id`" + `    INT         NOT NULL,
-  ` + "`token`" + ` VARCHAR(64) NOT NULL,
-  PRIMARY KEY (` + "`id`" + `)
+  ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`issued_at`" + ` DATETIME NOT NULL
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (
-  ` + "`id`" + `      INT NOT NULL,
-  ` + "`version`" + ` INT NOT NULL,
+  ` + "`id`" + `      INTEGER NOT NULL,
+  ` + "`version`" + ` INTEGER NOT NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
 	// A deployment's tunable, non-secret configuration -- see config.go's
 	// own doc comment on Config for what belongs here and what does not.
-	// One row, like grain_write and grain_schema: there is exactly one of
-	// these per deployment, not one per something else, so there is
-	// nothing for a second row to key against.
+	// One row, like grain_schema: there is exactly one of these per
+	// deployment, not one per something else, so there is nothing for a
+	// second row to key against.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
-  ` + "`id`" + `                         INT          NOT NULL,
-  ` + "`poll_interval_ms`" + `           BIGINT       NOT NULL,
-  ` + "`slots`" + `                      VARCHAR(512) NOT NULL,
-  ` + "`gemini_model`" + `                VARCHAR(128) NOT NULL,
-  ` + "`max_agent_turns`" + `             INT          NOT NULL,
-  ` + "`github_host`" + `                 VARCHAR(255) NOT NULL,
-  ` + "`github_insecure_http`" + `        BOOLEAN      NOT NULL,
-  ` + "`gcp_project`" + `                 VARCHAR(255) NOT NULL,
-  ` + "`gcp_service_account_email`" + `   VARCHAR(255) NOT NULL,
+  ` + "`id`" + `                         INTEGER NOT NULL,
+  ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
+  ` + "`slots`" + `                      TEXT    NOT NULL,
+  ` + "`gemini_model`" + `                TEXT    NOT NULL,
+  ` + "`max_agent_turns`" + `             INTEGER NOT NULL,
+  ` + "`github_host`" + `                 TEXT    NOT NULL,
+  ` + "`github_insecure_http`" + `        INTEGER NOT NULL,
+  ` + "`gcp_project`" + `                 TEXT    NOT NULL,
+  ` + "`gcp_service_account_email`" + `   TEXT    NOT NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 }
 
-// Views are the derivations. Order matters: task_ready reads the two
+// Views is the derivations, each a (name, DDL) pair so Init can drop and
+// recreate one by name -- SQLite has no CREATE OR REPLACE VIEW, unlike
+// the MySQL dialect Dolt spoke. Order matters: task_ready reads the two
 // above it.
-var Views = []string{
+var Views = []View{
 	// The invariant, as a view. Precedence top to bottom, matching
 	// StateOf exactly — see state_test.go on what holds them together.
-	`CREATE OR REPLACE VIEW ` + "`task_state`" + ` AS
+	{"task_state", `
 SELECT
   ` + "`t`.`id`" + ` AS ` + "`task_id`" + `,
   CASE
@@ -238,14 +224,14 @@ SELECT
 FROM ` + "`task`" + ` AS ` + "`t`" + `
 LEFT JOIN ` + "`task_observation`" + ` AS ` + "`o`" + ` ON ` + "`o`.`task_id`" + ` = ` + "`t`.`id`" + `
 LEFT JOIN ` + "`task_run`" + ` AS ` + "`r`" + `
-       ON ` + "`r`.`task_id`" + ` = ` + "`t`.`id`" + ` AND ` + "`r`.`finished_at`" + ` IS NULL`,
+       ON ` + "`r`.`task_id`" + ` = ` + "`t`.`id`" + ` AND ` + "`r`.`finished_at`" + ` IS NULL`},
 
 	// Blocked is an annotation on queued, never a state of its own, so it
 	// gets its own view rather than another branch of the CASE above. A
 	// link whose target is not a task at all — a review thread, a pull
 	// request — never blocks, which falls out of the join rather than
 	// needing a rule.
-	`CREATE OR REPLACE VIEW ` + "`task_blocked`" + ` AS
+	{"task_blocked", `
 SELECT
   ` + "`l`.`task_id`" + ` AS ` + "`task_id`" + `,
   COUNT(*)      AS ` + "`open_blockers`" + `
@@ -253,20 +239,20 @@ FROM ` + "`task_link`" + ` AS ` + "`l`" + `
 JOIN ` + "`task`" + ` AS ` + "`bt`" + ` ON ` + "`bt`.`id`" + ` = ` + "`l`.`target`" + `
 LEFT JOIN ` + "`task_observation`" + ` AS ` + "`bo`" + ` ON ` + "`bo`.`task_id`" + ` = ` + "`l`.`target`" + `
 WHERE ` + "`l`.`blocks`" + ` = TRUE AND ` + "`bo`.`closed_at`" + ` IS NULL
-GROUP BY ` + "`l`.`task_id`" + ``,
+GROUP BY ` + "`l`.`task_id`" + ``},
 
 	// What is dispatchable right now: approved, not running, nothing open
 	// in front of it. The whole dispatch query, as one view.
-	`CREATE OR REPLACE VIEW ` + "`task_ready`" + ` AS
+	{"task_ready", `
 SELECT ` + "`s`.`task_id`" + ` AS ` + "`task_id`" + `
 FROM ` + "`task_state`" + ` AS ` + "`s`" + `
 LEFT JOIN ` + "`task_blocked`" + ` AS ` + "`b`" + ` ON ` + "`b`.`task_id`" + ` = ` + "`s`.`task_id`" + `
 WHERE ` + "`s`.`state`" + ` = 'queued'
-  AND COALESCE(` + "`b`.`open_blockers`" + `, 0) = 0`,
+  AND COALESCE(` + "`b`.`open_blockers`" + `, 0) = 0`},
 
 	// Every lease still outstanding, with the credential that minted it —
 	// which makes "what would I break by rotating this?" a query.
-	`CREATE OR REPLACE VIEW ` + "`lease_live`" + ` AS
+	{"lease_live", `
 SELECT
   ` + "`l`.`run_id`" + `     AS ` + "`run_id`" + `,
   ` + "`r`.`task_id`" + `    AS ` + "`task_id`" + `,
@@ -277,13 +263,26 @@ SELECT
   ` + "`l`.`expires_at`" + ` AS ` + "`expires_at`" + `
 FROM ` + "`lease`" + ` AS ` + "`l`" + `
 JOIN ` + "`task_run`" + ` AS ` + "`r`" + ` ON ` + "`r`.`id`" + ` = ` + "`l`.`run_id`" + `
-WHERE ` + "`r`.`finished_at`" + ` IS NULL`,
+WHERE ` + "`r`.`finished_at`" + ` IS NULL`},
 }
 
-// Statements is the order Open applies things in: tables, then views, a
-// view referencing a missing table being an error.
+// View is one derivation: a name, and the SELECT that defines it.
+type View struct {
+	Name string
+	DDL  string // a SELECT statement, with no CREATE VIEW/AS around it
+}
+
+// Statements is the order Open applies things in: tables, then views
+// (each dropped first, so a changed definition always wins over
+// whatever an older build left behind -- a view has no data of its own
+// to lose), a view referencing a missing table being an error.
 func Statements() []string {
-	out := make([]string, 0, len(Tables)+len(Views))
+	out := make([]string, 0, len(Tables)+len(Views)*2)
 	out = append(out, Tables...)
-	return append(out, Views...)
+	for _, v := range Views {
+		out = append(out,
+			"DROP VIEW IF EXISTS `"+v.Name+"`",
+			"CREATE VIEW `"+v.Name+"` AS"+v.DDL)
+	}
+	return out
 }

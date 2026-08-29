@@ -5,67 +5,17 @@
 BIN := bin
 CMDS := grain
 
-# --- ICU linkage ------------------------------------------------------
-#
-# Embedded Dolt pulls in go-icu-regex, whose cgo preamble links
-# -licui18n -licuuc -licudata (../v2/README.md, "Two things the port
-# corrected"). Linked dynamically, the binary records versioned SONAMEs
-# -- libicui18n.so.74 -- and refuses to start against a host whose ICU
-# major differs: Bookworm ships 72, Trixie and Ubuntu 24.04 ship 74. That
-# silently couples the machine that builds a binary to the machine that
-# runs it, and the failure lands at exec time on the target, not at build
-# time where someone would see it. Linking ICU's static archives instead
-# removes the coupling for about +31 MB (grain: 148 MB -> 179 MB, almost
-# all of it libicudata.a -- unchanged since bwsalmon/agents#313 folded
-# graind, ui and mcpserver into this one binary too). libstdc++, libgcc
-# and libc stay dynamic, which a Debian host provides anyway.
-#
-# The archives are named by absolute path rather than with -Wl,-Bstatic
-# because ld64 (macOS) does not understand -Bstatic, while both linkers
-# understand an archive path. go-icu-regex's own -licui18n and friends
-# still follow on the link line; by then they resolve nothing and are
-# dropped, which `ldd` confirms -- no libicu*.so in the result.
-#
-# icu_static is go-icu-regex's own build tag. On ELF it changes nothing
-# (it only adds -DU_STATIC_IMPLEMENTATION, which matters for Windows
-# dllimport); it is passed because it is what the package documents for
-# this linkage, not because the link fails without it.
-#
-# Build and test targets deliberately differ here: `test` and `vet` stay
-# dynamic so they keep mirroring tests.yml, and only the binaries -- the
-# things you would actually ship to a controller -- are linked static.
-# ICU_STATIC=0 opts out. If the archives are missing (libicu-dev on
-# Debian/Ubuntu, libicu-devel on Fedora, `brew install icu4c` on macOS)
-# the build says so and falls back to dynamic rather than failing.
 BUILDVCS ?= auto
-ICU_STATIC ?= 1
-ICU_LIBDIR ?= $(shell pkg-config --variable=libdir icu-uc 2>/dev/null \
-	|| { brew --prefix icu4c 2>/dev/null && echo /lib; } | tr -d '\n')
-ICU_ARCHIVES := $(wildcard $(ICU_LIBDIR)/libicui18n.a $(ICU_LIBDIR)/libicuuc.a \
-	$(ICU_LIBDIR)/libicudata.a)
-
-ifeq ($(ICU_STATIC),1)
-ifeq ($(words $(ICU_ARCHIVES)),3)
-ICU_LDFLAGS := $(ICU_ARCHIVES)
-ICU_TAGS := -tags icu_static
-else
-$(warning ICU static archives not found under "$(ICU_LIBDIR)" -- linking ICU \
-dynamically. Install libicu-dev (Debian/Ubuntu), libicu-devel (Fedora) or \
-icu4c (brew), or set ICU_STATIC=0 to silence this.)
-endif
-endif
 
 # --- Containerised build ----------------------------------------------
 #
-# `make build` links against whatever ICU, GCC and ld the machine running
-# it happens to have, which is right on a host whose toolchain agrees with
-# its own prebuilt ICU archives and wrong on one where it does not. Two
-# ways it goes wrong: where GCC writes .sframe unwind sections that the
-# installed ld is too old to read, every member of libicuuc.a links with a
-# "section ignored" warning; and where glibc is newer than the target's,
-# the binary links clean and then fails to exec on the controller, which
-# is the coupling static ICU was adopted to remove, reappearing one layer
-# down in libc.
+# grain is pure Go (bwsalmon/agents#366 removed the one dependency that
+# wasn't -- embedded Dolt's go-icu-regex, which needed cgo and, through
+# it, a build host whose ICU archives and glibc agreed with the
+# controller's), so `make build` alone is already what most checkouts
+# want: no C toolchain, no ICU headers, and the binary it produces is
+# statically linked with no runtime library coupling to carry to the
+# controller at all.
 #
 # `make container-build` runs this same `make build`, out of this same
 # Makefile, inside Dockerfile.build's pinned Debian 12 toolchain -- the
@@ -116,9 +66,19 @@ build: $(CMDS)
 # worktree or submodule whose real gitdir is outside the mount. What is
 # lost is the commit stamp: `go version -m bin/grain` stops reporting
 # vcs.revision, and nothing else changes.
+#
+# CGO_ENABLED=0 here, and only here: with no cgo anywhere left in the
+# dependency graph, the default (CGO_ENABLED=1) build still links
+# dynamically against libc -- os/user and net's own cgo-based lookups
+# pull it in even though nothing in this module writes any C -- which is
+# exactly the "binary needs a newer glibc than the controller has"
+# coupling embedded Dolt's ICU dependency used to cause one layer up.
+# Forcing it off produces a genuinely static binary instead, with nothing
+# left to carry to the controller. `test` and `vet` below leave
+# CGO_ENABLED alone: `go test -race` requires it (the race detector is a
+# cgo library), and nothing about testing this module ships anywhere.
 $(CMDS):
-	CGO_LDFLAGS="$(ICU_LDFLAGS)" go build $(ICU_TAGS) \
-		-buildvcs=$(BUILDVCS) -o $(BIN)/$@ ./cmd/$@
+	CGO_ENABLED=0 go build -buildvcs=$(BUILDVCS) -o $(BIN)/$@ ./cmd/$@
 
 builder:
 	$(CONTAINER_ENGINE) build \

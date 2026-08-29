@@ -5,7 +5,7 @@ package model_test
 // approving tasks, a dispatcher handing a task to a sandbox, an agent
 // session working inside one, and GitHub sync observing what happened.
 // Nothing here is a fake standing in for the store -- these run against a
-// real embedded Dolt database, the discipline model/dolt/store_test.go
+// real embedded SQLite database, the discipline model/sqlite/store_test.go
 // and dispatch/dispatch_test.go already hold to. What is mocked is the *caller*:
 // every function below makes the same store calls a real GitHub poller,
 // sandbox manager or approval handler would make, so the sequences they
@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 var (
@@ -41,9 +41,9 @@ var (
 
 func open(t *testing.T) (*model.Store, context.Context) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

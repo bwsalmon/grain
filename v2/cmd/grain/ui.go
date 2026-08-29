@@ -31,7 +31,7 @@ import (
 	"runtime"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
@@ -39,11 +39,8 @@ import (
 func uiServe(args []string) {
 	fs := flag.NewFlagSet("grain ui", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:8420", "address to serve the UI on")
-	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- the multi-writer deployment (graind plus this plus a CLI)")
-	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
-	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
-	dataDir := fs.String("data-dir", "", "root directory of an embedded store, used when -store-addr is unset -- single writer, so nothing else may be running against it")
+	dataDir := fs.String("data-dir", "", "root directory of the embedded SQLite store (required, unless -demo) -- a "+
+		"daemon, a ui and this CLI may all point at the same one at once; SQLite's own file locking serialises the writes")
 	serverDataDir := fs.String("server-data-dir", "",
 		"the -data-dir a colocated `grain daemon` was started with, so this UI can set/delete/list its secrets "+
 			"(under <server-data-dir>/secrets) without ever reading one back (bwsalmon/agents#357). This is "+
@@ -58,8 +55,8 @@ func uiServe(args []string) {
 			"for trying out the UI with no orchestrator, sandbox or repo behind it")
 	fs.Parse(args)
 
-	if *demo && (*storeAddr != "" || *dataDir != "") {
-		fmt.Fprintln(os.Stderr, "grain ui: -demo seeds its own throwaway store; -store-addr/-data-dir must be unset")
+	if *demo && *dataDir != "" {
+		fmt.Fprintln(os.Stderr, "grain ui: -demo seeds its own throwaway store; -data-dir must be unset")
 		os.Exit(2)
 	}
 	if *demo {
@@ -69,12 +66,12 @@ func uiServe(args []string) {
 		}
 		*dataDir = dir
 	}
-
-	server, err := serverConfig(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile)
-	if err != nil {
-		log.Fatalf("grain ui: %v", err)
+	if *dataDir == "" {
+		fmt.Fprintln(os.Stderr, "grain ui: -data-dir is required (unless -demo)")
+		os.Exit(2)
 	}
-	db, err := dolt.OpenOrConnect(*dataDir, server)
+
+	db, err := sqlite.Open(sqlite.DefaultConfig(*dataDir))
 	if err != nil {
 		log.Fatalf("grain ui: opening the task store: %v", err)
 	}

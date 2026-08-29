@@ -1,7 +1,7 @@
 package main
 
 // sync_test.go exercises cmdSync's "settings" path end to end against a
-// real embedded Dolt store -- the same "nothing here is a fake standing
+// real embedded SQLite store -- the same "nothing here is a fake standing
 // in for the store" discipline demo_test.go already holds cmd/grain's
 // own tests to. The "gcp" path is pkg/gcpsetup's own, covered network-
 // free by gcpsetup_test.go; syncGCP itself is exercised for its
@@ -77,7 +77,7 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 		t.Fatalf("cmdSync (second run): %v", err)
 	}
 
-	c, closeStore, err := buildClient("", "grain", "root", "", dataDir, "", "")
+	c, closeStore, err := buildClient(dataDir, "", "")
 	if err != nil {
 		t.Fatalf("buildClient: %v", err)
 	}

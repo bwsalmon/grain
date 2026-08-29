@@ -1,7 +1,7 @@
 // daemon.go implements `grain daemon`, formerly its own cmd/graind
 // binary before bwsalmon/agents#313 combined every mode into one: it
 // runs pkg/orchestrator's RunCycle in the background on a timer, until
-// SIGINT/SIGTERM, against one real embedded Dolt store.
+// SIGINT/SIGTERM, against one real embedded SQLite store.
 //
 // bwsalmon/agents#254 asked for exactly this, with one simplification: by
 // default, sandboxing is still local -- the MCP server's sandbox tools
@@ -58,7 +58,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/kontur"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
@@ -78,7 +78,7 @@ func (s *stringSliceFlag) Set(v string) error {
 
 func daemon(args []string) {
 	// seedOnly marks a flag loadConfig only consults the first time this
-	// -data-dir/-store-addr has ever seen a daemon: it seeds grain_config,
+	// -data-dir has ever seen a daemon: it seeds grain_config,
 	// and every start after that reads the stored value back instead,
 	// silently ignoring whatever this flag says -- see loadConfig's own
 	// doc comment for why.
@@ -88,11 +88,6 @@ func daemon(args []string) {
 	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
 	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills"+seedOnly)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
-
-	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- required to share the store with a UI or a CLI")
-	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
-	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
 
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
@@ -167,8 +162,6 @@ func daemon(args []string) {
 
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
-		storeAddr: *storeAddr, storeDatabase: *storeDatabase,
-		storeUser: *storeUser, storePasswordFile: *storePasswordFile,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -185,11 +178,6 @@ type config struct {
 	dataDir      string
 	slots        []string
 	pollInterval time.Duration
-
-	storeAddr         string
-	storeDatabase     string
-	storeUser         string
-	storePasswordFile string
 
 	geminiAPIKeyFile string
 	geminiModel      string
@@ -220,15 +208,7 @@ type config struct {
 // ctx is cancelled (or setup itself fails).
 func run(ctx context.Context, cfg config) error {
 
-	server := dolt.ServerConfig{Addr: cfg.storeAddr, Database: cfg.storeDatabase, User: cfg.storeUser}
-	if cfg.storePasswordFile != "" {
-		password, err := readTrimmedFile(cfg.storePasswordFile)
-		if err != nil {
-			return fmt.Errorf("reading -store-password-file: %w", err)
-		}
-		server.Password = password
-	}
-	store, db, err := openStore(cfg.dataDir, server)
+	store, db, err := openStore(cfg.dataDir)
 	if err != nil {
 		return err
 	}
@@ -554,16 +534,16 @@ func (c credentialTokenSource) TokenFor(owner, repo string) *string {
 
 // openStore returns both the Store and the *sql.DB behind it, so run can
 // close the connection on the way out -- model.Store itself has no
-// Close, deliberately: it imports no driver (pkg/model/dolt's own doc
+// Close, deliberately: it imports no driver (pkg/model/sqlite's own doc
 // comment), so closing is the caller's job.
 //
-// -store-addr points at a Dolt SQL server, which is what a deployment
-// running a UI or a CLI alongside this daemon needs: embedded Dolt is a
-// single writer, and those are writers now (README, "Single writer").
-// Without it, the embedded database under -data-dir is used, and nothing
-// else may be running against it.
-func openStore(dataDir string, server dolt.ServerConfig) (*model.Store, *sql.DB, error) {
-	db, err := dolt.OpenOrConnect(filepath.Join(dataDir, "store"), server)
+// -data-dir/store is a plain SQLite database file, and a UI or a CLI
+// pointed at the same -data-dir opens that same file directly -- no
+// server to run alongside this daemon, and no separate flag to address
+// one: SQLite's own file locking is what lets a daemon, a UI and a CLI
+// all write to it at once (pkg/model/sqlite's own doc comment).
+func openStore(dataDir string) (*model.Store, *sql.DB, error) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(filepath.Join(dataDir, "store")))
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the task store: %w", err)
 	}

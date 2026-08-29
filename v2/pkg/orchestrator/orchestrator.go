@@ -9,7 +9,7 @@
 // cron/timer loop calls once per tick, the same shape v1's `automation
 // run-once` command wraps around core.py's Orchestrator.run_once.
 // cmd/graind is that timer loop, calling RunCycle against a real embedded
-// Dolt store, a real github.RESTClient, and a real agent/gemini.Framework
+// SQLite store, a real github.RESTClient, and a real agent/gemini.Framework
 // (bwsalmon/agents#263, reconciling this package with the parallel
 // pkg/orchestrate/cmd/graind bwsalmon/agents#254 built independently of
 // it — see v2/README.md's "What this does not have yet" for what that

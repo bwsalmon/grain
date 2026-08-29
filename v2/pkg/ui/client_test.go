@@ -1,6 +1,6 @@
 package ui_test
 
-// pkg/ui against a real embedded Dolt store, the same discipline every
+// pkg/ui against a real embedded SQLite store, the same discipline every
 // other package's own tests hold to (model/simulate_test.go: "Nothing
 // here is a fake standing in for the store"). These used to run against
 // an in-memory github.Client stand-in, because a task was a GitHub issue;
@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -23,9 +23,9 @@ var baseTime = time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 
 func testClient(t *testing.T) (*ui.Client, *model.Store, context.Context) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

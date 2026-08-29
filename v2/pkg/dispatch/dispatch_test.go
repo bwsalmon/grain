@@ -1,7 +1,7 @@
 package dispatch_test
 
-// Cycle against a real embedded Dolt database, the same discipline
-// model/dolt/store_test.go holds to: these prove the dispatch decision
+// Cycle against a real embedded SQLite database, the same discipline
+// model/sqlite/store_test.go holds to: these prove the dispatch decision
 // is correct against the actual views it reads, not a fake standing in
 // for them. bwsalmon/agents#219 asked for exactly this and nothing
 // more — no sandbox, no GitHub, no agent — so every "outcome" below is
@@ -17,7 +17,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 var (
@@ -27,9 +27,9 @@ var (
 
 func open(t *testing.T) (*model.Store, context.Context) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

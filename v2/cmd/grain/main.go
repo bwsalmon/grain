@@ -54,7 +54,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
@@ -110,11 +110,9 @@ const usage = `usage: grain [global flags] <command> [args]
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
 
 Global flags (must come before the command):
-  -store-addr string           host:port of a Dolt SQL server holding the task store
-  -store-database string       database name on -store-addr (default "grain")
-  -store-user string           user to connect as (default "root")
-  -store-password-file string  file holding that user's password
-  -data-dir string             root of an embedded store, when -store-addr is unset (single writer)
+  -data-dir string             root directory of the embedded SQLite store (required) -- a
+                                daemon, a ui and this CLI may all point at the same one at
+                                once; SQLite's own file locking serialises the writes
   -as string                   principal to attribute what this command does to (default: the OS user)
   -default-target-repo string  owner/name a task with no repo of its own targets
   -json                        print machine-readable JSON instead of a human-readable table
@@ -137,11 +135,7 @@ Commands:
 func runCLI(args []string) error {
 	fs := flag.NewFlagSet("grain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store")
-	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
-	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
-	dataDir := fs.String("data-dir", "", "root directory of an embedded store, used when -store-addr is unset -- single writer, so nothing else may be running against it")
+	dataDir := fs.String("data-dir", "", "root directory of the embedded SQLite store (required)")
 	actor := fs.String("as", "", "principal to attribute what this command does to (defaults to the OS user)")
 	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task with no repo of its own targets")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON instead of a human-readable table")
@@ -156,7 +150,7 @@ func runCLI(args []string) error {
 	}
 
 	ctx := context.Background()
-	c, closeStore, err := buildClient(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile, *dataDir, *actor, *defaultTargetRepo)
+	c, closeStore, err := buildClient(*dataDir, *actor, *defaultTargetRepo)
 	if err != nil {
 		return err
 	}
@@ -193,21 +187,19 @@ func runCLI(args []string) error {
 	}
 }
 
-// buildClient opens the task store (embedded, or a Dolt SQL server, per
-// the same -store-*/-data-dir flags every store-backed command accepts)
-// and wraps it in a *ui.Client -- the common setup runCLI's own commands
-// share, factored out so sync.go's `grain sync` can build one too without
-// going through runCLI's own flag set, since a sync run that only
-// reconciles GCP infrastructure (sync.go's own doc comment) has no
-// business requiring store flags at all. The returned close func is
-// always safe to defer, even on an error return before the store was
-// ever opened.
-func buildClient(storeAddr, storeDatabase, storeUser, storePasswordFile, dataDir, actor, defaultTargetRepo string) (*ui.Client, func() error, error) {
-	server, err := serverConfig(storeAddr, storeDatabase, storeUser, storePasswordFile)
-	if err != nil {
-		return nil, func() error { return nil }, err
+// buildClient opens the task store (the same -data-dir every store-backed
+// command accepts) and wraps it in a *ui.Client -- the common setup
+// runCLI's own commands share, factored out so sync.go's `grain sync` can
+// build one too without going through runCLI's own flag set, since a
+// sync run that only reconciles GCP infrastructure (sync.go's own doc
+// comment) has no business requiring a -data-dir at all. The returned
+// close func is always safe to defer, even on an error return before the
+// store was ever opened.
+func buildClient(dataDir, actor, defaultTargetRepo string) (*ui.Client, func() error, error) {
+	if dataDir == "" {
+		return nil, func() error { return nil }, fmt.Errorf("-data-dir is required")
 	}
-	db, err := dolt.OpenOrConnect(dataDir, server)
+	db, err := sqlite.Open(sqlite.DefaultConfig(dataDir))
 	if err != nil {
 		return nil, func() error { return nil }, fmt.Errorf("opening the task store: %w", err)
 	}
@@ -232,24 +224,6 @@ func buildClient(storeAddr, storeDatabase, storeUser, storePasswordFile, dataDir
 		cfg.DefaultTarget = &repo
 	}
 	return ui.NewClient(cfg, store), db.Close, nil
-}
-
-// serverConfig assembles a dolt.ServerConfig from the -store-* flags. An
-// empty addr means "no server", which OpenOrConnect reads as "use the
-// embedded database".
-func serverConfig(addr, database, user, passwordFile string) (dolt.ServerConfig, error) {
-	if addr == "" {
-		return dolt.ServerConfig{}, nil
-	}
-	cfg := dolt.ServerConfig{Addr: addr, Database: database, User: user}
-	if passwordFile != "" {
-		data, err := os.ReadFile(passwordFile)
-		if err != nil {
-			return dolt.ServerConfig{}, fmt.Errorf("reading -store-password-file: %w", err)
-		}
-		cfg.Password = strings.TrimSpace(string(data))
-	}
-	return cfg, nil
 }
 
 // actorID resolves who this command acts as: the -as flag, else the OS

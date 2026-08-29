@@ -139,7 +139,7 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	// configuring its git credentials over SSH -- happens synchronously
 	// in run()'s own setup, before reconcile() is ever entered. So rather
 	// than race a fixed sleep against that setup (flaky under real disk/
-	// CPU contention, e.g. a slow embedded-Dolt open), this polls for the
+	// CPU contention, e.g. a slow embedded-SQLite open), this polls for the
 	// setup's own last side effect -- the VM's .git-credentials file --
 	// and only cancels ctx (letting run() return) once that has actually
 	// happened.

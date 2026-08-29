@@ -17,8 +17,9 @@
 //   - Blocked is not a state. It is derived from links, and a blocked
 //     task is still queued.
 //
-// Nothing in this file imports a database. Dolt is one representation of
-// these types and GitHub labels are another; neither belongs in the types.
+// Nothing in this file imports a database. SQLite is one representation
+// of these types and GitHub labels are another; neither belongs in the
+// types.
 package model
 
 import (

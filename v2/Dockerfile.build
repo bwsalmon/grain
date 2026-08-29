@@ -2,28 +2,12 @@
 # what produces bin/grain is Debian 12 -- the release every machine this
 # project deploys to runs (packer/kontur/image.pkr.hcl's bookworm base,
 # terraform/gcp/variables.tf's debian-cloud/debian-12) -- whatever the
-# machine driving the build happens to be.
-#
-# Two couplings to the build host this removes, both of which a plain
-# `make build` leaves in place:
-#
-#   - Toolchain skew against the distribution's own ICU archives.
-#     libicuuc.a and friends arrive prebuilt from the distribution, and a
-#     host whose GCC writes .sframe unwind sections (GCC 14 and binutils
-#     2.41 onwards) into objects its ld is too old to read reports every
-#     ICU member it links with a "section ignored" warning -- one per
-#     object, ahead of any real diagnostic. Bookworm's GCC 12.2 and
-#     binutils 2.40 both predate SFrame, so its archives carry no .sframe
-#     section for a linker to disagree about.
-#
-#   - The glibc floor. ICU is linked statically (see the Makefile's "ICU
-#     linkage") but libstdc++, libgcc and libc stay dynamic, so the binary
-#     still records the symbol versions of whichever glibc linked it.
-#     Linked against one newer than the target's it needs symbols the
-#     target does not have, and -- exactly the failure mode static ICU was
-#     adopted to end -- says so at exec time on the controller rather than
-#     at build time. Linked here it needs 2.36, which is what the target
-#     ships.
+# machine driving the build happens to be. grain is pure Go (the
+# Makefile's own "Containerised build" comment), so there is no C
+# toolchain or system library here to pin a version of -- this image
+# exists purely to pin the Go toolchain itself, so `container-build`
+# reproduces the same compiler CI and a release both use regardless of
+# what is or isn't installed on whichever machine invokes it.
 #
 # Nothing is COPYed in: this image is the toolchain, not the build. The
 # working tree is bind-mounted and `make build` runs inside it, so the
@@ -37,15 +21,6 @@ ARG GO_VERSION=1.26.2
 ARG GO_IMAGE=golang
 
 FROM ${GO_IMAGE}:${GO_VERSION}-bookworm
-
-# libicu-dev rather than the libicu72 runtime package: the headers are
-# what cgo needs to compile go-icu-regex at all, and the static archives
-# are what ICU_STATIC=1 links (README.md, "Two things the port
-# corrected"). Which ICU major bookworm carries stops mattering once the
-# link is static -- that it is installed at build time does not.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends libicu-dev \
- && rm -rf /var/lib/apt/lists/*
 
 # The pinned tag above is the whole point of building in here, and a
 # go.mod toolchain line newer than it would quietly undo it by fetching a

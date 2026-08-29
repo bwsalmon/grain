@@ -8,9 +8,9 @@ import "time"
 //
 // What stays a flag, deliberately, is anything a deployment needs before
 // it can even reach the database this names, or that names secret
-// material rather than being one: -data-dir, -store-addr and its
-// credential family, -gemini-api-key-file and -kontur-ssh-key chief
-// among them. Config is everything left over on cmd/grain's "daemon"
+// material rather than being one: -data-dir, -gemini-api-key-file and
+// -kontur-ssh-key chief among them. Config is everything left over on
+// cmd/grain's "daemon"
 // subcommand's own flag set -- see daemon.go's own doc comment on how
 // the two combine.
 //

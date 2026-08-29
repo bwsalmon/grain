@@ -7,8 +7,8 @@
 //
 // It is a mode of its own (main.go's switch, next to daemon/ui/mcpserver
 // and setup), not one of runCLI's task-store commands, so that a sync run
-// naming no "settings" section never needs -store-addr/-data-dir at all
-// -- see buildClient's own doc comment.
+// naming no "settings" section never needs -data-dir at all -- see
+// buildClient's own doc comment.
 //
 // `grain sync -config path.json` reads one file with up to two
 // independent, optional sections:
@@ -35,8 +35,11 @@
 // so pointing a workflow at `grain sync` on every push touching the
 // config file is the whole of what "run this in a GitHub Action when code
 // or configurations change" needs -- see this package's own README
-// section (v2/README.md) for the workflow shape and how it reaches a
-// deployment whose store is bound to loopback only.
+// section (v2/README.md) for the workflow shape. A "settings" section
+// needs -data-dir naming the deployment's store on local disk, so it
+// only runs from a workflow step with access to that machine (an SSH
+// step, or one running on the machine itself), the same restriction
+// `grain secrets` already has for the same reason.
 package main
 
 import (
@@ -81,11 +84,7 @@ func syncCmd(args []string) {
 func cmdSync(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("grain sync", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to a JSON file with \"settings\" and/or \"gcp\" sections to reconcile (required)")
-	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store -- only needed if -config has a \"settings\" section")
-	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
-	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
-	dataDir := fs.String("data-dir", "", "root directory of an embedded store, used when -store-addr is unset")
+	dataDir := fs.String("data-dir", "", "root directory of the embedded SQLite store -- only needed if -config has a \"settings\" section")
 	actor := fs.String("as", "", "principal to attribute a settings change to (defaults to the OS user)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -113,7 +112,7 @@ func cmdSync(ctx context.Context, args []string) error {
 	}
 
 	if cfg.Settings != nil {
-		if err := syncSettings(ctx, *cfg.Settings, *storeAddr, *storeDatabase, *storeUser, *storePasswordFile, *dataDir, *actor); err != nil {
+		if err := syncSettings(ctx, *cfg.Settings, *dataDir, *actor); err != nil {
 			return fmt.Errorf("applying settings: %w", err)
 		}
 	}
@@ -146,8 +145,8 @@ func syncGCP(ctx context.Context, gc syncGCPConfig) error {
 	return nil
 }
 
-func syncSettings(ctx context.Context, req ui.UpdateSettingsRequest, storeAddr, storeDatabase, storeUser, storePasswordFile, dataDir, actor string) error {
-	c, closeStore, err := buildClient(storeAddr, storeDatabase, storeUser, storePasswordFile, dataDir, actor, "")
+func syncSettings(ctx context.Context, req ui.UpdateSettingsRequest, dataDir, actor string) error {
+	c, closeStore, err := buildClient(dataDir, actor, "")
 	if err != nil {
 		return err
 	}

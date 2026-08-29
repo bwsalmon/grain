@@ -4,7 +4,7 @@ package gitproxy_test
 // git repo, served over real smart-HTTP by `git http-backend` (standing in
 // for GitHub -- there is no live GitHub credential in this environment,
 // matching v1's own live-test rig in tests/test_vm_integration.py), behind
-// a real GitProxy whose Authorizer reads a real embedded Dolt-backed
+// a real GitProxy whose Authorizer reads a real embedded SQLite-backed
 // model.Store, reached through a real HTTP server, from a real `git`
 // process running with credentials NewSandboxTools' local stand-in
 // (v2/mcp) configured via ConfigureGitCredentials, driven by a scripted
@@ -44,7 +44,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 // scriptedGenerator replays one response per call -- gemini_test.go's own
@@ -176,9 +176,9 @@ func run(t *testing.T, dir string, name string, args ...string) {
 
 func openStore(t *testing.T) (*model.Store, context.Context) {
 	t.Helper()
-	db, err := dolt.Open(dolt.DefaultConfig(t.TempDir()))
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
-		t.Fatalf("opening embedded dolt: %v", err)
+		t.Fatalf("opening embedded sqlite: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	store := model.New(db)

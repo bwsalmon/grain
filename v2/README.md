@@ -5,12 +5,13 @@ here is wired into it.
 
 ```
 pkg/model/      the task model of ../docs/data-model.md
-pkg/model/dolt/ opening the Dolt database — the only package that imports
-                a driver. Open is the embedded, single-writer one;
-                Connect dials a Dolt SQL server, which is what makes
-                graind, the UI and a CLI writing at once a supported case
-                (see "Single writer" below); OpenOrConnect picks between
-                them from a deployment's flags
+pkg/model/sqlite/  opening the embedded SQLite database (modernc.org/sqlite,
+                pure Go, no cgo) — the only package that imports a driver.
+                Open is the one constructor there is: SQLite has no wire
+                protocol to dial, so a daemon, a UI and a CLI all writing
+                at once is just three processes calling Open on the same
+                file, serialised by SQLite's own file locking (see
+                "Concurrent writers" below)
 pkg/dispatch/   which task takes which slot: what one cycle decides to
                 do with the store, with no side effect beyond that
                 decision. It does not loop itself -- cmd/grain's "daemon"
@@ -53,10 +54,13 @@ pkg/capability/gcpkey/  the gcp-key capability: a real MINT
                 Reap, a standalone safety net that deletes anything GCP
                 itself reports as older than 24h regardless of whether a
                 Lease survived to say so
-pkg/secrets/    a model.CredentialResolver reading a directory shaped like
-                a Kubernetes Secret volume mount (<dir>/<secret>/<key>) --
-                the production implementation CapabilityContext.Credentials
-                had none of until now
+pkg/secrets/    a model.CredentialResolver backed by its own embedded
+                SQLite database (<dir>/secrets.db), kept deliberately
+                separate from the task/config store's own database file
+                (bwsalmon/agents#366: "put secrets in a separate db,
+                config and tasks in a common db") -- the production
+                implementation CapabilityContext.Credentials had none of
+                until now
 pkg/gitproxy/   a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -89,7 +93,7 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 pipeline" below.
 e2e/            tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/gemini run, and a real
-                gitproxy push, against a real embedded Dolt store and a
+                gitproxy push, against a real embedded SQLite store and a
                 local git
                 server standing in for GitHub — fixed scenarios plus a
                 randomized multi-user simulation (bwsalmon/agents#233).
@@ -123,10 +127,11 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 record of a dispatch that happened) or reopen one
                 (bwsalmon/agents#271). "daemon" (daemon.go, formerly
                 cmd/graind) runs pkg/orchestrator's RunCycle on a timer
-                against one real Dolt store (embedded, or a SQL server
-                via -store-addr so a UI and a CLI can write it too),
-                until SIGINT/SIGTERM, with an in-process gitproxy and a
-                real github.RESTClient wired in. "ui" (ui.go, formerly
+                against one real embedded SQLite store, until
+                SIGINT/SIGTERM, with an in-process gitproxy and a real
+                github.RESTClient wired in -- a UI and a CLI write the
+                very same store file, with no server process to run
+                (see "Concurrent writers" below). "ui" (ui.go, formerly
                 cmd/ui) serves pkg/ui.Server behind a local HTTP
                 listener, opening the system's default browser -- same
                 store flags as the CLI, and no GitHub credentials at
@@ -152,95 +157,76 @@ cd v2 && go test ./...
 
 ## Why Go
 
-Every substrate this design chose is Go, and one of them decides it:
-**Dolt embeds only in Go.** A Python controller had to reach it by
-shelling out to the `dolt` CLI, and a CLI has no bind parameters — so the
-Python version carried a module whose whole job was rendering untrusted
-issue titles and comment bodies into statements safely, by hand, against
-MySQL escaping rules it could not test. That module does not exist here.
-`database/sql` has parameters, and writes are real transactions rather
-than a best-effort batch.
+Every substrate this design chose is Go, and one of them decided it:
+**v1's Dolt store embedded only in Go.** A Python controller had to reach
+it by shelling out to the `dolt` CLI, and a CLI has no bind parameters —
+so the Python version carried a module whose whole job was rendering
+untrusted issue titles and comment bodies into statements safely, by
+hand, against MySQL escaping rules it could not test. That module does
+not exist here. `database/sql` has parameters, and writes are real
+transactions rather than a best-effort batch — true when this store was
+Dolt and unchanged now that bwsalmon/agents#366 has replaced it with
+embedded SQLite (`pkg/model/sqlite`).
 
 The rest follows: Incus ships a Go client, so the host adapter becomes API
 calls rather than shelling to `virsh` and parsing output.
 
 ## What this actually verifies
 
-The store's tests run against a **real embedded Dolt database** in a temp
-directory — not a fake, not a mock. They prove the DDL is valid, the
-views answer, the state machine walks every transition, a blocked task
-unblocks itself when its dependency closes, and a Dolt commit succeeds.
-The equivalent Python tests could only check the SQL grain *generated*,
-because there was no `dolt` binary to run it against.
+The store's tests run against a **real embedded SQLite database** in a
+temp directory — not a fake, not a mock. They prove the DDL is valid, the
+views answer, the state machine walks every transition, and a blocked
+task unblocks itself when its dependency closes. The equivalent Python
+tests could only check the SQL grain *generated*, because there was no
+database engine to run it against without shelling out to a CLI.
 
 `gitproxy`'s `live_test.go` is the same discipline applied one layer up:
 a real bare git repo, served over real smart-HTTP by a real `git
 http-backend` process standing in for GitHub, behind a real `GitProxy`
-whose `Authorizer` reads a real embedded Dolt-backed `model.Store`, driven
-by a scripted (not live-API) `gemini.Framework.Run` calling `run_command`
+whose `Authorizer` reads a real embedded SQLite-backed `model.Store`,
+driven by a scripted (not live-API) `gemini.Framework.Run` calling `run_command`
 the same way an agent would. It proves a task's `Target`/`Reads` are
 enough on their own to let a sandboxed `git clone`/`commit`/`push` reach
 the right repo and nothing else — no allowlist file exists anywhere in
 that test.
 
-## Two things the port corrected
+## No more cgo
 
-**Embedded Dolt needs cgo, and the binary is not static.** It pulls in
-`go-icu-regex` and `gozstd`; `CGO_ENABLED=0` does not build, and the
-result dynamically links `libicu`, `libstdc++` and `libgcc` at ~145 MB.
-An earlier claim in this project's notes — that Go would take the
-controller's package list to zero — was wrong. It shrinks (no `python3`,
-and the GCP Go SDK would retire the `gcloud` exception) but the C++
-runtime takes its place.
+Embedded Dolt needed cgo, and the binary was not static. It pulled in
+`go-icu-regex` and `gozstd`, so `CGO_ENABLED=0` did not build; what came
+out instead dynamically linked `libicu`, `libstdc++` and `libgcc`, and
+building it at all needed ICU's *headers* (`libicu-dev` on Debian/Ubuntu,
+`libicu-devel` on Fedora, a keg-only `brew install icu4c` on macOS with
+its own `CGO_CFLAGS`/`CGO_LDFLAGS`). The Makefile went on to link ICU
+*statically* into the binary targets on top of that, purely so the
+result would not refuse to start against a host whose ICU major version
+did not match the one it was built against — dynamically linked, it
+would have recorded a versioned SONAME (`libicui18n.so.74`) and died at
+exec time on a target shipping a different major, rather than at build
+time where someone would see it.
 
-Building therefore needs ICU's *headers*, not just the runtime library:
-`libicu-dev` on Debian/Ubuntu (what `tests.yml` installs), `libicu-devel`
-on Fedora, `brew install icu4c` on macOS — where it is keg-only, so
-`CGO_CFLAGS=-I$(brew --prefix icu4c)/include` and the matching
-`CGO_LDFLAGS=-L.../lib` are needed too. Without them the build dies in
-cgo on `fatal error: unicode/uregex.h: No such file or directory`, some
-way down a wall of `go: downloading` lines.
+bwsalmon/agents#366 removed all of it by removing Dolt. `modernc.org/sqlite`
+is a pure-Go transpilation of SQLite with no cgo anywhere in it, so none
+of the above — ICU headers, static linking, SONAME coupling — applies
+anymore; there is nothing here to link against, statically or otherwise.
+The Makefile's `$(CMDS)` target now sets `CGO_ENABLED=0` explicitly on
+its own, but for a narrower and still-real reason: even with no cgo left
+in this module's own dependency graph, `os/user` and `net`'s own
+cgo-based lookups would otherwise still pull in a dynamic link against
+libc, reintroducing the same "binary needs a newer glibc than the
+controller has" coupling ICU used to cause one layer up. Forcing it off
+produces a genuinely static binary with nothing left to carry to the
+controller. `make test`/`make vet` deliberately leave `CGO_ENABLED`
+alone, since `go test -race` needs cgo for the race detector and nothing
+about testing this module ships anywhere.
 
-ICU itself is linked **statically** by the Makefile's binary targets.
-Dynamically linked, the binary records versioned SONAMEs
-(`libicui18n.so.74`) and will not start against a host whose ICU major
-differs — Bookworm ships 72, Trixie and Ubuntu 24.04 ship 74 — which
-couples the machine that builds to the machine that runs, and fails at
-exec time on the target rather than at build time where someone would
-see it. Static ICU costs about +31 MB (`grain`: 148 MB → 179 MB, nearly
-all of it `libicudata.a` — unchanged since bwsalmon/agents#313 folded
-`graind`, the UI and `mcpserver` into this one binary) and leaves
-`libstdc++`/`libgcc`/`libc` dynamic, which a Debian host has anyway.
-`make test`/`make vet` deliberately stay dynamic so they keep mirroring
-`tests.yml`; `ICU_STATIC=0` opts the binary out, and a machine without
-the static archives gets a warning and a dynamic link rather than a
-failure. Verified by linking the binary, confirming `ldd` reports no
-`libicu*.so` on it, and running the ICU regex engine (including
-case-insensitive matching, which needs ICU's data) out of the resulting
-binary.
-
-**The machine that links the binary is still in it, unless you box it
-in.** Static ICU removes the coupling to the *runtime's* ICU; what it
-leaves is the toolchain doing the linking, in two places. A host whose
-GCC writes `.sframe` unwind sections into objects its `ld` is too old to
-read reports every member of the distribution's prebuilt `libicuuc.a`
-with a "section ignored" warning -- one per object, ahead of any real
-diagnostic. (SFrame arrives in GCC 14 and binutils 2.41, so it is a
-mixed toolchain -- new compiler, older linker -- that hits this, not an
-old one or a new one.) And `libstdc++`, `libgcc` and `libc` stay
-dynamic, so the binary records the symbol versions of whichever glibc
-linked it: link against one newer than the controller's and it dies at
-exec time there, which is the failure static ICU was adopted to end,
-reappearing one layer down.
-
-`make container-build` runs the same `make build`, out of this same
-Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain -- the
-release `packer/kontur/image.pkr.hcl` and `terraform/gcp/variables.tf`
-both deploy to. Bookworm's GCC 12.2 and binutils 2.40 predate SFrame, so the
-first cannot arise; its glibc 2.36 and GCC 12's `GLIBCXX_3.4.30` bound
-the second, and are what the target already ships. The Go version is
-read back out of `go.mod` rather than written down twice, and
-`GOTOOLCHAIN=local` in the image turns a stale image into an error
+`make container-build` still runs that same `make build`, out of this
+same Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain --
+the release `packer/kontur/image.pkr.hcl` and `terraform/gcp/variables.tf`
+both deploy to -- but the image now exists purely to pin the Go compiler
+version, with no C toolchain or system library left for it to carry. The
+Go version is read back out of `go.mod` rather than written down twice,
+and `GOTOOLCHAIN=local` in the image turns a stale image into an error
 naming both versions instead of a silent toolchain download. The tree is
 bind-mounted rather than copied in, so both paths build from one copy of
 the rules; `.container-cache/` keeps the module and build caches, so only
@@ -262,22 +248,6 @@ of nothing else. It is
 not the default -- `make build` needs no container engine, is what
 `tests.yml` runs, and on a host that agrees with itself produces the same
 binary.
-
-What comes out is portable across mainstream x86-64 Linux, not across
-every Linux, and is not meant to be: it needs glibc -- musl is not
-glibc, so Alpine will not run it -- no older than the builder's (2.36 on
-bookworm; today's link only reaches for 2.34), a `libstdc++` from GCC 12
-or newer, and x86-64. Debian 12, Ubuntu 22.04 and anything newer than
-either clear both; RHEL 9, whose `libstdc++` is GCC 11's, does not. A
-binary that runs anywhere regardless would have to link `libstdc++` and
-libc statically too, which this has not needed: every machine it is
-deployed to is the Debian 12 above.
-
-**Embedded Dolt serves one database per directory**, so naming it in the
-DSN before it exists fails with "database not found". `Open` therefore
-connects twice: once with no database selected purely to create it, then
-again for real. Not a `CREATE`-then-`USE` on one connection, which would
-be correct only while `MaxOpenConns` is 1 and silently wrong afterwards.
 
 ## Input is a model update, not a GitHub issue
 
@@ -350,10 +320,11 @@ and become grain's, which means grain has to render them. That is what
   take two — post a comment *and* re-apply the trigger label so the next
   poll would notice — and forgetting the second left the task parked
   forever.
-- `dolt.Connect`/`dolt.OpenOrConnect` and the `-store-addr`/`-data-dir`
-  flags on both the CLI and the "ui" subcommand of `cmd/grain`; see
-  "Single writer" below, which stops being a caveat and becomes the
-  deployment.
+- `-data-dir` on both the CLI and the "ui" subcommand of `cmd/grain`,
+  pointed at the same store a running daemon already opened; see
+  "Concurrent writers" below, which stops being a caveat and becomes the
+  deployment -- SQLite's own file locking, not a server anyone has to
+  run, is what makes a daemon, a UI and a CLI all writing at once safe.
 - `Store` grew `ListTasks`, `States` and `ObserveField`. The last is
   `pkg/orchestrator`'s own `observeField` promoted: `Observe` REPLACEs the
   whole observation row, so changing one field means reading it first,
@@ -391,8 +362,7 @@ and become grain's, which means grain has to render them. That is what
   `orchestrator.Config` loses `TaskRepo`, `TriggerLabel` and
   `DefaultTarget`: there is no task repo to list, no label to look for,
   and a task arrives with its `Target` already set because whatever wrote
-  it set one. The daemon loses the matching flags and gains the
-  `-store-addr` family.
+  it set one. The daemon loses the matching flags.
 
 GitHub is still reached, for exactly what is genuinely GitHub's: the
 branch a run pushed, the pull request opened for it, its checks, and its
@@ -408,110 +378,83 @@ GitHub is the pull request. Its sibling proves the question path: a run
 parks, a human replies with one `AddComment`, and the next cycle resumes
 it.
 
-## Every write is a commit
+## Grain no longer keeps a commit history
 
-`Store.write` makes a Dolt commit after each successful write, naming
-what it was: `grain: approve task 2`, `grain: comment on task 1`,
-`grain: update task 1`. Nothing committed before this — however much
-grain had done, `dolt_log` showed "Initialize data repository" and
-nothing else, and the store kept only a current state.
+Embedded Dolt made every write a commit, named for what it was --
+`grain: approve task 2`, `grain: comment on task 1`, `grain: update task
+1` -- attributed to `grain` via an explicit `--author` so an embedded
+deployment's history did not just read as `root`, whoever had started the
+process. `dolt_log` was what grain had done and when; `dolt_diff_task`
+answered what *changed*, old and new value side by side; and every
+commit was a point the deployment could be reset to.
 
-It now keeps a history, which is what choosing a versioned database was
-for. `dolt_log` is what grain did and when; `dolt_diff_task` answers what
-*changed*, with the old and new value side by side; and every commit is a
-point the deployment can be reset to.
+bwsalmon/agents#366 gave that up on purpose. SQLite has nothing that
+plays the same role, and rebuilding one was never the point of the
+migration -- the issue's own "put secrets in a separate db, config and
+tasks in a common db" asked for a simpler store, not a versioned one.
+`Store.write` makes no commit of any kind now; `historyAuthor`,
+`commitHistory` and every test that once pinned this behaviour are gone
+along with `pkg/model/dolt` itself. What `Store` keeps is current state
+only -- a task's own `created_at`, a comment's `created_at`, a run's
+`started_at`/`finished_at` are all still there, but there is no way to
+ask "what did this task look like an hour ago" or "list everything grain
+has ever done" the way `dolt_log` could. A deployment that needs that
+kind of audit trail going forward has to build it as an explicit feature
+-- an events table, most likely -- rather than get it for free from the
+substrate; nothing here builds one yet.
 
-**Commits are attributed to grain, via an explicit `--author`.** Without
-it Dolt credits the connected database user, so an embedded deployment's
-history reads as having been done by `root` — whoever started the
-process. The connection's configured author applies only to creating the
-database, which is measured rather than assumed
-(`TestCommitsAreAttributedToGrain`). The author says *grain* rather than
-which principal asked, because `Store.write` does not know that and the
-message already carries the interesting half; `historyAuthor` is where
-per-principal attribution would hook in.
+## Locking, not merging
 
-**The commit runs after the transaction, not inside it.** The transaction
-is what makes a change atomic; the commit is what makes it a named point
-in history. Two different boundaries, and conflating them would put a
-commit in the path of the write's own success.
+Every mutation runs in one transaction, and SQLite's own write lock is
+the whole of grain's concurrency control now. `sqlite.Open`'s DSN puts
+every transaction in immediate mode (`_txlock=immediate`), so the lock
+is acquired at `BEGIN` rather than at a transaction's first write
+statement: two overlapping mutations are serialised at that exact point
+every time, before either has touched a row -- one proceeds, and the
+other either waits out a five-second `busy_timeout` or fails outright
+with SQLite's own `SQLITE_BUSY`/"database is locked". `Store.write`
+retries a failed attempt from the top, re-reading whatever it needs
+through the transaction it is handed rather than anything read before
+the retry, up to five attempts, then `model.ErrConflict` — which
+`pkg/ui` maps to a 409 meaning plainly that the change did not land.
+There is no lock a caller has to remember to release, no per-row
+version, and nothing the mutating call sites (`Store.UpdateTask`,
+`Store.ObserveField` and the writes built on them) have to carry: it is
+all inside `write`/`writeOnce` (store.go).
 
-**A failed commit is dropped on purpose, and that is safe rather than
-sloppy.** By then the write has landed, so failing the call would tell a
-caller their change did not happen when it did — and a retry of, say,
-`AddComment` would post it twice. The next write stages everything
-outstanding (`-A`), so a missed commit costs a coarser history and
-nothing else; the gap closes itself, which
-`TestAMissedCommitIsRecoveredByTheNextWrite` pins down.
+This replaces a mechanism that had to work much harder for a weaker
+guarantee. Dolt merged concurrent writers *cell by cell*, and only
+reported a conflict when two of them disagreed about the same cell — so
+two writers that each rewrote a task's tags as delete-all-then-reinsert
+could have their sets silently **unioned** into one neither asked for,
+with both commits reporting success. Grain's answer was a single shared
+row, `grain_write`, rewritten with a fresh random token on every
+transaction purely to force every overlap to look like a disagreement
+Dolt would refuse — and the token had to be random, never a counter: two
+writers that both read version N and both wrote N+1 would have *agreed*,
+so the merge would have succeeded and the same silent union would have
+happened anyway (the deleted `dolt/store_test.go`'s
+`TestACounterStampWouldNotConflict` pinned exactly that trap). None of
+that exists anymore. SQLite admits only one writer at a time, full stop,
+so there is nothing left for an artificial per-write marker to catch
+that the lock itself does not already catch.
 
-The same `-A` means a commit under concurrent writers can contain more
-than the change its message names — another writer's transaction that
-landed in between is swept in. Nothing is ever lost and the boundaries
-are approximate; with one writer, which is what an embedded deployment
-has by construction, they are exact.
+**Failure still needs no cleanup.** An operation that does not reach its
+commit leaves nothing behind: SQLite releases the write lock when the
+transaction ends, one way or the other, so there is no lock to release by
+hand, no version to reconcile, no half-written row — a process that dies
+mid-write leaves an aborted transaction and the store immediately usable
+by the next one (`TestAFailedWriteLeavesNothingBehind`).
 
-Commits are proportional to real activity rather than to time: an idle
-`graind` writes nothing, so it commits nothing. `dolt.Commit` is gone —
-there is no separate "commit the cycle" step left for a caller to
-remember or forget.
-
-## One stamp, and start over on conflict
-
-Every mutation runs in a transaction that also rewrites a single shared
-row, `grain_write`. Two operations that overlap therefore disagree about
-what that one cell should say, the database refuses the second commit, and
-`Store.write` runs the whole operation again on fresh state.
-
-That is the entirety of grain's concurrency control. There is no lock, no
-per-row version, and nothing a caller has to carry or remember — the four
-mutating call sites go through `Store.UpdateTask` or `Store.ObserveField`
-and never mention any of it.
-
-**Why one shared row rather than a version per task.** Per-task versioning
-sounds better and is much harder to be sure of. Dolt merges concurrent
-writes *cell by cell*, so whether two overlapping operations are safe
-depends on which columns and which child tables each touched — and the
-answer is genuinely surprising in places. Two writers that each rewrite a
-task's tags as delete-all-then-reinsert had their sets silently **unioned**
-into one neither asked for, with both commits reporting success. A single
-shared cell makes every overlap a conflict, so that question never has to
-be answered. All writes serialising is the cost, and for a deployment with
-one developer and occasional edits it is not a cost.
-
-**The stamp must be unique per operation, never a counter.** This is the
-one sharp edge, and it is sharp: Dolt reports a conflict only when two
-writers *disagree* about a cell. Two writers that both read version N and
-both write N+1 agree — so the merge succeeds, both commit, and the
-child-row union above happens anyway. A counter is the obvious
-implementation and it is the broken one.
-`TestACounterStampWouldNotConflict` pins that down so nobody optimises the
-random token into a counter later.
-
-**Failure needs no cleanup.** An operation that does not reach its commit
-leaves nothing behind: no lock to release, no version to reconcile, no
-half-written row. A process that dies mid-write leaves an aborted
-transaction and the store immediately usable —
-`TestAFailedWriteLeavesNothingBehind` asserts both halves of that. This is
-the property that ruled out the alternative: `GET_LOCK` works on Dolt, but
-a lock returned to `database/sql`'s pool without an explicit release stays
-held, so any path that skips the release — a panic past a `defer`, a
-cancelled context — wedges the process against itself. Measured, not
-feared.
-
-**Retries are bounded and rare.** Five attempts, then `model.ErrConflict`,
-which `pkg/ui` maps to a 409 meaning plainly that the change did not land.
-Reaching that needs another writer to win five times in a row.
-
-Two things this leans on that were measured rather than assumed, both
-pinned by tests so a Dolt change breaks them loudly: that a lost race is
-reported at COMMIT as `Error 1213: serialization failure` (matched by
-message text, because this package imports no driver on purpose), and that
-the conflict aborts the whole transaction rather than just the stamp —
-`TestAConflictRollsBackChildRowsToo`.
-
-Verifying any of this against a real `dolt sql-server` still needs an
-environment that can install one; everything above is measured against the
-embedded engine with its connection pool widened to let two writers race.
+Two things this leans on were measured against the real engine rather
+than assumed, each pinned by a test so a wording change in the driver
+breaks it loudly: that `modernc.org/sqlite` reports a lost race as
+`"database is locked"` or `"SQLITE_BUSY"` (`sqlite/store_test.go`'s
+`TestSQLiteReportsABusyDatabase`, matched by message text because
+`pkg/model` imports no driver on purpose — `isSerializationFailure`'s
+own doc comment), and that a retried transaction rolls back its child
+rows along with everything else rather than leaving a partial write
+behind (`TestAConflictRollsBackChildRowsToo`).
 
 ## Reconcilers, not a pipeline
 
@@ -575,15 +518,19 @@ the pipeline version, with the state assertion naming what it stranded.
 This is the first of the three steps toward the Kubernetes-shaped model
 the design is converging on. The other two are not built: optimistic
 concurrency on `Store`'s mutators (`task` has no version column, and
-`PutTask` is last-write-wins — fine for one writer, and "Single writer"
-below is already honest that there is more than one), and a real watch,
-for which Dolt is an unusually good substrate and currently an unused
-one — a commit hash is a `resourceVersion` and `dolt_diff` is a change
-feed with history, but `dolt.Commit` has no caller outside its own test
-and the daemon never commits. Note the ordering: a watch is a latency
-optimization over level-triggered reconciliation, never a replacement
-for it, so it is worth having only once the reconcilers it would wake are
-independent and safe to run concurrently.
+`PutTask` is last-write-wins — a real gap now, not a hypothetical one,
+since a daemon, a UI and a CLI are all normal, simultaneous writers
+rather than the rare case "Concurrent writers" below once had to argue
+for), and a real watch. Dolt would have made one nearly free — a commit
+hash as a `resourceVersion`, `dolt_diff` as a ready-made change feed with
+history — and bwsalmon/agents#366 traded that away along with the rest of
+the commit history (see "Grain no longer keeps a commit history" above):
+SQLite has nothing built in that plays the same role, so a watch here
+would mean a change table or similar, built from scratch rather than read
+off the substrate for free. Note the ordering regardless: a watch is a
+latency optimization over level-triggered reconciliation, never a
+replacement for it, so it is worth having only once the reconcilers it
+would wake are independent and safe to run concurrently.
 
 ## What this does not have yet
 
@@ -965,20 +912,20 @@ caller of the same `/api/*` surface the "ui" subcommand's own frontend
 nothing about the server to rewrite.
 
 **`-demo` (bwsalmon/agents#276) for trying out the frontend on its own.**
-`grain ui` normally needs a real store — embedded or a Dolt SQL server —
-and a real deployment's tasks to look at anything. `-demo` opens a
-throwaway embedded store in a fresh temp directory instead and seeds it
-with fake tasks, one in each `model.State` (`cmd/grain/demo.go`), through
-the same `ui.Client`/`model.Store` writes a human clicking through the UI
-would make — no fake `Store` standing in, matching the "real embedded
-Dolt, not a fake" discipline every test in this repo already holds to
+`grain ui` normally needs a real store and a real deployment's tasks to
+look at anything. `-demo` opens a throwaway embedded SQLite store in a
+fresh temp directory instead and seeds it with fake tasks, one in each
+`model.State` (`cmd/grain/demo.go`), through the same
+`ui.Client`/`model.Store` writes a human clicking through the UI would
+make — no fake `Store` standing in, matching the "real embedded SQLite,
+not a fake" discipline every test in this repo already holds to
 (`pkg/ui/client_test.go`). That makes it a real server exercising the real
 frontend code, with fake data as the only difference from a real
 deployment — useful for checking a frontend change renders every state
 correctly without an orchestrator, a sandbox, a Gemini key, or a git repo
-anywhere behind it. `-store-addr`/`-data-dir` are rejected alongside it,
-since a throwaway store and a real one talking to the same flags would be
-a UI showing one deployment's fake tasks in some other deployment's data
+anywhere behind it. `-data-dir` is rejected alongside it, since a
+throwaway store and a real one talking to the same flag would be a UI
+showing one deployment's fake tasks in some other deployment's data
 directory.
 
 **Freshness, not a cache.** Every mutation in the frontend
@@ -1004,18 +951,17 @@ rebuilds the whole pane including the textarea somebody may be halfway
 through typing into. Both were checked by driving the real UI in a
 browser, which is also how the second one was found.
 
-Polling rather than a change feed is deliberate, and it is the one place
-this project declines something the substrate offers. The history is
-there now (see "Every write is a commit" above): `dolt_log` hands out
-commit hashes that would serve as a `resourceVersion`, and
-`dolt_diff_task` reports `added`/`modified`/`removed` with
-before-and-after values. What a feed would still need is a diff joined
-across six tables to answer "what changed about this task" (a capability
-toggle changes `task_grant`, a comment changes `task_comment`), a story
-for history that grows without bound, and handling for a cursor that has
-aged out. That is a real feature; this is fifteen lines with nothing to
-get wrong, and for one operator watching a handful of tasks on the same
-machine the two are indistinguishable.
+Polling rather than a change feed is deliberate, and unlike when this
+store ran on Dolt, there is no longer a substrate underneath it to
+decline: SQLite gives grain no commit log and no ready-made diff to build
+a watch on (see "Grain no longer keeps a commit history" above), so a
+real feed would mean building one from scratch — a diff joined across
+six tables to answer "what changed about this task" (a capability toggle
+changes `task_grant`, a comment changes `task_comment`), a story for
+history that grows without bound, and handling for a cursor that has
+aged out. That is a real feature; polling is fifteen lines with nothing
+to get wrong, and for one operator watching a handful of tasks on the
+same machine the two are indistinguishable.
 
 ## Deployment configuration lives in the store too
 
@@ -1031,8 +977,8 @@ somehow.
 
 `model.Config` (`pkg/model/config.go`) and `Store.GetConfig`/`PutConfig`
 are the store-backed answer: one row in `grain_config`, the same
-one-row-per-deployment shape `grain_write` and `grain_schema` already
-use. `cmd/grain`'s "daemon" subcommand's own `loadConfig` (`daemon.go`)
+one-row-per-deployment shape `grain_schema` already uses. `cmd/grain`'s
+"daemon" subcommand's own `loadConfig` (`daemon.go`)
 reads it once at startup — before `RunCycle` starts, never again while
 running, since bwsalmon/agents#320 explicitly did not ask for graceful
 in-flight reloading — and writes those flags into it as a one-time seed
@@ -1099,7 +1045,8 @@ writing a caller-supplied string to disk can no longer risk.
 `pkg/ui`'s `Config.Secrets` is nil unless the deployment says otherwise
 — `grain ui`'s `-server-data-dir` names the *server's* `-data-dir`, which
 is a different thing from `-data-dir` on `ui.go` itself (that one is the
-UI's own embedded task store, used only when `-store-addr` is unset).
+UI's own embedded SQLite task store -- see "Concurrent writers" above for
+why the two `-data-dir`s even mean different things).
 `GET /api/secrets` reports `{enabled, secrets}` either way, so the
 frontend's secrets pane can hide its controls behind a note rather than
 show ones that would only ever 404; `PUT`/`DELETE
@@ -1116,36 +1063,39 @@ and `set` takes its value from `-value-file` or, left unset, from
 stdin — deliberately never from an argv flag, which any other process
 on the same host could read back out of this one's own command line.
 
-## Single writer
+## Concurrent writers
 
-Embedded Dolt permits one writer, which suited a cron-driven controller
-and does not suit a controller plus a UI plus a human at a CLI. That
-became real the moment the CLI and the UI started writing the store
-instead of GitHub, so the answer this section always named is now built:
-`dolt.Connect` dials a Dolt SQL server, `dolt.OpenOrConnect` picks
-between it and the embedded database from a deployment's flags, and
-nothing above `pkg/model/dolt` changed — which is exactly why `Store`
-takes a `*sql.DB` and imports no driver.
+Dolt permitted one writer when embedded, which suited a cron-driven
+controller and did not suit a controller plus a UI plus a human at a
+CLI. That became real the moment the CLI and the UI started writing the
+store instead of GitHub -- and the answer this section used to name was
+running a whole second process, a `dolt sql-server`, purely so there was
+somewhere for a second writer to dial in. bwsalmon/agents#366 made that
+machinery unnecessary rather than replacing it: SQLite has no wire
+protocol to serve in the first place. A daemon, a UI and a CLI now all
+just call `sqlite.Open` (`pkg/model/sqlite`) on the same file, and
+SQLite's own file locking is what serialises the writes -- WAL mode, so
+a reader is never blocked by the one writer holding the lock;
+`_txlock=immediate` and a five-second `busy_timeout`, so an overlapping
+writer waits its turn or fails outright rather than corrupting anything
+(`pkg/model/sqlite`'s own doc comment; "Locking, not merging" above).
+There is no `-store-addr`, `-store-database`, `-store-user` or
+`-store-password-file` flag anywhere in `cmd/grain` anymore, and nothing
+to run alongside the daemon: every mode just takes `-data-dir` and opens
+the file.
 
-Both ends stay supported on purpose. Embedded is still right for a
-one-process deployment and for every test in this repo, which is why the
-store's own tests run against it. `-store-addr` opts a deployment into
-the server; `-data-dir` is the embedded fallback, and its flag help says
-plainly that nothing else may be running against it.
-
-Two settings on the server DSN are load-bearing rather than defaults
-restated, and both would otherwise show up only when run against a real
-server: `parseTime`, because the wire protocol hands `DATETIME` back as
-bytes otherwise and every `time.Time` on `model.Task`/`model.Observation`
-would fail to scan; and `loc=UTC`, because the store writes UTC and a
-driver left on `Local` hands it back shifted — a wrong timestamp rather
-than an error, and the merge queue orders by `Task.CreatedAt`.
-
-`MaxOpenConns` is deliberately *not* pinned to one on the server path.
-That pin exists in the embedded case because a pool there produces lock
-contention that reads as a deadlock; a server is the thing that makes
-concurrent writers supported rather than hazardous, so pinning it there
-would throw away the whole reason to run one.
+`-data-dir` means two different things depending on which command reads
+it, and a deployment has to get both right. `grain daemon`'s `-data-dir`
+is a *root*: it also holds `secrets/` and the sandbox roots, and nests
+the task store itself under `<data-dir>/store/`. `grain` (the CLI) and
+`grain ui`'s own `-data-dir` point *directly* at the store directory,
+with no nesting -- so a UI or a CLI colocated with a daemon has to be
+pointed at `<daemon's -data-dir>/store`, not at the daemon's `-data-dir`
+itself. `scripts/setup.sh`'s `write_systemd_units` is a real, working
+example of both conventions side by side: `grain-daemon.service` runs
+`grain daemon -data-dir "$GRAIN_DATA_DIR" ...`, while `grain-ui.service`
+runs `grain ui -data-dir "$GRAIN_DATA_DIR/store" ...` -- the very same
+SQLite file, addressed the two different ways each command expects it.
 
 ## Deploying it
 
@@ -1159,10 +1109,11 @@ defaults to `orchestrator.HostSandboxes` — plain host directories, not a
 VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
 not have either way yet). It builds with `make container-build`, so a
-working `docker` is the one thing it assumes about the host, and it runs
-a `dolt sql-server` container for the same reason ("Single writer",
-above) — a daemon plus a UI both writing the same store need the server
-end, not the embedded one. Safe to re-run: it is the installer and the
+working `docker` is the one thing it assumes about the host -- needed
+only for that build step now, not for anything at runtime: both services
+open the same SQLite store file directly, with no separate store process
+to run or wait for (`dolt sql-server` used to be exactly that; SQLite has
+no equivalent to run -- see "Concurrent writers" above). Safe to re-run: it is the installer and the
 updater both, seeding a secret or a config value only the first time and
 leaving anything already on disk alone every time after. `./setup.sh
 --help` lists every setting.
@@ -1202,12 +1153,14 @@ enabled gemini-key rollout that needs a grant it didn't before) gets
 repaired on every sync rather than only at install time. It never mints a
 new minter key on a `sync` run — that stays a deliberate,
 `grain setup gcp -mint-key` action. Reachability is the part this command
-does not solve: the store `"settings"` writes to is bound to loopback only
-(this section's own security note, above), so a workflow needs either a
-self-hosted runner that *is* the deployment host (the simplest shape: the
-workflow step becomes `grain sync -config deploy/grain.json -data-dir
-/var/lib/grain`, no network hop at all) or an SSH tunnel to
-`-store-addr`. A `"gcp"`-only sync needs neither — just a GCP credential,
+does not solve: the store `"settings"` writes to is a file on the
+deployment's own local disk, with no server or network port in front of
+it to reach remotely (see "Concurrent writers", above), so a workflow
+needs either a self-hosted runner that *is* the deployment host (the
+simplest shape: the workflow step becomes `grain sync -config
+deploy/grain.json -data-dir /var/lib/grain/store`, no network hop at
+all) or an SSH step that runs `grain sync` on the deployment host
+directly. A `"gcp"`-only sync needs neither — just a GCP credential,
 the same Workload Identity Federation `templates/gcp/.github/workflows/
 deploy.yml` already uses for v1 works here too, with no static key in the
 workflow. `cmd/grain/sync_test.go` covers both sections' validation and,

@@ -6,7 +6,7 @@ package main
 // closest thing to actually running `grain daemon` this repo can check
 // in. It calls run() itself -- the exact function daemon() (daemon.go,
 // what main() calls for a "daemon" argv[1]) calls, not a stand-in --
-// against a real embedded Dolt store, a real in-process git proxy, a
+// against a real embedded SQLite store, a real in-process git proxy, a
 // real *github.RESTClient pointed at a local server standing in for
 // GitHub (git smart-HTTP plus the handful of REST endpoints
 // orchestrate.openPullRequest needs, served by githubsim.Sim), and the
@@ -49,7 +49,6 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 )
 
 // syncedSim serializes every call into a *githubsim.Sim: the real Sim
@@ -233,7 +232,7 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	// no hook for a test to insert a task in between, so it has to
 	// already be there -- the same "-data-dir already has work queued"
 	// shape a real restart finds.
-	store, db, err := openStore(dataDir, dolt.ServerConfig{})
+	store, db, err := openStore(dataDir)
 	if err != nil {
 		t.Fatalf("seeding the store: %v", err)
 	}
