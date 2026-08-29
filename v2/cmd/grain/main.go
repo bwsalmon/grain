@@ -104,6 +104,9 @@ func main() {
 		case "sync":
 			syncCmd(args[1:])
 			return
+		case "schema-version":
+			schemaVersionCmd(args[1:])
+			return
 		}
 	}
 	if err := runCLI(args); err != nil {
@@ -120,6 +123,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
        grain setup gcp [flags] bootstrap external GCP infrastructure for a new installation (see setup.go)
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
+       grain schema-version    print pkg/model.SchemaVersion and exit (see schemaversion.go)
 
 Global flags (must come before the command):
   -server string  base URL of a running "grain daemon"'s UI/API (default "http://127.0.0.1:8420")
