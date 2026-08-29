@@ -113,13 +113,16 @@ class FakeRunner:
     def run(self, argv: list[str], *, stdin: str | None = None,
             check: bool = True) -> Result:
         self.calls.append((list(argv), stdin))
-        rendered = shlex.join(argv)
         match = None
+        match_words: list[str] = []
         for prefix, response in self.responses.items():
-            if rendered.startswith(prefix) and (
-                match is None or len(prefix) > len(match)
-            ):
+            words = shlex.split(prefix)
+            # Compare word-by-word, not string-prefix: "git log" must not
+            # match a call to "git logs", even though it is a string prefix
+            # of it.
+            if argv[: len(words)] == words and len(words) > len(match_words):
                 match = prefix
+                match_words = words
         result = (
             self.responses[match]
             if match is not None
