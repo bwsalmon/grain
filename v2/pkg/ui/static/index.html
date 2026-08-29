@@ -11,6 +11,7 @@
   <h1>grain</h1>
   <span id="repo-name" class="repo-name"></span>
   <div class="spacer"></div>
+  <button id="secrets-button" class="secondary">Secrets</button>
   <button id="settings-button" class="secondary">Settings</button>
   <button id="new-task-button" class="primary">+ New task</button>
 </header>
@@ -105,6 +106,38 @@
       </label>
       <div class="form-actions">
         <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Secrets -->
+<div id="secrets-overlay" class="overlay hidden">
+  <div class="panel">
+    <button class="close" data-close="secrets">&times;</button>
+    <h2>Secrets</h2>
+    <p id="secrets-disabled-note" class="unconfigured-note hidden">
+      Not available: this UI was not started with a local secrets directory to write to
+      (see -server-data-dir), which only works when the UI runs on the same host as the
+      server (bwsalmon/agents#357). You can only set and delete secrets here, never read
+      one back.
+    </p>
+    <div id="secrets-list-wrapper">
+      <ul id="secrets-list" class="secrets-list"></ul>
+      <p id="secrets-empty" class="empty hidden">No secrets set.</p>
+    </div>
+    <form id="secrets-set-form">
+      <label>Secret
+        <input name="secret" placeholder="github" autocomplete="off" required>
+      </label>
+      <label>Key
+        <input name="key" placeholder="token" autocomplete="off" required>
+      </label>
+      <label>Value <span class="hint">write-only -- never shown or read back</span>
+        <input name="value" type="password" autocomplete="off" required>
+      </label>
+      <div class="form-actions">
+        <button type="submit" class="primary">Set</button>
       </div>
     </form>
   </div>

@@ -8,14 +8,16 @@
 // comment, and close (grain's own stand-in for "delete" -- see
 // Client.Close's own doc comment for why) or reopen one.
 //
-// Three other subcommands -- daemon, ui, mcpserver -- select entirely
-// different modes, each what used to be its own cmd/graind, cmd/ui or
-// cmd/mcpserver binary before #313 combined them: the daemon runs
-// pkg/orchestrator's RunCycle on a timer, ui serves pkg/ui's JSON API and
-// static frontend, and mcpserver speaks MCP over stdin/stdout against the
-// sandbox tools. daemon.go, ui.go and mcpserver.go carry each one's own
-// doc comment. A running daemon forks mcpserver instances of itself --
-// this same binary, re-invoked with "mcpserver" as argv[1] -- rather than
+// Four other subcommands -- daemon, ui, mcpserver, secrets -- select
+// entirely different modes, each what used to be its own cmd/graind,
+// cmd/ui or cmd/mcpserver binary before #313 combined them (secrets is
+// new, bwsalmon/agents#357): the daemon runs pkg/orchestrator's RunCycle
+// on a timer, ui serves pkg/ui's JSON API and static frontend, mcpserver
+// speaks MCP over stdin/stdout against the sandbox tools, and secrets
+// sets/deletes/lists a colocated server's secrets directly on disk.
+// daemon.go, ui.go, mcpserver.go and secrets.go carry each one's own doc
+// comment. A running daemon forks mcpserver instances of itself -- this
+// same binary, re-invoked with "mcpserver" as argv[1] -- rather than
 // needing a second binary on disk; see pkg/agent/claude's own doc comment
 // for the one place that matters today.
 //
@@ -67,6 +69,9 @@ func main() {
 		case "mcpserver":
 			mcpserver(args[1:])
 			return
+		case "secrets":
+			secretsCmd(args[1:])
+			return
 		}
 	}
 	if err := runCLI(args); err != nil {
@@ -79,6 +84,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer (see daemon.go)
        grain ui [flags]        serve the task UI on localhost (see ui.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
+       grain secrets [flags]   set/delete/list a colocated server's secrets on disk (see secrets.go)
 
 Global flags (must come before the command):
   -store-addr string           host:port of a Dolt SQL server holding the task store

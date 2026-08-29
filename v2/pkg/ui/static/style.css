@@ -317,9 +317,41 @@ main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
   margin: -0.5rem 0 1rem;
 }
 
+.secrets-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+.secret-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--outline-variant);
+  flex-wrap: wrap;
+}
+.secret-name { font-weight: 500; }
+.secret-keys { display: flex; gap: 0.35rem; flex-wrap: wrap; flex: 1; }
+.secret-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  border-radius: 8px;
+  padding: 0.15rem 0.3rem 0.15rem 0.6rem;
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+}
+.secret-key-delete {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+}
+.secret-key-delete:hover { color: var(--error, #b3261e); }
+
 form label { display: block; margin-bottom: 1rem; font-weight: 500; font-size: 0.9rem; }
 form label.checkbox { display: flex; align-items: center; gap: 0.5rem; font-weight: normal; }
-form input[type=text], form input:not([type]), form textarea {
+form input[type=text], form input[type=password], form input:not([type]), form textarea {
   display: block;
   width: 100%;
   margin-top: 0.4rem;
@@ -330,7 +362,7 @@ form input[type=text], form input:not([type]), form textarea {
   color: inherit;
   font: inherit;
 }
-form input[type=text]:focus, form input:not([type]):focus, form textarea:focus {
+form input[type=text]:focus, form input[type=password]:focus, form input:not([type]):focus, form textarea:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 1px var(--primary);
 }
