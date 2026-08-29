@@ -157,6 +157,18 @@ func relayComment(ctx context.Context, store *model.Store, task model.Task,
 // (model.LinkProposedBy, provenance only -- it blocks nothing), which the
 // GitHub-issue version had no way to record.
 //
+// AutoMerge inherits from task, the job that proposed it, whenever the
+// proposal asks for nothing beyond what task itself was granted --
+// model.GrantsSubsetOf's own doc comment is the reasoning. A proposal
+// cannot yet ask for a capability at all (proposeTaskTool's own input
+// schema has no such field, so Grants is always empty here), which makes
+// the check trivially true today; it is written as a real comparison
+// rather than a bare `task.AutoMerge` so it stays correct the day a
+// capability request is added to that schema. This only changes what
+// happens once a human has approved and run the proposal and its PR
+// merges cleanly -- it does not touch Approval, so a proposed task still
+// needs a human to approve it before it ever runs, the same as any other.
+//
 // depends_on referring to another call's local `id` in the same run is
 // still not resolved: doing that needs holding every proposal until the
 // whole batch is filed and rewriting cross-references afterward, which is
@@ -192,6 +204,7 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 			Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
 			CreatedAt: &now,
 		}
+		proposal.AutoMerge = task.AutoMerge && model.GrantsSubsetOf(proposal.Grants, task.Grants)
 		if err := store.PutTask(ctx, proposal); err != nil {
 			return fmt.Errorf("orchestrator: filing proposed task %q: %w", title, err)
 		}
