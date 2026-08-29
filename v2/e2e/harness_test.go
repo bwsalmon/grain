@@ -193,7 +193,7 @@ func (w *world) runDispatch(d dispatch.Dispatch, script []*genai.GenerateContent
 			outcome = "failed"
 		}
 	}
-	if err := w.store.FinishRun(w.ctx, d.RunID, at, outcome); err != nil {
+	if err := w.store.FinishRun(w.ctx, d.RunID, at, outcome, ""); err != nil {
 		w.t.Fatalf("FinishRun(%s): %v", d.RunID, err)
 	}
 	return result

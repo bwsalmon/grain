@@ -165,6 +165,16 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	for _, cm := range comments {
 		detail.Comments = append(detail.Comments, commentFrom(cm))
 	}
+	streak, err := c.Store.FailureStreak(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
+	}
+	if streak != nil && streak.Count > 0 {
+		detail.FailedAttempts = streak.Count
+		lastFailureAt := streak.LastFinishedAt
+		detail.LastFailureAt = &lastFailureAt
+		detail.LastFailureReason = streak.LastDetail
+	}
 	return detail, nil
 }
 
@@ -570,6 +580,28 @@ func (c *Client) Close(ctx context.Context, id string) error {
 // observations and approval imply.
 func (c *Client) Reopen(ctx context.Context, id string) error {
 	return c.setClosed(ctx, id, false)
+}
+
+// Retry clears a task's own failure streak (model.Store.FailureStreak),
+// the human "try again" signal bwsalmon/agents#403 asks for: without it,
+// a task that reached model.MaxConsecutiveFailures would stay in
+// StateFailed forever, since nothing else ever resets that count. Calling
+// it on a task that is not currently failed is a harmless no-op --
+// RetryRequestedAt only ever narrows how far back task_streak looks, and
+// a task with no failing streak to narrow just keeps whatever state it
+// already had.
+func (c *Client) Retry(ctx context.Context, id string) error {
+	task, err := c.Store.GetTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return &NotFoundError{ID: id}
+	}
+	now := c.now()
+	return c.Store.ObserveField(ctx, id, now, func(o *model.Observation) {
+		o.RetryRequestedAt = &now
+	})
 }
 
 func (c *Client) setClosed(ctx context.Context, id string, closed bool) error {

@@ -30,6 +30,13 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
 
           <div className="description">{t.description || "(no description)"}</div>
 
+          {t.state === "failed" && (
+            <div className="failure-summary">
+              <strong>{t.failedAttempts} consecutive failed attempt{t.failedAttempts === 1 ? "" : "s"}.</strong>
+              {t.lastFailureReason && <> Last failure: {t.lastFailureReason}</>}
+            </div>
+          )}
+
           <Comments t={t} act={act} />
         </div>
 
@@ -95,6 +102,11 @@ function Actions({ t, act }) {
       {t.pullRequest && !t.autoMerge && (
         <button className="primary" onClick={() => act(() => api(`/api/tasks/${t.id}/submit`, { method: "POST" }), t.id)}>
           Submit
+        </button>
+      )}
+      {t.state === "failed" && (
+        <button className="primary" onClick={() => act(() => api(`/api/tasks/${t.id}/retry`, { method: "POST" }), t.id)}>
+          Retry
         </button>
       )}
       {t.state === "closed" ? (

@@ -53,6 +53,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/comments", s.handleAddComment)
 	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)
+	s.mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetry)
 
 	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)

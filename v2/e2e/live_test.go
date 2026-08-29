@@ -70,7 +70,7 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		t.Logf("tool call: %s(%v) -> error=%v text=%q", c.Name, c.Arguments, c.IsError, c.Text)
 	}
 
-	if err := w.store.FinishRun(w.ctx, d.RunID, clock.Add(time.Minute), "succeeded"); err != nil {
+	if err := w.store.FinishRun(w.ctx, d.RunID, clock.Add(time.Minute), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 

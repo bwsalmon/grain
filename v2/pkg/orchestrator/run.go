@@ -156,10 +156,11 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 
 	var result *agent.Result
 	var runErr error
-	outcome := "failed"
+	outcome, detail := "failed", ""
 	switch {
 	case prepErr != nil:
 		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, prepErr)
+		detail = prepErr.Error()
 	default:
 		// runCtx, not ctx, is what framework.Run actually gets: it is
 		// what watchForTaskClosed cancels the instant it sees this task
@@ -183,15 +184,23 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		switch {
 		case runErr != nil && errors.Is(context.Cause(runCtx), errTaskClosed):
 			outcome = "cancelled"
+			detail = "the task was closed while this run was still live"
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errTaskClosed)
 		case runErr != nil:
+			// runErr's own text, not the wrapped form below: that form
+			// repeats d.RunID, which is already this row's own id, and
+			// buries the one thing worth a human's own read (gemini's
+			// "exceeded max turns (20) without a final answer", a tool
+			// framework's own connection error) under two layers of
+			// "orchestrator: running ...: ".
+			detail = runErr.Error()
 			runErr = fmt.Errorf("orchestrator: running %s: %w", d.RunID, runErr)
 		default:
-			outcome = outcomeOf(result)
+			outcome, detail = outcomeOf(result)
 		}
 	}
 
-	finishErr := store.FinishRun(ctx, d.RunID, at, outcome)
+	finishErr := store.FinishRun(ctx, d.RunID, at, outcome, detail)
 	revokeAll(ctx, store, cc, materialized)
 	if finishErr != nil {
 		return nil, fmt.Errorf("orchestrator: finishing run %s: %w", d.RunID, finishErr)
@@ -204,22 +213,24 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 
 // outcomeOf reads agent.Result.ToolCalls -- the only record of what
 // happened inside the run (mcp/mock_tools.go's own sink is internal and
-// discarded when Run returns) -- and turns it into a run outcome: any
-// error tool call fails the run, and so does a run that made no tool call
-// at all, since an agent that never touched run_command did not do the
-// work. Ported from pkg/orchestrate's own runAgent (bwsalmon/agents#254).
-func outcomeOf(result *agent.Result) string {
+// discarded when Run returns) -- and turns it into a run outcome and a
+// short reason for it: any error tool call fails the run, and so does a
+// run that made no tool call at all, since an agent that never touched
+// run_command did not do the work. Ported from pkg/orchestrate's own
+// runAgent (bwsalmon/agents#254), extended with detail for
+// bwsalmon/agents#403's own "a human should see why, not just that".
+func outcomeOf(result *agent.Result) (outcome, detail string) {
 	sawTool := false
 	for _, c := range result.ToolCalls {
 		sawTool = true
 		if c.IsError {
-			return "failed"
+			return "failed", fmt.Sprintf("tool call %q failed: %s", c.Name, c.Text)
 		}
 	}
 	if !sawTool {
-		return "failed"
+		return "failed", "the agent made no tool calls at all"
 	}
-	return "succeeded"
+	return "succeeded", ""
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability

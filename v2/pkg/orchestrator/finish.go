@@ -68,8 +68,14 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 // calls it today gets ProcessResult's ordinary "nothing to act on" ending;
 // nothing is lost, since ask_question/comment_on_issue/propose_task's own
 // contracts already say a run should call one of the four, not several.
+//
+// runID is d.RunID, the very run result came from -- needed only for the
+// "nothing to act on" ending below, to correct that run's own outcome
+// (see the comment there for why RunDispatch's own guess is not good
+// enough). Every other ending here already has an outcome RunDispatch got
+// right without ProcessResult's help.
 func ProcessResult(ctx context.Context, store *model.Store, client github.Client,
-	task model.Task, result *agent.Result, now time.Time) error {
+	task model.Task, result *agent.Result, runID string, now time.Time) error {
 
 	if err := relayProposedTasks(ctx, store, task, result, now); err != nil {
 		return err
@@ -119,7 +125,24 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	// nothing to act on (the failScript case in the e2e harness this
 	// mirrors). Left running-less and un-observed, it is eligible for
 	// another attempt the next time dispatch.Cycle looks at task_ready --
-	// nothing here forces a retry, but nothing prevents one either.
+	// task_streak (schema.go) and dispatch.Cycle's own backoff are what
+	// keep that bounded now rather than unconditional (bwsalmon/agents#403).
+	//
+	// That bound only works if this run's own outcome says so: RunDispatch
+	// already called FinishRun before ProcessResult ever ran, using
+	// outcomeOf's own guess -- "succeeded" the moment the agent made any
+	// harmless tool call, since RunDispatch has no way to check GitHub or
+	// task_observation itself. A run that, say, ran a few shell commands
+	// and then gave up without pushing, asking, or leaving a comment would
+	// otherwise sit in task_run as a permanent "succeeded" that never
+	// counts toward the streak, dodging the very cap this ending exists to
+	// feed. Overwriting it here, now that a push/question/comment has
+	// actually been ruled out, is what keeps task_run's own outcome
+	// column meaning what a human reading `grain get` would expect it to.
+	if err := store.SetRunOutcome(ctx, runID, "no_action",
+		"the run finished without pushing a branch, asking a question, or leaving a closing comment"); err != nil {
+		return fmt.Errorf("orchestrator: recording %s's outcome: %w", task.ID, err)
+	}
 	return nil
 }
 

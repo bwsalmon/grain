@@ -1,5 +1,7 @@
 package model
 
+import "strconv"
+
 // The model as DDL, and the derivations as views.
 //
 // Two things here are not merely a translation of task.go, and both are
@@ -40,7 +42,7 @@ package model
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -116,9 +118,12 @@ var Tables = []string{
   ` + "`baseline_comment_id`" + `         INTEGER  NULL,
   ` + "`merge_queue_blocked_at`" + `      DATETIME NULL,
   ` + "`observed_at`" + `                 DATETIME NULL,
+  ` + "`retry_requested_at`" + `          DATETIME NULL,
   PRIMARY KEY (` + "`task_id`" + `)
 )`,
 
+	// detail is a short human-readable reason behind outcome -- see
+	// model.Run.Detail's own doc comment on why it exists at all.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
   ` + "`id`" + `          TEXT     NOT NULL,
   ` + "`task_id`" + `     TEXT     NOT NULL,
@@ -129,6 +134,7 @@ var Tables = []string{
   ` + "`started_at`" + `  DATETIME NOT NULL,
   ` + "`finished_at`" + ` DATETIME NULL,
   ` + "`outcome`" + `     TEXT     NULL,
+  ` + "`detail`" + `      TEXT     NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -205,11 +211,53 @@ var Tables = []string{
 
 // Views is the derivations, each a (name, DDL) pair so Init can drop and
 // recreate one by name -- SQLite has no CREATE OR REPLACE VIEW, unlike
-// the MySQL dialect Dolt spoke. Order matters: task_ready reads the two
-// above it.
+// the MySQL dialect Dolt spoke. Order matters: each view here may only
+// name a table or an earlier view in this same slice, since Init applies
+// them in order and a CREATE VIEW referencing something not yet created
+// fails outright. task_state reads task_streak, and task_ready reads
+// task_state and task_blocked -- all three appear before their reader.
 var Views = []View{
+	// How many of a task's most recent runs, in a row, ended without
+	// succeeding -- zero the moment any of them succeeds, or once a human
+	// asks for a retry (task_observation.retry_requested_at), whichever
+	// is later. task_state reads this to know when to stop calling a task
+	// 'queued' at all (bwsalmon/agents#403); it is its own view, not a
+	// branch of task_state's own CASE, because task_state must be able to
+	// join it the same way it already joins task_run and
+	// task_observation -- a CASE branch has no name of its own to join
+	// against a second time the way a WHEN condition needs here.
+	//
+	// The two correlated subqueries below stand in for a window function
+	// (ROW_NUMBER/PARTITION BY, which SQLite does support): both express
+	// "the most recent boundary after which every run counts", one for a
+	// success, one for a retry request, and COALESCE'ing each against a
+	// date no real row predates is what makes "never happened" fall out
+	// of the same comparison as "happened, but a while ago" rather than
+	// needing its own branch.
+	{"task_streak", `
+SELECT
+  ` + "`tr`.`task_id`" + ` AS ` + "`task_id`" + `,
+  COUNT(*) AS ` + "`streak`" + `
+FROM ` + "`task_run`" + ` AS ` + "`tr`" + `
+LEFT JOIN ` + "`task_observation`" + ` AS ` + "`o`" + ` ON ` + "`o`.`task_id`" + ` = ` + "`tr`.`task_id`" + `
+WHERE ` + "`tr`.`finished_at`" + ` IS NOT NULL
+  AND ` + "`tr`.`outcome`" + ` != 'succeeded'
+  AND ` + "`tr`.`started_at`" + ` > COALESCE((
+        SELECT MAX(` + "`started_at`" + `) FROM ` + "`task_run`" + ` AS ` + "`tr2`" + `
+        WHERE ` + "`tr2`.`task_id`" + ` = ` + "`tr`.`task_id`" + ` AND ` + "`tr2`.`outcome`" + ` = 'succeeded'
+      ), '0001-01-01 00:00:00')
+  AND ` + "`tr`.`started_at`" + ` > COALESCE(` + "`o`.`retry_requested_at`" + `, '0001-01-01 00:00:00')
+GROUP BY ` + "`tr`.`task_id`" + ``},
+
 	// The invariant, as a view. Precedence top to bottom, matching
 	// StateOf exactly — see state_test.go on what holds them together.
+	// 'failed' sits between 'running' and 'proposed': a task with a live
+	// run is running whatever its streak says (task_ready cannot have
+	// dispatched a capped task in the first place, but a run started
+	// before this cutoff shipped, or before a human lowered
+	// MaxConsecutiveFailures, should still be let to finish), and a
+	// proposed task can carry no streak at all -- dispatch never ran an
+	// unapproved task -- so the two branches never compete in practice.
 	{"task_state", `
 SELECT
   ` + "`t`.`id`" + ` AS ` + "`task_id`" + `,
@@ -218,13 +266,15 @@ SELECT
     WHEN ` + "`o`.`completed_at`" + ` IS NOT NULL THEN 'completed'
     WHEN ` + "`o`.`pending_question_comment_id`" + ` IS NOT NULL THEN 'awaiting_reply'
     WHEN ` + "`r`.`id`" + ` IS NOT NULL THEN 'running'
+    WHEN COALESCE(` + "`st`.`streak`" + `, 0) >= ` + strconv.Itoa(MaxConsecutiveFailures) + ` THEN 'failed'
     WHEN ` + "`t`.`approval_actor_kind`" + ` IS NULL THEN 'proposed'
     ELSE 'queued'
   END AS ` + "`state`" + `
 FROM ` + "`task`" + ` AS ` + "`t`" + `
 LEFT JOIN ` + "`task_observation`" + ` AS ` + "`o`" + ` ON ` + "`o`.`task_id`" + ` = ` + "`t`.`id`" + `
 LEFT JOIN ` + "`task_run`" + ` AS ` + "`r`" + `
-       ON ` + "`r`.`task_id`" + ` = ` + "`t`.`id`" + ` AND ` + "`r`.`finished_at`" + ` IS NULL`},
+       ON ` + "`r`.`task_id`" + ` = ` + "`t`.`id`" + ` AND ` + "`r`.`finished_at`" + ` IS NULL
+LEFT JOIN ` + "`task_streak`" + ` AS ` + "`st`" + ` ON ` + "`st`.`task_id`" + ` = ` + "`t`.`id`" + ``},
 
 	// Blocked is an annotation on queued, never a state of its own, so it
 	// gets its own view rather than another branch of the CASE above. A

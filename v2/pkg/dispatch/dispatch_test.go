@@ -163,7 +163,7 @@ func TestCycleRespectsTheSlotCount(t *testing.T) {
 
 	// Finishing one run frees exactly one slot, so exactly one more task
 	// starts, in the freed slot.
-	if err := store.FinishRun(ctx, first[0].RunID, now.Add(2*time.Minute), "succeeded"); err != nil {
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(2*time.Minute), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	third, err := dispatch.Cycle(ctx, store, slots, now.Add(3*time.Minute))
@@ -245,7 +245,7 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 
 	// Finishing with no Observation is a requeue, not a completion — the
 	// task must come back through task_ready exactly as before.
-	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "requeued"); err != nil {
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "requeued", ""); err != nil {
 		t.Fatal(err)
 	}
 	second, err := dispatch.Cycle(ctx, store, slots, now.Add(2*time.Minute))
@@ -257,6 +257,131 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	}
 	if n, err := store.Attempts(ctx, "t0"); err != nil || n != 2 {
 		t.Fatalf("attempts = %d (%v), want 2", n, err)
+	}
+}
+
+// TestARecentlyFailedTaskBacksOffWithoutBlockingOthers is bwsalmon/
+// agents#403: a task whose last run failed a moment ago must not take a
+// free slot again immediately (that is the whole "retried forever with no
+// backoff" bug), but it also must not hold up a free slot going to some
+// other, unrelated ready task that is not backing off at all.
+func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, task("t0", true), task("t1", true))
+	slots := []string{"slot-1"}
+
+	first, err := dispatch.Cycle(ctx, store, slots, now)
+	if err != nil || len(first) != 1 || first[0].TaskID != "t0" {
+		t.Fatalf("first dispatch: %v, %+v", err, first)
+	}
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Second), "failed", "simulated failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	// t0 just failed and has not backed off yet, but t1 has never run at
+	// all -- it must be offered the only free slot instead of the cycle
+	// giving up because task_ready's first entry (t0) is not eligible.
+	second, err := dispatch.Cycle(ctx, store, slots, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].TaskID != "t1" {
+		t.Fatalf("second dispatch = %+v, want t1 dispatched in t0's place", second)
+	}
+	finished := now.Add(3 * time.Second)
+	if err := store.FinishRun(ctx, second[0].RunID, finished, "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Mark t1 completed so it does not itself come back through
+	// task_ready and mask what this test is actually about: whether t0
+	// backs off correctly.
+	if err := store.Observe(ctx, model.Observation{TaskID: "t1", CompletedAt: &finished}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Still too soon after t0's own failure: nothing to dispatch even
+	// though the slot is free again.
+	third, err := dispatch.Cycle(ctx, store, slots, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third) != 0 {
+		t.Fatalf("third dispatch = %+v, want nothing: t0 has not backed off yet", third)
+	}
+
+	// Comfortably past baseRetryBackoff (30s): t0 is eligible again.
+	fourth, err := dispatch.Cycle(ctx, store, slots, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fourth) != 1 || fourth[0].TaskID != "t0" || fourth[0].Attempt != 2 {
+		t.Fatalf("fourth dispatch = %+v, want t0's second attempt", fourth)
+	}
+}
+
+// TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady is bwsalmon/
+// agents#403's own cap: once a task has failed model.MaxConsecutiveFailures
+// times in a row with nothing succeeding in between, task_state reads it
+// as 'failed' rather than 'queued', so it drops out of Ready and Cycle
+// never offers it a slot again on its own.
+func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, task("t0", true))
+	slots := []string{"slot-1"}
+
+	clock := now
+	for i := 0; i < model.MaxConsecutiveFailures; i++ {
+		// Advance well past any backoff window so the cap itself, not a
+		// still-pending backoff, is what this test exercises.
+		clock = clock.Add(time.Hour)
+		got, err := dispatch.Cycle(ctx, store, slots, clock)
+		if err != nil {
+			t.Fatalf("attempt %d: Cycle: %v", i+1, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("attempt %d: dispatched %+v, want exactly one run", i+1, got)
+		}
+		clock = clock.Add(time.Second)
+		if err := store.FinishRun(ctx, got[0].RunID, clock, "failed", "simulated failure"); err != nil {
+			t.Fatalf("attempt %d: FinishRun: %v", i+1, err)
+		}
+	}
+
+	st, err := store.State(ctx, "t0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateFailed {
+		t.Fatalf("state after %d consecutive failures = %q, want failed", model.MaxConsecutiveFailures, st)
+	}
+
+	clock = clock.Add(24 * time.Hour)
+	got, err := dispatch.Cycle(ctx, store, slots, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Cycle dispatched a capped task: %+v", got)
+	}
+
+	// A human's own retry request is the only way out: it clears the
+	// streak, and the task is dispatchable again despite no run ever
+	// having succeeded.
+	if err := store.ObserveField(ctx, "t0", clock, func(o *model.Observation) {
+		o.RetryRequestedAt = &clock
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := store.State(ctx, "t0"); err != nil || st != model.StateQueued {
+		t.Fatalf("state after a retry request = %q (%v), want queued", st, err)
+	}
+	clock = clock.Add(time.Minute)
+	got, err = dispatch.Cycle(ctx, store, slots, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TaskID != "t0" {
+		t.Fatalf("Cycle after a retry request = %+v, want t0 dispatched once more", got)
 	}
 }
 
@@ -350,7 +475,7 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 				continue
 			}
 			clock = clock.Add(time.Minute)
-			if err := store.FinishRun(ctx, runID, clock, "outcome"); err != nil {
+			if err := store.FinishRun(ctx, runID, clock, "outcome", ""); err != nil {
 				t.Fatalf("cycle %d: finishing %s: %v", cycle, runID, err)
 			}
 			delete(occupiedBy, liveSlot[id])

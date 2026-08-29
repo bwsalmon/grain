@@ -262,7 +262,15 @@ func checkSimInvariants(t *testing.T, w *world, round int, tasks map[string]*sim
 		if err != nil {
 			t.Fatalf("round %d: GetObservation(%s): %v", round, id, err)
 		}
-		want := model.StateOf(*task, obs, active)
+		streak, err := w.store.FailureStreak(w.ctx, id)
+		if err != nil {
+			t.Fatalf("round %d: FailureStreak(%s): %v", round, id, err)
+		}
+		failureStreak := 0
+		if streak != nil {
+			failureStreak = streak.Count
+		}
+		want := model.StateOf(*task, obs, active, failureStreak)
 		got, err := w.store.State(w.ctx, id)
 		if err != nil {
 			t.Fatalf("round %d: State(%s): %v", round, id, err)
