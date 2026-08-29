@@ -106,3 +106,32 @@ jobs:
       - name: Test frontend
         working-directory: v2/pkg/ui/frontend
         run: npm test
+
+  # A separate job rather than a step in go-test above: this needs a real
+  # browser and the apt packages `playwright install --with-deps` pulls
+  # in for it, which would slow down and complicate the fast, browser-free
+  # go-test job for no benefit to it (see test-e2e's own doc comment in
+  # v2/Makefile).
+  ui-e2e:
+    name: v2 (ui e2e)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: v2/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: v2/pkg/ui/frontend/package-lock.json
+
+      # Builds the frontend, installs Chromium and its apt dependencies,
+      # then runs the Playwright suite against a real pkg/ui.Server
+      # (`grain demo`) -- see v2/Makefile's test-e2e target.
+      - name: Test e2e
+        working-directory: v2
+        run: make test-e2e
