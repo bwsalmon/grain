@@ -8,6 +8,7 @@ package ui_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -396,6 +397,70 @@ func TestSetSecretRejectsTraversalNames(t *testing.T) {
 	rec := do(t, srv, http.MethodPut, "/api/secrets/..%2Fescape/key", `{"value":"x"}`)
 	if rec.Code == http.StatusOK {
 		t.Fatalf("status = %d, want a non-2xx rejection: %s", rec.Code, rec.Body)
+	}
+}
+
+// --- host reboot --------------------------------------------------------
+//
+// bwsalmon/agents#395: a human operator's "reboot host" button. Disabled
+// by default the same way secrets are (testServer's Config.Reboot is
+// nil, the same as a Server nothing has wired one into) -- these assert
+// on both halves, /api/config reporting whether it's available and
+// POST /api/host/reboot actually calling (or refusing to call) the
+// configured func.
+
+func TestRebootDisabledByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["rebootEnabled"] != false {
+		t.Fatalf("rebootEnabled = %v, want false", got["rebootEnabled"])
+	}
+
+	rec = do(t, srv, http.MethodPost, "/api/host/reboot", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestRebootCallsConfiguredFunc(t *testing.T) {
+	client, _, _ := testClient(t)
+	calls := 0
+	client.Config.Reboot = func(ctx context.Context) error {
+		calls++
+		return nil
+	}
+	srv := ui.NewServerWithClient(client)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["rebootEnabled"] != true {
+		t.Fatalf("rebootEnabled = %v, want true", got["rebootEnabled"])
+	}
+
+	rec = do(t, srv, http.MethodPost, "/api/host/reboot", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestRebootSurfacesError(t *testing.T) {
+	client, _, _ := testClient(t)
+	client.Config.Reboot = func(ctx context.Context) error {
+		return errors.New("sudo: a password is required")
+	}
+	srv := ui.NewServerWithClient(client)
+
+	rec := do(t, srv, http.MethodPost, "/api/host/reboot", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "a password is required") {
+		t.Fatalf("body = %s, want the underlying error message", rec.Body)
 	}
 }
 

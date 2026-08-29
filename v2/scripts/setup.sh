@@ -27,14 +27,17 @@
 #      around any host-specific linkage problem.
 #   3. installs it to /usr/local/bin/grain
 #   4. creates an unprivileged system user to run it as
-#   5. lays out $GRAIN_DATA_DIR (secrets, the sandbox root, the embedded
+#   5. grants that user passwordless sudo for exactly one command,
+#      `systemctl reboot` -- what the UI's own "reboot host" button
+#      (bwsalmon/agents#395) runs
+#   6. lays out $GRAIN_DATA_DIR (secrets, the sandbox root, the embedded
 #      SQLite store) and seeds secrets from environment variables -- only
 #      if they are not already there, so a second run never overwrites a
 #      credential placed by the first one or by hand
-#   6. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
+#   7. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
 #      empty commit so grain has a branch to work from ("format" it --
 #      grain always branches off an existing ref, never creates one)
-#   7. writes and enables grain-daemon.service, so it comes back on
+#   8. writes and enables grain-daemon.service, so it comes back on
 #      reboot, and restarts it (not just "enable --now") so a second
 #      run's new binary and new config actually take effect -- see
 #      docs/next-session.md item 3's "Update" for why
@@ -154,7 +157,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-for cmd in git docker systemctl install useradd; do
+for cmd in git docker systemctl install useradd visudo; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
     exit 1
@@ -207,7 +210,26 @@ ensure_user() {
   fi
 }
 
-# --- 5. data directory and secrets --------------------------------------
+# --- 5. sudo to reboot the machine, for the UI's reboot button ----------
+#
+# grant_reboot_sudo lets the UI's "reboot host" button (v2/pkg/ui/host.go,
+# bwsalmon/agents#395) actually reboot the machine: grain-daemon.service
+# runs as the unprivileged $GRAIN_USER (ensure_user, above), which cannot
+# reboot anything on its own. The drop-in grants exactly one command
+# line, matched verbatim by sudoers -- never a blanket NOPASSWD -- the
+# same shape ../../provision/controller.sh already uses for v1's own
+# self-repair sudoers file, and the same command rebootHost
+# (cmd/grain/daemon.go) runs.
+grant_reboot_sudo() {
+  log "Granting $GRAIN_USER passwordless sudo to reboot this machine"
+  cat > /etc/sudoers.d/grain-daemon-reboot <<SUDOERS
+${GRAIN_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+SUDOERS
+  chmod 0440 /etc/sudoers.d/grain-daemon-reboot
+  visudo -cf /etc/sudoers.d/grain-daemon-reboot
+}
+
+# --- 6. data directory and secrets --------------------------------------
 
 seed_secret() {
   # Writes $2 to file $1 only if it is missing or empty, and only if a
@@ -280,7 +302,7 @@ seed_gcp_minter_key() {
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
 }
 
-# --- 6. format the target repo, if it is empty --------------------------
+# --- 7. format the target repo, if it is empty --------------------------
 #
 # Every dispatch grain runs branches off an existing ref -- it never
 # creates the first one (v2/e2e's own harness always seeds one commit
@@ -322,7 +344,7 @@ format_target_repo_if_empty() {
   git -C "$tmp" push --quiet "$url" "HEAD:refs/heads/$GRAIN_TARGET_BRANCH"
 }
 
-# --- 7. the systemd unit ---------------------------------------------------
+# --- 8. the systemd unit ---------------------------------------------------
 
 write_systemd_units() {
   log "Writing grain-daemon.service"
@@ -400,6 +422,7 @@ main() {
   sync_repo
   build_and_install
   ensure_user
+  grant_reboot_sudo
   setup_data_dir
   format_target_repo_if_empty
   write_systemd_units

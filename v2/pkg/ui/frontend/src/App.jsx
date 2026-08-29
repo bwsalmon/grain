@@ -195,7 +195,7 @@ export default function App() {
       {showNewTask && (
         <NewTaskOverlay tasks={tasks} config={config} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
-      {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
+      {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
     </div>
   );

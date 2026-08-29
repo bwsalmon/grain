@@ -161,13 +161,18 @@ type configResponse struct {
 	ActorKind     string       `json:"actorKind"`
 	DefaultTarget string       `json:"defaultTarget,omitempty"`
 	Capabilities  []Capability `json:"capabilities"`
+	// RebootEnabled mirrors secretsResponse's own Enabled: whether
+	// Config.Reboot is set, so the frontend can hide the reboot button
+	// entirely rather than show one that can only ever 404.
+	RebootEnabled bool `json:"rebootEnabled"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	resp := configResponse{
-		Actor:        s.tasks.Config.Actor.ID,
-		ActorKind:    string(s.tasks.Config.Actor.Kind),
-		Capabilities: s.tasks.Config.Capabilities,
+		Actor:         s.tasks.Config.Actor.ID,
+		ActorKind:     string(s.tasks.Config.Actor.Kind),
+		Capabilities:  s.tasks.Config.Capabilities,
+		RebootEnabled: s.tasks.Config.Reboot != nil,
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()

@@ -644,6 +644,7 @@ func startUIServer(addr, actor, defaultTargetRepo, dataDir string, store *model.
 		Actor:        ui.DefaultActor(actorID(actor)),
 		Capabilities: ui.DefaultCapabilities(),
 		Secrets:      secrets.New(filepath.Join(dataDir, "secrets")),
+		Reboot:       rebootHost,
 	}
 	if defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(defaultTargetRepo)
@@ -670,6 +671,18 @@ func startUIServer(addr, actor, defaultTargetRepo, dataDir string, store *model.
 		}
 	}()
 	return httpSrv.Shutdown, nil
+}
+
+// rebootHost is startUIServer's ui.Config.Reboot: `sudo systemctl
+// reboot`, the exact command v1's mcp_server.py already ran for its own
+// `reboot_controller` tool (grain/automation/mcp_server.py) and the one
+// line scripts/setup.sh's sudoers drop-in grants $GRAIN_USER passwordless
+// sudo for. Run as the plain, unprivileged user grain-daemon.service
+// already runs as (scripts/setup.sh's own ensure_user), not as root
+// itself, the same "only exactly this one command line" restriction v1
+// gave its own self-repair sudoers file.
+func rebootHost(ctx context.Context) error {
+	return exec.CommandContext(ctx, "sudo", "systemctl", "reboot").Run()
 }
 
 // openBrowser best-effort launches url in the system's default browser --

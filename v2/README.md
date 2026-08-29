@@ -1109,6 +1109,25 @@ on the same host could read back out of this one's own command line.
 Unlike the UI, it never goes through the daemon's own REST API: it edits
 the files directly, so it works even when no daemon is running.
 
+`Config.Reboot` (bwsalmon/agents#395) is the same nil-means-unavailable
+shape as `Config.Secrets`, for a much smaller surface: a func the UI's
+"reboot host" button in the settings panel calls to reboot the machine
+`grain daemon` is itself running on, in place of an SSH session an
+operator would otherwise need just to run one command. `startUIServer`
+wires it to `sudo systemctl reboot` unconditionally, the same command
+v1's `reboot_controller` MCP tool already ran (`grain/automation/mcp_server.py`)
+for a task holding the `self-repair` capability — the difference here is
+who is pulling the trigger, a human at the UI rather than a task granted
+that capability, so there is no capability to gate it behind.
+`scripts/setup.sh` grants `$GRAIN_USER` (the unprivileged account
+`grain-daemon.service` runs as) passwordless sudo for exactly that one
+command line, the same narrow-as-possible sudoers shape
+`provision/controller.sh` already uses for v1. `GET /api/config` reports
+`rebootEnabled` so the button can hide itself rather than offer an action
+that would only ever 404 -- the case for `grain demo`'s throwaway UI,
+which leaves `Config.Reboot` nil since there is no real machine behind it
+worth rebooting.
+
 ## The UI and the CLI talk to the daemon over REST
 
 Dolt permitted one writer when embedded, which suited a cron-driven
