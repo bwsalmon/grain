@@ -5,22 +5,23 @@
 // infrastructure on a new installation, and the ability to run a syncing
 // command in a github action when code or configurations change."
 //
-// It is a mode of its own (main.go's switch, next to daemon/ui/mcpserver
-// and setup), not one of runCLI's task-store commands, so that a sync run
-// naming no "settings" section never needs -data-dir at all -- see
-// buildClient's own doc comment.
+// It is a mode of its own (main.go's switch, next to daemon/mcpserver
+// and setup), not one of runCLI's task-store commands, mainly so a
+// "gcp"-only sync -- one with no "settings" section -- never needs
+// -server, or anything else about a running daemon, at all.
 //
 // `grain sync -config path.json` reads one file with up to two
 // independent, optional sections:
 //
 //   - "settings" is unmarshaled straight into ui.UpdateSettingsRequest
-//     and applied through Client.UpdateSettings -- the exact same call
-//     `grain settings` makes by hand, one flag at a time; sync's whole
-//     value over that is that the settings live as one reviewable file in
-//     a config repo instead of a workflow step's own imperative flag
-//     list, and UpdateSettingsRequest's pointer fields already give
-//     "only the keys present in the file change anything" for free, no
-//     extra work here.
+//     and applied through HTTPClient.UpdateSettings, against -server, the
+//     same running daemon `grain settings` itself talks to (bwsalmon/
+//     agents#363: there is no store flag here to open the database
+//     directly with any more) -- sync's whole value over that is that the
+//     settings live as one reviewable file in a config repo instead of a
+//     workflow step's own imperative flag list, and
+//     UpdateSettingsRequest's pointer fields already give "only the keys
+//     present in the file change anything" for free, no extra work here.
 //   - "gcp" re-runs pkg/gcpsetup.EnsureInfrastructure, the same
 //     reconciliation `grain setup gcp` uses for a brand new installation
 //     (setup.go's own doc comment) -- run here on every sync instead of
@@ -35,11 +36,8 @@
 // so pointing a workflow at `grain sync` on every push touching the
 // config file is the whole of what "run this in a GitHub Action when code
 // or configurations change" needs -- see this package's own README
-// section (v2/README.md) for the workflow shape. A "settings" section
-// needs -data-dir naming the deployment's store on local disk, so it
-// only runs from a workflow step with access to that machine (an SSH
-// step, or one running on the machine itself), the same restriction
-// `grain secrets` already has for the same reason.
+// section (v2/README.md) for the workflow shape and how it reaches a
+// deployment whose UI/API is bound to loopback only.
 package main
 
 import (
@@ -84,8 +82,7 @@ func syncCmd(args []string) {
 func cmdSync(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("grain sync", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to a JSON file with \"settings\" and/or \"gcp\" sections to reconcile (required)")
-	dataDir := fs.String("data-dir", "", "root directory of the embedded SQLite store -- only needed if -config has a \"settings\" section")
-	actor := fs.String("as", "", "principal to attribute a settings change to (defaults to the OS user)")
+	server := fs.String("server", defaultServerURL, "base URL of a running \"grain daemon\"'s UI/API -- only needed if -config has a \"settings\" section")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -112,7 +109,7 @@ func cmdSync(ctx context.Context, args []string) error {
 	}
 
 	if cfg.Settings != nil {
-		if err := syncSettings(ctx, *cfg.Settings, *dataDir, *actor); err != nil {
+		if err := syncSettings(ctx, *cfg.Settings, *server); err != nil {
 			return fmt.Errorf("applying settings: %w", err)
 		}
 	}
@@ -145,12 +142,8 @@ func syncGCP(ctx context.Context, gc syncGCPConfig) error {
 	return nil
 }
 
-func syncSettings(ctx context.Context, req ui.UpdateSettingsRequest, dataDir, actor string) error {
-	c, closeStore, err := buildClient(dataDir, actor, "")
-	if err != nil {
-		return err
-	}
-	defer closeStore()
+func syncSettings(ctx context.Context, req ui.UpdateSettingsRequest, server string) error {
+	c := ui.NewHTTPClient(server)
 
 	before, err := c.GetSettings(ctx)
 	if err != nil {

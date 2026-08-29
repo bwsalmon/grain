@@ -10,10 +10,10 @@
 # work as plain host directories (orchestrator.HostSandboxes), no VM
 # involved. So this script does the simpler thing the issue actually
 # asks for -- run the one `grain` binary directly on this machine, as a
-# pair of systemd services, with no controller VM anywhere in the
-# picture. Real sandbox isolation (a VM or container per task) is still
-# open and out of scope here; see v2/README.md's own "neither sandbox
-# stand-in carries any real isolation."
+# single systemd service, with no controller VM anywhere in the picture.
+# Real sandbox isolation (a VM or container per task) is still open and
+# out of scope here; see v2/README.md's own "neither sandbox stand-in
+# carries any real isolation."
 #
 # What this script does, every time it runs (safe to re-run -- this is
 # the installer AND the updater):
@@ -27,38 +27,45 @@
 #      around any host-specific linkage problem.
 #   3. installs it to /usr/local/bin/grain
 #   4. creates an unprivileged system user to run it as
-#   5. lays out $GRAIN_DATA_DIR (secrets, the store, the sandbox root)
-#      and seeds secrets from environment variables -- only if they are
-#      not already there, so a second run never overwrites a credential
-#      placed by the first one or by hand. There is no separate store
-#      service to run or wait for: grain-daemon.service and
-#      grain-ui.service both point -data-dir at this same directory and
-#      open its SQLite store file directly, which SQLite's own file
-#      locking makes safe for both to write at once (v2/pkg/model/sqlite's
-#      own doc comment) -- the one place a controller-shaped background
-#      service (previously a `dolt sql-server` container) used to be
-#      unavoidable.
+#   5. lays out $GRAIN_DATA_DIR (secrets, the sandbox root, the embedded
+#      SQLite store) and seeds secrets from environment variables -- only
+#      if they are not already there, so a second run never overwrites a
+#      credential placed by the first one or by hand
 #   6. if $GRAIN_TARGET_REPO is set and has no commits yet, pushes one
 #      empty commit so grain has a branch to work from ("format" it --
 #      grain always branches off an existing ref, never creates one)
-#   7. writes and enables grain-daemon.service and grain-ui.service, so
-#      both come back on reboot, and restarts them (not just "enable
-#      --now") so a second run's new binary and new config actually
-#      take effect -- see docs/next-session.md item 3's "Update" for
-#      why enable-without-restart was already a bug once in v1's own
-#      proxy service
+#   7. writes and enables grain-daemon.service, so it comes back on
+#      reboot, and restarts it (not just "enable --now") so a second
+#      run's new binary and new config actually take effect -- see
+#      docs/next-session.md item 3's "Update" for why
+#      enable-without-restart was already a bug once in v1's own proxy
+#      service
 #
 # Every setting is an environment variable, not a flag, so the common
 # case is `sudo GRAIN_GITHUB_TOKEN=... GRAIN_GEMINI_API_KEY=... ./setup.sh`
 # and a re-run to pick up a repo update is `sudo ./setup.sh` with no
 # arguments at all. Run with -h/--help for the full list.
 #
+# There used to be a second service (grain-ui.service) and, before
+# bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt
+# sql-server` container behind it: embedded Dolt was single-writer, and a
+# daemon plus a UI on the same store both used to need to write.
+# bwsalmon/agents#363 removed the second writer -- the daemon now serves
+# the UI/API itself, in-process, over the store it already has open (see
+# v2/cmd/grain/daemon.go's own doc comment) -- so this script installs
+# one service, needs no separate store container, and no longer requires
+# `docker` at runtime (only at build time, for `make container-build`).
+#
 # The UI is bound to 127.0.0.1 on the plain HTTP port (80) and nowhere
 # else -- nothing here opens a firewall hole for it. Reach it by
 # forwarding that one port over SSH: `ssh -L 8080:localhost:80
-# <this-host>`, then open http://localhost:8080 locally. See
-# pkg/ui/README's own "single-operator tool" framing (v2/README.md, "The
-# UI") for why that is the whole access-control story today.
+# <this-host>`, then open http://localhost:8080 locally, or put it behind
+# Tailscale/IAP (the issue's own framing) instead of an SSH tunnel if the
+# deployment already has one of those. See pkg/ui/README's own
+# "single-operator tool" framing (v2/README.md, "The UI") for why that is
+# the whole access-control story today -- the API and the UI it serves
+# carry no auth of their own, so whatever reaches -ui-addr can act as the
+# deployment's one configured actor.
 
 set -euo pipefail
 
@@ -95,9 +102,10 @@ Usage: sudo ./setup.sh
 
 Installs or updates a v2 grain deployment on this machine: clones/builds
 the binary, lays out /var/lib/grain (including its embedded SQLite task
-store), and installs grain-daemon.service/grain-ui.service.
-Every setting is an environment variable; all have defaults, so a bare
-`sudo ./setup.sh` re-run is the update path. Recognized variables:
+store), and installs grain-daemon.service, which runs the dispatch loop
+and serves the UI/API itself. Every setting is an environment variable;
+all have defaults, so a bare `sudo ./setup.sh` re-run is the update path.
+Recognized variables:
 
   GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
   GRAIN_REF                branch to build (default: main)
@@ -105,8 +113,9 @@ Every setting is an environment variable; all have defaults, so a bare
   GRAIN_DATA_DIR            secrets/store/sandbox root (default: /var/lib/grain)
   GRAIN_USER                unprivileged account grain runs as (default: grain)
 
-  GRAIN_UI_ADDR             UI bind address (default: 127.0.0.1:80 -- loopback
-                             only; reach it with `ssh -L 8080:localhost:80 host`)
+  GRAIN_UI_ADDR             UI/API bind address (default: 127.0.0.1:80 -- loopback
+                             only; reach it with `ssh -L 8080:localhost:80 host`,
+                             or put it behind Tailscale/IAP instead)
   GRAIN_SLOTS               comma-separated concurrency slots (default: local)
   GRAIN_POLL_INTERVAL       daemon reconcile-cycle interval (default: 30s)
 
@@ -152,7 +161,7 @@ for cmd in git docker systemctl install useradd; do
   fi
 done
 if ! docker info >/dev/null 2>&1; then
-  echo "setup.sh: 'docker info' failed -- is the Docker daemon running?" >&2
+  echo "setup.sh: 'docker info' failed -- is the Docker daemon running? (only needed to build, via make container-build)" >&2
   exit 1
 fi
 
@@ -222,7 +231,11 @@ setup_data_dir() {
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/sandbox"
-  install -d -m0750 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/store"
+  # grain-daemon.service's own -data-dir/store, embedded SQLite -- the
+  # one process that ever opens it now (this file's own header on
+  # bwsalmon/agents#363), so no separate store container or directory
+  # layout is needed for it beyond what openStore creates on its own the
+  # first time the daemon starts.
 
   # GitHub credential ladder (v2/pkg/gitproxy/credentials.go): a pattern
   # file plus one <name>.token per credential. "*" is the catch-all every
@@ -309,10 +322,10 @@ format_target_repo_if_empty() {
   git -C "$tmp" push --quiet "$url" "HEAD:refs/heads/$GRAIN_TARGET_BRANCH"
 }
 
-# --- 8. systemd units -----------------------------------------------------
+# --- 7. the systemd unit ---------------------------------------------------
 
 write_systemd_units() {
-  log "Writing grain-daemon.service and grain-ui.service"
+  log "Writing grain-daemon.service"
 
   local daemon_args=(
     daemon
@@ -321,48 +334,17 @@ write_systemd_units() {
     -poll-interval "$GRAIN_POLL_INTERVAL"
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -github-host "$GRAIN_GITHUB_HOST"
+    -ui-addr "$GRAIN_UI_ADDR"
   )
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
   [ -n "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL" ] && daemon_args+=(-gcp-agent-service-account "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL")
-
-  # grain ui's own -data-dir names its task store directly, not a root
-  # holding secrets/sandbox/store the way the daemon's does (main.go's
-  # usage text) -- so this points it at the same store/ subdirectory
-  # inside $GRAIN_DATA_DIR the daemon just opened above. SQLite's own
-  # file locking is what makes both processes writing that same file at
-  # once safe (v2/pkg/model/sqlite's own doc comment); there is no
-  # server to address and nothing else to wait for.
-  local ui_args=(
-    ui
-    -addr "$GRAIN_UI_ADDR"
-    -data-dir "$GRAIN_DATA_DIR/store"
-    -open=false
-  )
-  [ -n "$GRAIN_TARGET_REPO" ] && ui_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
+  [ -n "$GRAIN_TARGET_REPO" ] && daemon_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
 
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
 [Unit]
-Description=grain daemon (task orchestrator)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${GRAIN_USER}
-Group=${GRAIN_USER}
-ExecStart=/usr/local/bin/grain ${daemon_args[*]}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  cat > /etc/systemd/system/grain-ui.service <<UNIT
-[Unit]
-Description=grain ui
+Description=grain daemon (task orchestrator, UI and API)
 After=network-online.target
 Wants=network-online.target
 
@@ -371,11 +353,11 @@ Type=simple
 User=${GRAIN_USER}
 Group=${GRAIN_USER}
 # CAP_NET_BIND_SERVICE, not root, is what lets an unprivileged process
-# bind -addr's port 80 -- see this script's own header on why that's the
-# port and why it's bound to loopback only.
+# bind -ui-addr's port 80 -- see this script's own header on why that's
+# the port and why it's bound to loopback only.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStart=/usr/local/bin/grain ${ui_args[*]}
+ExecStart=/usr/local/bin/grain ${daemon_args[*]}
 Restart=on-failure
 RestartSec=5
 
@@ -394,9 +376,6 @@ enable_services() {
   # git-proxy service (docs/next-session.md item 3's "Update"): restarting
   # an already-running unit is always safe, and starting a stopped one is
   # exactly what --now would have done anyway.
-  systemctl enable grain-ui.service >/dev/null
-  systemctl restart grain-ui.service
-
   systemctl enable grain-daemon.service >/dev/null
   if [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ]; then
     systemctl restart grain-daemon.service
@@ -411,10 +390,10 @@ print_summary() {
   echo
   log "Done."
   echo "    UI:      http://${GRAIN_UI_ADDR} -- reach it with: ssh -L 8080:localhost:${GRAIN_UI_ADDR##*:} <this-host>, then open http://localhost:8080"
-  echo "    Store:   embedded SQLite, data under ${GRAIN_DATA_DIR}/store"
+  echo "    Store:   embedded SQLite under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
-  echo "    Logs:    journalctl -u grain-daemon.service -f   /   journalctl -u grain-ui.service -f"
-  echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts both services"
+  echo "    Logs:    journalctl -u grain-daemon.service -f"
+  echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts the service"
 }
 
 main() {

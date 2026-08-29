@@ -336,7 +336,7 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 // `grain list` first rather than remember every task's state by hand.
 func listTasks(t *testing.T, bin, storeDir string) []ui.Task {
 	t.Helper()
-	out := runCLI(t, bin, "-data-dir", storeDir, "-json", "list")
+	out := runCLIStore(t, bin, storeDir, "-json", "list")
 	var tasks []ui.Task
 	if err := json.Unmarshal([]byte(out), &tasks); err != nil {
 		t.Fatalf("parsing grain list -json output: %v\n%s", err, out)
@@ -381,7 +381,7 @@ func operatorRound(t *testing.T, bin, storeDir string, rng *rand.Rand, tasks []u
 
 	if *createdCount < clusterMaxTasks && rng.Float64() < 0.5 {
 		args := []string{
-			"-data-dir", storeDir, "-json", "create",
+			"-json", "create",
 			"-title", fmt.Sprintf("random cluster task %d", *createdCount),
 			"-body", "exercise the randomized end-to-end cluster",
 			"-repo", clusterRepoOwner + "/" + clusterRepoName,
@@ -389,26 +389,26 @@ func operatorRound(t *testing.T, bin, storeDir string, rng *rand.Rand, tasks []u
 		if rng.Float64() < 0.7 {
 			args = append(args, "-approve")
 		}
-		runCLI(t, bin, args...)
+		runCLIStore(t, bin, storeDir, args...)
 		*createdCount++
 	}
 
 	if id, ok := pickByState(rng, tasks, model.StateProposed); ok && rng.Float64() < 0.6 {
-		runCLI(t, bin, "-data-dir", storeDir, "-json", "approve", id)
+		runCLIStore(t, bin, storeDir, "-json", "approve", id)
 	}
 
 	if id, ok := pickByState(rng, tasks, model.StateAwaitingReply); ok && rng.Float64() < 0.7 {
-		runCLI(t, bin, "-data-dir", storeDir, "-json", "comment", id, "here is the direction you asked for")
+		runCLIStore(t, bin, storeDir, "-json", "comment", id, "here is the direction you asked for")
 		coverage.replied = true
 	}
 
 	if id, ok := pickNotState(rng, tasks, model.StateClosed); ok && rng.Float64() < 0.15 {
-		runCLI(t, bin, "-data-dir", storeDir, "-json", "close", id)
+		runCLIStore(t, bin, storeDir, "-json", "close", id)
 		coverage.closed = true
 	}
 
 	if id, ok := pickByState(rng, tasks, model.StateClosed); ok && rng.Float64() < 0.15 {
-		runCLI(t, bin, "-data-dir", storeDir, "-json", "reopen", id)
+		runCLIStore(t, bin, storeDir, "-json", "reopen", id)
 		coverage.reopened = true
 	}
 }

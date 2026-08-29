@@ -1,23 +1,92 @@
+// demo.go implements `grain demo`, formerly `grain ui -demo` before
+// bwsalmon/agents#363 folded the real UI into `grain daemon` and left
+// nothing standalone for the CLI's own store flag (-data-dir) to attach
+// to. This mode never needed that anyway -- its whole point, unchanged,
+// is a throwaway store nothing else is connected to (this file's own
+// seedDemo doc comment) -- so it is its own small subcommand now rather
+// than a flag on a mode that no longer exists: a real pkg/ui.Server, over
+// a real embedded SQLite database in a fresh temp directory, seeded with
+// fake tasks, for trying out the frontend with no daemon, no
+// orchestrator, no sandbox, no Gemini key and no real git repo behind any
+// of it.
 package main
 
-// seedDemo populates a store with a fixed set of fake tasks for -demo
-// mode: one in each model.State a task can read, so a person working on
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/v2/pkg/ui"
+)
+
+func demo(args []string) {
+	fs := flag.NewFlagSet("grain demo", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:8420", "address to serve the demo UI on")
+	actor := fs.String("as", "", "principal to attribute the fake tasks to (defaults to the OS user)")
+	defaultTargetRepo := fs.String("default-target-repo", "acme/widgets", "owner/name the fake tasks target")
+	open := fs.Bool("open", true, "open the UI in the system's default browser once it's listening")
+	fs.Parse(args)
+
+	repo, err := model.ParseRepo(*defaultTargetRepo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "grain demo: -default-target-repo: %v\n", err)
+		os.Exit(2)
+	}
+	cfg := ui.Config{
+		Actor:         ui.DefaultActor(actorID(*actor)),
+		DefaultTarget: &repo,
+		Capabilities:  ui.DefaultCapabilities(),
+	}
+
+	dir, err := os.MkdirTemp("", "grain-demo-")
+	if err != nil {
+		log.Fatalf("grain demo: creating a throwaway store: %v", err)
+	}
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
+	if err != nil {
+		log.Fatalf("grain demo: opening the throwaway store: %v", err)
+	}
+	defer db.Close()
+
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		log.Fatalf("grain demo: applying the schema: %v", err)
+	}
+	if err := seedDemo(ctx, store, cfg); err != nil {
+		log.Fatalf("grain demo: seeding fake tasks: %v", err)
+	}
+
+	srv := ui.NewServer(cfg, store)
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("grain demo: listening on %s: %v", *addr, err)
+	}
+	url := "http://" + ln.Addr().String()
+	log.Printf("grain demo: serving fake tasks from a throwaway store at %s -- nothing here is real", url)
+	if *open {
+		openBrowser(url)
+	}
+	log.Fatal(http.Serve(ln, srv))
+}
+
+// seedDemo populates a store with a fixed set of fake tasks for `grain
+// demo`: one in each model.State a task can read, so a person working on
 // pkg/ui/static's frontend can see every card style, badge and button the
 // real states produce without an orchestrator, a sandbox, a Gemini key or
 // a real git repo behind any of it. It goes through ui.Client and
 // model.Store's own exported writes -- the same path a human clicking
-// through the UI or graind's reconcile loop would take -- rather than
+// through the UI or the daemon's reconcile loop would take -- rather than
 // inserting rows directly, so a demo task is exactly as well-formed as a
 // real one and nothing here can drift from what those paths actually
 // require.
-import (
-	"context"
-	"fmt"
-	"time"
-
-	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/ui"
-)
 
 func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	client := ui.NewClient(cfg, store)

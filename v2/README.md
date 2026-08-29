@@ -8,10 +8,10 @@ pkg/model/      the task model of ../docs/data-model.md
 pkg/model/sqlite/  opening the embedded SQLite database (modernc.org/sqlite,
                 pure Go, no cgo) — the only package that imports a driver.
                 Open is the one constructor there is: SQLite has no wire
-                protocol to dial, so a daemon, a UI and a CLI all writing
-                at once is just three processes calling Open on the same
-                file, serialised by SQLite's own file locking (see
-                "Concurrent writers" below)
+                protocol to dial, unlike the Dolt this replaced, and there
+                is only one writer to serialise now that the daemon is the
+                only thing that ever opens the store directly (see "The UI
+                and the CLI talk to the daemon over REST" below)
 pkg/dispatch/   which task takes which slot: what one cycle decides to
                 do with the store, with no side effect beyond that
                 decision. It does not loop itself -- cmd/grain's "daemon"
@@ -115,33 +115,40 @@ pkg/ui/         a JSON API, and the static frontend it serves, for
                 by hand (bwsalmon/agents#237). It reads and writes
                 model.Store: creating a task here IS filing it, with no
                 GitHub issue and no poll in between -- see "Input is a
-                model update, not a GitHub issue" below
+                model update, not a GitHub issue" below. Client is that
+                code directly, over a *model.Store the caller already
+                has open; HTTPClient (bwsalmon/agents#363) is the same
+                method surface spoken over HTTP instead, against
+                whichever pkg/ui.Server a "grain daemon" is serving --
+                see "The UI and the CLI talk to the daemon over REST"
+                below
 cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
-                combined what used to be four): with no subcommand, or
-                one of the task-management verbs, main.go is a CLI over
-                pkg/ui.Client -- the same model code the "ui" subcommand's
-                Server wraps in JSON and HTTP, driven from a terminal
-                instead: list/get/create/update a task, approve, attach
-                or detach a capability, comment (which also answers a
-                parked question), close ("delete" -- a task that ran is a
-                record of a dispatch that happened) or reopen one
-                (bwsalmon/agents#271). "daemon" (daemon.go, formerly
-                cmd/graind) runs pkg/orchestrator's RunCycle on a timer
-                against one real embedded SQLite store, until
-                SIGINT/SIGTERM, with an in-process gitproxy and a real
-                github.RESTClient wired in -- a UI and a CLI write the
-                very same store file, with no server process to run
-                (see "Concurrent writers" below). "ui" (ui.go, formerly
-                cmd/ui) serves pkg/ui.Server behind a local HTTP
-                listener, opening the system's default browser -- same
-                store flags as the CLI, and no GitHub credentials at
-                all. "mcpserver" (mcpserver.go, formerly cmd/mcpserver)
-                is the server as a standalone stdio mode -- -sandbox-root
-                for NewSandboxTools, or -kontur-vm (plus pkg/kontur,
-                above) for NewSSHSandboxTools against a real kontur-
-                managed VM -- what a running daemon (via pkg/agent/claude)
-                forks *this same binary* to get, rather than needing a
-                second one on disk
+                combined what used to be four, #363 folded a fifth --
+                the standalone "ui" subcommand -- into "daemon"): with no
+                subcommand, or one of the task-management verbs, main.go
+                is a CLI over pkg/ui.HTTPClient -- a REST client of
+                whichever "grain daemon" -server names, driven from a
+                terminal instead of a browser: list/get/create/update a
+                task, approve, attach or detach a capability, comment
+                (which also answers a parked question), close ("delete"
+                -- a task that ran is a record of a dispatch that
+                happened) or reopen one (bwsalmon/agents#271). "daemon"
+                (daemon.go, formerly cmd/graind) runs pkg/orchestrator's
+                RunCycle on a timer against one real embedded SQLite
+                store, until SIGINT/SIGTERM, with an in-process gitproxy,
+                a real github.RESTClient, and -- unless -ui-addr is
+                emptied out -- an in-process pkg/ui.Server over that same
+                store, all wired in. "mcpserver" (mcpserver.go, formerly
+                cmd/mcpserver) is the server as a standalone stdio mode
+                -- -sandbox-root for NewSandboxTools, or -kontur-vm (plus
+                pkg/kontur, above) for NewSSHSandboxTools against a real
+                kontur-managed VM -- what a running daemon (via
+                pkg/agent/claude) forks *this same binary* to get, rather
+                than needing a second one on disk. "demo" (demo.go,
+                formerly `grain ui -demo`) is a fifth, smaller mode: a
+                throwaway pkg/ui.Server over fake data and a temp-directory
+                store, for trying out the frontend with no daemon, no
+                store and no deployment behind it at all
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -320,11 +327,12 @@ and become grain's, which means grain has to render them. That is what
   take two — post a comment *and* re-apply the trigger label so the next
   poll would notice — and forgetting the second left the task parked
   forever.
-- `-data-dir` on both the CLI and the "ui" subcommand of `cmd/grain`,
-  pointed at the same store a running daemon already opened; see
-  "Concurrent writers" below, which stops being a caveat and becomes the
-  deployment -- SQLite's own file locking, not a server anyone has to
-  run, is what makes a daemon, a UI and a CLI all writing at once safe.
+- `-data-dir` and the `-store-addr` flag it briefly had on both the CLI
+  and the "ui" subcommand of `cmd/grain` — landed here as a multi-writer
+  deployment (a daemon, a UI and a CLI, each opening the store directly),
+  and replaced by a single writer again once bwsalmon/agents#363 turned
+  the CLI and the UI into REST clients of the daemon; see "The UI and the
+  CLI talk to the daemon over REST" below.
 - `Store` grew `ListTasks`, `States` and `ObserveField`. The last is
   `pkg/orchestrator`'s own `observeField` promoted: `Observe` REPLACEs the
   whole observation row, so changing one field means reading it first,
@@ -518,19 +526,21 @@ the pipeline version, with the state assertion naming what it stranded.
 This is the first of the three steps toward the Kubernetes-shaped model
 the design is converging on. The other two are not built: optimistic
 concurrency on `Store`'s mutators (`task` has no version column, and
-`PutTask` is last-write-wins — a real gap now, not a hypothetical one,
-since a daemon, a UI and a CLI are all normal, simultaneous writers
-rather than the rare case "Concurrent writers" below once had to argue
-for), and a real watch. Dolt would have made one nearly free — a commit
-hash as a `resourceVersion`, `dolt_diff` as a ready-made change feed with
-history — and bwsalmon/agents#366 traded that away along with the rest of
-the commit history (see "Grain no longer keeps a commit history" above):
-SQLite has nothing built in that plays the same role, so a watch here
-would mean a change table or similar, built from scratch rather than read
-off the substrate for free. Note the ordering regardless: a watch is a
-latency optimization over level-triggered reconciliation, never a
-replacement for it, so it is worth having only once the reconcilers it
-would wake are independent and safe to run concurrently.
+`PutTask` is last-write-wins — there is only one process holding the
+store open now ("The UI and the CLI talk to the daemon over REST",
+below), but that process still serves concurrent requests: the frontend
+and a CLI invocation racing each other on the same task is exactly the
+same last-write-wins hazard, one layer up), and a real watch. Dolt would
+have made one nearly free — a commit hash as a `resourceVersion`,
+`dolt_diff` as a ready-made change feed with history — and bwsalmon/agents#366
+traded that away along with the rest of the commit history (see "Grain no
+longer keeps a commit history" above): SQLite has nothing built in that
+plays the same role, so a watch here would mean a change table or
+similar, built from scratch rather than read off the substrate for free.
+Note the ordering regardless: a watch is a latency optimization over
+level-triggered reconciliation, never a replacement for it, so it is
+worth having only once the reconcilers it would wake are independent and
+safe to run concurrently.
 
 ## What this does not have yet
 
@@ -872,7 +882,8 @@ close the gap above, since nothing there is wired to run on its own yet.
 
 ## The UI
 
-`pkg/ui`/`cmd/grain`'s "ui" subcommand (bwsalmon/agents#237) is
+`pkg/ui`, served by `cmd/grain`'s "daemon" subcommand (bwsalmon/agents#237,
+folded in by #363 -- it used to be its own "ui" subcommand), is
 [`docs/data-model.md`'s "first-party UI"
 direction](../docs/data-model.md#direction-a-first-party-ui): create a
 task, approve a proposed one, attach or remove a capability, comment,
@@ -890,13 +901,18 @@ label-shaped copy.
 
 **No OAuth, and now nothing to authenticate to.** The direction document
 calls for GitHub OAuth plus `author_association` as the permission gate.
-The "ui" subcommand takes no GitHub credential at all any more — it
-takes `-as`, naming the principal it acts as, defaulting to the OS user.
-This is a
-single-operator tool run locally against a store that operator already
-reaches; a real permission gate is worth building the day this runs
-anywhere other than one person's own machine (bwsalmon/agents#237's
-follow-up), and it would gate store writes rather than API calls.
+Neither `pkg/ui.Server` nor `cmd/grain`'s own CLI takes a GitHub
+credential at all any more — the daemon that serves the UI/API takes
+`-as`, naming the single principal every task and comment created
+through it is attributed to (defaulting to the OS user), and every
+caller of that API — the browser frontend, the CLI, anything else
+reaching it — acts as that one principal. This is a single-operator tool,
+reached however an operator's network puts it in front of them —
+loopback, an SSH tunnel, Tailscale, IAP (bwsalmon/agents#363) — rather
+than authenticated per caller; a real permission gate is worth building
+the day this runs somewhere with more than one operator behind it
+(bwsalmon/agents#237's follow-up), and it would gate store writes rather
+than API calls.
 
 **Why a local web server, not Electron/Tauri/a native app.** `go build`
 already produces one dependency-free binary per OS `cmd/grain` runs on
@@ -907,26 +923,28 @@ no second toolchain (Node, Rust, Xcode) for this repo to carry. "Set up
 to run on iOS/Android in the future" is what shapes `pkg/ui` into an
 HTTP+JSON API in the first place rather than server-rendered pages: a
 future mobile client — native, or a thin webview shell — is just another
-caller of the same `/api/*` surface the "ui" subcommand's own frontend
+caller of the same `/api/*` surface the daemon's own embedded frontend
 (`pkg/ui/static/`, plain HTML/CSS/JS, no build step) already uses, with
-nothing about the server to rewrite.
+nothing about the server to rewrite — the same surface `pkg/ui.HTTPClient`
+gives `cmd/grain`'s own CLI (see "The UI and the CLI talk to the daemon
+over REST" below).
 
-**`-demo` (bwsalmon/agents#276) for trying out the frontend on its own.**
-`grain ui` normally needs a real store and a real deployment's tasks to
-look at anything. `-demo` opens a throwaway embedded SQLite store in a
+**`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
+#363) for trying out the frontend on its own.** A real `grain daemon`
+needs a real Gemini key, a real store, and a real deployment's tasks to
+look at anything. `grain demo` opens a throwaway embedded store in a
 fresh temp directory instead and seeds it with fake tasks, one in each
-`model.State` (`cmd/grain/demo.go`), through the same
-`ui.Client`/`model.Store` writes a human clicking through the UI would
-make — no fake `Store` standing in, matching the "real embedded SQLite,
-not a fake" discipline every test in this repo already holds to
+`model.State` (`cmd/grain/demo.go`), through the same `ui.Client`/
+`model.Store` writes a human clicking through the UI would make — no fake
+`Store` standing in, matching the "real embedded SQLite, not a fake"
+discipline every test in this repo already holds to
 (`pkg/ui/client_test.go`). That makes it a real server exercising the real
 frontend code, with fake data as the only difference from a real
 deployment — useful for checking a frontend change renders every state
-correctly without an orchestrator, a sandbox, a Gemini key, or a git repo
-anywhere behind it. `-data-dir` is rejected alongside it, since a
-throwaway store and a real one talking to the same flag would be a UI
-showing one deployment's fake tasks in some other deployment's data
-directory.
+correctly without an orchestrator, a sandbox, a Gemini key, a real store,
+or a git repo anywhere behind it. It takes no `-data-dir` of its own —
+there is no real store to point it at by mistake, only the throwaway one
+it creates and seeds itself.
 
 **Freshness, not a cache.** Every mutation in the frontend
 (`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
@@ -1024,13 +1042,10 @@ validation errors already use.
 `pkg/secrets.Store` (above, "no secret store in the model") was
 read-only until bwsalmon/agents#357: `Resolve` was the whole surface,
 since nothing except a dispatch resolving a capability's credential had
-any reason to touch it. A UI or a CLI running on the same host as the
-server is a different caller with a different need — an operator who
-wants to set a GitHub token or rotate a Gemini key without hand-editing
-files under `-data-dir/secrets` over SSH — and "same host" here is not a
-runtime check of anything, it's just what "-data-dir is a local
-filesystem path" already implies: pointing one at the server's own
-`-data-dir` only works from where that directory actually lives.
+any reason to touch it. A UI running alongside the server is a
+different caller with a different need — an operator who wants to set a
+GitHub token or rotate a Gemini key without hand-editing files under
+`-data-dir/secrets` over SSH.
 
 `Store.Set`, `DeleteKey`, `DeleteSecret` and `List` are the added
 surface. `List` reports `SecretInfo{Name, Keys}` for everything on
@@ -1042,11 +1057,17 @@ tightened onto `Resolve` too: it used to let a key contain `/` and
 resolve wherever that led, which nothing exercised on purpose but which
 writing a caller-supplied string to disk can no longer risk.
 
-`pkg/ui`'s `Config.Secrets` is nil unless the deployment says otherwise
-— `grain ui`'s `-server-data-dir` names the *server's* `-data-dir`, which
-is a different thing from `-data-dir` on `ui.go` itself (that one is the
-UI's own embedded SQLite task store -- see "Concurrent writers" above for
-why the two `-data-dir`s even mean different things).
+`pkg/ui`'s `Config.Secrets` is nil unless the deployment says otherwise.
+Before bwsalmon/agents#363, that meant naming the *server's* `-data-dir`
+from a second process — the standalone `grain ui`'s own `-server-data-dir`
+flag, only useful when that UI happened to run on the same host as the
+server it pointed at. Now that the UI only ever runs inside the daemon
+that owns the store (`cmd/grain/daemon.go`'s own `startUIServer`, "The UI
+and the CLI talk to the daemon over REST" below), it always has that
+directory to hand and wires it up unconditionally — there is no longer a
+cross-process case where it would not, and no flag to set. `grain demo`'s
+own throwaway UI is the one caller that still leaves it nil, on purpose:
+a fake store seeded with fake tasks has no real secrets to manage either.
 `GET /api/secrets` reports `{enabled, secrets}` either way, so the
 frontend's secrets pane can hide its controls behind a note rather than
 show ones that would only ever 404; `PUT`/`DELETE
@@ -1054,7 +1075,7 @@ show ones that would only ever 404; `PUT`/`DELETE
 set/delete-one-key/delete-the-whole-secret surface, each answering with
 the refreshed `{enabled, secrets}` the same way a mutating task route
 answers with the task. `grain secrets` (`cmd/grain/secrets.go`) is the
-CLI side, a fourth mode alongside `daemon`/`ui`/`mcpserver` rather than a
+CLI side, a mode of its own alongside `daemon`/`mcpserver` rather than a
 `runCLI` verb, since it has nothing to do with the task store and
 opening one for it would be pure overhead: `-data-dir` here means what
 `grain daemon`'s own `-data-dir` does (secrets live at
@@ -1062,58 +1083,75 @@ opening one for it would be pure overhead: `-data-dir` here means what
 and `set` takes its value from `-value-file` or, left unset, from
 stdin — deliberately never from an argv flag, which any other process
 on the same host could read back out of this one's own command line.
+Unlike the UI, it never goes through the daemon's own REST API: it edits
+the files directly, so it works even when no daemon is running.
 
-## Concurrent writers
+## The UI and the CLI talk to the daemon over REST
 
 Dolt permitted one writer when embedded, which suited a cron-driven
 controller and did not suit a controller plus a UI plus a human at a
-CLI. That became real the moment the CLI and the UI started writing the
-store instead of GitHub -- and the answer this section used to name was
-running a whole second process, a `dolt sql-server`, purely so there was
-somewhere for a second writer to dial in. bwsalmon/agents#366 made that
-machinery unnecessary rather than replacing it: SQLite has no wire
-protocol to serve in the first place. A daemon, a UI and a CLI now all
-just call `sqlite.Open` (`pkg/model/sqlite`) on the same file, and
-SQLite's own file locking is what serialises the writes -- WAL mode, so
-a reader is never blocked by the one writer holding the lock;
-`_txlock=immediate` and a five-second `busy_timeout`, so an overlapping
-writer waits its turn or fails outright rather than corrupting anything
-(`pkg/model/sqlite`'s own doc comment; "Locking, not merging" above).
-There is no `-store-addr`, `-store-database`, `-store-user` or
-`-store-password-file` flag anywhere in `cmd/grain` anymore, and nothing
-to run alongside the daemon: every mode just takes `-data-dir` and opens
-the file.
+CLI, each opening the store directly. That became real the moment the
+CLI and the UI started writing the store instead of GitHub ("Input is a
+model update, not a GitHub issue", above): for a while, the answer was a
+second writer *class* — `dolt.Connect` dialing a real Dolt SQL server
+instead of the embedded database, so a daemon, a UI and a CLI could all
+hold their own connection open at once, and later, once
+bwsalmon/agents#366 replaced Dolt with embedded SQLite, simply calling
+`sqlite.Open` (`pkg/model/sqlite`) on the same file directly: SQLite has
+no wire protocol to serve in the first place, so its own file locking —
+WAL mode, so a reader is never blocked by the one writer holding the
+lock; `_txlock=immediate` and a five-second `busy_timeout`, so an
+overlapping writer waits its turn or fails outright rather than
+corrupting anything (`pkg/model/sqlite`'s own doc comment; "Locking, not
+merging" above) — was enough to serialise a daemon, a UI and a CLI all
+writing the same file at once, no server process required.
 
-`-data-dir` means two different things depending on which command reads
-it, and a deployment has to get both right. `grain daemon`'s `-data-dir`
-is a *root*: it also holds `secrets/` and the sandbox roots, and nests
-the task store itself under `<data-dir>/store/`. `grain` (the CLI) and
-`grain ui`'s own `-data-dir` point *directly* at the store directory,
-with no nesting -- so a UI or a CLI colocated with a daemon has to be
-pointed at `<daemon's -data-dir>/store`, not at the daemon's `-data-dir`
-itself. `scripts/setup.sh`'s `write_systemd_units` is a real, working
-example of both conventions side by side: `grain-daemon.service` runs
-`grain daemon -data-dir "$GRAIN_DATA_DIR" ...`, while `grain-ui.service`
-runs `grain ui -data-dir "$GRAIN_DATA_DIR/store" ...` -- the very same
-SQLite file, addressed the two different ways each command expects it.
+bwsalmon/agents#363 removed the second writer *entirely* rather than
+scaling it. The daemon now serves `pkg/ui.Server` itself, in-process
+(`cmd/grain/daemon.go`'s own `startUIServer`, gated on `-ui-addr`), over
+the exact `*model.Store` `RunCycle` already has open — no second
+connection, and no separate store process needed just to let the two
+coexist. `cmd/grain`'s task CLI stopped opening the store at all: it is
+`pkg/ui.HTTPClient` now, a plain REST client of that same server (`-server`,
+default `http://127.0.0.1:8420`), the identical JSON API the browser
+frontend already speaks. The frontend and the CLI reach that one process
+however an operator's network puts it in front of them — a loopback
+port, an SSH tunnel, Tailscale, IAP — which is also the whole
+answer to "does the API need its own auth": it doesn't, because nothing
+downstream of the daemon's own store connection accepts one, and
+whatever can reach `-ui-addr` at all acts as the daemon's one configured
+principal (`-as`). `scripts/setup.sh` reflects this: one systemd unit
+(`grain-daemon.service`), one store, no separate store process to run
+alongside it.
+
+There is no `-store-addr` or equivalent anymore, either: SQLite has no
+server mode to dial in the first place (`pkg/model/sqlite`'s own doc
+comment), so `grain daemon`'s `-data-dir` always names a plain file on
+its own disk, and every mode that ever took a store flag — `grain
+daemon`, and, before #363, the standalone `grain ui` and the CLI itself
+— takes just that one, with no "embedded, or a server" distinction left
+to make.
 
 ## Deploying it
 
 `scripts/setup.sh` (bwsalmon/agents#355) is the first real answer to "how
 does this run anywhere" — this file's own opening line used to say
 nothing here was wired in yet, and now this is the one path that is. It
-runs `grain` directly on the target machine as `grain-daemon.service` and
-`grain-ui.service`, no controller VM involved: v2 has no host adapter yet
-(see "What this does not have yet" above), and its daemon already
+runs `grain` directly on the target machine as a single
+`grain-daemon.service`, no controller VM involved: v2 has no host adapter
+yet (see "What this does not have yet" above), and its daemon already
 defaults to `orchestrator.HostSandboxes` — plain host directories, not a
 VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
 not have either way yet). It builds with `make container-build`, so a
-working `docker` is the one thing it assumes about the host -- needed
-only for that build step now, not for anything at runtime: both services
-open the same SQLite store file directly, with no separate store process
-to run or wait for (`dolt sql-server` used to be exactly that; SQLite has
-no equivalent to run -- see "Concurrent writers" above). Safe to re-run: it is the installer and the
+working `docker` is the one thing it assumes about the host at build
+time; there used to be a second service (`grain-ui.service`) and, before
+bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt sql-server`
+container behind it, needed only because a daemon and a UI writing the
+same store used to mean two writers ("The UI and the CLI talk to the
+daemon over REST", above) — bwsalmon/agents#363 folded the UI into the
+daemon itself, so `docker` is no longer needed at runtime either, only to
+build. Safe to re-run: it is the installer and the
 updater both, seeding a secret or a config value only the first time and
 leaving anything already on disk alone every time after. `./setup.sh
 --help` lists every setting.
@@ -1145,27 +1183,27 @@ bootstrap for that gap, not a live-verified closing of it.
 half: the command a GitHub Action calls whenever a config repo's checked-
 in configuration changes. It reads one JSON file with up to two
 independent sections — `"settings"`, unmarshaled straight into
-`ui.UpdateSettingsRequest` and applied through the same
-`Client.UpdateSettings` `grain settings` already calls by hand, and
+`ui.UpdateSettingsRequest` and applied through `HTTPClient.UpdateSettings`
+against `-server`, the same running daemon `grain settings` itself talks
+to (bwsalmon/agents#363: there is no store flag here any more), and
 `"gcp"`, which re-runs the exact `pkg/gcpsetup.EnsureInfrastructure` logic
 `grain setup gcp` uses, so IAM drift (a binding removed by hand, a newly
 enabled gemini-key rollout that needs a grant it didn't before) gets
 repaired on every sync rather than only at install time. It never mints a
 new minter key on a `sync` run — that stays a deliberate,
 `grain setup gcp -mint-key` action. Reachability is the part this command
-does not solve: the store `"settings"` writes to is a file on the
-deployment's own local disk, with no server or network port in front of
-it to reach remotely (see "Concurrent writers", above), so a workflow
-needs either a self-hosted runner that *is* the deployment host (the
-simplest shape: the workflow step becomes `grain sync -config
-deploy/grain.json -data-dir /var/lib/grain/store`, no network hop at
-all) or an SSH step that runs `grain sync` on the deployment host
-directly. A `"gcp"`-only sync needs neither — just a GCP credential,
-the same Workload Identity Federation `templates/gcp/.github/workflows/
+does not solve: the daemon's UI/API is bound to loopback only by default
+(this section's own security note, above), so a workflow needs either a
+self-hosted runner that *is* the deployment host (the simplest shape: the
+workflow step becomes `grain sync -config deploy/grain.json`, `-server`'s
+own default already pointing at loopback, no network hop at all) or a
+tunnel of some kind — SSH, Tailscale, IAP — to wherever `-ui-addr` actually
+listens. A `"gcp"`-only sync needs neither — just a GCP credential, the
+same Workload Identity Federation `templates/gcp/.github/workflows/
 deploy.yml` already uses for v1 works here too, with no static key in the
 workflow. `cmd/grain/sync_test.go` covers both sections' validation and,
-for `"settings"`, a real embedded-store round trip including a second,
-no-op sync run.
+for `"settings"`, a real round trip against an `httptest.Server` wrapping
+an embedded store, including a second, no-op sync run.
 
 Neither command invokes an agent to walk an operator through a manual
 step — printing the exact command was judged enough for a first version;

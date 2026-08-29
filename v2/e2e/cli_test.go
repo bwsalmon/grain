@@ -149,6 +149,29 @@ func runCLI(t *testing.T, bin string, args ...string) string {
 	return stdout.String()
 }
 
+// runCLIStore runs the grain CLI binary against storeDir's embedded
+// store, reached over HTTP rather than opened directly -- bwsalmon/agents#363
+// turned the CLI into a REST client of the same pkg/ui.Server a real
+// `grain daemon` embeds, so a subprocess test driving it needs something
+// listening on the other end of -server. This opens the store, serves it
+// exactly the way daemon.go's own startUIServer does, runs the CLI
+// subprocess against that server, and tears both down again before
+// returning -- reusing withStore's own "take turns" discipline, since
+// embedded SQLite is what the test's own orchestrator.RunCycle calls
+// (driven directly in this process, not through this server) take turns
+// with.
+func runCLIStore(t *testing.T, bin, storeDir string, args ...string) string {
+	t.Helper()
+	var out string
+	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
+		cfg := ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.DefaultCapabilities()}
+		srv := httptest.NewServer(ui.NewServer(cfg, store))
+		defer srv.Close()
+		out = runCLI(t, bin, append([]string{"-server", srv.URL}, args...)...)
+	})
+	return out
+}
+
 // withStore opens the shared embedded SQLite store, hands it to fn, and
 // closes it again.
 //
@@ -218,8 +241,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	// writes the store directly, approved immediately so it is
 	// dispatchable the moment it is filed.
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir,
+	created := runCLIStore(t, bin, storeDir,
 		"-json",
 		"create",
 		"-title", "add a NOTES entry",
@@ -324,8 +346,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	// Step 5: confirm the loop closed the way an operator would actually
 	// see it -- by asking the CLI itself, in a fresh subprocess, not by
 	// reading the store from in here.
-	got := runCLI(t, bin,
-		"-data-dir", storeDir,
+	got := runCLIStore(t, bin, storeDir,
 		"-json",
 		"get", task.ID,
 	)
