@@ -291,6 +291,8 @@ func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	fs.BoolVar(&autoMerge, "auto-merge", false, "merge this task's pull request automatically once it reads clean")
 	var capabilities stringList
 	fs.Var(&capabilities, "capability", "capability ID to attach (repeatable)")
+	var reads stringList
+	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable)")
 	approve := fs.Bool("approve", false, "queue the task immediately instead of filing it as a proposal awaiting approval")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -298,7 +300,7 @@ func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, Base: *base,
-		AutoMerge: autoMerge, Capabilities: capabilities, Approved: *approve,
+		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
 	}
 
 	task, err := c.CreateTask(ctx, req)
@@ -317,6 +319,8 @@ func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	base := fs.String("base", "", "new base branch")
 	var autoMerge bool
 	fs.BoolVar(&autoMerge, "auto-merge", false, "whether the task auto-merges once clean")
+	var reads stringList
+	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable) -- replaces the whole set")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -343,6 +347,9 @@ func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 		case "auto-merge":
 			v := autoMerge
 			req.AutoMerge = &v
+		case "read":
+			v := []string(reads)
+			req.Reads = &v
 		}
 	})
 
@@ -624,6 +631,9 @@ func taskBlock(t ui.Task) string {
 	}
 	if t.Base != "" {
 		fmt.Fprintf(&b, "base:       %s\n", t.Base)
+	}
+	if len(t.Reads) > 0 {
+		fmt.Fprintf(&b, "reads:      %s\n", strings.Join(t.Reads, ", "))
 	}
 	fmt.Fprintf(&b, "auto-merge: %t\n", t.AutoMerge)
 	if len(t.Capabilities) > 0 {
