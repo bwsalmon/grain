@@ -9,19 +9,29 @@ const tasks = [
   { id: 3, state: "running", blocked: false },
 ];
 
+const noop = () => {};
+const baseProps = {
+  stateFilter: "all",
+  onSetFilter: noop,
+  onOpenSecrets: noop,
+  onOpenSettings: noop,
+  onOpenUpgrade: noop,
+  onOpenNewTask: noop,
+};
+
 describe("Sidebar", () => {
   it("shows the default target when config has one", () => {
-    render(<Sidebar config={{ defaultTarget: "owner/repo" }} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    render(<Sidebar {...baseProps} config={{ defaultTarget: "owner/repo" }} tasks={[]} />);
     expect(screen.getByText("owner/repo")).toBeInTheDocument();
   });
 
   it("falls back to the acting user when config has no default target", () => {
-    render(<Sidebar config={{ actor: "bwsalmon" }} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    render(<Sidebar {...baseProps} config={{ actor: "bwsalmon" }} tasks={[]} />);
     expect(screen.getByText("as bwsalmon")).toBeInTheDocument();
   });
 
   it("counts tasks per state and lists only states that are present", () => {
-    render(<Sidebar config={null} tasks={tasks} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
 
     expect(screen.getByRole("button", { name: /All issues 3/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Queued 2/ })).toBeInTheDocument();
@@ -30,19 +40,19 @@ describe("Sidebar", () => {
   });
 
   it("shows a blocked nav entry only when a task is blocked", () => {
-    render(<Sidebar config={null} tasks={tasks} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
     expect(screen.getByRole("button", { name: /Blocked 1/ })).toBeInTheDocument();
   });
 
   it("omits the blocked nav entry when nothing is blocked", () => {
-    render(<Sidebar config={null} tasks={[tasks[0]]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    render(<Sidebar {...baseProps} config={null} tasks={[tasks[0]]} />);
     expect(screen.queryByRole("button", { name: /Blocked/ })).not.toBeInTheDocument();
   });
 
   it("calls onSetFilter with the clicked state", async () => {
     const onSetFilter = vi.fn();
     const user = userEvent.setup();
-    render(<Sidebar config={null} tasks={tasks} stateFilter="all" onSetFilter={onSetFilter} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    render(<Sidebar {...baseProps} config={null} tasks={tasks} onSetFilter={onSetFilter} />);
 
     await user.click(screen.getByRole("button", { name: /Running 1/ }));
 
@@ -52,16 +62,29 @@ describe("Sidebar", () => {
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSecrets = vi.fn();
     const onOpenSettings = vi.fn();
+    const onOpenUpgrade = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
-    render(<Sidebar config={null} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={onOpenSecrets} onOpenSettings={onOpenSettings} onOpenNewTask={onOpenNewTask} />);
+    render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={[]}
+        onOpenSecrets={onOpenSecrets}
+        onOpenSettings={onOpenSettings}
+        onOpenUpgrade={onOpenUpgrade}
+        onOpenNewTask={onOpenNewTask}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Secrets" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Upgrade" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSecrets).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenUpgrade).toHaveBeenCalledTimes(1);
   });
 });
