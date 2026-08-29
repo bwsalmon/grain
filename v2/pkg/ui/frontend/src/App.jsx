@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import api from "./api.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
+import RepoList from "./components/RepoList.jsx";
 import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
@@ -25,6 +26,12 @@ export default function App() {
   const [config, setConfig] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [stateFilter, setStateFilter] = useState("all");
+  // view switches the main pane between the flat task list and the repo
+  // page; repoFilter is orthogonal to stateFilter and survives a trip
+  // through the repo page and back, since "which repo" and "which
+  // state" are two independent questions about the same task list.
+  const [view, setView] = useState("tasks");
+  const [repoFilter, setRepoFilter] = useState(null);
   const [error, setError] = useState(null);
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -92,6 +99,14 @@ export default function App() {
   const closeDetail = useCallback(() => {
     setOpenTaskId(null);
     setDetail(null);
+  }, []);
+
+  // openRepo is the repo page's row click: scope the task list to that
+  // repo and switch back to it, the same as clicking a repo chip
+  // anywhere else would.
+  const openRepo = useCallback((repo) => {
+    setRepoFilter(repo);
+    setView("tasks");
   }, []);
 
   // act runs a mutation, then re-fetches the task (and the list behind
@@ -171,10 +186,14 @@ export default function App() {
     };
   }, [openTaskId, refreshList]);
 
+  const scopedTasks = repoFilter ? tasks.filter((t) => t.repo === repoFilter) : tasks;
+
   return (
     <div className="app-shell">
       <Sidebar
         config={config}
+        view={view}
+        onSetView={setView}
         tasks={tasks}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
@@ -185,24 +204,36 @@ export default function App() {
         onOpenUpgrade={() => setShowUpgrade(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
-      <div className="main-column">
-        <TaskList
-          tasks={tasks}
-          stateFilter={stateFilter}
-          config={config}
-          onOpenTask={openTask}
-          selected={selected}
-          onToggleSelect={toggleSelect}
-          onSelectAll={setSelection}
-        />
-        <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
-      </div>
+      {view === "repos" ? (
+        <RepoList tasks={tasks} onOpenRepo={openRepo} />
+      ) : (
+        <div className="main-column">
+          {repoFilter !== null && (
+            <div className="repo-scope-bar">
+              <span className="chip dependency-chip">
+                Repo: {repoFilter}
+                <button type="button" className="chip-remove" title="Clear repo filter" onClick={() => setRepoFilter(null)}>×</button>
+              </span>
+            </div>
+          )}
+          <TaskList
+            tasks={scopedTasks}
+            stateFilter={stateFilter}
+            config={config}
+            onOpenTask={openTask}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+            onSelectAll={setSelection}
+          />
+          <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
+        </div>
+      )}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
         <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} />
       )}
       {showNewTask && (
-        <NewTaskOverlay tasks={tasks} config={config} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
+        <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
