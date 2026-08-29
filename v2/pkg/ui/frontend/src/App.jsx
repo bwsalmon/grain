@@ -235,7 +235,7 @@ export default function App() {
       {showNewTask && (
         <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
-      {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
+      {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
       {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
       {showSchedules && <ScheduledTasksOverlay onClose={() => setShowSchedules(false)} showError={showError} />}

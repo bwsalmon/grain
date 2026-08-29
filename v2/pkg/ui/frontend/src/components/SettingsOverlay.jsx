@@ -6,7 +6,7 @@ function parseCommaList(value) {
   return value.split(",").map((item) => item.trim()).filter((item) => item !== "");
 }
 
-export default function SettingsOverlay({ onClose, showError }) {
+export default function SettingsOverlay({ config, onClose, showError }) {
   const [settings, setSettings] = useState(null);
 
   useEffect(() => {
@@ -69,6 +69,20 @@ export default function SettingsOverlay({ onClose, showError }) {
     }
   };
 
+  // rebootHost is deliberately its own confirm/try, separate from
+  // submit's settings form: it is not a settings field, and unlike a
+  // failed settings save there is no "current" state to fall back on
+  // showing afterward -- a successful call cuts this same connection
+  // along with everything else on the machine.
+  const rebootHost = async () => {
+    if (!confirm("Reboot the host machine? Every task currently running is interrupted, and this UI will be unreachable until the machine comes back up.")) return;
+    try {
+      await api("/api/host/reboot", { method: "POST" });
+    } catch (err) {
+      showError(err);
+    }
+  };
+
   if (settings === null) return null;
 
   return (
@@ -113,6 +127,13 @@ export default function SettingsOverlay({ onClose, showError }) {
           <button type="submit" className="primary">Save</button>
         </div>
       </form>
+      {config && config.rebootEnabled && (
+        <fieldset>
+          <legend>Danger zone</legend>
+          <p className="hint">Reboots the machine grain itself is running on.</p>
+          <button type="button" className="danger secondary" onClick={rebootHost}>Reboot host</button>
+        </fieldset>
+      )}
     </Overlay>
   );
 }

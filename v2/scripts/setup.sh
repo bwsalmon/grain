@@ -30,11 +30,12 @@
 #      shell
 #   4. creates an unprivileged system user to run it as, gives it
 #      ownership of $GRAIN_SRC_DIR and membership in the docker group,
-#      and grants it a single, narrow NOPASSWD sudo rule -- exactly
-#      enough, and no more, for the UI's own Upgrade button
-#      (bwsalmon/agents#396, v2/pkg/upgrade) to check out a different
-#      branch, rebuild, install, and restart grain-daemon.service later
-#      with no further privilege of its own
+#      and grants it two narrow NOPASSWD sudo rules -- exactly enough,
+#      and no more, for the UI's own reboot host button
+#      (bwsalmon/agents#395) to reboot the machine, and for its Upgrade
+#      button (bwsalmon/agents#396, v2/pkg/upgrade) to check out a
+#      different branch, rebuild, install, and restart
+#      grain-daemon.service later, with no further privilege of its own
 #   5. lays out the rest of $GRAIN_DATA_DIR (secrets, the sandbox root,
 #      the embedded SQLite store) and seeds secrets from environment
 #      variables -- only if they are not already there, so a second run
@@ -178,7 +179,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-for cmd in git docker systemctl install useradd; do
+for cmd in git docker systemctl install useradd visudo; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
     exit 1
@@ -243,6 +244,25 @@ ensure_user() {
   fi
 }
 
+# --- 5. sudo to reboot the machine, for the UI's reboot button ----------
+#
+# grant_reboot_sudo lets the UI's "reboot host" button (v2/pkg/ui/host.go,
+# bwsalmon/agents#395) actually reboot the machine: grain-daemon.service
+# runs as the unprivileged $GRAIN_USER (ensure_user, above), which cannot
+# reboot anything on its own. The drop-in grants exactly one command
+# line, matched verbatim by sudoers -- never a blanket NOPASSWD -- the
+# same shape ../../provision/controller.sh already uses for v1's own
+# self-repair sudoers file, and the same command rebootHost
+# (cmd/grain/daemon.go) runs.
+grant_reboot_sudo() {
+  log "Granting $GRAIN_USER passwordless sudo to reboot this machine"
+  cat > /etc/sudoers.d/grain-daemon-reboot <<SUDOERS
+${GRAIN_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+SUDOERS
+  chmod 0440 /etc/sudoers.d/grain-daemon-reboot
+  visudo -cf /etc/sudoers.d/grain-daemon-reboot
+}
+
 # ensure_self_upgrade gives $GRAIN_USER everything the UI's own Upgrade
 # button (bwsalmon/agents#396) needs and nothing beyond it: ownership of
 # its own checkout (so it can fetch/checkout/build there), membership in
@@ -250,9 +270,8 @@ ensure_user() {
 # and one exact, NOPASSWD sudoers line to restart its own service --
 # never a wildcard, matching provision/controller.sh's own "software
 # gate, not infra gate" self-repair grant. It cannot restart anything
-# else, and it cannot reboot the host; "restart the host if needed" from
-# that issue is satisfied by bringing grain-daemon.service back up with
-# the binary this same run just built, not by an actual reboot.
+# else; rebooting the host outright is grant_reboot_sudo's separate,
+# narrower grant above.
 #
 # Run after ensure_user (the account has to exist) and again on every
 # re-run: chown -R is cheap against an already-correctly-owned tree, and
@@ -272,7 +291,7 @@ SUDOERS
   visudo -cf /etc/sudoers.d/grain-daemon-upgrade
 }
 
-# --- 5. data directory and secrets --------------------------------------
+# --- 6. data directory and secrets --------------------------------------
 
 seed_secret() {
   # Writes $2 to file $1 only if it is missing or empty, and only if a
@@ -534,6 +553,7 @@ main() {
   sync_repo
   build_and_install
   ensure_user
+  grant_reboot_sudo
   ensure_self_upgrade
   setup_data_dir
   reformat_store_if_schema_changed

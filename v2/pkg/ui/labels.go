@@ -21,6 +21,8 @@
 package ui
 
 import (
+	"context"
+
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/upgrade"
@@ -88,6 +90,14 @@ type Config struct {
 	// readable back through here -- only Set, DeleteKey, DeleteSecret and
 	// List (which reports names and key names, never values).
 	Secrets *secrets.Store
+	// Reboot, when set, is what the UI's "reboot host" button
+	// (bwsalmon/agents#395) calls to reboot the machine this deployment's
+	// daemon is running on. nil means handleRebootHost reports the action
+	// unavailable rather than erroring on every call -- the same
+	// nil-means-unavailable contract Secrets already gives the secrets
+	// pane, and the right default for `grain demo`'s throwaway UI, which
+	// has no real machine behind it worth rebooting.
+	Reboot func(ctx context.Context) error
 	// Upgrader is set only when this deployment was told where its own
 	// git checkout and build/install/restart mechanics live
 	// (bwsalmon/agents#396, cmd/grain/daemon.go's -upgrade-src-dir) --
