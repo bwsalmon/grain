@@ -101,8 +101,7 @@ func TestCLICreatesTaskWithAutoMergeAndSyncMergesItWithNoHuman(t *testing.T) {
 	// (pkg/orchestrator/sync.go's isQueueMember), rather than a store row
 	// built with AutoMerge already true.
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir,
+	created := runCLIStore(t, bin, storeDir,
 		"-json",
 		"create",
 		"-title", "add a NOTES entry",
@@ -209,8 +208,7 @@ func TestCLICreatesTaskWithAutoMergeAndSyncMergesItWithNoHuman(t *testing.T) {
 
 	// Step 5: confirm the loop closed the way an operator would actually
 	// see it -- by asking the CLI itself, in a fresh subprocess.
-	got := runCLI(t, bin,
-		"-data-dir", storeDir,
+	got := runCLIStore(t, bin, storeDir,
 		"-json",
 		"get", task.ID,
 	)

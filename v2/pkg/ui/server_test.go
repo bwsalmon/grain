@@ -152,6 +152,37 @@ func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
 	}
 }
 
+// TestUpdateRouteEditsFields is handleUpdateTask's own route test --
+// PATCH /api/tasks/{id} exists so the CLI's `grain update` (cmdUpdate)
+// has an endpoint to call now that it is an HTTPClient rather than a
+// direct Client caller; client_test.go's own TestUpdateTask* already
+// cover every field-level rule, so this only has to prove the route
+// itself is wired to Client.UpdateTask correctly.
+func TestUpdateRouteEditsFields(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it"}`)
+	id := decode[ui.Task](t, rec).ID
+
+	rec = do(t, srv, http.MethodPatch, "/api/tasks/"+id,
+		`{"title":"fix it for real","base":"release","autoMerge":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	task := decode[ui.Task](t, rec)
+	if task.Title != "fix it for real" || task.Base != "release" || !task.AutoMerge {
+		t.Fatalf("task after update = %+v, want the three fields changed", task)
+	}
+}
+
+func TestUpdateRouteUnknownTaskIs404(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPatch, "/api/tasks/does-not-exist", `{"title":"x"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}
+
 func TestSubmitRouteSetsAutoMerge(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -215,11 +246,11 @@ func TestConfigEndpointReportsActorAndCapabilities(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	cfg := decode[struct {
-		Actor        model.Principal `json:"actor"`
+		Actor        string          `json:"actor"`
 		Capabilities []ui.Capability `json:"capabilities"`
 	}](t, rec)
 
-	if cfg.Actor.ID != "alice" {
+	if cfg.Actor != "alice" {
 		t.Fatalf("actor = %+v, want the configured one", cfg.Actor)
 	}
 	if len(cfg.Capabilities) != len(ui.DefaultCapabilities()) {

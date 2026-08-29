@@ -8,14 +8,15 @@ import (
 )
 
 // errSecretsUnavailable is what every secrets handler reports when
-// Config.Secrets is nil -- this UI was not told where the server's own
-// secrets directory lives, which is the normal case for a UI running on
-// a different host from the server (bwsalmon/agents#357). Mapped to 404:
-// there is no secrets resource here to act on, the same as any other
-// name nothing exists behind.
+// Config.Secrets is nil -- this Server was not told where a secrets
+// directory lives, which is the normal case for `grain demo`'s throwaway
+// UI (no real secrets directory to name) but never for `grain daemon`'s
+// own in-process UI, which always has its own -data-dir/secrets to point
+// at (bwsalmon/agents#357, #363). Mapped to 404: there is no secrets
+// resource here to act on, the same as any other name nothing exists
+// behind.
 var errSecretsUnavailable = errors.New(
-	"secrets are not available: this UI was not started with a local secrets directory " +
-		"to write to -- see -server-data-dir")
+	"secrets are not available: this UI has no local secrets directory to write to")
 
 // secretsResponse is GET /api/secrets' whole body, and what every
 // mutation below re-fetches and returns afterward, the same

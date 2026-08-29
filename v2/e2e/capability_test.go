@@ -151,8 +151,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	// registry that actually resolves and materializes it below is this
 	// test's own, never the real one a deployment would wire up for it.
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir,
+	created := runCLIStore(t, bin, storeDir,
 		"-json",
 		"create",
 		"-title", "add a NOTES entry",
@@ -169,7 +168,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	}
 
 	const capabilityID = "self-debug"
-	attached := runCLI(t, bin, "-data-dir", storeDir, "-json", "capability", task.ID, capabilityID, "attach")
+	attached := runCLIStore(t, bin, storeDir, "-json", "capability", task.ID, capabilityID, "attach")
 	var afterAttach ui.Task
 	if err := json.Unmarshal([]byte(attached), &afterAttach); err != nil {
 		t.Fatalf("parsing grain capability attach -json output: %v\n%s", err, attached)

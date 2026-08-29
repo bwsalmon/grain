@@ -107,8 +107,8 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 	}
 
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir, "-json", "create",
+	created := runCLIStore(t, bin, storeDir,
+		"-json", "create",
 		"-title", "needs a decision", "-body", "should this touch the public API or stay internal?",
 		"-repo", owner+"/"+repoName, "-approve",
 	)
@@ -142,8 +142,8 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 	// a direct store.Observe -- ui.Client.AddComment's own doc comment is
 	// what this proves: replying is what clears PendingQuestionCommentID,
 	// with no separate "re-trigger" step needed.
-	replied := runCLI(t, bin,
-		"-data-dir", storeDir, "-json", "comment", task.ID,
+	replied := runCLIStore(t, bin, storeDir,
+		"-json", "comment", task.ID,
 		"stay", "internal", "for", "now",
 	)
 	var repliedTask ui.Task
@@ -211,7 +211,7 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 
 	// The reply itself must be readable back through the CLI too, not
 	// just have had the right side effect on state.
-	got := runCLI(t, bin, "-data-dir", storeDir, "-json", "get", task.ID)
+	got := runCLIStore(t, bin, storeDir, "-json", "get", task.ID)
 	var detail ui.TaskDetail
 	if err := json.Unmarshal([]byte(got), &detail); err != nil {
 		t.Fatalf("parsing grain get -json output: %v\n%s", err, got)
@@ -253,8 +253,8 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 	}
 
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir, "-json", "create",
+	created := runCLIStore(t, bin, storeDir,
+		"-json", "create",
 		"-title", "close me then bring me back", "-body", "...",
 		"-repo", owner+"/"+repoName, "-approve",
 	)
@@ -265,7 +265,7 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 
 	// Step 1: close the task before anything ever dispatches it -- a
 	// change of mind, not a run that finished.
-	closed := runCLI(t, bin, "-data-dir", storeDir, "-json", "close", task.ID)
+	closed := runCLIStore(t, bin, storeDir, "-json", "close", task.ID)
 	var closedTask ui.Task
 	if err := json.Unmarshal([]byte(closed), &closedTask); err != nil {
 		t.Fatalf("parsing grain close -json output: %v\n%s", err, closed)
@@ -300,7 +300,7 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 	// ClosedAt (pkg/ui/client.go's own setClosed), so this task -- closed
 	// before it ever completed -- returns to exactly queued, per
 	// model.StateOf's own precedence, ready for a real dispatch.
-	reopened := runCLI(t, bin, "-data-dir", storeDir, "-json", "reopen", task.ID)
+	reopened := runCLIStore(t, bin, storeDir, "-json", "reopen", task.ID)
 	var reopenedTask ui.Task
 	if err := json.Unmarshal([]byte(reopened), &reopenedTask); err != nil {
 		t.Fatalf("parsing grain reopen -json output: %v\n%s", err, reopened)
@@ -447,13 +447,13 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 	// Task A: attached through the real CLI verb, left attached, and
 	// actually dispatched -- the capability must be materialized once and
 	// revoked once by the time its run finishes.
-	createdA := runCLI(t, bin, "-data-dir", storeDir, "-json", "create",
+	createdA := runCLIStore(t, bin, storeDir, "-json", "create",
 		"-title", "uses a capability", "-body", "...", "-repo", owner+"/"+repoName, "-approve")
 	var taskA ui.Task
 	if err := json.Unmarshal([]byte(createdA), &taskA); err != nil {
 		t.Fatalf("parsing grain create -json output: %v\n%s", err, createdA)
 	}
-	attached := runCLI(t, bin, "-data-dir", storeDir, "-json", "capability", taskA.ID, "gemini-key", "attach")
+	attached := runCLIStore(t, bin, storeDir, "-json", "capability", taskA.ID, "gemini-key", "attach")
 	var attachedTask ui.Task
 	if err := json.Unmarshal([]byte(attached), &attachedTask); err != nil {
 		t.Fatalf("parsing grain capability attach -json output: %v\n%s", err, attached)
@@ -488,14 +488,14 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 	// SetCapability's own doc comment says detaching is what a second
 	// grants write is for, and the point here is that a detached grant
 	// leaves no trace on the run at all, not even a Materialize call.
-	createdB := runCLI(t, bin, "-data-dir", storeDir, "-json", "create",
+	createdB := runCLIStore(t, bin, storeDir, "-json", "create",
 		"-title", "never actually uses a capability", "-body", "...", "-repo", owner+"/"+repoName, "-approve")
 	var taskB ui.Task
 	if err := json.Unmarshal([]byte(createdB), &taskB); err != nil {
 		t.Fatalf("parsing grain create -json output: %v\n%s", err, createdB)
 	}
-	runCLI(t, bin, "-data-dir", storeDir, "-json", "capability", taskB.ID, "gemini-key", "attach")
-	detached := runCLI(t, bin, "-data-dir", storeDir, "-json", "capability", taskB.ID, "gemini-key", "detach")
+	runCLIStore(t, bin, storeDir, "-json", "capability", taskB.ID, "gemini-key", "attach")
+	detached := runCLIStore(t, bin, storeDir, "-json", "capability", taskB.ID, "gemini-key", "detach")
 	var detachedTask ui.Task
 	if err := json.Unmarshal([]byte(detached), &detachedTask); err != nil {
 		t.Fatalf("parsing grain capability detach -json output: %v\n%s", err, detached)
@@ -580,7 +580,7 @@ func TestCLIUpdateChangesBaseAndAutoMergeBeforeDispatchAndBothTakeEffect(t *test
 	}
 
 	storeDir := t.TempDir()
-	created := runCLI(t, bin, "-data-dir", storeDir, "-json", "create",
+	created := runCLIStore(t, bin, storeDir, "-json", "create",
 		"-title", "add a NOTES entry on release", "-body", "...", "-repo", owner+"/"+repoName, "-approve")
 	var task ui.Task
 	if err := json.Unmarshal([]byte(created), &task); err != nil {
@@ -592,7 +592,7 @@ func TestCLIUpdateChangesBaseAndAutoMergeBeforeDispatchAndBothTakeEffect(t *test
 
 	// The verb this test exists for: change both fields on an
 	// already-queued, not-yet-dispatched task.
-	updated := runCLI(t, bin, "-data-dir", storeDir, "-json", "update", "-base", "release", "-auto-merge", task.ID)
+	updated := runCLIStore(t, bin, storeDir, "-json", "update", "-base", "release", "-auto-merge", task.ID)
 	var updatedTask ui.Task
 	if err := json.Unmarshal([]byte(updated), &updatedTask); err != nil {
 		t.Fatalf("parsing grain update -json output: %v\n%s", err, updated)

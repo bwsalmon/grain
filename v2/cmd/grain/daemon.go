@@ -1,7 +1,19 @@
 // daemon.go implements `grain daemon`, formerly its own cmd/graind
 // binary before bwsalmon/agents#313 combined every mode into one: it
 // runs pkg/orchestrator's RunCycle in the background on a timer, until
-// SIGINT/SIGTERM, against one real embedded SQLite store.
+// SIGINT/SIGTERM, against one real embedded SQLite store, and -- unless
+// -ui-addr is emptied out -- also serves pkg/ui's JSON API and static
+// frontend directly over that same store (bwsalmon/agents#363). That
+// used to be a separate "ui" subcommand (formerly its own cmd/ui binary),
+// opening the store a second time -- SQLite's own file locking is what
+// makes a daemon and a UI both writing that same file at once safe
+// (pkg/model/sqlite's own doc comment). Folding UI serving into the same
+// process this dispatch loop already runs in removes the need for a
+// second process entirely: there is one process, one store connection,
+// one thing to run behind Tailscale or IAP (the issue's own "so the
+// server ui/api does not need auth on its own"), and cmd/grain's own
+// task CLI is a REST client of the API this serves (main.go's own doc
+// comment) rather than a second direct store writer.
 //
 // bwsalmon/agents#254 asked for exactly this, with one simplification: by
 // default, sandboxing is still local -- the MCP server's sandbox tools
@@ -27,8 +39,8 @@
 // time a deployment's store has none, and reads them back out of it on
 // every start after that, so a UI or a CLI editing model.Config changes
 // what the next restart runs with. What stays flags-only either has to
-// be known before there is a store to read it from (-data-dir, -store-*)
-// or names secret material rather than being configuration itself
+// be known before there is a store to read it from (-data-dir) or names
+// secret material rather than being configuration itself
 // (-gemini-api-key-file, -kontur-ssh-key) -- bwsalmon/agents#320's own
 // "but not the secrets."
 package main
@@ -42,8 +54,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +75,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
+	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
 // stringSliceFlag collects every occurrence of a repeatable flag, in
@@ -78,16 +93,21 @@ func (s *stringSliceFlag) Set(v string) error {
 
 func daemon(args []string) {
 	// seedOnly marks a flag loadConfig only consults the first time this
-	// -data-dir has ever seen a daemon: it seeds grain_config,
-	// and every start after that reads the stored value back instead,
-	// silently ignoring whatever this flag says -- see loadConfig's own
-	// doc comment for why.
+	// -data-dir has ever seen a daemon: it seeds grain_config, and every
+	// start after that reads the stored value back instead, silently
+	// ignoring whatever this flag says -- see loadConfig's own doc
+	// comment for why.
 	const seedOnly = " (bwsalmon/agents#320: seeds the stored configuration on first use; ignored once one exists -- see loadConfig)"
 
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
 	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills"+seedOnly)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
+
+	uiAddr := fs.String("ui-addr", "127.0.0.1:8420", "address to serve the UI/API on, in-process, over this same store -- empty disables it")
+	uiOpen := fs.Bool("ui-open", false, "open the UI in the system's default browser once it's listening")
+	actor := fs.String("as", "", "principal the UI/API attributes tasks and comments it creates to (defaults to the OS user)")
+	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task created through the UI/API with no repo of its own targets")
 
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
@@ -162,6 +182,7 @@ func daemon(args []string) {
 
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
+		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -178,6 +199,16 @@ type config struct {
 	dataDir      string
 	slots        []string
 	pollInterval time.Duration
+
+	// uiAddr, uiOpen, actor and defaultTargetRepo configure the in-process
+	// pkg/ui.Server this daemon serves alongside RunCycle (bwsalmon/agents#363);
+	// uiAddr empty disables it. actor and defaultTargetRepo build the same
+	// ui.Config the old standalone "ui" subcommand's -as/-default-target-repo
+	// flags did.
+	uiAddr            string
+	uiOpen            bool
+	actor             string
+	defaultTargetRepo string
 
 	geminiAPIKeyFile string
 	geminiModel      string
@@ -283,6 +314,14 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("starting git proxy: %w", err)
 	}
 	defer stopProxy(context.Background())
+
+	if cfg.uiAddr != "" {
+		stopUI, err := startUIServer(cfg.uiAddr, cfg.actor, cfg.defaultTargetRepo, cfg.dataDir, store, cfg.uiOpen)
+		if err != nil {
+			return fmt.Errorf("starting the UI/API server: %w", err)
+		}
+		defer stopUI(context.Background())
+	}
 
 	for _, slot := range cfg.slots {
 		// Configuring git credentials is a one-time, per-slot setup step,
@@ -441,10 +480,10 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 // for graceful in-flight reloading, so run() does not attempt it.
 //
 // Only the fields with no bearing on reaching the store in the first
-// place move through here: -data-dir, the -store-* family and
-// -gemini-api-key-file (a secret, not configuration -- bwsalmon/
-// agents#320's own "but not the secrets") stay flags-only, read by run()
-// before loadConfig has a store to call.
+// place move through here: -data-dir and -gemini-api-key-file (a
+// secret, not configuration -- bwsalmon/agents#320's own "but not the
+// secrets") stay flags-only, read by run() before loadConfig has a store
+// to call.
 func loadConfig(ctx context.Context, store *model.Store, flagCfg config) (config, error) {
 	stored, err := store.GetConfig(ctx)
 	if err != nil {
@@ -580,6 +619,75 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 		}
 	}()
 	return "http://" + ln.Addr().String(), srv.Shutdown, nil
+}
+
+// startUIServer serves pkg/ui.Server -- the JSON API plus the static
+// frontend -- on addr, over the same store RunCycle dispatches against,
+// returning a shutdown func the same shape startGitProxy's own is.
+// Running it in-process rather than as a separate "ui" binary/service is
+// exactly what bwsalmon/agents#363 asked for: one store connection, no
+// second process needed just to let a daemon and a UI coexist (see this
+// file's own doc comment).
+//
+// uiCfg.Secrets always points at this same process's own secrets
+// directory (dataDir/secrets, the exact root run() hands orchestrator.Deps'
+// own Credentials, above): bwsalmon/agents#357 added write-only secrets
+// access for a UI colocated with the server, gated behind a
+// -server-data-dir flag on the old standalone "ui" subcommand naming the
+// server's own -data-dir from a second process. Now that the UI only
+// ever runs inside the daemon that owns the store (the old standalone
+// mode is gone -- see this file's own doc comment), it always has that
+// directory to hand; there is no longer a cross-process case where it
+// would not.
+func startUIServer(addr, actor, defaultTargetRepo, dataDir string, store *model.Store, open bool) (stop func(context.Context) error, err error) {
+	uiCfg := ui.Config{
+		Actor:        ui.DefaultActor(actorID(actor)),
+		Capabilities: ui.DefaultCapabilities(),
+		Secrets:      secrets.New(filepath.Join(dataDir, "secrets")),
+	}
+	if defaultTargetRepo != "" {
+		repo, err := model.ParseRepo(defaultTargetRepo)
+		if err != nil {
+			return nil, fmt.Errorf("-default-target-repo: %w", err)
+		}
+		uiCfg.DefaultTarget = &repo
+	}
+	srv := ui.NewServer(uiCfg, store)
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listening on %s: %w", addr, err)
+	}
+	url := "http://" + ln.Addr().String()
+	log.Printf("grain daemon: serving the UI/API on %s as %s", url, uiCfg.Actor.ID)
+	if open {
+		openBrowser(url)
+	}
+	httpSrv := &http.Server{Handler: srv}
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("grain daemon: UI/API server: %v", err)
+		}
+	}()
+	return httpSrv.Shutdown, nil
+}
+
+// openBrowser best-effort launches url in the system's default browser --
+// failing to do so (headless box, unknown OS) is never fatal, since the
+// server is up and the URL is printed regardless.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	default:
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("grain: opening browser: %v", err)
+	}
 }
 
 func readTrimmedFile(path string) (string, error) {

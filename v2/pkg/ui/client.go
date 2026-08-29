@@ -321,17 +321,17 @@ func parseReads(repos []string) ([]model.RepoRef, error) {
 // the store has a real column for it now rather than an optional
 // directive line that could simply be absent.
 type UpdateTaskRequest struct {
-	Title       *string
-	Description *string
-	Repo        *string
-	Base        *string
-	AutoMerge   *bool
+	Title       *string `json:"title,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Repo        *string `json:"repo,omitempty"`
+	Base        *string `json:"base,omitempty"`
+	AutoMerge   *bool   `json:"autoMerge,omitempty"`
 	// Reads, given, replaces the whole set of read-only repos rather than
 	// adding to it -- there is no per-entry attach/detach endpoint for
 	// Reads the way SetCapability and SetDependency give Grants and
 	// Links, since a read-only repo grants nothing and so has no toggle
 	// worth exposing on its own. A non-nil empty slice clears the set.
-	Reads *[]string
+	Reads *[]string `json:"reads,omitempty"`
 }
 
 // UpdateTask edits a task's fields. Unlike the issue-backed version, this

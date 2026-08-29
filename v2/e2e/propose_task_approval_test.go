@@ -216,7 +216,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 
 	// Phase 2: approve it through the real CLI binary, not a direct store
 	// write -- storeDir is untouched by anything else while this runs.
-	approved := runCLI(t, bin, "-data-dir", storeDir, "-json", "approve", proposalID)
+	approved := runCLIStore(t, bin, storeDir, "-json", "approve", proposalID)
 	var approvedTask ui.Task
 	if err := json.Unmarshal([]byte(approved), &approvedTask); err != nil {
 		t.Fatalf("parsing grain approve -json output: %v\n%s", err, approved)
