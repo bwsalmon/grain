@@ -368,16 +368,59 @@ main { padding: 0 0 2.5rem; }
   line-height: 1;
   padding: 0;
 }
-.dependency-add { display: flex; gap: 0.4rem; padding: 0.4rem 0; align-items: center; }
-.dependency-add input {
-  flex: 1;
+.task-picker { position: relative; margin-top: 0.4rem; }
+.task-picker input {
+  display: block;
+  width: 100%;
   font: inherit;
-  padding: 0.3rem 0.5rem;
-  border: 1px solid var(--border-strong);
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--outline-variant);
   border-radius: 6px;
   background: var(--surface);
   color: inherit;
 }
+.task-picker input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.task-picker-results {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0.25rem 0;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--outline-variant);
+  border-radius: 8px;
+  box-shadow: var(--elevation-2);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.task-picker-results li {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+  align-items: baseline;
+}
+.task-picker-results li:hover, .task-picker-results li.active { background: var(--surface-container-high); }
+.task-picker-id {
+  color: var(--on-surface-variant);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+.task-picker-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-picker-empty { color: var(--on-surface-variant); cursor: default; }
+.task-picker-empty:hover { background: none; }
 
 .empty { color: var(--text-tertiary); padding: 1.5rem 1.75rem; }
 .hidden { display: none !important; }

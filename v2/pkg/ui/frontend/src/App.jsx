@@ -190,10 +190,10 @@ export default function App() {
       </div>
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
-        <DetailOverlay task={detail} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} />
+        <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} />
       )}
       {showNewTask && (
-        <NewTaskOverlay config={config} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
+        <NewTaskOverlay tasks={tasks} config={config} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}

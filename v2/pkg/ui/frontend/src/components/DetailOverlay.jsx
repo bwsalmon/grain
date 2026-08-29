@@ -2,12 +2,13 @@ import { useRef } from "react";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
 import Overlay from "./Overlay.jsx";
+import TaskPicker from "./TaskPicker.jsx";
 
 // The panel splits like Plane's own issue peek: title, description and
 // the conversation in a main column, everything about the task's current
 // state and its declared shape (repo, capabilities, dependencies) in a
 // narrow property column beside it.
-export default function DetailOverlay({ task: t, config, onClose, onOpenTask, act }) {
+export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act }) {
   return (
     <Overlay onClose={onClose} className="panel-detail">
       <div className="detail-layout">
@@ -44,7 +45,7 @@ export default function DetailOverlay({ task: t, config, onClose, onOpenTask, ac
           <Actions t={t} act={act} />
           <Declared t={t} />
           <CapabilityToggles t={t} config={config} act={act} />
-          <Dependencies t={t} act={act} onOpenTask={onOpenTask} />
+          <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
         </div>
       </div>
     </Overlay>
@@ -148,19 +149,14 @@ function CapabilityToggles({ t, config, act }) {
 // about, together: what a task has declared it depends on (chips,
 // removable), which of those are still open (the "blocked" styling on a
 // chip), and a way to add another -- attach/detach through /depends-on.
-function Dependencies({ t, act, onOpenTask }) {
-  const inputRef = useRef(null);
+function Dependencies({ t, tasks, act, onOpenTask }) {
   const dependsOn = t.dependsOn || [];
   const blockedBy = new Set(t.blockedBy || []);
 
-  const add = () => {
-    const id = inputRef.current.value.trim();
-    if (!id) return;
-    act(() => api(`/api/tasks/${t.id}/depends-on`, {
-      method: "POST",
-      body: JSON.stringify({ id, attach: true }),
-    }), t.id).then(() => { inputRef.current.value = ""; });
-  };
+  const add = (picked) => act(() => api(`/api/tasks/${t.id}/depends-on`, {
+    method: "POST",
+    body: JSON.stringify({ id: picked.id, attach: true }),
+  }), t.id);
 
   return (
     <fieldset>
@@ -190,10 +186,12 @@ function Dependencies({ t, act, onOpenTask }) {
           );
         })}
       </div>
-      <div className="dependency-add">
-        <input type="text" placeholder="task id" ref={inputRef} />
-        <button type="button" className="secondary" onClick={add}>Add</button>
-      </div>
+      <TaskPicker
+        tasks={tasks || []}
+        exclude={[t.id, ...dependsOn]}
+        onPick={add}
+        placeholder="Add a dependency…"
+      />
     </fieldset>
   );
 }

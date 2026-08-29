@@ -1,9 +1,21 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
+import TaskPicker from "./TaskPicker.jsx";
 
-export default function NewTaskOverlay({ config, onClose, onCreated, showError }) {
+export default function NewTaskOverlay({ tasks, config, onClose, onCreated, showError }) {
   const formRef = useRef(null);
+  // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
+  // title lets the chips below the picker read as "task 12 Fix the
+  // thing" instead of a bare number nobody can place.
+  const [dependsOn, setDependsOn] = useState([]);
+
+  const addDependency = (t) => {
+    setDependsOn((prev) => (prev.some((p) => p.id === t.id) ? prev : [...prev, t]));
+  };
+  const removeDependency = (id) => {
+    setDependsOn((prev) => prev.filter((p) => p.id !== id));
+  };
 
   const submit = async (evt) => {
     evt.preventDefault();
@@ -12,8 +24,6 @@ export default function NewTaskOverlay({ config, onClose, onCreated, showError }
     const capabilities = (config?.capabilities || [])
       .filter((c) => form.elements["cap-" + c.id] && form.elements["cap-" + c.id].checked)
       .map((c) => c.id);
-    const dependsOn = (data.get("dependsOn") || "")
-      .split(",").map((id) => id.trim()).filter((id) => id !== "");
     const reads = (data.get("reads") || "")
       .split(",").map((repo) => repo.trim()).filter((repo) => repo !== "");
     const payload = {
@@ -23,13 +33,14 @@ export default function NewTaskOverlay({ config, onClose, onCreated, showError }
       base: data.get("base") || "",
       autoMerge: form.elements.autoMerge.checked,
       capabilities,
-      dependsOn,
+      dependsOn: dependsOn.map((t) => t.id),
       reads,
       approved: form.elements.approved.checked,
     };
     try {
       await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
       form.reset();
+      setDependsOn([]);
       onClose();
       await onCreated();
     } catch (err) {
@@ -69,9 +80,32 @@ export default function NewTaskOverlay({ config, onClose, onCreated, showError }
             </label>
           ))}
         </fieldset>
-        <label>Depends on <span className="hint">task ids, comma-separated, optional</span>
-          <input name="dependsOn" placeholder="12, 15" autoComplete="off" />
-        </label>
+        <fieldset>
+          <legend>Depends on <span className="hint">optional</span></legend>
+          {dependsOn.length > 0 && (
+            <div className="chips dependency-chips">
+              {dependsOn.map((t) => (
+                <span key={t.id} className="chip dependency-chip">
+                  <span>{t.id} {t.title}</span>
+                  <button
+                    type="button"
+                    className="chip-remove"
+                    title={`Remove dependency on ${t.id}`}
+                    onClick={(e) => { e.stopPropagation(); removeDependency(t.id); }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <TaskPicker
+            tasks={tasks || []}
+            exclude={dependsOn.map((t) => t.id)}
+            onPick={addDependency}
+            placeholder="Search tasks to depend on…"
+          />
+        </fieldset>
         <label className="checkbox">
           <input type="checkbox" name="approved" />
           Queue immediately (unchecked files it as a proposal, needing approval)
