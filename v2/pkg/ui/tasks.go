@@ -21,18 +21,22 @@ import (
 // closed flag of, and labels, because state and capabilities are no
 // longer derived from any. PullRequest replaces htmlUrl as the one thing
 // worth linking to on GitHub, read off the task's own LinkFixes link.
+// GeneratedFrom is the same read off LinkProposedBy: the ID of the task
+// whose propose_task call filed this one, provenance only, empty for a
+// task nobody proposed.
 type Task struct {
-	ID           string      `json:"id"`
-	Title        string      `json:"title"`
-	Description  string      `json:"description"`
-	Author       string      `json:"author"`
-	State        model.State `json:"state"`
-	Repo         string      `json:"repo,omitempty"`
-	Base         string      `json:"base,omitempty"`
-	AutoMerge    bool        `json:"autoMerge"`
-	Capabilities []string    `json:"capabilities"`
-	PullRequest  string      `json:"pullRequest,omitempty"`
-	CreatedAt    *time.Time  `json:"createdAt,omitempty"`
+	ID            string      `json:"id"`
+	Title         string      `json:"title"`
+	Description   string      `json:"description"`
+	Author        string      `json:"author"`
+	State         model.State `json:"state"`
+	Repo          string      `json:"repo,omitempty"`
+	Base          string      `json:"base,omitempty"`
+	AutoMerge     bool        `json:"autoMerge"`
+	Capabilities  []string    `json:"capabilities"`
+	PullRequest   string      `json:"pullRequest,omitempty"`
+	GeneratedFrom string      `json:"generatedFrom,omitempty"`
+	CreatedAt     *time.Time  `json:"createdAt,omitempty"`
 }
 
 // Comment is one entry in a task's conversation.
@@ -79,6 +83,9 @@ func taskFrom(t model.Task, state model.State) Task {
 	for _, l := range t.Links {
 		if l.Kind == model.LinkFixes {
 			out.PullRequest = l.Target
+		}
+		if l.Kind == model.LinkProposedBy {
+			out.GeneratedFrom = l.Target
 		}
 	}
 	return out

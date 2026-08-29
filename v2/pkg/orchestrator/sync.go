@@ -316,7 +316,10 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail) string
 // columns set directly now. LinkFixTask on task is what stops this from running a
 // second time next cycle (advanceMergeQueueHead checks it first), and what
 // lets a later cycle find the fix task again once it finishes to decide
-// whether ref is fixed.
+// whether ref is fixed. LinkProposedBy on fixTask itself is the same
+// provenance relayProposedTasks records for a propose_task call: this
+// task exists because task did, and the UI reads it the same way
+// regardless of which path filed the task it is showing.
 //
 // The fix task is filed straight into the store, and a comment on the
 // task it repairs says so -- both writes grain owns, where the GitHub
@@ -357,6 +360,7 @@ func fileFixTask(ctx context.Context, store *model.Store,
 		Binding:   model.BindingDirective,
 		Base:      detail.HeadRef,
 		AutoMerge: true,
+		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
 		CreatedAt: &now,
 	}
 	if err := store.PutTask(ctx, fixTask); err != nil {
