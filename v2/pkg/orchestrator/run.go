@@ -111,6 +111,57 @@ func BuildPrompt(task model.Task) string {
 	return prompt
 }
 
+// commentThreadSection renders task's conversation into a prompt section,
+// or "" if there is none yet -- a task's first dispatch always gets "",
+// since nothing has been said about it until a run itself says something
+// or a human replies to it.
+//
+// Without this, a redispatched run has no way to see a human's answer to
+// a question it parked on with ask_question, or any other comment left
+// while it wasn't running: RunDispatch used to build every dispatch's
+// prompt from task.Title and task.Body alone, so a task that asked a
+// question and got answered would redispatch, ask the identical question
+// again, and go straight back to awaiting_reply -- forever, since nothing
+// about the run ever changed (bwsalmon/agents#402).
+func commentThreadSection(comments []model.Comment) string {
+	if len(comments) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Conversation on this task so far, oldest first -- read it before doing " +
+		"anything else, since it may already answer a question you would otherwise ask again:\n")
+	for _, c := range comments {
+		fmt.Fprintf(&b, "- %s: %s\n", attributionLabel(c.Author), c.Body)
+	}
+	return b.String()
+}
+
+// attributionLabel renders who said a comment, from the redispatched
+// run's own point of view -- "you" for grain relaying this same task's
+// own earlier ask_question or comment_on_issue call (Attribution.OnBehalfOf
+// naming a PrincipalAgent, exactly relayComment's own attribution in
+// finish.go), so a run recognizes its own prior words rather than reading
+// them as some third party's, and "a human" for a direct reply, which is
+// the answer a parked ask_question was waiting on.
+func attributionLabel(a model.Attribution) string {
+	if a.OnBehalfOf != nil {
+		switch a.OnBehalfOf.Kind {
+		case model.PrincipalAgent:
+			return "you, in an earlier attempt at this task"
+		case model.PrincipalHuman:
+			return "a human"
+		}
+	}
+	switch a.Actor.Kind {
+	case model.PrincipalHuman:
+		return "a human"
+	case model.PrincipalAgent:
+		return "an earlier attempt at this task"
+	default:
+		return "grain"
+	}
+}
+
 // rootedSandboxes is implemented by a Sandboxes backend that also hands
 // out a plain local directory for a slot -- HostSandboxes' own RootFor.
 // RunDispatch needs one of these to write a capability's SideSandbox
@@ -152,7 +203,12 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Slot: d.Slot, Sandbox: d.Slot, Attempt: d.Attempt, StartedAt: at}
 	cc := model.CapabilityContext{Task: task, Run: run, Now: at, Workdir: sandboxRoot, Credentials: cfg.Credentials}
 
-	materialized, prompt, prepErr := prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot)
+	comments, err := store.Comments(ctx, task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: reading %s's conversation: %w", task.ID, err)
+	}
+
+	materialized, prompt, prepErr := prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, comments)
 
 	var result *agent.Result
 	var runErr error
@@ -223,22 +279,26 @@ func outcomeOf(result *agent.Result) string {
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability
-// grants against reg and assembles the prompt they and the task itself
+// grants against reg and assembles the prompt they, the task itself, and
+// comments (its conversation so far -- see commentThreadSection) all
 // contribute, applying every SideSandbox placement under sandboxRoot on
-// the way. A nil registry, or a task with no Grants, skips all of this
-// and returns BuildPrompt's own prompt unchanged -- a deployment or test
-// that grants no capabilities needs to configure none of this. A non-nil
-// error means preparation itself failed (or a grant was refused) and the
-// caller must not run the agent at all -- the same "a half-materialized
-// capability is never described to the agent as present" rule
-// model.MaterializeGrants's own doc comment holds to, one level up: an
-// agent whose capability request was refused must not run at all, since
-// the task it would work almost always depends on it. Ported from
-// pkg/orchestrate's own prepare (bwsalmon/agents#254).
+// the way. A nil registry, or a task with no Grants, skips capability
+// resolution and returns BuildPrompt's own prompt plus the comment thread
+// unchanged -- a deployment or test that grants no capabilities needs to
+// configure none of this. A non-nil error means preparation itself failed
+// (or a grant was refused) and the caller must not run the agent at all
+// -- the same "a half-materialized capability is never described to the
+// agent as present" rule model.MaterializeGrants's own doc comment holds
+// to, one level up: an agent whose capability request was refused must
+// not run at all, since the task it would work almost always depends on
+// it. Ported from pkg/orchestrate's own prepare (bwsalmon/agents#254).
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
-	cc model.CapabilityContext, sandboxRoot string) (materialized []model.Materialized, prompt string, err error) {
+	cc model.CapabilityContext, sandboxRoot string, comments []model.Comment) (materialized []model.Materialized, prompt string, err error) {
 
 	prompt = BuildPrompt(cc.Task)
+	if thread := commentThreadSection(comments); thread != "" {
+		prompt += "\n\n" + thread
+	}
 	if reg == nil || len(cc.Task.Grants) == 0 {
 		return nil, prompt, nil
 	}

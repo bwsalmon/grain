@@ -105,9 +105,9 @@ Three values never appear in a `.tf` file, a `tfvars` file, or the
 Terraform state:
 
 - **The GitHub PAT** -- a fine-grained token scoped, on GitHub's own side,
-  to `test_repos` (see that variable's own doc comment on why that scope
-  is the actual enforcement boundary today, not something grain or
-  Terraform checks).
+  to `test_repos`, which is also wired into the daemon's own
+  `-target-repos` allow-list -- see that variable's own doc comment and
+  this module's README, "Repo enforcement."
 - **The Gemini API key** -- the daemon's own operating key
   (`pkg/agent/gemini`), needed before `grain-daemon.service` will even
   start. Distinct from the gemini-key *capability*
@@ -148,17 +148,25 @@ reasoning, and `variables.tf` for the on/off switches:
   keys project-wide. Its own key never touches Terraform; see
   "Secrets never touch Terraform" above.
 
-## What this does not enforce yet
+## Repo enforcement
 
-`test_repos`/`default_target_repo` are documentation and a source for
-`default_target_repo`'s own validation -- unlike v1's
-`terraform/gcp/variables.tf`, which builds a real `target_repos`
-allow-list the git proxy enforces, v2 has no equivalent yet. "A scoped
-PAT to a few test repos" is real and enforced *today* only by the PAT
-itself being a GitHub fine-grained token limited to those repositories --
-grain would currently accept a `/repo` directive naming any repository
-the PAT happens to reach. Consider filing a follow-up against v2 for a
-`target_repos` allow-list if that gap matters for your deployment.
+`test_repos` is now wired into the daemon's own `-target-repos`
+allow-list (`v2/pkg/model.Config.TargetRepos`, bwsalmon/agents#399): a
+task naming a repo outside it is filed as asked but parked awaiting
+reply rather than dispatched, the same "the allowlist the git proxy
+enforces, so a task naming anything else is parked with a comment rather
+than dispatched" v1's `terraform/gcp/variables.tf` `target_repos`
+documents. `default_target_repo`'s own validation, above, already
+requires it be a member of `test_repos` (or empty), so the two variables
+stay consistent with each other by construction.
+
+"A scoped PAT to a few test repos" -- the PAT itself being a GitHub
+fine-grained token limited, on GitHub's own side, to `test_repos` -- is
+still a second, independent enforcement boundary underneath this one:
+even a `grain settings` change widening `TargetRepos` past what the PAT
+can reach would still fail at the git proxy. Nothing here keeps the two
+lists in sync automatically; an operator who changes one by hand (via
+`grain settings`, bypassing Terraform) should update the other too.
 
 ## Notes and limits
 
