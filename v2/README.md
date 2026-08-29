@@ -1097,3 +1097,23 @@ That pin exists in the embedded case because a pool there produces lock
 contention that reads as a deadlock; a server is the thing that makes
 concurrent writers supported rather than hazardous, so pinning it there
 would throw away the whole reason to run one.
+
+## Deploying it
+
+`scripts/setup.sh` (bwsalmon/agents#355) is the first real answer to "how
+does this run anywhere" — this file's own opening line used to say
+nothing here was wired in yet, and now this is the one path that is. It
+runs `grain` directly on the target machine as `grain-daemon.service` and
+`grain-ui.service`, no controller VM involved: v2 has no host adapter yet
+(see "What this does not have yet" above), and its daemon already
+defaults to `orchestrator.HostSandboxes` — plain host directories, not a
+VM — so a controller VM would have bought nothing v1's own shape needed
+for a different reason (isolating a real per-task sandbox, which v2 does
+not have either way yet). It builds with `make container-build`, so a
+working `docker` is the one thing it assumes about the host, and it runs
+a `dolt sql-server` container for the same reason ("Single writer",
+above) — a daemon plus a UI both writing the same store need the server
+end, not the embedded one. Safe to re-run: it is the installer and the
+updater both, seeding a secret or a config value only the first time and
+leaving anything already on disk alone every time after. `./setup.sh
+--help` lists every setting.
