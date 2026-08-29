@@ -54,6 +54,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)
 
+	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
+	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
+	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
+	s.mux.HandleFunc("DELETE /api/secrets/{secret}", s.handleDeleteSecret)
+
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		// staticFS is embedded at build time from a directory this package

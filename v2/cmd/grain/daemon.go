@@ -337,7 +337,7 @@ func run(ctx context.Context, cfg config) error {
 	defer stopProxy(context.Background())
 
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg.uiAddr, cfg.actor, cfg.defaultTargetRepo, store, cfg.uiOpen)
+		stopUI, err := startUIServer(cfg.uiAddr, cfg.actor, cfg.defaultTargetRepo, cfg.dataDir, store, cfg.uiOpen)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -649,10 +649,20 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // exactly what bwsalmon/agents#363 asked for: one store connection, no
 // Dolt SQL server needed just to let a daemon and a UI coexist (see this
 // file's own doc comment).
-func startUIServer(addr, actor, defaultTargetRepo string, store *model.Store, open bool) (stop func(context.Context) error, err error) {
+//
+// uiCfg.Secrets is always wired up to dataDir/secrets -- the same
+// directory this daemon already reads its own credentials from (run's
+// own deps.Config.Credentials, above). The old standalone "ui" subcommand
+// needed a separate -server-data-dir opt-in for this (bwsalmon/agents#357)
+// because it was a second process that might not be colocated with the
+// server at all; now that the UI is the daemon serving over its own
+// store, "the server's data dir" and "this process's data dir" are the
+// same directory by construction, so there is nothing to opt into.
+func startUIServer(addr, actor, defaultTargetRepo, dataDir string, store *model.Store, open bool) (stop func(context.Context) error, err error) {
 	uiCfg := ui.Config{
 		Actor:        ui.DefaultActor(actorID(actor)),
 		Capabilities: ui.DefaultCapabilities(),
+		Secrets:      secrets.New(filepath.Join(dataDir, "secrets")),
 	}
 	if defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(defaultTargetRepo)

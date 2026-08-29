@@ -20,7 +20,10 @@
 // no API call.
 package ui
 
-import "github.com/bwsalmon/grain/v2/pkg/model"
+import (
+	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/secrets"
+)
 
 // Capability is one attachable, opt-in capability a human toggles on a
 // task -- the CAPABILITY-tier rows of v1's labels.py _STYLES table that
@@ -70,6 +73,15 @@ type Config struct {
 	// deployment need not repeat itself on every task.
 	DefaultTarget *model.RepoRef
 	Capabilities  []Capability
+	// Secrets is set only when this UI runs on the same host as the
+	// server whose secrets directory it names -- nil means it does not,
+	// and the secrets pane and its API routes report themselves
+	// unavailable rather than erroring on every call (bwsalmon/agents#357).
+	// It is write/list only in the sense that matters: nothing in this
+	// package ever calls Store.Resolve, so a value, once set, is never
+	// readable back through here -- only Set, DeleteKey, DeleteSecret and
+	// List (which reports names and key names, never values).
+	Secrets *secrets.Store
 }
 
 // DefaultActor is the principal a deployment gets without saying
