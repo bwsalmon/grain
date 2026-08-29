@@ -188,6 +188,67 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		return fmt.Errorf("seeding a completed task: %w", err)
 	}
 
+	stacked, err := create(ago(50*time.Minute), ui.CreateTaskRequest{
+		Title:       "Add pagination to the tasks API",
+		Description: "GET /api/tasks returns everything at once; needs a page size and a cursor.",
+		Approved:    true,
+	})
+	if err != nil {
+		return err
+	}
+	stackedTask, err := store.GetTask(ctx, stacked.ID)
+	if err != nil {
+		return err
+	}
+	stackedTask.Links = append(stackedTask.Links,
+		model.Link{Kind: model.LinkFixes, Target: "https://github.com/acme/widgets/pull/104"})
+	if err := store.PutTask(ctx, *stackedTask); err != nil {
+		return fmt.Errorf("seeding a task with a stacked fix: %w", err)
+	}
+	stackedCompletedAt := ago(40 * time.Minute)
+	if err := store.ObserveField(ctx, stacked.ID, stackedCompletedAt, func(o *model.Observation) {
+		o.CompletedAt = &stackedCompletedAt
+	}); err != nil {
+		return fmt.Errorf("seeding a task with a stacked fix: %w", err)
+	}
+	// The fix task itself, filed straight into the store already
+	// approved the same way orchestrator.fileFixTask files a real one --
+	// see model.LinkFixTask's doc comment -- so `grain demo` shows the
+	// nested-under-its-parent card bwsalmon/agents#378 asked for without
+	// needing a real merge queue cycle to produce one.
+	fixID, err := store.NewTaskID(ctx)
+	if err != nil {
+		return fmt.Errorf("seeding a stacked fix task: %w", err)
+	}
+	queue := model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}
+	fixCreatedAt := ago(35 * time.Minute)
+	fixTask := model.Task{
+		ID:     fixID,
+		Intent: model.IntentImplement,
+		Title:  "\U0001F916 grain: fix acme/widgets#104",
+		Body:   "Task " + stacked.ID + " opened acme/widgets#104, but it has conflicts with `main`.",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: queue},
+			Reason:      model.ReasonFix,
+		},
+		Approval:  &model.Attribution{Actor: queue},
+		Target:    cfg.DefaultTarget,
+		Binding:   model.BindingDirective,
+		Base:      model.BranchName(stacked.ID),
+		AutoMerge: true,
+		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: stacked.ID}},
+		CreatedAt: &fixCreatedAt,
+	}
+	if err := store.PutTask(ctx, fixTask); err != nil {
+		return fmt.Errorf("seeding a stacked fix task: %w", err)
+	}
+	if err := store.UpdateTask(ctx, stacked.ID, func(t *model.Task) error {
+		t.Links = append(t.Links, model.Link{Kind: model.LinkFixTask, Target: fixID})
+		return nil
+	}); err != nil {
+		return fmt.Errorf("seeding a stacked fix task: %w", err)
+	}
+
 	closed, err := create(ago(200*time.Hour), ui.CreateTaskRequest{
 		Title:       "Spike: websocket transport",
 		Description: "Explored replacing polling with a websocket; decided against it for now.",

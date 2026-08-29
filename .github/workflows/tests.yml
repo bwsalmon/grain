@@ -77,15 +77,12 @@ jobs:
         with:
           go-version-file: v2/go.mod
 
-      # No engines.node in pkg/ui/frontend/package.json to read a version
-      # from; Vite 6 needs Node ^18 || ^20 || >=22, so pin to the 20.x LTS.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
+          cache: npm
+          cache-dependency-path: v2/pkg/ui/frontend/package-lock.json
 
-      # pkg/ui/server.go embeds pkg/ui/static, which the frontend build
-      # populates -- see v2/Makefile's `frontend` target, which `build`,
-      # `test` and `vet` all depend on there for the same reason.
       - name: Build frontend
         working-directory: v2
         run: make frontend
@@ -105,3 +102,7 @@ jobs:
       - name: Test
         working-directory: v2
         run: go test ./...
+
+      - name: Test frontend
+        working-directory: v2/pkg/ui/frontend
+        run: npm test

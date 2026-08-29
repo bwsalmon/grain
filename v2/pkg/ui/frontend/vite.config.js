@@ -23,4 +23,13 @@ export default defineConfig({
       "/api": "http://localhost:8420",
     },
   },
+  // Vitest reads this same config rather than a separate file, since
+  // there is nothing about the test run (component tree, module
+  // resolution) that should differ from the one `vite build` uses.
+  // jsdom is the one addition build/dev never needed: a DOM for
+  // Testing Library to render components into without a real browser.
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/setupTests.js"],
+  },
 });

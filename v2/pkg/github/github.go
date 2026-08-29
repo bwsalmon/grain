@@ -365,6 +365,8 @@ type Client interface {
 	UpdateIssue(owner, repo string, number int, title, body *string) error
 	BranchExists(owner, repo, branch string) (bool, error)
 	GetBranchHead(owner, repo, branch string) (*BranchHead, error)
+	CreateBranch(owner, repo, branch, sha string) error
+	UpdateBranch(owner, repo, branch, sha string, force bool) error
 	CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error)
 	FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (Issue, error)
@@ -687,6 +689,52 @@ func (c *RESTClient) GetBranchHead(owner, repo, branch string) (*BranchHead, err
 		return nil, err
 	}
 	return &BranchHead{SHA: data.Commit.SHA, Message: data.Commit.Commit.Message}, nil
+}
+
+// CreateBranch creates branch pointing at sha -- release management's own
+// "cut" (bwsalmon/agents#398): a fresh, never-before-existing ref, via
+// GitHub's git-database API rather than the higher-level "create from" a
+// human uses on github.com, since the caller already has the exact
+// commit in hand (typically another branch's own GetBranchHead) and has
+// no reason to ask GitHub to resolve one itself. GitHub answers 422 if
+// branch already exists; that reaches the caller as an *Error the same
+// as any other non-201 status, since a caller wanting "create or move"
+// has UpdateBranch for the second half.
+func (c *RESTClient) CreateBranch(owner, repo, branch, sha string) error {
+	payload, _ := json.Marshal(map[string]string{"ref": "refs/heads/" + branch, "sha": sha})
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 201 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
+// UpdateBranch moves branch's tip to sha -- release management's other
+// half of a cut (repointing the repo's own moving rc branch at a freshly
+// cut candidate) and of a promotion (fast-forwarding ProdBranch to the
+// candidate being promoted). force matches GitHub's own field: false
+// refuses a move that is not a fast-forward, true moves it regardless --
+// a caller doing the former should treat a refusal (422) as a caller
+// error, not a transient failure to retry unmodified.
+func (c *RESTClient) UpdateBranch(owner, repo, branch, sha string, force bool) error {
+	payload, _ := json.Marshal(map[string]any{"sha": sha, "force": force})
+	resp, err := c.Transport.Request(
+		"PATCH", fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", owner, repo, branch),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
 }
 
 func (c *RESTClient) CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error) {
@@ -1075,6 +1123,16 @@ func (d DryRunClient) GetBranchHead(owner, repo, branch string) (*BranchHead, er
 
 func (d DryRunClient) FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error) {
 	return d.Inner.FindOpenPullRequestForBranch(owner, repo, branch)
+}
+
+func (d DryRunClient) CreateBranch(owner, repo, branch, sha string) error {
+	fmt.Printf("+ create branch %s/%s:%s at %s\n", owner, repo, branch, sha)
+	return nil
+}
+
+func (d DryRunClient) UpdateBranch(owner, repo, branch, sha string, force bool) error {
+	fmt.Printf("+ move branch %s/%s:%s to %s (force=%t)\n", owner, repo, branch, sha, force)
+	return nil
 }
 
 func (d DryRunClient) CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error) {

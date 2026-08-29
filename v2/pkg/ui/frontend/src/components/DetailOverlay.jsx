@@ -2,53 +2,82 @@ import { useRef } from "react";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
 import Overlay from "./Overlay.jsx";
+import TaskPicker from "./TaskPicker.jsx";
 
-export default function DetailOverlay({ task: t, config, onClose, onOpenTask, act }) {
+// The panel splits like Plane's own issue peek: title, description and
+// the conversation in a main column, everything about the task's current
+// state and its declared shape (repo, capabilities, dependencies) in a
+// narrow property column beside it.
+export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act }) {
   return (
-    <Overlay onClose={onClose}>
-      <div className="detail-header">
-        <h2>{t.id} {t.title}</h2>
-        <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
-        {/* Blocked reads as an annotation beside the state pill, not a
-            replacement for it -- a blocked task is still queued
-            (docs/data-model.md). */}
-        {t.blocked && <span className="badge badge-blocked">Blocked</span>}
+    <Overlay onClose={onClose} className="panel-detail">
+      <div className="detail-layout">
+        <div className="detail-main">
+          <div className="detail-header">
+            <h2>{t.id} {t.title}</h2>
+          </div>
+
+          <div className="freshness">
+            as of just now
+            {t.pullRequest && <> · <a href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</a></>}
+            {t.generatedFrom && (
+              <>
+                {" "}· generated from{" "}
+                <a href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</a>
+              </>
+            )}
+          </div>
+
+          <div className="description">{t.description || "(no description)"}</div>
+
+          <Comments t={t} act={act} />
+        </div>
+
+        <div className="detail-side">
+          <div className="detail-state">
+            <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
+            {/* Blocked reads as an annotation beside the state dot, not a
+                replacement for it -- a blocked task is still queued
+                (docs/data-model.md). */}
+            {t.blocked && <span className="badge badge-blocked">Blocked</span>}
+          </div>
+
+          <Actions t={t} act={act} />
+          <Declared t={t} />
+          <CapabilityToggles t={t} config={config} act={act} />
+          <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
+        </div>
       </div>
-
-      <div className="freshness">
-        as of just now
-        {t.pullRequest && <> · <span>{t.pullRequest}</span></>}
-        {t.generatedFrom && (
-          <>
-            {" "}· generated from{" "}
-            <a href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</a>
-          </>
-        )}
-      </div>
-
-      <Declared t={t} />
-
-      <div className="description">{t.description || "(no description)"}</div>
-
-      <Actions t={t} act={act} />
-
-      <CapabilityToggles t={t} config={config} act={act} />
-      <Dependencies t={t} act={act} onOpenTask={onOpenTask} />
-      <Comments t={t} act={act} />
     </Overlay>
   );
+}
+
+// pullRequestUrl turns "owner/name#123" (t.pullRequest, straight off
+// model.PullRequestRef.String()) into the GitHub URL it names.
+function pullRequestUrl(ref) {
+  const [repo, number] = ref.split("#");
+  return `https://github.com/${repo}/pull/${number}`;
 }
 
 // Real columns on the task now, not directive lines parsed out of a
 // body -- so they are rendered as fields rather than as the /repo,
 // /base, /auto-merge syntax they used to have to be written in.
 function Declared({ t }) {
-  const parts = [];
-  if (t.repo) parts.push(`repo ${t.repo}`);
-  if (t.base) parts.push(`base ${t.base}`);
-  if (t.reads && t.reads.length > 0) parts.push(`reads ${t.reads.join(", ")}`);
-  parts.push(`auto-merge ${t.autoMerge}`);
-  return <div className="declared">{parts.join("  ")}</div>;
+  const rows = [];
+  if (t.repo) rows.push(["Repo", t.repo]);
+  if (t.base) rows.push(["Base", t.base]);
+  if (t.reads && t.reads.length > 0) rows.push(["Reads", t.reads.join(", ")]);
+  rows.push(["Auto-merge", String(t.autoMerge)]);
+  return (
+    <div className="declared">
+      {rows.map(([key, value]) => (
+        <div className="declared-row" key={key}>
+          <span className="declared-key">{key}</span>
+          <span className="declared-value">{value}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function Actions({ t, act }) {
@@ -120,19 +149,14 @@ function CapabilityToggles({ t, config, act }) {
 // about, together: what a task has declared it depends on (chips,
 // removable), which of those are still open (the "blocked" styling on a
 // chip), and a way to add another -- attach/detach through /depends-on.
-function Dependencies({ t, act, onOpenTask }) {
-  const inputRef = useRef(null);
+function Dependencies({ t, tasks, act, onOpenTask }) {
   const dependsOn = t.dependsOn || [];
   const blockedBy = new Set(t.blockedBy || []);
 
-  const add = () => {
-    const id = inputRef.current.value.trim();
-    if (!id) return;
-    act(() => api(`/api/tasks/${t.id}/depends-on`, {
-      method: "POST",
-      body: JSON.stringify({ id, attach: true }),
-    }), t.id).then(() => { inputRef.current.value = ""; });
-  };
+  const add = (picked) => act(() => api(`/api/tasks/${t.id}/depends-on`, {
+    method: "POST",
+    body: JSON.stringify({ id: picked.id, attach: true }),
+  }), t.id);
 
   return (
     <fieldset>
@@ -162,10 +186,12 @@ function Dependencies({ t, act, onOpenTask }) {
           );
         })}
       </div>
-      <div className="dependency-add">
-        <input type="text" placeholder="task id" ref={inputRef} />
-        <button type="button" className="secondary" onClick={add}>Add</button>
-      </div>
+      <TaskPicker
+        tasks={tasks || []}
+        exclude={[t.id, ...dependsOn]}
+        onPick={add}
+        placeholder="Add a dependency…"
+      />
     </fieldset>
   );
 }

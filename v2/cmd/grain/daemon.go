@@ -34,7 +34,8 @@
 //
 // Most of this file's own flags (-slots, -poll-interval, -gemini-model,
 // -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
-// -gcp-agent-service-account) are store-backed now (bwsalmon/agents#320):
+// -gcp-agent-service-account, -target-repos) are store-backed now
+// (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
 // time a deployment's store has none, and reads them back out of it on
 // every start after that, so a UI or a CLI editing model.Config changes
@@ -76,6 +77,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
+	"github.com/bwsalmon/grain/v2/pkg/upgrade"
 )
 
 // stringSliceFlag collects every occurrence of a repeatable flag, in
@@ -108,6 +110,7 @@ func daemon(args []string) {
 	uiOpen := fs.Bool("ui-open", false, "open the UI in the system's default browser once it's listening")
 	actor := fs.String("as", "", "principal the UI/API attributes tasks and comments it creates to (defaults to the OS user)")
 	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task created through the UI/API with no repo of its own targets")
+	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any"+seedOnly)
 
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
@@ -118,6 +121,24 @@ func daemon(args []string) {
 
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both"+seedOnly)
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for"+seedOnly)
+
+	// Upgrading (bwsalmon/agents#396, v2/pkg/upgrade): the UI's own
+	// "target a branch and click Upgrade" button. -upgrade-src-dir is the
+	// opt in -- empty (the default) disables the whole feature and the
+	// pane reports itself unavailable, same as -gcp-project disabling
+	// gcp-key/gemini-key above. See v2/scripts/setup.sh for how a
+	// deployment built by it wires these three flags up so the feature
+	// works out of the box.
+	upgradeSrcDir := fs.String("upgrade-src-dir", "",
+		"git checkout of bwsalmon/grain to fetch/build from when the UI's Upgrade button is used; empty disables the feature")
+	upgradeInstallPath := fs.String("upgrade-install-path", "",
+		"where a successful upgrade's binary is installed to (required with -upgrade-src-dir)")
+	var upgradeRestartCmd stringSliceFlag
+	fs.Var(&upgradeRestartCmd, "upgrade-restart-cmd",
+		"one argument of the command run after a successful build+install to bring the new binary up -- repeat for "+
+			"every argument, e.g. -upgrade-restart-cmd=sudo -upgrade-restart-cmd=systemctl -upgrade-restart-cmd=restart "+
+			"-upgrade-restart-cmd=grain-daemon.service. Omitted entirely, the build and install still happen but "+
+			"nothing brings the new binary up on its own. Only used with -upgrade-src-dir.")
 
 	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
 	// host, no isolation) exactly as it always has -- see run()'s own
@@ -161,6 +182,10 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
 	}
+	if *upgradeSrcDir != "" && *upgradeInstallPath == "" {
+		fmt.Fprintln(os.Stderr, "grain daemon: -upgrade-install-path is required with -upgrade-src-dir")
+		os.Exit(2)
+	}
 	if *konturVMNamePrefix != "" {
 		if *konturSSHUser == "" {
 			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-user is required with -kontur-vm-name-prefix")
@@ -176,6 +201,10 @@ func daemon(args []string) {
 		}
 	}
 	slots := strings.Split(*slotList, ",")
+	var targetReposList []string
+	if strings.TrimSpace(*targetRepos) != "" {
+		targetReposList = strings.Split(*targetRepos, ",")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -183,9 +212,11 @@ func daemon(args []string) {
 	if err := run(ctx, config{
 		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
+		targetRepos:      targetReposList,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
+		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
 		konturVMNamePrefix: *konturVMNamePrefix, konturBackend: *konturBackend,
 		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
@@ -209,6 +240,10 @@ type config struct {
 	uiOpen            bool
 	actor             string
 	defaultTargetRepo string
+	// targetRepos is store-backed (model.Config.TargetRepos), unlike
+	// defaultTargetRepo above -- see loadConfig/toModelConfig/
+	// withModelConfig. Empty allows a task's repo to name anything.
+	targetRepos []string
 
 	geminiAPIKeyFile string
 	geminiModel      string
@@ -219,6 +254,14 @@ type config struct {
 
 	gcpProject             string
 	gcpServiceAccountEmail string
+
+	// upgradeSrcDir, upgradeInstallPath and upgradeRestartCmd configure
+	// v2/pkg/upgrade.Upgrader (bwsalmon/agents#396); upgradeSrcDir empty
+	// disables it, the same "empty disables" shape gcpProject uses for
+	// gcp-key/gemini-key above.
+	upgradeSrcDir      string
+	upgradeInstallPath string
+	upgradeRestartCmd  []string
 
 	// konturVMNamePrefix selects orchestrator.KonturSandboxes over the
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
@@ -316,7 +359,7 @@ func run(ctx context.Context, cfg config) error {
 	defer stopProxy(context.Background())
 
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg.uiAddr, cfg.actor, cfg.defaultTargetRepo, cfg.dataDir, store, cfg.uiOpen)
+		stopUI, err := startUIServer(cfg, store)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -508,6 +551,7 @@ func (c config) toModelConfig() model.Config {
 		GeminiModel: c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
 		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
 		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
+		TargetRepos: c.targetRepos,
 	}
 }
 
@@ -523,6 +567,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.githubInsecureHTTP = mc.GitHubInsecureHTTP
 	c.gcpProject = mc.GCPProject
 	c.gcpServiceAccountEmail = mc.GCPServiceAccountEmail
+	c.targetRepos = mc.TargetRepos
 	return c
 }
 
@@ -639,28 +684,39 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(addr, actor, defaultTargetRepo, dataDir string, store *model.Store, open bool) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store) (stop func(context.Context) error, err error) {
 	uiCfg := ui.Config{
-		Actor:        ui.DefaultActor(actorID(actor)),
+		Actor:        ui.DefaultActor(actorID(cfg.actor)),
 		Capabilities: ui.DefaultCapabilities(),
-		Secrets:      secrets.New(filepath.Join(dataDir, "secrets")),
+		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
+		TargetRepos:  cfg.targetRepos,
 	}
-	if defaultTargetRepo != "" {
-		repo, err := model.ParseRepo(defaultTargetRepo)
+	if cfg.defaultTargetRepo != "" {
+		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
 		if err != nil {
 			return nil, fmt.Errorf("-default-target-repo: %w", err)
 		}
 		uiCfg.DefaultTarget = &repo
 	}
+	if cfg.upgradeSrcDir != "" {
+		uiCfg.Upgrader = upgrade.New(upgrade.Config{
+			SrcDir:      cfg.upgradeSrcDir,
+			BuildCmd:    []string{"make", "container-build"},
+			BuiltBinary: filepath.Join(cfg.upgradeSrcDir, "v2", "bin", "grain"),
+			InstallPath: cfg.upgradeInstallPath,
+			RestartCmd:  cfg.upgradeRestartCmd,
+			StatusFile:  filepath.Join(cfg.dataDir, "upgrade-status.json"),
+		})
+	}
 	srv := ui.NewServer(uiCfg, store)
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", cfg.uiAddr)
 	if err != nil {
-		return nil, fmt.Errorf("listening on %s: %w", addr, err)
+		return nil, fmt.Errorf("listening on %s: %w", cfg.uiAddr, err)
 	}
 	url := "http://" + ln.Addr().String()
 	log.Printf("grain daemon: serving the UI/API on %s as %s", url, uiCfg.Actor.ID)
-	if open {
+	if cfg.uiOpen {
 		openBrowser(url)
 	}
 	httpSrv := &http.Server{Handler: srv}
