@@ -11,12 +11,25 @@
 // download the newest code from the branch, build it locally and start
 // running the new version. For now this can restart the host if
 // needed." This is deliberately the naive version that issue asked for:
-// one upgrade at a time, no rollback, and no health check of the new
-// binary before cutting over to it -- a failed build or a failed
-// install leaves the old binary running untouched (Start never reaches
-// RestartCmd unless every earlier step succeeded), but a build that
-// succeeds and then fails at runtime is not this package's problem to
-// catch.
+// one upgrade at a time -- a failed build or a failed install leaves
+// the old binary running untouched (Start never reaches RestartCmd
+// unless every earlier step succeeded).
+//
+// bwsalmon/agents#418/#422: a build that succeeds can still be broken
+// at runtime (a panic during init, a missing dynamic dependency, a
+// binary that just exits immediately), and that used to be entirely
+// invisible here -- Status would report "ok" forever with no trace of
+// it. If Config.HealthCheckArgs is set, Start now runs the newly
+// installed binary itself (InstallPath, not BuiltBinary) with those
+// args right after install and before RestartCmd; a nonzero exit or a
+// timeout there rolls the install back to whatever binary was at
+// InstallPath before (or removes it, if this was the very first
+// install) and reports PhaseFailed instead of cutting over to
+// RestartCmd at all. This still cannot catch a binary that starts up
+// fine but misbehaves only once it is actually serving real traffic --
+// that class of failure needs a real health check against the running
+// service, which is out of this package's reach (see HealthCheckArgs's
+// own doc comment).
 package upgrade
 
 import (
@@ -74,6 +87,23 @@ type Config struct {
 	// rename) so a reader (or a service restarting mid-copy) never sees
 	// a partial binary.
 	InstallPath string
+	// HealthCheckArgs, if non-empty, are run as exec.Command(InstallPath,
+	// HealthCheckArgs...) right after install and before RestartCmd --
+	// []string{"schema-version"} on a real deployment: a subcommand that
+	// touches no store, needs no config, and exits immediately, so
+	// failing to even run it means the newly built binary is broken
+	// outright (a panic in an init(), a missing dynamic library, a
+	// build that produced something that isn't a working executable at
+	// all) rather than that its actual serving behavior is somehow
+	// wrong -- that narrower kind of failure only shows up once the
+	// binary is actually handling real traffic, which is beyond what a
+	// short-lived subprocess here can check. A nonzero exit or a
+	// 10-second timeout rolls the install back (see install's own doc
+	// comment) and reports PhaseFailed without ever running RestartCmd.
+	// Empty skips the check and installs unconditionally -- the
+	// previous behavior, and what every test with no real "grain"
+	// binary of its own relies on.
+	HealthCheckArgs []string
 	// RestartCmd, given, is run after a successful build and install to
 	// bring the new binary up -- []string{"sudo", "systemctl", "restart",
 	// "grain-daemon.service"} on a real deployment
@@ -201,10 +231,30 @@ func (u *Upgrader) run(branch string, status Status) {
 		fail(fmt.Errorf("build: %w", err))
 		return
 	}
+	hadPrevious, err := u.backupInstalled()
+	if err != nil {
+		fail(fmt.Errorf("backing up previous binary: %w", err))
+		return
+	}
 	if err := u.install(); err != nil {
 		fail(fmt.Errorf("install: %w", err))
 		return
 	}
+	if len(u.cfg.HealthCheckArgs) > 0 {
+		if err := u.healthCheck(ctx); err != nil {
+			if rerr := u.rollbackInstalled(hadPrevious); rerr != nil {
+				fail(fmt.Errorf("health check failed (%w) and rollback also failed: %v", err, rerr))
+				return
+			}
+			if hadPrevious {
+				fail(fmt.Errorf("health check failed on newly installed binary, rolled back to the previous one: %w", err))
+			} else {
+				fail(fmt.Errorf("health check failed on newly installed binary, removed it (no previous binary to roll back to): %w", err))
+			}
+			return
+		}
+	}
+	u.removeBackup()
 
 	finished := time.Now().UTC()
 	status.Phase = PhaseOK
@@ -304,6 +354,78 @@ func (u *Upgrader) install() error {
 		return err
 	}
 	return os.Rename(tmp, u.cfg.InstallPath)
+}
+
+// backupPath is where backupInstalled keeps whatever was at InstallPath
+// before this upgrade's own install overwrites it, so rollbackInstalled
+// has something to restore if the newly installed binary fails its
+// health check.
+func (u *Upgrader) backupPath() string {
+	return u.cfg.InstallPath + ".prev"
+}
+
+// backupInstalled copies whatever is currently at InstallPath (an
+// earlier upgrade's binary, or the one setup.sh first installed) aside
+// before install overwrites it. hadPrevious is false, with no error,
+// when there is nothing there yet -- the very first install onto a
+// fresh deployment -- which rollbackInstalled uses to know it has
+// nothing to restore.
+func (u *Upgrader) backupInstalled() (hadPrevious bool, err error) {
+	data, err := os.ReadFile(u.cfg.InstallPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(u.backupPath(), data, 0o755); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// rollbackInstalled undoes install: restores the binary backupInstalled
+// set aside, or -- if there was none, meaning this was the first ever
+// install -- removes the broken one instead of leaving it in place for
+// a future restart to pick up.
+func (u *Upgrader) rollbackInstalled(hadPrevious bool) error {
+	if !hadPrevious {
+		if err := os.Remove(u.cfg.InstallPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return os.Rename(u.backupPath(), u.cfg.InstallPath)
+}
+
+// removeBackup discards the backup taken before a health check that
+// ended up passing (or was skipped entirely) -- there is nothing left
+// to ever roll back to once the newly installed binary is confirmed
+// good, and leaving it around would just be a stale file next to
+// InstallPath forever.
+func (u *Upgrader) removeBackup() {
+	_ = os.Remove(u.backupPath())
+}
+
+// healthCheck runs the binary install just wrote to disk -- InstallPath
+// itself, not BuiltBinary -- with Config.HealthCheckArgs, on the theory
+// that a binary broken at runtime (a panic in some init(), a missing
+// dynamic library, a build that produced something that plain doesn't
+// run) fails this the same way it would fail for real, in well under
+// the 10 seconds allotted here; a subcommand like "schema-version" that
+// touches no store and needs no config is expected to return almost
+// instantly, so the timeout exists only to bound a binary that
+// unexpectedly hangs rather than exiting, not to allow for any real
+// work.
+func (u *Upgrader) healthCheck(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, u.cfg.InstallPath, u.cfg.HealthCheckArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w: %s", u.cfg.InstallPath, strings.Join(u.cfg.HealthCheckArgs, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func readStatus(path string) (Status, error) {
