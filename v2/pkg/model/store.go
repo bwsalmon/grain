@@ -743,10 +743,24 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 }
 
 // Ready is every task dispatchable right now: approved, not running, with
-// no open blocker. The whole dispatch query, as one view.
+// no open blocker -- in dispatch order. A fix task (Origin.Reason ==
+// ReasonFix) sorts before everything else: it exists only because
+// orchestrator.queueHeads found its repo's merge queue head broken, and
+// queueHeads already guarantees at most one such task per repo at a
+// time, so there is never more than a handful competing for this and
+// nothing else to weigh them against. Leaving one to wait behind
+// unrelated new work is what bwsalmon/agents#389 asks to avoid: the
+// longer a queue head's repair sits queued, the more likely something
+// else lands on the branch it targets first and the fix has to be
+// refiled rather than simply merged. Ties within each group still break
+// on task ID, the same stable tiebreak as before.
 func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	var out []string
-	err := each(ctx, s.db, "SELECT `task_id` FROM `task_ready` ORDER BY `task_id`", nil,
+	err := each(ctx, s.db,
+		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
+			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"ORDER BY (`t`.`origin_reason` = ?) DESC, `r`.`task_id`",
+		[]any{string(ReasonFix)},
 		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
