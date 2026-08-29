@@ -9,6 +9,8 @@ import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import SecretsOverlay from "./components/SecretsOverlay.jsx";
 import ReleasesOverlay from "./components/ReleasesOverlay.jsx";
+import ScheduledTasksOverlay from "./components/ScheduledTasksOverlay.jsx";
+import UpgradeOverlay from "./components/UpgradeOverlay.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -30,6 +32,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
   const [showReleases, setShowReleases] = useState(false);
+  const [showSchedules, setShowSchedules] = useState(false);
+  const [showUpgrade, setShowUpgrade] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -175,8 +179,10 @@ export default function App() {
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
         onOpenSecrets={() => setShowSecrets(true)}
+        onOpenSchedules={() => setShowSchedules(true)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenReleases={() => setShowReleases(true)}
+        onOpenUpgrade={() => setShowUpgrade(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
       <div className="main-column">
@@ -201,6 +207,8 @@ export default function App() {
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
       {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
+      {showSchedules && <ScheduledTasksOverlay onClose={() => setShowSchedules(false)} showError={showError} />}
+      {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
     </div>
   );
 }

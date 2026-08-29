@@ -995,6 +995,197 @@ func splitSlots(s string) []string {
 	return strings.Split(s, ",")
 }
 
+// --- scheduled tasks ---------------------------------------------------
+
+// NewScheduledTaskID allocates a schedule identity from its own sequence,
+// distinct from task_sequence -- so a schedule's id (e.g. "sched-3") is
+// never mistaken for one of the tasks it files, the same "not the GitHub
+// issue it was filed from" reasoning NewTaskID's own doc comment gives.
+func (s *Store) NewScheduledTaskID(ctx context.Context) (id string, err error) {
+	err = s.write(ctx, "allocate a scheduled task id", func(tx *sql.Tx) error {
+		id, err = newScheduledTaskID(ctx, tx)
+		return err
+	})
+	return id, err
+}
+
+func newScheduledTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
+	res, err := tx.ExecContext(ctx,
+		"INSERT INTO `scheduled_task_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
+	if err != nil {
+		return "", fmt.Errorf("allocating a scheduled task id: %w", err)
+	}
+	n, err := res.LastInsertId()
+	if err != nil {
+		return "", fmt.Errorf("reading the allocated scheduled task id: %w", err)
+	}
+	return "sched-" + strconv.FormatInt(n, 10), nil
+}
+
+const scheduledTaskColumns = "`id`,`title`,`body`,`target_owner`,`target_name`,`base`," +
+	"`auto_merge`,`interval_ms`,`enabled`,`next_run_at`,`last_run_at`,`created_at`"
+
+func scanScheduledTask(scan func(...any) error) (ScheduledTask, error) {
+	var t ScheduledTask
+	var base sql.NullString
+	var intervalMS int64
+	var lastRun sql.NullTime
+	if err := scan(&t.ID, &t.Title, &t.Body, &t.Target.Owner, &t.Target.Name, &base,
+		&t.AutoMerge, &intervalMS, &t.Enabled, &t.NextRunAt, &lastRun, &t.CreatedAt); err != nil {
+		return ScheduledTask{}, err
+	}
+	t.Base = base.String
+	t.Interval = time.Duration(intervalMS) * time.Millisecond
+	t.LastRunAt = timePtr(lastRun)
+	return t, nil
+}
+
+// PutScheduledTask inserts or replaces a schedule wholesale -- there are
+// no child rows the way a task has, so this is a single REPLACE rather
+// than putTask's own multi-table dance.
+func (s *Store) PutScheduledTask(ctx context.Context, t ScheduledTask) error {
+	return s.write(ctx, "put scheduled task "+t.ID,
+		func(tx *sql.Tx) error { return putScheduledTask(ctx, tx, t) })
+}
+
+func putScheduledTask(ctx context.Context, tx *sql.Tx, t ScheduledTask) error {
+	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`scheduled_task`"+` (
+  `+"`id`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
+		"`auto_merge`,`interval_ms`,`enabled`,`next_run_at`,`last_run_at`,`created_at`"+`
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Title, t.Body, t.Target.Owner, t.Target.Name, nullable(t.Base),
+		t.AutoMerge, t.Interval.Milliseconds(), t.Enabled,
+		t.NextRunAt.UTC(), timeOf(t.LastRunAt), t.CreatedAt.UTC())
+	if err != nil {
+		return fmt.Errorf("writing scheduled task %s: %w", t.ID, err)
+	}
+	return nil
+}
+
+func getScheduledTask(ctx context.Context, q querier, id string) (*ScheduledTask, error) {
+	t, err := scanScheduledTask(q.QueryRowContext(ctx,
+		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` WHERE `id` = ?", id).Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+// GetScheduledTask returns a schedule, or nil if there is none with that ID.
+func (s *Store) GetScheduledTask(ctx context.Context, id string) (*ScheduledTask, error) {
+	return getScheduledTask(ctx, s.db, id)
+}
+
+// ListScheduledTasks returns every schedule, newest first -- ListTasks'
+// own "the whole table" reasoning applies again at this size.
+func (s *Store) ListScheduledTasks(ctx context.Context) ([]ScheduledTask, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` ORDER BY `created_at` DESC, `id` DESC")
+	if err != nil {
+		return nil, fmt.Errorf("listing scheduled tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []ScheduledTask
+	for rows.Next() {
+		t, err := scanScheduledTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DueScheduledTasks is every enabled schedule whose next run has come --
+// what the orchestrator's schedule reconciler fires each cycle. Ordered
+// by id for a deterministic firing order, the same reasoning v1's own
+// ScheduledJobsConfig.load gives for sorting by name.
+func (s *Store) DueScheduledTasks(ctx context.Context, now time.Time) ([]ScheduledTask, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` "+
+			"WHERE `enabled` = 1 AND `next_run_at` <= ? ORDER BY `id`", now.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("listing due scheduled tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []ScheduledTask
+	for rows.Next() {
+		t, err := scanScheduledTask(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// UpdateScheduledTask reads a schedule, applies mutate, and writes it
+// back -- UpdateTask's own read-modify-write-and-retry shape, for the
+// same reason: mutate may run more than once, on a schedule freshly read
+// inside each attempt.
+func (s *Store) UpdateScheduledTask(ctx context.Context, id string, mutate func(*ScheduledTask) error) error {
+	var missing bool
+	err := s.write(ctx, "update scheduled task "+id, func(tx *sql.Tx) error {
+		missing = false
+		t, err := getScheduledTask(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if t == nil {
+			missing = true
+			return nil
+		}
+		if err := mutate(t); err != nil {
+			return err
+		}
+		return putScheduledTask(ctx, tx, *t)
+	})
+	if err != nil {
+		return err
+	}
+	if missing {
+		return fmt.Errorf("updating scheduled task %s: no such scheduled task", id)
+	}
+	return nil
+}
+
+// DeleteScheduledTask removes a schedule -- unlike a task (Close's own
+// doc comment: "a task that ran is a record of a dispatch that
+// happened"), a schedule is only ever a standing declaration with no
+// history of its own worth keeping once a human no longer wants it, so
+// deleting it outright (rather than adding a closed-like flag) loses
+// nothing: every task it already filed remains exactly where it always
+// was, untouched by this.
+func (s *Store) DeleteScheduledTask(ctx context.Context, id string) error {
+	return s.write(ctx, "delete scheduled task "+id, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM `scheduled_task` WHERE `id` = ?", id)
+		return err
+	})
+}
+
+// HasOpenTaskWithTag reports whether any task carrying tag has not yet
+// reached model.StateClosed -- the idempotency check a schedule's own
+// firing needs before filing another one. v1's scheduled_jobs.py gave
+// every job a marker_label and had _scheduled_jobs list issues by it to
+// find a previous firing that has not finished; docs/data-model.md kept
+// that idea as a plain tag rather than a capability or a state of its
+// own ("neither a state nor a capability: it is an idempotency tag"),
+// and this is the query that reads it back.
+func (s *Store) HasOpenTaskWithTag(ctx context.Context, tag string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM `task_tag` AS `tg` "+
+			"JOIN `task_state` AS `st` ON `st`.`task_id` = `tg`.`task_id` "+
+			"WHERE `tg`.`tag` = ? AND `st`.`state` != ?", tag, string(StateClosed)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("checking for an open task tagged %s: %w", tag, err)
+	}
+	return n > 0, nil
+}
+
 // --- helpers ---------------------------------------------------------
 
 func each(ctx context.Context, q querier, query string, args any,
