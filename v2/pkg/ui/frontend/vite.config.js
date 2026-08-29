@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // Builds straight into ../static, the directory pkg/ui.Server embeds
@@ -31,5 +32,11 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/setupTests.js"],
+    // e2e/ holds Playwright specs, which the ui-e2e CI job runs through
+    // `make test-e2e`. Vitest's default include glob matches *.spec.js
+    // too, and Playwright's own test() throws outright when called
+    // under any runner but its own -- so without this the two suites
+    // collide and `npm test` fails on a file it was never meant to run.
+    exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });
