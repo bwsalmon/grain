@@ -174,7 +174,16 @@ button.danger:hover { background: rgba(var(--error-rgb), 0.08); }
   border-color: transparent;
 }
 
-main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
+main { padding: 1rem 1.5rem 4.5rem; max-width: 960px; margin: 0 auto; }
+
+.select-all {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--on-surface-variant);
+  font-size: 0.85rem;
+  padding: 0 0.2rem 0.6rem;
+}
 
 .task-list { list-style: none; margin: 0; padding: 0; }
 .task-list li {
@@ -193,6 +202,7 @@ main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
   box-shadow: var(--elevation-1);
   border-color: transparent;
 }
+.task-select { flex: 0 0 auto; }
 .task-number {
   color: var(--on-surface-variant);
   font-variant-numeric: tabular-nums;
@@ -268,6 +278,31 @@ main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
 .empty { color: var(--on-surface-variant); padding: 1rem 0; }
 .hidden { display: none !important; }
 
+.batch-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border-top: 1px solid var(--outline-variant);
+  box-shadow: var(--elevation-2);
+  padding: 0.65rem 1.5rem;
+  z-index: 4;
+}
+.batch-count { font-weight: 500; }
+.batch-bar select {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--outline-variant);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+}
+
 .error-banner {
   position: fixed;
   bottom: 1.25rem;
@@ -280,6 +315,10 @@ main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
   border-left: 4px solid var(--error);
   box-shadow: var(--elevation-3);
   max-width: min(90vw, 480px);
+  /* Above .batch-bar (z-index 4): a batch action's own failure is the
+     most likely reason the banner and the bar are ever up together, and
+     the message explaining what went wrong should win that overlap. */
+  z-index: 6;
 }
 
 .overlay {
