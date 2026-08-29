@@ -126,6 +126,85 @@ func TestUpgraderStartRunsCheckoutBuildInstallAndRestart(t *testing.T) {
 	}
 }
 
+// TestUpgraderReportsOKEvenWhenNewBinaryIsBrokenAtRuntime pins down the
+// gap called out in this package's own doc comment: "a build that
+// succeeds and then fails at runtime is not this package's problem to
+// catch." It builds and installs a "binary" that is a perfectly valid
+// executable -- so checkout/build/install all genuinely succeed -- but
+// which does nothing useful when actually run, then has RestartCmd run
+// that installed binary the same way a real restart would bring it up.
+// Today there is no health check anywhere in this path, so Status ends
+// up reporting PhaseOK regardless of whether the new binary actually
+// works; this test exists so a future health-check/rollback feature has
+// a red test to turn green instead of this staying an undocumented gap.
+func TestUpgraderReportsOKEvenWhenNewBinaryIsBrokenAtRuntime(t *testing.T) {
+	_, checkout := newFixtureRepo(t, "feature")
+	v2Dir := filepath.Join(checkout, "v2")
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	built := filepath.Join(v2Dir, "bin", "grain")
+	installPath := filepath.Join(t.TempDir(), "grain")
+	statusFile := filepath.Join(t.TempDir(), "upgrade-status.json")
+	// ranOK is only ever touched by a successful run of the installed
+	// binary; attempted is touched unconditionally, after that run (success
+	// or not) completes. Since the installed binary always exits 1, ranOK's
+	// absence once attempted exists is what confirms the "broken at
+	// runtime" setup actually took effect, rather than the test
+	// accidentally passing for an unrelated reason.
+	ranOK := filepath.Join(t.TempDir(), "ran-ok")
+	attempted := filepath.Join(t.TempDir(), "attempted")
+
+	u := New(Config{
+		SrcDir: checkout,
+		// A fake "build" that produces a real, executable script -- so
+		// build and install both succeed -- but one that always exits 1
+		// instead of doing anything useful once it's actually running.
+		BuildCmd:    []string{"sh", "-c", "mkdir -p bin && printf '#!/bin/sh\\nexit 1\\n' > bin/grain"},
+		BuiltBinary: built,
+		InstallPath: installPath,
+		// Stands in for "sudo systemctl restart grain-daemon.service":
+		// actually runs the newly installed binary, same as a real
+		// restart would. Because that binary always fails, ranOK is
+		// never created, but attempted always is.
+		RestartCmd: []string{"sh", "-c", installPath + " && touch " + ranOK + "; touch " + attempted},
+		StatusFile: statusFile,
+	})
+
+	if err := u.Start("feature"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	status := waitForPhase(t, u, PhaseOK)
+	if status.Detail == "" {
+		t.Error("ok status carries no Detail")
+	}
+
+	// Give RestartCmd -- which runs after the "ok" status is already
+	// written -- time to finish, then confirm the installed binary really
+	// did fail, i.e. that this test is actually exercising the runtime
+	// failure it claims to.
+	waitForFile(t, attempted)
+	if _, err := os.Stat(ranOK); err == nil {
+		t.Fatal("test bug: the installed binary reported success, so this test isn't exercising a runtime failure")
+	}
+
+	// This is the gap issue #418 pins down: even though the new binary is
+	// broken and RestartCmd's own attempt to bring it up failed, Status
+	// still reports PhaseOK with no trace of that failure. There is no
+	// health check of the new binary and no automatic rollback -- an
+	// operator is left running a broken new binary, and the only sign
+	// anything is wrong is outside this package entirely.
+	final, err := u.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Phase != PhaseOK {
+		t.Errorf("Status phase = %q, want %q (today's behavior: a broken-at-runtime binary is invisible to this package)", final.Phase, PhaseOK)
+	}
+}
+
 func TestUpgraderStartRejectsConcurrentUpgrade(t *testing.T) {
 	_, checkout := newFixtureRepo(t, "feature")
 	v2Dir := filepath.Join(checkout, "v2")
