@@ -1,0 +1,32 @@
+# KubeletConfiguration for a standalone kubelet: no apiserver, no
+# kubeconfig, just a container runtime and a directory of static pod
+# manifests. Installed to /etc/kubernetes/kubelet-config.yaml by
+# install.sh and referenced by kubelet.service via --config.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+
+staticPodPath: /etc/kubernetes/manifests
+
+# No apiserver to authenticate/authorize against, so there's nothing
+# meaningful to check requests against either. This only affects the
+# kubelet's own read-only/read-write HTTPS API (used by tools like
+# crictl/curl against :10250 for logs and debugging), not the static
+# pods themselves.
+authentication:
+  anonymous:
+    enabled: true
+  webhook:
+    enabled: false
+authorization:
+  mode: AlwaysAllow
+
+# Must match containerd-config.toml's SystemdCgroup = true.
+cgroupDriver: systemd
+
+# Static pods aren't managed by anything that would notice or care about
+# node memory/swap pressure the way a scheduler would, and dev/test nodes
+# commonly run with swap on.
+failSwapOn: false
+
+# registry.k8s.io/pause has to actually be pullable the first time a pod
+# sandbox is created; see README.md if the node is otherwise offline.

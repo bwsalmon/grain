@@ -1,0 +1,31 @@
+# containerd config for a node running a standalone (static-pod-only)
+# kubelet. Installed to /etc/containerd/config.toml by install.sh.
+#
+# This is deliberately a full config, not an override snippet: it's meant
+# to replace whatever config.toml ships with the distro's containerd
+# package (which usually has the CRI plugin disabled, since most distro
+# packaging assumes containerd is only being driven by Docker).
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri"]
+  sandbox_image = "registry.k8s.io/pause:3.10"
+
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  # Matches kubelet-config.yaml's cgroupDriver: systemd — kubelet and the
+  # container runtime must agree on this or pod cgroups end up split
+  # between the two drivers.
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+    runtime_type = "io.containerd.runc.v2"
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      SystemdCgroup = true
+
+[plugins."io.containerd.grpc.v1.cri".cni]
+  bin_dir = "/usr/lib/cni"
+  conf_dir = "/etc/cni/net.d"
+
+# Lets containerd pull kontur's images from the local registry started by
+# local-registry.sh (see README.md) without needing a TLS cert: the
+# registry only ever listens on localhost, so this is scoped to that one
+# host rather than disabling TLS verification broadly.
+[plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
+  endpoint = ["http://localhost:5000"]

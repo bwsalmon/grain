@@ -1,0 +1,22 @@
+[Unit]
+Description=kubelet (standalone, static pods only)
+Documentation=https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/
+After=containerd.service network-online.target
+Wants=network-online.target
+Requires=containerd.service
+
+[Service]
+# No --kubeconfig / --bootstrap-kubeconfig: this is what puts the kubelet
+# into standalone mode, where it only runs the pods it finds under
+# staticPodPath and never tries to register the node with an apiserver.
+ExecStart=/usr/local/bin/kubelet \
+  --config=/etc/kubernetes/kubelet-config.yaml \
+  --container-runtime-endpoint=unix:///run/containerd/containerd.sock \
+  --root-dir=/var/lib/kubelet \
+  --v=2
+Restart=always
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

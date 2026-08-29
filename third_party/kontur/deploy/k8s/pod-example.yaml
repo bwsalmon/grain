@@ -1,0 +1,136 @@
+# Example Pod running two cloud-hypervisor VMs, "web" and "worker", that
+# share the pod's single IP via the netshim init container. Each VM gets
+# its own external port on the pod IP (30080 / 30081) which netshim
+# forwards to the same fixed port inside the guest (8080); each guest is
+# expected to configure the IP given to it here (e.g. via a kernel `ip=`
+# boot parameter, as below) and listen on that port.
+#
+# The init container and both VM containers all use the same kontur image
+# -- one Go binary with two modes, selected by args ("netshim" for the
+# init container, "run" for the VM containers).
+#
+# Both VMs boot the same disk image read-only (CHV_DISK_READONLY): a
+# cloud-hypervisor VM takes an exclusive lock on any disk it opens
+# read-write, so two VMs can only share one underlying image file
+# concurrently when both open it read-only.
+#
+# Assumes:
+#  - the node has /dev/kvm exposed as the allocatable resource
+#    "devices.kubevirt.io/kvm" via a device plugin such as
+#    https://github.com/kubevirt/kubernetes-device-plugins. Without that,
+#    drop the "devices.kubevirt.io/kvm" resource below and instead set
+#    securityContext.privileged: true plus a hostPath volume for /dev/kvm.
+#  - the disk images and kernel are already present on the node under
+#    /var/lib/vm-images, e.g. pre-populated by a node-local image cache.
+#    Omitting CHV_DISK_IMAGE instead boots the reference guest image baked
+#    into the kontur image itself (see deploy/guest-image/README.md), but
+#    that image can't be shared read-only between VMs the way a hostPath
+#    image can, so this example still uses one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chv-vm-example
+  labels:
+    app: chv-vm-example
+spec:
+  restartPolicy: Never
+  # Must comfortably exceed CHV_SHUTDOWN_TIMEOUT below so kontur's own
+  # graceful-shutdown sequence can run to completion before the kubelet
+  # SIGKILLs the container itself.
+  terminationGracePeriodSeconds: 40
+  initContainers:
+    - name: netshim
+      image: ghcr.io/bwsalmon/kontur:latest
+      args: ["netshim"]
+      env:
+        - name: NETSHIM_VMS
+          value: "web:169.254.100.2:30080,worker:169.254.100.3:30081"
+        - name: NETSHIM_GUEST_PORT
+          value: "8080"
+      securityContext:
+        # netshim creates network interfaces and iptables rules in the
+        # pod's network namespace, which needs these capabilities (or
+        # privileged: true on a CNI/runtime that doesn't grant them
+        # individually).
+        capabilities:
+          add: ["NET_ADMIN", "NET_RAW"]
+  containers:
+    - name: web
+      image: ghcr.io/bwsalmon/kontur:latest
+      args: ["run"]
+      env:
+        - name: CHV_DISK_IMAGE
+          value: /images/disk.img
+        - name: CHV_DISK_READONLY
+          value: "true"
+        - name: CHV_KERNEL
+          value: /images/vmlinux
+        - name: CHV_CMDLINE
+          value: "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
+        - name: CHV_NET
+          value: "tap=tap-web"
+        - name: CHV_CPUS
+          value: "2"
+        - name: CHV_MEMORY_MB
+          value: "2048"
+        - name: CHV_SHUTDOWN_TIMEOUT
+          value: "20s"
+      resources:
+        requests:
+          cpu: "2"
+          memory: 3Gi
+          devices.kubevirt.io/kvm: "1"
+        limits:
+          cpu: "2"
+          memory: 3Gi
+          devices.kubevirt.io/kvm: "1"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: images
+          mountPath: /images
+          readOnly: true
+    - name: worker
+      image: ghcr.io/bwsalmon/kontur:latest
+      args: ["run"]
+      env:
+        - name: CHV_DISK_IMAGE
+          value: /images/disk.img
+        - name: CHV_DISK_READONLY
+          value: "true"
+        - name: CHV_KERNEL
+          value: /images/vmlinux
+        - name: CHV_CMDLINE
+          value: "console=ttyS0 root=/dev/vda ro ip=169.254.100.3::169.254.100.1:255.255.255.0::eth0:off"
+        - name: CHV_NET
+          value: "tap=tap-worker"
+        - name: CHV_CPUS
+          value: "2"
+        - name: CHV_MEMORY_MB
+          value: "2048"
+        - name: CHV_SHUTDOWN_TIMEOUT
+          value: "20s"
+      resources:
+        requests:
+          cpu: "2"
+          memory: 3Gi
+          devices.kubevirt.io/kvm: "1"
+        limits:
+          cpu: "2"
+          memory: 3Gi
+          devices.kubevirt.io/kvm: "1"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: images
+          mountPath: /images
+          readOnly: true
+  volumes:
+    - name: images
+      hostPath:
+        path: /var/lib/vm-images
+        type: Directory

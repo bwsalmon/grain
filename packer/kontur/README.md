@@ -129,14 +129,18 @@ point at a built image. `orchestrator.KonturConfig.CreateArgs`
 `-kontur-create-arg=-image -kontur-create-arg=gs://.../kontur-guest-....qcow2`
 -- rather than this repo guessing at and hard-coding a flag name. That
 name and shape are still owned entirely by bwsalmon/kontur's own CLI, a
-repo this one has no build or vendor relationship with (`pkg/kontur`'s own
-doc comment: "pulling in kontur's module graph ... would be a strange
-trade") and that has not been reachable from any sandbox this task has run
-in yet (both `github.com/bwsalmon/kontur` and its API endpoint 404 from
-here, same as bwsalmon/agents#267 found). A deployment wiring
-`-kontur-create-arg` for the first time should check bwsalmon/kontur's own
-`kontur vm create -h` (or its `internal/cli`) for the actual flag, and
-pass whichever of this directory's two outputs that flag expects -- a
+repo this one has no build or vendor relationship with in the Go-module
+sense (`pkg/kontur`'s own doc comment: "pulling in kontur's module graph
+... would be a strange trade") -- though as of bwsalmon/agents#351 its
+source is readable locally, at `../../third_party/kontur/`
+(`internal/cli/vm.go` for `create`'s actual flags), rather than only
+reachable from a sandbox that happens to hold proxy access to the private
+repo the way bwsalmon/agents#267 found it didn't. That vendored copy is a
+point-in-time snapshot with no automation keeping it current (see its own
+`VENDORED.md`), so a deployment wiring `-kontur-create-arg` for the first
+time should still treat bwsalmon/kontur's own `kontur vm create -h` as
+authoritative if the two ever disagree, and pass whichever of this
+directory's two outputs that flag expects -- a
 `gs://` URL if kontur fetches the image itself, or a path on the kontur
 host's own disk (this repo's `build.sh` always leaves the built qcow2 at
 `output/<image-name>-<version>/<image-name>.qcow2` locally, in addition to
