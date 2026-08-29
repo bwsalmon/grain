@@ -122,6 +122,19 @@ body {
 }
 .spacer { flex: 1; }
 
+.view-tabs { display: flex; gap: 0.25rem; }
+.view-tabs button {
+  background: transparent;
+  color: var(--on-surface-variant);
+  border: none;
+  border-radius: 999px;
+  padding: 0.45rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.view-tabs button:hover { background: var(--surface-container-high); }
+.view-tabs button.active { background: var(--primary-container); color: var(--on-primary-container); }
+
 button {
   font: inherit;
   cursor: pointer;
@@ -264,6 +277,26 @@ main { padding: 1rem 1.5rem 2.5rem; max-width: 960px; margin: 0 auto; }
   background: var(--surface);
   color: inherit;
 }
+
+.repo-list { list-style: none; margin: 0; padding: 0; }
+.repo-list li {
+  background: var(--surface);
+  border: 1px solid var(--outline-variant);
+  border-radius: 12px;
+  padding: 0.9rem 1.1rem;
+  margin-bottom: 0.6rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  transition: box-shadow 120ms ease, border-color 120ms ease;
+}
+.repo-list li:hover { box-shadow: var(--elevation-1); border-color: transparent; }
+.repo-list-name { flex: 1; font-weight: 500; font-variant-numeric: tabular-nums; }
+.repo-list-total { color: var(--on-surface-variant); font-size: 0.8rem; white-space: nowrap; }
+
+.repo-scope-bar { padding: 1rem 1.5rem 0; max-width: 960px; margin: 0 auto; }
+.repo-scope-bar .chip { font-size: 0.85rem; padding: 0.3rem 0.5rem 0.3rem 0.8rem; }
 
 .empty { color: var(--on-surface-variant); padding: 1rem 0; }
 .hidden { display: none !important; }

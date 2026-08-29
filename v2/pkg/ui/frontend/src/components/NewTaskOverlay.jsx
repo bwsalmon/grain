@@ -2,7 +2,7 @@ import { useRef } from "react";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
-export default function NewTaskOverlay({ config, onClose, onCreated, showError }) {
+export default function NewTaskOverlay({ config, defaultRepo, onClose, onCreated, showError }) {
   const formRef = useRef(null);
 
   const submit = async (evt) => {
@@ -48,7 +48,11 @@ export default function NewTaskOverlay({ config, onClose, onCreated, showError }
           <textarea name="description" rows="5" />
         </label>
         <label>Target repo <span className="hint">owner/name, optional</span>
-          <input name="repo" placeholder="owner/name" autoComplete="off" />
+          {/* Pre-filled from the repo the "+ New task" button was opened
+              from -- the repo-centric task list's whole point is filing
+              work against the repo you're already looking at without
+              retyping it. */}
+          <input name="repo" placeholder="owner/name" defaultValue={defaultRepo || ""} autoComplete="off" />
         </label>
         <label>Base branch <span className="hint">optional</span>
           <input name="base" placeholder="main" autoComplete="off" />
