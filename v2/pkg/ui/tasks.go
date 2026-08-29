@@ -33,6 +33,15 @@ type Task struct {
 	Capabilities []string    `json:"capabilities"`
 	PullRequest  string      `json:"pullRequest,omitempty"`
 	CreatedAt    *time.Time  `json:"createdAt,omitempty"`
+	// DependsOn is every task this one has declared a depends-on link to,
+	// resolved or not -- the definition. Blocked and BlockedBy are the
+	// signal: whether any of it (or a child-of link) is still open right
+	// now, re-derived on every read rather than pinned at creation, per
+	// docs/data-model.md's "blocked is not a state, it is derived from
+	// links" -- see model.IsBlocked.
+	DependsOn []string `json:"dependsOn,omitempty"`
+	Blocked   bool     `json:"blocked"`
+	BlockedBy []string `json:"blockedBy,omitempty"`
 }
 
 // Comment is one entry in a task's conversation.
@@ -58,7 +67,12 @@ type TaskDetail struct {
 	Comments []Comment `json:"comments"`
 }
 
-func taskFrom(t model.Task, state model.State) Task {
+// taskFrom projects a model.Task to its JSON shape. closed reports, for
+// every task ID a blocking link might target, whether that task reads
+// closed -- the caller resolves it (Client.ListTasks over the whole
+// store in one query, Client.Task over just this task's own targets) so
+// this function stays free of the store itself.
+func taskFrom(t model.Task, state model.State, closed map[string]bool) Task {
 	out := Task{
 		ID:           t.ID,
 		Title:        t.Title,
@@ -80,7 +94,14 @@ func taskFrom(t model.Task, state model.State) Task {
 		if l.Kind == model.LinkFixes {
 			out.PullRequest = l.Target
 		}
+		if l.Kind == model.LinkDependsOn {
+			out.DependsOn = append(out.DependsOn, l.Target)
+		}
+		if l.Kind.Blocks() && !closed[l.Target] {
+			out.BlockedBy = append(out.BlockedBy, l.Target)
+		}
 	}
+	out.Blocked = len(out.BlockedBy) > 0
 	return out
 }
 
@@ -157,6 +178,27 @@ func (s *Server) handleSetCapability(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := s.tasks.SetCapability(r.Context(), id, req.ID, req.Attach); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	s.respondWithTask(w, r, id)
+}
+
+type setDependencyRequest struct {
+	ID     string `json:"id"`
+	Attach bool   `json:"attach"`
+}
+
+// handleSetDependency attaches or detaches one depends-on link, the same
+// attach/detach shape handleSetCapability already gives a checkbox --
+// this is the picker's "add"/"remove" button, not a general link editor.
+func (s *Server) handleSetDependency(w http.ResponseWriter, r *http.Request) {
+	var req setDependencyRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.tasks.SetDependency(r.Context(), id, req.ID, req.Attach); err != nil {
 		writeClientError(w, err)
 		return
 	}

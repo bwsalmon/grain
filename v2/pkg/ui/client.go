@@ -78,9 +78,17 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One States call already answers "is X closed?" for every task in
+	// the store, so a list of many tasks costs nothing extra to also
+	// carry each one's blocked signal -- unlike Task below, which has no
+	// reason to fetch every task's state just to render one.
+	closed := make(map[string]bool, len(states))
+	for id, st := range states {
+		closed[id] = st == model.StateClosed
+	}
 	out := make([]Task, 0, len(tasks))
 	for _, t := range tasks {
-		out = append(out, taskFrom(t, states[t.ID]))
+		out = append(out, taskFrom(t, states[t.ID], closed))
 	}
 	return out, nil
 }
@@ -98,7 +106,33 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	return taskFrom(*t, state), nil
+	closed, err := c.closedTargets(ctx, t.Links)
+	if err != nil {
+		return Task{}, err
+	}
+	return taskFrom(*t, state, closed), nil
+}
+
+// closedTargets resolves whether each of a task's own blocking-link
+// targets reads closed -- a handful of extra queries for one task rather
+// than States' whole-store read, matching ListTasks' own "a few queries
+// per task" trade-off (store.go's hydrate).
+func (c *Client) closedTargets(ctx context.Context, links []model.Link) (map[string]bool, error) {
+	closed := map[string]bool{}
+	for _, l := range links {
+		if !l.Kind.Blocks() {
+			continue
+		}
+		if _, ok := closed[l.Target]; ok {
+			continue
+		}
+		state, err := c.Store.State(ctx, l.Target)
+		if err != nil {
+			return nil, err
+		}
+		closed[l.Target] = state == model.StateClosed
+	}
+	return closed, nil
 }
 
 // GetTask returns one task plus its conversation.
@@ -130,6 +164,11 @@ type CreateTaskRequest struct {
 	Base         string   `json:"base"`
 	AutoMerge    bool     `json:"autoMerge"`
 	Capabilities []string `json:"capabilities"`
+	// DependsOn is a set of task IDs this task cannot dispatch ahead of --
+	// model.LinkDependsOn links, filed at creation the same way
+	// Capabilities is. SetDependency is the picker's attach/detach
+	// counterpart for a task that already exists.
+	DependsOn []string `json:"dependsOn"`
 	// Approved files the task already approved, so it is dispatchable at
 	// once. False files it proposed, waiting for Approve.
 	Approved bool `json:"approved"`
@@ -164,6 +203,10 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
+	links, err := c.dependsOnLinks(ctx, req.DependsOn, "")
+	if err != nil {
+		return Task{}, err
+	}
 
 	id, err := c.Store.NewTaskID(ctx)
 	if err != nil {
@@ -184,6 +227,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Base:      req.Base,
 		AutoMerge: req.AutoMerge,
 		Grants:    grants,
+		Links:     links,
 		CreatedAt: &now,
 	}
 	if req.Approved {
@@ -206,6 +250,36 @@ func (c *Client) grantsFor(ids []string) ([]model.Grant, error) {
 		grants = append(grants, model.Grant{Capability: id, Via: model.GrantByLabel})
 	}
 	return grants, nil
+}
+
+// dependsOnLinks turns a set of task IDs into model.LinkDependsOn links,
+// rejecting one that names no task and one that names selfID -- caught
+// here, before the store is touched, rather than left to surface as a
+// task silently blocked on nothing (an unknown id) or forever (itself).
+// Blank entries and repeats are dropped rather than rejected: a picker
+// built from free text will produce both.
+func (c *Client) dependsOnLinks(ctx context.Context, ids []string, selfID string) ([]model.Link, error) {
+	links := make([]model.Link, 0, len(ids))
+	seen := map[string]bool{}
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if id == selfID {
+			return nil, validationErrorf("a task cannot depend on itself")
+		}
+		target, err := c.Store.GetTask(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if target == nil {
+			return nil, validationErrorf("depends on unknown task %s", id)
+		}
+		links = append(links, model.Link{Kind: model.LinkDependsOn, Target: id})
+	}
+	return links, nil
 }
 
 // UpdateTaskRequest is a task's editable fields -- nil means "leave this
@@ -303,6 +377,44 @@ func (c *Client) SetCapability(ctx context.Context, id, capabilityID string, att
 			kept = append(kept, model.Grant{Capability: capabilityID, Via: model.GrantByLabel})
 		}
 		task.Grants = kept
+		return nil
+	})
+}
+
+// SetDependency attaches or detaches one depends-on link -- the picker's
+// attach/detach counterpart to SetCapability, so a dependency named after
+// creation goes through the same mutate-and-retry path every other edit
+// here does. Detaching one not attached is a no-op, matching
+// SetCapability; attaching one already attached is too, since the link
+// table's own primary key (task_id, kind, target) already forbids a
+// duplicate.
+func (c *Client) SetDependency(ctx context.Context, id, dependsOnID string, attach bool) error {
+	if strings.TrimSpace(dependsOnID) == "" {
+		return validationErrorf("dependsOn id is required")
+	}
+	if !attach {
+		return c.mutate(ctx, id, func(task *model.Task) error {
+			kept := make([]model.Link, 0, len(task.Links))
+			for _, l := range task.Links {
+				if !(l.Kind == model.LinkDependsOn && l.Target == dependsOnID) {
+					kept = append(kept, l)
+				}
+			}
+			task.Links = kept
+			return nil
+		})
+	}
+	links, err := c.dependsOnLinks(ctx, []string{dependsOnID}, id)
+	if err != nil {
+		return err
+	}
+	return c.mutate(ctx, id, func(task *model.Task) error {
+		for _, l := range task.Links {
+			if l.Kind == model.LinkDependsOn && l.Target == dependsOnID {
+				return nil
+			}
+		}
+		task.Links = append(task.Links, links...)
 		return nil
 	})
 }

@@ -165,6 +165,39 @@ func TestSubmitRouteSetsAutoMerge(t *testing.T) {
 	}
 }
 
+func TestDependsOnRouteAttachesAndReportsBlocked(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"blocker"}`)
+	blockerID := decode[ui.Task](t, rec).ID
+	rec = do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it"}`)
+	id := decode[ui.Task](t, rec).ID
+
+	rec = do(t, srv, http.MethodPost, "/api/tasks/"+id+"/depends-on",
+		`{"id":"`+blockerID+`","attach":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	task := decode[ui.Task](t, rec)
+	if !task.Blocked {
+		t.Fatal("blocked = false, want true")
+	}
+	if len(task.DependsOn) != 1 || task.DependsOn[0] != blockerID {
+		t.Fatalf("dependsOn = %v, want [%s]", task.DependsOn, blockerID)
+	}
+}
+
+func TestDependsOnRouteRejectsSelfDependency(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it"}`)
+	id := decode[ui.Task](t, rec).ID
+
+	rec = do(t, srv, http.MethodPost, "/api/tasks/"+id+"/depends-on", `{"id":"`+id+`","attach":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
 func TestSubmitUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {
