@@ -49,6 +49,16 @@ describe("Sidebar", () => {
     expect(onSetFilter).toHaveBeenCalledWith("running");
   });
 
+  it("shows the build version in the footer when config carries one", () => {
+    render(<Sidebar config={{ version: "7+a7f9540" }} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    expect(screen.getByText("v7+a7f9540")).toBeInTheDocument();
+  });
+
+  it("omits the version footer when config has none yet", () => {
+    render(<Sidebar config={null} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={() => {}} onOpenSettings={() => {}} onOpenNewTask={() => {}} />);
+    expect(screen.queryByText(/^v\d/)).not.toBeInTheDocument();
+  });
+
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSecrets = vi.fn();
     const onOpenSettings = vi.fn();

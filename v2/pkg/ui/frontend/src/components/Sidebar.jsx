@@ -49,6 +49,11 @@ export default function Sidebar({ config, tasks, stateFilter, onSetFilter, onOpe
       <div className="sidebar-footer">
         <button onClick={onOpenSecrets}>Secrets</button>
         <button onClick={onOpenSettings}>Settings</button>
+        {config?.version && (
+          <div className="sidebar-version" title={`schema version + build commit`}>
+            v{config.version}
+          </div>
+        )}
       </div>
     </aside>
   );

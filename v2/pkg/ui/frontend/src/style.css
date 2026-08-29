@@ -190,6 +190,15 @@ body {
   font-weight: 500;
 }
 .sidebar-footer button:hover { background: var(--surface-hover); color: var(--text); }
+.sidebar-version {
+  padding: 0.45rem 0.55rem 0;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-family: monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .main-column {
   flex: 1;

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/version"
 )
 
 // Task is a task's JSON shape -- everything the frontend needs to list
@@ -161,6 +162,13 @@ type configResponse struct {
 	ActorKind     string       `json:"actorKind"`
 	DefaultTarget string       `json:"defaultTarget,omitempty"`
 	Capabilities  []Capability `json:"capabilities"`
+	// Version is pkg/version.String(): the store schema version this
+	// build expects, plus the git commit it was built from
+	// (bwsalmon/agents#397) -- a build property, not a deployment
+	// setting, so it rides along on this same endpoint (the one thing
+	// the frontend already fetches once at load) rather than a route of
+	// its own.
+	Version string `json:"version"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +176,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Actor:        s.tasks.Config.Actor.ID,
 		ActorKind:    string(s.tasks.Config.Actor.Kind),
 		Capabilities: s.tasks.Config.Capabilities,
+		Version:      version.String(),
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()
