@@ -111,10 +111,15 @@ func daemon(args []string) {
 	konturVMNamePrefix := fs.String("kontur-vm-name-prefix", "",
 		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
+	konturBackend := fs.String("kontur-backend", kontur.BackendDocker,
+		"backend `kontur vm create -backend` builds each slot's VM with (only used with -kontur-vm-name-prefix): "+
+			"\"docker\" (the default -- bwsalmon/agents#353: no konturctl setup, containerd, CNI or kubelet needed on "+
+			"the host, just a local docker daemon) or \"static-pod\" to run under a standalone kubelet instead")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
 		"kontur's VM state directory (only used with -kontur-vm-name-prefix)")
 	criRuntimeEndpoint := fs.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
-		"containerd CRI socket, used to resolve a kontur VM's pod IP via crictl (only used with -kontur-vm-name-prefix)")
+		"containerd CRI socket, used to resolve a kontur VM's pod IP via crictl (only used with -kontur-vm-name-prefix "+
+			"and -kontur-backend static-pod; the docker backend has no CRI to ask)")
 	konturSSHUser := fs.String("kontur-ssh-user", "",
 		"username to SSH into each kontur VM as (required with -kontur-vm-name-prefix)")
 	konturSSHKey := fs.String("kontur-ssh-key", "",
@@ -166,7 +171,8 @@ func daemon(args []string) {
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
-		konturVMNamePrefix: *konturVMNamePrefix, konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
+		konturVMNamePrefix: *konturVMNamePrefix, konturBackend: *konturBackend,
+		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
 		konturCreateArgs: konturCreateArgs,
 	}); err != nil {
@@ -199,6 +205,7 @@ type config struct {
 	// kontur* fields are only consulted then. See run()'s own comment on
 	// sandboxes.
 	konturVMNamePrefix string
+	konturBackend      string
 	konturStateDir     string
 	criRuntimeEndpoint string
 	konturSSHUser      string
@@ -246,6 +253,7 @@ func run(ctx context.Context, cfg config) error {
 	if cfg.konturVMNamePrefix != "" {
 		konturSandboxes = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 			NamePrefix:      cfg.konturVMNamePrefix,
+			Backend:         cfg.konturBackend,
 			StateDir:        cfg.konturStateDir,
 			RuntimeEndpoint: cfg.criRuntimeEndpoint,
 			CreateArgs:      cfg.konturCreateArgs,

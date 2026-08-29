@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,8 +16,12 @@ import (
 // writeFakeKontur installs a shell script named "kontur" on PATH that
 // answers "vm create <name> -state-dir <dir> ..." by writing
 // <dir>/<name>.json with the given port (kontur's own real behavior,
-// which is what Port later reads back), logs every invocation's argv (one
-// line per call) to argvLog, and otherwise succeeds silently.
+// which is what Port later reads back) and "vm delete <name> -state-dir
+// <dir>" by removing that same file (kontur's own staticpod.Delete,
+// mirrored here so a Recreate test's second "vm create" sees a VM that
+// genuinely doesn't exist yet rather than reusing stale state) -- logs
+// every invocation's argv (one line per call) to argvLog, and otherwise
+// succeeds silently.
 func writeFakeKontur(t *testing.T, argvLog string, port int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -25,7 +30,8 @@ func writeFakeKontur(t *testing.T, argvLog string, port int) {
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$*" >> %q
-if [ "$1" = "vm" ] && [ "$2" = "create" ]; then
+if [ "$1" = "vm" ] && { [ "$2" = "create" ] || [ "$2" = "delete" ]; }; then
+  action="$2"
   name="$3"
   statedir=""
   shift 3
@@ -35,10 +41,35 @@ if [ "$1" = "vm" ] && [ "$2" = "create" ]; then
     fi
     shift
   done
-  echo "{\"port\": %d}" > "$statedir/$name.json"
+  if [ "$action" = "create" ]; then
+    echo "{\"port\": %d}" > "$statedir/$name.json"
+  else
+    rm -f "$statedir/$name.json"
+  fi
 fi
 `, argvLog, port)
 	path := filepath.Join(dir, "kontur")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// writeFakeDocker installs a shell script named "docker" on PATH that logs
+// every invocation's argv (one line per call) to argvLog and answers
+// every call with ip -- the docker-backend equivalent of writeFakeCrictl,
+// standing in for `docker inspect` (see pkg/kontur.DockerPodIP).
+func writeFakeDocker(t *testing.T, argvLog, ip string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake docker script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+echo %q
+`, argvLog, ip)
+	path := filepath.Join(dir, "docker")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +172,131 @@ func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T
 	// actually took effect end to end.
 	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "second-token"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestKonturSandboxesRecreateDeletesAndRecreatesTheVM(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Recreate(context.Background(), "slot-0"); err != nil {
+		t.Fatalf("Recreate: %v", err)
+	}
+	// The slot's sandbox must still work after being recreated -- a
+	// second create, not a reuse of whatever ensure() thinks it already
+	// knows about the now-deleted VM.
+	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+		t.Fatalf("ToolsFor after Recreate: %v", err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"vm create grain-test-slot-0 -state-dir " + stateDir,
+		"vm delete grain-test-slot-0 -state-dir " + stateDir,
+		"vm create grain-test-slot-0 -state-dir " + stateDir,
+	}
+	got := splitNonEmptyLines(string(data))
+	if len(got) != len(want) {
+		t.Fatalf("kontur invocations = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestKonturSandboxesRecreateReappliesGitCredentials(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	home := t.TempDir()
+	writeFakeSSH(t, home)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate what a real Recreate's fresh VM actually looks like: no
+	// filesystem carried over from the one just torn down, credentials
+	// included.
+	if err := os.Remove(filepath.Join(home, ".git-credentials")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.Recreate(context.Background(), "slot-0"); err != nil {
+		t.Fatalf("Recreate: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".git-credentials"))
+	if err != nil {
+		t.Fatalf("Recreate did not reapply git credentials to the rebuilt VM: %v", err)
+	}
+	if want := "http://sandbox:secret-token@10.100.0.1:8080\n"; string(data) != want {
+		t.Errorf(".git-credentials = %q, want %q", data, want)
+	}
+}
+
+func TestKonturSandboxesDockerBackendPassesBackendFlagAndResolvesViaDockerInspect(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	dockerLog := filepath.Join(t.TempDir(), "docker-argv.log")
+	writeFakeDocker(t, dockerLog, "172.17.0.9")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		Backend:           "docker",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+		t.Fatal(err)
+	}
+
+	konturArgv, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker\n"; string(konturArgv) != want {
+		t.Errorf("kontur invoked with %q, want %q", konturArgv, want)
+	}
+
+	dockerArgv, err := os.ReadFile(dockerLog)
+	if err != nil {
+		t.Fatalf("docker was never invoked to resolve the VM's address: %v", err)
+	}
+	if !strings.Contains(string(dockerArgv), "kontur-vm-grain-test-slot-0-netns") {
+		t.Errorf("docker invoked with %q, want it naming kontur-vm-grain-test-slot-0-netns", dockerArgv)
 	}
 }
 

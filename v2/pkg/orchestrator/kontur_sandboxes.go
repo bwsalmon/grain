@@ -26,8 +26,19 @@ type KonturConfig struct {
 	StateDir string
 	// RuntimeEndpoint is the containerd CRI socket (kontur.
 	// DefaultRuntimeEndpoint if empty), used to resolve a slot's VM's pod
-	// IP via crictl.
+	// IP via crictl. Ignored when Backend is kontur.BackendDocker, which
+	// has no CRI to ask.
 	RuntimeEndpoint string
+	// Backend selects the value `kontur vm create -backend` builds each
+	// slot's VM with, and which of pkg/kontur's two ways of finding a
+	// VM's reachable address resolveEndpoint uses to match. Empty means
+	// kontur's own default, the static-pod backend under a standalone
+	// kubelet, resolved via kontur.PodIP (crictl). kontur.BackendDocker
+	// runs the VM directly against a local docker daemon instead --
+	// bwsalmon/agents#353's ask, since it needs neither `konturctl setup`
+	// nor containerd/CNI/kubelet on the host -- and is resolved via
+	// kontur.DockerPodIP (docker inspect) instead.
+	Backend string
 	// CreateArgs is appended to "kontur vm create <name> -state-dir
 	// <dir>" verbatim when a slot's VM does not exist yet -- guest image,
 	// guest SSH port, resource sizing, and anything else a deployment's
@@ -81,6 +92,17 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 	return 2 * time.Second
 }
 
+// createArgs returns the full argument list ensure passes to kontur.Create
+// beyond a name and -state-dir: -backend cfg.Backend first, when set, so a
+// caller's own CreateArgs never needs to repeat it, followed by
+// cfg.CreateArgs verbatim.
+func (c KonturConfig) createArgs() []string {
+	if c.Backend == "" {
+		return c.CreateArgs
+	}
+	return append([]string{"-backend", c.Backend}, c.CreateArgs...)
+}
+
 // KonturSandboxes hands out mcp tools that run over SSH against a real
 // bwsalmon/kontur-managed VM, one per slot, created on first use and
 // reused across cycles after that -- matching HostSandboxes' own
@@ -92,13 +114,22 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 type KonturSandboxes struct {
 	cfg KonturConfig
 
-	mu      sync.Mutex
-	created map[string]bool
+	mu       sync.Mutex
+	created  map[string]bool
+	gitCreds map[string]gitCredentials
+}
+
+// gitCredentials is what ConfigureGitCredentials remembers per slot, so
+// Recreate can reapply it to the fresh VM it just built without its own
+// caller (which only knows about slots, not credentials -- see cycle.go's
+// recreatingSandboxes) having to carry it around.
+type gitCredentials struct {
+	remoteURL, token string
 }
 
 // NewKonturSandboxes returns a KonturSandboxes configured by cfg.
 func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
-	return &KonturSandboxes{cfg: cfg, created: map[string]bool{}}
+	return &KonturSandboxes{cfg: cfg, created: map[string]bool{}, gitCreds: map[string]gitCredentials{}}
 }
 
 // VMNameFor returns the kontur VM name ToolsFor uses for slot, so
@@ -146,7 +177,7 @@ func (k *KonturSandboxes) ensure(ctx context.Context, name string) error {
 		k.created[name] = true
 		return nil
 	}
-	if err := kontur.Create(ctx, k.cfg.stateDir(), name, k.cfg.CreateArgs...); err != nil {
+	if err := kontur.Create(ctx, k.cfg.stateDir(), name, k.cfg.createArgs()...); err != nil {
 		return fmt.Errorf("orchestrator: creating kontur VM %q for sandbox: %w", name, err)
 	}
 	k.created[name] = true
@@ -162,6 +193,11 @@ func (k *KonturSandboxes) ensure(ctx context.Context, name string) error {
 // backend. Safe to call before any ToolsFor call for slot: like ToolsFor,
 // it creates the VM on first use and waits out cfg.readyTimeout for it to
 // become reachable.
+//
+// remoteURL and token are also remembered for slot, so a later Recreate
+// call can reapply them to the fresh VM it just built without its own
+// caller (dispatch, which knows only about slots, not credentials) having
+// to carry them.
 func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, remoteURL, token string) error {
 	name := k.VMNameFor(slot)
 	if err := k.ensure(ctx, name); err != nil {
@@ -174,6 +210,54 @@ func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, rem
 	runner := &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}
 	if err := mcp.ConfigureGitCredentialsOverSSH(runner, remoteURL, token); err != nil {
 		return fmt.Errorf("orchestrator: configuring git credentials on kontur VM %q: %w", name, err)
+	}
+	k.mu.Lock()
+	k.gitCreds[slot] = gitCredentials{remoteURL: remoteURL, token: token}
+	k.mu.Unlock()
+	return nil
+}
+
+// Recreate tears slot's VM down and rebuilds it from scratch -- the
+// isolation boundary bwsalmon/agents#353 asked for between one dispatched
+// task and the next, the same "destroy then create" shape v1's own
+// HostAdapter.recreate() gives a sandbox (grain/adapter/base.py), applied
+// here per task rather than on v1's own weekly-or-wedged schedule. It is
+// deliberately delete-then-create, the same two primitives ensure already
+// calls, rather than `kontur vm update` (which happens to do the same
+// thing for -backend docker, per bwsalmon/kontur's own internal/cli
+// doc comment, but only there): that keeps this package's only path to
+// building a VM in one place, cfg.createArgs(), instead of leaning on a
+// kontur subcommand whose "recreate" behavior is backend-specific and not
+// this package's to depend on.
+//
+// If ConfigureGitCredentials was ever called for slot, Recreate reapplies
+// it to the rebuilt VM before returning -- a fresh VM has none of the
+// previous one's filesystem, credentials included, and dispatch has no
+// other opportunity to redo that setup between tasks.
+func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
+	name := k.VMNameFor(slot)
+
+	if err := kontur.Delete(ctx, k.cfg.stateDir(), name); err != nil {
+		return fmt.Errorf("orchestrator: deleting kontur VM %q to recreate it: %w", name, err)
+	}
+	k.mu.Lock()
+	delete(k.created, name)
+	k.mu.Unlock()
+
+	if err := k.ensure(ctx, name); err != nil {
+		return fmt.Errorf("orchestrator: recreating kontur VM %q: %w", name, err)
+	}
+	if _, _, err := k.resolveEndpoint(ctx, name); err != nil {
+		return fmt.Errorf("orchestrator: waiting for recreated kontur VM %q to become ready: %w", name, err)
+	}
+
+	k.mu.Lock()
+	creds, ok := k.gitCreds[slot]
+	k.mu.Unlock()
+	if ok {
+		if err := k.ConfigureGitCredentials(ctx, slot, creds.remoteURL, creds.token); err != nil {
+			return fmt.Errorf("orchestrator: reconfiguring git credentials on recreated kontur VM %q: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -193,7 +277,11 @@ func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (hos
 
 	deadline := time.Now().Add(k.cfg.readyTimeout())
 	for {
-		host, err = kontur.PodIP(ctx, k.cfg.runtimeEndpoint(), name)
+		if k.cfg.Backend == kontur.BackendDocker {
+			host, err = kontur.DockerPodIP(ctx, name)
+		} else {
+			host, err = kontur.PodIP(ctx, k.cfg.runtimeEndpoint(), name)
+		}
 		if err == nil {
 			return host, port, nil
 		}

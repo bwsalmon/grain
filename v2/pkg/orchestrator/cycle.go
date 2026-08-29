@@ -133,6 +133,17 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	return errors.Join(errs...)
 }
 
+// recreatingSandboxes is implemented by a Sandboxes backend that supports
+// resetting a slot's sandbox to a clean state between tasks --
+// KonturSandboxes' own Recreate. HostSandboxes does not implement it: the
+// local-directory stand-in is deliberately left long-lived, resetting one
+// between tasks being "the caller's job" per its own doc comment, the same
+// as it always has been; only a real sandbox backend gains the recreate-
+// after-each-task boundary bwsalmon/agents#353 asked for.
+type recreatingSandboxes interface {
+	Recreate(ctx context.Context, slot string) error
+}
+
 func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) error {
 	task, err := deps.Store.GetTask(ctx, d.TaskID)
 	if err != nil {
@@ -159,9 +170,25 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		}
 	}
 
-	result, err := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
-	if err != nil {
-		return err
+	result, runErr := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
+
+	// The sandbox is recreated once this dispatch is done with it,
+	// whether or not it succeeded -- a failed or cancelled run is exactly
+	// the kind of run that should not leave anything behind for the next
+	// one dispatched onto this slot. A recreate failure is reported
+	// alongside whatever else went wrong, but it never itself skips
+	// ProcessResult below: what a successful run's result implies for
+	// GitHub does not depend on whether cleaning up after it also
+	// succeeded.
+	var recreateErr error
+	if recreater, ok := deps.Sandboxes.(recreatingSandboxes); ok {
+		if err := recreater.Recreate(ctx, d.Slot); err != nil {
+			recreateErr = fmt.Errorf("orchestrator: recreating slot %s's sandbox after task %s: %w", d.Slot, task.ID, err)
+		}
 	}
-	return ProcessResult(ctx, deps.Store, deps.Client, *task, result, now)
+
+	if runErr != nil {
+		return errors.Join(runErr, recreateErr)
+	}
+	return errors.Join(ProcessResult(ctx, deps.Store, deps.Client, *task, result, now), recreateErr)
 }
