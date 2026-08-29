@@ -5,7 +5,7 @@ import { STATE_LABELS, STATE_ORDER } from "../state.js";
 // list styled like Plane's own status groups (a dot standing in for the
 // state's badge color, a count on the right), and the deployment-level
 // actions (secrets, settings) pinned to the bottom.
-export default function Sidebar({ config, tasks, stateFilter, onSetFilter, onOpenSecrets, onOpenSettings, onOpenNewTask }) {
+export default function Sidebar({ config, tasks, stateFilter, onSetFilter, onOpenSecrets, onOpenSchedules, onOpenSettings, onOpenNewTask }) {
   const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
 
   const counts = {};
@@ -48,6 +48,7 @@ export default function Sidebar({ config, tasks, stateFilter, onSetFilter, onOpe
 
       <div className="sidebar-footer">
         <button onClick={onOpenSecrets}>Secrets</button>
+        <button onClick={onOpenSchedules}>Scheduled tasks</button>
         <button onClick={onOpenSettings}>Settings</button>
       </div>
     </aside>

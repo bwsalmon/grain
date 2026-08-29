@@ -45,21 +45,28 @@ type Reconciler struct {
 // Reconcilers returns the cycle's reconcilers, in the order RunCycle runs
 // them.
 //
-// There were three. "poll" listed the task repo's labelled GitHub issues
-// and turned each into a task, and it is gone: tasks are created by
+// There used to be a "poll" that listed the task repo's labelled GitHub
+// issues and turned each into a task, and it is gone: tasks are created by
 // writing them (README, "Input is a model update, not a GitHub issue"),
 // so there is no longer an outside source of tasks to reconcile against.
 // A task filed by the CLI or the UI is in task_ready the moment it is
 // written, rather than on whichever tick happened to poll next.
 //
-// The order of the two that remain is a latency preference, not a
+// "schedule" is the one addition since (bwsalmon/agents#376): it turns
+// each schedule whose interval has come due into a real task, the same
+// store write CreateTask itself makes. It runs first for the same
+// latency reason syncing runs last -- a task a schedule files this cycle
+// should be dispatchable this same tick, not on the next one.
+//
+// The order of the two after it is a latency preference, not a
 // dependency: syncing last lets a pull request opened moments ago by this
-// very cycle be picked up without a tick's delay. Both read their own
-// inputs from the store, so the other order produces the same state one
-// cycle later — which is exactly why one failing does not invalidate the
-// other.
+// very cycle be picked up without a tick's delay. All three read their
+// own inputs from the store, so a different order produces the same
+// state one cycle later — which is exactly why one failing does not
+// invalidate the others.
 func Reconcilers() []Reconciler {
 	return []Reconciler{
+		{Name: "schedule", Reconcile: reconcileSchedule},
 		{Name: "dispatch", Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
 	}

@@ -93,6 +93,7 @@ function TaskRow({ t, config, onOpenTask, selected, onToggleSelect }) {
       <span className="task-number">{t.id}</span>
       <span className="task-title">{t.title}</span>
       <span className="chips">
+        {t.scheduled && <span className="chip chip-scheduled" title="filed automatically by a schedule">scheduled</span>}
         {t.repo && <span className="chip">{t.repo}</span>}
         {(t.reads || []).map((repo) => (
           <span key={repo} className="chip chip-read" title="read-only">{repo} (read)</span>
