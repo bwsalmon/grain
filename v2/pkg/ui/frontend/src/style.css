@@ -266,7 +266,7 @@ main { padding: 0 0 2.5rem; }
 }
 
 .task-list { list-style: none; margin: 0; padding: 0; }
-.task-list li {
+.task-row {
   display: flex;
   align-items: center;
   gap: 0.85rem;
@@ -274,7 +274,17 @@ main { padding: 0 0 2.5rem; }
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-.task-list li:hover { background: var(--surface-hover); }
+.task-row:hover { background: var(--surface-hover); }
+/* A stacked task (bwsalmon/agents#378) nests under the task that
+   generated it rather than getting a row of its own -- indented and
+   set off from the parent's own row, so it reads as a continuation of
+   the same change rather than a separate task. */
+.task-sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.task-sublist .task-row { padding-left: 3.25rem; }
 .task-select { flex: 0 0 auto; }
 .task-number {
   color: var(--text-tertiary);
