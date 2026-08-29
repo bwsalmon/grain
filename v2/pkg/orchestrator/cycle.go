@@ -52,16 +52,22 @@ type Reconciler struct {
 // A task filed by the CLI or the UI is in task_ready the moment it is
 // written, rather than on whichever tick happened to poll next.
 //
-// The order of the two that remain is a latency preference, not a
-// dependency: syncing last lets a pull request opened moments ago by this
-// very cycle be picked up without a tick's delay. Both read their own
-// inputs from the store, so the other order produces the same state one
-// cycle later — which is exactly why one failing does not invalidate the
-// other.
+// releases (bwsalmon/agents#398) is the one genuinely new entry since:
+// a cut or promotion a human just requested through the UI is a fresh row
+// in the store, not an outside event to poll for, the same "the store is
+// the record" shape everything else here already holds to.
+//
+// The order among the three that touch GitHub is a latency preference,
+// not a dependency: syncing pull requests before releases lets a merge
+// this very cycle just performed be picked up promptly, and each reads
+// its own inputs from the store, so any other order produces the same
+// state one cycle later — which is exactly why one failing does not
+// invalidate another.
 func Reconcilers() []Reconciler {
 	return []Reconciler{
 		{Name: "dispatch", Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
+		{Name: "releases", Reconcile: reconcileReleases},
 	}
 }
 
@@ -102,6 +108,13 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 // reconcileSync refreshes every pull request grain is still watching.
 func reconcileSync(ctx context.Context, deps Deps, now time.Time) error {
 	return SyncPullRequests(ctx, deps.Store, deps.Client, now)
+}
+
+// reconcileReleases carries out whatever GitHub-side effect a release
+// candidate still declares (bwsalmon/agents#398) but has not yet had
+// performed -- cutting its own branch, or promoting it.
+func reconcileReleases(ctx context.Context, deps Deps, now time.Time) error {
+	return SyncReleases(ctx, deps.Store, deps.Client, now)
 }
 
 // reconcileDispatch lets dispatch.Cycle decide what runs, then runs each

@@ -60,6 +60,10 @@ var (
 	pullCommentsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/comments$`)
 	pullReviewsRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews$`)
 	checkRunsRe    = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/commits/([^/]+)/check-runs$`)
+	// gitRefsRe/gitRefRe: the git-database endpoints CreateBranch and
+	// UpdateBranch call -- release management's own (bwsalmon/agents#398).
+	gitRefsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/git/refs$`)
+	gitRefRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/git/refs/heads/(.+)$`)
 )
 
 // Issue is one seeded or created fake issue -- Sim's own bookkeeping, not
@@ -176,6 +180,36 @@ func New(owner, repo, bareRepo, defaultBranch string) *Sim {
 func (s *Sim) branchExists(branch string) bool {
 	cmd := exec.Command("git", "--git-dir", s.BareRepo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	return cmd.Run() == nil
+}
+
+// branchHead resolves branch's own tip commit for real, against BareRepo
+// -- what backs GetBranchHead the same honest way branchExists backs
+// BranchExists (this file's own doc comment): a caller cutting a release
+// candidate from it needs the real sha CreateBranch then pins, not a
+// canned one a test would have to keep in sync with whatever pushBranch
+// last committed.
+func (s *Sim) branchHead(branch string) (sha, message string, ok bool) {
+	if !s.branchExists(branch) {
+		return "", "", false
+	}
+	shaOut, err := exec.Command("git", "--git-dir", s.BareRepo, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", "", false
+	}
+	msgOut, err := exec.Command("git", "--git-dir", s.BareRepo, "log", "-1", "--format=%B", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", "", false
+	}
+	return strings.TrimSpace(string(shaOut)), strings.TrimRight(string(msgOut), "\n"), true
+}
+
+// setBranch points branch at sha -- update-ref both creates a ref that
+// doesn't yet exist and moves one that does, which is what lets Sim
+// answer CreateBranch and UpdateBranch with the same underlying command;
+// real GitHub's own git-database API is the two different endpoints
+// github.go's own doc comments on those methods explain.
+func (s *Sim) setBranch(branch, sha string) error {
+	return runGit(s.BareRepo, "git", "--git-dir", s.BareRepo, "update-ref", "refs/heads/"+branch, sha)
 }
 
 // mergeIntoBase performs pr's merge for real, at the git level, against
@@ -338,10 +372,16 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			if err != nil {
 				branch = m[3]
 			}
-			if s.branchExists(branch) {
-				return github.ApiResponse{Status: 200, Body: []byte("{}")}, nil
+			sha, message, ok := s.branchHead(branch)
+			if !ok {
+				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
 			}
-			return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
+			return jsonResponse(200, map[string]any{
+				"commit": map[string]any{
+					"sha":    sha,
+					"commit": map[string]string{"message": message},
+				},
+			}), nil
 		}
 	}
 
@@ -434,6 +474,24 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			s.Reviews = append(s.Reviews, Review{Number: number, Body: payload.Body, Comments: comments})
 			return jsonResponse(200, map[string]any{"id": s.nextReviewID}), nil
 		}
+		if m := gitRefsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			var payload struct {
+				Ref string `json:"ref"`
+				SHA string `json:"sha"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			branch := strings.TrimPrefix(payload.Ref, "refs/heads/")
+			if s.branchExists(branch) {
+				return github.ApiResponse{Status: 422, Body: []byte(`{"message":"Reference already exists"}`)}, nil
+			}
+			if err := s.setBranch(branch, payload.SHA); err != nil {
+				return github.ApiResponse{Status: 422, Body: []byte(err.Error())}, nil
+			}
+			return jsonResponse(201, map[string]string{"ref": payload.Ref, "object.sha": payload.SHA}), nil
+		}
 	}
 
 	if method == "PATCH" {
@@ -451,6 +509,27 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			}
 			issue.State = payload.State
 			return jsonResponse(200, issueJSON(number, s.Owner, s.Repo, issue)), nil
+		}
+		if m := gitRefRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			branch, err := url.PathUnescape(m[3])
+			if err != nil {
+				branch = m[3]
+			}
+			var payload struct {
+				SHA   string `json:"sha"`
+				Force bool   `json:"force"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			if !s.branchExists(branch) {
+				return github.ApiResponse{Status: 422, Body: []byte(`{"message":"Reference does not exist"}`)}, nil
+			}
+			if err := s.setBranch(branch, payload.SHA); err != nil {
+				return github.ApiResponse{Status: 422, Body: []byte(err.Error())}, nil
+			}
+			return jsonResponse(200, map[string]string{"ref": "refs/heads/" + branch, "object.sha": payload.SHA}), nil
 		}
 	}
 

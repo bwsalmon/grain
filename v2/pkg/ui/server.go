@@ -54,6 +54,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)
 
+	s.mux.HandleFunc("GET /api/release-configs", s.handleListReleaseConfigs)
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/release-config", s.handleGetReleaseConfig)
+	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/release-config", s.handlePutReleaseConfig)
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/candidates", s.handleListCandidates)
+	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/candidates", s.handleCutCandidate)
+	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/candidates/promote", s.handlePromoteCandidate)
+
 	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)

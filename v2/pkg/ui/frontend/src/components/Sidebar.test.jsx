@@ -52,16 +52,19 @@ describe("Sidebar", () => {
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSecrets = vi.fn();
     const onOpenSettings = vi.fn();
+    const onOpenReleases = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
-    render(<Sidebar config={null} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={onOpenSecrets} onOpenSettings={onOpenSettings} onOpenNewTask={onOpenNewTask} />);
+    render(<Sidebar config={null} tasks={[]} stateFilter="all" onSetFilter={() => {}} onOpenSecrets={onOpenSecrets} onOpenSettings={onOpenSettings} onOpenReleases={onOpenReleases} onOpenNewTask={onOpenNewTask} />);
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Secrets" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Releases" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSecrets).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenReleases).toHaveBeenCalledTimes(1);
   });
 });
