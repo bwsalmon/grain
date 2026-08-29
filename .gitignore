@@ -7,3 +7,11 @@ v2/bin/
 # container-build toolchain (v2/Dockerfile.build), owned by whoever ran make.
 v2/.container-cache/
 v2/grain
+# terraform init's working directory and its lock file, created in
+# terraform/gcp/ and terraform/gcp-v2/ by the `terraform` job in
+# .github/workflows/tests.yml and by anyone running the same commands by
+# hand. The lock file stays out of the repo deliberately: the modules pin
+# `google ~> 6.8` in their own versions.tf, and a lock committed from one
+# machine's platform records only that platform's hashes.
+.terraform/
+.terraform.lock.hcl
