@@ -1,5 +1,7 @@
 import { STATE_LABELS, capabilityName } from "../state.js";
 
+const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
+
 export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll }) {
   const visible = stateFilter === "all" ? tasks
     : stateFilter === "blocked" ? tasks.filter((t) => t.blocked)
@@ -7,8 +9,14 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   const visibleIds = visible.map((t) => t.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
 
+  const title = FILTER_TITLES[stateFilter] || STATE_LABELS[stateFilter] || stateFilter;
+
   return (
     <main>
+      <div className="content-header">
+        <h2>{title}</h2>
+        <span className="count">{visible.length}</span>
+      </div>
       {visibleIds.length > 0 && (
         <label className="select-all">
           <input
@@ -29,6 +37,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
               onClick={(e) => e.stopPropagation()}
               onChange={() => onToggleSelect(t.id)}
             />
+            <span className={`badge badge-${t.state}`} title={STATE_LABELS[t.state] || t.state} />
             <span className="task-number">{t.id}</span>
             <span className="task-title">{t.title}</span>
             <span className="chips">
@@ -40,7 +49,6 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
                 <span key={id} className="chip">{capabilityName(config, id)}</span>
               ))}
             </span>
-            <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
             {t.blocked && (
               <span className="badge badge-blocked" title={`Waiting on ${t.blockedBy.join(", ")}`}>Blocked</span>
             )}
