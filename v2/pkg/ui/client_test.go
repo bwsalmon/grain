@@ -133,6 +133,57 @@ func TestCreateTaskCarriesCapabilityGrants(t *testing.T) {
 	}
 }
 
+// A dependency declared at creation is both the definition (DependsOn)
+// and, while the blocker is still open, the signal (Blocked/BlockedBy) --
+// docs/data-model.md's "blocked is not a state, it is derived from
+// links", re-derived here rather than pinned at creation.
+func TestCreateTaskCarriesDependsOnAndBlockedSignal(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	blocker := create(t, c, ctx)
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "needs the other thing first", Approved: true, DependsOn: []string{blocker.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(task.DependsOn) != 1 || task.DependsOn[0] != blocker.ID {
+		t.Fatalf("dependsOn = %v, want [%s]", task.DependsOn, blocker.ID)
+	}
+	if !task.Blocked {
+		t.Fatal("blocked = false, want true: its dependency has not closed")
+	}
+	if len(task.BlockedBy) != 1 || task.BlockedBy[0] != blocker.ID {
+		t.Fatalf("blockedBy = %v, want [%s]", task.BlockedBy, blocker.ID)
+	}
+
+	// Approved and blocked is still not ready: task_ready must agree with
+	// the JSON signal, not just IsBlocked's own unit tests.
+	ready, err := c.Store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ready {
+		if id == task.ID {
+			t.Fatalf("ready = %v, want the blocked task excluded", ready)
+		}
+	}
+
+	if err := c.Close(ctx, blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Blocked {
+		t.Fatalf("blocked = true after its dependency closed, want false")
+	}
+	if len(got.DependsOn) != 1 || got.DependsOn[0] != blocker.ID {
+		t.Fatalf("dependsOn after the blocker closed = %v, want it kept as the definition", got.DependsOn)
+	}
+}
+
 func TestCreateTaskValidates(t *testing.T) {
 	c, _, ctx := testClient(t)
 
@@ -140,6 +191,7 @@ func TestCreateTaskValidates(t *testing.T) {
 		"empty title":        {Title: "  "},
 		"unknown capability": {Title: "t", Capabilities: []string{"nope"}},
 		"unparseable repo":   {Title: "t", Repo: "not-a-repo"},
+		"unknown dependency": {Title: "t", DependsOn: []string{"404"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.CreateTask(ctx, req)
@@ -264,6 +316,61 @@ func TestSetCapabilityAttachesAndDetaches(t *testing.T) {
 	// removing an absent label used to do.
 	if err := c.SetCapability(ctx, task.ID, "gemini-key", false); err != nil {
 		t.Fatalf("detaching an absent capability: %v", err)
+	}
+}
+
+func TestSetDependencyAttachesAndDetaches(t *testing.T) {
+	c, _, ctx := testClient(t)
+	blocker := create(t, c, ctx)
+	task := create(t, c, ctx)
+
+	if err := c.SetDependency(ctx, task.ID, blocker.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Blocked || len(got.DependsOn) != 1 || got.DependsOn[0] != blocker.ID {
+		t.Fatalf("task = %+v, want blocked and depending on %s", got, blocker.ID)
+	}
+
+	// Attaching twice must not produce two links -- the link table's own
+	// primary key already forbids the duplicate, but SetDependency's own
+	// mutate closure checks first so a retry cannot even attempt it.
+	if err := c.SetDependency(ctx, task.ID, blocker.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = c.Task(ctx, task.ID); len(got.DependsOn) != 1 {
+		t.Fatalf("dependsOn after a second attach = %v, want still one", got.DependsOn)
+	}
+
+	if err := c.SetDependency(ctx, task.ID, blocker.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = c.Task(ctx, task.ID); got.Blocked || len(got.DependsOn) != 0 {
+		t.Fatalf("task after detach = %+v, want unblocked with no dependencies", got)
+	}
+	// Detaching one that is not attached is a no-op, matching SetCapability.
+	if err := c.SetDependency(ctx, task.ID, blocker.ID, false); err != nil {
+		t.Fatalf("detaching an absent dependency: %v", err)
+	}
+}
+
+func TestSetDependencyValidates(t *testing.T) {
+	c, _, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if _, err := c.Task(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	var ve *ui.ValidationError
+
+	if err := c.SetDependency(ctx, task.ID, task.ID, true); !errors.As(err, &ve) {
+		t.Fatalf("depending on itself: error = %v, want a ValidationError", err)
+	}
+	if err := c.SetDependency(ctx, task.ID, "404", true); !errors.As(err, &ve) {
+		t.Fatalf("depending on an unknown task: error = %v, want a ValidationError", err)
 	}
 }
 

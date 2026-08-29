@@ -98,6 +98,36 @@ main { padding: 0 1.25rem 2rem; max-width: 900px; margin: 0 auto; }
 .badge-needs_approval { background: #8250df; }
 .badge-completed { background: #1a7f37; }
 .badge-untracked { background: #57606a; }
+/* Blocked is an annotation next to the state pill, not a state of its
+   own (docs/data-model.md) -- a distinct shape (outline, not a solid
+   fill) keeps it from reading as a second, competing state. */
+.badge-blocked {
+  background: transparent;
+  color: #9a6700;
+  border: 1px solid #9a6700;
+}
+
+.dependency-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.dependency-chip.chip-blocking { border-color: #9a6700; color: #9a6700; }
+.chip-remove {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0;
+}
+.dependency-add { display: flex; gap: 0.4rem; padding: 0.6rem; align-items: center; }
+.dependency-add input {
+  flex: 1;
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: canvas;
+  color: inherit;
+}
 
 .empty { color: var(--muted); }
 .hidden { display: none !important; }
