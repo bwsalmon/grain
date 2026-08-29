@@ -110,6 +110,38 @@ func startRun(t *testing.T, ctx context.Context, store *model.Store, d dispatch.
 	}
 }
 
+// BuildPrompt tells the agent about a read-only repo, but the wording
+// makes clear it grants nothing beyond a fetch -- gitproxy/authorize.go
+// is what actually refuses a push to one; this only informs.
+func TestBuildPromptMentionsReadOnlyRepos(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+		Reads: []model.RepoRef{
+			{Owner: "acme", Name: "shared-lib"},
+			{Owner: "acme", Name: "schema"},
+		},
+	}
+	prompt := orchestrator.BuildPrompt(task)
+	if !strings.Contains(prompt, "acme/shared-lib") || !strings.Contains(prompt, "acme/schema") {
+		t.Fatalf("prompt does not mention both read-only repos: %q", prompt)
+	}
+	if !strings.Contains(prompt, "never push") {
+		t.Fatalf("prompt does not warn against pushing to a read-only repo: %q", prompt)
+	}
+}
+
+func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task)
+	if strings.Contains(prompt, "read") {
+		t.Fatalf("prompt mentions reading a repo with no Reads set: %q", prompt)
+	}
+}
+
 func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "keyed", Via: model.GrantByLabel})

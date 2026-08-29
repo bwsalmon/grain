@@ -80,17 +80,35 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 }
 
 // BuildPrompt is the prompt a dispatched run receives — deliberately
-// plain: the task's own title and body plus exactly the two facts that
-// are grain's own, never the agent's to guess (which branch to push, and
-// which repo it lives in), the same "deterministic, not self-reported"
-// reasoning model.BranchName's own doc comment gives, restated here at the
-// one place that fact reaches the prompt.
+// plain: the task's own title and body plus the facts that are grain's
+// own, never the agent's to guess (which branch to push, which repo it
+// lives in, and which other repos it may read), the same "deterministic,
+// not self-reported" reasoning model.BranchName's own doc comment gives,
+// restated here at the one place those facts reach the prompt.
+//
+// task.Reads is mentioned but not enforced here: the git proxy already
+// allows a fetch against any of them and refuses a push to any but
+// task.Target (gitproxy/authorize.go), so this line is purely
+// informational -- it tells the agent those repos exist and are safe to
+// clone, rather than granting anything itself.
 func BuildPrompt(task model.Task) string {
-	return fmt.Sprintf(
+	prompt := fmt.Sprintf(
 		"%s\n\n%s\n\nWork in %s. Push your change to a new branch named %q -- "+
 			"never to the repo's default branch directly.",
 		task.Title, task.Body, task.Target, model.BranchName(task.ID),
 	)
+	if len(task.Reads) > 0 {
+		names := make([]string, len(task.Reads))
+		for i, r := range task.Reads {
+			names[i] = r.String()
+		}
+		prompt += fmt.Sprintf(
+			"\n\nYou may also read %s for reference -- clone them if you need to, "+
+				"but never push to them.",
+			strings.Join(names, ", "),
+		)
+	}
+	return prompt
 }
 
 // rootedSandboxes is implemented by a Sandboxes backend that also hands

@@ -57,3 +57,23 @@ func TestParseDirectivesRejectsBadAutoMerge(t *testing.T) {
 		t.Fatal("expected an error for a non-boolean /auto-merge directive")
 	}
 }
+
+// Unlike /repo, /base and /auto-merge, /reads is repeatable -- each line
+// adds a repo to the set rather than replacing the previous one.
+func TestParseDirectivesReadsIsRepeatable(t *testing.T) {
+	body := "/reads owner/shared-lib\n/reads owner/schema\n"
+	d, err := orchestrator.ParseDirectives(body)
+	if err != nil {
+		t.Fatalf("ParseDirectives: %v", err)
+	}
+	want := []model.RepoRef{{Owner: "owner", Name: "shared-lib"}, {Owner: "owner", Name: "schema"}}
+	if len(d.Reads) != len(want) || d.Reads[0] != want[0] || d.Reads[1] != want[1] {
+		t.Fatalf("Reads = %+v, want %+v", d.Reads, want)
+	}
+}
+
+func TestParseDirectivesRejectsBadReads(t *testing.T) {
+	if _, err := orchestrator.ParseDirectives("/reads not-a-repo\n"); err == nil {
+		t.Fatal("expected an error for a malformed /reads directive")
+	}
+}

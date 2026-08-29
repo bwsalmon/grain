@@ -169,6 +169,12 @@ type CreateTaskRequest struct {
 	// Capabilities is. SetDependency is the picker's attach/detach
 	// counterpart for a task that already exists.
 	DependsOn []string `json:"dependsOn"`
+	// Reads is a set of owner/name repos this task's run may read but
+	// never push to -- model.Task.Reads, docs/data-model.md's "one write
+	// target, many read targets". Unlike Repo, a Reads entry grants
+	// nothing: it never touches Grants, so naming a capability-offering
+	// repo here inherits none of its offers.
+	Reads []string `json:"reads"`
 	// Approved files the task already approved, so it is dispatchable at
 	// once. False files it proposed, waiting for Approve.
 	Approved bool `json:"approved"`
@@ -207,6 +213,10 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
+	reads, err := parseReads(req.Reads)
+	if err != nil {
+		return Task{}, err
+	}
 
 	id, err := c.Store.NewTaskID(ctx)
 	if err != nil {
@@ -228,6 +238,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		AutoMerge: req.AutoMerge,
 		Grants:    grants,
 		Links:     links,
+		Reads:     reads,
 		CreatedAt: &now,
 	}
 	if req.Approved {
@@ -282,6 +293,28 @@ func (c *Client) dependsOnLinks(ctx context.Context, ids []string, selfID string
 	return links, nil
 }
 
+// parseReads turns a set of owner/name strings into model.RepoRefs,
+// rejecting one that does not parse before the store is touched -- the
+// same "caught here, not left to surface later" reasoning target's own
+// parse in CreateTask follows. Blank entries are dropped rather than
+// rejected, matching dependsOnLinks: a picker built from free text will
+// produce them.
+func parseReads(repos []string) ([]model.RepoRef, error) {
+	reads := make([]model.RepoRef, 0, len(repos))
+	for _, raw := range repos {
+		text := strings.TrimSpace(raw)
+		if text == "" {
+			continue
+		}
+		repo, err := model.ParseRepo(text)
+		if err != nil {
+			return nil, &ValidationError{err: err}
+		}
+		reads = append(reads, repo)
+	}
+	return reads, nil
+}
+
 // UpdateTaskRequest is a task's editable fields -- nil means "leave this
 // one alone". Repo pointing at an empty string is rejected rather than
 // clearing the target: a task with no target cannot be dispatched, and
@@ -293,6 +326,12 @@ type UpdateTaskRequest struct {
 	Repo        *string
 	Base        *string
 	AutoMerge   *bool
+	// Reads, given, replaces the whole set of read-only repos rather than
+	// adding to it -- there is no per-entry attach/detach endpoint for
+	// Reads the way SetCapability and SetDependency give Grants and
+	// Links, since a read-only repo grants nothing and so has no toggle
+	// worth exposing on its own. A non-nil empty slice clears the set.
+	Reads *[]string
 }
 
 // UpdateTask edits a task's fields. Unlike the issue-backed version, this
@@ -318,6 +357,14 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 	if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
 		return Task{}, validationErrorf("title cannot be empty")
 	}
+	var reads []model.RepoRef
+	if req.Reads != nil {
+		var err error
+		reads, err = parseReads(*req.Reads)
+		if err != nil {
+			return Task{}, err
+		}
+	}
 
 	if err := c.mutate(ctx, id, func(task *model.Task) error {
 		if req.Title != nil {
@@ -334,6 +381,9 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 		if req.AutoMerge != nil {
 			task.AutoMerge = *req.AutoMerge
+		}
+		if req.Reads != nil {
+			task.Reads = reads
 		}
 		return nil
 	}); err != nil {
