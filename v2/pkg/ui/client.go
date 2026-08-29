@@ -55,9 +55,25 @@ func validationErrorf(format string, a ...any) error {
 // NotFoundError marks a task ID with no task behind it. Server maps this
 // to a 404 -- the one case where the caller's mistake and the store's own
 // trouble need telling apart, which github.Error's status used to answer.
-type NotFoundError struct{ ID string }
+//
+// message overrides the default "no task "+ID rendering when set --
+// HTTPClient's own httpError (httpclient.go) only ever has the server's
+// already-formatted message text to reconstruct this from, not a bare
+// ID, and formatting that message through Error() a second time doubled
+// it into "no task no task <id>" for every 404 an HTTPClient caller (the
+// CLI, and the browser frontend, which displays the JSON body's "error"
+// field verbatim) ever saw.
+type NotFoundError struct {
+	ID      string
+	message string
+}
 
-func (e *NotFoundError) Error() string { return "no task " + e.ID }
+func (e *NotFoundError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return "no task " + e.ID
+}
 
 func (c *Client) capabilityByID(id string) (Capability, bool) {
 	for _, capability := range c.Config.Capabilities {

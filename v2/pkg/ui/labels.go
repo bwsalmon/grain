@@ -25,6 +25,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
+	"github.com/bwsalmon/grain/v2/pkg/upgrade"
 )
 
 // Capability is one attachable, opt-in capability a human toggles on a
@@ -92,6 +93,21 @@ type Config struct {
 	// pane, and the right default for `grain demo`'s throwaway UI, which
 	// has no real machine behind it worth rebooting.
 	Reboot func(ctx context.Context) error
+	// Upgrader is set only when this deployment was told where its own
+	// git checkout and build/install/restart mechanics live
+	// (bwsalmon/agents#396, cmd/grain/daemon.go's -upgrade-src-dir) --
+	// nil means it wasn't, and the upgrade pane and its API routes
+	// report themselves unavailable rather than erroring on every call,
+	// the same as a nil Secrets above.
+	Upgrader Upgrader
+}
+
+// Upgrader is the subset of *upgrade.Upgrader the UI needs -- an
+// interface so a test can fake an upgrade without a real git checkout,
+// docker daemon, or restart command behind it.
+type Upgrader interface {
+	Start(branch string) error
+	Status() (upgrade.Status, error)
 }
 
 // DefaultActor is the principal a deployment gets without saying

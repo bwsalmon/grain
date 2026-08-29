@@ -76,6 +76,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
+	"github.com/bwsalmon/grain/v2/pkg/upgrade"
 )
 
 // stringSliceFlag collects every occurrence of a repeatable flag, in
@@ -119,6 +120,24 @@ func daemon(args []string) {
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into; empty disables both"+seedOnly)
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for"+seedOnly)
 
+	// Upgrading (bwsalmon/agents#396, v2/pkg/upgrade): the UI's own
+	// "target a branch and click Upgrade" button. -upgrade-src-dir is the
+	// opt in -- empty (the default) disables the whole feature and the
+	// pane reports itself unavailable, same as -gcp-project disabling
+	// gcp-key/gemini-key above. See v2/scripts/setup.sh for how a
+	// deployment built by it wires these three flags up so the feature
+	// works out of the box.
+	upgradeSrcDir := fs.String("upgrade-src-dir", "",
+		"git checkout of bwsalmon/grain to fetch/build from when the UI's Upgrade button is used; empty disables the feature")
+	upgradeInstallPath := fs.String("upgrade-install-path", "",
+		"where a successful upgrade's binary is installed to (required with -upgrade-src-dir)")
+	var upgradeRestartCmd stringSliceFlag
+	fs.Var(&upgradeRestartCmd, "upgrade-restart-cmd",
+		"one argument of the command run after a successful build+install to bring the new binary up -- repeat for "+
+			"every argument, e.g. -upgrade-restart-cmd=sudo -upgrade-restart-cmd=systemctl -upgrade-restart-cmd=restart "+
+			"-upgrade-restart-cmd=grain-daemon.service. Omitted entirely, the build and install still happen but "+
+			"nothing brings the new binary up on its own. Only used with -upgrade-src-dir.")
+
 	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
 	// host, no isolation) exactly as it always has -- see run()'s own
 	// comment on sandboxes below. -kontur-vm-name-prefix is the opt in to
@@ -161,6 +180,10 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
 	}
+	if *upgradeSrcDir != "" && *upgradeInstallPath == "" {
+		fmt.Fprintln(os.Stderr, "grain daemon: -upgrade-install-path is required with -upgrade-src-dir")
+		os.Exit(2)
+	}
 	if *konturVMNamePrefix != "" {
 		if *konturSSHUser == "" {
 			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-user is required with -kontur-vm-name-prefix")
@@ -186,6 +209,7 @@ func daemon(args []string) {
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
+		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
 		konturVMNamePrefix: *konturVMNamePrefix, konturBackend: *konturBackend,
 		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
@@ -219,6 +243,14 @@ type config struct {
 
 	gcpProject             string
 	gcpServiceAccountEmail string
+
+	// upgradeSrcDir, upgradeInstallPath and upgradeRestartCmd configure
+	// v2/pkg/upgrade.Upgrader (bwsalmon/agents#396); upgradeSrcDir empty
+	// disables it, the same "empty disables" shape gcpProject uses for
+	// gcp-key/gemini-key above.
+	upgradeSrcDir      string
+	upgradeInstallPath string
+	upgradeRestartCmd  []string
 
 	// konturVMNamePrefix selects orchestrator.KonturSandboxes over the
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
@@ -316,7 +348,7 @@ func run(ctx context.Context, cfg config) error {
 	defer stopProxy(context.Background())
 
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg.uiAddr, cfg.actor, cfg.defaultTargetRepo, cfg.dataDir, store, cfg.uiOpen)
+		stopUI, err := startUIServer(cfg, store)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -639,29 +671,39 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(addr, actor, defaultTargetRepo, dataDir string, store *model.Store, open bool) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store) (stop func(context.Context) error, err error) {
 	uiCfg := ui.Config{
-		Actor:        ui.DefaultActor(actorID(actor)),
+		Actor:        ui.DefaultActor(actorID(cfg.actor)),
 		Capabilities: ui.DefaultCapabilities(),
-		Secrets:      secrets.New(filepath.Join(dataDir, "secrets")),
+		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 		Reboot:       rebootHost,
 	}
-	if defaultTargetRepo != "" {
-		repo, err := model.ParseRepo(defaultTargetRepo)
+	if cfg.defaultTargetRepo != "" {
+		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
 		if err != nil {
 			return nil, fmt.Errorf("-default-target-repo: %w", err)
 		}
 		uiCfg.DefaultTarget = &repo
 	}
+	if cfg.upgradeSrcDir != "" {
+		uiCfg.Upgrader = upgrade.New(upgrade.Config{
+			SrcDir:      cfg.upgradeSrcDir,
+			BuildCmd:    []string{"make", "container-build"},
+			BuiltBinary: filepath.Join(cfg.upgradeSrcDir, "v2", "bin", "grain"),
+			InstallPath: cfg.upgradeInstallPath,
+			RestartCmd:  cfg.upgradeRestartCmd,
+			StatusFile:  filepath.Join(cfg.dataDir, "upgrade-status.json"),
+		})
+	}
 	srv := ui.NewServer(uiCfg, store)
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", cfg.uiAddr)
 	if err != nil {
-		return nil, fmt.Errorf("listening on %s: %w", addr, err)
+		return nil, fmt.Errorf("listening on %s: %w", cfg.uiAddr, err)
 	}
 	url := "http://" + ln.Addr().String()
 	log.Printf("grain daemon: serving the UI/API on %s as %s", url, uiCfg.Actor.ID)
-	if open {
+	if cfg.uiOpen {
 		openBrowser(url)
 	}
 	httpSrv := &http.Server{Handler: srv}

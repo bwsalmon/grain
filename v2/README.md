@@ -1253,3 +1253,50 @@ see bwsalmon/agents#358's own "If there is enough we need to automate
 manually we may want to invoke an agent" for the option this leaves open,
 should the list of manual steps grow long enough on a real project to be
 worth it.
+
+## Upgrading from the UI
+
+bwsalmon/agents#396 (filed "For v2") asked for a specific, narrow thing:
+target a branch from the UI, and have an "Upgrade" button download it,
+build it locally (containerized, since `make container-build` already
+was — see "Deploying it" above), and start running the new version, a
+host restart along the way accepted as fine for now. `pkg/upgrade` is
+that, and nothing more: `Upgrader.Start` fetches and hard-resets
+`-upgrade-src-dir` onto the given branch, runs `make container-build`
+there, installs the binary to `-upgrade-install-path`, and — if
+`-upgrade-restart-cmd` names one — runs a command to bring it up.
+`GET /api/upgrade` reports how that went (`idle`/`running`/`ok`/
+`failed`, with a detail string), persisted to a file under `-data-dir` so
+it survives the very restart it triggers; `POST /api/upgrade` starts one
+and serializes against a second call arriving while it's running.
+Deliberately absent, the same way `grain sync`'s manual-step fallback
+above stops short of walking an operator through it: no rollback if the
+new binary is broken, and no health check before cutting over to it —
+a build or install failure leaves the old binary running untouched
+(`RestartCmd` is never reached unless every earlier step succeeded), but
+a build that succeeds and then misbehaves at runtime is not something
+this catches.
+
+All three flags are empty by default, which disables the feature
+entirely (the UI's own Upgrade pane reports itself unavailable, the same
+convention the Secrets pane already uses for its own optional
+`-server-data-dir` wiring). `scripts/setup.sh` wires them up for the one
+deployment shape it knows about: the real binary lives at
+`$GRAIN_DATA_DIR/bin/grain` rather than `/usr/local/bin/grain` directly
+(a stable symlink points there instead, for an operator's own shell), so
+that `$GRAIN_USER` — otherwise unprivileged — can overwrite it on a later
+upgrade with no sudo of its own; `ensure_self_upgrade` gives that same
+account ownership of its own checkout, membership in the `docker` group,
+and one exact, `NOPASSWD` sudoers line to restart
+`grain-daemon.service` — never a wildcard, matching
+`provision/controller.sh`'s own "software gate, not infra gate"
+self-repair grant for v1. That is also why "restart the host" above
+means restarting the service, not `systemctl reboot`ing the machine: the
+binary this pipeline just built is already on disk at the path the
+systemd unit's own `ExecStart` names, unchanged across the upgrade, so
+bringing the service back up is enough. This is not wired into
+`terraform/gcp-v2`'s own metadata-driven rollout (`config-sync.sh`/
+`deploy.sh`) at all — that mechanism exists precisely so a fleet's
+configuration is Terraform's record, not a button anyone can push against
+a single host, and reconciling the two is future work if it turns out to
+be worth doing.
