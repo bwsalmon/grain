@@ -165,6 +165,92 @@ func TestSimBranchExistsChecksTheRealBareRepo(t *testing.T) {
 	}
 }
 
+func TestSimGetBranchHeadReadsTheRealCommit(t *testing.T) {
+	sim, client := newSim(t, "main")
+
+	head, err := client.GetBranchHead("acme", "widgets", "main")
+	if err != nil || head == nil {
+		t.Fatalf("head=%+v err=%v", head, err)
+	}
+	if head.SHA == "" {
+		t.Fatal("expected a real sha, got empty")
+	}
+	if head.Message != "seed" {
+		t.Fatalf("got message %q, want %q", head.Message, "seed")
+	}
+
+	shaOut, err := exec.Command("git", "--git-dir", sim.BareRepo, "rev-parse", "refs/heads/main").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.TrimSpace(string(shaOut)); head.SHA != want {
+		t.Fatalf("got sha %q, want %q (the real repo's own tip)", head.SHA, want)
+	}
+
+	missing, err := client.GetBranchHead("acme", "widgets", "no-such-branch")
+	if err != nil || missing != nil {
+		t.Fatalf("missing=%+v err=%v", missing, err)
+	}
+}
+
+// CreateBranch and UpdateBranch are release management's own
+// (bwsalmon/agents#398) git-database calls; Sim answers both against the
+// real bare repo the same way branchExists does, so a test proving the
+// releases reconciler cuts and promotes for real needs no mock beneath
+// them either.
+func TestSimCreateBranchCreatesARealRef(t *testing.T) {
+	sim, client := newSim(t, "main")
+	head, err := client.GetBranchHead("acme", "widgets", "main")
+	if err != nil || head == nil {
+		t.Fatalf("head=%+v err=%v", head, err)
+	}
+
+	if err := client.CreateBranch("acme", "widgets", "release/3.1-rc1", head.SHA); err != nil {
+		t.Fatal(err)
+	}
+	if !sim.branchExists("release/3.1-rc1") {
+		t.Fatal("expected release/3.1-rc1 to exist in the real bare repo")
+	}
+	newHead, err := client.GetBranchHead("acme", "widgets", "release/3.1-rc1")
+	if err != nil || newHead == nil || newHead.SHA != head.SHA {
+		t.Fatalf("got %+v, want it pinned at main's own tip %q", newHead, head.SHA)
+	}
+
+	// Creating it again is a caller mistake, the same 422 real GitHub
+	// answers with.
+	if err := client.CreateBranch("acme", "widgets", "release/3.1-rc1", head.SHA); err == nil {
+		t.Fatal("expected an error creating an already-existing branch")
+	}
+}
+
+func TestSimUpdateBranchMovesARealRef(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "rc")
+	before, err := client.GetBranchHead("acme", "widgets", "rc")
+	if err != nil || before == nil {
+		t.Fatalf("before=%+v err=%v", before, err)
+	}
+	mainHead, err := client.GetBranchHead("acme", "widgets", "main")
+	if err != nil || mainHead == nil {
+		t.Fatalf("mainHead=%+v err=%v", mainHead, err)
+	}
+	if before.SHA == mainHead.SHA {
+		t.Fatal("test setup: rc and main should not already share a tip")
+	}
+
+	if err := client.UpdateBranch("acme", "widgets", "rc", mainHead.SHA, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := client.GetBranchHead("acme", "widgets", "rc")
+	if err != nil || after == nil || after.SHA != mainHead.SHA {
+		t.Fatalf("got %+v, want rc moved to main's own tip %q", after, mainHead.SHA)
+	}
+
+	if err := client.UpdateBranch("acme", "widgets", "no-such-branch", mainHead.SHA, true); err == nil {
+		t.Fatal("expected an error moving a branch that doesn't exist")
+	}
+}
+
 func TestSimCreatePullRequestRecordsThePR(t *testing.T) {
 	sim, client := newSim(t, "main")
 

@@ -229,6 +229,56 @@ var Tables = []string{
   ` + "`gcp_service_account_email`" + `   TEXT    NOT NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
+
+	// A repo's release settings -- bwsalmon/agents#398's prod/rc branch
+	// names, the prefix a cut or promoted branch is named under, and the
+	// hand-edited major version an RC's own label starts from. One row per
+	// repo, keyed the way task_read and every other repo-scoped table
+	// already is (owner, name), rather than a single deployment-wide row
+	// the way grain_config is: a deployment can run release management for
+	// more than one repo at once.
+	`CREATE TABLE IF NOT EXISTS ` + "`release_config`" + ` (
+  ` + "`owner`" + `                 TEXT    NOT NULL,
+  ` + "`name`" + `                  TEXT    NOT NULL,
+  ` + "`prod_branch`" + `           TEXT    NOT NULL,
+  ` + "`rc_branch`" + `             TEXT    NOT NULL,
+  ` + "`release_branch_prefix`" + ` TEXT    NOT NULL,
+  ` + "`major_version`" + `         INTEGER NOT NULL,
+  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
+)`,
+
+	// One cut release candidate. INTEGER PRIMARY KEY AUTOINCREMENT for the
+	// same reason task_sequence uses it: cutting a new candidate has to
+	// stay correct with more than one writer, and letting SQLite assign
+	// the rowid is atomic where a read-then-increment column would race.
+	//
+	// major_version, number and version together are the candidate's own
+	// label (CandidateLabel) -- captured here at cut time rather than
+	// re-read from release_config, so a later hand-edit to major_version
+	// never renames a candidate already cut under the old one. status is
+	// TEXT rather than a constrained type for the reason schema.go's own
+	// doc comment gives for every other enum column here: the vocabulary
+	// lives in release.go, not the schema. last_error is the reconciler's
+	// own report of why a cut or promotion it attempted did not land yet
+	// -- cleared the moment the attempt that follows succeeds.
+	`CREATE TABLE IF NOT EXISTS ` + "`release_candidate`" + ` (
+  ` + "`id`" + `             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`owner`" + `          TEXT     NOT NULL,
+  ` + "`name`" + `           TEXT     NOT NULL,
+  ` + "`major_version`" + `  INTEGER  NOT NULL,
+  ` + "`number`" + `         INTEGER  NOT NULL,
+  ` + "`version`" + `        INTEGER  NOT NULL,
+  ` + "`branch`" + `         TEXT     NOT NULL,
+  ` + "`release_branch`" + ` TEXT     NULL,
+  ` + "`status`" + `         TEXT     NOT NULL,
+  ` + "`created_at`" + `     DATETIME NOT NULL,
+  ` + "`promoted_at`" + `    DATETIME NULL,
+  ` + "`last_error`" + `     TEXT     NULL
+)`,
+
+	// What CurrentCandidate and the releases reconciler both need: every
+	// candidate for one repo, newest first.
+	`CREATE INDEX IF NOT EXISTS ` + "`release_candidate_repo`" + ` ON ` + "`release_candidate`" + ` (` + "`owner`" + `, ` + "`name`" + `, ` + "`id`" + `)`,
 }
 
 // Views is the derivations, each a (name, DDL) pair so Init can drop and

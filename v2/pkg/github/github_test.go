@@ -368,6 +368,74 @@ func TestDryRunClientPassesGetBranchHeadThrough(t *testing.T) {
 	}
 }
 
+func TestCreateBranchPostsTheRefAndSha(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 201, Body: []byte(`{"ref":"refs/heads/release/3.1-rc1"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.CreateBranch("o", "r", "release/3.1-rc1", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	call := transport.Calls[0]
+	if call.Method != "POST" || call.Path != "/repos/o/r/git/refs" {
+		t.Fatalf("got %s %s", call.Method, call.Path)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(call.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["ref"] != "refs/heads/release/3.1-rc1" || payload["sha"] != "abc123" {
+		t.Fatalf("got %+v", payload)
+	}
+}
+
+func TestCreateBranchRaisesOnANon201(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 422, Body: []byte("Reference already exists")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.CreateBranch("o", "r", "release/3.1-rc1", "abc123"); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestUpdateBranchPatchesTheShaAndForceFlag(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte(`{"ref":"refs/heads/rc"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.UpdateBranch("o", "r", "rc", "abc123", true); err != nil {
+		t.Fatal(err)
+	}
+	call := transport.Calls[0]
+	if call.Method != "PATCH" || call.Path != "/repos/o/r/git/refs/heads/rc" {
+		t.Fatalf("got %s %s", call.Method, call.Path)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(call.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["sha"] != "abc123" || payload["force"] != true {
+		t.Fatalf("got %+v", payload)
+	}
+}
+
+func TestUpdateBranchRaisesOnANon200(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 422, Body: []byte("not a fast forward")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.UpdateBranch("o", "r", "rc", "abc123", false); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestDryRunClientPrintsRatherThanCreatingOrMovingABranch(t *testing.T) {
+	inner := NewFakeTransport()
+	dry := DryRunClient{Inner: NewClient(inner, nil)}
+	if err := dry.CreateBranch("o", "r", "release/3.1-rc1", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dry.UpdateBranch("o", "r", "rc", "abc123", true); err != nil {
+		t.Fatal(err)
+	}
+	if len(inner.Calls) != 0 {
+		t.Fatalf("expected no real calls, got %+v", inner.Calls)
+	}
+}
+
 func TestCreatePullRequestPostsHeadBaseAndTitle(t *testing.T) {
 	body := mustJSON(t, map[string]any{"number": 42, "html_url": "https://github.com/o/r/pull/42"})
 	transport := NewFakeTransport(ApiResponse{Status: 201, Body: body})
