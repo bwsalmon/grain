@@ -1,0 +1,55 @@
+import { STATE_LABELS, STATE_ORDER } from "../state.js";
+
+// Sidebar replaces TopBar and Filters with the one nav Plane builds every
+// view around: a fixed rail with the workspace identity up top, a state
+// list styled like Plane's own status groups (a dot standing in for the
+// state's badge color, a count on the right), and the deployment-level
+// actions (secrets, settings) pinned to the bottom.
+export default function Sidebar({ config, tasks, stateFilter, onSetFilter, onOpenSecrets, onOpenSettings, onOpenNewTask }) {
+  const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
+
+  const counts = {};
+  let blocked = 0;
+  for (const t of tasks) {
+    counts[t.state] = (counts[t.state] || 0) + 1;
+    if (t.blocked) blocked += 1;
+  }
+
+  const NavItem = ({ id, label, dotClass, count }) => (
+    <button className={stateFilter === id ? "active" : ""} onClick={() => onSetFilter(id)}>
+      <span className={`dot ${dotClass}`} />
+      <span className="label">{label}</span>
+      <span className="count">{count}</span>
+    </button>
+  );
+
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-brand">
+        <span className="brand-mark" />
+        <h1>grain</h1>
+      </div>
+      {repoName && <div className="sidebar-target" title={repoName}>{repoName}</div>}
+
+      <button className="primary new-task" onClick={onOpenNewTask}>+ New task</button>
+
+      <nav className="sidebar-nav">
+        <NavItem id="all" label="All issues" dotClass="dot-all" count={tasks.length} />
+        {STATE_ORDER.filter((s) => counts[s]).map((s) => (
+          <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} />
+        ))}
+        {/* Blocked is not a state (docs/data-model.md) so it gets its own
+            nav entry alongside the state ones rather than a slot in
+            STATE_ORDER -- a task stays under its own state filter too,
+            this is just a faster way to find what dispatch is currently
+            skipping over. */}
+        {blocked > 0 && <NavItem id="blocked" label="Blocked" dotClass="dot-blocked" count={blocked} />}
+      </nav>
+
+      <div className="sidebar-footer">
+        <button onClick={onOpenSecrets}>Secrets</button>
+        <button onClick={onOpenSettings}>Settings</button>
+      </div>
+    </aside>
+  );
+}
