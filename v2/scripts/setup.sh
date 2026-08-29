@@ -105,6 +105,7 @@ GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="${GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE:-}"
 
 GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
+GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
 usage() {
   cat <<'EOF'
@@ -147,6 +148,11 @@ Recognized variables:
                              no repo of its own, and the repo this script pushes
                              one empty commit to if it has no commits yet
   GRAIN_TARGET_BRANCH       branch to create there if formatting it (default: main)
+  GRAIN_TARGET_REPOS        comma-separated owner/name list a task's repo may
+                             name (default: empty, meaning unrestricted) -- the
+                             daemon's own -target-repos, the allowlist a task
+                             naming anything else is parked with a comment
+                             rather than dispatched against
 EOF
 }
 
@@ -404,6 +410,7 @@ write_systemd_units() {
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
   [ -n "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL" ] && daemon_args+=(-gcp-agent-service-account "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL")
   [ -n "$GRAIN_TARGET_REPO" ] && daemon_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
+  [ -n "$GRAIN_TARGET_REPOS" ] && daemon_args+=(-target-repos "$GRAIN_TARGET_REPOS")
 
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
 [Unit]
