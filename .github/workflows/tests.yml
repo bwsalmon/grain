@@ -77,13 +77,6 @@ jobs:
         with:
           go-version-file: v2/go.mod
 
-      # Embedded Dolt is cgo, not pure Go: it pulls in go-icu-regex and
-      # gozstd, so CGO_ENABLED=0 doesn't build and the linked binary needs
-      # libicu at link time. See v2/README.md, "Two things the port
-      # corrected".
-      - name: Install libicu-dev
-        run: sudo apt-get update && sudo apt-get install -y libicu-dev
-
       - name: Build
         working-directory: v2
         run: go build ./...
