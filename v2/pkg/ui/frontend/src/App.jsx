@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "./api.js";
-import TopBar from "./components/TopBar.jsx";
-import Filters from "./components/Filters.jsx";
+import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
@@ -112,15 +111,19 @@ export default function App() {
   }, [openTaskId, refreshList]);
 
   return (
-    <>
-      <TopBar
+    <div className="app-shell">
+      <Sidebar
         config={config}
+        tasks={tasks}
+        stateFilter={stateFilter}
+        onSetFilter={setStateFilter}
         onOpenSecrets={() => setShowSecrets(true)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
-      <Filters tasks={tasks} stateFilter={stateFilter} onSetFilter={setStateFilter} />
-      <TaskList tasks={tasks} stateFilter={stateFilter} config={config} onOpenTask={openTask} />
+      <div className="main-column">
+        <TaskList tasks={tasks} stateFilter={stateFilter} config={config} onOpenTask={openTask} />
+      </div>
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
         <DetailOverlay task={detail} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} />
@@ -130,6 +133,6 @@ export default function App() {
       )}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
-    </>
+    </div>
   );
 }

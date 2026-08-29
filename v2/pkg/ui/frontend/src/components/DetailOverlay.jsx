@@ -3,38 +3,50 @@ import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
 import Overlay from "./Overlay.jsx";
 
+// The panel splits like Plane's own issue peek: title, description and
+// the conversation in a main column, everything about the task's current
+// state and its declared shape (repo, capabilities, dependencies) in a
+// narrow property column beside it.
 export default function DetailOverlay({ task: t, config, onClose, onOpenTask, act }) {
   return (
-    <Overlay onClose={onClose}>
-      <div className="detail-header">
-        <h2>{t.id} {t.title}</h2>
-        <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
-        {/* Blocked reads as an annotation beside the state pill, not a
-            replacement for it -- a blocked task is still queued
-            (docs/data-model.md). */}
-        {t.blocked && <span className="badge badge-blocked">Blocked</span>}
+    <Overlay onClose={onClose} className="panel-detail">
+      <div className="detail-layout">
+        <div className="detail-main">
+          <div className="detail-header">
+            <h2>{t.id} {t.title}</h2>
+          </div>
+
+          <div className="freshness">
+            as of just now
+            {t.pullRequest && <> · <span>{t.pullRequest}</span></>}
+            {t.generatedFrom && (
+              <>
+                {" "}· generated from{" "}
+                <a href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</a>
+              </>
+            )}
+          </div>
+
+          <div className="description">{t.description || "(no description)"}</div>
+
+          <Comments t={t} act={act} />
+        </div>
+
+        <div className="detail-side">
+          <div className="detail-state">
+            <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
+            {/* Blocked reads as an annotation beside the state dot, not a
+                replacement for it -- a blocked task is still queued
+                (docs/data-model.md). */}
+            {t.blocked && <span className="badge badge-blocked">Blocked</span>}
+          </div>
+
+          <Actions t={t} act={act} />
+          <Declared t={t} />
+          <CapabilityToggles t={t} config={config} act={act} />
+          <Dependencies t={t} act={act} onOpenTask={onOpenTask} />
+        </div>
       </div>
-
-      <div className="freshness">
-        as of just now
-        {t.pullRequest && <> · <span>{t.pullRequest}</span></>}
-        {t.generatedFrom && (
-          <>
-            {" "}· generated from{" "}
-            <a href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</a>
-          </>
-        )}
-      </div>
-
-      <Declared t={t} />
-
-      <div className="description">{t.description || "(no description)"}</div>
-
-      <Actions t={t} act={act} />
-
-      <CapabilityToggles t={t} config={config} act={act} />
-      <Dependencies t={t} act={act} onOpenTask={onOpenTask} />
-      <Comments t={t} act={act} />
     </Overlay>
   );
 }
@@ -43,12 +55,21 @@ export default function DetailOverlay({ task: t, config, onClose, onOpenTask, ac
 // body -- so they are rendered as fields rather than as the /repo,
 // /base, /auto-merge syntax they used to have to be written in.
 function Declared({ t }) {
-  const parts = [];
-  if (t.repo) parts.push(`repo ${t.repo}`);
-  if (t.base) parts.push(`base ${t.base}`);
-  if (t.reads && t.reads.length > 0) parts.push(`reads ${t.reads.join(", ")}`);
-  parts.push(`auto-merge ${t.autoMerge}`);
-  return <div className="declared">{parts.join("  ")}</div>;
+  const rows = [];
+  if (t.repo) rows.push(["Repo", t.repo]);
+  if (t.base) rows.push(["Base", t.base]);
+  if (t.reads && t.reads.length > 0) rows.push(["Reads", t.reads.join(", ")]);
+  rows.push(["Auto-merge", String(t.autoMerge)]);
+  return (
+    <div className="declared">
+      {rows.map(([key, value]) => (
+        <div className="declared-row" key={key}>
+          <span className="declared-key">{key}</span>
+          <span className="declared-value">{value}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function Actions({ t, act }) {
