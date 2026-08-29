@@ -314,7 +314,7 @@ func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first RunDispatch: %v", err)
 	}
-	if err := orchestrator.ProcessResult(ctx, store, client, *got, result1, baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, *got, result1, d1.RunID, baseTime); err != nil {
 		t.Fatalf("ProcessResult after the question: %v", err)
 	}
 
