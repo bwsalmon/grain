@@ -17,7 +17,7 @@ export default function DetailOverlay({ task: t, config, onClose, onOpenTask, ac
 
       <div className="freshness">
         as of just now
-        {t.pullRequest && <> · <span>{t.pullRequest}</span></>}
+        {t.pullRequest && <> · <a href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</a></>}
         {t.generatedFrom && (
           <>
             {" "}· generated from{" "}
@@ -37,6 +37,13 @@ export default function DetailOverlay({ task: t, config, onClose, onOpenTask, ac
       <Comments t={t} act={act} />
     </Overlay>
   );
+}
+
+// pullRequestUrl turns "owner/name#123" (t.pullRequest, straight off
+// model.PullRequestRef.String()) into the GitHub URL it names.
+function pullRequestUrl(ref) {
+  const [repo, number] = ref.split("#");
+  return `https://github.com/${repo}/pull/${number}`;
 }
 
 // Real columns on the task now, not directive lines parsed out of a
