@@ -340,6 +340,18 @@ def test_dispatch_prompt_points_an_agent_at_comment_on_issue():
     assert "comment_on_issue" in prompt_stdin
 
 
+def test_dispatch_prompt_tells_the_agent_to_rebase_before_pushing():
+    runner = FakeRunner()
+    dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
+             remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "git fetch origin && git rebase origin/HEAD" in prompt_stdin
+    assert prompt_stdin.index("rebase origin/HEAD") < prompt_stdin.index("git push origin HEAD")
+
+
 def test_dispatch_prepares_credentials_and_workspace_before_the_prompt():
     runner = FakeRunner()
     dispatch(runner, runner, "sandbox-0", make_target(), make_issue(),
@@ -735,6 +747,18 @@ def test_dispatch_pr_prompt_tells_the_agent_the_exact_branch_to_push():
         if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
     )
     assert "git push origin HEAD:feature-x" in prompt_stdin
+
+
+def test_dispatch_pr_prompt_tells_the_agent_to_rebase_before_pushing():
+    runner = FakeRunner()
+    dispatch_pr(runner, runner, "sandbox-0", make_target(), make_pr(head_ref="feature-x"),
+                make_comments(), remote_url=REMOTE_URL, token=TOKEN)
+    prompt_stdin = next(
+        stdin for argv, stdin in runner.calls
+        if argv[0] == "sudo" and argv[1] == "dd" and argv[2] == f"of={PROMPT_PATH}"
+    )
+    assert "git fetch origin && git rebase origin/HEAD" in prompt_stdin
+    assert prompt_stdin.index("rebase origin/HEAD") < prompt_stdin.index("git push origin HEAD")
 
 
 def test_dispatch_pr_prompt_handles_no_review_comments():
