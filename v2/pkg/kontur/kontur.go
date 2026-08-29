@@ -48,8 +48,19 @@ const DefaultStateDir = "/var/lib/kontur/vms"
 
 // DefaultRuntimeEndpoint matches the containerd CRI socket
 // deploy/static-kubelet/containerd-config.toml and kubelet-config.yaml
-// both point at on a node kontur set up.
+// both point at on a node kontur set up. Only meaningful for
+// BackendStaticPod (below); the docker backend has no CRI to ask.
 const DefaultRuntimeEndpoint = "unix:///run/containerd/containerd.sock"
+
+// BackendDocker is the value `kontur vm create -backend` takes to run a VM
+// directly against a local docker daemon instead of writing a static pod
+// manifest for a standalone kubelet to pick up -- bwsalmon/kontur's own
+// internal/staticpod.BackendDocker, duplicated here for the same "read the
+// shape, don't import the writer" reason PodName is (see the package doc
+// comment). It needs neither `konturctl setup` nor containerd/CNI/kubelet
+// on the host, which is why bwsalmon/agents#353 asked for grain's own
+// sandboxes to run under it rather than the default static-pod backend.
+const BackendDocker = "docker"
 
 // PodName returns the static pod name kontur gives a VM's manifest --
 // bwsalmon/kontur's internal/staticpod.PodName, duplicated here rather
@@ -149,6 +160,60 @@ func PodIP(ctx context.Context, runtimeEndpoint, vmName string) (string, error) 
 		return "", fmt.Errorf("kontur: pod %q has no network IP yet", podName)
 	}
 	return status.Status.Network.IP, nil
+}
+
+// dockerNetnsContainerName returns the name of the otherwise-idle
+// container bwsalmon/kontur's docker backend (internal/dockervm) starts
+// per VM purely to hold open the network namespace netshim and the VM
+// container share -- see that package's own doc comment for why a plain
+// docker container needs one at all. Duplicated here for the same reason
+// PodName is: this package reads kontur's own naming convention rather
+// than importing it.
+func dockerNetnsContainerName(vmName string) string {
+	return PodName(vmName) + "-netns"
+}
+
+// dockerIPFormat is a docker inspect Go template that prefers
+// NetworkSettings.IPAddress (populated on docker's default bridge
+// network) and falls back to the first network under
+// NetworkSettings.Networks (where IPAddress is always empty instead) --
+// covering a container attached to a named network, e.g. via `docker run
+// --network`.
+const dockerIPFormat = `{{if .NetworkSettings.IPAddress}}{{.NetworkSettings.IPAddress}}{{else}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{end}}`
+
+// dockerInspect runs `docker inspect -f format name` and returns its
+// trimmed stdout, folding stderr into the returned error the same way
+// crictl above does.
+func dockerInspect(ctx context.Context, format, name string) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", format, name)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("kontur: docker inspect %s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// DockerPodIP resolves the address netshim's DNAT rules listen on for a VM
+// created with `kontur vm create -backend docker` (BackendDocker): the
+// docker-assigned address of that VM's network-namespace-holder container
+// (dockerNetnsContainerName) -- what internal/netshim/setup.go's
+// ensurePortForward calls "the pod IP" when there is no real Kubernetes
+// pod to ask. The docker backend has no CRI for crictl to ask the way
+// PodIP (above) does, which is why this is a separate function rather
+// than a branch inside that one; callers building a docker-backed
+// KonturSandboxes call this instead of PodIP.
+func DockerPodIP(ctx context.Context, vmName string) (string, error) {
+	name := dockerNetnsContainerName(vmName)
+	ip, err := dockerInspect(ctx, dockerIPFormat, name)
+	if err != nil {
+		return "", err
+	}
+	if ip == "" {
+		return "", fmt.Errorf("kontur: container %q has no network IP yet -- is the VM up?", name)
+	}
+	return ip, nil
 }
 
 // vm runs `kontur vm <subcommand> name -state-dir stateDir <extraArgs...>`,

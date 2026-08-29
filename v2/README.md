@@ -636,8 +636,29 @@ instead of `os.WriteFile`, since an SSH-backed slot has no local directory
 for the daemon to write into. A kontur VM's own guest image is still
 expected to arrive already carrying the operator's SSH key and a running
 sshd, the same assumption v1's own sandbox provisioning stood in for —
-`../packer/kontur/` is that successor (bwsalmon/agents#267). The
-`mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
+`../packer/kontur/` is that successor (bwsalmon/agents#267).
+
+bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
+`KonturConfig.Backend` selects the value `kontur vm create -backend`
+builds each slot's VM with, and defaults (`-kontur-backend`'s own default)
+to `kontur.BackendDocker`: run the VM directly against a local docker
+daemon, needing neither `konturctl setup` nor containerd/CNI/kubelet on
+the host, instead of kontur's own default static-pod backend under a
+standalone kubelet. Since the docker backend has no CRI for `crictl` to
+ask, `ToolsFor`/`ConfigureGitCredentials` resolve a docker-backed VM's
+reachable address via the new `kontur.DockerPodIP` (`docker inspect` on
+the otherwise-idle container `internal/dockervm` starts per VM purely to
+hold its network namespace open) instead of `kontur.PodIP`. And
+`KonturSandboxes.Recreate` — called by `cycle.go`'s `runOne` once a slot's
+dispatch is done, success or failure — deletes and rebuilds that slot's VM
+from scratch and reapplies `ConfigureGitCredentials` if it was ever called
+for that slot, the isolation boundary v1's own `HostAdapter.recreate()`
+gives a sandbox (`grain/adapter/base.py`), applied here per task instead
+of on a schedule. `HostSandboxes` implements no such method: the local-
+directory stand-in stays long-lived, resetting one between tasks still
+being "the caller's job" the same way it always has been.
+
+The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
 `propose_task`, `add_review_comment`) `agent/gemini.Framework.Run` wires
 internally are still discarded rather than posted anywhere real while a
 run is live — `ProcessResult` only ever inspects `agent.Result.ToolCalls`

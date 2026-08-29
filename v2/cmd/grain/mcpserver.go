@@ -11,12 +11,16 @@
 // Its sandbox tools run against one of two backends: a local directory
 // (-sandbox-root, unchanged since before bwsalmon/agents#256 -- what
 // pkg/mcp's own tests and e2e/ still use, since neither wants a real VM),
-// or a real kontur-managed VM behind a static kubelet (-kontur-vm, see
-// package kontur and pkg/mcp's NewSSHSandboxTools) -- the wiring
-// bwsalmon/agents#256 asked for, so a run_command/read_file/edit_file/
-// write_file call actually lands inside one of the sandbox VMs the
-// Kubelet is running instead of the local-directory stand-in
-// pkg/mcp/sandbox_tools.go's own doc comment describes.
+// or a real kontur-managed VM (-kontur-vm, see package kontur and
+// pkg/mcp's NewSSHSandboxTools) -- the wiring bwsalmon/agents#256 asked
+// for, so a run_command/read_file/edit_file/write_file call actually
+// lands inside one of the sandbox VMs kontur is running instead of the
+// local-directory stand-in pkg/mcp/sandbox_tools.go's own doc comment
+// describes. -kontur-backend selects which of kontur's two ways of
+// running that VM -kontur-vm was created with -- "docker" (the default,
+// bwsalmon/agents#353) needs just a local docker daemon; "static-pod"
+// needs a standalone kubelet (deploy/static-kubelet/README.md) and is
+// resolved via crictl instead.
 package main
 
 import (
@@ -41,12 +45,15 @@ func mcpserver(args []string) {
 	konturVM := fs.String("kontur-vm", "",
 		"name of a kontur-managed VM (bwsalmon/kontur) to run the sandbox tools against over SSH, "+
 			"instead of a local directory (mutually exclusive with -sandbox-root)")
+	konturBackend := fs.String("kontur-backend", kontur.BackendDocker,
+		"backend -kontur-vm was created with: \"docker\" (the default, resolved via docker inspect) or "+
+			"\"static-pod\" (resolved via crictl, -cri-runtime-endpoint)")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
 		"kontur's VM state directory, used to look up -kontur-vm's external port")
 	criRuntimeEndpoint := fs.String("cri-runtime-endpoint", kontur.DefaultRuntimeEndpoint,
-		"containerd CRI socket, used to resolve -kontur-vm's pod IP via crictl")
+		"containerd CRI socket, used to resolve -kontur-vm's pod IP via crictl (only used with -kontur-backend static-pod)")
 	konturHost := fs.String("kontur-host", "",
-		"override the address -kontur-vm resolves to, skipping the crictl pod-IP lookup")
+		"override the address -kontur-vm resolves to, skipping the pod-IP lookup")
 	sshUser := fs.String("ssh-user", "", "username to SSH into -kontur-vm as (required with -kontur-vm)")
 	sshKey := fs.String("ssh-key", "", "path to the SSH private key to authenticate to -kontur-vm with (required with -kontur-vm)")
 	workspace := fs.String("workspace", "",
@@ -59,7 +66,7 @@ func mcpserver(args []string) {
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -sandbox-root and -kontur-vm are mutually exclusive")
 		os.Exit(2)
 	case *konturVM != "":
-		tools = mustSSHSandboxTools(*konturVM, *konturStateDir, *criRuntimeEndpoint, *konturHost, *sshUser, *sshKey, *workspace)
+		tools = mustSSHSandboxTools(*konturVM, *konturBackend, *konturStateDir, *criRuntimeEndpoint, *konturHost, *sshUser, *sshKey, *workspace)
 	case *root != "":
 		if info, err := os.Stat(*root); err != nil || !info.IsDir() {
 			fmt.Fprintf(os.Stderr, "grain mcpserver: -sandbox-root %q is not a directory: %v\n", *root, err)
@@ -96,7 +103,7 @@ func mcpserver(args []string) {
 // checks above) if any required flag is missing or the VM can't be
 // resolved -- there is no useful degraded mode for an mcpserver process
 // that can't reach the sandbox it was told to run against.
-func mustSSHSandboxTools(konturVM, stateDir, criRuntimeEndpoint, konturHost, sshUser, sshKey, workspace string) []mcp.Tool {
+func mustSSHSandboxTools(konturVM, backend, stateDir, criRuntimeEndpoint, konturHost, sshUser, sshKey, workspace string) []mcp.Tool {
 	if sshUser == "" {
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -ssh-user is required with -kontur-vm")
 		os.Exit(2)
@@ -117,7 +124,11 @@ func mustSSHSandboxTools(konturVM, stateDir, criRuntimeEndpoint, konturHost, ssh
 
 	host := konturHost
 	if host == "" {
-		host, err = kontur.PodIP(context.Background(), criRuntimeEndpoint, konturVM)
+		if backend == kontur.BackendDocker {
+			host, err = kontur.DockerPodIP(context.Background(), konturVM)
+		} else {
+			host, err = kontur.PodIP(context.Background(), criRuntimeEndpoint, konturVM)
+		}
 		if err != nil {
 			log.Fatalf("grain mcpserver: %v", err)
 		}
