@@ -178,6 +178,34 @@ var Tables = []string{
   ` + "`issued_at`" + ` DATETIME NOT NULL
 )`,
 
+	// One row per schedule (bwsalmon/agents#376), not one per firing --
+	// task_sequence's own reasoning applies again for a firing's identity,
+	// but the schedule itself needs exactly one durable row to carry
+	// next_run_at/last_run_at and the enabled switch a UI toggles.
+	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task`" + ` (
+  ` + "`id`" + `            TEXT     NOT NULL,
+  ` + "`title`" + `         TEXT     NOT NULL,
+  ` + "`body`" + `          TEXT     NOT NULL,
+  ` + "`target_owner`" + `  TEXT     NOT NULL,
+  ` + "`target_name`" + `   TEXT     NOT NULL,
+  ` + "`base`" + `          TEXT     NULL,
+  ` + "`auto_merge`" + `    INTEGER  NOT NULL,
+  ` + "`interval_ms`" + `   INTEGER  NOT NULL,
+  ` + "`enabled`" + `       INTEGER  NOT NULL,
+  ` + "`next_run_at`" + `   DATETIME NOT NULL,
+  ` + "`last_run_at`" + `   DATETIME NULL,
+  ` + "`created_at`" + `    DATETIME NOT NULL,
+  PRIMARY KEY (` + "`id`" + `)
+)`,
+
+	// task_sequence's own doc comment gives the reasoning for a dedicated
+	// allocator rather than a counter column: an INSERT that lets SQLite
+	// assign the rowid is atomic where read-modify-write is a race.
+	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_sequence`" + ` (
+  ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`issued_at`" + ` DATETIME NOT NULL
+)`,
+
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (
   ` + "`id`" + `      INTEGER NOT NULL,
   ` + "`version`" + ` INTEGER NOT NULL,

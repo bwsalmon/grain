@@ -52,6 +52,26 @@ func TestParseDirectivesRejectsBadRepo(t *testing.T) {
 	}
 }
 
+func TestParseDirectivesBareAutoMergeMeansTrue(t *testing.T) {
+	d, err := orchestrator.ParseDirectives("Please fix the thing.\n\n/auto-merge\n")
+	if err != nil {
+		t.Fatalf("ParseDirectives: %v", err)
+	}
+	if !d.AutoMerge {
+		t.Fatal("AutoMerge = false, want true for a bare /auto-merge line")
+	}
+}
+
+func TestParseDirectivesBareAutoMergeThenFalseWins(t *testing.T) {
+	d, err := orchestrator.ParseDirectives("/auto-merge\n/auto-merge false\n")
+	if err != nil {
+		t.Fatalf("ParseDirectives: %v", err)
+	}
+	if d.AutoMerge {
+		t.Fatal("AutoMerge = true, want false: the later line should win")
+	}
+}
+
 func TestParseDirectivesRejectsBadAutoMerge(t *testing.T) {
 	if _, err := orchestrator.ParseDirectives("/auto-merge sure\n"); err == nil {
 		t.Fatal("expected an error for a non-boolean /auto-merge directive")

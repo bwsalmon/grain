@@ -84,4 +84,15 @@ describe("TaskList", () => {
     renderList({ selected: new Set([1, 2]) });
     expect(screen.getByLabelText("Select all")).toBeChecked();
   });
+
+  it("badges a task a schedule filed, and leaves an ordinary one unbadged", () => {
+    renderList({
+      tasks: [
+        { ...tasks[0], scheduled: true },
+        tasks[1],
+      ],
+    });
+    expect(screen.getByTitle("filed automatically by a schedule")).toHaveTextContent("scheduled");
+    expect(screen.queryAllByTitle("filed automatically by a schedule")).toHaveLength(1);
+  });
 });

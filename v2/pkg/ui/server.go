@@ -61,10 +61,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/candidates", s.handleCutCandidate)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/candidates/promote", s.handlePromoteCandidate)
 
+	s.mux.HandleFunc("GET /api/schedules", s.handleListSchedules)
+	s.mux.HandleFunc("POST /api/schedules", s.handleCreateSchedule)
+	s.mux.HandleFunc("PATCH /api/schedules/{id}", s.handleUpdateSchedule)
+	s.mux.HandleFunc("DELETE /api/schedules/{id}", s.handleDeleteSchedule)
+
 	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}", s.handleDeleteSecret)
+
+	s.mux.HandleFunc("GET /api/upgrade", s.handleGetUpgradeStatus)
+	s.mux.HandleFunc("POST /api/upgrade", s.handleStartUpgrade)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
