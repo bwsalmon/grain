@@ -566,7 +566,7 @@ async function main() {
     config = await api("/api/config");
     const target = config.defaultTarget;
     document.getElementById("repo-name").textContent =
-      target ? `${target.Owner}/${target.Name}` : `as ${config.actor.ID}`;
+      target ? target : `as ${config.actor}`;
     populateCapabilityFieldset();
     await refreshList();
   } catch (err) {

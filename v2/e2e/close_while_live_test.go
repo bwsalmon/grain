@@ -72,8 +72,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 
 	// File the task the way an operator would, through the real CLI.
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir,
+	created := runCLIStore(t, bin, storeDir,
 		"-json",
 		"create",
 		"-title", "add a NOTES entry",
@@ -134,7 +133,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 	// Close the task through the real CLI while its run is still live --
 	// the same command an operator would run at a shell, racing an agent
 	// that has already claimed the slot.
-	closed := runCLI(t, bin, "-data-dir", storeDir, "-json", "close", task.ID)
+	closed := runCLIStore(t, bin, storeDir, "-json", "close", task.ID)
 	var closedTask ui.Task
 	if err := json.Unmarshal([]byte(closed), &closedTask); err != nil {
 		t.Fatalf("parsing grain close -json output: %v\n%s", err, closed)
@@ -221,7 +220,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 
 	// Confirm the loop stayed closed the way an operator would actually
 	// see it, by asking the CLI itself in a fresh subprocess.
-	got := runCLI(t, bin, "-data-dir", storeDir, "-json", "get", task.ID)
+	got := runCLIStore(t, bin, storeDir, "-json", "get", task.ID)
 	var detail ui.TaskDetail
 	if err := json.Unmarshal([]byte(got), &detail); err != nil {
 		t.Fatalf("parsing grain get -json output: %v\n%s", err, got)

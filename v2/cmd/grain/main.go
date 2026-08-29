@@ -1,31 +1,40 @@
 // Command grain is the one binary this repo builds (bwsalmon/agents#313):
 // given no recognized subcommand, or one of the task-management verbs
-// below, it is a standalone CLI over pkg/ui's Client -- the same model
-// code the "ui" subcommand's Server wraps in JSON and HTTP, driven
-// straight from a terminal instead. It connects to the task store and
-// lets the caller do what a human does to a task: create one, edit its
+// below, it is a standalone CLI over pkg/ui's HTTPClient -- a plain REST
+// client of the same JSON API (`grain daemon`'s own embedded `pkg/ui.Server`)
+// the browser frontend speaks, driven straight from a terminal instead.
+// It lets the caller do what a human does to a task: create one, edit its
 // fields, attach or detach a capability, accept (approve) a proposal,
 // comment, and close (grain's own stand-in for "delete" -- see
 // Client.Close's own doc comment for why) or reopen one.
 //
-// Four other subcommands -- daemon, ui, mcpserver, controller -- select
+// This used to open the task store directly -- embedded, or a Dolt SQL
+// server via -store-addr -- and call pkg/ui.Client's methods in-process,
+// which made the CLI a second direct writer against whatever daemon a
+// deployment also runs (v2/README.md used to carry a whole "Single
+// writer" section about exactly that). bwsalmon/agents#363 closed that
+// gap: the daemon is the only thing that ever opens the store now, and
+// serves pkg/ui's JSON API and static frontend itself (daemon.go's own
+// doc comment); this talks to that API over plain HTTP, wherever an
+// operator's network puts it -- a loopback port, an SSH tunnel,
+// Tailscale, IAP. -server names it; there is no GitHub credential and no
+// store flag here at all any more.
+//
+// Three other subcommands -- daemon, mcpserver, controller -- select
 // entirely different modes, each what used to be its own cmd/graind,
 // cmd/ui or cmd/mcpserver binary before #313 combined them: the daemon
-// runs pkg/orchestrator's RunCycle on a timer, ui serves pkg/ui's JSON API
-// and static frontend, mcpserver speaks MCP over stdin/stdout against the
-// sandbox tools, and controller runs one-time interactive setup verbs
-// (currently just bootstrap-github-app) against an operator's own
-// machine, never a running daemon. daemon.go, ui.go, mcpserver.go and
-// controller.go carry each one's own doc comment. A running daemon forks
-// mcpserver instances of itself -- this same binary, re-invoked with
-// "mcpserver" as argv[1] -- rather than needing a second binary on disk;
-// see pkg/agent/claude's own doc comment for the one place that matters
-// today.
-//
-// The task CLI itself takes no GitHub credentials at all. A task used to
-// be a GitHub issue, so this command needed a token and a task repo to
-// file one; a task is a store row now, and creating one is a write to
-// the store (README, "Input is a model update, not a GitHub issue").
+// runs pkg/orchestrator's RunCycle on a timer and serves the UI/API,
+// mcpserver speaks MCP over stdin/stdout against the sandbox tools, and
+// controller runs one-time interactive setup verbs (currently just
+// bootstrap-github-app) against an operator's own machine, never a
+// running daemon. daemon.go, mcpserver.go and controller.go carry each
+// one's own doc comment. A running daemon forks mcpserver instances of
+// itself -- this same binary, re-invoked with "mcpserver" as argv[1] --
+// rather than needing a second binary on disk; see pkg/agent/claude's own
+// doc comment for the one place that matters today. "demo" (demo.go) is a
+// fourth, smaller mode: a throwaway UI server over fake data, for trying
+// out the frontend with no daemon, no store and no deployment behind it
+// at all.
 //
 // Folder and repo *management* (docs/data-model.md's Folder tree, the
 // containment structure a capability's `offers` are attached to) is
@@ -44,19 +53,17 @@ import (
 	"os/user"
 	"strings"
 
-	"github.com/bwsalmon/grain/v2/pkg/model"
-	"github.com/bwsalmon/grain/v2/pkg/model/dolt"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
 // main dispatches on argv[1] before parsing anything else: "daemon",
-// "ui" and "mcpserver" are modes with their own, unrelated flag sets, so
+// "demo" and "mcpserver" are modes with their own, unrelated flag sets, so
 // they are matched exactly and handed the rest of argv verbatim rather
 // than folded into runCLI's own flag.FlagSet. Anything else -- including
 // no arguments at all, or a leading global flag like -json -- falls
 // through to the task CLI exactly as it always has, so a task command
-// itself is never allowed to collide with one of the three mode names
-// above (none of the ones below do).
+// itself is never allowed to collide with one of the mode names above
+// (none of the ones below do).
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -64,8 +71,8 @@ func main() {
 		case "daemon":
 			daemon(args[1:])
 			return
-		case "ui":
-			uiServe(args[1:])
+		case "demo":
+			demo(args[1:])
 			return
 		case "mcpserver":
 			mcpserver(args[1:])
@@ -82,20 +89,14 @@ func main() {
 }
 
 const usage = `usage: grain [global flags] <command> [args]
-       grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer (see daemon.go)
-       grain ui [flags]        serve the task UI on localhost (see ui.go)
+       grain daemon [flags]    run pkg/orchestrator's RunCycle on a timer, and serve the UI/API (see daemon.go)
+       grain demo [flags]      serve the task UI on localhost over a throwaway store of fake tasks (see demo.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
        grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
 
 Global flags (must come before the command):
-  -store-addr string           host:port of a Dolt SQL server holding the task store
-  -store-database string       database name on -store-addr (default "grain")
-  -store-user string           user to connect as (default "root")
-  -store-password-file string  file holding that user's password
-  -data-dir string             root of an embedded store, when -store-addr is unset (single writer)
-  -as string                   principal to attribute what this command does to (default: the OS user)
-  -default-target-repo string  owner/name a task with no repo of its own targets
-  -json                        print machine-readable JSON instead of a human-readable table
+  -server string  base URL of a running "grain daemon"'s UI/API (default "http://127.0.0.1:8420")
+  -json           print machine-readable JSON instead of a human-readable table
 
 Commands:
   list                                 list every task
@@ -112,16 +113,12 @@ Commands:
   settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
 `
 
+const defaultServerURL = "http://127.0.0.1:8420"
+
 func runCLI(args []string) error {
 	fs := flag.NewFlagSet("grain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	storeAddr := fs.String("store-addr", "", "host:port of a Dolt SQL server holding the task store")
-	storeDatabase := fs.String("store-database", "grain", "database name on -store-addr")
-	storeUser := fs.String("store-user", "root", "user to connect to -store-addr as")
-	storePasswordFile := fs.String("store-password-file", "", "file holding the password for -store-user")
-	dataDir := fs.String("data-dir", "", "root directory of an embedded store, used when -store-addr is unset -- single writer, so nothing else may be running against it")
-	actor := fs.String("as", "", "principal to attribute what this command does to (defaults to the OS user)")
-	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task with no repo of its own targets")
+	server := fs.String("server", defaultServerURL, "base URL of a running \"grain daemon\"'s UI/API")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON instead of a human-readable table")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -133,35 +130,9 @@ func runCLI(args []string) error {
 		return errors.New("a command is required")
 	}
 
-	server, err := serverConfig(*storeAddr, *storeDatabase, *storeUser, *storePasswordFile)
-	if err != nil {
-		return err
-	}
-	db, err := dolt.OpenOrConnect(*dataDir, server)
-	if err != nil {
-		return fmt.Errorf("opening the task store: %w", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	store := model.New(db)
-	if err := store.Init(ctx); err != nil {
-		return fmt.Errorf("applying the schema: %w", err)
-	}
-
-	cfg := ui.Config{
-		Actor:        ui.DefaultActor(actorID(*actor)),
-		Capabilities: ui.DefaultCapabilities(),
-	}
-	if *defaultTargetRepo != "" {
-		repo, err := model.ParseRepo(*defaultTargetRepo)
-		if err != nil {
-			return fmt.Errorf("-default-target-repo: %w", err)
-		}
-		cfg.DefaultTarget = &repo
-	}
-	c := ui.NewClient(cfg, store)
+	c := ui.NewHTTPClient(*server)
 	out := &printer{json: *jsonOutput}
+	ctx := context.Background()
 
 	cmd, cmdArgs := rest[0], rest[1:]
 	switch cmd {
@@ -193,27 +164,11 @@ func runCLI(args []string) error {
 	}
 }
 
-// serverConfig assembles a dolt.ServerConfig from the -store-* flags. An
-// empty addr means "no server", which OpenOrConnect reads as "use the
-// embedded database".
-func serverConfig(addr, database, user, passwordFile string) (dolt.ServerConfig, error) {
-	if addr == "" {
-		return dolt.ServerConfig{}, nil
-	}
-	cfg := dolt.ServerConfig{Addr: addr, Database: database, User: user}
-	if passwordFile != "" {
-		data, err := os.ReadFile(passwordFile)
-		if err != nil {
-			return dolt.ServerConfig{}, fmt.Errorf("reading -store-password-file: %w", err)
-		}
-		cfg.Password = strings.TrimSpace(string(data))
-	}
-	return cfg, nil
-}
-
-// actorID resolves who this command acts as: the -as flag, else the OS
-// user, else ui.DefaultActor's own fallback. A GitHub issue used to
-// answer this with its own opening account.
+// actorID resolves who a local, non-REST command (currently just "demo")
+// acts as: the -as flag, else the OS user, else ui.DefaultActor's own
+// fallback. The task CLI itself no longer has a notion of this: attribution
+// is the daemon's own deployment-wide setting now (pkg/ui's HTTPClient.Config
+// doc comment), not something a REST caller can override per request.
 func actorID(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
@@ -238,7 +193,7 @@ func taskID(s string) (string, error) {
 // respond re-reads number and prints it -- what every mutating command
 // below does once its own call to Client succeeds, the CLI's analogue of
 // pkg/ui's own respondWithTask.
-func respond(ctx context.Context, c *ui.Client, out *printer, id string) error {
+func respond(ctx context.Context, c *ui.HTTPClient, out *printer, id string) error {
 	task, err := c.Task(ctx, id)
 	if err != nil {
 		return err
@@ -247,7 +202,7 @@ func respond(ctx context.Context, c *ui.Client, out *printer, id string) error {
 	return nil
 }
 
-func cmdList(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdList(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain list", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -260,7 +215,7 @@ func cmdList(ctx context.Context, c *ui.Client, out *printer, args []string) err
 	return nil
 }
 
-func cmdGet(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdGet(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain get", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -288,7 +243,7 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain create", flag.ContinueOnError)
 	title := fs.String("title", "", "task title (required)")
 	body := fs.String("body", "", "task description")
@@ -318,7 +273,7 @@ func cmdCreate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	return nil
 }
 
-func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdUpdate(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain update", flag.ContinueOnError)
 	title := fs.String("title", "", "new task title")
 	body := fs.String("body", "", "new task description")
@@ -368,7 +323,7 @@ func cmdUpdate(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	return nil
 }
 
-func cmdApprove(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdApprove(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain approve", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -383,7 +338,7 @@ func cmdApprove(ctx context.Context, c *ui.Client, out *printer, args []string) 
 	return respond(ctx, c, out, id)
 }
 
-func cmdCapability(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdCapability(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain capability", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -411,7 +366,7 @@ func cmdCapability(ctx context.Context, c *ui.Client, out *printer, args []strin
 	return respond(ctx, c, out, id)
 }
 
-func cmdComment(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdComment(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain comment", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -430,7 +385,7 @@ func cmdComment(ctx context.Context, c *ui.Client, out *printer, args []string) 
 	return respond(ctx, c, out, id)
 }
 
-func cmdClose(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdClose(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain close", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -445,7 +400,7 @@ func cmdClose(ctx context.Context, c *ui.Client, out *printer, args []string) er
 	return respond(ctx, c, out, id)
 }
 
-func cmdReopen(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdReopen(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain reopen", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -460,12 +415,16 @@ func cmdReopen(ctx context.Context, c *ui.Client, out *printer, args []string) e
 	return respond(ctx, c, out, id)
 }
 
-func cmdConfig(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdConfig(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain config", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	out.config(c.Config)
+	cfg, err := c.Config(ctx)
+	if err != nil {
+		return err
+	}
+	out.config(cfg)
 	return nil
 }
 
@@ -475,7 +434,7 @@ func cmdConfig(ctx context.Context, c *ui.Client, out *printer, args []string) e
 // yet, on a store no daemon has ever started against); with any given,
 // it applies only those, the same fs.Visit convention cmdUpdate uses for
 // a task's own fields, and prints the result.
-func cmdSettings(ctx context.Context, c *ui.Client, out *printer, args []string) error {
+func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
 	slots := fs.String("slots", "", "comma-separated slot names -- the daemon's concurrency pool")

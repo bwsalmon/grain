@@ -115,8 +115,7 @@ func TestCLICreateWithBaseOpensPullRequestAgainstThatBranch(t *testing.T) {
 	// Step 1: file the task through the real CLI binary with -base
 	// release, the real path an operator drives this through.
 	storeDir := t.TempDir()
-	created := runCLI(t, bin,
-		"-data-dir", storeDir,
+	created := runCLIStore(t, bin, storeDir,
 		"-json",
 		"create",
 		"-title", "add a NOTES entry on release",

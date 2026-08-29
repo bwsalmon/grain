@@ -6,11 +6,14 @@ here is wired into it.
 ```
 pkg/model/      the task model of ../docs/data-model.md
 pkg/model/dolt/ opening the Dolt database — the only package that imports
-                a driver. Open is the embedded, single-writer one;
-                Connect dials a Dolt SQL server, which is what makes
-                graind, the UI and a CLI writing at once a supported case
-                (see "Single writer" below); OpenOrConnect picks between
-                them from a deployment's flags
+                a driver. Open is the embedded, single-writer one, which
+                is all a deployment needs now that the daemon is the only
+                thing that ever opens the store directly (see "The UI and
+                the CLI talk to the daemon over REST" below); Connect
+                still dials a Dolt SQL server instead, for a deployment
+                that wants the store served from somewhere other than the
+                daemon's own disk. OpenOrConnect picks between them from a
+                deployment's flags
 pkg/dispatch/   which task takes which slot: what one cycle decides to
                 do with the store, with no side effect beyond that
                 decision. It does not loop itself -- cmd/grain's "daemon"
@@ -111,32 +114,41 @@ pkg/ui/         a JSON API, and the static frontend it serves, for
                 by hand (bwsalmon/agents#237). It reads and writes
                 model.Store: creating a task here IS filing it, with no
                 GitHub issue and no poll in between -- see "Input is a
-                model update, not a GitHub issue" below
+                model update, not a GitHub issue" below. Client is that
+                code directly, over a *model.Store the caller already
+                has open; HTTPClient (bwsalmon/agents#363) is the same
+                method surface spoken over HTTP instead, against
+                whichever pkg/ui.Server a "grain daemon" is serving --
+                see "The UI and the CLI talk to the daemon over REST"
+                below
 cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
-                combined what used to be four): with no subcommand, or
-                one of the task-management verbs, main.go is a CLI over
-                pkg/ui.Client -- the same model code the "ui" subcommand's
-                Server wraps in JSON and HTTP, driven from a terminal
-                instead: list/get/create/update a task, approve, attach
-                or detach a capability, comment (which also answers a
-                parked question), close ("delete" -- a task that ran is a
-                record of a dispatch that happened) or reopen one
-                (bwsalmon/agents#271). "daemon" (daemon.go, formerly
-                cmd/graind) runs pkg/orchestrator's RunCycle on a timer
-                against one real Dolt store (embedded, or a SQL server
-                via -store-addr so a UI and a CLI can write it too),
-                until SIGINT/SIGTERM, with an in-process gitproxy and a
-                real github.RESTClient wired in. "ui" (ui.go, formerly
-                cmd/ui) serves pkg/ui.Server behind a local HTTP
-                listener, opening the system's default browser -- same
-                store flags as the CLI, and no GitHub credentials at
-                all. "mcpserver" (mcpserver.go, formerly cmd/mcpserver)
-                is the server as a standalone stdio mode -- -sandbox-root
-                for NewSandboxTools, or -kontur-vm (plus pkg/kontur,
-                above) for NewSSHSandboxTools against a real kontur-
-                managed VM -- what a running daemon (via pkg/agent/claude)
-                forks *this same binary* to get, rather than needing a
-                second one on disk
+                combined what used to be four, #363 folded a fifth --
+                the standalone "ui" subcommand -- into "daemon"): with no
+                subcommand, or one of the task-management verbs, main.go
+                is a CLI over pkg/ui.HTTPClient -- a REST client of
+                whichever "grain daemon" -server names, driven from a
+                terminal instead of a browser: list/get/create/update a
+                task, approve, attach or detach a capability, comment
+                (which also answers a parked question), close ("delete"
+                -- a task that ran is a record of a dispatch that
+                happened) or reopen one (bwsalmon/agents#271). "daemon"
+                (daemon.go, formerly cmd/graind) runs pkg/orchestrator's
+                RunCycle on a timer against one real Dolt store
+                (embedded by default, or a SQL server via -store-addr),
+                until SIGINT/SIGTERM, with an in-process gitproxy, a real
+                github.RESTClient, and -- unless -ui-addr is emptied out
+                -- an in-process pkg/ui.Server over that same store, all
+                wired in. "mcpserver" (mcpserver.go, formerly
+                cmd/mcpserver) is the server as a standalone stdio mode
+                -- -sandbox-root for NewSandboxTools, or -kontur-vm (plus
+                pkg/kontur, above) for NewSSHSandboxTools against a real
+                kontur-managed VM -- what a running daemon (via
+                pkg/agent/claude) forks *this same binary* to get, rather
+                than needing a second one on disk. "demo" (demo.go,
+                formerly `grain ui -demo`) is a fifth, smaller mode: a
+                throwaway pkg/ui.Server over fake data and a temp-directory
+                store, for trying out the frontend with no daemon, no
+                store and no deployment behind it at all
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
@@ -351,9 +363,12 @@ and become grain's, which means grain has to render them. That is what
   poll would notice — and forgetting the second left the task parked
   forever.
 - `dolt.Connect`/`dolt.OpenOrConnect` and the `-store-addr`/`-data-dir`
-  flags on both the CLI and the "ui" subcommand of `cmd/grain`; see
-  "Single writer" below, which stops being a caveat and becomes the
-  deployment.
+  flags on both the CLI and the "ui" subcommand of `cmd/grain` — landed
+  here as a multi-writer deployment (a daemon, a UI and a CLI, each
+  opening the store directly), and later replaced by a single writer
+  again once bwsalmon/agents#363 turned the CLI and the UI into REST
+  clients of the daemon; see "The UI and the CLI talk to the daemon over
+  REST" below.
 - `Store` grew `ListTasks`, `States` and `ObserveField`. The last is
   `pkg/orchestrator`'s own `observeField` promoted: `Observe` REPLACEs the
   whole observation row, so changing one field means reading it first,
@@ -575,8 +590,11 @@ the pipeline version, with the state assertion naming what it stranded.
 This is the first of the three steps toward the Kubernetes-shaped model
 the design is converging on. The other two are not built: optimistic
 concurrency on `Store`'s mutators (`task` has no version column, and
-`PutTask` is last-write-wins — fine for one writer, and "Single writer"
-below is already honest that there is more than one), and a real watch,
+`PutTask` is last-write-wins — there is only one process holding the
+store open now ("The UI and the CLI talk to the daemon over REST",
+below), but that process still serves concurrent requests: the frontend
+and a CLI invocation racing each other on the same task is exactly the
+same last-write-wins hazard, one layer up), and a real watch,
 for which Dolt is an unusually good substrate and currently an unused
 one — a commit hash is a `resourceVersion` and `dolt_diff` is a change
 feed with history, but `dolt.Commit` has no caller outside its own test
@@ -925,7 +943,8 @@ close the gap above, since nothing there is wired to run on its own yet.
 
 ## The UI
 
-`pkg/ui`/`cmd/grain`'s "ui" subcommand (bwsalmon/agents#237) is
+`pkg/ui`, served by `cmd/grain`'s "daemon" subcommand (bwsalmon/agents#237,
+folded in by #363 -- it used to be its own "ui" subcommand), is
 [`docs/data-model.md`'s "first-party UI"
 direction](../docs/data-model.md#direction-a-first-party-ui): create a
 task, approve a proposed one, attach or remove a capability, comment,
@@ -943,13 +962,18 @@ label-shaped copy.
 
 **No OAuth, and now nothing to authenticate to.** The direction document
 calls for GitHub OAuth plus `author_association` as the permission gate.
-The "ui" subcommand takes no GitHub credential at all any more — it
-takes `-as`, naming the principal it acts as, defaulting to the OS user.
-This is a
-single-operator tool run locally against a store that operator already
-reaches; a real permission gate is worth building the day this runs
-anywhere other than one person's own machine (bwsalmon/agents#237's
-follow-up), and it would gate store writes rather than API calls.
+Neither `pkg/ui.Server` nor `cmd/grain`'s own CLI takes a GitHub
+credential at all any more — the daemon that serves the UI/API takes
+`-as`, naming the single principal every task and comment created
+through it is attributed to (defaulting to the OS user), and every
+caller of that API — the browser frontend, the CLI, anything else
+reaching it — acts as that one principal. This is a single-operator tool,
+reached however an operator's network puts it in front of them —
+loopback, an SSH tunnel, Tailscale, IAP (bwsalmon/agents#363) — rather
+than authenticated per caller; a real permission gate is worth building
+the day this runs somewhere with more than one operator behind it
+(bwsalmon/agents#237's follow-up), and it would gate store writes rather
+than API calls.
 
 **Why a local web server, not Electron/Tauri/a native app.** `go build`
 already produces one dependency-free binary per OS `cmd/grain` runs on
@@ -960,26 +984,28 @@ no second toolchain (Node, Rust, Xcode) for this repo to carry. "Set up
 to run on iOS/Android in the future" is what shapes `pkg/ui` into an
 HTTP+JSON API in the first place rather than server-rendered pages: a
 future mobile client — native, or a thin webview shell — is just another
-caller of the same `/api/*` surface the "ui" subcommand's own frontend
+caller of the same `/api/*` surface the daemon's own embedded frontend
 (`pkg/ui/static/`, plain HTML/CSS/JS, no build step) already uses, with
-nothing about the server to rewrite.
+nothing about the server to rewrite — the same surface `pkg/ui.HTTPClient`
+gives `cmd/grain`'s own CLI (see "The UI and the CLI talk to the daemon
+over REST" below).
 
-**`-demo` (bwsalmon/agents#276) for trying out the frontend on its own.**
-`grain ui` normally needs a real store — embedded or a Dolt SQL server —
-and a real deployment's tasks to look at anything. `-demo` opens a
-throwaway embedded store in a fresh temp directory instead and seeds it
-with fake tasks, one in each `model.State` (`cmd/grain/demo.go`), through
-the same `ui.Client`/`model.Store` writes a human clicking through the UI
-would make — no fake `Store` standing in, matching the "real embedded
-Dolt, not a fake" discipline every test in this repo already holds to
+**`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
+#363) for trying out the frontend on its own.** A real `grain daemon`
+needs a real Gemini key, a real store, and a real deployment's tasks to
+look at anything. `grain demo` opens a throwaway embedded store in a
+fresh temp directory instead and seeds it with fake tasks, one in each
+`model.State` (`cmd/grain/demo.go`), through the same `ui.Client`/
+`model.Store` writes a human clicking through the UI would make — no fake
+`Store` standing in, matching the "real embedded Dolt, not a fake"
+discipline every test in this repo already holds to
 (`pkg/ui/client_test.go`). That makes it a real server exercising the real
 frontend code, with fake data as the only difference from a real
 deployment — useful for checking a frontend change renders every state
-correctly without an orchestrator, a sandbox, a Gemini key, or a git repo
-anywhere behind it. `-store-addr`/`-data-dir` are rejected alongside it,
-since a throwaway store and a real one talking to the same flags would be
-a UI showing one deployment's fake tasks in some other deployment's data
-directory.
+correctly without an orchestrator, a sandbox, a Gemini key, a real store,
+or a git repo anywhere behind it. It takes no `-store-addr`/`-data-dir`
+of its own — there is no real store to point it at by mistake, only the
+throwaway one it creates and seeds itself.
 
 **Freshness, not a cache.** Every mutation in the frontend
 (`pkg/ui/static/app.js`'s `act`) re-fetches the task afterward rather
@@ -1073,24 +1099,41 @@ message (a bad duration string, an empty required field the first
 time) surfaces through the same error banner task creation's own
 validation errors already use.
 
-## Single writer
+## The UI and the CLI talk to the daemon over REST
 
 Embedded Dolt permits one writer, which suited a cron-driven controller
-and does not suit a controller plus a UI plus a human at a CLI. That
-became real the moment the CLI and the UI started writing the store
-instead of GitHub, so the answer this section always named is now built:
-`dolt.Connect` dials a Dolt SQL server, `dolt.OpenOrConnect` picks
-between it and the embedded database from a deployment's flags, and
-nothing above `pkg/model/dolt` changed — which is exactly why `Store`
-takes a `*sql.DB` and imports no driver.
+and did not suit a controller plus a UI plus a human at a CLI, each
+opening the store directly. That became real the moment the CLI and the
+UI started writing the store instead of GitHub ("Input is a model
+update, not a GitHub issue", above): for a while, the answer was a
+second writer *class* — `dolt.Connect` dialing a real Dolt SQL server
+instead of the embedded database, so a daemon, a UI and a CLI could all
+hold their own connection open at once.
 
-Both ends stay supported on purpose. Embedded is still right for a
-one-process deployment and for every test in this repo, which is why the
-store's own tests run against it. `-store-addr` opts a deployment into
-the server; `-data-dir` is the embedded fallback, and its flag help says
-plainly that nothing else may be running against it.
+bwsalmon/agents#363 removed the second writer instead of scaling it
+up. The daemon now serves `pkg/ui.Server` itself, in-process
+(`cmd/grain/daemon.go`'s own `startUIServer`, gated on `-ui-addr`), over
+the exact `*model.Store` `RunCycle` already has open — no second
+connection, no Dolt SQL server needed just to let the two coexist.
+`cmd/grain`'s task CLI stopped opening the store at all: it is
+`pkg/ui.HTTPClient` now, a plain REST client of that same server (`-server`,
+default `http://127.0.0.1:8420`), the identical JSON API the browser
+frontend already speaks. The frontend and the CLI reach that one process
+however an operator's network puts it in front of them — a loopback
+port, an SSH tunnel, Tailscale, IAP — which is also the whole
+answer to "does the API need its own auth": it doesn't, because nothing
+downstream of the daemon's own store connection accepts one, and
+whatever can reach `-ui-addr` at all acts as the daemon's one configured
+principal (`-as`). `scripts/setup.sh` reflects this: one systemd unit
+(`grain-daemon.service`), one store, no `dolt sql-server` container.
 
-Two settings on the server DSN are load-bearing rather than defaults
+Embedded is not the only option even now: `-store-addr` still opts the
+daemon into dialing a Dolt SQL server instead of opening `-data-dir`
+directly (`dolt.Connect`, `dolt.OpenOrConnect` picking between the two
+from a deployment's flags) — useful for running the store somewhere
+other than the daemon's own disk, not for a second writer, since the
+daemon is the only thing that ever holds either connection open. Two
+settings on the server DSN are load-bearing rather than defaults
 restated, and both would otherwise show up only when run against a real
 server: `parseTime`, because the wire protocol hands `DATETIME` back as
 bytes otherwise and every `time.Time` on `model.Task`/`model.Observation`
@@ -1098,28 +1141,25 @@ would fail to scan; and `loc=UTC`, because the store writes UTC and a
 driver left on `Local` hands it back shifted — a wrong timestamp rather
 than an error, and the merge queue orders by `Task.CreatedAt`.
 
-`MaxOpenConns` is deliberately *not* pinned to one on the server path.
-That pin exists in the embedded case because a pool there produces lock
-contention that reads as a deadlock; a server is the thing that makes
-concurrent writers supported rather than hazardous, so pinning it there
-would throw away the whole reason to run one.
-
 ## Deploying it
 
 `scripts/setup.sh` (bwsalmon/agents#355) is the first real answer to "how
 does this run anywhere" — this file's own opening line used to say
 nothing here was wired in yet, and now this is the one path that is. It
-runs `grain` directly on the target machine as `grain-daemon.service` and
-`grain-ui.service`, no controller VM involved: v2 has no host adapter yet
-(see "What this does not have yet" above), and its daemon already
+runs `grain` directly on the target machine as a single
+`grain-daemon.service`, no controller VM involved: v2 has no host adapter
+yet (see "What this does not have yet" above), and its daemon already
 defaults to `orchestrator.HostSandboxes` — plain host directories, not a
 VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
 not have either way yet). It builds with `make container-build`, so a
-working `docker` is the one thing it assumes about the host, and it runs
-a `dolt sql-server` container for the same reason ("Single writer",
-above) — a daemon plus a UI both writing the same store need the server
-end, not the embedded one. Safe to re-run: it is the installer and the
+working `docker` is the one thing it assumes about the host at build
+time; there used to be a second service (`grain-ui.service`) and a `dolt
+sql-server` container behind it, needed only because a daemon and a UI
+writing the same store used to mean two writers ("The UI and the CLI
+talk to the daemon over REST", above) — bwsalmon/agents#363 folded the UI
+into the daemon itself, so `docker` is no longer needed at runtime
+either, only to build. Safe to re-run: it is the installer and the
 updater both, seeding a secret or a config value only the first time and
 leaving anything already on disk alone every time after. `./setup.sh
 --help` lists every setting.

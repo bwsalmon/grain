@@ -141,12 +141,28 @@ func commentFrom(c model.Comment) Comment {
 // lives in client.go, once, so a non-HTTP caller (cmd/grain's CLI) gets
 // identical behaviour by calling the same Client directly.
 
+// configResponse is GET /api/config's JSON shape -- deliberately its own
+// type rather than json.Marshal'ing model.Principal/model.RepoRef
+// directly, since neither carries wire tags (they are not otherwise a
+// wire format) and would round-trip as {"Kind":...,"ID":...} instead of
+// the plain strings HTTPClient and the frontend both expect.
+type configResponse struct {
+	Actor         string       `json:"actor"`
+	ActorKind     string       `json:"actorKind"`
+	DefaultTarget string       `json:"defaultTarget,omitempty"`
+	Capabilities  []Capability `json:"capabilities"`
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"actor":         s.tasks.Config.Actor,
-		"defaultTarget": s.tasks.Config.DefaultTarget,
-		"capabilities":  s.tasks.Config.Capabilities,
-	})
+	resp := configResponse{
+		Actor:        s.tasks.Config.Actor.ID,
+		ActorKind:    string(s.tasks.Config.Actor.Kind),
+		Capabilities: s.tasks.Config.Capabilities,
+	}
+	if s.tasks.Config.DefaultTarget != nil {
+		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +194,25 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, task)
+}
+
+// handleUpdateTask is the CLI's `grain update` (cmdUpdate) reached over
+// HTTP now that the CLI is a Client (this package's own HTTPClient) over
+// REST rather than a direct model.Store caller -- the one Client method
+// with no route before this, since the frontend has never needed a
+// general field editor (it drives capabilities, dependencies, approval
+// and comments through their own narrower endpoints instead).
+func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
+	var req UpdateTaskRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	task, err := s.tasks.UpdateTask(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
 
 type setCapabilityRequest struct {
