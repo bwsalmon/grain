@@ -249,12 +249,12 @@ main { padding: 0 0 2.5rem; }
   .badge-running::before { animation: none; }
 }
 
-.repo-list { list-style: none; margin: 0; padding: 0; }
+.repo-list { list-style: none; margin: 0; padding: 1rem 1.75rem 0; }
 .repo-list li {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.85rem;
   overflow: hidden;
   transition: box-shadow 120ms ease, border-color 120ms ease;
 }
