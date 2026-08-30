@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { Button, Checkbox, Chip, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
+import { Box, Button, Checkbox, Chip, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
+import RepoField from "./RepoField.jsx";
 
 // ScheduledTasksOverlay manages schedules (bwsalmon/agents#376): each row
 // is a standing declaration -- "file this task every N" -- that graind's
 // own schedule reconciler turns into a real task each time it comes due.
 // SecretsOverlay's own shape fits here almost exactly: a list fetched on
 // open, refreshed after every mutation, plus a form that only ever adds.
-export default function ScheduledTasksOverlay({ onClose, showError }) {
+export default function ScheduledTasksOverlay({ config, tasks, onClose, showError }) {
   const [schedules, setSchedules] = useState(null);
+  const repoOptions = knownRepos(config, tasks);
 
   const refresh = useCallback(async () => {
     try {
@@ -97,7 +100,12 @@ export default function ScheduledTasksOverlay({ onClose, showError }) {
       <form onSubmit={submit}>
         <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" multiline rows={4} fullWidth margin="normal" />
-        <TextField name="repo" label="Target repo" helperText="owner/name" placeholder="owner/name" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
+        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+            Target repo <span className="hint">owner/name</span>
+          </Typography>
+          <RepoField name="repo" options={repoOptions} required />
+        </Box>
         <TextField name="base" label="Base branch" helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
         <TextField name="interval" label="Interval" helperText="Go duration, e.g. 24h" placeholder="24h" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <FormControlLabel

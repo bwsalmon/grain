@@ -2,7 +2,10 @@ package orchestrator
 
 import (
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/bwsalmon/grain/v2/pkg/agent"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -168,4 +171,57 @@ func (c *checkRunsClient) ListCheckRuns(owner, repo, ref string) ([]github.Check
 		return nil, c.err
 	}
 	return c.checks, nil
+}
+
+// --- what a no-action run reports --------------------------------------
+
+func TestToolCallSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []agent.ToolCall
+		want  string
+	}{
+		// The most informative case: an agent that called nothing did not
+		// fail to act so much as never start.
+		{"no calls at all", nil, ""},
+		{"one call", []agent.ToolCall{{Name: "run_command"}}, " [run_command x1]"},
+		{"repeats are counted", []agent.ToolCall{
+			{Name: "run_command"}, {Name: "run_command"}, {Name: "read_file"},
+		}, " [read_file x1, run_command x2]"},
+		// An erroring tool is a different signal from a working one --
+		// four runs of read_file(error) says the sandbox is wrong, not the
+		// model.
+		{"errors are distinguished", []agent.ToolCall{
+			{Name: "read_file"}, {Name: "read_file", IsError: true},
+		}, " [read_file x1, read_file(error) x1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolCallSummary(&agent.Result{ToolCalls: tc.calls})
+			if got != tc.want {
+				t.Errorf("toolCallSummary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// FinalText is model output and a sandbox can hold a .git-credentials, so
+// the bound is not advisory.
+func TestTruncateBoundsModelOutput(t *testing.T) {
+	if got := truncate("", 10); got != "<empty>" {
+		t.Errorf("empty final text = %q, want <empty>", got)
+	}
+	if got := truncate("   \n ", 10); got != "<empty>" {
+		t.Errorf("whitespace-only final text = %q, want <empty>", got)
+	}
+	if got := truncate("short", 10); got != `"short"` {
+		t.Errorf("short text = %q, want it quoted whole", got)
+	}
+	long := strings.Repeat("x", 40)
+	got := truncate(long, 10)
+	if !strings.HasSuffix(got, "... (truncated)") {
+		t.Errorf("long text = %q, want it marked as truncated", got)
+	}
+	if len(got) > 10+len(`""... (truncated)`) {
+		t.Errorf("long text = %q, longer than the bound plus its marker", got)
+	}
 }

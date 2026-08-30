@@ -51,6 +51,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
           </div>
 
           <Actions t={t} act={act} />
+          <Attempts t={t} />
           <Declared t={t} />
           <CapabilityToggles t={t} config={config} act={act} />
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
@@ -135,6 +136,54 @@ function Actions({ t, act }) {
         </Button>
       )}
     </Stack>
+  );
+}
+
+// OUTCOME_LABELS and OUTCOME_BADGES cover model.Run's own outcome
+// vocabulary (orchestrator.outcomeOf, orchestrator.run's "cancelled"),
+// plus the empty string a run still in flight (no finishedAt yet) comes
+// back as -- the one case that isn't itself an outcome. An outcome this
+// doesn't recognise falls back to the raw string, capitalised, rather
+// than disappearing, so a value added on the backend later still shows
+// up here before this map catches up with it.
+const OUTCOME_LABELS = { "": "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled" };
+const OUTCOME_BADGES = { "": "running", succeeded: "completed", failed: "failed", cancelled: "closed" };
+
+// outcome is undefined, not "", for a still-running attempt: the API's
+// own Attempt.Outcome carries `omitempty`, so the wire form drops the
+// key entirely rather than sending an empty string.
+function outcomeLabel(outcome) {
+  outcome = outcome || "";
+  return OUTCOME_LABELS[outcome] || (outcome.charAt(0).toUpperCase() + outcome.slice(1));
+}
+
+// Attempts is every run this task has had, oldest first, each with its
+// own status and timing -- bwsalmon/agents#445's "show attempts and
+// their status in order in the task view", the full history
+// t.failedAttempts only counts and t.lastFailureReason only explains for
+// the most recent one.
+function Attempts({ t }) {
+  const attempts = t.attempts || [];
+  if (attempts.length === 0) return null;
+  return (
+    <fieldset>
+      <legend>Attempts ({attempts.length})</legend>
+      <ul className="attempts">
+        {attempts.map((a) => (
+          <li className="attempt" key={a.number}>
+            <div className="attempt-header">
+              <span className="attempt-number">#{a.number}</span>
+              <span className={`badge badge-${OUTCOME_BADGES[a.outcome || ""] || "queued"}`}>{outcomeLabel(a.outcome)}</span>
+            </div>
+            <div className="attempt-meta">
+              started {new Date(a.startedAt).toLocaleString()}
+              {a.finishedAt && <> · finished {new Date(a.finishedAt).toLocaleString()}</>}
+            </div>
+            {a.detail && <div className="attempt-detail">{a.detail}</div>}
+          </li>
+        ))}
+      </ul>
+    </fieldset>
   );
 }
 

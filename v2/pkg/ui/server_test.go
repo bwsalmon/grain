@@ -233,6 +233,28 @@ func TestDependsOnRouteRejectsSelfDependency(t *testing.T) {
 	}
 }
 
+// TestConfigEndpointReportsTargetRepos is the dropdown source
+// bwsalmon/agents#447 added the frontend's repo fields: whatever
+// CreateTask enforces a task's repo against should be exactly what GET
+// /api/config reports, so the UI never offers a repo the server would
+// then park off the allowlist.
+func TestConfigEndpointReportsTargetRepos(t *testing.T) {
+	client, _, _ := testClient(t)
+	client.Config.TargetRepos = []string{"acme/widgets", "acme/other"}
+	srv := ui.NewServerWithClient(client)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	cfg := decode[struct {
+		TargetRepos []string `json:"targetRepos"`
+	}](t, rec)
+	if !reflect.DeepEqual(cfg.TargetRepos, []string{"acme/widgets", "acme/other"}) {
+		t.Fatalf("targetRepos = %v, want [acme/widgets acme/other]", cfg.TargetRepos)
+	}
+}
+
 func TestSubmitUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {

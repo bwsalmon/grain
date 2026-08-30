@@ -1,11 +1,14 @@
 import { useRef, useState } from "react";
 import { Box, Button, Checkbox, Chip, FormControlLabel, FormGroup, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
+import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
 export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, showError }) {
   const formRef = useRef(null);
+  const repoOptions = knownRepos(config, tasks);
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
@@ -55,16 +58,16 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       <form ref={formRef} onSubmit={submit}>
         <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
-        <TextField
-          name="repo"
-          label="Target repo"
-          helperText="owner/name, optional"
-          placeholder="owner/name"
-          defaultValue={defaultRepo || ""}
-          autoComplete="off"
-          fullWidth
-          margin="normal"
-        />
+        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+            Target repo <span className="hint">owner/name, optional</span>
+          </Typography>
+          {/* Pre-filled from the repo the "+ New task" button was opened
+              from -- the repo-centric task list's whole point is filing
+              work against the repo you're already looking at without
+              retyping it. */}
+          <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} />
+        </Box>
         <TextField name="base" label="Base branch" helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
         <TextField
           name="reads"

@@ -350,6 +350,53 @@ func TestAttemptsCountsRuns(t *testing.T) {
 	}
 }
 
+func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	// Started out of attempt order, to prove Runs sorts by attempt rather
+	// than by id or insertion order.
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r2", TaskID: "a1b2", Slot: "s2", Sandbox: "s2",
+		Attempt: 2, StartedAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", now.Add(30*time.Minute), "failed", "build error"); err != nil {
+		t.Fatal(err)
+	}
+	// r2 is left unfinished, to prove a still-running attempt comes back
+	// with a nil FinishedAt and empty Outcome rather than erroring.
+
+	runs, err := store.Runs(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %+v, want 2", runs)
+	}
+	if runs[0].Attempt != 1 || runs[0].Outcome != "failed" || runs[0].Detail != "build error" {
+		t.Fatalf("runs[0] = %+v, want attempt 1, failed, build error", runs[0])
+	}
+	if runs[0].FinishedAt == nil {
+		t.Fatalf("runs[0].FinishedAt = nil, want the time FinishRun recorded")
+	}
+	if runs[1].Attempt != 2 || runs[1].Outcome != "" || runs[1].FinishedAt != nil {
+		t.Fatalf("runs[1] = %+v, want attempt 2, still running", runs[1])
+	}
+
+	if none, err := store.Runs(ctx, "nonexistent"); err != nil || len(none) != 0 {
+		t.Fatalf("runs for a nonexistent task = %+v (%v), want none", none, err)
+	}
+}
+
 func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 	store, _, ctx := openStore(t)
 	tk := task("a1b2", true) // Target: owner/payments-api

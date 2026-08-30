@@ -19,6 +19,7 @@ const baseProps = {
   onOpenSettings: noop,
   onOpenReleases: noop,
   onOpenUpgrade: noop,
+  onOpenLogs: noop,
   onOpenNewTask: noop,
 };
 
@@ -68,6 +69,7 @@ describe("Sidebar", () => {
     const onOpenSettings = vi.fn();
     const onOpenReleases = vi.fn();
     const onOpenUpgrade = vi.fn();
+    const onOpenLogs = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
     render(
@@ -80,6 +82,7 @@ describe("Sidebar", () => {
         onOpenSettings={onOpenSettings}
         onOpenReleases={onOpenReleases}
         onOpenUpgrade={onOpenUpgrade}
+        onOpenLogs={onOpenLogs}
         onOpenNewTask={onOpenNewTask}
       />,
     );
@@ -90,6 +93,7 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("button", { name: "Settings" }));
     await user.click(screen.getByRole("button", { name: "Releases" }));
     await user.click(screen.getByRole("button", { name: "Upgrade" }));
+    await user.click(screen.getByRole("button", { name: "Logs" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSecrets).toHaveBeenCalledTimes(1);
@@ -97,5 +101,6 @@ describe("Sidebar", () => {
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onOpenReleases).toHaveBeenCalledTimes(1);
     expect(onOpenUpgrade).toHaveBeenCalledTimes(1);
+    expect(onOpenLogs).toHaveBeenCalledTimes(1);
   });
 });
