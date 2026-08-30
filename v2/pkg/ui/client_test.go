@@ -1125,6 +1125,60 @@ func TestStackedIsTrueOnlyForAFixTask(t *testing.T) {
 	}
 }
 
+// MergeQueueBlockedAt is bwsalmon/agents#494's own signal that a
+// completed task's pull request needs a human, not another automatic
+// merge-queue attempt -- ListTasks, Task and GetTask each project it
+// off model.Observation through a different path (a bulk query, a
+// single Store.GetObservation call, and one already fetched for
+// Transitions), so all three are worth covering here rather than
+// trusting they agree.
+func TestTaskSurfacesMergeQueueBlockedAt(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MergeQueueBlockedAt != nil {
+		t.Fatalf("MergeQueueBlockedAt = %v, want nil before the merge queue gives up", got.MergeQueueBlockedAt)
+	}
+
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: task.ID, CompletedAt: &baseTime, MergeQueueBlockedAt: &baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err = c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MergeQueueBlockedAt == nil || !got.MergeQueueBlockedAt.Equal(baseTime) {
+		t.Fatalf("Task: MergeQueueBlockedAt = %v, want %v", got.MergeQueueBlockedAt, baseTime)
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.MergeQueueBlockedAt == nil || !detail.MergeQueueBlockedAt.Equal(baseTime) {
+		t.Fatalf("GetTask: MergeQueueBlockedAt = %v, want %v", detail.MergeQueueBlockedAt, baseTime)
+	}
+
+	list, err := c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].MergeQueueBlockedAt == nil || !list[0].MergeQueueBlockedAt.Equal(baseTime) {
+		t.Fatalf("ListTasks: MergeQueueBlockedAt = %v, want %v", list[0].MergeQueueBlockedAt, baseTime)
+	}
+}
+
 func TestTaskNotFound(t *testing.T) {
 	c, _, ctx := testClient(t)
 	_, err := c.Task(ctx, "404")

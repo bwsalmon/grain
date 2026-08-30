@@ -690,6 +690,29 @@ func (s *Store) States(ctx context.Context) (map[string]State, error) {
 	return out, err
 }
 
+// MergeQueueBlocked reads every task_observation row whose
+// merge_queue_blocked_at is set, in one query, for a caller rendering a
+// list -- the same "one round trip for everyone" trade States already
+// makes, applied to the one Observation field a task list needs
+// (bwsalmon/agents#494's "make post complete states clear": a human
+// needs to see, without opening each task, which ones the merge queue
+// has given up fixing on its own).
+func (s *Store) MergeQueueBlocked(ctx context.Context) (map[string]time.Time, error) {
+	out := map[string]time.Time{}
+	err := each(ctx, s.db,
+		"SELECT `task_id`,`merge_queue_blocked_at` FROM `task_observation` WHERE `merge_queue_blocked_at` IS NOT NULL", nil,
+		func(rows *sql.Rows) error {
+			var id string
+			var at time.Time
+			if err := rows.Scan(&id, &at); err != nil {
+				return err
+			}
+			out[id] = at
+			return nil
+		})
+	return out, err
+}
+
 func hydrate(ctx context.Context, q querier, t *Task) error {
 	if err := each(ctx, q,
 		"SELECT `owner`,`name` FROM `task_read` WHERE `task_id` = ? ORDER BY `owner`,`name`",

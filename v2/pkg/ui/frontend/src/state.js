@@ -15,6 +15,33 @@ export const STATE_LABELS = {
   closed: "Closed",
 };
 
+// completionPhase names what a completed task is waiting on next --
+// nothing yet, a human's Submit click, the merge queue, or (once the
+// queue has tried and failed to land it automatically) a human again --
+// the distinction bwsalmon/agents#494 asked for. model.State itself
+// stops at "completed" for a task's entire post-run life (model.StateOf
+// never reads a PR's own health), so this is a second axis rendered
+// beside the state badge rather than folded into it, the same treatment
+// Blocked already gets.
+//
+// Returns null for anything not "completed", or completed with no pull
+// request yet (a task whose run needed no code change has nothing left
+// to wait on).
+export function completionPhase(t) {
+  if (t.state !== "completed" || !t.pullRequest) return null;
+  if (t.mergeQueueBlockedAt) {
+    return {
+      label: "Merge blocked",
+      color: "error",
+      title: "The merge queue tried to land this automatically and gave up -- push a fix by hand, or close it.",
+    };
+  }
+  if (!t.autoMerge) {
+    return { label: "Awaiting submit", color: "warning", title: "Submit to put this on the merge queue." };
+  }
+  return { label: "Queued to merge", color: "info", title: "On the merge queue -- merges automatically once its checks pass." };
+}
+
 export function capabilityName(config, id) {
   const c = (config?.capabilities || []).find((c) => c.id === id);
   return c ? c.name : id;
