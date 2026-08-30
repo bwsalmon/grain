@@ -72,6 +72,13 @@ variable "machine_type" {
     8 GB) is comfortably enough to build grain (`make container-build`:
     a Go compile plus a Vite frontend build, both inside Docker) and run
     one daemon against a handful of test repos.
+
+    Size up for real agent work, though. Because dispatch lands in host
+    directories rather than in a sandbox guest of its own, whatever an
+    agent does -- a build, a docker daemon, a kind cluster -- runs on
+    *this* machine, alongside the daemon. The default covers grain's own
+    build and not much more; a deployment whose tasks compile or test
+    anything substantial wants several times it.
   EOT
   default     = "e2-standard-2"
 }
