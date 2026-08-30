@@ -305,6 +305,29 @@ func branchExistsSettled(client github.Client, owner, repo, branch string) (bool
 			return true, nil
 		}
 	}
+
+	// Every attempt said no. Confirm the client can see the repository at
+	// all before believing it: BranchExists reads a 404 as "no such
+	// branch", and every other way of failing to reach a repo -- a
+	// transport aimed at the wrong host, a revoked or unscoped token, a
+	// repo turned private -- 404s in exactly the same way. A negative
+	// that means "I cannot look" is then indistinguishable from one that
+	// means "I looked and it is not there", and this caller acts on the
+	// difference: the second ends the task as no_action, the first throws
+	// away work the agent really did push.
+	//
+	// That is not hypothetical. github.NewRealTransport pointed the REST
+	// client at github.com rather than api.github.com, so every API path
+	// 404'd, so every branch read as unpushed, and runs that had just
+	// pushed were recorded as having done nothing at all -- with no error
+	// anywhere to say so. A cheap read of the repo itself, on the
+	// negative path only, is what turns that class of failure from a
+	// wrong answer into a reported one.
+	if _, err := client.DefaultBranch(owner, repo); err != nil {
+		return false, fmt.Errorf(
+			"orchestrator: cannot read %s/%s, so %q cannot be treated as unpushed: %w",
+			owner, repo, branch, err)
+	}
 	return false, nil
 }
 
