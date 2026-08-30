@@ -1,19 +1,19 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import UpgradeOverlay from "./UpgradeOverlay.jsx";
+import UpgradePanel from "./UpgradePanel.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-describe("UpgradeOverlay", () => {
+describe("UpgradePanel", () => {
   afterEach(() => {
     api.mockReset();
   });
 
   it("shows a note instead of a form when the deployment has no upgrader configured", async () => {
     api.mockResolvedValueOnce({ enabled: false });
-    render(<UpgradeOverlay onClose={() => {}} showError={() => {}} />);
+    render(<UpgradePanel showError={() => {}} />);
 
     expect(await screen.findByText(/not available/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Branch/)).not.toBeInTheDocument();
@@ -24,7 +24,7 @@ describe("UpgradeOverlay", () => {
       .mockResolvedValueOnce({ enabled: true, phase: "", branch: "" })
       .mockResolvedValueOnce({ enabled: true, phase: "running", branch: "grain/issue-396" });
     const user = userEvent.setup();
-    render(<UpgradeOverlay onClose={() => {}} showError={() => {}} />);
+    render(<UpgradePanel showError={() => {}} />);
 
     const input = await screen.findByLabelText(/Branch/);
     await user.type(input, "grain/issue-396");
@@ -45,7 +45,7 @@ describe("UpgradeOverlay", () => {
       phase: "failed",
       detail: "checkout: git fetch: exit status 128",
     });
-    render(<UpgradeOverlay onClose={() => {}} showError={() => {}} />);
+    render(<UpgradePanel showError={() => {}} />);
 
     expect(await screen.findByText("failed")).toBeInTheDocument();
     expect(screen.getByText("checkout: git fetch: exit status 128")).toBeInTheDocument();

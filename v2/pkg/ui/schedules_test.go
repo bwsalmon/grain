@@ -10,10 +10,13 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
+var everyDay = ui.Recurrence{Kind: "daily", TimeOfDay: "09:00"}
+
 func TestCreateScheduleFilesAnEnabledScheduleDueImmediately(t *testing.T) {
 	c, _, ctx := testClient(t)
 	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
-		Title: "Nightly dependency bump", Repo: "acme/widgets", Interval: "24h",
+		Title: "Nightly dependency bump", Repo: "acme/widgets",
+		Recurrence: ui.Recurrence{Kind: "everyNHours", EveryNHours: 24},
 	})
 	if err != nil {
 		t.Fatalf("creating a schedule: %v", err)
@@ -27,8 +30,8 @@ func TestCreateScheduleFilesAnEnabledScheduleDueImmediately(t *testing.T) {
 	if sched.Repo != "acme/widgets" {
 		t.Errorf("repo = %q, want acme/widgets", sched.Repo)
 	}
-	if sched.Interval != "24h0m0s" {
-		t.Errorf("interval = %q, want 24h0m0s", sched.Interval)
+	if sched.Recurrence.Kind != "everyNHours" || sched.Recurrence.EveryNHours != 24 {
+		t.Errorf("recurrence = %+v, want every 24 hours", sched.Recurrence)
 	}
 	if !sched.NextRunAt.Equal(baseTime) {
 		t.Errorf("nextRunAt = %v, want %v (fires the moment it is created)", sched.NextRunAt, baseTime)
@@ -38,9 +41,29 @@ func TestCreateScheduleFilesAnEnabledScheduleDueImmediately(t *testing.T) {
 	}
 }
 
+func TestCreateScheduleAcceptsDailyWeeklyAndMonthlyRecurrences(t *testing.T) {
+	c, _, ctx := testClient(t)
+	cases := []ui.Recurrence{
+		{Kind: "daily", TimeOfDay: "09:00"},
+		{Kind: "weekly", TimeOfDay: "14:30", Weekday: "monday"},
+		{Kind: "monthly", TimeOfDay: "00:00", DayOfMonth: 31},
+	}
+	for _, r := range cases {
+		sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+			Title: "x", Repo: "acme/widgets", Recurrence: r,
+		})
+		if err != nil {
+			t.Fatalf("creating a %s schedule: %v", r.Kind, err)
+		}
+		if sched.Recurrence != r {
+			t.Errorf("recurrence = %+v, want %+v", sched.Recurrence, r)
+		}
+	}
+}
+
 func TestCreateScheduleRejectsAMissingTitle(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Repo: "acme/widgets", Interval: "24h"})
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Repo: "acme/widgets", Recurrence: everyDay})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
@@ -49,25 +72,94 @@ func TestCreateScheduleRejectsAMissingTitle(t *testing.T) {
 
 func TestCreateScheduleRejectsAMissingRepo(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Interval: "24h"})
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Recurrence: everyDay})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
 	}
 }
 
-func TestCreateScheduleRejectsAnUnparseableInterval(t *testing.T) {
+func TestCreateScheduleRejectsAnUnrecognizedRecurrenceKind(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Interval: "nope"})
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets", Recurrence: ui.Recurrence{Kind: "nope"},
+	})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
 	}
 }
 
-func TestCreateScheduleRejectsANonPositiveInterval(t *testing.T) {
+func TestCreateScheduleRejectsANonPositiveEveryNHours(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Interval: "0s"})
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets", Recurrence: ui.Recurrence{Kind: "everyNHours", EveryNHours: 0},
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestCreateScheduleRejectsAnUnparseableTimeOfDay(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets", Recurrence: ui.Recurrence{Kind: "daily", TimeOfDay: "nope"},
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestCreateScheduleRejectsAnUnknownWeekday(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets",
+		Recurrence: ui.Recurrence{Kind: "weekly", TimeOfDay: "09:00", Weekday: "someday"},
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestCreateScheduleRejectsADayOfMonthOutOfRange(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets",
+		Recurrence: ui.Recurrence{Kind: "monthly", TimeOfDay: "09:00", DayOfMonth: 32},
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestCreateScheduleAcceptsCapabilitiesAndReads(t *testing.T) {
+	c, _, ctx := testClient(t)
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets", Recurrence: everyDay,
+		Capabilities: []string{"gemini-key"},
+		Reads:        []string{"acme/shared-lib"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sched.Capabilities) != 1 || sched.Capabilities[0] != "gemini-key" {
+		t.Errorf("capabilities = %v, want [gemini-key]", sched.Capabilities)
+	}
+	if len(sched.Reads) != 1 || sched.Reads[0] != "acme/shared-lib" {
+		t.Errorf("reads = %v, want [acme/shared-lib]", sched.Reads)
+	}
+}
+
+func TestCreateScheduleRejectsAnUnknownCapability(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "x", Repo: "acme/widgets", Recurrence: everyDay,
+		Capabilities: []string{"not-a-real-capability"},
+	})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
@@ -78,7 +170,7 @@ func TestCreateScheduleCanBeFiledDisabled(t *testing.T) {
 	c, _, ctx := testClient(t)
 	disabled := false
 	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
-		Title: "x", Repo: "acme/widgets", Interval: "24h", Enabled: &disabled,
+		Title: "x", Repo: "acme/widgets", Recurrence: everyDay, Enabled: &disabled,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -90,11 +182,14 @@ func TestCreateScheduleCanBeFiledDisabled(t *testing.T) {
 
 func TestListSchedulesReturnsNewestFirst(t *testing.T) {
 	c, _, ctx := testClient(t)
-	first, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "first", Repo: "acme/widgets", Interval: "24h"})
+	first, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "first", Repo: "acme/widgets", Recurrence: everyDay})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "second", Repo: "acme/widgets", Interval: "1h"})
+	second, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "second", Repo: "acme/widgets",
+		Recurrence: ui.Recurrence{Kind: "everyNHours", EveryNHours: 1},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +205,7 @@ func TestListSchedulesReturnsNewestFirst(t *testing.T) {
 func TestUpdateScheduleAppliesOnlyGivenFields(t *testing.T) {
 	c, _, ctx := testClient(t)
 	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
-		Title: "old title", Repo: "acme/widgets", Interval: "24h",
+		Title: "old title", Repo: "acme/widgets", Recurrence: everyDay,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -126,11 +221,42 @@ func TestUpdateScheduleAppliesOnlyGivenFields(t *testing.T) {
 	if updated.Repo != "acme/widgets" {
 		t.Errorf("repo = %q, want it left alone", updated.Repo)
 	}
+	if updated.Recurrence != everyDay {
+		t.Errorf("recurrence = %+v, want it left alone at %+v", updated.Recurrence, everyDay)
+	}
+}
+
+func TestUpdateScheduleReplacesRecurrenceCapabilitiesAndReads(t *testing.T) {
+	c, _, ctx := testClient(t)
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Recurrence: everyDay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	weekly := ui.Recurrence{Kind: "weekly", TimeOfDay: "08:00", Weekday: "friday"}
+	capabilities := []string{"gemini-key"}
+	reads := []string{"acme/shared-lib"}
+	updated, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{
+		Recurrence:   &weekly,
+		Capabilities: &capabilities,
+		Reads:        &reads,
+	})
+	if err != nil {
+		t.Fatalf("updating: %v", err)
+	}
+	if updated.Recurrence != weekly {
+		t.Errorf("recurrence = %+v, want %+v", updated.Recurrence, weekly)
+	}
+	if len(updated.Capabilities) != 1 || updated.Capabilities[0] != "gemini-key" {
+		t.Errorf("capabilities = %v, want [gemini-key]", updated.Capabilities)
+	}
+	if len(updated.Reads) != 1 || updated.Reads[0] != "acme/shared-lib" {
+		t.Errorf("reads = %v, want [acme/shared-lib]", updated.Reads)
+	}
 }
 
 func TestUpdateScheduleCanPauseAndResume(t *testing.T) {
 	c, _, ctx := testClient(t)
-	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Interval: "24h"})
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Recurrence: everyDay})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +288,7 @@ func TestUpdateScheduleOnAnUnknownIDIsNotFound(t *testing.T) {
 
 func TestDeleteScheduleRemovesIt(t *testing.T) {
 	c, _, ctx := testClient(t)
-	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Interval: "24h"})
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Recurrence: everyDay})
 	if err != nil {
 		t.Fatal(err)
 	}

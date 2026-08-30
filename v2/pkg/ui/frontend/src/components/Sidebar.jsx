@@ -7,8 +7,12 @@ const SIDEBAR_WIDTH = 232;
 // view around: a fixed rail with the workspace identity up top, a state
 // list styled like Plane's own status groups (a dot standing in for the
 // state's badge color, a count on the right), and the deployment-level
-// actions (secrets, settings) pinned to the bottom.
-export default function Sidebar({ config, tasks, schedules = [], view, onSetView, stateFilter, onSetFilter, onOpenSecrets, onOpenSettings, onOpenUpgrade, onOpenLogs, onOpenNewTask }) {
+// actions (settings) pinned to the bottom. Scheduled tasks, Releases and
+// Logs live in their own nav pane / the repo pane (bwsalmon/agents#455,
+// bwsalmon/agents#398, bwsalmon/agents#457) and Secrets and Upgrade live
+// as tabs inside Settings (bwsalmon/agents#456), rather than their own
+// buttons here.
+export default function Sidebar({ config, tasks, schedules = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenNewTask }) {
   const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
 
   const counts = {};
@@ -84,6 +88,10 @@ export default function Sidebar({ config, tasks, schedules = [], view, onSetView
           <ListItemText primary="Scheduled tasks" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{schedules.length}</Typography>
         </ListItemButton>
+        <ListItemButton selected={view === "logs"} onClick={() => onSetView("logs")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="dot dot-all" />
+          <ListItemText primary="Logs" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+        </ListItemButton>
         <NavItem id="all" label="All issues" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
         {STATE_ORDER.filter((s) => counts[s]).map((s) => (
           <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} active={view === "tasks" && stateFilter === s} />
@@ -100,10 +108,7 @@ export default function Sidebar({ config, tasks, schedules = [], view, onSetView
 
       <Box sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
         <Divider sx={{ mb: 0.9 }} />
-        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenSecrets}>Secrets</Button>
         <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenSettings}>Settings</Button>
-        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenUpgrade}>Upgrade</Button>
-        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenLogs}>Logs</Button>
       </Box>
     </Box>
   );

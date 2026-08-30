@@ -1,13 +1,22 @@
 import { useEffect, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
+import SecretsPanel from "./SecretsPanel.jsx";
+import UpgradePanel from "./UpgradePanel.jsx";
 
-function parseCommaList(value) {
-  return value.split(",").map((item) => item.trim()).filter((item) => item !== "");
-}
+// bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
+// sidebar overlays; they live here now as tabs alongside the general
+// deployment settings, since all three are the same kind of
+// operator-only, deployment-wide configuration.
+const TABS = [
+  { id: "general", label: "General" },
+  { id: "secrets", label: "Secrets" },
+  { id: "upgrade", label: "Upgrade" },
+];
 
 export default function SettingsOverlay({ config, onClose, showError }) {
+  const [tab, setTab] = useState("general");
   const [settings, setSettings] = useState(null);
   const [targetRepos, setTargetRepos] = useState([]);
   const [newRepo, setNewRepo] = useState("");
@@ -61,8 +70,11 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || "")) payload.pollInterval = pollInterval;
 
-    const slots = parseCommaList(form.elements.slots.value);
-    if (JSON.stringify(slots) !== JSON.stringify(settings.slots || [])) payload.slots = slots;
+    const maxConcurrentRaw = form.elements.maxConcurrent.value.trim();
+    if (maxConcurrentRaw !== "") {
+      const maxConcurrent = parseInt(maxConcurrentRaw, 10);
+      if (maxConcurrent !== (settings.maxConcurrent || 0)) payload.maxConcurrent = maxConcurrent;
+    }
 
     const geminiModel = form.elements.geminiModel.value.trim();
     if (geminiModel !== (settings.geminiModel || "")) payload.geminiModel = geminiModel;
@@ -116,68 +128,79 @@ export default function SettingsOverlay({ config, onClose, showError }) {
   return (
     <Overlay onClose={onClose}>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Settings</Typography>
-      {!settings.configured && (
-        <Alert severity="info" sx={{ mb: 2 }}>
-          Not configured yet -- nothing has been saved for this deployment. Poll interval, slots, Gemini model
-          and GitHub host are required the first time.
-        </Alert>
-      )}
-      <form onSubmit={submit}>
-        <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
-        <TextField name="slots" label="Slots" helperText="comma-separated slot names" defaultValue={(settings.slots || []).join(", ")} placeholder="a, b, c" autoComplete="off" fullWidth margin="normal" />
-        <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
-        <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
-        <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />
-        <FormControlLabel
-          control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
-          label={<>Speak plain HTTP to GitHub host <span className="hint">mock servers only</span></>}
-          sx={{ display: "flex", mt: 1 }}
-        />
-        <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
-        <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
-
-        <Typography variant="body2" sx={{ mt: 2, fontWeight: 500 }}>
-          Target repos <span className="hint">owner/name; empty allows any</span>
-        </Typography>
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mt: 1 }}>
-          {targetRepos.map((repo) => (
-            <Chip
-              key={repo}
-              size="small"
-              label={repo}
-              onDelete={() => removeTargetRepo(repo)}
-              deleteIcon={<span title={`remove ${repo}`}>×</span>}
+      <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
+        {TABS.map((t) => (
+          <Tab key={t.id} value={t.id} label={t.label} />
+        ))}
+      </Tabs>
+      {tab === "general" && (
+        <>
+          {!settings.configured && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Not configured yet -- nothing has been saved for this deployment. Poll interval, max concurrent, Gemini
+              model and GitHub host are required the first time.
+            </Alert>
+          )}
+          <form onSubmit={submit}>
+            <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
+            <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
+            <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />
+            <FormControlLabel
+              control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
+              label={<>Speak plain HTTP to GitHub host <span className="hint">mock servers only</span></>}
+              sx={{ display: "flex", mt: 1 }}
             />
-          ))}
-        </Box>
-        {targetRepos.length === 0 && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>No repos added -- any repo is allowed.</Typography>
-        )}
-        <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
-          <TextField
-            name="newTargetRepo"
-            value={newRepo}
-            onChange={(evt) => setNewRepo(evt.target.value)}
-            onKeyDown={newRepoKeyDown}
-            placeholder="owner/repo"
-            autoComplete="off"
-            size="small"
-            fullWidth
-          />
-          <Button variant="outlined" onClick={addTargetRepo}>Add</Button>
-        </Stack>
+            <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
 
-        <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-          <Button type="submit" variant="contained">Save</Button>
-        </Stack>
-      </form>
-      {config && config.rebootEnabled && (
-        <fieldset>
-          <legend>Danger zone</legend>
-          <p className="hint">Reboots the machine grain itself is running on.</p>
-          <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
-        </fieldset>
+            <Typography variant="body2" sx={{ mt: 2, fontWeight: 500 }}>
+              Target repos <span className="hint">owner/name; empty allows any</span>
+            </Typography>
+            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mt: 1 }}>
+              {targetRepos.map((repo) => (
+                <Chip
+                  key={repo}
+                  size="small"
+                  label={repo}
+                  onDelete={() => removeTargetRepo(repo)}
+                  deleteIcon={<span title={`remove ${repo}`}>×</span>}
+                />
+              ))}
+            </Box>
+            {targetRepos.length === 0 && (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>No repos added -- any repo is allowed.</Typography>
+            )}
+            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+              <TextField
+                name="newTargetRepo"
+                value={newRepo}
+                onChange={(evt) => setNewRepo(evt.target.value)}
+                onKeyDown={newRepoKeyDown}
+                placeholder="owner/repo"
+                autoComplete="off"
+                size="small"
+                fullWidth
+              />
+              <Button variant="outlined" onClick={addTargetRepo}>Add</Button>
+            </Stack>
+
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button type="submit" variant="contained">Save</Button>
+            </Stack>
+          </form>
+          {config && config.rebootEnabled && (
+            <fieldset>
+              <legend>Danger zone</legend>
+              <p className="hint">Reboots the machine grain itself is running on.</p>
+              <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
+            </fieldset>
+          )}
+        </>
       )}
+      {tab === "secrets" && <SecretsPanel showError={showError} />}
+      {tab === "upgrade" && <UpgradePanel showError={showError} />}
     </Overlay>
   );
 }

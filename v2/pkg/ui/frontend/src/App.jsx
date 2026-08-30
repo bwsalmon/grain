@@ -10,10 +10,8 @@ import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
-import SecretsOverlay from "./components/SecretsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
-import UpgradeOverlay from "./components/UpgradeOverlay.jsx";
-import LogsOverlay from "./components/LogsOverlay.jsx";
+import LogsPage from "./components/LogsPage.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -45,9 +43,6 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [showNewTask, setShowNewTask] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showSecrets, setShowSecrets] = useState(false);
-  const [showUpgrade, setShowUpgrade] = useState(false);
-  const [showLogs, setShowLogs] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -221,10 +216,7 @@ export default function App() {
         schedules={schedules}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
-        onOpenSecrets={() => setShowSecrets(true)}
         onOpenSettings={() => setShowSettings(true)}
-        onOpenUpgrade={() => setShowUpgrade(true)}
-        onOpenLogs={() => setShowLogs(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
       {view === "repos" && releasesRepo !== null ? (
@@ -233,6 +225,8 @@ export default function App() {
         <RepoList tasks={tasks} onOpenRepo={openRepo} onOpenReleases={setReleasesRepo} />
       ) : view === "schedules" ? (
         <SchedulesList schedules={schedules} config={config} tasks={tasks} onRefresh={refreshSchedules} showError={showError} />
+      ) : view === "logs" ? (
+        <LogsPage showError={showError} />
       ) : (
         <div className="main-column">
           {repoFilter !== null && (
@@ -264,9 +258,6 @@ export default function App() {
         <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
       {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
-      {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
-      {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
-      {showLogs && <LogsOverlay onClose={() => setShowLogs(false)} showError={showError} />}
     </div>
   );
 }
