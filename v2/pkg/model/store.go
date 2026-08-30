@@ -748,6 +748,31 @@ func (s *Store) Attempts(ctx context.Context, taskID string) (int, error) {
 	return n, err
 }
 
+// Runs is every attempt at taskID, oldest first -- the full history
+// Attempts only counts and FailureStreak only summarises, for a caller
+// (Client.GetTask) that wants to show each one: when it ran, whether it
+// finished, and how (bwsalmon/agents#445).
+func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
+	var out []Run
+	err := each(ctx, s.db,
+		"SELECT `id`,`slot`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail` "+
+			"FROM `task_run` WHERE `task_id` = ? ORDER BY `attempt` ASC", taskID,
+		func(rows *sql.Rows) error {
+			r := Run{TaskID: taskID}
+			var unit, outcome, detail sql.NullString
+			var finishedAt sql.NullTime
+			if err := rows.Scan(&r.ID, &r.Slot, &r.Sandbox, &unit, &r.Attempt,
+				&r.StartedAt, &finishedAt, &outcome, &detail); err != nil {
+				return err
+			}
+			r.Unit, r.Outcome, r.Detail = unit.String, outcome.String, detail.String
+			r.FinishedAt = timePtr(finishedAt)
+			out = append(out, r)
+			return nil
+		})
+	return out, err
+}
+
 // FailureStreak is taskID's own task_streak.streak (Count), plus the most
 // recent finished run's own outcome/detail -- the two things task_streak
 // itself cannot carry (schema.go's own doc comment on that view: "the
