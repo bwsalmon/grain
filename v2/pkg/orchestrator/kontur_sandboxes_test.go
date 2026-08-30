@@ -96,6 +96,36 @@ echo %q
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// writeFakeDockerWithDeadVMContainer installs a shell script named
+// "docker" on PATH that answers DockerPodIP's own "docker inspect"
+// (its format string mentions NetworkSettings) with ip, the same as
+// writeFakeDocker, but answers kontur.DockerContainerStatus's own
+// "docker inspect -f {{.State.Status}} <name>" (its format string
+// mentions State.Status) with "exited" -- standing in for the real
+// failure TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly's own
+// doc comment describes finding by hand: a VM container that "docker run
+// -d" started successfully but which cloud-hypervisor itself then exits
+// out of moments later.
+func writeFakeDockerWithDeadVMContainer(t *testing.T, argvLog, ip string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake docker script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+case "$*" in
+  *State.Status*) echo "exited" ;;
+  *) echo %q ;;
+esac
+`, argvLog, ip)
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // writeFakeCrictl installs a shell script named "crictl" on PATH that
 // answers a ready pod on `pods`/`inspectp` once readyAfter prior calls
 // have already happened (tracked via a counter file), letting a test
@@ -439,6 +469,61 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 
 	if _, err := k.ToolsFor(context.Background(), "slot-0"); err == nil {
 		t.Fatal("ToolsFor() on a VM that never becomes ready: got nil error, want one")
+	}
+}
+
+// TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly guards against
+// a real failure mode confirmed by hand against a real docker daemon
+// (29.7.2) and a deliberately broken CHV_DISK_IMAGE path: under
+// BackendDocker, "konturctl vm create" starts the VM container with a
+// plain "docker run -d" (bwsalmon/kontur's own internal/dockervm), which
+// -- like any "docker run -d" -- reports success the instant the
+// container starts, not once cloud-hypervisor inside it has actually
+// proven itself alive. A guest that fails before finishing boot exits
+// within seconds of that "success", and without this check ToolsFor would
+// have no way to tell that apart from "still booting," so it would poll a
+// dead port for the entire ReadyTimeout before finally giving up with a
+// generic connection-refused error. This drives ToolsFor against a fake
+// docker whose VM container is already "exited" from the first inspect
+// call, with a ReadyTimeout generous enough that a timing-based pass would
+// be meaningless (a slow CI host might legitimately not fail by then) and
+// asserts instead that ToolsFor returns quickly, well under that timeout,
+// and that the error names the container and mentions its exited status
+// rather than just "connection refused."
+func TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30082)
+	writeFakeDockerWithDeadVMContainer(t, filepath.Join(t.TempDir(), "docker-argv.log"), "127.0.0.1")
+	// Deliberately no listenTCP(t, 30082): the fake VM container is dead
+	// from the start, so nothing should ever answer that port, and nothing
+	// here should need to wait around confirming that the slow way.
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		Backend:           "docker",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: 10 * time.Millisecond,
+		ReadyTimeout:      10 * time.Second,
+	})
+
+	started := time.Now()
+	_, err := k.ToolsFor(context.Background(), "slot-0")
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("ToolsFor() against a VM container that already exited: got nil error, want one")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("ToolsFor() took %s to fail, want well under the 10s ReadyTimeout -- it should fast-fail on the dead container instead of polling out the full deadline", elapsed)
+	}
+	if !strings.Contains(err.Error(), "exited") {
+		t.Errorf("error = %q, want it to mention the container's \"exited\" status", err)
+	}
+	if !strings.Contains(err.Error(), "kontur-vm-grain-test-slot-0") {
+		t.Errorf("error = %q, want it to name the container kontur-vm-grain-test-slot-0", err)
 	}
 }
 

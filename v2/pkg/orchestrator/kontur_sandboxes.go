@@ -195,6 +195,11 @@ type KonturSandboxes struct {
 	mu       sync.Mutex
 	created  map[string]bool
 	gitCreds map[string]gitCredentials
+	// nameLocks holds one *sync.Mutex per VM name, taken around the
+	// kontur.Create call inside ensure -- see ensure's own doc comment for
+	// why a single KonturSandboxes-wide lock cannot guard that call the
+	// way mu guards created/gitCreds.
+	nameLocks map[string]*sync.Mutex
 }
 
 // gitCredentials is what ConfigureGitCredentials remembers per slot, so
@@ -207,7 +212,12 @@ type gitCredentials struct {
 
 // NewKonturSandboxes returns a KonturSandboxes configured by cfg.
 func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
-	return &KonturSandboxes{cfg: cfg, created: map[string]bool{}, gitCreds: map[string]gitCredentials{}}
+	return &KonturSandboxes{
+		cfg:       cfg,
+		created:   map[string]bool{},
+		gitCreds:  map[string]gitCredentials{},
+		nameLocks: map[string]*sync.Mutex{},
+	}
 }
 
 // VMNameFor returns the kontur VM name ToolsFor uses for slot, so
@@ -245,14 +255,39 @@ func (k *KonturSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool
 // operator ran "konturctl vm create" by hand ahead of time -- counts as
 // already existing and is left alone, the same "reuse what's there" choice
 // HostSandboxes.RootFor makes for a directory that already exists on disk.
+//
+// The actual kontur.Create call runs under a lock scoped to name alone
+// (lockFor), not k.mu: k.mu only ever guards fast, in-memory map
+// operations elsewhere in this package, but kontur.Create execs a real
+// "konturctl vm create" subprocess that can run for a long time (a VM
+// genuinely booting under KVM, not a fake standing in for one). Guarding
+// that call with k.mu itself -- as an earlier version of this method did
+// -- would serialize VM creation across every slot in this
+// KonturSandboxes, not just repeat calls for the same one, silently
+// undoing the concurrency reconcileDispatch's own doc comment promises
+// ("HostSandboxes and KonturSandboxes both guard their own per-slot state
+// with a mutex keyed by slot") every time more than one slot's VM needs
+// creating at once -- confirmed by hand with a fake konturctl slow enough
+// to make two concurrent ToolsFor calls for distinct slots visibly wait on
+// each other before this change existed (sandboxes_concurrency_test.go's
+// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially).
 func (k *KonturSandboxes) ensure(ctx context.Context, name, slot string) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	if k.created[name] {
+	if k.alreadyCreated(name) {
+		return nil
+	}
+
+	lock := k.lockFor(name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check now that this name's lock is held exclusively: a concurrent
+	// call for the same name may have finished creating it between the
+	// fast-path check above and acquiring this lock.
+	if k.alreadyCreated(name) {
 		return nil
 	}
 	if _, err := kontur.Port(k.cfg.stateDir(), name); err == nil {
-		k.created[name] = true
+		k.markCreated(name)
 		return nil
 	}
 	args, err := k.cfg.createArgs(slot)
@@ -262,8 +297,35 @@ func (k *KonturSandboxes) ensure(ctx context.Context, name, slot string) error {
 	if err := kontur.Create(ctx, k.cfg.stateDir(), name, args...); err != nil {
 		return fmt.Errorf("orchestrator: creating kontur VM %q for sandbox: %w", name, err)
 	}
-	k.created[name] = true
+	k.markCreated(name)
 	return nil
+}
+
+// lockFor returns the *sync.Mutex ensure takes around kontur.Create for
+// name, creating one under k.mu on first use -- k.mu itself is held only
+// long enough to look up or insert into nameLocks, never across the
+// subprocess call the returned lock actually guards.
+func (k *KonturSandboxes) lockFor(name string) *sync.Mutex {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	lock, ok := k.nameLocks[name]
+	if !ok {
+		lock = &sync.Mutex{}
+		k.nameLocks[name] = lock
+	}
+	return lock
+}
+
+func (k *KonturSandboxes) alreadyCreated(name string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.created[name]
+}
+
+func (k *KonturSandboxes) markCreated(name string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.created[name] = true
 }
 
 // ConfigureGitCredentials ensures slot's VM exists and points its git at
@@ -389,10 +451,37 @@ func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (hos
 		}
 	}
 
-	if err := k.waitForSSHPort(ctx, host, port, deadline); err != nil {
+	if err := k.waitForSSHPort(ctx, name, host, port, deadline); err != nil {
 		return "", 0, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest sshd to become reachable: %w", name, err)
 	}
 	return host, port, nil
+}
+
+// dockerContainerDead is the set of docker State.Status values
+// waitForSSHPort treats as "this container will never answer" rather than
+// "not ready yet" -- see dockerExitedEarly's own doc comment. "created" is
+// deliberately absent: a container docker has accepted but not yet
+// started is still on its way up, same as "running" itself taking a
+// moment to start accepting connections.
+var dockerContainerDead = map[string]bool{"exited": true, "dead": true}
+
+// dockerExitedEarly reports whether name's own VM container (not the
+// "-netns" holder) has already exited under BackendDocker -- see
+// kontur.DockerContainerStatus's own doc comment for why "vm create"
+// returning success does not mean this can't happen. Errors from the
+// status lookup itself (e.g. a transient docker daemon hiccup) are
+// treated as "not dead" rather than propagated: this is only ever a
+// fast-fail optimization layered on top of waitForSSHPort's own deadline,
+// which still applies regardless.
+func dockerExitedEarly(ctx context.Context, backend, name string) (status string, dead bool) {
+	if backend != kontur.BackendDocker {
+		return "", false
+	}
+	status, err := kontur.DockerContainerStatus(ctx, name)
+	if err != nil {
+		return "", false
+	}
+	return status, dockerContainerDead[status]
 }
 
 // waitForSSHPort polls a plain TCP dial against host:port until it
@@ -402,7 +491,14 @@ func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (hos
 // boot-time gap described on resolveEndpoint's own doc comment: a refused
 // or timed-out connection means the guest has not finished booting yet,
 // not that anything is actually wrong.
-func (k *KonturSandboxes) waitForSSHPort(ctx context.Context, host string, port int, deadline time.Time) error {
+//
+// Under BackendDocker it also checks, on every failed dial, whether name's
+// own VM container has already exited (dockerExitedEarly) and fails
+// immediately if so, rather than waiting out the rest of deadline dialing
+// a port a dead container will never answer on -- see
+// kontur.DockerContainerStatus's own doc comment for why "vm create"
+// returning success does not already rule this out.
+func (k *KonturSandboxes) waitForSSHPort(ctx context.Context, name, host string, port int, deadline time.Time) error {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	dialer := net.Dialer{Timeout: k.cfg.readyPollInterval()}
 	var lastErr error
@@ -413,6 +509,9 @@ func (k *KonturSandboxes) waitForSSHPort(ctx context.Context, host string, port 
 			return nil
 		}
 		lastErr = err
+		if status, dead := dockerExitedEarly(ctx, k.cfg.Backend, name); dead {
+			return fmt.Errorf("VM container %q exited (status %q) before its guest ever answered on %s -- check `docker logs %s`: %w", kontur.PodName(name), status, addr, kontur.PodName(name), lastErr)
+		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%s: %w", addr, lastErr)
 		}
