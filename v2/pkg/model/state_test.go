@@ -242,6 +242,34 @@ func TestTransitionsShowsFailedOnceTheStreakCapsOut(t *testing.T) {
 	}
 }
 
+// TestTransitionsHidesFailedOnceTheTaskHasCompleted covers
+// bwsalmon/agents#502: a run salvaged into a pull request after erroring
+// keeps its own outcome "failed" forever (orchestrator.salvagePushedBranch
+// never corrects it), so task_streak's count can sit at or above
+// MaxConsecutiveFailures for a task that has, in every other respect,
+// completed. StateOf already masks that streak the moment
+// obs.CompletedAt is set; Transitions has to apply the same precedence
+// when reconstructing history, or a completed task's timeline shows a
+// bogus "Failed" entry right before "Completed", forever.
+func TestTransitionsHidesFailedOnceTheTaskHasCompleted(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &created
+	lastFinished := created.Add(time.Hour)
+	streak := &FailureStreak{Count: MaxConsecutiveFailures, LastFinishedAt: lastFinished, LastOutcome: "failed"}
+	obs := &Observation{CompletedAt: &lastFinished}
+
+	got := Transitions(tk, obs, nil, streak, nil)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, created},
+		{StateCompleted, lastFinished},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+}
+
 func TestTransitionsShowsAPendingQuestionOnlyWhileOutstanding(t *testing.T) {
 	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
 	asked := created.Add(time.Hour)
