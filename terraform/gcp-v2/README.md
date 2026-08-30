@@ -347,6 +347,12 @@ lists in sync automatically; an operator who changes one by hand (via
 
 ## Notes and limits
 
+- **The host runs nested guests by default.**
+  `enable_nested_virtualization` is on, so `machine_type` must be a
+  family that supports it -- N1, N2, N2D, C2, C3 or M-series, never E2 --
+  and `on_host_maintenance` is `TERMINATE` in consequence. A deployment
+  dispatching only into host directories can turn it off and get MIGRATE,
+  E2, and a daemon that survives host maintenance.
 - **The load balancer and managed SSL certificate cost more to run than
   the VM does.** This module is sized for a staging environment working
   against a handful of test repos, not for scaling traffic.

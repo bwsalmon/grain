@@ -65,6 +65,16 @@ resource "google_compute_instance" "host" {
   # instance; a machine_type change needs a stop, and this permits it.
   allow_stopping_for_update = true
 
+  # /dev/kvm, for a deployment whose sandboxes are VMs rather than host
+  # directories. Without this the device does not exist and anything
+  # expecting it fails on the host, not here.
+  dynamic "advanced_machine_features" {
+    for_each = var.enable_nested_virtualization ? [1] : []
+    content {
+      enable_nested_virtualization = true
+    }
+  }
+
   boot_disk {
     initialize_params {
       image  = var.boot_image
@@ -96,18 +106,21 @@ resource "google_compute_instance" "host" {
   }
 
   scheduling {
-    # MIGRATE, unlike terraform/gcp's v1 host, which sets TERMINATE
-    # because "nested virtualization and live migration have a history"
-    # (that file's own comment). This VM runs no nested guests, so that
-    # reason does not carry over -- and TERMINATE did carry over, which
-    # made this module's own default machine type impossible to apply:
-    # E2 rejects TERMINATE unless the instance is spot, so
-    # `machine_type = "e2-standard-2"` failed with "e2 instances do not
-    # support maintenance terminate unless spot" on a first apply.
+    # Follows enable_nested_virtualization, because the right answer
+    # differs and neither is safe as a blanket default.
     #
-    # Live migration is also simply better here: the daemon survives a
-    # host maintenance event instead of being killed and reconverged.
-    on_host_maintenance = "MIGRATE"
+    # With nested guests: TERMINATE, the same choice terraform/gcp makes
+    # for v1, whose comment gives the reason -- "nested virtualization
+    # and live migration have a history". config-sync reconverges on
+    # boot, so a terminate-and-restart costs a rollout, not state.
+    #
+    # Without them: MIGRATE, so the daemon rides out a host maintenance
+    # event instead of being killed. This also matters for what can run
+    # here at all -- E2 rejects TERMINATE unless the instance is spot,
+    # so hardcoding TERMINATE made an E2 machine_type impossible, which
+    # is what "e2 instances do not support maintenance terminate unless
+    # spot" meant on a first apply.
+    on_host_maintenance = var.enable_nested_virtualization ? "TERMINATE" : "MIGRATE"
     automatic_restart   = true
   }
 
@@ -140,6 +153,16 @@ resource "google_compute_instance" "host" {
   }
 
   lifecycle {
+    # E2 supports neither nested virtualization nor the TERMINATE
+    # maintenance policy it forces, and GCP reports the second failure
+    # first -- "e2 instances do not support maintenance terminate unless
+    # spot" -- which says nothing about nested virtualization at all.
+    # Caught here so the message names the actual constraint.
+    precondition {
+      condition     = !var.enable_nested_virtualization || !startswith(var.machine_type, "e2-")
+      error_message = "enable_nested_virtualization needs a machine family that supports it -- N1, N2, N2D, C2, C3 or M-series. E2 does not. Either pick a non-E2 machine_type, or set enable_nested_virtualization = false if this deployment's sandboxes are host directories."
+    }
+
     precondition {
       condition     = !(var.enable_gemini_key || var.agent_can_manage_compute_instances || var.agent_can_manage_gke) || var.deployer_member != ""
       error_message = "enable_gemini_key, agent_can_manage_compute_instances, and agent_can_manage_gke all need a real key on the agent account to do anything -- set deployer_member so push-secrets.sh can mint one after apply (see iam.tf's deployer_manages_minter_keys)."
