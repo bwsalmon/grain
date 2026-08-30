@@ -8,7 +8,7 @@ import RepoField from "./RepoField.jsx";
 // ScheduledTasksOverlay manages schedules (bwsalmon/agents#376): each row
 // is a standing declaration -- "file this task every N" -- that graind's
 // own schedule reconciler turns into a real task each time it comes due.
-// SecretsOverlay's own shape fits here almost exactly: a list fetched on
+// SecretsPanel's own shape fits here almost exactly: a list fetched on
 // open, refreshed after every mutation, plus a form that only ever adds.
 export default function ScheduledTasksOverlay({ config, tasks, onClose, showError }) {
   const [schedules, setSchedules] = useState(null);

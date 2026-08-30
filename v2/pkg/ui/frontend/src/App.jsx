@@ -9,10 +9,8 @@ import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
-import SecretsOverlay from "./components/SecretsOverlay.jsx";
 import ReleasesOverlay from "./components/ReleasesOverlay.jsx";
 import ScheduledTasksOverlay from "./components/ScheduledTasksOverlay.jsx";
-import UpgradeOverlay from "./components/UpgradeOverlay.jsx";
 import LogsOverlay from "./components/LogsOverlay.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
@@ -39,10 +37,8 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   const [showNewTask, setShowNewTask] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showSecrets, setShowSecrets] = useState(false);
   const [showReleases, setShowReleases] = useState(false);
   const [showSchedules, setShowSchedules] = useState(false);
-  const [showUpgrade, setShowUpgrade] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
@@ -200,11 +196,9 @@ export default function App() {
         tasks={tasks}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
-        onOpenSecrets={() => setShowSecrets(true)}
         onOpenSchedules={() => setShowSchedules(true)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenReleases={() => setShowReleases(true)}
-        onOpenUpgrade={() => setShowUpgrade(true)}
         onOpenLogs={() => setShowLogs(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
@@ -241,10 +235,8 @@ export default function App() {
         <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
       {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
-      {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
       {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
       {showSchedules && <ScheduledTasksOverlay config={config} tasks={tasks} onClose={() => setShowSchedules(false)} showError={showError} />}
-      {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
       {showLogs && <LogsOverlay onClose={() => setShowLogs(false)} showError={showError} />}
     </div>
   );

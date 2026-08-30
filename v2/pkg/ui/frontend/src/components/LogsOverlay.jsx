@@ -17,8 +17,8 @@ const LINES_TO_FETCH = 500;
 // configured at all; when it doesn't (`grain demo`'s throwaway UI, or
 // any UI not colocated with a real daemon), this shows a note instead of
 // a pane that could only ever 404, the same convention
-// UpgradeOverlay/SecretsOverlay already use for their own optional
-// pieces.
+// UpgradePanel/SecretsPanel (Settings' own tabs) already use for their
+// own optional pieces.
 export default function LogsOverlay({ onClose, showError }) {
   const [sources, setSources] = useState(null);
   const [source, setSource] = useState(null);

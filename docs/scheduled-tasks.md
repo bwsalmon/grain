@@ -49,7 +49,7 @@ switch" fit that world. v2 already moved task creation onto the store
 involved) specifically so a UI or the CLI could create one without a
 redeploy; a `ScheduledTask` (`pkg/model/schedule.go`) is the same idea —
 `ScheduledTasksOverlay.jsx` creates, pauses/resumes, and deletes one the
-same way `SecretsOverlay.jsx` already manages secrets.
+same way `SecretsPanel.jsx` already manages secrets.
 
 **No `needs_approval` field.** v1's design draft called `SCHEDULED` "the
 one origin that chooses per instance" before `docs/data-model.md`
@@ -131,8 +131,8 @@ UI's "Pause"/"Resume" button rather than "Delete" for that case.
   gains no matching methods, so a schedule can be managed from the web
   UI but not yet from `grain` on the command line — see "Left open."
 - **Frontend** (`ScheduledTasksOverlay.jsx`): a list-plus-form overlay
-  following `SecretsOverlay.jsx`'s pattern exactly, opened from a new
-  sidebar entry alongside Secrets/Settings. A task the overlay's own
+  following `SecretsPanel.jsx`'s pattern exactly, opened from a new
+  sidebar entry alongside Settings. A task the overlay's own
   schedule fired shows a "Scheduled" badge in the ordinary task list
   (`Task.Scheduled`, off `Origin.Reason == ReasonSchedule` — the same
   treatment `Task.Stacked` already gives `ReasonFix`).

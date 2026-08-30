@@ -147,10 +147,8 @@ describe("App", () => {
 
   it.each([
     ["Releases", "Releases"],
-    ["Secrets", "Secrets"],
     ["Scheduled tasks", "Scheduled tasks"],
     ["Settings", "Settings"],
-    ["Upgrade", "Upgrade"],
     ["Logs", "Logs"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
@@ -161,6 +159,25 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: button }));
 
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("opens Secrets and Upgrade as tabs inside Settings rather than their own sidebar entries", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    expect(screen.queryByRole("button", { name: "Secrets" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upgrade" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Secrets" }));
+    expect(await screen.findByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Upgrade" }));
+    expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {

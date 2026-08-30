@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, Box, Button, Chip, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import Overlay from "./Overlay.jsx";
 
 // bwsalmon/agents#357: this pane can set and delete secrets on a server
 // this UI shares a host with, and report which ones exist, but it never
@@ -9,7 +8,11 @@ import Overlay from "./Overlay.jsx";
 // flag says whether that colocation is configured at all; when it isn't,
 // the list and form are hidden behind a note instead of showing controls
 // that could only ever 404.
-export default function SecretsOverlay({ onClose, showError }) {
+//
+// bwsalmon/agents#456: lives as a tab inside SettingsOverlay rather than
+// its own top-level overlay, so it renders its content only -- the
+// shared Overlay/Dialog chrome is SettingsOverlay's.
+export default function SecretsPanel({ showError }) {
   const [resp, setResp] = useState(null);
 
   const refresh = useCallback(async () => {
@@ -61,8 +64,7 @@ export default function SecretsOverlay({ onClose, showError }) {
   if (resp === null) return null;
 
   return (
-    <Overlay onClose={onClose}>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Secrets</Typography>
+    <>
       {!resp.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this UI was not started with a local secrets directory to write to
@@ -105,6 +107,6 @@ export default function SecretsOverlay({ onClose, showError }) {
           </form>
         </>
       )}
-    </Overlay>
+    </>
   );
 }
