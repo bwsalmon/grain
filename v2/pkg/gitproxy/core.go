@@ -167,7 +167,21 @@ func (p *GitProxy) selectCredential(ctx context.Context, sandbox, owner, repo st
 	}
 	cred, ok := p.Credentials.Select(owner, repo)
 	if !ok {
-		return Credential{}, "no credential configured for this repository", nil
+		// Naming the repo and the likely cause here, rather than a bare
+		// "no credential configured," is bwsalmon/agents#427: a
+		// deployment's targetRepos (Settings, model.Config) and its
+		// credential ladder (secrets/github/credentials.json) are two
+		// independent things an operator can widen one of without the
+		// other, and this is exactly where that drift fails safe --
+		// this repo passed Authorize (it's in scope for the caller) but
+		// nothing on the ladder covers it. ui.Client.GetSettings's own
+		// targetReposMissingCredentials flags the same gap proactively,
+		// before a push ever reaches here.
+		return Credential{}, fmt.Sprintf(
+			"no credential configured for %s/%s -- if it was recently added to targetRepos in Settings, "+
+				"credentials.json under secrets/github needs an entry for it too, then the proxy restarted",
+			owner, repo,
+		), nil
 	}
 	return cred, "", nil
 }

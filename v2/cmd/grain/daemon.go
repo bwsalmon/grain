@@ -693,12 +693,22 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // directory to hand; there is no longer a cross-process case where it
 // would not.
 func startUIServer(cfg config, store *model.Store) (stop func(context.Context) error, err error) {
+	// A second CredentialSet, loaded the same way BuildProxy (above) and
+	// run's own githubClient each load their own: not hot-reloaded,
+	// cheap to load again, and this is the one Settings checks
+	// targetRepos against to flag bwsalmon/agents#427's drift before a
+	// push ever reaches the proxy with a confusing 500.
+	uiCredentials, err := gitproxy.LoadCredentialSet(filepath.Join(cfg.dataDir, "secrets", "github"))
+	if err != nil {
+		return nil, fmt.Errorf("loading GitHub credential ladder for the UI: %w", err)
+	}
 	uiCfg := ui.Config{
 		Actor:        ui.DefaultActor(actorID(cfg.actor)),
 		Capabilities: ui.DefaultCapabilities(),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 		Reboot:       rebootHost,
 		TargetRepos:  cfg.targetRepos,
+		Credentials:  uiCredentials,
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

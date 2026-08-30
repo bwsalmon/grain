@@ -36,21 +36,58 @@ type Settings struct {
 	// TargetRepos restricts which repos a task's Repo may name -- empty
 	// means unrestricted. model.Config's own field of the same name.
 	TargetRepos []string `json:"targetRepos"`
+	// TargetReposMissingCredentials is every TargetRepos entry that
+	// Config.Credentials -- the same ladder the git proxy resolves
+	// pushes against -- has no exact, owner/*, or * pattern covering.
+	// A task targeting one of these is dispatched (it passed
+	// targetAllowed) but every push its sandbox makes fails at the git
+	// proxy with a 500 "no credential configured," so this is the
+	// widened-targetRepos/stale-credentials.json drift
+	// (bwsalmon/agents#427) surfaced at the moment it's introduced
+	// rather than only discoverable later as that proxy failure. Always
+	// empty when Config.Credentials is nil (nothing to check against),
+	// which reads from JSON exactly like "no gaps found" -- there is
+	// nothing actionable to tell those two cases apart on.
+	TargetReposMissingCredentials []string `json:"targetReposMissingCredentials,omitempty"`
 }
 
-func settingsFrom(c model.Config) Settings {
+func (c *Client) settingsFrom(cfg model.Config) Settings {
 	return Settings{
-		Configured:             true,
-		PollInterval:           c.PollInterval.String(),
-		Slots:                  c.Slots,
-		GeminiModel:            c.GeminiModel,
-		MaxAgentTurns:          c.MaxAgentTurns,
-		GitHubHost:             c.GitHubHost,
-		GitHubInsecureHTTP:     c.GitHubInsecureHTTP,
-		GCPProject:             c.GCPProject,
-		GCPServiceAccountEmail: c.GCPServiceAccountEmail,
-		TargetRepos:            c.TargetRepos,
+		Configured:                    true,
+		PollInterval:                  cfg.PollInterval.String(),
+		Slots:                         cfg.Slots,
+		GeminiModel:                   cfg.GeminiModel,
+		MaxAgentTurns:                 cfg.MaxAgentTurns,
+		GitHubHost:                    cfg.GitHubHost,
+		GitHubInsecureHTTP:            cfg.GitHubInsecureHTTP,
+		GCPProject:                    cfg.GCPProject,
+		GCPServiceAccountEmail:        cfg.GCPServiceAccountEmail,
+		TargetRepos:                   cfg.TargetRepos,
+		TargetReposMissingCredentials: c.targetReposMissingCredentials(cfg.TargetRepos),
 	}
+}
+
+// targetReposMissingCredentials is TargetReposMissingCredentials's own
+// computation: every entry of targetRepos that c.Config.Credentials.Select
+// has no ladder entry for. A malformed entry can't reach here --
+// UpdateSettings already rejected it with model.ParseRepo before it was
+// ever stored -- so ParseRepo failing is silently skipped rather than
+// treated as a gap.
+func (c *Client) targetReposMissingCredentials(targetRepos []string) []string {
+	if c.Config.Credentials == nil || len(targetRepos) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, r := range targetRepos {
+		repo, err := model.ParseRepo(r)
+		if err != nil {
+			continue
+		}
+		if _, ok := c.Config.Credentials.Select(repo.Owner, repo.Name); !ok {
+			missing = append(missing, r)
+		}
+	}
+	return missing
 }
 
 // GetSettings reads the deployment's stored configuration. A zero
@@ -64,7 +101,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 	if cfg == nil {
 		return Settings{}, nil
 	}
-	return settingsFrom(*cfg), nil
+	return c.settingsFrom(*cfg), nil
 }
 
 // UpdateSettingsRequest is Settings' editable fields -- nil means "leave
@@ -184,7 +221,7 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	if err := c.Store.PutConfig(ctx, cfg); err != nil {
 		return Settings{}, err
 	}
-	return settingsFrom(cfg), nil
+	return c.settingsFrom(cfg), nil
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {

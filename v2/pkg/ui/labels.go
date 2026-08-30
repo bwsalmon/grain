@@ -23,6 +23,7 @@ package ui
 import (
 	"context"
 
+	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 	"github.com/bwsalmon/grain/v2/pkg/upgrade"
@@ -98,6 +99,18 @@ type Config struct {
 	// pane, and the right default for `grain demo`'s throwaway UI, which
 	// has no real machine behind it worth rebooting.
 	Reboot func(ctx context.Context) error
+	// Credentials is the same GitHub credential ladder (secrets/github/
+	// credentials.json, loaded once at startup, not hot-reloaded) the
+	// git proxy resolves pushes against -- given here so Settings can
+	// flag a targetRepos entry the ladder has no owner/repo, owner/*, or
+	// * pattern covering. nil (`grain demo`'s throwaway UI, or any UI
+	// not colocated with the proxy that built it) means Settings reports
+	// no such gaps rather than erroring, the same nil-means-unavailable
+	// contract Secrets and Reboot already give. Without this, the only
+	// way to learn targetRepos and the credential ladder have drifted
+	// apart is a confusing 500 "no credential configured" from the git
+	// proxy on the next push (bwsalmon/agents#427).
+	Credentials *gitproxy.CredentialSet
 	// Upgrader is set only when this deployment was told where its own
 	// git checkout and build/install/restart mechanics live
 	// (bwsalmon/agents#396, cmd/grain/daemon.go's -upgrade-src-dir) --

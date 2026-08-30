@@ -906,6 +906,7 @@ func testConfig() model.Config {
 		GeminiModel: "gemini-2.5-pro", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
+		TargetRepos: []string{"acme/widgets", "acme/gadgets"},
 	}
 }
 
@@ -944,6 +945,71 @@ func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*got, updated) {
 		t.Fatalf("got %+v, want %+v", *got, updated)
+	}
+}
+
+// bwsalmon/agents#427: grain_config.target_repos did not exist at all
+// before this, on any database, so an already-created grain_config table
+// has no such column -- CREATE TABLE IF NOT EXISTS (schema.go's own
+// Tables) does nothing to a table that's already there. This simulates
+// exactly that database, built with the pre-#427 column set directly
+// rather than through Store, and checks Store.Init's own migration step
+// (ensureConfigTargetReposColumn) brings it up to date in place without
+// disturbing the row already sitting in it.
+func TestInitMigratesAnExistingDatabaseMissingTargetRepos(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`slots`"+`                      TEXT    NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#427 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`slots`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`) "+
+			"VALUES (1,30000,'a,b','gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com')"); err != nil {
+		t.Fatalf("seeding a pre-#427 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing target_repos: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 {
+		t.Fatalf("got %+v, want the pre-existing row intact and targetRepos empty", got)
+	}
+
+	// And it's not just readable -- PutConfig can now actually make
+	// targetRepos durable, which is the whole bug this migration fixes.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
 	}
 }
 
