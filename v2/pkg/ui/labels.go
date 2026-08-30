@@ -138,6 +138,23 @@ type Config struct {
 	// attempt is read the way bwsalmon/agents#446 originally left it,
 	// nothing to show until it finishes (bwsalmon/agents#467).
 	LiveTranscripts LiveTranscript
+	// AutoMergeDegraded, when set, is polled by GET /api/config to report
+	// whether this deployment's GitHub credential can read pull request
+	// check runs at all -- orchestrator.ChecksUnavailable's own doc
+	// comment. A deployment where it cannot (a fine-grained PAT, e.g.
+	// terraform/gcp-v2's own staging credential, rather than a GitHub
+	// App installation token) still accepts Submit and sets AutoMerge,
+	// but never actually merges: PR health can never resolve past
+	// "unknown", which orchestrator's own reconcile loop declines to
+	// act on. Before this field existed that fact lived only in server
+	// logs, so Submit looked like it silently did nothing
+	// (bwsalmon/agents#483). nil (`grain demo`'s throwaway UI, or any
+	// deployment not wired to orchestrator's own package-level state)
+	// means AutoMergeDegraded always reports false, the same
+	// nil-means-unavailable-feature default Reboot and Upgrader give
+	// their own panes above -- except here false is the "nothing to
+	// warn about" answer rather than "the feature is off."
+	AutoMergeDegraded func() bool
 }
 
 // LiveTranscript is implemented by whatever can read back a still-running

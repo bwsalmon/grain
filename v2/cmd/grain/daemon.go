@@ -772,6 +772,11 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string) (stop f
 		// back to the store either way, so this costs nothing today and is
 		// already correct for whenever agent/claude is wired in instead.
 		LiveTranscripts: claude.LiveTranscriptDir{Dir: transcriptDir},
+		// orchestrator.ChecksUnavailable reads process-lifetime state
+		// RunCycle's own reconcile loop sets the first time GitHub 403s a
+		// check-runs read against this deployment's credential -- see its
+		// own doc comment and Config.AutoMergeDegraded's.
+		AutoMergeDegraded: orchestrator.ChecksUnavailable,
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

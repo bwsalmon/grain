@@ -242,6 +242,13 @@ type configResponse struct {
 	// instead of a bare text field (bwsalmon/agents#447). Empty means
 	// unrestricted, same as everywhere else this field appears.
 	TargetRepos []string `json:"targetRepos,omitempty"`
+	// AutoMergeDegraded mirrors Config.AutoMergeDegraded's own doc
+	// comment: true means this deployment's GitHub credential cannot
+	// read check runs, so a submitted task's AutoMerge is set but will
+	// never actually merge. The frontend uses this to warn on Submit
+	// instead of a task looking stuck for no visible reason
+	// (bwsalmon/agents#483).
+	AutoMergeDegraded bool `json:"autoMergeDegraded,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +258,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Capabilities:  s.tasks.Config.Capabilities,
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.Config.TargetRepos,
+	}
+	if s.tasks.Config.AutoMergeDegraded != nil {
+		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()

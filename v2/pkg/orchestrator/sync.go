@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
@@ -64,6 +65,23 @@ func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, check
 // never resolves on its own while that credential is in use.
 var checksUnavailableOnce sync.Once
 
+// checksUnavailable backs ChecksUnavailable -- set alongside the log line
+// checksUnavailableOnce prints, so a caller outside this package can ask
+// the same question without grepping server logs for it.
+var checksUnavailable atomic.Bool
+
+// ChecksUnavailable reports whether this process has ever seen GitHub
+// refuse a check-runs read with 403 (checkRunsFor's own doc comment).
+// Once true it stays true for the rest of the process's life -- the same
+// permanent-until-restart fact the "no Checks access" log line already
+// reports -- which is what lets pkg/ui surface a "submit is queued but
+// will never actually merge" notice on this deployment's own /api/config
+// (bwsalmon/agents#483) instead of an operator having to notice a task's
+// AutoMerge never resolving and go searching logs to learn why.
+func ChecksUnavailable() bool {
+	return checksUnavailable.Load()
+}
+
 // checkRunsFor reads ref's check runs, reporting whether the answer is
 // known at all.
 //
@@ -90,6 +108,7 @@ func checkRunsFor(client github.Client, ref model.PullRequestRef, head string) (
 		return nil, false, fmt.Errorf("orchestrator: reading check runs for %s: %w", ref, err)
 	}
 	checksUnavailableOnce.Do(func() {
+		checksUnavailable.Store(true)
 		log.Printf("orchestrator: this deployment's GitHub credential cannot read check runs " +
 			"(the Checks API takes GitHub App installation tokens only, and a fine-grained PAT " +
 			"has no permission for it) -- pull request health stays unknown and nothing is " +
