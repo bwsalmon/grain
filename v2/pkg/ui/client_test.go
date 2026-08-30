@@ -682,6 +682,93 @@ func TestAttemptTranscript(t *testing.T) {
 	}
 }
 
+// fakeLiveTranscript is a ui.LiveTranscript a test can script with a
+// canned response (or none at all) per run ID, without a real transcript
+// file anywhere on disk.
+type fakeLiveTranscript map[string]string
+
+func (f fakeLiveTranscript) Tail(runID string) (string, bool, error) {
+	text, ok := f[runID]
+	return text, ok, nil
+}
+
+// TestAttemptTranscriptPrefersTheLiveTranscriptWhileARunIsStillGoing is
+// bwsalmon/agents#467's whole point: an attempt with no FinishedAt yet
+// reads its transcript-in-progress from Config.LiveTranscripts rather
+// than waiting on Store.RunTranscript, which has nothing until
+// orchestrator.RunDispatch's own SetRunTranscript call lands after the
+// run is over.
+func TestAttemptTranscriptPrefersTheLiveTranscriptWhileARunIsStillGoing(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+	c.Config.LiveTranscripts = fakeLiveTranscript{"r1": "still working on it"}
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.AttemptTranscript(ctx, task.ID, 1)
+	if err != nil || got != "still working on it" {
+		t.Fatalf("AttemptTranscript = (%q, %v), want the live transcript", got, err)
+	}
+}
+
+// TestAttemptTranscriptFallsBackToTheStoreOnceALiveRunFinishes proves the
+// other half: once FinishedAt is set, AttemptTranscript reads
+// Store.RunTranscript even when Config.LiveTranscripts still has
+// something recorded for that run ID -- the store, not a file that
+// orchestrator.RunDispatch has by now already deleted, is authoritative
+// for a finished attempt.
+func TestAttemptTranscriptFallsBackToTheStoreOnceALiveRunFinishes(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+	c.Config.LiveTranscripts = fakeLiveTranscript{"r1": "stale in-progress text"}
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", baseTime.Add(time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRunTranscript(ctx, "r1", "the real, finished story"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.AttemptTranscript(ctx, task.ID, 1)
+	if err != nil || got != "the real, finished story" {
+		t.Fatalf("AttemptTranscript = (%q, %v), want the stored transcript", got, err)
+	}
+}
+
+// TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet covers a
+// still-running attempt whose framework has not written anything to its
+// live transcript file yet (or was never given one -- agent/gemini, for
+// now): AttemptTranscript should fall back to Store.RunTranscript (empty,
+// but not an error) rather than surface that as a failure.
+func TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+	c.Config.LiveTranscripts = fakeLiveTranscript{}
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.AttemptTranscript(ctx, task.ID, 1)
+	if err != nil || got != "" {
+		t.Fatalf("AttemptTranscript = (%q, %v), want (\"\", nil)", got, err)
+	}
+}
+
 // Replying to a parked task resumes it. This used to take two separate
 // acts -- post a comment AND re-apply the trigger label so the next poll
 // would notice -- and forgetting the second left the task parked forever.

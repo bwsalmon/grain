@@ -232,6 +232,13 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	if err := c.Store.PutConfig(ctx, cfg); err != nil {
 		return Settings{}, err
 	}
+	// Config.TargetRepos is also read in-process, unguarded by the store
+	// (targetAllowed in CreateTask, handleConfig's own response) -- keep
+	// it in step with what was just written so neither goes stale until
+	// this server restarts. Every other Config field stays exactly as
+	// NewClient set it; TargetRepos is the only one a running server ever
+	// changes.
+	c.setTargetRepos(cfg.TargetRepos)
 	return c.settingsFrom(cfg), nil
 }
 

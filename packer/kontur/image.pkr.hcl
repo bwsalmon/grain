@@ -14,6 +14,12 @@ variable "operator_ssh_public_key" {
   description = "The public half of the operator SSH keypair (grain/pkg/kontur's SSHRunner uses the private half). Baked into the debian user's authorized_keys at build time -- see README.md, 'Why the key is baked in, not injected'. Never the private key; this variable's value is not a secret."
 }
 
+variable "sandbox_setup_script" {
+  type        = string
+  default     = ""
+  description = "Contents (not a path) of an optional shell script run against the guest near the end of provision.sh, after the built-in provisioning and before the operator-key/cloud-init finalization -- see provision.sh's own comment on that section. Empty (the default) runs nothing extra. May itself be a secret-free thing only -- like provision.sh's own rule, nothing here should bake a credential into the image."
+}
+
 variable "base_image_url" {
   type        = string
   default     = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
@@ -105,8 +111,11 @@ build {
   sources = ["source.qemu.kontur-guest"]
 
   provisioner "shell" {
-    execute_command   = "{{ .Vars }} sudo -E sh -c '{{ .Path }}'"
-    environment_vars  = ["OPERATOR_SSH_PUBLIC_KEY=${var.operator_ssh_public_key}"]
+    execute_command = "{{ .Vars }} sudo -E sh -c '{{ .Path }}'"
+    environment_vars = [
+      "OPERATOR_SSH_PUBLIC_KEY=${var.operator_ssh_public_key}",
+      "SANDBOX_SETUP_SCRIPT=${var.sandbox_setup_script}",
+    ]
     script            = "${path.root}/provision.sh"
     expect_disconnect = true
   }

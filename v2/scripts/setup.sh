@@ -17,10 +17,14 @@
 #
 # What this script does, every time it runs (safe to re-run -- this is
 # the installer AND the updater):
-#   1. clones or updates this repo under $GRAIN_SRC_DIR
+#   1. clones or updates this repo under $GRAIN_SRC_DIR -- and, if that
+#      update replaced this script itself, re-runs the new copy in place
+#      of this one (reexec_if_updated), so a run always builds with the
+#      code it just pulled rather than the code it started with
 #   2. builds bin/grain with `make container-build` (v2/Makefile) -- the
-#      containerised build, not the host toolchain, which is the one
-#      thing this script assumes: a working `docker`. grain is pure Go
+#      containerised build, not the host toolchain, so a working
+#      `docker` is the one thing this script assumes about the host
+#      (`make` itself it installs, see ensure_make). grain is pure Go
 #      (bwsalmon/agents#366 removed the one dependency that wasn't), so
 #      this buys reproducibility -- one pinned Go toolchain regardless of
 #      what is or isn't installed on this machine -- rather than working
@@ -209,15 +213,51 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# make included: build_and_install runs `make -C v2 container-build`, and
-# without it here the failure was a bare `make: command not found` from
-# deep inside the build rather than this loop's own message naming it.
-for cmd in git docker systemctl install useradd visudo make; do
+# Taken here, before sync_repo below can replace the file underneath this
+# running process -- see reexec_if_updated for what it is compared
+# against and why.
+SELF_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SELF_SUM_BEFORE="$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}' || true)"
+
+for cmd in git docker systemctl install useradd visudo; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
     exit 1
   fi
 done
+
+# make is the odd one out, so this installs it rather than only reporting
+# it missing like the loop above. build_and_install runs `make -C v2
+# container-build` and the UI's own Upgrade button runs the same target
+# (v2/cmd/grain/daemon.go's BuildCmd), but the compile itself happens
+# inside Docker -- so make is the only piece of that toolchain the host
+# needs, which is exactly why nobody lists it, and a Debian cloud image
+# carries none.
+#
+# terraform/gcp-v2/files/deploy.sh installs it too, and that was supposed
+# to be enough. It is not, because of how each file reaches a host:
+# deploy.sh arrives in instance metadata, rewritten only by a
+# `terraform apply`, while this script arrives in the git checkout it
+# updates itself (sync_repo). A host whose metadata predates that
+# deploy.sh fix has no make and no way to get one -- every deploy dies
+# here -- until someone runs Terraform, which is not something a machine
+# that only ever pulls from git can do for itself. Installing it here
+# closes that loop: the fix travels the same path as the script that
+# needs it.
+ensure_make() {
+  command -v make >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    log "installing make (the build step runs 'make -C v2 container-build'; no Debian cloud image carries it)"
+    apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends make || true
+  fi
+  if ! command -v make >/dev/null 2>&1; then
+    echo "setup.sh: required command not found: make, and it could not be installed automatically -- install it (e.g. 'apt-get install make') and re-run" >&2
+    exit 1
+  fi
+}
+ensure_make
+
 if ! docker info >/dev/null 2>&1; then
   echo "setup.sh: 'docker info' failed -- is the Docker daemon running? (only needed to build, via make container-build)" >&2
   exit 1
@@ -245,6 +285,36 @@ sync_repo() {
     mkdir -p "$(dirname "$GRAIN_SRC_DIR")"
     git clone --quiet --branch "$GRAIN_REF" "$GRAIN_REPO_URL" "$GRAIN_SRC_DIR"
   fi
+}
+
+# sync_repo updates the checkout this script itself lives in, and git
+# swaps the file for a new one rather than rewriting it in place -- so
+# this process goes on reading the copy it started with. Every step below
+# is therefore the *old* script's version of that step, and a fix to this
+# file only takes effect on the run after the one that pulled it.
+#
+# That is not hypothetical: it is how the deploy that pulled ff6e818
+# ("Install make on the host, and check for it") still died on a bare
+# `make: command not found` from build_and_install, with the check that
+# exists to name that failure sitting unread on disk a few inches away.
+#
+# So: if the file at $0 is not the one this process is running, hand over
+# to it. Only ever once -- $GRAIN_SETUP_REEXECED is exported across the
+# exec, so the new copy runs its own sync_repo (a no-op by then, the
+# checkout is already at $GRAIN_REF) and carries on rather than looking
+# for a third. A setup.sh run from a copy outside the checkout is
+# untouched by sync_repo, so its checksum does not change and this does
+# nothing at all.
+reexec_if_updated() {
+  [ -z "${GRAIN_SETUP_REEXECED:-}" ] || return 0
+  [ -n "$SELF_SUM_BEFORE" ] || return 0
+  local now=""
+  now="$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}' || true)"
+  [ -n "$now" ] || return 0
+  [ "$now" != "$SELF_SUM_BEFORE" ] || return 0
+  log "$SELF_PATH changed in the update just pulled; re-running it"
+  export GRAIN_SETUP_REEXECED=1
+  exec "$SELF_PATH" "$@"
 }
 
 # --- 2/3. build and install the binary ----------------------------------
@@ -762,6 +832,7 @@ print_summary() {
 
 main() {
   sync_repo
+  reexec_if_updated "$@"
   build_and_install
   ensure_user
   grant_reboot_sudo
@@ -774,4 +845,4 @@ main() {
   print_summary
 }
 
-main
+main "$@"
