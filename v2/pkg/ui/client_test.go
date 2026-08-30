@@ -649,6 +649,54 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	}
 }
 
+// TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted covers
+// bwsalmon/agents#514, the sibling of the bug model.Transitions' own
+// guard already fixed for bwsalmon/agents#502. orchestrator.
+// salvagePushedBranch turns a pushed branch into a pull request (and the
+// task into StateCompleted) even for a run whose own outcome stays
+// "failed" forever -- an agent that commits, pushes, and then runs out of
+// turns did the work; only the ending failed (orchestrator/cycle.go's own
+// comment, orchestrator/finish_test.go's
+// TestRunCycleOpensAPullRequestForABranchAFailedRunAlreadyPushed). That
+// leaves task_streak sitting at 1 or more forever, since a "succeeded"
+// outcome is the only thing that resets it. GetTask read that streak
+// straight onto FailedAttempts/LastFailureAt/LastFailureReason with no
+// regard for whether the task had since completed or closed -- unlike
+// model.StateOf and model.Transitions, which both give obs.CompletedAt/
+// ClosedAt precedence over the streak -- so a task's own detail view kept
+// showing "1 consecutive failed attempt" (grain get's own "failed
+// attempts: N in a row" line) long after the task plainly succeeded.
+func TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "exceeded max turns (2) without a final answer"); err != nil {
+		t.Fatal(err)
+	}
+	completedAt := baseTime.Add(11 * time.Minute)
+	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &completedAt}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != model.StateCompleted {
+		t.Fatalf("state = %s, want completed", detail.State)
+	}
+	if detail.FailedAttempts != 0 || detail.LastFailureAt != nil || detail.LastFailureReason != "" {
+		t.Fatalf("FailedAttempts = %d, LastFailureAt = %v, LastFailureReason = %q, want all zero on a completed task",
+			detail.FailedAttempts, detail.LastFailureAt, detail.LastFailureReason)
+	}
+}
+
 // TestGetTaskListsPullRequestEventsOldestFirst covers bwsalmon/agents#493
 // -- "show PR events in the task timeline" -- the same projection
 // TestGetTaskListsEveryAttemptOldestFirst above already exercises for
