@@ -3,6 +3,10 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"log"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
@@ -139,11 +143,76 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	// feed. Overwriting it here, now that a push/question/comment has
 	// actually been ruled out, is what keeps task_run's own outcome
 	// column meaning what a human reading `grain get` would expect it to.
+	// Log what the run *did* do, because nothing else does. agent.Result
+	// carries FinalText and ToolCalls, neither of which is persisted --
+	// SetRunOutcome stores an outcome string and nothing more -- and
+	// neither this package nor pkg/agent/gemini logs them. So a run
+	// ending here left no record at all of the agent's behaviour, and
+	// "finished without pushing a branch, asking a question, or leaving a
+	// closing comment" was the entire evidence available for diagnosing
+	// why: it says what did not happen and nothing about what did.
+	//
+	// This branch specifically is where that hurts. Every other ending
+	// leaves an artefact a human can read -- a pull request, a question, a
+	// comment. This one is defined by leaving none.
+	//
+	// Tool names are a fixed vocabulary and safe to log in full. FinalText
+	// is model output and is bounded hard: an agent that read a file is
+	// free to quote it back, and a sandbox working directory can hold a
+	// .git-credentials. A truncated prefix is enough to tell "I could not
+	// find anything to do" from "I hit an API error" without turning the
+	// journal into a transcript store.
+	log.Printf("orchestrator: task %s run %s ended with no action: %d tool call(s)%s; final text (%d bytes): %s",
+		task.ID, runID, len(result.ToolCalls), toolCallSummary(result), len(result.FinalText),
+		truncate(result.FinalText, 500))
+
 	if err := store.SetRunOutcome(ctx, runID, "no_action",
 		"the run finished without pushing a branch, asking a question, or leaving a closing comment"); err != nil {
 		return fmt.Errorf("orchestrator: recording %s's outcome: %w", task.ID, err)
 	}
 	return nil
+}
+
+// toolCallSummary names every tool the run called and how often, in a
+// stable order, or empty when it called none -- which is itself the most
+// informative case, since an agent that called nothing at all did not
+// fail to act so much as never start.
+func toolCallSummary(result *agent.Result) string {
+	if len(result.ToolCalls) == 0 {
+		return ""
+	}
+	counts := map[string]int{}
+	var order []string
+	for _, c := range result.ToolCalls {
+		name := c.Name
+		if c.IsError {
+			name += "(error)"
+		}
+		if _, seen := counts[name]; !seen {
+			order = append(order, name)
+		}
+		counts[name]++
+	}
+	sort.Strings(order)
+	parts := make([]string, 0, len(order))
+	for _, name := range order {
+		parts = append(parts, fmt.Sprintf("%s x%d", name, counts[name]))
+	}
+	return " [" + strings.Join(parts, ", ") + "]"
+}
+
+// truncate bounds model output on its way to the journal. Marks that it
+// cut rather than silently eliding, so a short final text is never
+// mistaken for a truncated one.
+func truncate(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "<empty>"
+	}
+	if len(s) <= max {
+		return strconv.Quote(s)
+	}
+	return strconv.Quote(s[:max]) + "... (truncated)"
 }
 
 // relayComment records something a dispatched run said, attributed as

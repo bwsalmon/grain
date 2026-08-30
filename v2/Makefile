@@ -60,12 +60,26 @@ build: frontend $(CMDS)
 # build` trusts go.sum over re-resolving go.mod.
 #
 # The find clears out a previous build first rather than leaving Vite's
-# own emptyOutDir to do it: that would also take ../static/.gitignore
-# and .gitkeep with it, the two files that let go:embed compile against
-# this generated directory on a fresh checkout that has never run
-# `npm run build` at all.
+# own emptyOutDir to do it: that would also take ../static/.gitignore,
+# .gitkeep and placeholder.html with it, the three files that let
+# go:embed compile against this generated directory on a fresh checkout
+# that has never run `npm run build` at all.
+#
+# placeholder.html is exempt because it is *tracked*, unlike everything
+# else this deletes. Removing it left the checkout permanently dirty,
+# and v2/scripts/setup.sh's own sync_repo refuses to update a dirty
+# checkout rather than clobber what might be an operator's edit -- so on
+# a host that builds in place from a git clone, which is exactly what
+# terraform/gcp-v2 deploys, the first successful build broke every
+# deploy after it.
+#
+# Keeping it cannot ship a placeholder in place of a real UI, which is
+# what deleting it was guarding against: server.go serves this directory
+# with http.FileServerFS, so "/" resolves to index.html once a build
+# exists and placeholder.html is reachable only at its own path.
 frontend:
-	find pkg/ui/static -mindepth 1 -not -name '.gitignore' -not -name '.gitkeep' -delete
+	find pkg/ui/static -mindepth 1 -not -name '.gitignore' -not -name '.gitkeep' \
+		-not -name 'placeholder.html' -delete
 	cd pkg/ui/frontend && npm ci && npm run build
 
 # BUILDVCS is passed explicitly rather than left to `go build`'s default
