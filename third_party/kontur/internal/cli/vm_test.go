@@ -188,6 +188,72 @@ func TestVMUpdate_ExplicitCmdlineSurvivesLaterUpdates(t *testing.T) {
 	}
 }
 
+func TestVMLifecycle_WritableDisk(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+	imagesDir := t.TempDir()
+	diskDir := filepath.Join(t.TempDir(), "vm-disks")
+
+	if err := os.WriteFile(filepath.Join(imagesDir, "disk.img"), []byte("base image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--disk-readonly=false",
+		"--images-hostpath", imagesDir,
+		"--disk-hostpath", diskDir,
+		"--ip", "169.254.100.2",
+		"--port", "30080",
+		"--state-dir", stateDir,
+		"--static-pod-path", podDir,
+	)
+	if err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+
+	writableDisk := filepath.Join(diskDir, "web", "disk.qcow2")
+	got, err := os.ReadFile(writableDisk)
+	if err != nil {
+		t.Fatalf("writable disk overlay not created: %v", err)
+	}
+	if len(got) < 4 || string(got[:4]) != "QFI\xfb" {
+		t.Fatalf("writable disk overlay does not start with the qcow2 magic: got %q", got[:min(4, len(got))])
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(podDir, "kontur-vm-web.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), "/disk/disk.qcow2") {
+		t.Errorf("manifest missing writable disk path:\n%s", manifest)
+	}
+
+	// Simulate the guest having written state, then confirm an unrelated
+	// update leaves it alone rather than re-creating it.
+	if err := os.WriteFile(writableDisk, []byte("guest state"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := runVMArgs(t, "update", "web", "--cpus", "4", "--state-dir", stateDir); err != nil {
+		t.Fatalf("update error = %v, stderr = %s", err, stderr)
+	}
+	got, err = os.ReadFile(writableDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "guest state" {
+		t.Errorf("update discarded guest-written disk state: got %q", got)
+	}
+
+	// delete removes the writable disk overlay along with everything else.
+	if _, stderr, err := runVMArgs(t, "delete", "web", "--state-dir", stateDir); err != nil {
+		t.Fatalf("delete error = %v, stderr = %s", err, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(diskDir, "web")); !os.IsNotExist(err) {
+		t.Errorf("writable disk dir still exists after delete: err = %v", err)
+	}
+}
+
 func TestRunVM_UnknownSubcommand(t *testing.T) {
 	if _, _, err := runVMArgs(t, "frobnicate"); err == nil {
 		t.Fatalf("runVM(frobnicate) = nil error, want one")

@@ -14,12 +14,59 @@ func baseSpec() VMSpec {
 	return s
 }
 
+func TestValidate_WritableDiskMustBeUnderImagesMountPath(t *testing.T) {
+	s := baseSpec()
+	s.DiskReadOnly = false
+	s.DiskImage = "/var/lib/kontur/guest/disk.img"
+	if err := s.Validate(); err == nil {
+		t.Fatalf("Validate() = nil, want an error for a writable disk outside %s", ImagesMountPath)
+	}
+}
+
+func TestValidate_WritableDiskRequiresDiskHostPath(t *testing.T) {
+	s := baseSpec()
+	s.DiskReadOnly = false
+	s.DiskHostPath = ""
+	if err := s.Validate(); err == nil {
+		t.Fatalf("Validate() = nil, want an error for an empty disk-hostpath with disk-readonly=false")
+	}
+}
+
+func TestValidate_WritableDiskUnderImagesMountPathOK(t *testing.T) {
+	s := baseSpec()
+	s.DiskReadOnly = false
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for a writable disk under %s with a disk-hostpath set", err, ImagesMountPath)
+	}
+}
+
+func TestResolvedDiskImage(t *testing.T) {
+	s := baseSpec()
+	if got, want := s.ResolvedDiskImage(), s.DiskImage; got != want {
+		t.Errorf("ResolvedDiskImage() = %q, want %q (unchanged) when DiskReadOnly", got, want)
+	}
+
+	s.DiskReadOnly = false
+	if got, want := s.ResolvedDiskImage(), DiskMountPath+"/disk.qcow2"; got != want {
+		t.Errorf("ResolvedDiskImage() = %q, want %q when writable", got, want)
+	}
+}
+
+func TestWritableDiskDir(t *testing.T) {
+	s := baseSpec()
+	s.DiskHostPath = "/var/lib/kontur/vm-disks"
+	if got, want := s.WritableDiskDir(), "/var/lib/kontur/vm-disks/web"; got != want {
+		t.Errorf("WritableDiskDir() = %q, want %q", got, want)
+	}
+}
+
 func TestValidate_RequiresCore(t *testing.T) {
 	cases := []struct {
 		name string
 		mut  func(s *VMSpec)
 	}{
 		{"name", func(s *VMSpec) { s.Name = "" }},
+		{"name too long for tap device", func(s *VMSpec) { s.Name = "way-too-long-a-name" }},
 		{"disk", func(s *VMSpec) { s.DiskImage = "" }},
 		{"ip", func(s *VMSpec) { s.IP = "" }},
 		{"bad ip", func(s *VMSpec) { s.IP = "not-an-ip" }},
@@ -41,6 +88,20 @@ func TestValidate_RequiresCore(t *testing.T) {
 				t.Errorf("Validate() = nil, want an error")
 			}
 		})
+	}
+}
+
+func TestValidate_TapNameLengthBoundary(t *testing.T) {
+	// "tap-" (4 chars) + name must fit in 15 chars (IFNAMSIZ-1), so an
+	// 11-character name is the longest that still fits.
+	s := baseSpec()
+	s.Name = "twelvecharzz"[:11]
+	if err := s.Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil for an 11-character name", err)
+	}
+	s.Name = "twelvecharzz"[:12]
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() = nil, want an error for a 12-character name")
 	}
 }
 

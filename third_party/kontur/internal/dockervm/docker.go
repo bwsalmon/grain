@@ -150,9 +150,12 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 		"--network", "container:" + netnsName,
 		"--privileged",
 		"--device", "/dev/kvm",
-		"-v", spec.ImagesHostPath + ":/images:ro",
-		"-e", "CHV_DISK_IMAGE=" + spec.DiskImage,
+		"-v", spec.ImagesHostPath + ":" + staticpod.ImagesMountPath + ":ro",
+		"-e", "CHV_DISK_IMAGE=" + spec.ResolvedDiskImage(),
 		"-e", "CHV_DISK_READONLY=" + strconv.FormatBool(spec.DiskReadOnly),
+	}
+	if !spec.DiskReadOnly {
+		vmArgs = append(vmArgs, "-v", spec.WritableDiskDir()+":"+staticpod.DiskMountPath)
 	}
 	if spec.Kernel != "" {
 		vmArgs = append(vmArgs, "-e", "CHV_KERNEL="+spec.Kernel)
@@ -171,6 +174,10 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 		"-e", "CHV_CPUS="+strconv.Itoa(spec.CPUs),
 		"-e", "CHV_MEMORY_MB="+strconv.Itoa(spec.MemoryMB),
 		"-e", "CHV_SHUTDOWN_TIMEOUT="+spec.ShutdownTimeout,
+		// See staticpod's manifestTemplateSrc for why this is the VM's
+		// own tap-attached address on the fixed guest sshd port, not
+		// NETSHIM_GUEST_PORT's external DNAT.
+		"-e", "KONTUR_EXEC_ADDR="+spec.IP+":22",
 		spec.KonturImage, "run",
 	)
 	if err := d.run(ctx, io.Discard, vmArgs...); err != nil {

@@ -23,16 +23,44 @@ func BuildArgs(cfg config.Config) []string {
 
 	for _, d := range cfg.Disks {
 		// image_type=raw is a local addition (bwsalmon/agents#478, see
-		// this repo's own VENDORED.md) -- every disk this runtime is
-		// ever pointed at is a plain raw image (config.go's own
-		// defaultDiskImage, and every guest packer/kontur/build.sh
-		// produces), and without it cloud-hypervisor's own format
+		// this repo's own VENDORED.md) -- every disk this runtime was
+		// originally ever pointed at was a plain raw image (config.go's
+		// own defaultDiskImage, and every guest packer/kontur/build.sh
+		// produces), and without this hint cloud-hypervisor's own format
 		// auto-detection refuses writes to sector 0 ("Attempting to
 		// write to sector 0 on a disk without specifying image_type"),
 		// which fails the guest's root-filesystem mount outright.
 		// Confirmed by hand against a real cloud-hypervisor v53.0
 		// binary: the exact same disk boots cleanly once this is added.
-		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=%s,image_type=raw", d.Path, onOff(d.ReadOnly)))
+		//
+		// bwsalmon/agents#510's own vendor bump introduced a second kind
+		// of disk this same runtime is pointed at: the qcow2 writable
+		// overlay staticpod.PrepareWritableDisk creates for
+		// -disk-readonly=false (internal/staticpod/qcow2.go upstream,
+		// always named disk.qcow2 -- staticpod.writableDiskFileName),
+		// backed by the shared read-only source image. Forcing
+		// image_type=raw on that disk made cloud-hypervisor refuse to
+		// open it at all ("Maximum disk nesting depth exceeded"), and
+		// switching to the correct image_type=qcow2 alone did not fix
+		// that -- cloud-hypervisor v53.0 also needs backing_files=on to
+		// actually follow a qcow2 file's backing-file chain at all
+		// (undocumented beyond the --disk flag's own --help listing it
+		// as an option); without it, a backing file counts as "nesting"
+		// no depth budget allows, regardless of image_type. Confirmed by
+		// hand end to end: with both set, a real writable-disk VM boots,
+		// SSHes in, and a write made through the guest lands in the
+		// overlay (confirmed by its file size growing) while the shared
+		// source image file underneath (mounted read-only regardless --
+		// see ImagesMountPath's own doc comment) is untouched. Every raw
+		// disk in this tree keeps the extension config.go's
+		// defaultDiskImage and packer/kontur/build.sh's own output
+		// already use (".img"), so this distinction never mistakes one
+		// kind of disk for the other.
+		extra := ",image_type=raw"
+		if strings.HasSuffix(d.Path, ".qcow2") {
+			extra = ",image_type=qcow2,backing_files=on"
+		}
+		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=%s%s", d.Path, onOff(d.ReadOnly), extra))
 	}
 
 	if cfg.Kernel != "" {

@@ -26,6 +26,13 @@
 #    into the kontur image itself (see deploy/guest-image/README.md), but
 #    that image can't be shared read-only between VMs the way a hostPath
 #    image can, so this example still uses one.
+#
+# KONTUR_EXEC_ADDR below (see the top-level README's "Execing into a VM")
+# lets `kubectl exec -it chv-vm-example -c web -- kontur exec -- <command>`
+# run <command> inside the "web" VM's guest itself, over SSH to its
+# already-running sshd, rather than in this otherwise-empty container --
+# `kubectl exec ... -- kontur exec` alone (no `-- <command>`) opens an
+# interactive login shell instead.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -49,11 +56,15 @@ spec:
           value: "8080"
       securityContext:
         # netshim creates network interfaces and nftables rules in the
-        # pod's network namespace, which needs these capabilities (or
-        # privileged: true on a CNI/runtime that doesn't grant them
-        # individually).
-        capabilities:
-          add: ["NET_ADMIN", "NET_RAW"]
+        # pod's network namespace (NET_ADMIN/NET_RAW would cover that much
+        # on their own) and also has to flip on net.ipv4.ip_forward via
+        # /proc/sys/net, which the container runtime's default runc-style
+        # OCI spec mounts read-only regardless of capabilities granted --
+        # confirmed against both a real standalone kubelet/containerd CRI
+        # pod and plain `docker run` (see the top-level README's "Docker
+        # backend" section), so privileged: true is needed here on any of
+        # these runtimes, not just as a fallback for less-capable ones.
+        privileged: true
   containers:
     - name: web
       image: ghcr.io/bwsalmon/kontur:latest
@@ -75,6 +86,8 @@ spec:
           value: "2048"
         - name: CHV_SHUTDOWN_TIMEOUT
           value: "20s"
+        - name: KONTUR_EXEC_ADDR
+          value: "169.254.100.2:22"
       resources:
         requests:
           cpu: "2"
@@ -112,6 +125,8 @@ spec:
           value: "2048"
         - name: CHV_SHUTDOWN_TIMEOUT
           value: "20s"
+        - name: KONTUR_EXEC_ADDR
+          value: "169.254.100.3:22"
       resources:
         requests:
           cpu: "2"

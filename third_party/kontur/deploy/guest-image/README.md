@@ -10,8 +10,14 @@ two rootfs stages runs:
 
 - `debian` (default): a minimal Debian rootfs (`debootstrap
   --variant=minbase`) with `openssh-server`, `systemd-sysv` (for
-  `/sbin/init`), `iproute2` and `acpid`. `GUEST_SUITE` (default
-  `bookworm`) picks the Debian suite.
+  `/sbin/init`), `iproute2`, `acpid` and `udev`. `GUEST_SUITE` (default
+  `bookworm`) picks the Debian suite. `udev` has to be listed explicitly
+  -- `--variant=minbase` skips Recommends, and without `systemd-udevd`
+  running, `dev-ttyS0.device` never gets marked ready, which stalls boot
+  for `DefaultDeviceTimeoutSec` (systemd's default: 90s) before
+  `serial-getty@ttyS0.service` gives up on it; SSH itself doesn't depend
+  on that device unit and isn't affected, but the console (this guest's
+  only other point of entry) would otherwise never show a login prompt.
 - `alpine`: a minimal Alpine rootfs (`apk add --root`, the same technique
   Alpine's own official base image is built with) with `openssh-server`,
   `alpine-base` (for `busybox`/`openrc`, standing in for `systemd-sysv`),
@@ -87,9 +93,14 @@ adding a separate logging pipeline inside the guest.
 
 ## Getting SSH access
 
-By default the image ships with no way to authenticate as root at all
-(`PermitRootLogin prohibit-password` plus no password set). Pass a public
-key at build time to allow key-based root login:
+Root login is key-only (`PermitRootLogin prohibit-password` plus no
+password set). By default this image already authorizes one key: the
+public half of a keypair the top-level `Dockerfile`'s `exec-keypair`
+stage generates at build time, whose private half is baked into the
+outer `kontur` image so `kontur exec` (see the top-level README's
+"Execing into a VM") always has a way in without any of this section's
+setup. Pass your own public key at build time too, to allow your own
+key-based root login *alongside* that one:
 
 ```sh
 docker build --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat ~/.ssh/id_ed25519.pub)" -t kontur .

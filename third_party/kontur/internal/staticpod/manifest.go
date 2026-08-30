@@ -89,15 +89,14 @@ spec:
         - name: NETSHIM_GUEST_PORT
           value: {{yq (itoa .GuestPort)}}
       securityContext:
-        capabilities:
-          add: ["NET_ADMIN", "NET_RAW"]
+        privileged: true
   containers:
     - name: {{yq .Name}}
       image: {{yq .KonturImage}}
       args: ["run"]
       env:
         - name: CHV_DISK_IMAGE
-          value: {{yq .DiskImage}}
+          value: {{yq .ResolvedDiskImage}}
         - name: CHV_DISK_READONLY
           value: {{yq (fmtBool .DiskReadOnly)}}
 {{- if .Kernel}}
@@ -124,12 +123,26 @@ spec:
           value: {{yq (itoa .MemoryMB)}}
         - name: CHV_SHUTDOWN_TIMEOUT
           value: {{yq .ShutdownTimeout}}
+        # Lets "kontur exec" (see internal/guestexec) reach this VM's own
+        # sshd directly via its tap-attached address (the same one the
+        # guest's own kernel "ip=" boot parameter configures), rather
+        # than through NETSHIM_GUEST_PORT's external DNAT -- reachable
+        # because "kubectl exec"/"docker exec" on this container shares
+        # its network namespace with the netshim init container that
+        # created that address. Port 22 is fixed: the reference guest
+        # image (deploy/guest-image) always runs sshd there.
+        - name: KONTUR_EXEC_ADDR
+          value: {{yq (printf "%s:22" .IP)}}
       securityContext:
         privileged: true
       volumeMounts:
         - name: images
           mountPath: /images
           readOnly: true
+{{- if not .DiskReadOnly}}
+        - name: disk
+          mountPath: /disk
+{{- end}}
         - name: kvm
           mountPath: /dev/kvm
   volumes:
@@ -137,6 +150,12 @@ spec:
       hostPath:
         path: {{yq .ImagesHostPath}}
         type: Directory
+{{- if not .DiskReadOnly}}
+    - name: disk
+      hostPath:
+        path: {{yq .WritableDiskDir}}
+        type: Directory
+{{- end}}
     - name: kvm
       hostPath:
         path: /dev/kvm
