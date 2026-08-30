@@ -337,19 +337,32 @@ main { padding: 0 0 2.5rem; }
 }
 .badge::before {
   content: "";
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
   background: var(--text-tertiary);
   flex: none;
 }
 .badge-queued::before { background: transparent; border: 1.5px solid var(--state-queued); box-sizing: border-box; }
-.badge-running::before { background: var(--state-running); }
+.badge-running::before {
+  background: transparent;
+  border: 2px solid var(--state-running);
+  border-top-color: transparent;
+  box-sizing: border-box;
+  animation: badge-spin 0.8s linear infinite;
+}
 .badge-awaiting_reply::before { background: var(--state-awaiting); }
 .badge-failed::before { background: var(--state-failed); }
 .badge-proposed::before { background: var(--state-proposed); }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
+
+@keyframes badge-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .badge-running::before { animation: none; }
+}
 /* Blocked is an annotation next to the state dot, not a state of its
    own (docs/data-model.md) -- it drops the dot for a small filled chip
    instead, so it never reads as a second, competing status. */
