@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, FormGroup, Link, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
 import Overlay from "./Overlay.jsx";
@@ -188,28 +188,52 @@ function Attempts({ t }) {
 }
 
 function CapabilityToggles({ t, config, act }) {
+  const capabilities = config?.capabilities || [];
+  const selected = t.capabilities || [];
+
+  const handleChange = (e) => {
+    const next = e.target.value;
+    const added = next.filter((id) => !selected.includes(id));
+    const removed = selected.filter((id) => !next.includes(id));
+    added.forEach((id) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
+      method: "POST",
+      body: JSON.stringify({ id, attach: true }),
+    }), t.id));
+    removed.forEach((id) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
+      method: "POST",
+      body: JSON.stringify({ id, attach: false }),
+    }), t.id));
+  };
+
   return (
     <fieldset>
       <legend>Capabilities</legend>
-      <FormGroup>
-        {(config?.capabilities || []).map((c) => (
-          <FormControlLabel
-            key={c.id}
-            title={c.description}
-            control={(
-              <Checkbox
-                size="small"
-                checked={t.capabilities.includes(c.id)}
-                onChange={(e) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
-                  method: "POST",
-                  body: JSON.stringify({ id: c.id, attach: e.target.checked }),
-                }), t.id)}
-              />
-            )}
-            label={c.name}
-          />
-        ))}
-      </FormGroup>
+      <FormControl fullWidth size="small">
+        <Select
+          multiple
+          displayEmpty
+          inputProps={{ "aria-label": "Capabilities" }}
+          value={selected}
+          onChange={handleChange}
+          renderValue={(sel) => (sel.length === 0 ? (
+            <span className="hint">None</span>
+          ) : (
+            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+              {sel.map((id) => {
+                const c = capabilities.find((cap) => cap.id === id);
+                return <Chip key={id} size="small" label={c ? c.name : id} />;
+              })}
+            </Box>
+          ))}
+        >
+          {capabilities.map((c) => (
+            <MenuItem key={c.id} value={c.id} title={c.description}>
+              <Checkbox checked={selected.includes(c.id)} size="small" />
+              <ListItemText primary={c.name} />
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
     </fieldset>
   );
 }

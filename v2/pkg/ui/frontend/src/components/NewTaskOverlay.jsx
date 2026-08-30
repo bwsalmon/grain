@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Box, Button, Checkbox, Chip, FormControlLabel, FormGroup, Stack, TextField, Typography } from "@mui/material";
+import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
@@ -13,6 +13,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
   const [dependsOn, setDependsOn] = useState([]);
+  const [capabilities, setCapabilities] = useState([]);
 
   const addDependency = (t) => {
     setDependsOn((prev) => (prev.some((p) => p.id === t.id) ? prev : [...prev, t]));
@@ -25,9 +26,6 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     evt.preventDefault();
     const form = evt.target;
     const data = new FormData(form);
-    const capabilities = (config?.capabilities || [])
-      .filter((c) => form.elements["cap-" + c.id] && form.elements["cap-" + c.id].checked)
-      .map((c) => c.id);
     const reads = (data.get("reads") || "")
       .split(",").map((repo) => repo.trim()).filter((repo) => repo !== "");
     const payload = {
@@ -45,6 +43,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
       form.reset();
       setDependsOn([]);
+      setCapabilities([]);
       onClose();
       await onCreated();
     } catch (err) {
@@ -83,19 +82,31 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           label="Auto-merge once checks pass"
           sx={{ display: "flex", mt: 1 }}
         />
-        <fieldset>
-          <legend>Capabilities</legend>
-          <FormGroup>
+        <FormControl fullWidth margin="normal" size="small">
+          <InputLabel id="new-task-capabilities-label">Capabilities</InputLabel>
+          <Select
+            labelId="new-task-capabilities-label"
+            label="Capabilities"
+            multiple
+            value={capabilities}
+            onChange={(e) => setCapabilities(e.target.value)}
+            renderValue={(selected) => (
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {selected.map((id) => {
+                  const c = (config?.capabilities || []).find((cap) => cap.id === id);
+                  return <Chip key={id} size="small" label={c ? c.name : id} />;
+                })}
+              </Box>
+            )}
+          >
             {(config?.capabilities || []).map((c) => (
-              <FormControlLabel
-                key={c.id}
-                title={c.description}
-                control={<Checkbox name={"cap-" + c.id} />}
-                label={c.name}
-              />
+              <MenuItem key={c.id} value={c.id} title={c.description}>
+                <Checkbox checked={capabilities.includes(c.id)} size="small" />
+                <ListItemText primary={c.name} />
+              </MenuItem>
             ))}
-          </FormGroup>
-        </fieldset>
+          </Select>
+        </FormControl>
         <fieldset>
           <legend>Depends on <span className="hint">optional</span></legend>
           {dependsOn.length > 0 && (

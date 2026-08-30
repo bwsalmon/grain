@@ -56,7 +56,9 @@ describe("NewTaskOverlay", () => {
     await user.click(await screen.findByText("Add dark mode"));
 
     await user.type(screen.getByLabelText(/Read-only repos/), "owner/shared-lib, owner/schema ");
-    await user.click(screen.getByRole("checkbox", { name: "Web search" }));
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "Web search" }));
+    await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);

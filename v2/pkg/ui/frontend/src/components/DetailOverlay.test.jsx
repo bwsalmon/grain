@@ -175,18 +175,18 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("true")).toBeInTheDocument();
   });
 
-  it("toggles a capability checkbox via the capabilities endpoint", async () => {
+  it("toggles a capability via the capabilities select", async () => {
     // act must run its mutate callback synchronously, the same as the
     // real App.jsx does -- the callback closes over the change event's
-    // `checked`, which React resets on this controlled checkbox as soon
-    // as the event handler returns, so reading it any later (as the
-    // other assertions in this file do via a deferred `act.mock.calls`
-    // invocation) would observe the reverted value instead.
+    // selection, computed from the task's current capabilities, which
+    // would otherwise be stale by the time a deferred `act.mock.calls`
+    // invocation (as the other assertions in this file use) ran it.
     const act = vi.fn((mutate) => mutate());
     const user = userEvent.setup();
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
 
-    await user.click(screen.getByRole("checkbox", { name: "Web search" }));
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "Web search" }));
 
     expect(api).toHaveBeenCalledWith("/api/tasks/12/capabilities", {
       method: "POST",
