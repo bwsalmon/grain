@@ -72,6 +72,16 @@ export default function App() {
     setSchedules(await api("/api/schedules"));
   }, []);
 
+  // refreshConfig re-fetches /api/config -- needed after adding or
+  // removing a target repo (RepoList's own "Add"/"Remove",
+  // bwsalmon/agents#473) since config is otherwise only ever fetched
+  // once, at mount, and the repos pane's own list (repoRows) reads
+  // config.targetRepos to decide which repos to show and which ones it
+  // can offer to remove.
+  const refreshConfig = useCallback(async () => {
+    setConfig(await api("/api/config"));
+  }, []);
+
   const toggleSelect = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -222,7 +232,14 @@ export default function App() {
       {view === "repos" && releasesRepo !== null ? (
         <RepoReleases repo={releasesRepo} onBack={() => setReleasesRepo(null)} showError={showError} />
       ) : view === "repos" ? (
-        <RepoList tasks={tasks} onOpenRepo={openRepo} onOpenReleases={setReleasesRepo} />
+        <RepoList
+          tasks={tasks}
+          config={config}
+          onOpenRepo={openRepo}
+          onOpenReleases={setReleasesRepo}
+          onRefreshConfig={refreshConfig}
+          showError={showError}
+        />
       ) : view === "schedules" ? (
         <SchedulesList schedules={schedules} config={config} tasks={tasks} onRefresh={refreshSchedules} showError={showError} />
       ) : view === "logs" ? (

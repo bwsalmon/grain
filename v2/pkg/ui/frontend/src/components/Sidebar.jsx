@@ -1,5 +1,5 @@
 import { Box, Button, Divider, List, ListItemButton, ListItemText, Typography } from "@mui/material";
-import { STATE_LABELS, STATE_ORDER, reposFromTasks } from "../state.js";
+import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 
 const SIDEBAR_WIDTH = 232;
 
@@ -21,7 +21,7 @@ export default function Sidebar({ config, tasks, schedules = [], view, onSetView
     counts[t.state] = (counts[t.state] || 0) + 1;
     if (t.blocked) blocked += 1;
   }
-  const repoCount = reposFromTasks(tasks).length;
+  const repoCount = repoRows(config, tasks).length;
 
   // Picking a state filter always lands on the task list -- there is
   // nothing for it to scope on the repo page.

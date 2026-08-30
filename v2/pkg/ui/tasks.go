@@ -249,7 +249,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		ActorKind:     string(s.tasks.Config.Actor.Kind),
 		Capabilities:  s.tasks.Config.Capabilities,
 		RebootEnabled: s.tasks.Config.Reboot != nil,
-		TargetRepos:   s.tasks.Config.TargetRepos,
+		TargetRepos:   s.tasks.targetRepos(),
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()

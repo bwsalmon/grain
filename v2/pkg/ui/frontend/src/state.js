@@ -20,18 +20,30 @@ export function capabilityName(config, id) {
   return c ? c.name : id;
 }
 
-// reposFromTasks groups tasks by their write target (Task.Repo, never
-// Reads -- a read-only repo grants nothing and is not what a task
-// "belongs to") into one row per repo, sorted alphabetically, for the
-// repo page and its per-state counts. Tasks with no target (a proposal
-// nobody has pointed at a repo yet) are omitted rather than grouped
-// under a blank name.
-export function reposFromTasks(tasks) {
+// repoRows unions config.targetRepos with every repo a task's write
+// target names (Task.Repo, never Reads -- a read-only repo grants
+// nothing and is not what a task "belongs to") into one row per repo,
+// sorted alphabetically, for the repo page and its per-state counts.
+// Tasks with no target (a proposal nobody has pointed at a repo yet) are
+// omitted rather than grouped under a blank name.
+//
+// A targetRepos entry with no tasks yet still gets a (zero-count) row --
+// bwsalmon/agents#473 moved adding/removing a target repo onto this
+// page, which only works if a repo shows up here the moment it's added,
+// before anything has ever run against it. `configured` tells a row
+// apart from one that only exists because a task already targets it: the
+// repos pane only offers to remove the former, since there is nothing to
+// remove otherwise -- an unrestricted deployment's targetRepos is always
+// empty, so every row it has is `configured: false`.
+export function repoRows(config, tasks) {
   const byRepo = new Map();
+  for (const repo of config?.targetRepos || []) {
+    byRepo.set(repo, { repo, total: 0, counts: {}, blocked: 0, configured: true });
+  }
   for (const t of tasks) {
     if (!t.repo) continue;
     if (!byRepo.has(t.repo)) {
-      byRepo.set(t.repo, { repo: t.repo, total: 0, counts: {}, blocked: 0 });
+      byRepo.set(t.repo, { repo: t.repo, total: 0, counts: {}, blocked: 0, configured: false });
     }
     const entry = byRepo.get(t.repo);
     entry.total += 1;
@@ -47,7 +59,7 @@ export function reposFromTasks(tasks) {
 // whatever repo any existing task already targets -- so an unrestricted
 // deployment still gets a useful dropdown once it has filed at least one
 // task, rather than staying a bare text field forever. Sorted and
-// deduped the same way reposFromTasks already sorts its own rows.
+// deduped the same way repoRows already sorts its own rows.
 export function knownRepos(config, tasks) {
   const repos = new Set(config?.targetRepos || []);
   for (const t of tasks || []) {

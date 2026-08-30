@@ -1,7 +1,10 @@
-import { Button, Chip, Typography } from "@mui/material";
-import { STATE_LABELS, STATE_ORDER, reposFromTasks } from "../state.js";
+import { useState } from "react";
+import { Button, Chip, Stack, TextField, Typography } from "@mui/material";
+import api from "../api.js";
+import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 
-// RepoList is the repo page: one row per repo tasks actually target,
+// RepoList is the repo page: one row per known repo -- every
+// config.targetRepos entry, plus any repo tasks target that isn't one --
 // each showing how many tasks sit in every state so a repo with
 // something stuck (awaiting_reply, or a pile of blocked work) stands out
 // before anyone opens it. Clicking a row is the entry point into the
@@ -11,11 +14,58 @@ import { STATE_LABELS, STATE_ORDER, reposFromTasks } from "../state.js";
 // management is a property of the repo (bwsalmon/agents#459), not a
 // deployment-wide action, so it lives here rather than behind a sidebar
 // button reachable from anywhere.
-export default function RepoList({ tasks, onOpenRepo, onOpenReleases }) {
-  const repos = reposFromTasks(tasks);
+//
+// Adding and removing a target repo (bwsalmon/agents#473) lives here
+// too now, replacing the "Target repos" list Settings used to bury this
+// behind: a repo is a thing this page is about, not a deployment knob.
+// Remove only appears on a row that is actually in config.targetRepos
+// (repoRows' own `configured`) -- a row that only exists because a task
+// already targets it has nothing to remove, and removing a configured
+// repo doesn't make the row disappear either as long as a task still
+// targets it, so the two facts (targeted, configured) stay visibly
+// independent rather than the button pretending removal always clears
+// the row.
+export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, onRefreshConfig, showError }) {
+  const [newRepo, setNewRepo] = useState("");
+  const repos = repoRows(config, tasks);
+
+  const addRepo = async (evt) => {
+    evt.preventDefault();
+    const repo = newRepo.trim();
+    if (repo === "") return;
+    try {
+      await api("/api/repos", { method: "POST", body: JSON.stringify({ repo }) });
+      setNewRepo("");
+      await onRefreshConfig();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const removeRepo = async (evt, repo) => {
+    evt.stopPropagation();
+    if (!confirm(`Remove ${repo} from target repos? Tasks that already target it are not affected, but new tasks won't be able to until it's added back.`)) return;
+    try {
+      const [owner, name] = repo.split("/");
+      await api(`/api/repos/${owner}/${name}`, { method: "DELETE" });
+      await onRefreshConfig();
+    } catch (err) {
+      showError(err);
+    }
+  };
 
   return (
     <main>
+      <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ px: "1.5rem", pt: "1.2rem" }}>
+        <TextField
+          value={newRepo}
+          onChange={(evt) => setNewRepo(evt.target.value)}
+          placeholder="owner/name"
+          size="small"
+          autoComplete="off"
+        />
+        <Button type="submit" variant="outlined">Add repo</Button>
+      </Stack>
       <ul className="repo-list">
         {repos.map((r) => (
           <li key={r.repo} onClick={() => onOpenRepo(r.repo)}>
@@ -36,11 +86,16 @@ export default function RepoList({ tasks, onOpenRepo, onOpenReleases }) {
             >
               Releases
             </Button>
+            {r.configured && (
+              <Button size="small" variant="outlined" color="error" onClick={(evt) => removeRepo(evt, r.repo)}>
+                Remove
+              </Button>
+            )}
           </li>
         ))}
       </ul>
       {repos.length === 0 && (
-        <p className="empty">No repos yet -- tasks with a target repo will show up here.</p>
+        <p className="empty">No repos yet -- add one above, or file a task with a target repo.</p>
       )}
     </main>
   );
