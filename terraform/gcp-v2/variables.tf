@@ -248,6 +248,40 @@ variable "ui_port" {
   default     = 8080
 }
 
+variable "expose_ui_publicly" {
+  type        = bool
+  description = <<-EOT
+    Put the UI behind a public HTTPS load balancer, protected by IAP
+    (iap.tf), reachable at a fixed DNS name from any browser.
+
+    Turn it off for a tunnel-only deployment. Nothing public is created
+    then -- no load balancer, no reserved address, no managed
+    certificate, no DNS name -- and the UI is reached by forwarding
+    ui_port over IAP's TCP tunnel instead:
+
+        gcloud compute start-iap-tunnel <instance> <ui_port> \
+          --local-host-port=localhost:8080 --zone <zone>
+
+    then http://localhost:8080. See the tunnel_command output, which
+    fills that in for you.
+
+    The access control is equivalent, not weaker: both paths are IAP,
+    differing in which grant they check --
+    roles/iap.httpsResourceAccessor on the backend service for the load
+    balancer, roles/iap.tunnelResourceAccessor for the tunnel. What
+    changes is what exists: tunnel-only has no public entry point at
+    all, no third-party DNS dependency (variables.tf's own
+    dns_managed_zone explains the sslip.io default), and none of the
+    certificate provisioning wait a first apply otherwise spends.
+
+    It is also most of this module's running cost -- the load balancer
+    and its managed certificate cost more than the VM. On for
+    compatibility; a deployment serving two named people probably wants
+    it off.
+  EOT
+  default     = true
+}
+
 # ------------------------------------------------------------------- IAM ---
 
 variable "agent_account_id" {

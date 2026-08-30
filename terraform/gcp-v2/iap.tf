@@ -21,7 +21,8 @@
 #                              google_compute_instance.host:ui_port
 
 resource "google_compute_health_check" "ui" {
-  name = "${var.name_prefix}-ui-health"
+  count = var.expose_ui_publicly ? 1 : 0
+  name  = "${var.name_prefix}-ui-health"
 
   http_health_check {
     port         = var.ui_port
@@ -33,6 +34,7 @@ resource "google_compute_health_check" "ui" {
 # this deployment is one VM, on purpose (variables.tf's own machine_type
 # comment on why v2 needs no fleet).
 resource "google_compute_instance_group" "host" {
+  count     = var.expose_ui_publicly ? 1 : 0
   name      = "${var.name_prefix}-ig"
   zone      = var.zone
   instances = [google_compute_instance.host.self_link]
@@ -44,14 +46,15 @@ resource "google_compute_instance_group" "host" {
 }
 
 resource "google_compute_backend_service" "ui" {
+  count                 = var.expose_ui_publicly ? 1 : 0
   name                  = "${var.name_prefix}-ui-backend"
   protocol              = "HTTP"
   port_name             = "http"
   load_balancing_scheme = "EXTERNAL_MANAGED"
-  health_checks         = [google_compute_health_check.ui.id]
+  health_checks         = [google_compute_health_check.ui[0].id]
 
   backend {
-    group = google_compute_instance_group.host.self_link
+    group = google_compute_instance_group.host[0].self_link
   }
 
   iap {
@@ -78,12 +81,14 @@ resource "google_compute_backend_service" "ui" {
 }
 
 resource "google_compute_url_map" "ui" {
+  count           = var.expose_ui_publicly ? 1 : 0
   name            = "${var.name_prefix}-ui-map"
-  default_service = google_compute_backend_service.ui.id
+  default_service = google_compute_backend_service.ui[0].id
 }
 
 resource "google_compute_managed_ssl_certificate" "ui" {
-  name = "${var.name_prefix}-ui-cert"
+  count = var.expose_ui_publicly ? 1 : 0
+  name  = "${var.name_prefix}-ui-cert"
 
   managed {
     domains = [local.dns_name]
@@ -91,18 +96,20 @@ resource "google_compute_managed_ssl_certificate" "ui" {
 }
 
 resource "google_compute_target_https_proxy" "ui" {
+  count            = var.expose_ui_publicly ? 1 : 0
   name             = "${var.name_prefix}-ui-proxy"
-  url_map          = google_compute_url_map.ui.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.ui.id]
+  url_map          = google_compute_url_map.ui[0].id
+  ssl_certificates = [google_compute_managed_ssl_certificate.ui[0].id]
 }
 
 resource "google_compute_global_forwarding_rule" "ui" {
+  count                 = var.expose_ui_publicly ? 1 : 0
   name                  = "${var.name_prefix}-ui-fr"
-  ip_address            = google_compute_global_address.lb.address
+  ip_address            = google_compute_global_address.lb[0].address
   ip_protocol           = "TCP"
   port_range            = "443"
   load_balancing_scheme = "EXTERNAL_MANAGED"
-  target                = google_compute_target_https_proxy.ui.id
+  target                = google_compute_target_https_proxy.ui[0].id
 }
 
 # --- an OAuth brand/client, for a deployment that wants its own -------
@@ -119,7 +126,7 @@ resource "google_compute_global_forwarding_rule" "ui" {
 # not cover.
 
 resource "google_iap_brand" "this" {
-  count             = var.create_iap_brand ? 1 : 0
+  count             = var.expose_ui_publicly && var.create_iap_brand ? 1 : 0
   support_email     = var.iap_brand_support_email
   application_title = var.iap_brand_application_title
   project           = var.project_id
@@ -135,14 +142,14 @@ resource "google_iap_brand" "this" {
 }
 
 resource "google_iap_client" "this" {
-  count        = var.create_iap_brand ? 1 : 0
+  count        = var.expose_ui_publicly && var.create_iap_brand ? 1 : 0
   brand        = google_iap_brand.this[0].name
   display_name = "${var.name_prefix} UI"
 }
 
 locals {
-  iap_client_id     = var.create_iap_brand ? google_iap_client.this[0].client_id : var.iap_client_id
-  iap_client_secret = var.create_iap_brand ? google_iap_client.this[0].secret : var.iap_client_secret
+  iap_client_id     = var.expose_ui_publicly && var.create_iap_brand ? google_iap_client.this[0].client_id : var.iap_client_id
+  iap_client_secret = var.expose_ui_publicly && var.create_iap_brand ? google_iap_client.this[0].secret : var.iap_client_secret
 }
 
 # Who may actually reach the UI once they are through Google's own sign-in
@@ -151,9 +158,9 @@ locals {
 # grant elsewhere (another IAP-protected app in the same project) does
 # not also open this one.
 resource "google_iap_web_backend_service_iam_member" "members" {
-  for_each            = toset(var.iap_members)
+  for_each            = var.expose_ui_publicly ? toset(var.iap_members) : toset([])
   project             = var.project_id
-  web_backend_service = google_compute_backend_service.ui.name
+  web_backend_service = google_compute_backend_service.ui[0].name
   role                = "roles/iap.httpsResourceAccessor"
   member              = each.value
 }

@@ -6,7 +6,12 @@
 # Required env:
 #   GITHUB_STEP_SUMMARY  set by the Actions runner
 # Optional env:
-#   URL, INSTANCE, ZONE, PROJECT, DEPLOY_GENERATION
+#   URL, TUNNEL_COMMAND, INSTANCE, ZONE, PROJECT, DEPLOY_GENERATION
+#
+# Exactly one of URL and TUNNEL_COMMAND describes how to reach this
+# deployment: a public load balancer, or IAP's TCP tunnel when
+# expose_ui_publicly is off. Both empty means the apply did not get far
+# enough to have outputs at all.
 set -euo pipefail
 
 summary="${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is not set (is this running outside Actions?)}"
@@ -16,13 +21,29 @@ summary="${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is not set (is this running 
   echo
   echo "| | |"
   echo "|---|---|"
-  echo "| URL | ${URL:-<not applied>} |"
+  if [ -n "${URL:-}" ]; then
+    echo "| URL | ${URL} |"
+  elif [ -n "${TUNNEL_COMMAND:-}" ]; then
+    echo "| URL | none -- tunnel-only (see below) |"
+  else
+    echo "| URL | <not applied> |"
+  fi
   echo "| Instance | ${INSTANCE:-<not applied>} |"
   echo "| Zone | ${ZONE:-<not applied>} |"
   echo "| Project | ${PROJECT:-<not applied>} |"
   echo "| Generation | ${DEPLOY_GENERATION:-<none>} |"
   echo
-  echo "The URL is reachable only after signing in as one of \`iap_members\`."
+  if [ -n "${URL:-}" ]; then
+    echo "The URL is reachable only after signing in as one of \`iap_members\`."
+  elif [ -n "${TUNNEL_COMMAND:-}" ]; then
+    echo "This deployment has no public entry point. Forward the UI to your own"
+    echo "machine over IAP's TCP tunnel, then open http://localhost:8080 --"
+    echo "authenticated by \`roles/iap.tunnelResourceAccessor\`:"
+    echo
+    echo '```sh'
+    echo "${TUNNEL_COMMAND}"
+    echo '```'
+  fi
   echo
   echo "Host log:"
   echo

@@ -102,7 +102,11 @@ gcloud compute ssh "$INSTANCE" --zone "$ZONE" --project "$PROJECT" \
   --tunnel-through-iap --command 'sudo journalctl -u grain-v2-config-sync -f'
 ```
 
-**6. Open it.** `terraform output url` -- sign in as one of `iap_members`.
+**6. Open it.** `terraform output url` -- sign in as one of
+`iap_members`. With `expose_ui_publicly = false` there is no URL: run
+`terraform output tunnel_command`, which prints the
+`gcloud compute start-iap-tunnel` line to forward the UI to
+`http://localhost:8080`.
 
 ## Deploying it from CI
 
@@ -354,8 +358,14 @@ lists in sync automatically; an operator who changes one by hand (via
   dispatching only into host directories can turn it off and get MIGRATE,
   E2, and a daemon that survives host maintenance.
 - **The load balancer and managed SSL certificate cost more to run than
-  the VM does.** This module is sized for a staging environment working
-  against a handful of test repos, not for scaling traffic.
+  the VM does**, and are most of what this module spends. Set
+  `expose_ui_publicly = false` and none of it is created: no load
+  balancer, no reserved address, no managed certificate, no DNS name.
+  The UI is then reached by forwarding `ui_port` over IAP's TCP tunnel
+  (`terraform output tunnel_command`), which is the same IAP, checking
+  `roles/iap.tunnelResourceAccessor` instead of
+  `roles/iap.httpsResourceAccessor`. It also drops the sslip.io
+  dependency and the certificate-provisioning wait entirely.
 - **`create_iap_brand` is not needed and may not work.** IAP falls back
   to a Google-managed OAuth client when none is configured, which is the
   normal path -- see "No OAuth client needed" above.
