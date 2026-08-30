@@ -44,6 +44,7 @@ function setupApi(tasks = initialTasks) {
     if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
     if (path === "/api/schedules") return Promise.resolve([]);
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
+    if (path === "/api/logs") return Promise.resolve({ enabled: false });
     return Promise.resolve(null);
   });
   return { get tasksState() { return tasksState; } };
@@ -150,6 +151,7 @@ describe("App", () => {
     ["Scheduled tasks", "Scheduled tasks"],
     ["Settings", "Settings"],
     ["Upgrade", "Upgrade"],
+    ["Logs", "Logs"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
     const user = userEvent.setup();
