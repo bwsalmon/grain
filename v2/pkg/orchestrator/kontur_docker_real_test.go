@@ -48,12 +48,14 @@ package orchestrator_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -356,5 +358,159 @@ func TestKonturSandboxesToolsForAgainstARealDockerBackedVM(t *testing.T) {
 	}
 	if status := string(bytes.TrimSpace(statusOut)); status != "running" {
 		t.Errorf("real VM container status = %q, want %q", status, "running")
+	}
+}
+
+// TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently is the
+// concurrency counterpart to TestKonturSandboxesToolsForAgainstARealDockerBackedVM
+// above: that test proves ToolsFor works against one real cloud-hypervisor
+// VM under KVM, this one proves two slots' worth of real VMs actually come
+// up side by side under real docker/netshim/cloud-hypervisor, driven the
+// same way reconcileDispatch's own goroutine-per-dispatch loop
+// (cycle.go) drives distinct slots -- concurrently, from independent
+// goroutines, racing kontur.Create for two different VM names against
+// each other for real, not against sandboxes_concurrency_test.go's fake
+// konturctl double.
+//
+// It exists because bwsalmon/agents#528 asked for kontur to be exercised
+// under real nested virtualization specifically for corner cases and
+// concurrency, and because KonturSandboxes.ensure used to hold a single
+// KonturSandboxes-wide lock across the whole kontur.Create subprocess
+// call -- serializing every slot's VM creation behind whichever slot
+// happened to start first, silently undoing the concurrency
+// reconcileDispatch's own doc comment promises. That bug was caught and
+// fixed against a fake (sandboxes_concurrency_test.go's
+// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially,
+// which can assert wall-clock overlap precisely because its fake
+// konturctl sleeps a known amount); this test is the same claim proven
+// against the real thing, where "does it still work" -- two independent
+// netshim network namespaces, two independent cloud-hypervisor guests,
+// two independently-derived -ip/-port pairs (KonturConfig.BaseIP/
+// BasePort) -- matters more than exact timing.
+func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
+	konturDockerRealTestPrereqs(t)
+
+	konturctlDir := buildKonturctl(t)
+	image := buildKonturDockerImage(t)
+	imagesHostPath, sshKeyPath := buildKonturGuestImage(t)
+
+	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stateDir := t.TempDir()
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		// "kdc-" + a one-digit slot number stays well under the 11-byte
+		// cap KonturConfig.NamePrefix's own doc comment explains (netshim
+		// names each VM's tap device "tap-"+name, and Linux caps interface
+		// names at 15 bytes).
+		NamePrefix: "kdc-",
+		Backend:    kontur.BackendDocker,
+		StateDir:   stateDir,
+		CreateArgs: []string{
+			"-kontur-image", image,
+			"-images-hostpath", imagesHostPath,
+			"-disk", "/images/disk.img",
+			"-kernel", "/images/vmlinuz",
+			"-initramfs", "/images/initrd.img",
+			"-guest-port", "22",
+		},
+		SSHUser:           "debian",
+		SSHKey:            sshKeyPath,
+		Workspace:         "/home/debian",
+		ReadyTimeout:      3 * time.Minute,
+		ReadyPollInterval: time.Second,
+		// Distinct from TestKonturSandboxesToolsForAgainstARealDockerBackedVM's
+		// own hardcoded -ip/-port (169.254.100.2:31080) so the two tests
+		// never fight over the same address if run back to back without a
+		// clean teardown in between.
+		BaseIP:   "169.254.100.20",
+		BasePort: 31090,
+	})
+
+	slots := []string{"1", "2"}
+	names := make([]string, len(slots))
+	for i, slot := range slots {
+		names[i] = k.VMNameFor(slot)
+	}
+	t.Cleanup(func() {
+		for _, name := range names {
+			if err := kontur.Delete(context.Background(), stateDir, name); err != nil {
+				t.Logf("cleaning up real kontur VM %q: %v", name, err)
+			}
+		}
+	})
+
+	type outcome struct {
+		slot  string
+		tools []mcp.Tool
+		err   error
+	}
+	results := make(chan outcome, len(slots))
+	var wg sync.WaitGroup
+	for _, slot := range slots {
+		wg.Add(1)
+		go func(slot string) {
+			defer wg.Done()
+			tools, err := k.ToolsFor(context.Background(), slot)
+			results <- outcome{slot: slot, tools: tools, err: err}
+		}(slot)
+	}
+	wg.Wait()
+	close(results)
+
+	toolsBySlot := map[string][]mcp.Tool{}
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("ToolsFor(%s) against real konturctl/docker/cloud-hypervisor: %v", r.slot, r.err)
+		}
+		toolsBySlot[r.slot] = r.tools
+	}
+
+	// Each VM got its own independently-derived port -- confirms BaseIP/
+	// BasePort's arithmetic actually reached real konturctl's "-port" flag
+	// for both slots, not just the first.
+	port1, err := kontur.Port(stateDir, names[0])
+	if err != nil {
+		t.Fatalf("kontur.Port(%s): %v", names[0], err)
+	}
+	port2, err := kontur.Port(stateDir, names[1])
+	if err != nil {
+		t.Fatalf("kontur.Port(%s): %v", names[1], err)
+	}
+	if port1 == port2 {
+		t.Errorf("both slots' VMs got the same port %d, want BasePort-derived distinct ports", port1)
+	}
+	if port1 != 31090 || port2 != 31091 {
+		t.Errorf("ports = %d, %d, want 31090, 31091 (BasePort=31090, offsets 0 and 1)", port1, port2)
+	}
+
+	// Each guest actually runs and answers a distinct command over SSH --
+	// the same boot-time race TestKonturSandboxesToolsForAgainstARealDockerBackedVM's
+	// own retry loop works around, run for two guests at once this time.
+	for _, slot := range slots {
+		var runCommand *mcp.Tool
+		for i, tool := range toolsBySlot[slot] {
+			if tool.Name == "run_command" {
+				runCommand = &toolsBySlot[slot][i]
+			}
+		}
+		if runCommand == nil {
+			t.Fatalf("slot %s: no run_command tool returned", slot)
+		}
+		marker := fmt.Sprintf("grain-kontur-concurrent-marker-%s", slot)
+		var result mcp.Result
+		deadline := time.Now().Add(2 * time.Minute)
+		for {
+			result = runCommand.Handler(context.Background(), map[string]any{"command": "echo " + marker})
+			if !result.IsError {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("slot %s: run_command over SSH never succeeded within %s: %s", slot, 2*time.Minute, result.Text)
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if !strings.Contains(result.Text, marker) {
+			t.Errorf("slot %s: run_command output = %q, want it to contain %q", slot, result.Text, marker)
+		}
 	}
 }

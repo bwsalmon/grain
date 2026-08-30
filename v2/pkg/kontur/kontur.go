@@ -233,6 +233,25 @@ func DockerPodIP(ctx context.Context, vmName string) (string, error) {
 	return ip, nil
 }
 
+// DockerContainerStatus returns the docker State.Status (e.g. "running",
+// "exited", "created", "dead") of vmName's own VM container under
+// BackendDocker -- kontur.PodName(vmName), not the "-netns" holder
+// DockerPodIP resolves. "konturctl vm create" under this backend starts
+// that container with a plain "docker run -d" (bwsalmon/kontur's own
+// internal/dockervm), which -- like any "docker run -d" -- reports
+// success the moment the container starts, not once whatever it execs
+// has proven itself alive: a guest that fails before finishing boot
+// (a bad disk/kernel path, cloud-hypervisor itself crashing, ...) still
+// makes kontur.Create return nil, and the container goes on to exit
+// within seconds -- confirmed by hand against a real docker daemon with a
+// deliberately broken disk path. KonturSandboxes.waitForSSHPort polls this
+// so that case fails fast with the container's own status instead of
+// silently waiting out the full ReadyTimeout dialing a port nothing will
+// ever answer.
+func DockerContainerStatus(ctx context.Context, vmName string) (string, error) {
+	return dockerInspect(ctx, `{{.State.Status}}`, PodName(vmName))
+}
+
 // vm runs `konturctl vm <subcommand> name -state-dir stateDir
 // <extraArgs...>`, the shape every `konturctl vm` subcommand shares
 // (DefaultStateDir's own doc comment). It returns konturctl's combined
