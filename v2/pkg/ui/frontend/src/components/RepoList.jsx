@@ -1,4 +1,4 @@
-import { Chip, Typography } from "@mui/material";
+import { Button, Chip, Typography } from "@mui/material";
 import { STATE_LABELS, STATE_ORDER, reposFromTasks } from "../state.js";
 
 // RepoList is the repo page: one row per repo tasks actually target,
@@ -6,7 +6,12 @@ import { STATE_LABELS, STATE_ORDER, reposFromTasks } from "../state.js";
 // something stuck (awaiting_reply, or a pile of blocked work) stands out
 // before anyone opens it. Clicking a row is the entry point into the
 // repo-centric task list -- onOpenRepo scopes App's own task view to it.
-export default function RepoList({ tasks, onOpenRepo }) {
+// The Releases button is a second entry point into the same row (hence
+// stopPropagation, so it doesn't also fire onOpenRepo): release
+// management is a property of the repo (bwsalmon/agents#459), not a
+// deployment-wide action, so it lives here rather than behind a sidebar
+// button reachable from anywhere.
+export default function RepoList({ tasks, onOpenRepo, onOpenReleases }) {
   const repos = reposFromTasks(tasks);
 
   return (
@@ -24,6 +29,13 @@ export default function RepoList({ tasks, onOpenRepo }) {
             <Typography variant="caption" color="text.secondary" whiteSpace="nowrap">
               {r.total} task{r.total === 1 ? "" : "s"}
             </Typography>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={(evt) => { evt.stopPropagation(); onOpenReleases(r.repo); }}
+            >
+              Releases
+            </Button>
           </li>
         ))}
       </ul>

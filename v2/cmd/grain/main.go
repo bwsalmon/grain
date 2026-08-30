@@ -515,7 +515,7 @@ func cmdConfig(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
-	slots := fs.String("slots", "", "comma-separated slot names -- the daemon's concurrency pool")
+	maxConcurrent := fs.Int("max-concurrent", 0, "maximum number of tasks dispatched at once")
 	geminiModel := fs.String("gemini-model", "", "Gemini model the agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
 	githubHost := fs.String("github-host", "", "GitHub API host")
@@ -534,9 +534,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "poll-interval":
 			v := *pollInterval
 			req.PollInterval = &v
-		case "slots":
-			v := strings.Split(*slots, ",")
-			req.Slots = &v
+		case "max-concurrent":
+			v := *maxConcurrent
+			req.MaxConcurrent = &v
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
@@ -669,7 +669,7 @@ func (p *printer) settings(s ui.Settings) {
 		return
 	}
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
-	fmt.Printf("slots:          %s\n", strings.Join(s.Slots, ", "))
+	fmt.Printf("max concurrent: %d\n", s.MaxConcurrent)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)
 	fmt.Printf("github host:    %s\n", s.GitHubHost)

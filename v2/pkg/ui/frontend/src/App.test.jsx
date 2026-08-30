@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
@@ -38,7 +38,6 @@ function setupApi(tasks = initialTasks, schedules = []) {
     if (/^\/api\/tasks\/\w+\/(approve|submit|retry|close|reopen)$/.test(path)) return Promise.resolve({});
     if (path === "/api/secrets") return Promise.resolve({ enabled: false });
     if (path === "/api/settings") return Promise.resolve({ configured: false });
-    if (path === "/api/release-configs") return Promise.resolve([]);
     if (/^\/api\/repos\/[^/]+\/[^/]+\/release-config$/.test(path)) {
       return Promise.resolve({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 });
     }
@@ -162,6 +161,24 @@ describe("App", () => {
     expect(screen.queryByText(/Repo: acme\/other/)).not.toBeInTheDocument();
   });
 
+  it("opens a repo's release pane from the repo view and back out of it", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+    const row = (await screen.findByText("acme/other")).closest("li");
+    await user.click(within(row).getByRole("button", { name: "Releases" }));
+
+    expect(await screen.findByRole("heading", { name: "acme/other releases" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Releases" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+
+    expect(await screen.findByText("acme/other")).toBeInTheDocument();
+  });
+
   it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
     const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
     setupApi(initialTasks, [schedule]);
@@ -196,11 +213,9 @@ describe("App", () => {
   });
 
   it.each([
-    ["Releases", "Releases"],
     ["Secrets", "Secrets"],
     ["Settings", "Settings"],
     ["Upgrade", "Upgrade"],
-    ["Logs", "Logs"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
     const user = userEvent.setup();
@@ -210,6 +225,18 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: button }));
 
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("switches to the logs page, hiding the task list", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "Logs" }));
+
+    expect(await screen.findByRole("heading", { name: "Logs" })).toBeInTheDocument();
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {

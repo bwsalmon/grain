@@ -38,7 +38,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             </Alert>
           )}
 
-          <Comments t={t} act={act} />
+          <Timeline t={t} act={act} />
         </div>
 
         <div className="detail-side">
@@ -51,8 +51,6 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
           </div>
 
           <Actions t={t} act={act} />
-          <Timeline t={t} />
-          <Attempts t={t} />
           <Declared t={t} />
           <CapabilityToggles t={t} config={config} act={act} />
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
@@ -158,71 +156,81 @@ function outcomeLabel(outcome) {
   return OUTCOME_LABELS[outcome] || (outcome.charAt(0).toUpperCase() + outcome.slice(1));
 }
 
-// Timeline is every point the record lets a task's state be pinned to a
-// time, oldest first (bwsalmon/agents#452 -- "make it clear what state
-// the task is in", as a history rather than only the badge above it).
+// timelineEvents merges everything grain has recorded about a task --
+// every state transition (bwsalmon/agents#452's t.transitions, which
+// already covers filed/queued/running/awaiting_reply/failed/completed/
+// closed), every attempt's own result (bwsalmon/agents#445's
+// t.attempts, with the outcome and detail a bare state change doesn't
+// carry), and every comment -- into one list, oldest first, each
+// carrying the timestamp it happened at. There is no unified "history"
+// on the wire: this just interleaves TaskDetail's own separate arrays by
+// their own timestamps, client-side.
 //
 // t.transitions omits a state the record has no timestamp for -- most
 // notably a past awaiting_reply period once its question has been
 // answered (see model.Transitions' own doc comment on why that one is
-// unrecoverable) -- so this can show fewer entries than State's full
-// vocabulary, which is expected rather than a bug to chase.
-function Timeline({ t }) {
+// unrecoverable) -- so this can skip a state without that being a bug to
+// chase.
+function timelineEvents(t) {
+  const events = [];
   const transitions = t.transitions || [];
-  if (transitions.length === 0) return null;
-  const lastIndex = transitions.length - 1;
-  return (
-    <fieldset>
-      <legend>History</legend>
-      <ul className="transitions">
-        {transitions.map((tr, i) => {
-          // Only the most recent transition can still be "now" -- a
-          // running entry earlier in the list is over and done, so it
-          // should read as a static dot rather than keep spinning as if
-          // the task were still running that far in the past.
-          const isCurrent = i === lastIndex;
-          const badgeClass = `badge badge-${tr.state}${isCurrent ? "" : " badge-static"}`;
-          return (
-            <li className="transition" key={i}>
-              <span className="transition-arrow">→</span>
-              <span className={badgeClass}>{STATE_LABELS[tr.state] || tr.state}</span>
-              <span className="transition-at">{new Date(tr.at).toLocaleString()}</span>
-            </li>
-          );
-        })}
-      </ul>
-    </fieldset>
-  );
-}
+  const lastTransitionIndex = transitions.length - 1;
 
-// Attempts is every run this task has had, oldest first, each with its
-// own status and timing -- bwsalmon/agents#445's "show attempts and
-// their status in order in the task view", the full history
-// t.failedAttempts only counts and t.lastFailureReason only explains for
-// the most recent one.
-function Attempts({ t }) {
-  const attempts = t.attempts || [];
-  if (attempts.length === 0) return null;
-  return (
-    <fieldset>
-      <legend>Attempts ({attempts.length})</legend>
-      <ul className="attempts">
-        {attempts.map((a) => (
-          <li className="attempt" key={a.number}>
-            <div className="attempt-header">
-              <span className="attempt-number">#{a.number}</span>
-              <span className={`badge badge-${OUTCOME_BADGES[a.outcome || ""] || "queued"}`}>{outcomeLabel(a.outcome)}</span>
-            </div>
-            <div className="attempt-meta">
-              started {new Date(a.startedAt).toLocaleString()}
-              {a.finishedAt && <> · finished {new Date(a.finishedAt).toLocaleString()}</>}
-            </div>
-            {a.detail && <div className="attempt-detail">{a.detail}</div>}
-          </li>
-        ))}
-      </ul>
-    </fieldset>
-  );
+  transitions.forEach((tr, i) => {
+    events.push({
+      key: `transition-${i}`,
+      at: new Date(tr.at),
+      badge: tr.state,
+      // Only the most recent transition can still be "now" -- a running
+      // entry earlier in the list is over and done, so its dot should
+      // read as static rather than keep spinning as if the task were
+      // still running that far in the past.
+      current: i === lastTransitionIndex,
+      render: () => <div className="timeline-title">{STATE_LABELS[tr.state] || tr.state}</div>,
+    });
+  });
+
+  (t.attempts || []).forEach((a) => {
+    events.push({
+      key: `attempt-${a.number}`,
+      at: new Date(a.startedAt),
+      badge: OUTCOME_BADGES[a.outcome || ""] || "queued",
+      // Same reasoning as transitions above: a "running" badge only
+      // belongs to an attempt that hasn't finished yet, never a past one.
+      current: !a.finishedAt,
+      render: () => (
+        <>
+          <div className="timeline-title">Attempt #{a.number} · {outcomeLabel(a.outcome)}</div>
+          <div className="timeline-meta">
+            started {new Date(a.startedAt).toLocaleString()}
+            {a.finishedAt && <> · finished {new Date(a.finishedAt).toLocaleString()}</>}
+          </div>
+          {a.detail && <div className="timeline-detail">{a.detail}</div>}
+        </>
+      ),
+    });
+  });
+
+  (t.comments || []).forEach((c, i) => {
+    // onBehalfOf is set when grain relayed somebody else's words -- a
+    // question from a dispatched run reads as grain speaking for an
+    // agent, not as grain's own.
+    const who = c.onBehalfOf ? `${c.author} on behalf of ${c.onBehalfOf}` : c.author;
+    events.push({
+      key: `comment-${i}`,
+      at: c.createdAt ? new Date(c.createdAt) : null,
+      badge: "comment",
+      render: () => (
+        <>
+          <div className="timeline-meta">{who} · {c.authorKind}</div>
+          <div className="timeline-comment-body">{c.body}</div>
+        </>
+      ),
+    });
+  });
+
+  events.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));
+  return events;
 }
 
 function CapabilityToggles({ t, config, act }) {
@@ -323,8 +331,16 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
   );
 }
 
-function Comments({ t, act }) {
+// Timeline is the task's whole history -- every state transition, every
+// attempt's result, every comment -- as one time-ordered feed
+// (bwsalmon/agents#453: "show the various actions ... as a timeline with
+// times next to each transition"), rendered as a connected list of dots
+// (reusing the existing badge-<state> dot styling) with the comment box
+// fixed at the bottom, the same spot Comments used to keep it in under
+// the conversation-only list this replaces.
+function Timeline({ t, act }) {
   const textareaRef = useRef(null);
+  const events = timelineEvents(t);
 
   const send = async () => {
     const body = textareaRef.current.value;
@@ -334,20 +350,23 @@ function Comments({ t, act }) {
   };
 
   return (
-    <div className="comments">
-      <h3>Conversation</h3>
-      {(t.comments || []).map((c, i) => {
-        // onBehalfOf is set when grain relayed somebody else's words --
-        // a question from a dispatched run reads as grain speaking for
-        // an agent, not as grain's own.
-        const who = c.onBehalfOf ? `${c.author} on behalf of ${c.onBehalfOf}` : c.author;
-        return (
-          <div className="comment" key={i}>
-            <div className="meta">{who} · {c.authorKind}</div>
-            <div>{c.body}</div>
-          </div>
-        );
-      })}
+    <div className="timeline">
+      <h3>Timeline</h3>
+      {events.length > 0 && (
+        <ul className="timeline-list">
+          {events.map((e) => (
+            <li className="timeline-item" key={e.key}>
+              <div className="timeline-marker">
+                <span className={`badge badge-${e.badge}${e.badge === "running" && !e.current ? " badge-static" : ""}`} />
+              </div>
+              <div className="timeline-body">
+                {e.at && <div className="timeline-when">{e.at.toLocaleString()}</div>}
+                {e.render()}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
       {/* Uncontrolled on purpose: a poll landing mid-reply re-renders
           this component with fresh props, but never touches the
           textarea's own DOM value, so an unsent draft survives it. */}

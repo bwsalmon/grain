@@ -194,12 +194,13 @@ describe("DetailOverlay", () => {
     });
   });
 
-  it("shows nothing under Attempts when the task has never run", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
-    expect(screen.queryByText(/Attempts/)).not.toBeInTheDocument();
+  it("shows no timeline entries when the task has no history", () => {
+    const { container } = render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.getByText("Timeline")).toBeInTheDocument();
+    expect(container.querySelectorAll(".timeline-item")).toHaveLength(0);
   });
 
-  it("lists every attempt in order, with its number, status and timing", () => {
+  it("lists every attempt on the timeline in order, with its number, status and timing", () => {
     render(
       <DetailOverlay
         task={{
@@ -217,20 +218,12 @@ describe("DetailOverlay", () => {
       />
     );
 
-    expect(screen.getByText("Attempts (2)")).toBeInTheDocument();
-    expect(screen.getByText("#1")).toBeInTheDocument();
-    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Attempt #1 · Failed")).toBeInTheDocument();
     expect(screen.getByText("build error")).toBeInTheDocument();
-    expect(screen.getByText("#2")).toBeInTheDocument();
-    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByText("Attempt #2 · Running")).toBeInTheDocument();
   });
 
-  it("shows nothing under History when there are no transitions", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
-    expect(screen.queryByText("History")).not.toBeInTheDocument();
-  });
-
-  it("lists every transition in order, with its state and time", () => {
+  it("lists every transition on the timeline in order, with its label and time", () => {
     render(
       <DetailOverlay
         task={{
@@ -249,11 +242,35 @@ describe("DetailOverlay", () => {
       />
     );
 
-    const history = screen.getByText("History").closest("fieldset");
+    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
     const labels = ["Proposed", "Queued", "Running"];
     for (const label of labels) {
-      expect(within(history).getByText(label)).toBeInTheDocument();
+      expect(within(list).getByText(label)).toBeInTheDocument();
     }
+  });
+
+  it("interleaves transitions, attempts and comments by their own timestamps", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          transitions: [
+            { state: "proposed", at: "2026-08-28T09:00:00Z" },
+            { state: "closed", at: "2026-08-28T15:00:00Z" },
+          ],
+          attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "succeeded" }],
+          comments: [{ author: "alice", authorKind: "human", body: "looks good", createdAt: "2026-08-28T13:00:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const titles = screen.getAllByText(/^Proposed$|^Attempt #1 · Succeeded$|^looks good$|^Closed$/).map((el) => el.textContent);
+    expect(titles).toEqual(["Proposed", "Attempt #1 · Succeeded", "looks good", "Closed"]);
   });
 
   it("only animates the running badge for the current transition, not a past one", () => {
@@ -261,11 +278,12 @@ describe("DetailOverlay", () => {
       <DetailOverlay
         task={{
           ...baseTask,
-          state: "completed",
+          state: "running",
           transitions: [
             { state: "queued", at: "2026-08-28T12:00:00Z" },
             { state: "running", at: "2026-08-28T12:01:00Z" },
-            { state: "completed", at: "2026-08-28T12:02:00Z" },
+            { state: "awaiting_reply", at: "2026-08-28T12:02:00Z" },
+            { state: "running", at: "2026-08-28T12:03:00Z" },
           ],
         }}
         tasks={[]}
@@ -276,12 +294,9 @@ describe("DetailOverlay", () => {
       />
     );
 
-    const history = screen.getByText("History").closest("fieldset");
-    const pastRunningBadge = within(history).getByText("Running");
-    expect(pastRunningBadge).toHaveClass("badge-static");
-
-    const currentTransitionBadge = within(history).getByText("Completed");
-    expect(currentTransitionBadge).not.toHaveClass("badge-static");
+    const runningItems = screen.getAllByText("Running").map((el) => el.closest(".timeline-item"));
+    expect(runningItems[0].querySelector(".badge")).toHaveClass("badge-static");
+    expect(runningItems[1].querySelector(".badge")).not.toHaveClass("badge-static");
   });
 
   it("shows a hint when there are no dependencies", () => {

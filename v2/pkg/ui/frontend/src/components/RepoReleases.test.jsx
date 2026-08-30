@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import ReleasesOverlay from "./ReleasesOverlay.jsx";
+import RepoReleases from "./RepoReleases.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -21,40 +21,30 @@ const releaseConfig = {
 const activeCandidate = { id: "c2", label: "v1.1.0-rc1", status: "active", branch: "rc", releaseBranch: "" };
 const promotedCandidate = { id: "c1", label: "v1.0.0-rc1", status: "promoted", branch: "rc", releaseBranch: "release/v1" };
 
-// MUI's Dialog renders its content through a portal into document.body
-// rather than into render()'s own container, so lookups here go through
-// document.body (screen already does the same for every other query in
-// this file) instead of the container render() returns.
 function current() {
   return within(document.body.querySelector(".candidate-current"));
 }
 
-describe("ReleasesOverlay", () => {
+describe("RepoReleases", () => {
   afterEach(() => {
     api.mockReset();
   });
 
-  it("loads the first repo from the configs list and shows its current candidate", async () => {
-    api
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }])
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([activeCandidate]);
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+  it("loads the given repo's config and shows its current candidate", async () => {
+    api.mockResolvedValueOnce(releaseConfig).mockResolvedValueOnce([activeCandidate]);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
+    expect(screen.getByRole("heading", { name: "acme/widgets releases" })).toBeInTheDocument();
     expect(current().getByText("v1.1.0-rc1")).toBeInTheDocument();
     expect(current().getByText(/active/)).toBeInTheDocument();
-    expect(api).toHaveBeenCalledWith("/api/release-configs");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/release-config");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates");
   });
 
   it("enables Promote but not Cut when the current candidate is still active", async () => {
-    api
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }])
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([activeCandidate]);
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    api.mockResolvedValueOnce(releaseConfig).mockResolvedValueOnce([activeCandidate]);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     expect(screen.getByRole("button", { name: "Cut new RC" })).toBeDisabled();
@@ -63,10 +53,9 @@ describe("ReleasesOverlay", () => {
 
   it("shows a note and no candidate history when the repo has no release config yet", async () => {
     api
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }])
       .mockResolvedValueOnce({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 })
       .mockResolvedValueOnce([]);
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/has no release configuration yet/)).toBeInTheDocument();
     expect(screen.getByText("No release candidate cut yet.")).toBeInTheDocument();
@@ -75,15 +64,13 @@ describe("ReleasesOverlay", () => {
 
   it("saves the release config form and reloads it", async () => {
     api
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }])
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([activeCandidate])
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ ...releaseConfig, prodBranch: "production" })
-      .mockResolvedValueOnce([activeCandidate])
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }]);
+      .mockResolvedValueOnce([activeCandidate]);
     const user = userEvent.setup();
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByLabelText(/Prod branch/);
 
     const prodInput = screen.getByLabelText(/Prod branch/);
@@ -99,14 +86,13 @@ describe("ReleasesOverlay", () => {
 
   it("cuts a new RC when eligible", async () => {
     api
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }])
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([promotedCandidate])
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([activeCandidate, promotedCandidate]);
     const user = userEvent.setup();
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     await user.click(screen.getByRole("button", { name: "Cut new RC" }));
@@ -117,14 +103,13 @@ describe("ReleasesOverlay", () => {
 
   it("promotes the current RC when eligible", async () => {
     api
-      .mockResolvedValueOnce([{ repo: "acme/widgets" }])
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([activeCandidate])
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([{ ...activeCandidate, status: "promoted" }]);
     const user = userEvent.setup();
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     await user.click(screen.getByRole("button", { name: "Promote current RC" }));
@@ -133,14 +118,15 @@ describe("ReleasesOverlay", () => {
     expect(await current().findByText(/promoted/)).toBeInTheDocument();
   });
 
-  it("shows no config form for a manually entered repo that isn't owner/name", async () => {
-    api.mockResolvedValueOnce([]);
+  it("calls onBack when the back button is clicked", async () => {
+    api.mockResolvedValueOnce(releaseConfig).mockResolvedValueOnce([activeCandidate]);
+    const onBack = vi.fn();
     const user = userEvent.setup();
-    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
-    await screen.findByRole("combobox");
+    render(<RepoReleases repo="acme/widgets" onBack={onBack} showError={() => {}} />);
+    await screen.findByRole("button", { name: "Promote current RC" });
 
-    await user.type(screen.getByRole("combobox"), "notarepo");
+    await user.click(screen.getByRole("button", { name: /Repos/ }));
 
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 });

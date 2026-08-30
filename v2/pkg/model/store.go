@@ -58,6 +58,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigTargetReposColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigMaxConcurrentColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
@@ -98,6 +101,45 @@ func (s *Store) ensureConfigTargetReposColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `target_repos` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigMaxConcurrentColumn replaces grain_config's old slots column
+// (a comma-separated list of operator-chosen concurrency-slot names,
+// bwsalmon/agents#320) with max_concurrent (a plain count, bwsalmon/
+// agents#461) on a database created before that switch -- the same
+// probe-then-ALTER approach ensureConfigTargetReposColumn already uses,
+// since CREATE TABLE IF NOT EXISTS never alters a table that is already
+// there. max_concurrent is backfilled from however many comma-separated
+// names the old slots column held (its LENGTH-vs-REPLACE arithmetic is
+// just "count the commas, plus one", the same thing splitCSV would do in
+// Go against the same string), so a deployment's dispatch pool stays the
+// same size across the upgrade even though the individual slots it names
+// no longer exist. The old column is then dropped: leaving it in place,
+// still NOT NULL with no default, would break every later PutConfig,
+// which stops supplying it.
+func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
+	if rows, err := s.db.QueryContext(ctx, "SELECT `max_concurrent` FROM `grain_config` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `max_concurrent` INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT `slots` FROM `grain_config` WHERE 1 = 0")
+	if err != nil {
+		// No old slots column either -- a database that never had one --
+		// so the DEFAULT above already leaves max_concurrent at 1.
+		return nil
+	}
+	rows.Close()
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `grain_config` SET `max_concurrent` = "+
+			"LENGTH(`slots`) - LENGTH(REPLACE(`slots`, ',', '')) + 1 "+
+			"WHERE `slots` IS NOT NULL AND `slots` != ''"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `slots`")
 	return err
 }
 
@@ -1139,21 +1181,20 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 	return &c, nil
 }
 
-const configColumns = "`poll_interval_ms`,`slots`,`gemini_model`,`max_agent_turns`," +
+const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
 	var pollMS int64
-	var slots, targetRepos string
-	if err := scan(&pollMS, &slots, &c.GeminiModel, &c.MaxAgentTurns,
+	var targetRepos string
+	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
-	c.Slots = splitSlots(slots)
-	c.TargetRepos = splitSlots(targetRepos)
+	c.TargetRepos = splitCSV(targetRepos)
 	return c, nil
 }
 
@@ -1165,21 +1206,20 @@ func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?)",
-			c.PollInterval.Milliseconds(), joinSlots(c.Slots), c.GeminiModel, c.MaxAgentTurns,
+			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinSlots(c.TargetRepos))
+			joinCSV(c.TargetRepos))
 		return err
 	})
 }
 
-// joinSlots/splitSlots round-trip Config.Slots, and equally Config.
-// TargetRepos (an owner/name repo can never contain a comma), through
-// the same comma-separated shape the daemon's own -slots/-target-repos
-// flags already parse, so a value written by one reads back identically
-// through the other.
-func joinSlots(slots []string) string { return strings.Join(slots, ",") }
+// joinCSV/splitCSV round-trip Config.TargetRepos (an owner/name repo can
+// never contain a comma) through the same comma-separated shape the
+// daemon's own -target-repos flag already parses, so a value written by
+// one reads back identically through the other.
+func joinCSV(items []string) string { return strings.Join(items, ",") }
 
-func splitSlots(s string) []string {
+func splitCSV(s string) []string {
 	if s == "" {
 		return nil
 	}

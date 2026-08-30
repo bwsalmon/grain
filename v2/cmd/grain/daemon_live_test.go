@@ -271,7 +271,7 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, config{
-			dataDir: dataDir, slots: []string{"local"}, pollInterval: 5 * time.Second,
+			dataDir: dataDir, maxConcurrent: 1, pollInterval: 5 * time.Second,
 			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: gemini.DefaultModel, maxAgentTurns: 15,
 			githubHost: githubHost, githubInsecureHTTP: true,
 		})
