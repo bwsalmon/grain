@@ -435,6 +435,26 @@ variable "gemini_model" {
   default     = ""
 }
 
+variable "max_agent_turns" {
+  type        = number
+  description = <<-EOT
+    Cap on model/tool round trips in a single agent run. 0 leaves the
+    framework's own default, which is 20 (v2/pkg/agent/gemini's
+    defaultMaxTurns).
+
+    That default is tight for real work, and exhausting it is a hard
+    failure -- "exceeded max turns without a final answer" -- not a run
+    that stops early with what it has. Reading a few files, writing one,
+    running a test, then add/commit/push are each a turn, and anything
+    exploratory spends several more before it starts.
+
+    Raise it for a deployment doing more than one-file changes. The cost
+    of a larger cap is only paid by runs that would otherwise have
+    failed, since a run that finishes stops on its own.
+  EOT
+  default     = 0
+}
+
 variable "slots" {
   type        = string
   description = "Comma-separated concurrency slot names -- v2/scripts/setup.sh's own GRAIN_SLOTS."

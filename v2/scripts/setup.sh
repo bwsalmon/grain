@@ -108,6 +108,7 @@ GRAIN_GITHUB_CREDENTIAL_NAME="${GRAIN_GITHUB_CREDENTIAL_NAME:-bot}"
 
 GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
+GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 
 GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
@@ -165,6 +166,11 @@ Recognized variables:
                              minter then mints the daemon's own key here --
                              see mint_gemini_operating_key
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model
+  GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
+                             the framework's own default (20), which a real task
+                             can exhaust: reading a few files, writing one, running
+                             a test and then add/commit/push are each a turn, and
+                             the run fails outright rather than finishing short
 
   GRAIN_GCP_PROJECT                  enables the gcp-key/gemini-key capabilities
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL    the narrow agent service account they mint for
@@ -616,6 +622,7 @@ write_systemd_units() {
     )
   fi
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
+  [ -n "$GRAIN_MAX_AGENT_TURNS" ] && daemon_args+=(-max-agent-turns "$GRAIN_MAX_AGENT_TURNS")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
   [ -n "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL" ] && daemon_args+=(-gcp-agent-service-account "$GRAIN_GCP_SERVICE_ACCOUNT_EMAIL")
