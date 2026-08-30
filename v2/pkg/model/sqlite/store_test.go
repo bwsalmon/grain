@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"reflect"
@@ -772,6 +773,168 @@ func TestAConflictRollsBackChildRowsToo(t *testing.T) {
 	for i := range want {
 		if got.Tags[i] != want[i] {
 			t.Fatalf("tags = %v, want %v", got.Tags, want)
+		}
+	}
+}
+
+// The two tests above pin the mechanism with two writers. A real
+// deployment's daemon, ui, and git-proxy processes all share one store
+// (cmd/grain/daemon.go runs all three against the same *sql.DB), so it is
+// worth also knowing the same guarantee holds at higher fan-out: every
+// writer's change lands somewhere, none silently vanishes, and nothing
+// under database/sql itself races even though every one of these
+// goroutines shares the one *sql.DB Store wraps.
+func TestManyConcurrentWritersEachLandTheirOwnTask(t *testing.T) {
+	store, _, ctx := openStore(t)
+
+	const writers = 32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, writers)
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			id := fmt.Sprintf("task-%02d", i)
+			errs[i] = store.PutTask(ctx, task(id, true))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	for i := 0; i < writers; i++ {
+		id := fmt.Sprintf("task-%02d", i)
+		got, err := store.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if got == nil {
+			t.Errorf("task %s was never written -- one of %d concurrent writers lost its change", id, writers)
+		}
+	}
+}
+
+// The same "one winner at a time, nothing lost" guarantee
+// TestConcurrentUpdatesBothLand and TestAConflictRollsBackChildRowsToo
+// check with two writers, at a fan-out closer to what would actually
+// force Store.write's retry loop to run more than once for some of them.
+func TestManyConcurrentUpdatesToTheSameTaskAllLand(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, writers)
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			tag := fmt.Sprintf("from-%02d", i)
+			errs[i] = store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+				tk.Tags = append(tk.Tags, tag)
+				return nil
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tags) != writers {
+		t.Fatalf("tags = %v (%d), want %d -- a retry that rewrote over another winner would have lost one",
+			got.Tags, len(got.Tags), writers)
+	}
+	seen := map[string]bool{}
+	for _, tag := range got.Tags {
+		seen[tag] = true
+	}
+	for i := 0; i < writers; i++ {
+		tag := fmt.Sprintf("from-%02d", i)
+		if !seen[tag] {
+			t.Errorf("missing tag %q", tag)
+		}
+	}
+}
+
+// A store's read side under the same concurrent writers: GetTask,
+// Ready, and OccupiedSlots must never see a half-written row, and none
+// of them may return an error just because a writer is mid-transaction
+// at the moment they run -- database/sql already guarantees the first;
+// this is what tests it against Store's own queries rather than taking
+// it on faith.
+func TestReadsSeeConsistentStateWhileWritersAreActive(t *testing.T) {
+	store, _, ctx := openStore(t)
+
+	const (
+		writers = 8
+		readers = 8
+	)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	writeErrs := make([]error, writers)
+	readErrs := make([]error, readers)
+
+	wg.Add(writers + readers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			id := fmt.Sprintf("task-%02d", i)
+			if err := store.PutTask(ctx, task(id, true)); err != nil {
+				writeErrs[i] = err
+				return
+			}
+			writeErrs[i] = store.StartRun(ctx, model.Run{
+				ID: "r-" + id, TaskID: id, Slot: fmt.Sprintf("sandbox-%d", i),
+				Sandbox: fmt.Sprintf("sandbox-%d", i), Attempt: 1, StartedAt: now,
+			})
+		}(i)
+	}
+	for i := 0; i < readers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 20; j++ {
+				if _, err := store.Ready(ctx); err != nil {
+					readErrs[i] = fmt.Errorf("Ready: %w", err)
+					return
+				}
+				if _, err := store.OccupiedSlots(ctx); err != nil {
+					readErrs[i] = fmt.Errorf("OccupiedSlots: %w", err)
+					return
+				}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range writeErrs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	for i, err := range readErrs {
+		if err != nil {
+			t.Fatalf("reader %d: %v", i, err)
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -134,4 +135,51 @@ func TestGetAnonymousNeedsNoTokenFile(t *testing.T) {
 	if !ok || cred.Token != nil {
 		t.Fatalf("got %+v, %v", cred, ok)
 	}
+}
+
+// load's cache is the one piece of mutable state a CredentialSet carries,
+// and Select/Get are called from GitProxy.Handle -- one goroutine per
+// inbound HTTP request in a real deployment, so two sandboxes doing git
+// operations at the same moment reach it concurrently. Run with -race:
+// before mu guarded the cache, this reliably reported a concurrent map
+// read/write.
+func TestSelectAndGetAreSafeForConcurrentCallers(t *testing.T) {
+	dir := writeCredentialSet(t,
+		map[string]string{"acme/widgets": "narrow", "acme/*": "wide", "*": "global"},
+		map[string]string{"narrow": "narrow-token", "wide": "wide-token", "global": "global-token", "named": "named-token"})
+	set, err := LoadCredentialSet(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const goroutines = 64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			switch i % 4 {
+			case 0:
+				if _, ok := set.Select("acme", "widgets"); !ok {
+					t.Error("expected acme/widgets to resolve")
+				}
+			case 1:
+				if _, ok := set.Select("acme", "other"); !ok {
+					t.Error("expected acme/other to resolve")
+				}
+			case 2:
+				if _, ok := set.Select("someone-else", "repo"); !ok {
+					t.Error("expected someone-else/repo to resolve")
+				}
+			case 3:
+				if _, ok := set.Get("named"); !ok {
+					t.Error("expected named to resolve")
+				}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
 }

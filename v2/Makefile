@@ -134,7 +134,7 @@ container-build: builder
 # fails to compile -- not just to run -- against a static/ holding
 # nothing but .gitkeep.
 test: frontend
-	go test ./...
+	go test -race ./...
 	cd pkg/ui/frontend && npm test
 
 # pkg/ui/frontend/e2e (bwsalmon/agents#415) drives the real built
