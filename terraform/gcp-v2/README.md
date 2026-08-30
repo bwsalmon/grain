@@ -162,6 +162,29 @@ The state bucket, the deployer account, the instance, and the guest
 attribute namespace (`grain-v2` here against v1's `grain`) are already
 distinct for the same reason.
 
+**`agent_account_id` is not, and has to be set.** It defaults to
+`grain-agent`, matching `pkg/gcpsetup.DefaultAgentAccountID` -- and v1's
+own `iam.tf` creates `${name_prefix}-agent`, which is `grain-agent` for a
+v1 deployment left at its own default. Applying this module into that
+project fails with
+
+```
+Error 409: Service account grain-agent already exists within project ...
+  with google_service_account.agent[0], on iam.tf line 69
+```
+
+Set something like `agent_account_id = "grain-v2-staging-agent"`. Do not
+point this at v1's existing account to make the error go away: that
+account carries v1's grants, so sharing it hands a staging agent whatever
+the production deployment was trusted with, which is the whole thing
+sharing a project is already uncomfortably close to.
+
+Nothing on the host assumes the default name -- the account's email
+reaches the daemon as `gcp_agent_service_account` in instance metadata,
+straight from this module's own output -- so changing it costs nothing.
+`minter_account_id` needs no such treatment against a v1 deployment: v1
+has no minter account. Two *v2* deployments in one project need both.
+
 What is *not* separated by any of this is the agent account's reach.
 `agent_can_manage_gke` grants `roles/container.admin` project-wide with
 no exclusion, and `agent_can_manage_compute_instances`'s exclusion names

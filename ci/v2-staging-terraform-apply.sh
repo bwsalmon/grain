@@ -69,16 +69,23 @@ while true; do
   fi
   if [ "$attempt" -ge "$max_attempts" ] \
      || ! grep -qiE 'RESOURCE_POOL_EXHAUSTED|does not have enough resources available' "$out"; then
-    # A brand failure is worth naming: it is not something Terraform can
-    # retry, and the fix is to stop asking for a brand at all rather than
-    # to edit anything. IAP uses a Google-managed OAuth client when none
-    # is configured, so create_iap_brand should normally be false with
-    # iap_client_id/iap_client_secret unset.
-    if grep -qi 'iap_brand\|OAuth client' "$out"; then
-      echo "::error::This looks like an IAP OAuth client failure. A client is not" \
-           "required: leave create_iap_brand false and iap_client_id/iap_client_secret" \
-           "unset in $tfvars_file, and IAP uses its own Google-managed client. See" \
-           "terraform/gcp-v2/README.md, \"No OAuth client needed\"."
+    # Name only what a reader could not diagnose from the Terraform error
+    # itself, and match on something that cannot appear in a *successful*
+    # run's noise. An earlier version of this grepped for "iap_brand",
+    # which the provider emits as a deprecation warning on every single
+    # run whether or not anything failed -- so the hint fired on every
+    # failure and talked over the real error underneath it.
+    #
+    # A 409 alreadyExists is the one worth a hint: in a project shared
+    # with another grain deployment it means a resource name is claimed,
+    # and the Terraform error names the resource but not the fix.
+    if grep -q 'Error 409' "$out" && grep -qi 'already exists' "$out"; then
+      echo "::error::A resource this deployment wants already exists in the project," \
+           "which usually means another grain deployment there already owns that name." \
+           "The Terraform error above names it. Set a distinct agent_account_id or" \
+           "minter_account_id in $tfvars_file (or a distinct name_prefix) -- never" \
+           "reuse the other deployment's account, which carries its grants, not this" \
+           "one's. See terraform/gcp-v2/README.md, \"Sharing a project\"."
     fi
     exit 1
   fi
