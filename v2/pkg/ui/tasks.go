@@ -332,6 +332,28 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
+// handleReorder is TaskList.jsx's drag-and-drop drop handler
+// (bwsalmon/agents#476): move every task named in the request to sit
+// between whatever neighbours it names, in one call so a multi-select
+// drag lands as a single atomic move rather than one race-prone request
+// per task.
+func (s *Server) handleReorder(w http.ResponseWriter, r *http.Request) {
+	var req ReorderRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.tasks.Reorder(r.Context(), req); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	tasks, err := s.tasks.ListTasks(r.Context())
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
 type setCapabilityRequest struct {
 	ID     string `json:"id"`
 	Attach bool   `json:"attach"`

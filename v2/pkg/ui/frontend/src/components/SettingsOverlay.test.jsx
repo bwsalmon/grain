@@ -79,6 +79,37 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // bwsalmon/agents#476: the global backlog-order switch.
+  it("toggles newestFirst and includes it in the payload only when changed", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    const checkbox = screen.getByRole("checkbox", { name: /Work through the backlog newest-first/ });
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ newestFirst: true }),
+    });
+  });
+
+  it("leaves newestFirst out of the payload when already on and left alone", async () => {
+    api.mockResolvedValueOnce({ ...settings, newestFirst: true }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByRole("checkbox", { name: /Work through the backlog newest-first/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+  });
+
   it("reports the error and does not close on a failed save", async () => {
     api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("pollInterval must be positive"));
     const showError = vi.fn();

@@ -83,6 +83,46 @@ func TestCreateThenListAndGet(t *testing.T) {
 	}
 }
 
+// TestReorderRoute is the HTTP surface for Client.Reorder
+// (client_test.go's TestReorderMovesATaskInTheBacklog already covers what
+// it does to the store): POST /api/tasks/reorder, a literal path segment
+// that has to win over the PATCH /api/tasks/{id} wildcard registered at
+// the same depth rather than being swallowed by it.
+func TestReorderRoute(t *testing.T) {
+	srv, _ := testServer(t)
+
+	var ids [3]string
+	for i := range ids {
+		rec := do(t, srv, http.MethodPost, "/api/tasks",
+			`{"title":"t","approved":true}`)
+		ids[i] = decode[ui.Task](t, rec).ID
+	}
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks/reorder",
+		`{"ids":["`+ids[2]+`"],"beforeId":"`+ids[0]+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reorder status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	listed := decode[[]ui.Task](t, rec)
+	if len(listed) != 3 {
+		t.Fatalf("reorder returned %d tasks, want 3", len(listed))
+	}
+	// The default display order is still newest first; the third task
+	// moving to the front of the backlog does not change that it was
+	// created last.
+	if listed[0].ID != ids[1] {
+		t.Fatalf("listed[0] = %q, want %q (still newest first)", listed[0].ID, ids[1])
+	}
+}
+
+func TestReorderRouteRejectsEmptyIDs(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPost, "/api/tasks/reorder", `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
 func TestGetUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodGet, "/api/tasks/404", ""); rec.Code != http.StatusNotFound {

@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Checkbox, Chip, FormControlLabel, Typography } from "@mui/material";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { STATE_LABELS, capabilityName } from "../state.js";
 
 const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
@@ -32,7 +34,7 @@ function groupByStack(tasks, matches) {
   return { topLevel, children };
 }
 
-export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll }) {
+export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder }) {
   const matches = (t) => stateFilter === "all" ? true
     : stateFilter === "blocked" ? t.blocked
     : t.state === stateFilter;
@@ -42,6 +44,40 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
 
   const title = FILTER_TITLES[stateFilter] || STATE_LABELS[stateFilter] || stateFilter;
+
+  // dragIds is every id being dragged right now, in their own current
+  // backlog order -- a single row not part of the current selection
+  // drags alone; a row that is part of a multi-selection drags the whole
+  // selection as a block (bwsalmon/agents#476). null means nothing is
+  // being dragged. overId is purely the drop-target highlight and never
+  // drives the actual move -- that only happens in onDrop.
+  const [dragIds, setDragIds] = useState(null);
+  const [overId, setOverId] = useState(null);
+
+  // dropOn resolves a drop at targetId (or at the very end, when
+  // targetId is null) to the two backlog neighbours -- among the tasks
+  // currently visible under this filter -- the drop landed between, and
+  // hands them to onReorder as afterId/beforeId. The store places the
+  // dragged tasks between whatever those two names resolve to in the
+  // *full*, unfiltered backlog, which is what makes a drag inside a
+  // filtered view still land correctly relative to tasks the filter is
+  // hiding: dropping at the very top of a filtered view has no
+  // preceding job, so it goes just before the following one instead --
+  // the same rule the issue itself asks for.
+  const dropOn = (targetId) => {
+    if (!dragIds) return;
+    const dragging = new Set(dragIds);
+    const visible = topLevel.map((t) => t.id).filter((id) => !dragging.has(id));
+    const idx = targetId === null ? visible.length : visible.indexOf(targetId);
+    onReorder(dragIds, idx > 0 ? visible[idx - 1] : null, idx < visible.length ? visible[idx] : null);
+    setDragIds(null);
+    setOverId(null);
+  };
+
+  const startDrag = (t) => {
+    const ids = selected.has(t.id) && selected.size > 1 ? selected : new Set([t.id]);
+    setDragIds(topLevel.filter((x) => ids.has(x.id)).map((x) => x.id));
+  };
 
   return (
     <main>
@@ -65,8 +101,21 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
       )}
       <ul className="task-list">
         {topLevel.map((t) => (
-          <li key={t.id}>
-            <TaskRow t={t} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect} />
+          <li
+            key={t.id}
+            className={overId === t.id && dragIds && !dragIds.includes(t.id) ? "task-drop-target" : undefined}
+            draggable={!!onReorder}
+            onDragStart={() => startDrag(t)}
+            onDragEnd={() => { setDragIds(null); setOverId(null); }}
+            onDragOver={(e) => {
+              if (!dragIds || dragIds.includes(t.id)) return;
+              e.preventDefault();
+              setOverId(t.id);
+            }}
+            onDrop={(e) => { e.preventDefault(); dropOn(t.id); }}
+          >
+            <TaskRow t={t} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
+              draggable={!!onReorder} dragging={dragIds?.includes(t.id) ?? false} />
             {children.has(t.id) && (
               <ul className="task-sublist">
                 {children.get(t.id).map((c) => (
@@ -78,6 +127,13 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
             )}
           </li>
         ))}
+        {onReorder && dragIds && (
+          <li
+            className={`task-drop-end${overId === "__end__" ? " task-drop-target" : ""}`}
+            onDragOver={(e) => { e.preventDefault(); setOverId("__end__"); }}
+            onDrop={(e) => { e.preventDefault(); dropOn(null); }}
+          />
+        )}
       </ul>
       {topLevel.length === 0 && <p className="empty">No tasks in this state.</p>}
     </main>
@@ -87,12 +143,14 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // TaskRow is exported so any other view that lists tasks -- the repo
 // pane's own per-repo sublist (bwsalmon/agents#474) is the first -- can
 // render a row identical to this one instead of re-deriving the badge
-// and chip markup. Selection is opt-in: a caller with nowhere to put a
-// batch-actions bar (the repo pane, again) just omits onToggleSelect
-// and gets a row with no checkbox rather than a dead one.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect }) {
+// and chip markup. Selection and dragging are both opt-in: a caller with
+// nowhere to put a batch-actions bar or a reorderable list (the repo
+// pane, again) just omits onToggleSelect/draggable and gets a plain row
+// with no checkbox or drag handle rather than a dead one.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging }) {
   return (
-    <div className="task-row" onClick={() => onOpenTask(t.id)}>
+    <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
+      {draggable && <DragIndicatorIcon className="task-drag-handle" fontSize="small" titleAccess="Drag to reorder" />}
       {onToggleSelect && (
         <Checkbox
           size="small"

@@ -42,7 +42,7 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 10
+const SchemaVersion = 11
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -72,6 +72,7 @@ var Tables = []string{
 
   ` + "`auto_merge`" + `            INTEGER  NOT NULL,
   ` + "`created_at`" + `            DATETIME NULL,
+  ` + "`order_key`" + `             REAL     NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -319,6 +320,7 @@ var Tables = []string{
   ` + "`gcp_project`" + `                 TEXT    NOT NULL,
   ` + "`gcp_service_account_email`" + `   TEXT    NOT NULL,
   ` + "`target_repos`" + `                TEXT    NOT NULL,
+  ` + "`newest_first`" + `                INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

@@ -62,6 +62,15 @@ type Config struct {
 	// line for it to be parsed from (see orchestrator.ParseDirectives'
 	// own doc comment).
 	TargetRepos []string
+	// NewestFirst switches the backlog's default order (bwsalmon/
+	// agents#476): false, the default, keeps grain's original shape --
+	// Store.OrderKeyForNewTask files a new task behind everything already
+	// queued, so it is dispatched last, and the task list shows it at the
+	// top regardless. true files a new task ahead of everything queued
+	// instead, so it dispatches next, and the task list's default sort
+	// flips to match -- top-to-bottom is dispatch order either way, this
+	// only decides which end a new task joins.
+	NewestFirst bool
 }
 
 // SlotNames returns the n dispatch.Cycle slot identifiers a deployment

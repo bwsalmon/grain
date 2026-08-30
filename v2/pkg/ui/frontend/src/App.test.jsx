@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
@@ -29,6 +29,14 @@ function setupApi(tasks = initialTasks, schedules = []) {
       const newTask = { id: "3", title: body.title, state: "proposed", repo: body.repo || "", blocked: false, capabilities: [], reads: [] };
       tasksState = [...tasksState, newTask];
       return Promise.resolve(newTask);
+    }
+    if (path === "/api/tasks/reorder" && method === "POST") {
+      const { ids, afterId, beforeId } = JSON.parse(opts.body);
+      const rest = tasksState.filter((t) => !ids.includes(t.id));
+      const moved = ids.map((id) => tasksState.find((t) => t.id === id));
+      const idx = afterId ? rest.findIndex((t) => t.id === afterId) + 1 : 0;
+      tasksState = [...rest.slice(0, idx), ...moved, ...rest.slice(idx)];
+      return Promise.resolve(tasksState);
     }
     const detailMatch = path.match(/^\/api\/tasks\/(\w+)$/);
     if (detailMatch) {
@@ -138,6 +146,25 @@ describe("App", () => {
     expect(await screen.findByText("Fix bug")).toBeInTheDocument();
     expect(api).toHaveBeenCalledWith("/api/tasks/1/approve", { method: "POST" });
     expect(screen.queryByText(/selected/)).not.toBeInTheDocument();
+  });
+
+  it("drags a task onto another and reorders the list via the API (bwsalmon/agents#476)", async () => {
+    setupApi();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    const titles = () => [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
+    expect(titles()).toEqual(["Fix bug", "Add feature"]);
+
+    fireEvent.dragStart(screen.getByText("Add feature").closest("li"));
+    fireEvent.dragOver(screen.getByText("Fix bug").closest("li"));
+    fireEvent.drop(screen.getByText("Fix bug").closest("li"));
+
+    expect(api).toHaveBeenCalledWith("/api/tasks/reorder", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["2"], afterId: undefined, beforeId: "1" }),
+    });
+    await waitFor(() => expect(titles()).toEqual(["Add feature", "Fix bug"]));
   });
 
   it("switches to the repo view, scopes the task list from a repo click, and clears the scope", async () => {

@@ -186,6 +186,23 @@ export default function App() {
     actBatch([...selected], mutate).then((ok) => { if (ok) clearSelection(); });
   }, [actBatch, selected, clearSelection]);
 
+  // reorderTasks is TaskList's drag-and-drop drop handler (bwsalmon/
+  // agents#476): afterId/beforeId are either the id of a task or null,
+  // TaskList's own way of saying "no bound on this side" (dropped at the
+  // very head or the very tail of the list), which the API expects as an
+  // absent field rather than a literal null.
+  const reorderTasks = useCallback(async (ids, afterId, beforeId) => {
+    try {
+      await api("/api/tasks/reorder", {
+        method: "POST",
+        body: JSON.stringify({ ids, afterId: afterId || undefined, beforeId: beforeId || undefined }),
+      });
+      await refreshList();
+    } catch (err) {
+      showError(err);
+    }
+  }, [refreshList, showError]);
+
   useEffect(() => {
     (async () => {
       try {
@@ -279,6 +296,7 @@ export default function App() {
             selected={selected}
             onToggleSelect={toggleSelect}
             onSelectAll={setSelection}
+            onReorder={reorderTasks}
           />
           <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
         </div>

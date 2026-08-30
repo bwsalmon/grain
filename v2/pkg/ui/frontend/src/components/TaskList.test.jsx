@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import TaskList from "./TaskList.jsx";
@@ -21,6 +21,13 @@ function renderList(overrides = {}) {
   };
   render(<TaskList {...props} />);
   return props;
+}
+
+// row/rowFor is the draggable <li> a task's title sits inside -- what
+// TaskList.jsx's onDragStart/onDragOver/onDrop are actually attached to,
+// one level up from the text a test finds the row by.
+function rowFor(title) {
+  return screen.getByText(title).closest("li");
 }
 
 describe("TaskList", () => {
@@ -83,6 +90,75 @@ describe("TaskList", () => {
   it("checks select-all once every visible task is already selected", () => {
     renderList({ selected: new Set([1, 2]) });
     expect(screen.getByLabelText("Select all")).toBeChecked();
+  });
+
+  describe("drag-and-drop reordering (bwsalmon/agents#476)", () => {
+    const threeTasks = [
+      { id: 1, title: "First", state: "queued", capabilities: [], blocked: false },
+      { id: 2, title: "Second", state: "queued", capabilities: [], blocked: false },
+      { id: 3, title: "Third", state: "queued", capabilities: [], blocked: false },
+    ];
+
+    it("drops a task onto another, calling onReorder with its new neighbours", () => {
+      const onReorder = vi.fn();
+      renderList({ tasks: threeTasks, onReorder });
+
+      fireEvent.dragStart(rowFor("Third"));
+      fireEvent.dragOver(rowFor("First"));
+      fireEvent.drop(rowFor("First"));
+
+      // Third dropped onto First's row lands just before it -- no
+      // preceding job, so afterId is null (the issue's own "moved to the
+      // head of the list" case).
+      expect(onReorder).toHaveBeenCalledWith([3], null, 1);
+    });
+
+    it("drops a task between two others", () => {
+      const onReorder = vi.fn();
+      renderList({ tasks: threeTasks, onReorder });
+
+      fireEvent.dragStart(rowFor("Third"));
+      fireEvent.dragOver(rowFor("Second"));
+      fireEvent.drop(rowFor("Second"));
+
+      expect(onReorder).toHaveBeenCalledWith([3], 1, 2);
+    });
+
+    it("drops a task at the very end of the list", () => {
+      const onReorder = vi.fn();
+      renderList({ tasks: threeTasks, onReorder });
+
+      fireEvent.dragStart(rowFor("First"));
+      // The trailing drop zone only renders once a drag is in flight.
+      fireEvent.dragOver(document.querySelector(".task-drop-end"));
+      fireEvent.drop(document.querySelector(".task-drop-end"));
+
+      expect(onReorder).toHaveBeenCalledWith([1], 3, null);
+    });
+
+    it("drags every selected task as a block, in their existing backlog order, when dragging a selected row", () => {
+      const onReorder = vi.fn();
+      renderList({ tasks: threeTasks, onReorder, selected: new Set([1, 3]) });
+
+      // Grabbing the un-selected middle task drags only itself.
+      fireEvent.dragStart(rowFor("Second"));
+      fireEvent.drop(rowFor("Third"));
+      expect(onReorder).toHaveBeenLastCalledWith([2], 1, 3);
+
+      // Grabbing a selected task drags the whole selection.
+      fireEvent.dragStart(rowFor("Third"));
+      fireEvent.drop(document.querySelector(".task-drop-end"));
+      expect(onReorder).toHaveBeenLastCalledWith([1, 3], 2, null);
+    });
+
+    it("never starts a drag, and shows no drag handle, without an onReorder prop", () => {
+      const { container } = render(
+        <TaskList tasks={threeTasks} stateFilter="all" config={null} onOpenTask={vi.fn()}
+          selected={new Set()} onToggleSelect={vi.fn()} onSelectAll={vi.fn()} />,
+      );
+      expect(container.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+      expect(rowFor("First")).toHaveAttribute("draggable", "false");
+    });
   });
 
   it("badges a task a schedule filed, and leaves an ordinary one unbadged", () => {
