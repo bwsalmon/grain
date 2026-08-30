@@ -1294,9 +1294,19 @@ self-repair grant for v1. That is also why "restart the host" above
 means restarting the service, not `systemctl reboot`ing the machine: the
 binary this pipeline just built is already on disk at the path the
 systemd unit's own `ExecStart` names, unchanged across the upgrade, so
-bringing the service back up is enough. This is not wired into
-`terraform/gcp-v2`'s own metadata-driven rollout (`config-sync.sh`/
-`deploy.sh`) at all — that mechanism exists precisely so a fleet's
-configuration is Terraform's record, not a button anyone can push against
-a single host, and reconciling the two is future work if it turns out to
-be worth doing.
+bringing the service back up is enough.
+
+`GRAIN_ENABLE_UI_UPGRADE` (default `1`) is the escape hatch for a
+deployment shape that already has its own rollout mechanism and cannot
+tolerate a second one racing it: set to `0`, `setup.sh` skips
+`ensure_self_upgrade` and leaves the three upgrade flags off entirely, so
+the daemon starts with the feature disabled, same as if none of this
+section existed. `terraform/gcp-v2`'s own metadata-driven rollout
+(`config-sync.sh`/`deploy.sh` — which watches the
+`grain-deploy-generation` instance-metadata attribute Terraform writes,
+and re-runs `deploy.sh`, and through it `setup.sh`, from there) sets
+exactly that, since Terraform's own state is the record of what
+`grain_ref` a GCP deployment is on, and letting an operator's UI click
+upgrade it out from under a `terraform apply` (or the reverse) would let
+the two silently disagree about what's actually running
+(bwsalmon/agents#405).
