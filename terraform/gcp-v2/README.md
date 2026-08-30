@@ -103,6 +103,63 @@ gcloud compute ssh "$INSTANCE" --zone "$ZONE" --project "$PROJECT" \
 
 **6. Open it.** `terraform output url` -- sign in as one of `iap_members`.
 
+## Deploying it from CI
+
+Everything above is the by-hand path. To have a config repo's GitHub
+Actions apply it instead, pass `--repo owner/name` to the bootstrap
+script and wire a workflow to the step scripts in grain's `ci/`:
+
+```
+ci/v2-staging-terraform-apply.sh    init, validate, apply (with stock-out retries)
+ci/v2-staging-read-outputs.sh       Terraform outputs -> Actions step outputs
+push-secrets.sh                     this directory's own, called with env
+ci/v2-staging-wait-for-host.sh      block until the host reports it converged
+ci/v2-staging-write-summary.sh      the job summary
+```
+
+The step bodies live in grain, and the config repo's workflow only wires
+them up -- supplying which secrets, which config directory, which
+generation. That is the same split `terraform/gcp/`'s own template
+argues for: a workflow file is forked and then owned by the config repo,
+so anything written *there* is something nobody re-syncs, while a fix
+here reaches every deployment on its next `grain_ref` bump. See
+`bwsalmon/agents`'s `.github/workflows/deploy-v2-staging.yml` for a
+worked example.
+
+Two things differ from a by-hand deploy:
+
+- **`deployer_member` must be the CI service account**, not a human --
+  `push-secrets.sh` mints the minter's key, which needs
+  `deployer_manages_minter_keys` (iam.tf) on whoever runs it.
+- **The workflow supplies `deploy_generation`**, so a manual re-run
+  redeploys rather than no-oping. `wait-for-host` then blocks on the host
+  reporting *that* generation, and CI goes green only once the rollout
+  actually landed.
+
+### Sharing a project with a v1 deployment
+
+Supported, and the reason `bootstrap-gcp.sh` prefixes its workload
+identity pool and provider with `name_prefix` rather than calling both
+"github" the way v1's own bootstrap does. A pool is a project-level
+resource: with the v1 names, bootstrapping staging into a project that
+already runs v1 would rewrite v1's provider -- harmlessly while both name
+the same `--repo`, and catastrophically the moment they do not, since
+v1's deploy workflow would silently lose the ability to authenticate.
+The prefixed defaults mean the two never touch. `--pool`/`--provider`
+override them if you want a pool shared deliberately.
+
+The state bucket, the deployer account, the instance, and the guest
+attribute namespace (`grain-v2` here against v1's `grain`) are already
+distinct for the same reason.
+
+What is *not* separated by any of this is the agent account's reach.
+`agent_can_manage_gke` grants `roles/container.admin` project-wide with
+no exclusion, and `agent_can_manage_compute_instances`'s exclusion names
+only this deployment's own host -- so in a shared project a staging
+agent can reach a v1 deployment's host VM and any cluster in the
+project. Set both to `false` while sharing, or give staging its own
+project.
+
 ## Secrets never touch Terraform
 
 Three values never appear in a `.tf` file, a `tfvars` file, or the
