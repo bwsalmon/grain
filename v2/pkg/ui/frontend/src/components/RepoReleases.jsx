@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel,
   InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography,
 } from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
+
+// POLL_INTERVAL_MS mirrors App.jsx's own poll: a candidate can move
+// through "cutting"/"promoting", and a qualification run's tasks
+// through queued/running/completed, entirely server-side (graind
+// dispatch, a run finishing), so without a poll this pane only ever
+// moves when a human takes some action that happens to re-render it.
+const POLL_INTERVAL_MS = 3000;
 
 // RepoReleases is a single repo's release pane (bwsalmon/agents#459):
 // configure its prod/rc branches, release branch prefix and major
@@ -27,6 +34,7 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
   const [candidates, setCandidates] = useState([]);
   const [qualificationPlan, setQualificationPlan] = useState(null);
   const [qualificationRun, setQualificationRun] = useState(null);
+  const polling = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -48,6 +56,32 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
   }, [owner, name, showError]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Poll for the same reason App.jsx does: cutting/promoting a
+  // candidate and running its qualification tasks both happen
+  // server-side, with no other event to tell this pane it should
+  // re-fetch. visibilitychange catches up immediately on tab-back
+  // rather than waiting out a stale interval.
+  useEffect(() => {
+    async function poll() {
+      if (polling.current || document.visibilityState === "hidden") return;
+      polling.current = true;
+      try {
+        await refresh();
+      } finally {
+        polling.current = false;
+      }
+    }
+    const interval = setInterval(poll, POLL_INTERVAL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refresh]);
 
   const submitConfig = async (evt) => {
     evt.preventDefault();
