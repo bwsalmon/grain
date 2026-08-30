@@ -33,6 +33,18 @@ type RunConfig struct {
 	// that never stops asking for tools. Zero means the framework's own
 	// default.
 	MaxTurns int
+	// TranscriptPath, if set, is a file a Framework may write its own
+	// transcript-in-progress to as the run proceeds, rather than only
+	// handing one back in Result.Transcript once Run returns -- what
+	// lets a caller with filesystem access to that path show a
+	// still-running run's output, not just a finished one's
+	// (bwsalmon/agents#467). "" means no caller wants this; a Framework
+	// that does not populate Result.Transcript at all (agent/gemini, for
+	// now) need not do anything with this either. The exact file format
+	// is a Framework's own business -- pkg/agent/claude's own doc
+	// comment on Framework.Run says what it writes there and how a
+	// reader gets a still-in-progress run's transcript back out of it.
+	TranscriptPath string
 }
 
 // ToolCall records one function call an agent made and what it got back,
@@ -50,6 +62,14 @@ type ToolCall struct {
 type Result struct {
 	FinalText string
 	ToolCalls []ToolCall
+	// Transcript is a human-readable, chronological narrative of the run
+	// -- its thinking and text output interleaved with each tool call and
+	// what it got back -- for a caller that wants to read the whole story
+	// rather than just its outcome (bwsalmon/agents#446's "show attempt
+	// agent logs": a single scrolling pane to debug or check up on a run
+	// with). It is best-effort: "" means the framework that produced this
+	// Result does not build one, not that the run said nothing.
+	Transcript string
 }
 
 // Framework drives one agent run to completion, using only the tools its

@@ -84,17 +84,25 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   );
 }
 
-function TaskRow({ t, config, onOpenTask, selected, onToggleSelect }) {
+// TaskRow is exported so any other view that lists tasks -- the repo
+// pane's own per-repo sublist (bwsalmon/agents#474) is the first -- can
+// render a row identical to this one instead of re-deriving the badge
+// and chip markup. Selection is opt-in: a caller with nowhere to put a
+// batch-actions bar (the repo pane, again) just omits onToggleSelect
+// and gets a row with no checkbox rather than a dead one.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect }) {
   return (
     <div className="task-row" onClick={() => onOpenTask(t.id)}>
-      <Checkbox
-        size="small"
-        className="task-select"
-        checked={selected.has(t.id)}
-        onClick={(e) => e.stopPropagation()}
-        onChange={() => onToggleSelect(t.id)}
-        inputProps={{ "aria-label": `Select ${t.id}` }}
-      />
+      {onToggleSelect && (
+        <Checkbox
+          size="small"
+          className="task-select"
+          checked={selected.has(t.id)}
+          onClick={(e) => e.stopPropagation()}
+          onChange={() => onToggleSelect(t.id)}
+          inputProps={{ "aria-label": `Select ${t.id}` }}
+        />
+      )}
       <span className={`badge badge-${t.state}`} title={STATE_LABELS[t.state] || t.state} />
       <span className="task-number">{t.id}</span>
       <span className="task-title">{t.title}</span>

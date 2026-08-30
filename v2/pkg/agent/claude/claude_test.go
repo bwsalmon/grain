@@ -3,7 +3,9 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,7 +25,7 @@ type fakeRunner struct {
 	gotMCPConfig []byte
 }
 
-func (f *fakeRunner) Run(_ context.Context, args []string, stdin string, env []string) (string, error) {
+func (f *fakeRunner) Run(_ context.Context, args []string, stdin string, env []string, tee io.Writer) (string, error) {
 	f.gotArgs = args
 	f.gotStdin = stdin
 	f.gotEnv = env
@@ -31,6 +33,9 @@ func (f *fakeRunner) Run(_ context.Context, args []string, stdin string, env []s
 		if data, err := os.ReadFile(path); err == nil {
 			f.gotMCPConfig = data
 		}
+	}
+	if tee != nil {
+		io.WriteString(tee, f.stdout)
 	}
 	return f.stdout, f.err
 }
@@ -149,6 +154,63 @@ func TestRunReportsToolResultContentGivenAsBlocksNotAPlainString(t *testing.T) {
 	}
 	if len(result.ToolCalls) != 1 || result.ToolCalls[0].Text != "exit=1" || !result.ToolCalls[0].IsError {
 		t.Fatalf("ToolCalls = %+v", result.ToolCalls)
+	}
+}
+
+func TestRunBuildsAHumanReadableTranscript(t *testing.T) {
+	fake := &fakeRunner{stdout: strings.Join([]string{
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{"type": "thinking", "thinking": "let me check the file first"}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "tool_use", "id": "call-1", "name": "read_file",
+					"input": map[string]any{"file_path": "out.txt"},
+				}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "user",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "tool_result", "tool_use_id": "call-1", "content": "PONG",
+				}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "found it"}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{"type": "result", "result": "done"}),
+	}, "\n")}
+	f := newFramework(fake, "mcpserver-path")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"let me check the file first", "read_file", "out.txt", "PONG", "found it"} {
+		if !strings.Contains(result.Transcript, want) {
+			t.Errorf("Transcript = %q, want it to contain %q", result.Transcript, want)
+		}
+	}
+	// Chronological: the thinking block precedes the tool call it explains,
+	// which precedes the result it read, which precedes the final text
+	// that used it.
+	thinkAt := strings.Index(result.Transcript, "let me check the file first")
+	toolAt := strings.Index(result.Transcript, "read_file")
+	resultAt := strings.Index(result.Transcript, "PONG")
+	textAt := strings.Index(result.Transcript, "found it")
+	if !(thinkAt < toolAt && toolAt < resultAt && resultAt < textAt) {
+		t.Errorf("Transcript not in chronological order: %q", result.Transcript)
 	}
 }
 
@@ -320,6 +382,51 @@ func TestWithOAuthTokenSetsTheEnvironmentNotArgv(t *testing.T) {
 			t.Errorf("token leaked into argv: %v", fake.gotArgs)
 		}
 	}
+}
+
+func TestRunMirrorsStdoutToTranscriptPath(t *testing.T) {
+	stdout := strings.Join([]string{
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "on it"}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{"type": "result", "result": "done"}),
+	}, "\n")
+	fake := &fakeRunner{stdout: stdout}
+	f := newFramework(fake, "mcpserver-path")
+
+	transcriptPath := filepath.Join(t.TempDir(), "r1")
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "x", SandboxRoot: t.TempDir(), TranscriptPath: transcriptPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("expected TranscriptPath to have been written: %v", err)
+	}
+	if string(got) != stdout {
+		t.Errorf("transcript file = %q, want the raw stdout %q", got, stdout)
+	}
+	if partial := PartialTranscript(string(got)); !strings.Contains(partial, "on it") {
+		t.Errorf("PartialTranscript(transcript file) = %q, want it to contain %q", partial, "on it")
+	}
+}
+
+func TestRunWithNoTranscriptPathWritesNoFile(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing to assert on directly beyond "this didn't panic or error" --
+	// TranscriptPath's own zero value ("") is the only thing distinguishing
+	// this from the test above, and Run must treat it as "no caller wants
+	// this" rather than trying to open a file at an empty path.
 }
 
 // TestMockToolCallsNeverReachAnyNetwork mirrors agent/gemini's own test of

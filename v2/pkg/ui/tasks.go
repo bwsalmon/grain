@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -273,6 +274,30 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)
+}
+
+// attemptTranscriptResponse is GET
+// /api/tasks/{id}/attempts/{number}/transcript's whole body -- its own
+// shape, not folded into Attempt, so a caller listing many attempts (the
+// task detail fetch) never pays to carry every one's full transcript,
+// the same reasoning logLinesResponse's own {lines} shape follows for
+// GET /api/logs/{source} (bwsalmon/agents#446).
+type attemptTranscriptResponse struct {
+	Transcript string `json:"transcript"`
+}
+
+func (s *Server) handleGetAttemptTranscript(w http.ResponseWriter, r *http.Request) {
+	number, err := strconv.Atoi(r.PathValue("number"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("attempt number must be an integer"))
+		return
+	}
+	transcript, err := s.tasks.AttemptTranscript(r.Context(), r.PathValue("id"), number)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, attemptTranscriptResponse{Transcript: transcript})
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {

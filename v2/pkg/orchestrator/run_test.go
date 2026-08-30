@@ -193,6 +193,42 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 	}
 }
 
+// TestRunDispatchRecordsTheAgentsTranscript covers bwsalmon/agents#446:
+// a framework's own agent.Result.Transcript should end up readable back
+// off the store, against the task and attempt number RunDispatch was
+// given -- the one thing FinishRun's own outcome/detail never carried.
+func TestRunDispatchRecordsTheAgentsTranscript(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return &agent.Result{
+			FinalText:  "pushed the change",
+			ToolCalls:  []agent.ToolCall{{Name: "run_command", Text: "ok"}},
+			Transcript: "> run_command(...)\nok\n\npushed the change",
+		}, nil
+	})
+	cfg := orchestrator.Config{}
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	transcript, found, err := store.RunTranscript(ctx, "t1", 1)
+	if err != nil || !found {
+		t.Fatalf("RunTranscript: (%q, %v, %v)", transcript, found, err)
+	}
+	if !strings.Contains(transcript, "pushed the change") {
+		t.Errorf("transcript = %q, want it to contain the agent's own transcript text", transcript)
+	}
+}
+
 func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "locked", Via: model.GrantByLabel})
@@ -500,5 +536,75 @@ func TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall(t *testing.T)
 	}
 	if !sawCancelledCtx {
 		t.Error("framework.Run's own ctx was not already cancelled when it started -- an already-closed task's first tool call could still reach a real sandbox")
+	}
+}
+
+// TestRunDispatchGivesTheFrameworkATranscriptPathAndCleansItUp proves the
+// two halves of bwsalmon/agents#467's wiring: RunDispatch tells the
+// framework where to mirror a still-running run's own transcript (a file
+// named after the run ID, under Config.TranscriptDir, matching what
+// claude.LiveTranscriptDir would look for), and removes that file once
+// the run is over -- its own store row already carries the same story by
+// then (SetRunTranscript, just above in RunDispatch), so nothing is ever
+// left behind for a finished run to read back out of the file.
+func TestRunDispatchGivesTheFrameworkATranscriptPathAndCleansItUp(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	transcriptDir := t.TempDir()
+	var gotPath string
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPath = cfg.TranscriptPath
+		if err := os.WriteFile(gotPath, []byte("still going"), 0o644); err != nil {
+			t.Fatalf("writing transcript file: %v", err)
+		}
+		return pushed(), nil
+	})
+	cfg := orchestrator.Config{TranscriptDir: transcriptDir}
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	if want := filepath.Join(transcriptDir, "r1"); gotPath != want {
+		t.Errorf("TranscriptPath = %q, want %q", gotPath, want)
+	}
+	if _, err := os.Stat(gotPath); !os.IsNotExist(err) {
+		t.Errorf("transcript file %s still exists after RunDispatch returned, want it removed", gotPath)
+	}
+}
+
+// TestRunDispatchLeavesTranscriptPathEmptyWithoutATranscriptDir proves
+// the opt-in half of the same wiring: a deployment that never sets
+// Config.TranscriptDir gets the pre-bwsalmon/agents#467 behaviour back,
+// exactly -- no file, no path, nothing for a framework that doesn't look
+// at RunConfig.TranscriptPath to trip over.
+func TestRunDispatchLeavesTranscriptPathEmptyWithoutATranscriptDir(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	gotPath := "unset"
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPath = cfg.TranscriptPath
+		return pushed(), nil
+	})
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+	if gotPath != "" {
+		t.Errorf("TranscriptPath = %q, want empty with no Config.TranscriptDir set", gotPath)
 	}
 }

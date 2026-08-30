@@ -13,19 +13,22 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
-// writeFakeKontur installs a shell script named "kontur" on PATH that
-// answers "vm create <name> -state-dir <dir> ..." by writing
-// <dir>/<name>.json with the given port (kontur's own real behavior,
-// which is what Port later reads back) and "vm delete <name> -state-dir
-// <dir>" by removing that same file (kontur's own staticpod.Delete,
-// mirrored here so a Recreate test's second "vm create" sees a VM that
-// genuinely doesn't exist yet rather than reusing stale state) -- logs
-// every invocation's argv (one line per call) to argvLog, and otherwise
-// succeeds silently.
+// writeFakeKontur installs a shell script named "konturctl" on PATH --
+// the operator-facing binary orchestrator.KonturSandboxes actually execs
+// via pkg/kontur.Create/Delete, not the container-facing "kontur" binary
+// bwsalmon/kontur's own cmd/kontur is a distinct program from (see
+// pkg/kontur's package doc comment) -- that answers "vm create <name>
+// -state-dir <dir> ..." by writing <dir>/<name>.json with the given port
+// (kontur's own real behavior, which is what Port later reads back) and
+// "vm delete <name> -state-dir <dir>" by removing that same file (kontur's
+// own staticpod.Delete, mirrored here so a Recreate test's second "vm
+// create" sees a VM that genuinely doesn't exist yet rather than reusing
+// stale state) -- logs every invocation's argv (one line per call) to
+// argvLog, and otherwise succeeds silently.
 func writeFakeKontur(t *testing.T, argvLog string, port int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fake kontur script is POSIX shell only")
+		t.Skip("fake konturctl script is POSIX shell only")
 	}
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
@@ -48,7 +51,7 @@ if [ "$1" = "vm" ] && { [ "$2" = "create" ] || [ "$2" = "delete" ]; }; then
   fi
 fi
 `, argvLog, port)
-	path := filepath.Join(dir, "kontur")
+	path := filepath.Join(dir, "konturctl")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +347,7 @@ func TestKonturSandboxesCreatesVMOnFirstUseAndReusesAfter(t *testing.T) {
 		}
 	}
 	if createCalls != 1 {
-		t.Errorf("kontur vm create was invoked %d times across two ToolsFor calls for the same slot, want 1: log = %q", createCalls, data)
+		t.Errorf("konturctl vm create was invoked %d times across two ToolsFor calls for the same slot, want 1: log = %q", createCalls, data)
 	}
 }
 
@@ -412,6 +415,72 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 
 	if _, err := k.ToolsFor(context.Background(), "slot-0"); err == nil {
 		t.Fatal("ToolsFor() on a VM that never becomes ready: got nil error, want one")
+	}
+}
+
+func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/key",
+		Workspace:         "/workspace",
+		BaseIP:            "169.254.100.2",
+		BasePort:          30080,
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	// Two different slots must land two different VMs, each with its own
+	// -ip/-port derived from BaseIP/BasePort and the slot's own number --
+	// the whole point being that a deployment with more than one slot
+	// (-max-concurrent > 1) does not ask konturctl to give every VM after
+	// the first the exact same address on the one bridge they all share.
+	if _, err := k.ToolsFor(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.ToolsFor(context.Background(), "2"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"vm create grain1 -state-dir " + stateDir + " -ip 169.254.100.2 -port 30080",
+		"vm create grain2 -state-dir " + stateDir + " -ip 169.254.100.3 -port 30081",
+	}
+	got := splitNonEmptyLines(string(data))
+	if len(got) != len(want) {
+		t.Fatalf("kontur invocations = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestKonturSandboxesRejectsNonNumericSlotWithBaseIPSet(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix: "grain-test-",
+		StateDir:   stateDir,
+		SSHUser:    "debian",
+		SSHKey:     "/key",
+		Workspace:  "/workspace",
+		BaseIP:     "169.254.100.2",
+	})
+
+	if _, err := k.ToolsFor(context.Background(), "slot-0"); err == nil {
+		t.Fatal("ToolsFor() with a non-numeric slot and BaseIP set: got nil error, want one")
 	}
 }
 

@@ -66,6 +66,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent/claude"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
@@ -86,7 +87,7 @@ import (
 // stringSliceFlag collects every occurrence of a repeatable flag, in
 // order, into a []string -- flag.String only ever keeps the last one,
 // which -kontur-create-arg (an ordered sequence of flag/value pairs
-// passed straight through to `kontur vm create`) can't use.
+// passed straight through to `konturctl vm create`) can't use.
 type stringSliceFlag []string
 
 func (s *stringSliceFlag) String() string { return strings.Join(*s, " ") }
@@ -152,7 +153,7 @@ func daemon(args []string) {
 		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
 	konturBackend := fs.String("kontur-backend", kontur.BackendDocker,
-		"backend `kontur vm create -backend` builds each slot's VM with (only used with -kontur-vm-name-prefix): "+
+		"backend `konturctl vm create -backend` builds each slot's VM with (only used with -kontur-vm-name-prefix): "+
 			"\"docker\" (the default -- bwsalmon/agents#353: no konturctl setup, containerd, CNI or kubelet needed on "+
 			"the host, just a local docker daemon) or \"static-pod\" to run under a standalone kubelet instead")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
@@ -168,13 +169,23 @@ func daemon(args []string) {
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
 	fs.Var(&konturCreateArgs, "kontur-create-arg",
-		"one argument appended verbatim to `kontur vm create <name> -state-dir <dir>` when a slot's VM does not "+
-			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `kontur vm create -h` calls for "+
+		"one argument appended verbatim to `konturctl vm create <name> -state-dir <dir>` when a slot's VM does not "+
+			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
-			"-kontur-create-arg=-image -kontur-create-arg=gs://bucket/kontur-guest-....qcow2 to point at "+
-			"packer/kontur/build.sh's published output using whatever flag bwsalmon/kontur's own CLI turns out "+
-			"to call that (see packer/kontur/README.md, \"What isn't settled here\"). Only used with "+
-			"-kontur-vm-name-prefix.")
+			"-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images -kontur-create-arg=-disk "+
+			"-kontur-create-arg=/images/kontur-guest-....qcow2 to point at packer/kontur/build.sh's published "+
+			"output, already copied onto this host under -images-hostpath's directory (see packer/kontur/README.md, "+
+			"\"Building and publishing\"). Only used with -kontur-vm-name-prefix. Leave -ip/-port out of this list "+
+			"and set -kontur-base-ip/-kontur-base-port instead once -max-concurrent is more than 1 -- konturctl has "+
+			"no default for either and no way to vary a value shared verbatim across every slot's create call, so "+
+			"without one of those two, every slot's VM would otherwise be created with the exact same address.")
+	konturBaseIP := fs.String("kontur-base-ip", "",
+		"the -ip slot \"1\"'s kontur VM gets on netshim's bridge; every later slot's is the next IPv4 address after "+
+			"it. Leave unset for a single-slot (-max-concurrent 1) deployment content to put a literal -ip in "+
+			"-kontur-create-arg itself. Only used with -kontur-vm-name-prefix.")
+	konturBasePort := fs.Int("kontur-base-port", 0,
+		"the -port slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own "+
+			"number minus one, the same derivation -kontur-base-ip uses. Only used with -kontur-vm-name-prefix.")
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -226,7 +237,7 @@ func daemon(args []string) {
 		konturVMNamePrefix: *konturVMNamePrefix, konturBackend: *konturBackend,
 		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
-		konturCreateArgs: konturCreateArgs,
+		konturCreateArgs: konturCreateArgs, konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
@@ -281,6 +292,8 @@ type config struct {
 	konturSSHKey       string
 	konturWorkspace    string
 	konturCreateArgs   []string
+	konturBaseIP       string
+	konturBasePort     int
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -326,6 +339,8 @@ func run(ctx context.Context, cfg config) error {
 			SSHUser:         cfg.konturSSHUser,
 			SSHKey:          cfg.konturSSHKey,
 			Workspace:       cfg.konturWorkspace,
+			BaseIP:          cfg.konturBaseIP,
+			BasePort:        cfg.konturBasePort,
 		})
 		sandboxes = konturSandboxes
 	} else {
@@ -369,8 +384,24 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer stopProxy(context.Background())
 
+	// transcriptDir is where a run's own agent.Framework (currently only
+	// pkg/agent/claude does anything with it) may mirror its
+	// transcript-in-progress live, and where the UI server below reads one
+	// back from for a still-running attempt -- the two sides of
+	// bwsalmon/agents#467's live tailing, agreeing on this directory (and,
+	// within it, the run-ID-named file orchestrator.RunDispatch and
+	// claude.LiveTranscriptDir each independently compute) is what lets
+	// them talk to each other without either package importing the other.
+	// It must exist before any run can write into it -- orchestrator's own
+	// HostSandboxes.RootFor makes the same "must already exist" assumption
+	// about its own baseDir.
+	transcriptDir := filepath.Join(cfg.dataDir, "state", "transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return fmt.Errorf("creating transcript directory: %w", err)
+	}
+
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg, store)
+		stopUI, err := startUIServer(cfg, store, transcriptDir)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -433,6 +464,7 @@ func run(ctx context.Context, cfg config) error {
 			Capabilities:  registry,
 			Credentials:   secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 			MaxAgentTurns: cfg.maxAgentTurns,
+			TranscriptDir: transcriptDir,
 		},
 		Slots: slots,
 	}
@@ -703,7 +735,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(cfg config, store *model.Store) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store, transcriptDir string) (stop func(context.Context) error, err error) {
 	// A second CredentialSet, loaded the same way BuildProxy (above) and
 	// run's own githubClient each load their own: not hot-reloaded,
 	// cheap to load again, and this is the one Settings checks
@@ -732,6 +764,14 @@ func startUIServer(cfg config, store *model.Store) (stop func(context.Context) e
 			"daemon":          systemlog.Journalctl{Unit: "grain-daemon.service"},
 			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
 		},
+		// LiveTranscriptDir reads back whatever claude.Framework.Run has
+		// mirrored so far into transcriptDir/<runID> for a still-running
+		// attempt (run's own doc comment on the shared directory
+		// convention). agent/gemini, the framework actually wired in
+		// below, never writes there at all yet -- AttemptTranscript falls
+		// back to the store either way, so this costs nothing today and is
+		// already correct for whenever agent/claude is wired in instead.
+		LiveTranscripts: claude.LiveTranscriptDir{Dir: transcriptDir},
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
