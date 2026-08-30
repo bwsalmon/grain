@@ -12,26 +12,38 @@ import TaskPicker from "./TaskPicker.jsx";
 // narrow property column beside it.
 export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
   const phase = completionPhase(t);
+  // editing is local to DetailOverlay, not lifted to App.jsx, the same
+  // as Timeline's own openAttempt -- nothing outside this overlay needs
+  // to know a task's title and description are mid-edit, and closing
+  // the overlay (which unmounts it) is itself "cancel" for free.
+  const [editing, setEditing] = useState(false);
   return (
     <Overlay onClose={onClose} wide>
       <div className="detail-layout">
         <div className="detail-main">
-          <div className="detail-header">
-            <Typography variant="h6" component="h2" sx={{ m: 0, fontWeight: 600, fontSize: "1.15rem" }}>{t.id} {t.title}</Typography>
-          </div>
+          {editing ? (
+            <EditTaskForm t={t} act={act} onDone={() => setEditing(false)} />
+          ) : (
+            <>
+              <div className="detail-header">
+                <Typography variant="h6" component="h2" sx={{ m: 0, fontWeight: 600, fontSize: "1.15rem" }}>{t.id} {t.title}</Typography>
+                <Button size="small" onClick={() => setEditing(true)}>Edit</Button>
+              </div>
 
-          <div className="freshness">
-            as of just now
-            {t.pullRequest && <> · <Link href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</Link></>}
-            {t.generatedFrom && (
-              <>
-                {" "}· generated from{" "}
-                <Link href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</Link>
-              </>
-            )}
-          </div>
+              <div className="freshness">
+                as of just now
+                {t.pullRequest && <> · <Link href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</Link></>}
+                {t.generatedFrom && (
+                  <>
+                    {" "}· generated from{" "}
+                    <Link href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</Link>
+                  </>
+                )}
+              </div>
 
-          <div className="description">{t.description || "(no description)"}</div>
+              <div className="description">{t.description || "(no description)"}</div>
+            </>
+          )}
 
           {t.state === "failed" && (
             <Alert severity="error" sx={{ mb: 2 }}>
@@ -61,6 +73,46 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
         </div>
       </div>
     </Overlay>
+  );
+}
+
+// EditTaskForm is the title/description editor DetailOverlay swaps its
+// header for (bwsalmon/agents#523) -- those two fields are the only ones
+// BuildPrompt actually hands a dispatched run, so an edit to either has
+// to reach one already running, not just show up here; PATCH /api/tasks/
+// {id} (ui.Client.UpdateTask) is what records that as an addendum
+// comment (noteEdit) for orchestrator.addendaPoller to pick up. Every
+// other UpdateTaskRequest field (repo, base, auto-merge, reads) already
+// has its own editor on this same page (Declared has no editor yet, but
+// CapabilityToggles and Dependencies cover the two that do), so this
+// form does not attempt to cover them too.
+function EditTaskForm({ t, act, onDone }) {
+  const [title, setTitle] = useState(t.title);
+  const [description, setDescription] = useState(t.description || "");
+
+  // Mirrors Timeline's own send(): act() already reports a failure to
+  // the user (showError, wired in by App.jsx), so there is nothing left
+  // for this form to do differently on one -- closing either way is the
+  // same "fire it and stop showing the form" precedent send() already
+  // set for a reply.
+  const save = async () => {
+    if (!title.trim()) return;
+    await act(() => api(`/api/tasks/${t.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title, description }),
+    }), t.id);
+    onDone();
+  };
+
+  return (
+    <Stack spacing={1.5} sx={{ mb: 2 }}>
+      <TextField label="Title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus fullWidth size="small" />
+      <TextField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} multiline rows={5} fullWidth size="small" />
+      <Stack direction="row" spacing={1} justifyContent="flex-end">
+        <Button onClick={onDone}>Cancel</Button>
+        <Button variant="contained" disabled={!title.trim()} onClick={save}>Save</Button>
+      </Stack>
+    </Stack>
   );
 }
 

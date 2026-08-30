@@ -677,11 +677,19 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 	}
 
+	// titleChanged/descriptionChanged are recomputed on every call apply
+	// makes, including a retry against a fresh read after another writer
+	// won the race -- so whichever attempt actually lands is the one
+	// whose diff the addendum below describes, never a stale one from an
+	// attempt that got overwritten before it ever took effect.
+	var titleChanged, descriptionChanged bool
 	if err := c.mutate(ctx, id, func(task *model.Task) error {
 		if req.Title != nil {
+			titleChanged = *req.Title != task.Title
 			task.Title = *req.Title
 		}
 		if req.Description != nil {
+			descriptionChanged = *req.Description != task.Body
 			task.Body = *req.Description
 		}
 		if target != nil {
@@ -700,7 +708,41 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 	}); err != nil {
 		return Task{}, err
 	}
+	if titleChanged || descriptionChanged {
+		if err := c.noteEdit(ctx, id, titleChanged, req.Title, descriptionChanged, req.Description); err != nil {
+			return Task{}, err
+		}
+	}
 	return c.Task(ctx, id)
+}
+
+// noteEdit records an editorial change to title or description as an
+// ordinary Comment, attributed the same way AddComment attributes a
+// human's own reply -- there is no separate "edit log" here, because a
+// second channel for the same fact would also need its own way to reach
+// a run in flight, and Comment already has one: orchestrator.
+// addendaPoller and commentThreadSection both read every task's
+// conversation without caring whether an entry started life as a reply
+// or as this. An edit to any other field (repo, base, auto-merge, reads)
+// gets no comment: those are dispatch mechanics a running agent has no
+// use for mid-run, unlike the title and body BuildPrompt actually hands
+// it.
+func (c *Client) noteEdit(ctx context.Context, id string, titleChanged bool, title *string, descriptionChanged bool, description *string) error {
+	var parts []string
+	if titleChanged {
+		parts = append(parts, fmt.Sprintf("the title changed to %q", *title))
+	}
+	if descriptionChanged {
+		parts = append(parts, fmt.Sprintf("the description changed to:\n\n%s", *description))
+	}
+	body := fmt.Sprintf("This task was just edited -- %s.", strings.Join(parts, "; and "))
+	_, err := c.Store.AddComment(ctx, model.Comment{
+		TaskID:    id,
+		Author:    model.Attribution{Actor: c.Config.Actor},
+		Body:      body,
+		CreatedAt: c.now(),
+	})
+	return err
 }
 
 // mutate wraps Store.UpdateTask so a missing task reports as this

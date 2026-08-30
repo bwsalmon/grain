@@ -178,6 +178,57 @@ func attributionLabel(a model.Attribution) string {
 	}
 }
 
+// addendumText renders one just-arrived comment for a Framework to fold
+// into its conversation mid-run -- present tense, unlike
+// attributionLabel's own labels ("an earlier attempt at this task"),
+// which are phrased for a redispatched run looking back at its whole
+// history rather than for something that landed seconds ago in the run
+// currently reading it.
+func addendumText(c model.Comment) string {
+	who := "a human"
+	if c.Author.OnBehalfOf == nil && c.Author.Actor.Kind != model.PrincipalHuman {
+		who = "grain"
+	}
+	return fmt.Sprintf(
+		"%s just added this to the task while you're already working on it -- read it and factor it in:\n\n%s",
+		who, c.Body,
+	)
+}
+
+// addendaPoller returns an agent.RunConfig.Addenda function bound to
+// store and taskID, for the one Framework that can actually use it
+// (agent.RunConfig.Addenda's own doc comment) to pick up a comment
+// posted while this run is still live, rather than only seeing it folded
+// into the task's next dispatch (commentThreadSection).
+//
+// seen is the same slice RunDispatch already read to build this run's
+// own prompt -- its highest comment id seeds the cursor here, so the
+// first poll only ever returns what arrived after dispatch, never
+// something already sitting in the prompt this run started with.
+func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func(context.Context) ([]string, error) {
+	var lastID int64
+	for _, c := range seen {
+		if c.ID > lastID {
+			lastID = c.ID
+		}
+	}
+	return func(ctx context.Context) ([]string, error) {
+		comments, err := store.Comments(ctx, taskID)
+		if err != nil {
+			return nil, fmt.Errorf("orchestrator: polling %s's conversation for addenda: %w", taskID, err)
+		}
+		var addenda []string
+		for _, c := range comments {
+			if c.ID <= lastID {
+				continue
+			}
+			lastID = c.ID
+			addenda = append(addenda, addendumText(c))
+		}
+		return addenda, nil
+	}
+}
+
 // rootedSandboxes is implemented by a Sandboxes backend that also hands
 // out a plain local directory for a slot -- HostSandboxes' own RootFor.
 // RunDispatch needs one of these to write a capability's SideSandbox
@@ -289,6 +340,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 
 		result, runErr = framework.Run(runCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
+			Addenda: addendaPoller(store, task.ID, comments),
 		})
 		cancelRun(nil)
 		<-watcherDone

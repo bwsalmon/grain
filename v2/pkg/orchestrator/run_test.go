@@ -436,6 +436,93 @@ func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 	}
 }
 
+// TestRunDispatchLetsAFrameworkPollForACommentAddedMidRun is bwsalmon/
+// agents#523's own scenario: a comment posted while a run is still live
+// has to reach a Framework whose own loop polls for one
+// (agent.RunConfig.Addenda), not just the task's next dispatch. fw here
+// plays that Framework itself, polling before and after adding a comment
+// mid-run to prove the second poll sees what the first could not have.
+func TestRunDispatchLetsAFrameworkPollForACommentAddedMidRun(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	const addendum = "actually, use snake_case for the new field"
+	var gotBefore, gotAfter []string
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		var err error
+		if gotBefore, err = cfg.Addenda(ctx); err != nil {
+			t.Fatalf("polling before the comment landed: %v", err)
+		}
+		if _, err := store.AddComment(ctx, model.Comment{
+			TaskID:    "t1",
+			Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalHuman, ID: "alice"}},
+			Body:      addendum,
+			CreatedAt: baseTime.Add(time.Minute),
+		}); err != nil {
+			t.Fatalf("adding a comment mid-run: %v", err)
+		}
+		if gotAfter, err = cfg.Addenda(ctx); err != nil {
+			t.Fatalf("polling after the comment landed: %v", err)
+		}
+		return pushed(), nil
+	})
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+	if len(gotBefore) != 0 {
+		t.Errorf("polled before any comment existed, got %v, want none", gotBefore)
+	}
+	if len(gotAfter) != 1 || !strings.Contains(gotAfter[0], addendum) {
+		t.Errorf("polled after a comment landed mid-run, got %v, want one containing %q", gotAfter, addendum)
+	}
+}
+
+// TestRunDispatchSeedsTheAddendaCursorPastCommentsAlreadyInThePrompt
+// checks the other half of the same rule: on a redispatch, a comment
+// already folded into the prompt by commentThreadSection must not also
+// come back out of the first Addenda poll -- a Framework that acted on
+// both would fold the same comment into its conversation twice.
+func TestRunDispatchSeedsTheAddendaCursorPastCommentsAlreadyInThePrompt(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID:    "t1",
+		Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalHuman, ID: "alice"}},
+		Body:      "already folded into the prompt",
+		CreatedAt: baseTime,
+	}); err != nil {
+		t.Fatalf("adding a comment before dispatch: %v", err)
+	}
+
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	var got []string
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		var err error
+		if got, err = cfg.Addenda(ctx); err != nil {
+			t.Fatalf("polling: %v", err)
+		}
+		return pushed(), nil
+	})
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Addenda returned a comment already folded into the prompt: %v", got)
+	}
+}
+
 // closeTask marks id closed by writing task_observation directly, the
 // same effect ui.Client.Close has -- restated here rather than importing
 // pkg/ui, matching orchestrator_test.go's own "duplicated per file" style
