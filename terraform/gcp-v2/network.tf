@@ -9,6 +9,12 @@ locals {
   network_name    = var.create_network ? google_compute_network.this[0].name : var.network_name
   subnetwork_name = var.create_network ? google_compute_subnetwork.this[0].name : var.subnetwork_name
   host_tag        = "${var.name_prefix}-host"
+
+  # IAP's TCP forwarding range -- where a `gcloud compute start-iap-tunnel`
+  # connection arrives from. Fixed by Google, and deliberately not
+  # ssh_source_ranges: an operator may widen that to their own CIDR for
+  # direct SSH, and doing so must not also open the UI port to it.
+  iap_tunnel_range = "35.235.240.0/20"
 }
 
 resource "google_compute_network" "this" {
@@ -49,11 +55,30 @@ resource "google_compute_firewall" "ssh" {
 # the load balancer, gated by IAP, is the only intended path to this
 # port.
 resource "google_compute_firewall" "lb_to_ui" {
-  count         = var.create_network ? 1 : 0
+  count         = var.create_network && var.expose_ui_publicly ? 1 : 0
   name          = "${var.name_prefix}-allow-lb-to-ui"
   network       = google_compute_network.this[0].name
   direction     = "INGRESS"
   source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  target_tags   = [local.host_tag]
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.ui_port)]
+  }
+}
+
+# ui_port over IAP's TCP tunnel, which is the whole access path when
+# expose_ui_publicly is off and a debugging one when it is on. Reaching
+# through this range at all requires roles/iap.tunnelResourceAccessor, so
+# it is authenticated the same way the SSH rule above is -- the range is
+# not the control, the IAM grant is.
+resource "google_compute_firewall" "tunnel_to_ui" {
+  count         = var.create_network ? 1 : 0
+  name          = "${var.name_prefix}-allow-tunnel-to-ui"
+  network       = google_compute_network.this[0].name
+  direction     = "INGRESS"
+  source_ranges = [local.iap_tunnel_range]
   target_tags   = [local.host_tag]
 
   allow {

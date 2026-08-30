@@ -30,6 +30,9 @@ out() { terraform output -raw "$1" 2>/dev/null || true; }
   echo "instance=$(out instance_name)"
   echo "zone=$(out zone)"
   echo "url=$(out url)"
+  # Empty exactly when expose_ui_publicly is off, which is how the
+  # summary decides whether to print a URL or the tunnel command.
+  echo "tunnel_command=$(out tunnel_command)"
   echo "agent_service_account=$(out agent_service_account)"
   echo "minter_service_account=$(out minter_service_account)"
 } >> "$github_output"
