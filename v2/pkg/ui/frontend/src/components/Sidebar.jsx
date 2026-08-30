@@ -78,6 +78,19 @@ export default function Sidebar({ config, tasks, schedules = [], view, onSetView
       <Button variant="contained" fullWidth onClick={onOpenNewTask}>+ New task</Button>
 
       <List component="nav" disablePadding sx={{ display: "flex", flexDirection: "column", gap: 0.2 }}>
+        <NavItem id="all" label="All issues" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
+        {STATE_ORDER.filter((s) => counts[s]).map((s) => (
+          <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} active={view === "tasks" && stateFilter === s} />
+        ))}
+        {/* Blocked is not a state (docs/data-model.md) so it gets its own
+            nav entry alongside the state ones rather than a slot in
+            STATE_ORDER -- a task stays under its own state filter too,
+            this is just a faster way to find what dispatch is currently
+            skipping over. */}
+        {blocked > 0 && (
+          <NavItem id="blocked" label="Blocked" dotClass="dot-blocked" count={blocked} active={view === "tasks" && stateFilter === "blocked"} />
+        )}
+        <Divider sx={{ my: 0.7 }} />
         <ListItemButton selected={view === "repos"} onClick={() => onSetView("repos")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />
           <ListItemText primary="Repos" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
@@ -92,18 +105,6 @@ export default function Sidebar({ config, tasks, schedules = [], view, onSetView
           <span className="dot dot-all" />
           <ListItemText primary="Logs" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
         </ListItemButton>
-        <NavItem id="all" label="All issues" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
-        {STATE_ORDER.filter((s) => counts[s]).map((s) => (
-          <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} active={view === "tasks" && stateFilter === s} />
-        ))}
-        {/* Blocked is not a state (docs/data-model.md) so it gets its own
-            nav entry alongside the state ones rather than a slot in
-            STATE_ORDER -- a task stays under its own state filter too,
-            this is just a faster way to find what dispatch is currently
-            skipping over. */}
-        {blocked > 0 && (
-          <NavItem id="blocked" label="Blocked" dotClass="dot-blocked" count={blocked} active={view === "tasks" && stateFilter === "blocked"} />
-        )}
       </List>
 
       <Box sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
