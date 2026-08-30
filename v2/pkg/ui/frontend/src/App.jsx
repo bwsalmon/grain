@@ -12,6 +12,7 @@ import SecretsOverlay from "./components/SecretsOverlay.jsx";
 import ReleasesOverlay from "./components/ReleasesOverlay.jsx";
 import ScheduledTasksOverlay from "./components/ScheduledTasksOverlay.jsx";
 import UpgradeOverlay from "./components/UpgradeOverlay.jsx";
+import LogsOverlay from "./components/LogsOverlay.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -41,6 +42,7 @@ export default function App() {
   const [showReleases, setShowReleases] = useState(false);
   const [showSchedules, setShowSchedules] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -202,6 +204,7 @@ export default function App() {
         onOpenSettings={() => setShowSettings(true)}
         onOpenReleases={() => setShowReleases(true)}
         onOpenUpgrade={() => setShowUpgrade(true)}
+        onOpenLogs={() => setShowLogs(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
       {view === "repos" ? (
@@ -240,6 +243,7 @@ export default function App() {
       {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
       {showSchedules && <ScheduledTasksOverlay onClose={() => setShowSchedules(false)} showError={showError} />}
       {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
+      {showLogs && <LogsOverlay onClose={() => setShowLogs(false)} showError={showError} />}
     </div>
   );
 }
