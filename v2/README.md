@@ -109,7 +109,14 @@ e2e/            tasks filed the way a user would, carried through
                 TestRandomizedClusterLong is the same driver run for much
                 longer by hand (its own doc comment says how) and does
                 nothing unless asked to. See "What this does not have
-                yet" below for where it stops.
+                yet" below for where it stops. loadtest_test.go
+                (bwsalmon/agents#416) is a third: many tasks, across many
+                repos, many slots dispatching at once, several goroutines
+                writing to the same on-disk store concurrently with a
+                live RunCycle, to catch scheduling starvation, sqlite
+                contention and a capability leak at a scale none of the
+                above reach -- `make loadtest`, or that file's own doc
+                comment for how to size it up to an actual host.
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237). It reads and writes
