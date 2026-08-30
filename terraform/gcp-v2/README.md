@@ -138,15 +138,24 @@ Two things differ from a by-hand deploy:
 
 ### Sharing a project with a v1 deployment
 
-Supported, and the reason `bootstrap-gcp.sh` prefixes its workload
-identity pool and provider with `name_prefix` rather than calling both
-"github" the way v1's own bootstrap does. A pool is a project-level
-resource: with the v1 names, bootstrapping staging into a project that
-already runs v1 would rewrite v1's provider -- harmlessly while both name
-the same `--repo`, and catastrophically the moment they do not, since
-v1's deploy workflow would silently lose the ability to authenticate.
-The prefixed defaults mean the two never touch. `--pool`/`--provider`
-override them if you want a pool shared deliberately.
+Supported, and the reason `bootstrap-gcp.sh` derives its workload
+identity pool and provider from `name_prefix`. A pool is a project-level
+resource, and both bootstrap scripts once hardcoded "github" for it: on
+those names, bootstrapping staging into a project already running v1
+took the *update* branch on v1's provider and rewrote its attribute
+condition to name whatever `--repo` was passed here -- a no-op while both
+name the same repo, and a v1 deploy that can no longer authenticate at
+all the moment they differ.
+
+Both scripts now prefix, so the two never touch. `--pool`/`--provider`
+override it for a pool shared deliberately.
+
+One asymmetry is deliberate: v1's script *adopts* an existing unprefixed
+`github` pool when that pool's provider already names its own `--repo`,
+because a deployment bootstrapped before prefixing is still wired to it
+and its `GCP_WORKLOAD_IDENTITY_PROVIDER` secret still points there. This
+script never adopts. In a shared project that pool is v1's, and taking
+it over is exactly the collision the prefixing exists to prevent.
 
 The state bucket, the deployer account, the instance, and the guest
 attribute namespace (`grain-v2` here against v1's `grain`) are already
@@ -341,7 +350,9 @@ lists in sync automatically; an operator who changes one by hand (via
 - **One deployment per state prefix.** Running more than one of these in
   the same project needs a different `name_prefix`, a different
   `backend.hcl` prefix, and (since `agent_account_id`/`minter_account_id`
-  default to fixed names) distinct values for those two as well.
+  default to fixed names) distinct values for those two as well. The
+  state bucket, the deployer account, and the workload identity pool and
+  provider all derive from `name_prefix` already.
 - **Destroying it is deliberately awkward.** The data disk carries
   `prevent_destroy` (`instance.tf`) -- it holds the SQLite store, the
   secrets database, and the sandbox working directories. Remove that

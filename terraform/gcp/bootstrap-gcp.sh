@@ -21,8 +21,26 @@ GITHUB_REPO=""
 REGION="us-central1"
 NAME_PREFIX="grain"
 BUCKET=""
-POOL_ID="github"
-PROVIDER_ID="github"
+# Empty here, derived from NAME_PREFIX after argument parsing (--prefix
+# may not have been seen yet) unless --pool/--provider say otherwise.
+#
+# A workload identity pool is a *project-level* resource, so two grain
+# deployments sharing a project -- which this README says works fine,
+# given different name_prefix and backend prefixes -- would both land on
+# an unprefixed name. The second bootstrap then takes the update branch
+# on the first's provider and rewrites its attribute condition to name
+# the second's repo, and the first's deploy workflow silently loses the
+# ability to authenticate at all. Prefixing is what makes that README
+# claim true of the workload identity half too, rather than only of the
+# state bucket and the service account, which were already prefixed.
+POOL_ID=""
+PROVIDER_ID=""
+
+# What this script used to hardcode for both. A deployment bootstrapped
+# before the prefixing above is still wired to it, so it is adopted
+# rather than abandoned -- see the "legacy" block below.
+LEGACY_POOL_ID="github"
+LEGACY_PROVIDER_ID="github"
 
 usage() {
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -35,6 +53,12 @@ Options:
   --prefix     PREFIX         resource-name prefix, must match name_prefix
                               in config/grain.tfvars. default: grain
   --bucket     NAME           Terraform state bucket. default: PROJECT-PREFIX-tfstate
+  --pool       ID             workload identity pool id. default: PREFIX, so two
+                              deployments in one project never share a pool. An
+                              existing unprefixed "github" pool already wired to
+                              --repo is adopted instead, so re-running this against
+                              a deployment set up before prefixing changes nothing
+  --provider   ID             workload identity provider id. default: as --pool
 USAGE
 }
 
@@ -45,6 +69,8 @@ while [ "$#" -gt 0 ]; do
     --region)  REGION="$2"; shift 2 ;;
     --prefix)  NAME_PREFIX="$2"; shift 2 ;;
     --bucket)  BUCKET="$2"; shift 2 ;;
+    --pool)    POOL_ID="$2"; shift 2 ;;
+    --provider) PROVIDER_ID="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -128,6 +154,44 @@ for role in roles/storage.objectAdmin roles/storage.legacyBucketReader; do
     --member="serviceAccount:${DEPLOYER_EMAIL}" --role="$role" >/dev/null
   echo "  $role on gs://$BUCKET"
 done
+
+# Which pool and provider, now that --prefix and --pool have both been
+# seen. Prefixed by default so two deployments in one project never
+# collide -- with one exception, below.
+if [ -z "$POOL_ID" ] && [ -z "$PROVIDER_ID" ]; then
+  # A deployment bootstrapped before prefixing is wired to the old
+  # unprefixed names, and its GCP_WORKLOAD_IDENTITY_PROVIDER secret still
+  # names them. Switching it to a prefixed pool on a routine re-run would
+  # leave that secret pointing at a provider this script no longer
+  # maintains, so adopt what is already there instead.
+  #
+  # Adopted only when the legacy provider's attribute condition already
+  # names *this* --repo -- that is what makes it this deployment's own
+  # earlier output rather than some other deployment's pool, which is the
+  # collision the prefixing exists to prevent. Anything else takes the
+  # prefixed default.
+  legacy_condition="$(gcloud iam workload-identity-pools providers describe "$LEGACY_PROVIDER_ID" \
+    --project="$PROJECT_ID" --location=global \
+    --workload-identity-pool="$LEGACY_POOL_ID" \
+    --format='value(attributeCondition)' 2>/dev/null || true)"
+  case "$legacy_condition" in
+    *"'${GITHUB_REPO}'"*)
+      POOL_ID="$LEGACY_POOL_ID"
+      PROVIDER_ID="$LEGACY_PROVIDER_ID"
+      say "Reusing this project's existing \"$LEGACY_POOL_ID\" workload identity pool"
+      echo "  It is already wired to $GITHUB_REPO, so this deployment predates prefixed"
+      echo "  pool names and its GCP_WORKLOAD_IDENTITY_PROVIDER secret still points at it."
+      echo "  Nothing changes, and re-running this stays a no-op."
+      echo
+      echo "  To move it onto a pool of its own -- worth doing before a second"
+      echo "  deployment shares this project -- re-run with:"
+      echo "      --pool $NAME_PREFIX --provider $NAME_PREFIX"
+      echo "  and update that secret to the provider printed at the end."
+      ;;
+  esac
+fi
+POOL_ID="${POOL_ID:-$NAME_PREFIX}"
+PROVIDER_ID="${PROVIDER_ID:-$NAME_PREFIX}"
 
 say "Workload identity federation for $GITHUB_REPO"
 if ! gcloud iam workload-identity-pools describe "$POOL_ID" \
