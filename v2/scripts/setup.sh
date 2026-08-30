@@ -260,6 +260,37 @@ build_and_install() {
   install -m0755 "$GRAIN_SRC_DIR/v2/bin/grain" "$REAL_BIN"
   ln -sf "$REAL_BIN" /usr/local/bin/grain
   log "Installed $REAL_BIN (linked from /usr/local/bin/grain)"
+  write_cli_profile
+}
+
+# write_cli_profile points this host's `grain` CLI at this host's own
+# daemon.
+#
+# The CLI talks to the daemon over REST and defaults to
+# http://127.0.0.1:8420 (cmd/grain/main.go's defaultServerURL), which is
+# only ever right by coincidence -- a deployment setting GRAIN_UI_ADDR to
+# anything else made every invocation on its own host need an explicit
+# -server, forever, with a connection refused as the only hint.
+#
+# The bind address is not reusable as-is: it is what the daemon listens
+# on, so a deployment behind a load balancer or a tunnel binds 0.0.0.0,
+# which is not an address to connect *to*. Only the port carries over;
+# the host is always loopback, since this file is for shells on the same
+# machine.
+write_cli_profile() {
+  local port="${GRAIN_UI_ADDR##*:}"
+  if [ -z "$port" ] || [ "$port" = "$GRAIN_UI_ADDR" ]; then
+    log "  GRAIN_UI_ADDR ($GRAIN_UI_ADDR) has no port; not writing /etc/profile.d/grain.sh"
+    return 0
+  fi
+  cat > /etc/profile.d/grain.sh <<PROFILE
+# Written by v2/scripts/setup.sh. Points the grain CLI at the daemon this
+# host runs, whose port comes from the -ui-addr it was started with.
+# An explicit -server flag still overrides this.
+export GRAIN_SERVER="http://127.0.0.1:${port}"
+PROFILE
+  chmod 0644 /etc/profile.d/grain.sh
+  log "  grain CLI on this host defaults to http://127.0.0.1:${port} (/etc/profile.d/grain.sh)"
 }
 
 # --- 4. the unprivileged account grain runs as --------------------------
@@ -643,6 +674,8 @@ print_summary() {
   echo "    UI:      http://${GRAIN_UI_ADDR} -- reach it with: ssh -L 8080:localhost:${GRAIN_UI_ADDR##*:} <this-host>, then open http://localhost:8080"
   echo "    Store:   embedded SQLite under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
+  echo "    CLI:     grain list  (a new shell picks up GRAIN_SERVER from /etc/profile.d/grain.sh;"
+  echo "             in this one: export GRAIN_SERVER=http://127.0.0.1:${GRAIN_UI_ADDR##*:})"
   echo "    Logs:    journalctl -u grain-daemon.service -f"
   echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts the service"
 }
