@@ -28,7 +28,7 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 real remote host instead, the transport a kontur-managed
                 sandbox VM needs
 pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
-                external port kontur itself persisted at "kontur vm
+                external port kontur itself persisted at "konturctl vm
                 create" time, plus the pod IP that port answers on, asked
                 of containerd directly via crictl since kontur has no
                 apiserver to have recorded it anywhere itself
@@ -589,7 +589,7 @@ pointed at it for real: `-kontur-vm-name-prefix` opts a deployment in,
 with `-kontur-ssh-user`/`-kontur-ssh-key`/`-kontur-workspace` for the SSH
 side and repeatable `-kontur-create-arg` flags building
 `KonturConfig.CreateArgs` (bwsalmon/agents#274) — a deployment's own
-`kontur vm create -h` decides what those are, most importantly whichever
+`konturctl vm create -h` decides what those are, most importantly whichever
 flag points at a built guest image (`../packer/kontur/`, below), since
 that flag's name is owned by bwsalmon/kontur's own CLI and still hasn't
 been reachable to confirm from this repo. `KonturSandboxes.
@@ -603,7 +603,7 @@ sshd, the same assumption v1's own sandbox provisioning stood in for —
 `../packer/kontur/` is that successor (bwsalmon/agents#267).
 
 bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
-`KonturConfig.Backend` selects the value `kontur vm create -backend`
+`KonturConfig.Backend` selects the value `konturctl vm create -backend`
 builds each slot's VM with, and defaults (`-kontur-backend`'s own default)
 to `kontur.BackendDocker`: run the VM directly against a local docker
 daemon, needing neither `konturctl setup` nor containerd/CNI/kubelet on
@@ -621,6 +621,38 @@ gives a sandbox (`grain/adapter/base.py`), applied here per task instead
 of on a schedule. `HostSandboxes` implements no such method: the local-
 directory stand-in stays long-lived, resetting one between tasks still
 being "the caller's job" the same way it always has been.
+
+bwsalmon/agents#466 ("Use kontur sandboxes") found and fixed three bugs
+that every other kontur test in this repo, all built against hand-written
+`kontur`/`docker`/`crictl` doubles, had no way to catch: `pkg/kontur`'s
+own `Create`/`Delete` were exec'ing a binary literally named `kontur` for
+`vm create`/`vm delete`, when that binary is `konturctl`'s job --
+`kontur` is a different, container-facing program entirely (its own
+`cmd/kontur/main.go` doc comment: "distinct from cmd/konturctl, which is
+the operator-facing CLI"); `kontur.DockerPodIP`'s `docker inspect`
+template dot-accessed `NetworkSettings.IPAddress` directly, which errors
+("map has no entry for key") against a real, current docker daemon
+(29.7.2) that omits the field from a container with no legacy
+single-network attachment, rather than returning it empty; and
+`KonturConfig.CreateArgs` had no way to give more than one slot's VM a
+distinct `-ip`/`-port` (`konturctl` requires both, with no default and no
+auto-allocation of its own), so any deployment with `-max-concurrent`
+greater than 1 would have asked every slot's VM to share the exact same
+address. The third is now `KonturConfig.BaseIP`/`BasePort`: set either
+and `ensure` derives slot's own `-ip`/`-port` from it and the slot's own
+number (`model.SlotNames`' own 1-based, all-numeric contract), rather
+than repeating a literal `-ip`/`-port` in `-kontur-create-arg` that could
+only ever be right for one slot. `pkg/orchestrator`'s
+`TestKonturSandboxesToolsForAgainstARealDockerBackedVM` is the test that
+found all three: it builds `konturctl` and bwsalmon/kontur's own OCI
+image from the vendored source and drives `KonturSandboxes.ToolsFor`
+against a real docker daemon and a real cloud-hypervisor VM under real
+KVM, skipping outright on a host missing either (as of this writing, that
+still stops short of a real dispatched tool call actually executing
+inside the guest over SSH -- see the test's own doc comment for why:
+packer/kontur's own guest image, the one built to actually carry
+`git`/build tooling and a working SSH login, is not yet published
+anywhere a test could fetch it from).
 
 The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
 `propose_task`, `add_review_comment`) `agent/gemini.Framework.Run` wires
@@ -834,7 +866,7 @@ the same way v1's `configure_git_credentials` sets a real sandbox's up,
 once per slot at daemon startup). The `mcpserver` subcommand itself can
 now be pointed at a real remote VM instead — `-kontur-vm` resolves a
 bwsalmon/kontur-managed VM's SSH endpoint (`pkg/kontur`: the external port
-kontur persisted at `kontur vm create` time, plus the pod IP that port
+kontur persisted at `konturctl vm create` time, plus the pod IP that port
 answers on, asked of containerd via `crictl` since kontur has no
 apiserver to have recorded it anywhere itself), `mcp.NewSSHSandboxTools`
 runs the same four tools — `run_command`/`read_file`/`edit_file`/
@@ -862,7 +894,7 @@ The daemon still defaults `Deps.Sandboxes` to `HostSandboxes`, but
 `-cri-runtime-endpoint` flags, see "What this does not have yet" above)
 now opts a real deployment into `KonturSandboxes` instead — the flag that
 picks the image lives in `-kontur-create-arg`, repeated once per
-`kontur vm create` flag/value pair a deployment's own `kontur vm create
+`konturctl vm create` flag/value pair a deployment's own `konturctl vm create
 -h` calls for, rather than a name this repo guesses at.
 
 A real `github.RESTClient` exists and is wired into the daemon too, driving
@@ -1212,7 +1244,13 @@ VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
 not have either way yet). It builds with `make container-build`, so a
 working `docker` is the one thing it assumes about the host at build
-time; there used to be a second service (`grain-ui.service`) and, before
+time -- `make` itself it installs when the host has none, since the
+compile happens inside Docker and make is the one piece of that
+toolchain the host still needs, which no Debian cloud image carries
+(`ensure_make`); it also re-runs itself when the update it just pulled
+replaced the script mid-run, so a deploy never builds with the copy it
+started with (`reexec_if_updated`). There used to be a second service
+(`grain-ui.service`) and, before
 bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt sql-server`
 container behind it, needed only because a daemon and a UI writing the
 same store used to mean two writers ("The UI and the CLI talk to the

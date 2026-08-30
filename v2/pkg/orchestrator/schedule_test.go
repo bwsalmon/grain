@@ -18,14 +18,14 @@ import (
 func filedSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) model.ScheduledTask {
 	t.Helper()
 	sched := model.ScheduledTask{
-		ID:        id,
-		Title:     "Nightly dependency bump",
-		Body:      "Bump every dependency to its latest patch release.",
-		Target:    model.RepoRef{Owner: "acme", Name: "widgets"},
-		Interval:  24 * time.Hour,
-		Enabled:   true,
-		NextRunAt: nextRunAt,
-		CreatedAt: baseTime,
+		ID:         id,
+		Title:      "Nightly dependency bump",
+		Body:       "Bump every dependency to its latest patch release.",
+		Target:     model.RepoRef{Owner: "acme", Name: "widgets"},
+		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
+		Enabled:    true,
+		NextRunAt:  nextRunAt,
+		CreatedAt:  baseTime,
 	}
 	if err := store.PutScheduledTask(t.Context(), sched); err != nil {
 		t.Fatalf("filing schedule: %v", err)
@@ -59,6 +59,11 @@ func scheduledTasksTagged(t *testing.T, store *model.Store, tag string) []model.
 func TestReconcileScheduleFilesAnAlreadyApprovedTask(t *testing.T) {
 	store, ctx := openStore(t)
 	sched := filedSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
+	sched.Reads = []model.RepoRef{{Owner: "acme", Name: "shared-lib"}}
+	sched.Grants = []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}}
+	if err := store.PutScheduledTask(t.Context(), sched); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := runScheduleOnly(t, store, baseTime); err != nil {
 		t.Fatalf("RunCycle: %v", err)
@@ -86,6 +91,12 @@ func TestReconcileScheduleFilesAnAlreadyApprovedTask(t *testing.T) {
 	}
 	if got.Title != sched.Title || got.Body != sched.Body {
 		t.Errorf("title/body did not carry over: %+v", got)
+	}
+	if len(got.Reads) != 1 || got.Reads[0] != sched.Reads[0] {
+		t.Errorf("reads = %+v, want %+v", got.Reads, sched.Reads)
+	}
+	if len(got.Grants) != 1 || got.Grants[0].Capability != "web-search" {
+		t.Errorf("grants = %+v, want web-search", got.Grants)
 	}
 
 	updated, err := store.GetScheduledTask(ctx, sched.ID)

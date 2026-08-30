@@ -41,6 +41,7 @@ output_directory="output/${image_name}-${version}"
 packer init image.pkr.hcl
 packer build \
   -var "operator_ssh_public_key=${OPERATOR_SSH_PUBLIC_KEY}" \
+  -var "sandbox_setup_script=${SANDBOX_SETUP_SCRIPT:-}" \
   -var "packer_ssh_private_key_file=${seed_dir}/packer_ssh_key" \
   -var "seed_dir=${seed_dir}" \
   -var "image_name=${image_name}" \

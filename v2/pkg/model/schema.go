@@ -214,19 +214,32 @@ var Tables = []string{
 	// task_sequence's own reasoning applies again for a firing's identity,
 	// but the schedule itself needs exactly one durable row to carry
 	// next_run_at/last_run_at and the enabled switch a UI toggles.
+	// recurrence_kind/every_n_hours/time_of_day_minutes/weekday/day_of_month
+	// are model.Recurrence's fields (bwsalmon/agents#464) -- only the
+	// subset matching recurrence_kind is ever non-NULL for a given row
+	// (model.Recurrence.Validate's own doc comment has the mapping), the
+	// same "column per case, most left NULL" shape task's own
+	// approval_actor_kind columns already use for a different sum type.
+	// This replaces the original bare interval_ms (every N hours since it
+	// last fired, with no wall-clock alignment); a database from before
+	// that widening is migrated by ensureScheduledTaskRecurrenceColumns.
 	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task`" + ` (
-  ` + "`id`" + `            TEXT     NOT NULL,
-  ` + "`title`" + `         TEXT     NOT NULL,
-  ` + "`body`" + `          TEXT     NOT NULL,
-  ` + "`target_owner`" + `  TEXT     NOT NULL,
-  ` + "`target_name`" + `   TEXT     NOT NULL,
-  ` + "`base`" + `          TEXT     NULL,
-  ` + "`auto_merge`" + `    INTEGER  NOT NULL,
-  ` + "`interval_ms`" + `   INTEGER  NOT NULL,
-  ` + "`enabled`" + `       INTEGER  NOT NULL,
-  ` + "`next_run_at`" + `   DATETIME NOT NULL,
-  ` + "`last_run_at`" + `   DATETIME NULL,
-  ` + "`created_at`" + `    DATETIME NOT NULL,
+  ` + "`id`" + `                    TEXT     NOT NULL,
+  ` + "`title`" + `                 TEXT     NOT NULL,
+  ` + "`body`" + `                  TEXT     NOT NULL,
+  ` + "`target_owner`" + `          TEXT     NOT NULL,
+  ` + "`target_name`" + `           TEXT     NOT NULL,
+  ` + "`base`" + `                  TEXT     NULL,
+  ` + "`auto_merge`" + `            INTEGER  NOT NULL,
+  ` + "`recurrence_kind`" + `       TEXT     NOT NULL,
+  ` + "`every_n_hours`" + `         INTEGER  NULL,
+  ` + "`time_of_day_minutes`" + `   INTEGER  NULL,
+  ` + "`weekday`" + `               INTEGER  NULL,
+  ` + "`day_of_month`" + `          INTEGER  NULL,
+  ` + "`enabled`" + `               INTEGER  NOT NULL,
+  ` + "`next_run_at`" + `           DATETIME NOT NULL,
+  ` + "`last_run_at`" + `           DATETIME NULL,
+  ` + "`created_at`" + `            DATETIME NOT NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -236,6 +249,29 @@ var Tables = []string{
 	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_sequence`" + ` (
   ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`issued_at`" + ` DATETIME NOT NULL
+)`,
+
+	// task_read's own doc comment gives the reasoning for a table rather
+	// than a JSON column, applied again here now that a schedule's firing
+	// carries read-only repos too (bwsalmon/agents#464).
+	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_read`" + ` (
+  ` + "`scheduled_task_id`" + ` TEXT NOT NULL,
+  ` + "`owner`" + `             TEXT NOT NULL,
+  ` + "`name`" + `              TEXT NOT NULL,
+  PRIMARY KEY (` + "`scheduled_task_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
+)`,
+
+	// task_grant's own shape, for a schedule's own capabilities
+	// (bwsalmon/agents#464) -- via is always 'label' here (a human chose
+	// it in the schedule's own form, same as grantsFor does for a task),
+	// but the column exists anyway so scanning stays identical to
+	// task_grant's.
+	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_grant`" + ` (
+  ` + "`scheduled_task_id`" + ` TEXT NOT NULL,
+  ` + "`capability`" + `        TEXT NOT NULL,
+  ` + "`via`" + `               TEXT NOT NULL,
+  ` + "`folder`" + `            TEXT NULL,
+  PRIMARY KEY (` + "`scheduled_task_id`" + `, ` + "`capability`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (
