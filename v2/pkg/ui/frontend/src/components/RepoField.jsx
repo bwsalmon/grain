@@ -24,29 +24,31 @@ export default function RepoField({ name, options, defaultValue = "", required =
 
   if (custom) {
     return (
-      <>
+      <div className="repo-field">
         <input name={name} placeholder={placeholder} defaultValue={defaultValue} required={required} autoComplete="off" />
         {options.length > 0 && (
           <button type="button" className="link-button" onClick={() => setCustom(false)}>
             Choose from list
           </button>
         )}
-      </>
+      </div>
     );
   }
 
   return (
-    <select
-      name={name}
-      defaultValue={defaultValue}
-      required={required}
-      onChange={(e) => { if (e.target.value === CUSTOM) setCustom(true); }}
-    >
-      {!required && <option value="">—</option>}
-      {options.map((r) => (
-        <option key={r} value={r}>{r}</option>
-      ))}
-      <option value={CUSTOM}>Other…</option>
-    </select>
+    <div className="repo-field">
+      <select
+        name={name}
+        defaultValue={defaultValue}
+        required={required}
+        onChange={(e) => { if (e.target.value === CUSTOM) setCustom(true); }}
+      >
+        {!required && <option value="">—</option>}
+        {options.map((r) => (
+          <option key={r} value={r}>{r}</option>
+        ))}
+        <option value={CUSTOM}>Other…</option>
+      </select>
+    </div>
   );
 }

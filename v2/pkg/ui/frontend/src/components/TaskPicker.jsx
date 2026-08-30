@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ClickAwayListener, ListItemText, MenuItem, MenuList, Paper, Popper, TextField, Typography } from "@mui/material";
 
 // TaskPicker is a search box that resolves free text to a task: type to
 // filter by id or title, click (or arrow down + Enter) to pick one. It
@@ -15,7 +16,7 @@ export default function TaskPicker({ tasks, exclude = [], onPick, placeholder = 
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
-  const containerRef = useRef(null);
+  const anchorRef = useRef(null);
 
   const excludeSet = new Set(exclude);
   const q = query.trim().toLowerCase();
@@ -23,14 +24,6 @@ export default function TaskPicker({ tasks, exclude = [], onPick, placeholder = 
     .filter((t) => !excludeSet.has(t.id))
     .filter((t) => t.id.toLowerCase().includes(q) || t.title.toLowerCase().includes(q))
     .slice(0, 8);
-
-  useEffect(() => {
-    function onDocClick(e) {
-      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, []);
 
   useEffect(() => { setHighlight(0); }, [query]);
 
@@ -48,34 +41,48 @@ export default function TaskPicker({ tasks, exclude = [], onPick, placeholder = 
     else if (e.key === "Enter") { e.preventDefault(); pick(matches[highlight]); }
   };
 
+  const showResults = open && q !== "";
+
   return (
-    <div className="task-picker" ref={containerRef}>
-      <input
-        type="text"
-        placeholder={placeholder}
-        value={query}
-        autoFocus={autoFocus}
-        autoComplete="off"
-        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
-        onKeyDown={onKeyDown}
-      />
-      {open && q !== "" && (
-        <ul className="task-picker-results">
-          {matches.length === 0 && <li className="task-picker-empty">No matching tasks</li>}
-          {matches.map((t, i) => (
-            <li
-              key={t.id}
-              className={i === highlight ? "active" : ""}
-              onClick={() => pick(t)}
-              onMouseEnter={() => setHighlight(i)}
-            >
-              <span className="task-picker-id">{t.id}</span>
-              <span className="task-picker-title">{t.title}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <ClickAwayListener onClickAway={() => setOpen(false)}>
+      <div ref={anchorRef} style={{ position: "relative" }}>
+        <TextField
+          size="small"
+          fullWidth
+          placeholder={placeholder}
+          value={query}
+          autoFocus={autoFocus}
+          autoComplete="off"
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+        />
+        <Popper open={showResults} anchorEl={anchorRef.current} placement="bottom-start" style={{ width: anchorRef.current?.offsetWidth, zIndex: 1300 }}>
+          <Paper variant="outlined" sx={{ mt: 0.5, maxHeight: 220, overflowY: "auto" }}>
+            <MenuList dense>
+              {matches.length === 0 && (
+                <MenuItem disabled>
+                  <Typography variant="body2" color="text.secondary">No matching tasks</Typography>
+                </MenuItem>
+              )}
+              {matches.map((t, i) => (
+                <MenuItem
+                  key={t.id}
+                  selected={i === highlight}
+                  onClick={() => pick(t)}
+                  onMouseEnter={() => setHighlight(i)}
+                >
+                  <ListItemText
+                    primary={t.title}
+                    secondary={t.id}
+                    primaryTypographyProps={{ noWrap: true }}
+                  />
+                </MenuItem>
+              ))}
+            </MenuList>
+          </Paper>
+        </Popper>
+      </div>
+    </ClickAwayListener>
   );
 }

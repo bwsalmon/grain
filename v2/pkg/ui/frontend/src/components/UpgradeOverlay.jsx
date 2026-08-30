@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, Button, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -58,37 +59,39 @@ export default function UpgradeOverlay({ onClose, showError }) {
 
   return (
     <Overlay onClose={onClose}>
-      <h2>Upgrade</h2>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Upgrade</Typography>
       {!status.enabled && (
-        <p className="unconfigured-note">
+        <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this deployment has no -upgrade-src-dir configured (bwsalmon/agents#396), so there is
           nothing here that can check out, build and install a branch.
-        </p>
+        </Alert>
       )}
       {status.enabled && (
         <>
-          <p className="overlay-hint">
+          <Typography variant="body2" color="text.secondary" sx={{ mt: -1, mb: 2 }}>
             Fetches the branch below into this deployment's own checkout, rebuilds bin/grain with the
             containerised build, installs it, and restarts to run it -- one upgrade at a time, with no
             rollback if it goes wrong.
-          </p>
+          </Typography>
           <form onSubmit={submit}>
-            <label>Branch
-              <input
-                name="branch"
-                value={branch}
-                onChange={(e) => setBranch(e.target.value)}
-                placeholder="main"
-                autoComplete="off"
-                disabled={running}
-                required
-              />
-            </label>
-            <div className="form-actions">
-              <button type="submit" className="primary" disabled={running}>
+            <TextField
+              name="branch"
+              label="Branch"
+              value={branch}
+              onChange={(e) => setBranch(e.target.value)}
+              placeholder="main"
+              autoComplete="off"
+              disabled={running}
+              required
+              InputLabelProps={{ required: false }}
+              fullWidth
+              margin="normal"
+            />
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button type="submit" variant="contained" disabled={running}>
                 {running ? "Upgrading…" : "Upgrade"}
-              </button>
-            </div>
+              </Button>
+            </Stack>
           </form>
           {status.phase && (
             <dl className="upgrade-status">

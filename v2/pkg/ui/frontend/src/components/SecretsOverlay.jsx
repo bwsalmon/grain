@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Alert, Box, Button, Chip, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -61,14 +62,14 @@ export default function SecretsOverlay({ onClose, showError }) {
 
   return (
     <Overlay onClose={onClose}>
-      <h2>Secrets</h2>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Secrets</Typography>
       {!resp.enabled && (
-        <p className="unconfigured-note">
+        <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this UI was not started with a local secrets directory to write to
           (see -server-data-dir), which only works when the UI runs on the same host as the
           server (bwsalmon/agents#357). You can only set and delete secrets here, never read
           one back.
-        </p>
+        </Alert>
       )}
       {resp.enabled && (
         <>
@@ -76,41 +77,31 @@ export default function SecretsOverlay({ onClose, showError }) {
             {(resp.secrets || []).map((s) => (
               <li className="secret-row" key={s.name}>
                 <span className="secret-name">{s.name}</span>
-                <span className="secret-keys">
+                <Box sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}>
                   {s.keys.map((key) => (
-                    <span className="secret-key" key={key}>
-                      {key}
-                      <button
-                        className="secret-key-delete"
-                        type="button"
-                        title={`delete ${s.name}/${key}`}
-                        onClick={() => deleteKey(s.name, key)}
-                      >
-                        ×
-                      </button>
-                    </span>
+                    <Chip
+                      key={key}
+                      size="small"
+                      label={key}
+                      onDelete={() => deleteKey(s.name, key)}
+                      deleteIcon={<span title={`delete ${s.name}/${key}`}>×</span>}
+                    />
                   ))}
-                </span>
-                <button className="secondary secret-delete" type="button" onClick={() => deleteSecret(s.name)}>
+                </Box>
+                <Button size="small" variant="outlined" onClick={() => deleteSecret(s.name)}>
                   Delete secret
-                </button>
+                </Button>
               </li>
             ))}
           </ul>
           {(resp.secrets || []).length === 0 && <p className="empty">No secrets set.</p>}
           <form onSubmit={submit}>
-            <label>Secret
-              <input name="secret" placeholder="github" autoComplete="off" required />
-            </label>
-            <label>Key
-              <input name="key" placeholder="token" autoComplete="off" required />
-            </label>
-            <label>Value <span className="hint">write-only -- never shown or read back</span>
-              <input name="value" type="password" autoComplete="off" required />
-            </label>
-            <div className="form-actions">
-              <button type="submit" className="primary">Set</button>
-            </div>
+            <TextField name="secret" label="Secret" placeholder="github" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
+            <TextField name="key" label="Key" placeholder="token" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
+            <TextField name="value" label="Value" helperText="write-only -- never shown or read back" type="password" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button type="submit" variant="contained">Set</Button>
+            </Stack>
           </form>
         </>
       )}

@@ -76,7 +76,7 @@ describe("App", () => {
 
     expect(await screen.findByText("1 Fix bug")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "×" }));
+    await user.click(screen.getByRole("button", { name: "Close dialog" }));
 
     expect(screen.queryByText("1 Fix bug")).not.toBeInTheDocument();
   });

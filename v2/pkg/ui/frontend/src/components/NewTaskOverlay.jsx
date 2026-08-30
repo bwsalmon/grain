@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { Box, Button, Checkbox, Chip, FormControlLabel, FormGroup, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
@@ -53,58 +54,62 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
 
   return (
     <Overlay onClose={onClose}>
-      <h2>New task</h2>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>New task</Typography>
       <form ref={formRef} onSubmit={submit}>
-        <label>Title
-          <input name="title" required autoComplete="off" />
-        </label>
-        <label>Description
-          <textarea name="description" rows="5" />
-        </label>
-        <label>Target repo <span className="hint">owner/name, optional</span>
+        <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
+        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+            Target repo <span className="hint">owner/name, optional</span>
+          </Typography>
           {/* Pre-filled from the repo the "+ New task" button was opened
               from -- the repo-centric task list's whole point is filing
               work against the repo you're already looking at without
               retyping it. */}
           <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} />
-        </label>
-        <label>Base branch <span className="hint">optional</span>
-          <input name="base" placeholder="main" autoComplete="off" />
-        </label>
-        <label>Read-only repos <span className="hint">owner/name, comma-separated, optional</span>
-          <input name="reads" placeholder="owner/shared-lib, owner/schema" autoComplete="off" />
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" name="autoMerge" />
-          Auto-merge once checks pass
-        </label>
+        </Box>
+        <TextField name="base" label="Base branch" helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
+        <TextField
+          name="reads"
+          label="Read-only repos"
+          helperText="owner/name, comma-separated, optional"
+          placeholder="owner/shared-lib, owner/schema"
+          autoComplete="off"
+          fullWidth
+          margin="normal"
+        />
+        <FormControlLabel
+          control={<Checkbox name="autoMerge" />}
+          label="Auto-merge once checks pass"
+          sx={{ display: "flex", mt: 1 }}
+        />
         <fieldset>
           <legend>Capabilities</legend>
-          {(config?.capabilities || []).map((c) => (
-            <label key={c.id} className="checkbox" title={c.description}>
-              <input type="checkbox" name={"cap-" + c.id} />
-              {c.name}
-            </label>
-          ))}
+          <FormGroup>
+            {(config?.capabilities || []).map((c) => (
+              <FormControlLabel
+                key={c.id}
+                title={c.description}
+                control={<Checkbox name={"cap-" + c.id} />}
+                label={c.name}
+              />
+            ))}
+          </FormGroup>
         </fieldset>
         <fieldset>
           <legend>Depends on <span className="hint">optional</span></legend>
           {dependsOn.length > 0 && (
-            <div className="chips dependency-chips">
+            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: 1 }}>
               {dependsOn.map((t) => (
-                <span key={t.id} className="chip dependency-chip">
-                  <span>{t.id} {t.title}</span>
-                  <button
-                    type="button"
-                    className="chip-remove"
-                    title={`Remove dependency on ${t.id}`}
-                    onClick={(e) => { e.stopPropagation(); removeDependency(t.id); }}
-                  >
-                    ×
-                  </button>
-                </span>
+                <Chip
+                  key={t.id}
+                  size="small"
+                  label={`${t.id} ${t.title}`}
+                  onDelete={() => removeDependency(t.id)}
+                  deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
+                />
               ))}
-            </div>
+            </Box>
           )}
           <TaskPicker
             tasks={tasks || []}
@@ -113,13 +118,14 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             placeholder="Search tasks to depend on…"
           />
         </fieldset>
-        <label className="checkbox">
-          <input type="checkbox" name="approved" />
-          Queue immediately (unchecked files it as a proposal, needing approval)
-        </label>
-        <div className="form-actions">
-          <button type="submit" className="primary">Create task</button>
-        </div>
+        <FormControlLabel
+          control={<Checkbox name="approved" />}
+          label="Queue immediately (unchecked files it as a proposal, needing approval)"
+          sx={{ display: "flex", mt: 1 }}
+        />
+        <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+          <Button type="submit" variant="contained">Create task</Button>
+        </Stack>
       </form>
     </Overlay>
   );

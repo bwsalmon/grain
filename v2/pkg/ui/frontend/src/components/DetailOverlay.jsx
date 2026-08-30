@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, FormGroup, Link, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
 import Overlay from "./Overlay.jsx";
@@ -10,20 +11,20 @@ import TaskPicker from "./TaskPicker.jsx";
 // narrow property column beside it.
 export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act }) {
   return (
-    <Overlay onClose={onClose} className="panel-detail">
+    <Overlay onClose={onClose} wide>
       <div className="detail-layout">
         <div className="detail-main">
           <div className="detail-header">
-            <h2>{t.id} {t.title}</h2>
+            <Typography variant="h6" component="h2" sx={{ m: 0, fontWeight: 600, fontSize: "1.15rem" }}>{t.id} {t.title}</Typography>
           </div>
 
           <div className="freshness">
             as of just now
-            {t.pullRequest && <> · <a href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</a></>}
+            {t.pullRequest && <> · <Link href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</Link></>}
             {t.generatedFrom && (
               <>
                 {" "}· generated from{" "}
-                <a href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</a>
+                <Link href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</Link>
               </>
             )}
           </div>
@@ -31,10 +32,10 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
           <div className="description">{t.description || "(no description)"}</div>
 
           {t.state === "failed" && (
-            <div className="failure-summary">
+            <Alert severity="error" sx={{ mb: 2 }}>
               <strong>{t.failedAttempts} consecutive failed attempt{t.failedAttempts === 1 ? "" : "s"}.</strong>
               {t.lastFailureReason && <> Last failure: {t.lastFailureReason}</>}
-            </div>
+            </Alert>
           )}
 
           <Comments t={t} act={act} />
@@ -46,7 +47,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             {/* Blocked reads as an annotation beside the state dot, not a
                 replacement for it -- a blocked task is still queued
                 (docs/data-model.md). */}
-            {t.blocked && <span className="badge badge-blocked">Blocked</span>}
+            {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>
 
           <Actions t={t} act={act} />
@@ -90,50 +91,51 @@ function Declared({ t }) {
 
 function Actions({ t, act }) {
   return (
-    <div className="actions">
+    <Stack className="actions" spacing={1}>
       {t.state === "proposed" && (
-        <button className="primary" onClick={() => act(() => api(`/api/tasks/${t.id}/approve`, { method: "POST" }), t.id)}>
+        <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/approve`, { method: "POST" }), t.id)}>
           Approve
-        </button>
+        </Button>
       )}
       {/* Once a task's run has produced a pull request, submitting is
           what puts it on the merge queue for automatic conflict
           resolution and merging. Already-submitted tasks (autoMerge
           already true) have nothing left for this button to do. */}
       {t.pullRequest && !t.autoMerge && (
-        <button className="primary" onClick={() => act(() => api(`/api/tasks/${t.id}/submit`, { method: "POST" }), t.id)}>
+        <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/submit`, { method: "POST" }), t.id)}>
           Submit
-        </button>
+        </Button>
       )}
       {t.state === "failed" && (
-        <button className="primary" onClick={() => act(() => api(`/api/tasks/${t.id}/retry`, { method: "POST" }), t.id)}>
+        <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/retry`, { method: "POST" }), t.id)}>
           Retry
-        </button>
+        </Button>
       )}
       {t.state === "closed" ? (
-        <button className="secondary" onClick={() => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id)}>
+        <Button variant="outlined" onClick={() => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id)}>
           Reopen
-        </button>
+        </Button>
       ) : t.state === "running" ? (
         // Closing a running task stops it from ever being re-dispatched
         // or opened as a pull request, and cancels the run in flight --
         // "Cancel" is that same close call, surfaced under a name that
         // matches what a running task's close button actually does.
-        <button
-          className="danger secondary"
+        <Button
+          variant="outlined"
+          color="error"
           onClick={() => {
             if (!confirm("Cancel this job? Its run will be abandoned: no pull request will be opened for it.")) return;
             act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id);
           }}
         >
           Cancel
-        </button>
+        </Button>
       ) : (
-        <button className="danger secondary" onClick={() => act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id)}>
+        <Button variant="outlined" color="error" onClick={() => act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id)}>
           Close
-        </button>
+        </Button>
       )}
-    </div>
+    </Stack>
   );
 }
 
@@ -189,19 +191,25 @@ function CapabilityToggles({ t, config, act }) {
   return (
     <fieldset>
       <legend>Capabilities</legend>
-      {(config?.capabilities || []).map((c) => (
-        <label key={c.id} className="checkbox" title={c.description}>
-          <input
-            type="checkbox"
-            checked={t.capabilities.includes(c.id)}
-            onChange={(e) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
-              method: "POST",
-              body: JSON.stringify({ id: c.id, attach: e.target.checked }),
-            }), t.id)}
+      <FormGroup>
+        {(config?.capabilities || []).map((c) => (
+          <FormControlLabel
+            key={c.id}
+            title={c.description}
+            control={(
+              <Checkbox
+                size="small"
+                checked={t.capabilities.includes(c.id)}
+                onChange={(e) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
+                  method: "POST",
+                  body: JSON.stringify({ id: c.id, attach: e.target.checked }),
+                }), t.id)}
+              />
+            )}
+            label={c.name}
           />
-          {c.name}
-        </label>
-      ))}
+        ))}
+      </FormGroup>
     </fieldset>
   );
 }
@@ -223,30 +231,26 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
     <fieldset>
       <legend>Depends on</legend>
       {dependsOn.length === 0 && <p className="hint">No dependencies.</p>}
-      <div className="chips dependency-chips">
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: dependsOn.length > 0 ? 1 : 0 }}>
         {dependsOn.map((id) => {
           const blocking = blockedBy.has(id);
           return (
-            <span key={id} className={`chip dependency-chip${blocking ? " chip-blocking" : ""}`}>
-              <span onClick={() => onOpenTask(id)}>{id}{blocking ? " (open)" : ""}</span>
-              <button
-                type="button"
-                className="chip-remove"
-                title={`Remove dependency on ${id}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  act(() => api(`/api/tasks/${t.id}/depends-on`, {
-                    method: "POST",
-                    body: JSON.stringify({ id, attach: false }),
-                  }), t.id);
-                }}
-              >
-                ×
-              </button>
-            </span>
+            <Chip
+              key={id}
+              size="small"
+              variant={blocking ? "outlined" : "filled"}
+              color={blocking ? "warning" : "default"}
+              label={`${id}${blocking ? " (open)" : ""}`}
+              onClick={() => onOpenTask(id)}
+              onDelete={() => act(() => api(`/api/tasks/${t.id}/depends-on`, {
+                method: "POST",
+                body: JSON.stringify({ id, attach: false }),
+              }), t.id)}
+              deleteIcon={<span title={`Remove dependency on ${id}`}>×</span>}
+            />
           );
         })}
-      </div>
+      </Box>
       <TaskPicker
         tasks={tasks || []}
         exclude={[t.id, ...dependsOn]}
@@ -286,8 +290,8 @@ function Comments({ t, act }) {
           this component with fresh props, but never touches the
           textarea's own DOM value, so an unsent draft survives it. */}
       <div className="comment-form">
-        <textarea rows="2" placeholder="Reply..." ref={textareaRef} />
-        <button className="secondary" onClick={send}>Comment</button>
+        <TextField multiline rows={2} placeholder="Reply..." inputRef={textareaRef} fullWidth size="small" />
+        <Button variant="outlined" onClick={send}>Comment</Button>
       </div>
     </div>
   );

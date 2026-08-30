@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Chip } from "@mui/material";
 import api from "./api.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
@@ -213,10 +214,11 @@ export default function App() {
         <div className="main-column">
           {repoFilter !== null && (
             <div className="repo-scope-bar">
-              <span className="chip dependency-chip">
-                Repo: {repoFilter}
-                <button type="button" className="chip-remove" title="Clear repo filter" onClick={() => setRepoFilter(null)}>×</button>
-              </span>
+              <Chip
+                label={`Repo: ${repoFilter}`}
+                onDelete={() => setRepoFilter(null)}
+                deleteIcon={<span title="Clear repo filter">×</span>}
+              />
             </div>
           )}
           <TaskList

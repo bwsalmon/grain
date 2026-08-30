@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Alert, Button, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -107,49 +108,43 @@ export default function ReleasesOverlay({ config, onClose, showError }) {
   const canPromote = current && current.status === "active";
 
   return (
-    <Overlay onClose={onClose} className="releases-panel">
-      <h2>Releases</h2>
+    <Overlay onClose={onClose}>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Releases</Typography>
 
-      <label>Repo <span className="hint">owner/name</span>
-        <input
-          list="release-repos"
-          value={repo}
-          placeholder="acme/widgets"
-          autoComplete="off"
-          onChange={(e) => setRepo(e.target.value.trim())}
-        />
-        <datalist id="release-repos">
-          {repos.map((r) => <option key={r.repo} value={r.repo} />)}
-        </datalist>
-      </label>
+      <TextField
+        label="Repo"
+        helperText="owner/name"
+        value={repo}
+        placeholder="acme/widgets"
+        autoComplete="off"
+        fullWidth
+        margin="normal"
+        inputProps={{ list: "release-repos" }}
+        onChange={(e) => setRepo(e.target.value.trim())}
+      />
+      <datalist id="release-repos">
+        {repos.map((r) => <option key={r.repo} value={r.repo} />)}
+      </datalist>
 
       {repo.includes("/") && releaseConfig && (
         <>
           {!releaseConfig.configured && (
-            <p className="unconfigured-note">
+            <Alert severity="info" sx={{ mb: 2 }}>
               {repo} has no release configuration yet -- set its prod branch, rc branch and
               release branch prefix below before cutting a release candidate.
-            </p>
+            </Alert>
           )}
           <form onSubmit={submitConfig}>
-            <label>Prod branch
-              <input name="prodBranch" defaultValue={releaseConfig.prodBranch || ""} autoComplete="off" required />
-            </label>
-            <label>RC branch <span className="hint">the moving pointer a fresh cut repoints</span>
-              <input name="rcBranch" defaultValue={releaseConfig.rcBranch || ""} autoComplete="off" required />
-            </label>
-            <label>Release branch prefix
-              <input name="releaseBranchPrefix" defaultValue={releaseConfig.releaseBranchPrefix || ""} autoComplete="off" placeholder="release/" />
-            </label>
-            <label>Major version <span className="hint">hand-edited; grain never changes this</span>
-              <input name="majorVersion" type="number" min="0" step="1" defaultValue={String(releaseConfig.majorVersion || 0)} />
-            </label>
-            <div className="form-actions">
-              <button type="submit" className="primary">Save</button>
-            </div>
+            <TextField name="prodBranch" label="Prod branch" defaultValue={releaseConfig.prodBranch || ""} autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
+            <TextField name="rcBranch" label="RC branch" helperText="the moving pointer a fresh cut repoints" defaultValue={releaseConfig.rcBranch || ""} autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
+            <TextField name="releaseBranchPrefix" label="Release branch prefix" defaultValue={releaseConfig.releaseBranchPrefix || ""} autoComplete="off" placeholder="release/" fullWidth margin="normal" />
+            <TextField name="majorVersion" label="Major version" helperText="hand-edited; grain never changes this" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(releaseConfig.majorVersion || 0)} fullWidth margin="normal" />
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button type="submit" variant="contained">Save</Button>
+            </Stack>
           </form>
 
-          <h3>Current candidate</h3>
+          <Typography variant="subtitle1" sx={{ mt: 2 }}>Current candidate</Typography>
           {current ? (
             <div className="candidate-current">
               <p>
@@ -161,12 +156,12 @@ export default function ReleasesOverlay({ config, onClose, showError }) {
           ) : (
             <p className="empty">No release candidate cut yet.</p>
           )}
-          <div className="form-actions">
-            <button type="button" className="primary" disabled={!canCut} onClick={cut}>Cut new RC</button>
-            <button type="button" className="secondary" disabled={!canPromote} onClick={promote}>Promote current RC</button>
-          </div>
+          <Stack direction="row" spacing={1} sx={{ mt: 1, mb: 2 }}>
+            <Button variant="contained" disabled={!canCut} onClick={cut}>Cut new RC</Button>
+            <Button variant="outlined" disabled={!canPromote} onClick={promote}>Promote current RC</Button>
+          </Stack>
 
-          <h3>History</h3>
+          <Typography variant="subtitle1">History</Typography>
           {candidates.length === 0 && <p className="empty">No candidates yet.</p>}
           {candidates.length > 0 && (
             <ul className="candidate-history">
