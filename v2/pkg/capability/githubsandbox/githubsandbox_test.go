@@ -497,3 +497,45 @@ func TestResolveHonoursAConfiguredApp(t *testing.T) {
 		t.Errorf("Resolve refused a fully configured App: %s", res.Reason)
 	}
 }
+
+// --- Reap on a deployment with no App ----------------------------------
+
+// The daemon sweeps every registered provider hourly, and this one
+// registers everywhere. Erroring here logged
+// `reaping capability "github-sandbox": ...` every hour forever on any
+// deployment that never ran bootstrap-github-app -- a recurring error
+// nobody can act on. There is genuinely nothing to reap: no App means no
+// sandbox repos were ever created.
+func TestReapIsQuietWithNoApp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		creds model.CredentialResolver
+	}{
+		{"no credentials at all", &fakeCredentials{material: map[string]string{}}},
+		{"app id only", &fakeCredentials{material: map[string]string{DefaultAppIDCredential: "app-123"}}},
+		{"nil resolver", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProvider(Config{})
+			deleted, err := p.Reap(context.Background(), tc.creds, time.Now())
+			if err != nil {
+				t.Errorf("Reap returned an error for an unconfigured deployment: %v", err)
+			}
+			if len(deleted) != 0 {
+				t.Errorf("Reap reported %d deletions with no App configured", len(deleted))
+			}
+		})
+	}
+}
+
+// A configured App that fails is a real problem with real leaked repos
+// behind it, and must not be swallowed by the quiet path above.
+func TestReapStillErrorsWhenTheAppIsConfiguredButFailing(t *testing.T) {
+	p := &Provider{}
+	p.newClient = func(ctx context.Context, appID, privateKeyPEM, host string, insecureHTTP bool) (appClient, error) {
+		return nil, errors.New("github is unreachable")
+	}
+	if _, err := p.Reap(context.Background(), testCredentials(), time.Now()); err == nil {
+		t.Fatal("expected a configured-but-failing App to surface its error")
+	}
+}

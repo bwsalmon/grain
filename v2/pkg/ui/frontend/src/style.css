@@ -205,19 +205,38 @@ main { padding: 0 0 2.5rem; }
 }
 .badge::before {
   content: "";
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
   background: var(--text-tertiary);
   flex: none;
 }
 .badge-queued::before { background: transparent; border: 1.5px solid var(--state-queued); box-sizing: border-box; }
-.badge-running::before { background: var(--state-running); }
+.badge-running::before {
+  background: transparent;
+  border: 2px solid var(--state-running);
+  border-top-color: transparent;
+  box-sizing: border-box;
+  animation: badge-spin 0.8s linear infinite;
+}
 .badge-awaiting_reply::before { background: var(--state-awaiting); }
 .badge-failed::before { background: var(--state-failed); }
 .badge-proposed::before { background: var(--state-proposed); }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
+
+/* .badge-running still drives the plain CSS status dot (TaskList,
+   DetailOverlay) rather than an MUI primitive, so it keeps its own spin
+   animation. Blocked/dependency/task-picker chips and inputs were
+   converted to MUI Chip/TaskPicker components instead, so their CSS
+   (dependency-chip, chip-remove, chip-read, badge-blocked, task-picker*)
+   is gone rather than merged back in. */
+@keyframes badge-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .badge-running::before { animation: none; }
+}
 
 .repo-list { list-style: none; margin: 0; padding: 0; }
 .repo-list li {
@@ -257,6 +276,30 @@ main { padding: 0 0 2.5rem; }
 }
 .secret-name { font-weight: 500; }
 
+.repo-chip-list { list-style: none; margin: 0.4rem 0 0; padding: 0; display: flex; gap: 0.35rem; flex-wrap: wrap; }
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  border-radius: 4px;
+  padding: 0.2rem 0.3rem 0.2rem 0.6rem;
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+.repo-chip-delete {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.1rem 0.3rem;
+}
+.repo-chip-delete:hover { color: var(--danger); }
+.repo-chip-add { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
+.repo-chip-add input { flex: 1; margin-top: 0; }
+
 .schedules-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .schedule-row {
   padding: 0.6rem 0;
@@ -276,8 +319,43 @@ main { padding: 0 0 2.5rem; }
 
 /* Form fields themselves are MUI's own TextField/Checkbox now; fieldset
    and legend remain plain HTML (MUI has no fieldset primitive) and keep
-   their own look here. */
+   their own look here. RepoField's <input>/<select> are plain HTML too
+   (it predates this MUI pass and needs native <select> semantics its
+   own tests rely on) -- scoped to .repo-field rather than a bare "form
+   input" selector so it never fights MUI's own input styling elsewhere
+   in the same form. */
+.repo-field input, .repo-field select {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+}
+.repo-field input:focus, .repo-field select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  outline: none;
+}
 form .hint { font-weight: normal; color: var(--text-tertiary); font-size: 0.8rem; }
+/* .link-button is RepoField's "Choose from list" toggle back out of its
+   typed-a-custom-repo state -- chip-remove's own button reset, styled to
+   read as a text link rather than a chip's own × since it sits below a
+   full-width field instead of inline with a short label. */
+.link-button {
+  display: block;
+  margin-top: 0.3rem;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
 fieldset { border: none; padding: 0; margin: 0 0 1.1rem; }
 fieldset legend {
   display: block;
@@ -299,6 +377,24 @@ fieldset legend {
   font-size: 0.85rem;
 }
 .upgrade-status dt { color: var(--text-tertiary); font-weight: 500; }
+
+.panel.panel-logs { max-width: 760px; }
+.logs-toolbar { display: flex; align-items: flex-end; gap: 0.75rem; margin-bottom: 0.75rem; }
+.logs-toolbar label { margin-bottom: 0; }
+.logs-view {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .upgrade-status dd { margin: 0; word-break: break-word; }
 .upgrade-phase-running { color: var(--accent); }
 .upgrade-phase-ok { color: var(--state-completed); }
@@ -325,6 +421,14 @@ fieldset legend {
 }
 
 .detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+
+.attempts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.attempt { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.6rem; }
+.attempt-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.attempt-number { font-size: 0.82rem; font-weight: 600; color: var(--text-secondary); }
+.attempt-meta { color: var(--text-tertiary); font-size: 0.78rem; margin-top: 0.2rem; }
+.attempt-detail { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.3rem; word-break: break-word; }
+
 .declared { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.1rem; }
 .declared-row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.82rem; }
 .declared-key { color: var(--text-tertiary); }

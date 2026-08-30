@@ -96,6 +96,31 @@ describe("ScheduledTasksOverlay", () => {
     vi.unstubAllGlobals();
   });
 
+  it("offers a repo dropdown when the deployment has known repos, instead of a bare text field", async () => {
+    api.mockResolvedValueOnce([]).mockResolvedValueOnce({}).mockResolvedValueOnce([schedule]);
+    const config = { targetRepos: ["acme/widgets", "acme/other"] };
+    const user = userEvent.setup();
+    render(<ScheduledTasksOverlay config={config} onClose={() => {}} showError={() => {}} />);
+    await screen.findByText("No scheduled tasks.");
+
+    await user.type(screen.getByLabelText(/Title/), "Nightly dependency bump");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
+    await user.type(screen.getByLabelText(/Interval/), "24h");
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    expect(api).toHaveBeenCalledWith("/api/schedules", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Nightly dependency bump",
+        description: "",
+        repo: "acme/other",
+        base: "",
+        autoMerge: false,
+        interval: "24h",
+      }),
+    });
+  });
+
   it("reports the error and leaves the overlay open when creation fails", async () => {
     api.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("interval must be positive"));
     const showError = vi.fn();

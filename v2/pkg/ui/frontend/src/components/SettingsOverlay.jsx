@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -9,16 +9,44 @@ function parseCommaList(value) {
 
 export default function SettingsOverlay({ config, onClose, showError }) {
   const [settings, setSettings] = useState(null);
+  const [targetRepos, setTargetRepos] = useState([]);
+  const [newRepo, setNewRepo] = useState("");
 
   useEffect(() => {
     (async () => {
       try {
-        setSettings(await api("/api/settings"));
+        const s = await api("/api/settings");
+        setSettings(s);
+        setTargetRepos(s.targetRepos || []);
       } catch (err) {
         showError(err);
       }
     })();
   }, [showError]);
+
+  // addTargetRepo/removeTargetRepo only touch local state -- like every
+  // other field here, the list is only sent to the server when Save is
+  // pressed, so adding or removing an entry can be undone by closing the
+  // overlay without saving.
+  const addTargetRepo = () => {
+    const repo = newRepo.trim();
+    if (repo === "" || targetRepos.includes(repo)) {
+      setNewRepo("");
+      return;
+    }
+    setTargetRepos([...targetRepos, repo]);
+    setNewRepo("");
+  };
+
+  const removeTargetRepo = (repo) => {
+    setTargetRepos(targetRepos.filter((r) => r !== repo));
+  };
+
+  const newRepoKeyDown = (evt) => {
+    if (evt.key !== "Enter") return;
+    evt.preventDefault();
+    addTargetRepo();
+  };
 
   // submitSettings only puts a field in the request when it differs from
   // what was last loaded, so an operator changing one field never
@@ -57,7 +85,6 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const gcpServiceAccountEmail = form.elements.gcpServiceAccountEmail.value.trim();
     if (gcpServiceAccountEmail !== (settings.gcpServiceAccountEmail || "")) payload.gcpServiceAccountEmail = gcpServiceAccountEmail;
 
-    const targetRepos = parseCommaList(form.elements.targetRepos.value);
     if (JSON.stringify(targetRepos) !== JSON.stringify(settings.targetRepos || [])) payload.targetRepos = targetRepos;
 
     try {
@@ -108,7 +135,38 @@ export default function SettingsOverlay({ config, onClose, showError }) {
         />
         <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
         <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
-        <TextField name="targetRepos" label="Target repos" helperText="comma-separated owner/name; empty allows any" defaultValue={(settings.targetRepos || []).join(", ")} placeholder="owner/repo, owner/other" autoComplete="off" fullWidth margin="normal" />
+
+        <Typography variant="body2" sx={{ mt: 2, fontWeight: 500 }}>
+          Target repos <span className="hint">owner/name; empty allows any</span>
+        </Typography>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mt: 1 }}>
+          {targetRepos.map((repo) => (
+            <Chip
+              key={repo}
+              size="small"
+              label={repo}
+              onDelete={() => removeTargetRepo(repo)}
+              deleteIcon={<span title={`remove ${repo}`}>×</span>}
+            />
+          ))}
+        </Box>
+        {targetRepos.length === 0 && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>No repos added -- any repo is allowed.</Typography>
+        )}
+        <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+          <TextField
+            name="newTargetRepo"
+            value={newRepo}
+            onChange={(evt) => setNewRepo(evt.target.value)}
+            onKeyDown={newRepoKeyDown}
+            placeholder="owner/repo"
+            autoComplete="off"
+            size="small"
+            fullWidth
+          />
+          <Button variant="outlined" onClick={addTargetRepo}>Add</Button>
+        </Stack>
+
         <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
           <Button type="submit" variant="contained">Save</Button>
         </Stack>

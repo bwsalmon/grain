@@ -31,7 +31,7 @@ describe("SettingsOverlay", () => {
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
     expect(screen.getByDisplayValue("a, b")).toBeInTheDocument();
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("acme/widgets")).toBeInTheDocument();
+    expect(screen.getByText("acme/widgets")).toBeInTheDocument();
   });
 
   it("shows an unconfigured note when settings have never been saved", async () => {
@@ -69,6 +69,58 @@ describe("SettingsOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+  });
+
+  it("adds a target repo via the Add button", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.type(screen.getByPlaceholderText("owner/repo"), "acme/gadgets");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByText("acme/gadgets")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ targetRepos: ["acme/widgets", "acme/gadgets"] }),
+    });
+  });
+
+  it("adds a target repo when Enter is pressed in the input", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.type(screen.getByPlaceholderText("owner/repo"), "acme/gadgets{enter}");
+    expect(screen.getByText("acme/gadgets")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ targetRepos: ["acme/widgets", "acme/gadgets"] }),
+    });
+  });
+
+  it("removes a target repo via its delete button", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByTitle("remove acme/widgets"));
+    expect(screen.queryByText("acme/widgets")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ targetRepos: [] }),
+    });
   });
 
   it("reports the error and does not close on a failed save", async () => {

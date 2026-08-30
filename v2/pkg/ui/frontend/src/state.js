@@ -40,3 +40,18 @@ export function reposFromTasks(tasks) {
   }
   return [...byRepo.values()].sort((a, b) => a.repo.localeCompare(b.repo));
 }
+
+// knownRepos is the option list behind the repo dropdowns
+// (bwsalmon/agents#447): config.targetRepos (what CreateTask actually
+// enforces a task's repo against, when the deployment restricts it) union
+// whatever repo any existing task already targets -- so an unrestricted
+// deployment still gets a useful dropdown once it has filed at least one
+// task, rather than staying a bare text field forever. Sorted and
+// deduped the same way reposFromTasks already sorts its own rows.
+export function knownRepos(config, tasks) {
+  const repos = new Set(config?.targetRepos || []);
+  for (const t of tasks || []) {
+    if (t.repo) repos.add(t.repo);
+  }
+  return [...repos].sort((a, b) => a.localeCompare(b));
+}

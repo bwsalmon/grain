@@ -76,6 +76,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
+	"github.com/bwsalmon/grain/v2/pkg/systemlog"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 	"github.com/bwsalmon/grain/v2/pkg/upgrade"
 )
@@ -709,6 +710,18 @@ func startUIServer(cfg config, store *model.Store) (stop func(context.Context) e
 		Reboot:       rebootHost,
 		TargetRepos:  cfg.targetRepos,
 		Credentials:  uiCredentials,
+		// "daemon" reads back this same process's own journal (it always
+		// runs as grain-daemon.service -- scripts/setup.sh's own unit --
+		// under a real deployment); "git-proxy-audit" reads the audit log
+		// startGitProxy's own gitproxy.BuildProxy just wrote alongside it,
+		// in the same DataDir. Both are colocated with this process by
+		// construction -- unlike Secrets/Credentials above, there is no
+		// case here where this deployment has one but not the other
+		// (bwsalmon/agents#444).
+		Logs: map[string]ui.LogSource{
+			"daemon":          systemlog.Journalctl{Unit: "grain-daemon.service"},
+			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
+		},
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

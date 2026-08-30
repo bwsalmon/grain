@@ -65,6 +65,20 @@ describe("NewTaskOverlay", () => {
     expect(payload.capabilities).toEqual(["web-search"]);
   });
 
+  it("offers a repo dropdown built from targetRepos and existing tasks' repos, instead of a bare text field", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [{ id: "1", title: "Old task", repo: "acme/other" }];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.repo).toBe("acme/other");
+  });
+
   it("reports the error and leaves the overlay open when the request fails", async () => {
     api.mockRejectedValueOnce(new Error("title is required"));
     const showError = vi.fn();

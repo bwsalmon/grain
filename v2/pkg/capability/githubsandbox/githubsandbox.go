@@ -278,17 +278,28 @@ func (p *Provider) Spec() model.CapabilitySpec {
 // the refusal arrives at the point built for saying a deployment cannot
 // offer something, carrying the command that would make it able to.
 func (p *Provider) Resolve(ctx context.Context, cc model.CapabilityContext) (model.Resolution, error) {
-	if cc.Credentials == nil {
-		return model.RefusedBecause("no credential resolver is configured, so this deployment cannot authenticate as a GitHub App"), nil
-	}
-	for _, name := range []string{p.appIDCredential(), p.privateKeyCredential()} {
-		if _, err := cc.Credentials.Resolve(ctx, name); err != nil {
-			return model.RefusedBecause(fmt.Sprintf(
-				"this deployment has no GitHub App configured (%s is unset) -- run `grain controller bootstrap-github-app` on the host, or detach this capability from the task",
-				name)), nil
-		}
+	if missing, ok := p.unconfigured(ctx, cc.Credentials); ok {
+		return model.RefusedBecause(missing), nil
 	}
 	return model.Honoured(), nil
+}
+
+// unconfigured reports whether this deployment has no GitHub App at all,
+// and a human-readable reason if so. Distinguishes "never set up" from
+// "set up and failing": only the absence of a credential counts here, so
+// a real API failure still surfaces as an error wherever it happens.
+func (p *Provider) unconfigured(ctx context.Context, creds model.CredentialResolver) (string, bool) {
+	if creds == nil {
+		return "no credential resolver is configured, so this deployment cannot authenticate as a GitHub App", true
+	}
+	for _, name := range []string{p.appIDCredential(), p.privateKeyCredential()} {
+		if _, err := creds.Resolve(ctx, name); err != nil {
+			return fmt.Sprintf(
+				"this deployment has no GitHub App configured (%s is unset) -- run `grain controller bootstrap-github-app` on the host, or detach this capability from the task",
+				name), true
+		}
+	}
+	return "", false
 }
 
 // Materialize creates a fresh private repo, named for cc.Run.ID alone
@@ -434,6 +445,19 @@ func (p *Provider) Revoke(ctx context.Context, cc model.CapabilityContext, lease
 // for a listing that should only ever contain this capability's own
 // stray repos to begin with.
 func (p *Provider) Reap(ctx context.Context, creds model.CredentialResolver, now time.Time) ([]string, error) {
+	// Nothing to reap on a deployment that never had a GitHub App: it has
+	// created no sandbox repos, so there are none to clean up. Returning
+	// an error instead made the daemon's hourly sweep log
+	// `reaping capability "github-sandbox": ...` forever on every
+	// deployment that does not use this capability -- a recurring error
+	// nobody can act on, which is how the ones that matter get missed.
+	//
+	// Only absence is treated this way. An App that is configured and
+	// failing still errors, because that is a real problem with real
+	// leaked repos behind it.
+	if _, ok := p.unconfigured(ctx, creds); ok {
+		return nil, nil
+	}
 	client, err := p.client(ctx, creds)
 	if err != nil {
 		return nil, err

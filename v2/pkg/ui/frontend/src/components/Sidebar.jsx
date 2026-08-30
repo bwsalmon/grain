@@ -8,7 +8,7 @@ const SIDEBAR_WIDTH = 232;
 // list styled like Plane's own status groups (a dot standing in for the
 // state's badge color, a count on the right), and the deployment-level
 // actions (secrets, settings) pinned to the bottom.
-export default function Sidebar({ config, tasks, view, onSetView, stateFilter, onSetFilter, onOpenSecrets, onOpenSchedules, onOpenSettings, onOpenReleases, onOpenUpgrade, onOpenNewTask }) {
+export default function Sidebar({ config, tasks, view, onSetView, stateFilter, onSetFilter, onOpenSecrets, onOpenSchedules, onOpenSettings, onOpenReleases, onOpenUpgrade, onOpenLogs, onOpenNewTask }) {
   const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
 
   const counts = {};
@@ -100,6 +100,7 @@ export default function Sidebar({ config, tasks, view, onSetView, stateFilter, o
         <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenSchedules}>Scheduled tasks</Button>
         <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenSettings}>Settings</Button>
         <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenUpgrade}>Upgrade</Button>
+        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenLogs}>Logs</Button>
       </Box>
     </Box>
   );

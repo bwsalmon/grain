@@ -104,6 +104,28 @@ type TaskDetail struct {
 	// error, the agent framework's own error text, or ProcessResult's own
 	// "finished without pushing, asking, or commenting".
 	LastFailureReason string `json:"lastFailureReason,omitempty"`
+	// Attempts is every run this task has had, oldest first -- the full
+	// history FailedAttempts only counts and summarises (bwsalmon/
+	// agents#445: "show attempts and their status, in order, in the task
+	// view").
+	Attempts []Attempt `json:"attempts,omitempty"`
+}
+
+// Attempt is one of a task's runs, projected from model.Run.
+//
+// Number is model.Run.Attempt, 1-based and dense per task (dispatch.
+// Cycle's own doc comment on how it assigns one). Outcome is empty for a
+// run still in flight (no FinishedAt yet); otherwise it is model.Run's
+// own outcome vocabulary -- "succeeded", "failed", "cancelled" -- the
+// same strings orchestrator.outcomeOf and orchestrator.run already
+// record, passed through rather than re-encoded so the UI's label for
+// one matches `grain get`'s.
+type Attempt struct {
+	Number     int        `json:"number"`
+	StartedAt  time.Time  `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Outcome    string     `json:"outcome,omitempty"`
+	Detail     string     `json:"detail,omitempty"`
 }
 
 // taskFrom projects a model.Task to its JSON shape. closed reports, for
@@ -166,6 +188,16 @@ func commentFrom(c model.Comment) Comment {
 	return out
 }
 
+func attemptFrom(r model.Run) Attempt {
+	return Attempt{
+		Number:     r.Attempt,
+		StartedAt:  r.StartedAt,
+		FinishedAt: r.FinishedAt,
+		Outcome:    r.Outcome,
+		Detail:     r.Detail,
+	}
+}
+
 // --- handlers ------------------------------------------------------------
 //
 // Every handler below is a thin HTTP shim over a Client method: decode
@@ -188,6 +220,12 @@ type configResponse struct {
 	// Config.Reboot is set, so the frontend can hide the reboot button
 	// entirely rather than show one that can only ever 404.
 	RebootEnabled bool `json:"rebootEnabled"`
+	// TargetRepos mirrors Client.Config.TargetRepos -- the same list
+	// CreateTask enforces a task's repo against -- so the frontend can
+	// offer a dropdown of known repos on the task and schedule forms
+	// instead of a bare text field (bwsalmon/agents#447). Empty means
+	// unrestricted, same as everywhere else this field appears.
+	TargetRepos []string `json:"targetRepos,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -196,6 +234,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		ActorKind:     string(s.tasks.Config.Actor.Kind),
 		Capabilities:  s.tasks.Config.Capabilities,
 		RebootEnabled: s.tasks.Config.Reboot != nil,
+		TargetRepos:   s.tasks.Config.TargetRepos,
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()
