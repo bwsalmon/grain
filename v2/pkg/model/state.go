@@ -128,9 +128,25 @@ func Transitions(task Task, obs *Observation, runs []Run, streak *FailureStreak,
 	}
 
 	add(StateAwaitingReply, askedAt)
-	if streak != nil && streak.Count >= MaxConsecutiveFailures {
-		lastFinishedAt := streak.LastFinishedAt
-		add(StateFailed, &lastFinishedAt)
+	// Guarded the same way StateOf itself guards it: obs.CompletedAt and
+	// obs.ClosedAt outrank a failure streak there, so once either is set
+	// the task can never again read 'failed' no matter what task_streak
+	// says. Transitions has to apply the same precedence rather than
+	// adding StateFailed off streak.Count alone, because a task can reach
+	// StateCompleted without task_streak ever resetting: a run salvaged
+	// into a pull request after erroring keeps its own outcome "failed"
+	// forever (orchestrator.salvagePushedBranch never corrects it -- see
+	// orchestrator.RunCycle's "only the ending failed"), so streak.Count
+	// can sit at or above MaxConsecutiveFailures permanently for a task
+	// that has, in every other respect, completed. Left unguarded, every
+	// later read of this task's timeline showed a bogus "Failed" entry
+	// immediately before "Completed", forever, even though the task
+	// plainly succeeded (bwsalmon/agents#502).
+	if obs == nil || (obs.CompletedAt == nil && obs.ClosedAt == nil) {
+		if streak != nil && streak.Count >= MaxConsecutiveFailures {
+			lastFinishedAt := streak.LastFinishedAt
+			add(StateFailed, &lastFinishedAt)
+		}
 	}
 	if obs != nil {
 		add(StateCompleted, obs.CompletedAt)
