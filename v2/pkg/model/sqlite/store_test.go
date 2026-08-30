@@ -397,6 +397,45 @@ func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
 	}
 }
 
+func TestRunTranscriptRoundTrips(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A started but not yet finished attempt exists, but has nothing
+	// recorded for it yet.
+	transcript, found, err := store.RunTranscript(ctx, "a1b2", 1)
+	if err != nil || !found || transcript != "" {
+		t.Fatalf("RunTranscript before FinishRun = (%q, %v, %v), want (\"\", true, nil)", transcript, found, err)
+	}
+
+	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRunTranscript(ctx, "r1", "> read_file(out.txt)\nPONG\n\nfound it"); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript, found, err = store.RunTranscript(ctx, "a1b2", 1)
+	if err != nil || !found || transcript != "> read_file(out.txt)\nPONG\n\nfound it" {
+		t.Fatalf("RunTranscript after SetRunTranscript = (%q, %v, %v)", transcript, found, err)
+	}
+
+	if _, found, err := store.RunTranscript(ctx, "a1b2", 2); err != nil || found {
+		t.Fatalf("RunTranscript for a nonexistent attempt = (found %v, %v), want (false, nil)", found, err)
+	}
+	if _, found, err := store.RunTranscript(ctx, "nonexistent", 1); err != nil || found {
+		t.Fatalf("RunTranscript for a nonexistent task = (found %v, %v), want (false, nil)", found, err)
+	}
+}
+
 func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 	store, _, ctx := openStore(t)
 	tk := task("a1b2", true) // Target: owner/payments-api
@@ -1272,6 +1311,55 @@ func TestInitMigratesAnExistingDatabaseMissingTargetRepos(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+}
+
+func TestInitMigratesAnExistingDatabaseMissingTranscript(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_run`"+` (
+  `+"`id`"+`          TEXT     NOT NULL,
+  `+"`task_id`"+`     TEXT     NOT NULL,
+  `+"`slot`"+`        TEXT     NOT NULL,
+  `+"`sandbox`"+`     TEXT     NOT NULL,
+  `+"`unit`"+`        TEXT     NULL,
+  `+"`attempt`"+`     INTEGER  NOT NULL,
+  `+"`started_at`"+`  DATETIME NOT NULL,
+  `+"`finished_at`"+` DATETIME NULL,
+  `+"`outcome`"+`     TEXT     NULL,
+  `+"`detail`"+`      TEXT     NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#446 task_run table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_run` (`id`,`task_id`,`slot`,`sandbox`,`attempt`,`started_at`,`outcome`,`detail`) "+
+			"VALUES ('r1','a1b2','s1','s1',1,?,'succeeded',NULL)", now); err != nil {
+		t.Fatalf("seeding a pre-#446 task_run row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task_run.transcript: %v", err)
+	}
+
+	// The pre-existing row is still readable, transcript-less...
+	transcript, found, err := store.RunTranscript(ctx, "a1b2", 1)
+	if err != nil || !found || transcript != "" {
+		t.Fatalf("RunTranscript after migrating = (%q, %v, %v), want (\"\", true, nil)", transcript, found, err)
+	}
+	// ...and SetRunTranscript can now actually make one durable, which is
+	// the whole bug this migration fixes.
+	if err := store.SetRunTranscript(ctx, "r1", "found it"); err != nil {
+		t.Fatalf("set after migrating: %v", err)
+	}
+	if transcript, _, err := store.RunTranscript(ctx, "a1b2", 1); err != nil || transcript != "found it" {
+		t.Fatalf("RunTranscript after set = (%q, %v), want (\"found it\", nil)", transcript, err)
 	}
 }
 

@@ -193,6 +193,42 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 	}
 }
 
+// TestRunDispatchRecordsTheAgentsTranscript covers bwsalmon/agents#446:
+// a framework's own agent.Result.Transcript should end up readable back
+// off the store, against the task and attempt number RunDispatch was
+// given -- the one thing FinishRun's own outcome/detail never carried.
+func TestRunDispatchRecordsTheAgentsTranscript(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return &agent.Result{
+			FinalText:  "pushed the change",
+			ToolCalls:  []agent.ToolCall{{Name: "run_command", Text: "ok"}},
+			Transcript: "> run_command(...)\nok\n\npushed the change",
+		}, nil
+	})
+	cfg := orchestrator.Config{}
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	transcript, found, err := store.RunTranscript(ctx, "t1", 1)
+	if err != nil || !found {
+		t.Fatalf("RunTranscript: (%q, %v, %v)", transcript, found, err)
+	}
+	if !strings.Contains(transcript, "pushed the change") {
+		t.Errorf("transcript = %q, want it to contain the agent's own transcript text", transcript)
+	}
+}
+
 func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "locked", Via: model.GrantByLabel})

@@ -252,7 +252,7 @@ export default function App() {
       )}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
-        <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} />
+        <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />
       )}
       {showNewTask && (
         <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />

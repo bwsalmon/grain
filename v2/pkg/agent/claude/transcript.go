@@ -26,8 +26,14 @@ type rawMessage struct {
 }
 
 type rawBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
+	Type string `json:"type"`
+	Text string `json:"text"`
+	// Thinking carries a "thinking"-type block's own text -- Claude's
+	// extended-thinking output, present only when that feature is on, and
+	// otherwise the one part of a real transcript neither FinalText nor
+	// ToolCalls ever captured before bwsalmon/agents#446 gave it
+	// somewhere to go (agent.Result.Transcript).
+	Thinking  string          `json:"thinking"`
 	Name      string          `json:"name"`
 	Input     map[string]any  `json:"input"`
 	ID        string          `json:"id"`
@@ -47,10 +53,16 @@ type rawBlock struct {
 // Code's event shape grows new fields and subtypes across versions, and
 // this parser seeing one it doesn't know about should not make a whole run
 // unreadable.
+//
+// The same pass also builds Result.Transcript: every "thinking" and
+// "text" block's own text, and a line for each tool call and what it got
+// back, in the order they appeared -- the human-readable narrative
+// FinalText and ToolCalls alone do not give a reader (bwsalmon/agents#446).
 func parseTranscript(stdout string) (*agent.Result, error) {
 	result := &agent.Result{}
 	pending := map[string]int{}
 	sawResult := false
+	var transcript strings.Builder
 
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -69,13 +81,28 @@ func parseTranscript(stdout string) (*agent.Result, error) {
 			}
 			for _, b := range parseBlocks(ev.Message.Content) {
 				switch b.Type {
+				case "thinking":
+					if b.Thinking != "" {
+						fmt.Fprintf(&transcript, "%s\n\n", b.Thinking)
+					}
+				case "text":
+					if b.Text != "" {
+						fmt.Fprintf(&transcript, "%s\n\n", b.Text)
+					}
 				case "tool_use":
 					result.ToolCalls = append(result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
 					pending[b.ID] = len(result.ToolCalls) - 1
+					fmt.Fprintf(&transcript, "> %s(%s)\n", b.Name, inputSummary(b.Input))
 				case "tool_result":
 					if idx, ok := pending[b.ToolUseID]; ok {
-						result.ToolCalls[idx].Text = toolResultText(b.Content)
+						text := toolResultText(b.Content)
+						result.ToolCalls[idx].Text = text
 						result.ToolCalls[idx].IsError = b.IsError
+						if b.IsError {
+							fmt.Fprintf(&transcript, "! %s\n\n", text)
+						} else {
+							fmt.Fprintf(&transcript, "%s\n\n", text)
+						}
 					}
 				}
 			}
@@ -91,7 +118,21 @@ func parseTranscript(stdout string) (*agent.Result, error) {
 	if !sawResult {
 		return nil, fmt.Errorf("claude: no result event found in output")
 	}
+	result.Transcript = strings.TrimSpace(transcript.String())
 	return result, nil
+}
+
+// inputSummary renders a tool_use block's own input as compact JSON for a
+// transcript line -- best-effort, since a malformed value here should
+// cost the transcript one unreadable line, never the whole parse (see
+// parseTranscript's own doc comment on the same tolerance for the stream
+// itself).
+func inputSummary(input map[string]any) string {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Sprintf("%v", input)
+	}
+	return string(data)
 }
 
 // parseBlocks reads a message's content field, which is either a plain

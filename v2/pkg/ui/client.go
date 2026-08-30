@@ -208,6 +208,24 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	return detail, nil
 }
 
+// AttemptTranscript returns one attempt's own recorded agent transcript
+// -- the full narrative record GetTask's own Attempts list never carries
+// (attemptFrom's own doc comment: TaskDetail stays cheap to fetch), for a
+// caller that wants to read one attempt's whole story rather than just
+// its outcome (bwsalmon/agents#446). "", nil means the attempt exists but
+// has nothing recorded yet -- still running, or run by a framework that
+// never populates one (agent.Result.Transcript's own doc comment).
+func (c *Client) AttemptTranscript(ctx context.Context, taskID string, number int) (string, error) {
+	transcript, ok, err := c.Store.RunTranscript(ctx, taskID, number)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", &NotFoundError{message: fmt.Sprintf("no attempt %d for task %s", number, taskID)}
+	}
+	return transcript, nil
+}
+
 // askedAt is the currently pending question's own CreatedAt, or nil once
 // there is none -- model.Transitions' own askedAt parameter, resolved
 // against the same comment list GetTask already fetched rather than a

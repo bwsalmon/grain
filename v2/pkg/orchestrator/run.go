@@ -264,6 +264,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	}
 
 	finishErr := store.FinishRun(ctx, d.RunID, at, outcome, detail)
+	if finishErr == nil && result != nil && result.Transcript != "" {
+		// A separate write, after FinishRun's own -- see
+		// Store.SetRunTranscript's own doc comment on why (bwsalmon/
+		// agents#446). Skipped once finishErr is already non-nil: a run
+		// whose own outcome failed to record is not worth a second write
+		// attempt on top of it.
+		finishErr = store.SetRunTranscript(ctx, d.RunID, result.Transcript)
+	}
 	revokeAll(ctx, store, cc, materialized)
 	if finishErr != nil {
 		return nil, fmt.Errorf("orchestrator: finishing run %s: %w", d.RunID, finishErr)
