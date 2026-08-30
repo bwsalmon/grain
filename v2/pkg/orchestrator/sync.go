@@ -85,20 +85,27 @@ func ChecksUnavailable() bool {
 // checkRunsFor reads ref's check runs, reporting whether the answer is
 // known at all.
 //
-// A 403 here is not a failure to handle but a fact about the credential:
-// the Checks API takes GitHub App installation tokens only, and a
-// fine-grained PAT has no permission to grant for it (see
-// github.IsPermissionDenied). A deployment authenticating with the
-// scoped PAT terraform/gcp-v2 documents therefore gets one on every
-// call, forever. Failing the sync on it would leave every tracked pull
-// request erroring every cycle, so instead the health of those PRs goes
-// unknown -- which costs auto-merge, and nothing else: dispatch, the
-// push, and opening the PR are a separate reconciler that never reads a
-// check run.
+// A 403 that names a missing permission is not a failure to handle but a
+// fact about the credential: reading the Checks API needs the `repo`
+// scope on a classic PAT, or the "Checks" repository permission on a
+// fine-grained one, and a credential holding neither gets that same
+// refusal on every call, forever (see github.IsPermissionDenied).
+// Failing the sync on it would leave every tracked pull request erroring
+// every cycle, so instead the health of those PRs goes unknown -- which
+// costs auto-merge, and nothing else: dispatch, the push, and opening
+// the PR are a separate reconciler that never reads a check run.
 //
-// Every other error is still an error. This deliberately does not widen
-// to 404 or to a failure of any other call: it is exactly the one
-// permission GitHub offers no way to hold.
+// Every other error is still an error, and that deliberately includes
+// the other conditions GitHub answers 403 for -- rate limits, SAML
+// enforcement, an organization IP allow list. Those clear, on their own
+// or with a change an operator can make, so swallowing one as "this
+// credential cannot read checks" would switch auto-merge off until the
+// next restart over something that had already fixed itself
+// (checksUnavailable below never clears within a process).
+// github.IsPermissionDenied draws that line by message, not by status.
+//
+// This also does not widen to 404 or to a failure of any other call: it
+// is exactly the one permission a deployment can be configured without.
 func checkRunsFor(client github.Client, ref model.PullRequestRef, head string) ([]github.CheckRun, bool, error) {
 	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, head)
 	if err == nil {
@@ -109,10 +116,14 @@ func checkRunsFor(client github.Client, ref model.PullRequestRef, head string) (
 	}
 	checksUnavailableOnce.Do(func() {
 		checksUnavailable.Store(true)
-		log.Printf("orchestrator: this deployment's GitHub credential cannot read check runs " +
-			"(the Checks API takes GitHub App installation tokens only, and a fine-grained PAT " +
-			"has no permission for it) -- pull request health stays unknown and nothing is " +
-			"auto-merged. Everything else is unaffected.")
+		// GitHub's own refusal goes in the line: it is the only place an
+		// operator can see whether the credential is a classic PAT
+		// missing `repo` or a fine-grained one missing "Checks", and
+		// this is the one time the process ever reports it.
+		log.Printf("orchestrator: this deployment's GitHub credential cannot read check runs "+
+			"-- pull request health stays unknown and nothing is auto-merged. Everything else "+
+			"is unaffected. Grant the `repo` scope (classic PAT) or the \"Checks\" repository "+
+			"permission (fine-grained PAT), then restart. GitHub said: %v", err)
 	})
 	return nil, false, nil
 }

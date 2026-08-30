@@ -207,18 +207,27 @@ func (e *Error) Error() string {
 }
 
 // IsPermissionDenied reports whether err is GitHub refusing the call for
-// want of a permission, rather than failing it -- a 403, which for a
-// token is "Resource not accessible by personal access token".
+// want of a permission the credential can never hold -- a 403 whose body
+// says "Resource not accessible by personal access token" (or "... by
+// integration", the same refusal phrased for an App).
 //
-// It exists because one endpoint here is unreachable by a whole class of
-// credential: the Checks API accepts GitHub App installation tokens
-// only, and a fine-grained personal access token has no permission to
-// grant for it at all (GitHub offered "Checks" for fine-grained tokens
-// initially and withdrew it). So a deployment authenticating with a
-// scoped PAT gets a permanent 403 from ListCheckRuns that no
-// configuration on its side can clear -- unlike an ordinary transient
-// error, retrying never helps, and unlike a missing scope on any other
-// endpoint here, there is no box to tick.
+// It exists because one endpoint here can be unreachable by a whole
+// class of credential: reading the Checks API needs the `repo` scope on
+// a classic personal access token, or the "Checks" repository permission
+// on a fine-grained one. A deployment whose credential has neither gets
+// a 403 from ListCheckRuns on every call -- unlike an ordinary transient
+// error, retrying never helps.
+//
+// The status alone is deliberately not enough. GitHub answers 403 for
+// several conditions that are nothing to do with a missing permission
+// and that do clear on their own or with a configuration change an
+// operator can make: primary and secondary rate limits, SAML enforcement
+// on an unauthorized token, and an organization IP allow list. Reading
+// any of those as a permanent property of the credential would have a
+// single transient 403 silently switch auto-merge off for the rest of
+// the process's life (orchestrator.ChecksUnavailable latches), so
+// anything this cannot positively identify as a missing permission stays
+// an ordinary error, to fail loudly and be retried on the next cycle.
 //
 // A caller that can carry on without whatever the call would have told
 // it should treat this as "unknown", never as "nothing found": the two
@@ -226,7 +235,20 @@ func (e *Error) Error() string {
 // is indistinguishable from a genuinely clean answer.
 func IsPermissionDenied(err error) bool {
 	var e *Error
-	return errors.As(err, &e) && e.Status == 403
+	if !errors.As(err, &e) || e.Status != 403 {
+		return false
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	// An unparseable or message-less body is not a permission denial we
+	// can vouch for, so it stays an error -- the safe direction, since
+	// the cost of a false negative here is one retried cycle and the
+	// cost of a false positive is auto-merge off until a restart.
+	if err := json.Unmarshal(e.Body, &body); err != nil {
+		return false
+	}
+	return strings.HasPrefix(body.Message, "Resource not accessible by")
 }
 
 // Issue is one issue or pull request from the issues endpoint (GitHub

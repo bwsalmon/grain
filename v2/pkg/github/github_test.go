@@ -1149,6 +1149,8 @@ func TestIsPermissionDenied(t *testing.T) {
 		want bool
 	}{
 		{"a 403 is a permission the credential does not hold", &Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}, true},
+		// The same refusal as GitHub phrases it for an App credential.
+		{"the integration wording counts too", &Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by integration"}`)}, true},
 		// 404 is how GitHub hides a private repo from a token that
 		// cannot see it, which is a different problem with a different
 		// fix -- widening test_repos or the token's repository scope,
@@ -1157,6 +1159,38 @@ func TestIsPermissionDenied(t *testing.T) {
 		{"a 500 is not", &Error{Status: 500}, false},
 		{"a transport failure is not", errors.New("dial tcp: connection refused"), false},
 		{"no error at all is not", nil, false},
+
+		// Everything below is a 403 that is NOT a missing permission.
+		// Reading any of these as one would latch
+		// orchestrator.ChecksUnavailable and leave auto-merge off until
+		// the daemon restarted, over a condition that clears on its own
+		// or with a change the operator can make.
+		{
+			"a primary rate limit is not",
+			&Error{Status: 403, Body: []byte(`{"message":"API rate limit exceeded for user ID 1."}`)},
+			false,
+		},
+		{
+			"a secondary rate limit is not",
+			&Error{Status: 403, Body: []byte(`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`)},
+			false,
+		},
+		{
+			"SAML enforcement is not",
+			&Error{Status: 403, Body: []byte(`{"message":"Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization."}`)},
+			false,
+		},
+		{
+			"an organization IP allow list is not",
+			&Error{Status: 403, Body: []byte(`{"message":"Although you appear to have the correct authorization credentials, the organization has an IP allow list enabled, and your IP address is not permitted to access this resource."}`)},
+			false,
+		},
+		// A body this cannot read is not one it can vouch for. Failing
+		// closed here costs a retried cycle; failing open would cost
+		// auto-merge until a restart.
+		{"an empty body is not", &Error{Status: 403}, false},
+		{"a non-JSON body is not", &Error{Status: 403, Body: []byte("<html>403 Forbidden</html>")}, false},
+		{"a JSON body with no message is not", &Error{Status: 403, Body: []byte(`{"documentation_url":"https://docs.github.com"}`)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := IsPermissionDenied(tc.err); got != tc.want {
@@ -1169,7 +1203,8 @@ func TestIsPermissionDenied(t *testing.T) {
 // The helper unwraps, so a caller that has already annotated the error
 // with fmt.Errorf(...%w...) still gets the right answer.
 func TestIsPermissionDeniedUnwraps(t *testing.T) {
-	wrapped := fmt.Errorf("reading check runs for owner/repo#1: %w", &Error{Status: 403})
+	wrapped := fmt.Errorf("reading check runs for owner/repo#1: %w",
+		&Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)})
 	if !IsPermissionDenied(wrapped) {
 		t.Error("a wrapped 403 was not recognized")
 	}
