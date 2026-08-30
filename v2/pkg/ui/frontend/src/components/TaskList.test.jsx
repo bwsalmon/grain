@@ -151,6 +151,17 @@ describe("TaskList", () => {
       expect(onReorder).toHaveBeenLastCalledWith([1, 3], 2, null);
     });
 
+    it("clicking the drag handle does not open the task (bwsalmon/agents#490)", async () => {
+      const onOpenTask = vi.fn();
+      const onReorder = vi.fn();
+      const user = userEvent.setup();
+      renderList({ tasks: threeTasks, onOpenTask, onReorder });
+
+      await user.click(document.querySelector(".task-drag-handle"));
+
+      expect(onOpenTask).not.toHaveBeenCalled();
+    });
+
     it("never starts a drag, and shows no drag handle, without an onReorder prop", () => {
       const { container } = render(
         <TaskList tasks={threeTasks} stateFilter="all" config={null} onOpenTask={vi.fn()}

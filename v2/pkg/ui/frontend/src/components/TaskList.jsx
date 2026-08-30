@@ -150,7 +150,14 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging }) {
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
-      {draggable && <DragIndicatorIcon className="task-drag-handle" fontSize="small" titleAccess="Drag to reorder" />}
+      {draggable && (
+        <DragIndicatorIcon
+          className="task-drag-handle"
+          fontSize="small"
+          titleAccess="Drag to reorder"
+          onClick={(e) => e.stopPropagation()}
+        />
+      )}
       {onToggleSelect && (
         <Checkbox
           size="small"
