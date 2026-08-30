@@ -273,6 +273,32 @@ describe("DetailOverlay", () => {
     expect(titles).toEqual(["Proposed", "Attempt #1 · Succeeded", "looks good", "Closed"]);
   });
 
+  it("only animates the running badge for the current transition, not a past one", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "running",
+          transitions: [
+            { state: "queued", at: "2026-08-28T12:00:00Z" },
+            { state: "running", at: "2026-08-28T12:01:00Z" },
+            { state: "awaiting_reply", at: "2026-08-28T12:02:00Z" },
+            { state: "running", at: "2026-08-28T12:03:00Z" },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const runningItems = screen.getAllByText("Running").map((el) => el.closest(".timeline-item"));
+    expect(runningItems[0].querySelector(".badge")).toHaveClass("badge-static");
+    expect(runningItems[1].querySelector(".badge")).not.toHaveClass("badge-static");
+  });
+
   it("shows a hint when there are no dependencies", () => {
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.getByText("No dependencies.")).toBeInTheDocument();
