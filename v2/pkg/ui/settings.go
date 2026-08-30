@@ -25,14 +25,14 @@ type Settings struct {
 	Configured bool `json:"configured"`
 	// PollInterval is a Go duration string ("30s"), the same syntax
 	// -poll-interval itself parses.
-	PollInterval           string   `json:"pollInterval"`
-	Slots                  []string `json:"slots"`
-	GeminiModel            string   `json:"geminiModel"`
-	MaxAgentTurns          int      `json:"maxAgentTurns"`
-	GitHubHost             string   `json:"githubHost"`
-	GitHubInsecureHTTP     bool     `json:"githubInsecureHttp"`
-	GCPProject             string   `json:"gcpProject"`
-	GCPServiceAccountEmail string   `json:"gcpServiceAccountEmail"`
+	PollInterval           string `json:"pollInterval"`
+	MaxConcurrent          int    `json:"maxConcurrent"`
+	GeminiModel            string `json:"geminiModel"`
+	MaxAgentTurns          int    `json:"maxAgentTurns"`
+	GitHubHost             string `json:"githubHost"`
+	GitHubInsecureHTTP     bool   `json:"githubInsecureHttp"`
+	GCPProject             string `json:"gcpProject"`
+	GCPServiceAccountEmail string `json:"gcpServiceAccountEmail"`
 	// TargetRepos restricts which repos a task's Repo may name -- empty
 	// means unrestricted. model.Config's own field of the same name.
 	TargetRepos []string `json:"targetRepos"`
@@ -55,7 +55,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 	return Settings{
 		Configured:                    true,
 		PollInterval:                  cfg.PollInterval.String(),
-		Slots:                         cfg.Slots,
+		MaxConcurrent:                 cfg.MaxConcurrent,
 		GeminiModel:                   cfg.GeminiModel,
 		MaxAgentTurns:                 cfg.MaxAgentTurns,
 		GitHubHost:                    cfg.GitHubHost,
@@ -115,7 +115,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 // than that yet.
 type UpdateSettingsRequest struct {
 	PollInterval           *string   `json:"pollInterval"`
-	Slots                  *[]string `json:"slots"`
+	MaxConcurrent          *int      `json:"maxConcurrent"`
 	GeminiModel            *string   `json:"geminiModel"`
 	MaxAgentTurns          *int      `json:"maxAgentTurns"`
 	GitHubHost             *string   `json:"githubHost"`
@@ -129,7 +129,7 @@ type UpdateSettingsRequest struct {
 // zero model.Config if nothing is yet) and writes the result back
 // wholesale.
 //
-// The first time settings are ever saved, PollInterval, Slots,
+// The first time settings are ever saved, PollInterval, MaxConcurrent,
 // GeminiModel and GitHubHost are required: leaving one of them out would
 // otherwise write a zero value that reads back later as a deliberate
 // setting rather than as "never configured" -- Configured already tells
@@ -161,11 +161,11 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		}
 		cfg.PollInterval = d
 	}
-	if req.Slots != nil {
-		if len(*req.Slots) == 0 {
-			return Settings{}, validationErrorf("slots cannot be empty")
+	if req.MaxConcurrent != nil {
+		if *req.MaxConcurrent < 1 {
+			return Settings{}, validationErrorf("maxConcurrent must be at least 1")
 		}
-		cfg.Slots = *req.Slots
+		cfg.MaxConcurrent = *req.MaxConcurrent
 	}
 	if req.GeminiModel != nil {
 		if strings.TrimSpace(*req.GeminiModel) == "" {
@@ -207,8 +207,8 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		if cfg.PollInterval <= 0 {
 			return Settings{}, validationErrorf("pollInterval is required the first time settings are saved")
 		}
-		if len(cfg.Slots) == 0 {
-			return Settings{}, validationErrorf("slots is required the first time settings are saved")
+		if cfg.MaxConcurrent < 1 {
+			return Settings{}, validationErrorf("maxConcurrent is required the first time settings are saved")
 		}
 		if strings.TrimSpace(cfg.GeminiModel) == "" {
 			return Settings{}, validationErrorf("geminiModel is required the first time settings are saved")

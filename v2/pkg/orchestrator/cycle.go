@@ -126,8 +126,9 @@ func reconcileReleases(ctx context.Context, deps Deps, now time.Time) error {
 // reconcileDispatch lets dispatch.Cycle decide what runs, then runs every
 // dispatch it decided on concurrently, one goroutine per dispatch.
 //
-// This is what actually makes -slots/GRAIN_SLOTS a concurrency knob rather
-// than just a scheduling one (bwsalmon/agents#435): each Dispatch names a
+// This is what actually makes -max-concurrent/GRAIN_MAX_CONCURRENT a
+// concurrency knob rather than just a scheduling one (bwsalmon/
+// agents#435): each Dispatch names a
 // distinct, free slot (dispatch.Cycle's own loop draws each one from
 // store.OccupiedSlots-filtered "free" without repeats), so two dispatches
 // from the same Cycle call never touch the same sandbox, the same
