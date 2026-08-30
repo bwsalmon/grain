@@ -42,7 +42,7 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -137,6 +137,21 @@ var Tables = []string{
   ` + "`detail`" + `      TEXT     NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
+
+	// At most one open (finished_at IS NULL) run per slot -- the DB-level
+	// backstop bwsalmon/agents#434 asks for. dispatch.Cycle reads
+	// OccupiedSlots and Ready outside of any single transaction and then
+	// issues one StartRun per free slot it found, so nothing in Go stops
+	// two overlapping Cycle calls (nothing makes one today -- cycle.go's
+	// own doc comments -- but nothing enforces that either) from both
+	// seeing the same slot as free and both dispatching onto it. Paired
+	// with startRun's own INSERT (its doc comment), the second StartRun
+	// now fails outright on this index instead of landing a second live
+	// run on a slot the first dispatch already claimed. A partial index
+	// rather than a plain UNIQUE column, since the same slot legitimately
+	// appears in many finished rows over a store's lifetime and only the
+	// currently-open one must be unique.
+	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`task_run_open_slot`" + ` ON ` + "`task_run`" + ` (` + "`slot`" + `) WHERE ` + "`finished_at`" + ` IS NULL`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`lease`" + ` (
   ` + "`run_id`" + `     TEXT     NOT NULL,

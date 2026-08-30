@@ -666,9 +666,21 @@ func (s *Store) StartRun(ctx context.Context, r Run) error {
 	return s.write(ctx, "start run "+r.ID+" for task "+r.TaskID, func(tx *sql.Tx) error { return startRun(ctx, tx, r) })
 }
 
+// startRun uses INSERT rather than REPLACE, unlike most writes in this
+// file, precisely so it does not behave like them here: REPLACE INTO
+// resolves a conflict -- on task_run's own id, or on task_run_open_slot's
+// one-open-run-per-slot index (schema.go's own doc comment on it,
+// bwsalmon/agents#434) -- by silently deleting the conflicting row and
+// inserting this one, which is exactly the silent-overwrite failure mode
+// that index exists to rule out. A caller never legitimately starts the
+// same run id twice (RunID's own doc comment: an id already names its
+// task and attempt), so INSERT's ordinary conflict error is both correct
+// and, for the slot index specifically, the loud failure a double
+// dispatch onto one slot should produce instead of one run's row quietly
+// clobbering the other's.
 func startRun(ctx context.Context, tx *sql.Tx, r Run) error {
 	if _, err := tx.ExecContext(ctx,
-		"REPLACE INTO `task_run` (`id`,`task_id`,`slot`,`sandbox`,`unit`,`attempt`,"+
+		"INSERT INTO `task_run` (`id`,`task_id`,`slot`,`sandbox`,`unit`,`attempt`,"+
 			"`started_at`,`finished_at`,`outcome`) VALUES (?,?,?,?,?,?,?,?,?)",
 		r.ID, r.TaskID, r.Slot, r.Sandbox, nullable(r.Unit), r.Attempt,
 		r.StartedAt.UTC(), timeOf(r.FinishedAt), nullable(r.Outcome)); err != nil {
