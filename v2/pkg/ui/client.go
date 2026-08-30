@@ -175,6 +175,14 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 		detail.LastFailureAt = &lastFailureAt
 		detail.LastFailureReason = streak.LastDetail
 	}
+	runs, err := c.Store.Runs(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
+	}
+	detail.Attempts = make([]Attempt, 0, len(runs))
+	for _, r := range runs {
+		detail.Attempts = append(detail.Attempts, attemptFrom(r))
+	}
 	return detail, nil
 }
 

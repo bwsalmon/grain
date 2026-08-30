@@ -609,6 +609,46 @@ func TestAddCommentAppendsToTheConversation(t *testing.T) {
 	}
 }
 
+// GetTask surfaces every one of a task's runs, oldest first, so the UI
+// can show attempts and their status in order (bwsalmon/agents#445)
+// rather than just the failure streak's own count and most recent
+// reason.
+func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "build error"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r2", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 2, StartedAt: baseTime.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Attempts) != 2 {
+		t.Fatalf("attempts = %+v, want 2", detail.Attempts)
+	}
+	first, second := detail.Attempts[0], detail.Attempts[1]
+	if first.Number != 1 || first.Outcome != "failed" || first.Detail != "build error" || first.FinishedAt == nil {
+		t.Fatalf("attempts[0] = %+v, want attempt 1, failed, build error, finished", first)
+	}
+	if second.Number != 2 || second.Outcome != "" || second.FinishedAt != nil {
+		t.Fatalf("attempts[1] = %+v, want attempt 2, still running", second)
+	}
+}
+
 // Replying to a parked task resumes it. This used to take two separate
 // acts -- post a comment AND re-apply the trigger label so the next poll
 // would notice -- and forgetting the second left the task parked forever.
