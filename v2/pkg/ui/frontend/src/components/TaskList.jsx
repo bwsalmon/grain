@@ -1,9 +1,23 @@
 import { useState } from "react";
-import { Checkbox, Chip, FormControlLabel, Typography } from "@mui/material";
+import { Checkbox, Chip, FormControl, FormControlLabel, InputLabel, MenuItem, Select, TextField, Typography } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { STATE_LABELS, capabilityName } from "../state.js";
 
 const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
+
+// SORTS is every order the toolbar's own Select offers, keyed by what it
+// stores in sortBy. "manual" is the backlog order the store itself
+// keeps (Store.Reorder, bwsalmon/agents#476) and the only one dragging
+// a row makes sense against -- picking any other one is a display-only
+// reordering of the same tasks, so drag-and-drop is disabled outside it
+// rather than let a drop silently reorder the backlog underneath a view
+// that no longer matches it.
+const SORTS = {
+  manual: { label: "Backlog order", cmp: null },
+  newest: { label: "Newest first", cmp: (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0) },
+  oldest: { label: "Oldest first", cmp: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0) },
+  title: { label: "Title (A–Z)", cmp: (a, b) => a.title.localeCompare(b.title) },
+};
 
 // A stacked task -- the merge queue's own automatic fix for another
 // task's pull request (bwsalmon/agents#378) -- is not new work of its
@@ -35,11 +49,26 @@ function groupByStack(tasks, matches) {
 }
 
 export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder }) {
-  const matches = (t) => stateFilter === "all" ? true
-    : stateFilter === "blocked" ? t.blocked
-    : t.state === stateFilter;
+  // search and sortBy are local, not lifted to App.jsx alongside
+  // stateFilter/repoFilter: unlike those two, they are a refinement of
+  // the list currently on screen rather than a standing question about
+  // "which tasks", so it is fine for them to reset the next time this
+  // component mounts (switching to the repos or schedules view and back)
+  // instead of surviving the trip the way repoFilter deliberately does.
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("manual");
 
-  const { topLevel, children } = groupByStack(tasks, matches);
+  const q = search.trim().toLowerCase();
+  const matches = (t) => {
+    if (stateFilter === "blocked" ? !t.blocked : stateFilter !== "all" && t.state !== stateFilter) return false;
+    return q === "" || t.title.toLowerCase().includes(q) || String(t.id).toLowerCase().includes(q);
+  };
+
+  const reorderEnabled = !!onReorder && sortBy === "manual";
+  const cmp = SORTS[sortBy].cmp;
+  const sortedTasks = cmp ? [...tasks].sort(cmp) : tasks;
+
+  const { topLevel, children } = groupByStack(sortedTasks, matches);
   const visibleIds = topLevel.flatMap((t) => [t.id, ...(children.get(t.id) || []).map((c) => c.id)]);
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
 
@@ -85,6 +114,28 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
         <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>{title}</Typography>
         <span className="count">{visibleIds.length}</span>
       </div>
+      {tasks.length > 0 && (
+        <div className="task-list-toolbar">
+          <TextField
+            size="small"
+            placeholder="Search tasks…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            sx={{ flex: 1, maxWidth: 320 }}
+          />
+          <FormControl size="small" sx={{ minWidth: 170 }}>
+            <InputLabel id="task-sort-label">Sort</InputLabel>
+            <Select
+              labelId="task-sort-label"
+              label="Sort"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+            >
+              {Object.entries(SORTS).map(([id, { label }]) => <MenuItem key={id} value={id}>{label}</MenuItem>)}
+            </Select>
+          </FormControl>
+        </div>
+      )}
       {visibleIds.length > 0 && (
         <div className="select-all">
           <FormControlLabel
@@ -104,8 +155,8 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
           <li
             key={t.id}
             className={overId === t.id && dragIds && !dragIds.includes(t.id) ? "task-drop-target" : undefined}
-            draggable={!!onReorder}
-            onDragStart={() => startDrag(t)}
+            draggable={reorderEnabled}
+            onDragStart={() => reorderEnabled && startDrag(t)}
             onDragEnd={() => { setDragIds(null); setOverId(null); }}
             onDragOver={(e) => {
               if (!dragIds || dragIds.includes(t.id)) return;
@@ -115,7 +166,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
             onDrop={(e) => { e.preventDefault(); dropOn(t.id); }}
           >
             <TaskRow t={t} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
-              draggable={!!onReorder} dragging={dragIds?.includes(t.id) ?? false} />
+              draggable={reorderEnabled} dragging={dragIds?.includes(t.id) ?? false} />
             {children.has(t.id) && (
               <ul className="task-sublist">
                 {children.get(t.id).map((c) => (
@@ -127,7 +178,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
             )}
           </li>
         ))}
-        {onReorder && dragIds && (
+        {reorderEnabled && dragIds && (
           <li
             className={`task-drop-end${overId === "__end__" ? " task-drop-target" : ""}`}
             onDragOver={(e) => { e.preventDefault(); setOverId("__end__"); }}
@@ -135,7 +186,9 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
           />
         )}
       </ul>
-      {topLevel.length === 0 && <p className="empty">No tasks in this state.</p>}
+      {topLevel.length === 0 && (
+        <p className="empty">{q ? "No tasks match your search." : "No tasks in this state."}</p>
+      )}
     </main>
   );
 }

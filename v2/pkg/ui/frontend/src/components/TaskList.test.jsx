@@ -182,4 +182,101 @@ describe("TaskList", () => {
     expect(screen.getByTitle("filed automatically by a schedule")).toHaveTextContent("scheduled");
     expect(screen.queryAllByTitle("filed automatically by a schedule")).toHaveLength(1);
   });
+
+  describe("search (bwsalmon/agents#460)", () => {
+    it("filters down to tasks whose title matches the search text", async () => {
+      const user = userEvent.setup();
+      renderList();
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "ship");
+
+      expect(screen.queryByText("Fix the thing")).not.toBeInTheDocument();
+      expect(screen.getByText("Ship the other thing")).toBeInTheDocument();
+      expect(document.querySelector(".content-header .count")).toHaveTextContent("1");
+    });
+
+    it("filters down to tasks whose id matches the search text, case-insensitively", async () => {
+      const user = userEvent.setup();
+      renderList({
+        tasks: [
+          { id: "abc-1", title: "Fix the thing", state: "queued", capabilities: [], blocked: false },
+          { id: "xyz-2", title: "Ship the other thing", state: "running", capabilities: [], blocked: false },
+        ],
+      });
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "ABC");
+
+      expect(screen.getByText("Fix the thing")).toBeInTheDocument();
+      expect(screen.queryByText("Ship the other thing")).not.toBeInTheDocument();
+    });
+
+    it("shows a search-specific empty message when nothing matches", async () => {
+      const user = userEvent.setup();
+      renderList();
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "nothing matches this");
+
+      expect(screen.getByText("No tasks match your search.")).toBeInTheDocument();
+    });
+
+    it("hides the toolbar entirely when there are no tasks at all", () => {
+      renderList({ tasks: [] });
+      expect(screen.queryByPlaceholderText("Search tasks…")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("sort (bwsalmon/agents#460)", () => {
+    const threeTasks = [
+      { id: 1, title: "Charlie", state: "queued", capabilities: [], blocked: false, createdAt: "2026-01-03T00:00:00Z" },
+      { id: 2, title: "Alpha", state: "queued", capabilities: [], blocked: false, createdAt: "2026-01-01T00:00:00Z" },
+      { id: 3, title: "Bravo", state: "queued", capabilities: [], blocked: false, createdAt: "2026-01-02T00:00:00Z" },
+    ];
+
+    function titlesInOrder() {
+      return [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
+    }
+
+    it("defaults to the given (backlog) order", () => {
+      renderList({ tasks: threeTasks });
+      expect(titlesInOrder()).toEqual(["Charlie", "Alpha", "Bravo"]);
+    });
+
+    it("sorts alphabetically by title when picked from the sort menu", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: threeTasks });
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "Title (A–Z)" }));
+
+      expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
+    });
+
+    it("sorts oldest-first by createdAt when picked from the sort menu", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: threeTasks });
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "Oldest first" }));
+
+      expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
+    });
+
+    it("disables drag-and-drop reordering once a non-backlog sort is chosen", async () => {
+      const onReorder = vi.fn();
+      const user = userEvent.setup();
+      renderList({ tasks: threeTasks, onReorder });
+
+      expect(rowFor("Charlie")).toHaveAttribute("draggable", "true");
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "Title (A–Z)" }));
+
+      expect(document.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+      expect(rowFor("Alpha")).toHaveAttribute("draggable", "false");
+
+      fireEvent.dragStart(rowFor("Alpha"));
+      fireEvent.drop(rowFor("Bravo"));
+      expect(onReorder).not.toHaveBeenCalled();
+    });
+  });
 });
