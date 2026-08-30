@@ -97,16 +97,25 @@ run_deploy() {
   # Login, or debugging from CI, does not have. The tail goes into a
   # guest attribute, which is readable with
   # `gcloud compute instances get-guest-attributes` and no shell at all.
+  # tee's own stdout is this service's stdout, which systemd already
+  # wires to the journal -- so the output streams there live and lands in
+  # $out at the same time, with no second destination to name.
+  #
+  # It named one before: `tee /dev/stderr > "$out"`. Under systemd stderr
+  # is a socket, and /dev/stderr (a symlink to /proc/self/fd/2) cannot be
+  # reopened for writing on one -- tee died with "No such device or
+  # address" and took the deploy with it through the broken pipe, so the
+  # line added to explain failures was causing them.
+  #
   # The status is taken in the `||` branch, not from a PIPESTATUS read on
-  # the next line. `pipeline || true` runs `true`, and `true` is itself a
-  # pipeline, so it resets PIPESTATUS -- a later ${PIPESTATUS[0]} then
-  # reads 0 no matter how the deploy exited. That mistake reported every
-  # failed rollout as converged, which is worse than the missing detail
-  # this tee was added to provide.
+  # a following line. `pipeline || true` runs `true`, and `true` is itself
+  # a pipeline, so it resets PIPESTATUS -- a later ${PIPESTATUS[0]} reads
+  # 0 no matter how the deploy exited, which reported every failed
+  # rollout as converged.
   local out rc=0
   out="$(mktemp)"
   timeout --signal=TERM --kill-after=60 "$DEPLOY_TIMEOUT_SECS" "$DEPLOY" 2>&1 \
-    | tee /dev/stderr > "$out" || rc="${PIPESTATUS[0]}"
+    | tee "$out" || rc="${PIPESTATUS[0]}"
 
   if [ "$rc" -eq 0 ]; then
     log "generation $generation deployed"
