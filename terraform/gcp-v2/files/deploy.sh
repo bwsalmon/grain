@@ -20,13 +20,23 @@ md() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1"; }
 # attributes are optional until push-secrets.sh has run at least once.
 md_optional() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || true; }
 
+# make is here because v2/scripts/setup.sh builds the binary with
+# `make -C v2 container-build`. It is not in a Debian cloud image, and
+# nothing else pulls it in -- the compile happens inside Docker, so make
+# is the only part of that toolchain the host needs, and the easiest to
+# overlook. Missing, the deploy died on `make: command not found`, which
+# config-sync reported as a bare "exit=127".
 install_prerequisites() {
-  if command -v git >/dev/null 2>&1 && command -v docker >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  local missing=0
+  for cmd in git docker python3 make; do
+    command -v "$cmd" >/dev/null 2>&1 || missing=1
+  done
+  if [ "$missing" -eq 0 ]; then
     return
   fi
-  log "installing git, docker, python3 (needed once; v2/scripts/setup.sh's own build/install steps need them)"
+  log "installing git, docker, python3, make (needed once; v2/scripts/setup.sh's own build/install steps need them)"
   apt-get update
-  apt-get install -y --no-install-recommends git docker.io python3 ca-certificates
+  apt-get install -y --no-install-recommends git docker.io python3 make ca-certificates
 }
 
 # Ship this host's systemd journal to Cloud Logging, so a failed deploy

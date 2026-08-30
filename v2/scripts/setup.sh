@@ -203,7 +203,10 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-for cmd in git docker systemctl install useradd visudo; do
+# make included: build_and_install runs `make -C v2 container-build`, and
+# without it here the failure was a bare `make: command not found` from
+# deep inside the build rather than this loop's own message naming it.
+for cmd in git docker systemctl install useradd visudo make; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
     exit 1
