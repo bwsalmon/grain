@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Box, Button, Typography } from "@mui/material";
+import { Alert, Button, FormControl, InputLabel, MenuItem, Select, Typography } from "@mui/material";
 import api from "../api.js";
 
 // REFRESH_MS is how often this page re-fetches the selected source's log
@@ -18,6 +18,12 @@ const LINES_TO_FETCH = 500;
 // daemon), this shows a note instead of a pane that could only ever
 // 404, the same convention UpgradePanel/SecretsPanel (Settings' own
 // tabs) already use for their own optional pieces.
+//
+// The pane fills the full main column height (bwsalmon/agents#486)
+// rather than capping the log box at a fraction of the viewport --
+// .logs-page is a flex column so the toolbar stays put while .logs-view
+// grows to take up whatever room is left, the same "one scroller fills
+// the panel" shape a terminal tail gives you.
 export default function LogsPage({ showError }) {
   const [sources, setSources] = useState(null);
   const [source, setSource] = useState(null);
@@ -56,28 +62,34 @@ export default function LogsPage({ showError }) {
   if (sources === null) return null;
 
   return (
-    <main>
-      <Box sx={{ px: "1.5rem" }}>
-        <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Logs</Typography>
-        {!sources.enabled && (
-          <p className="unconfigured-note">
-            Not available: this deployment has no log sources configured (bwsalmon/agents#444).
-          </p>
-        )}
-        {sources.enabled && (
-          <>
-            <div className="logs-toolbar">
-              <label>Source
-                <select value={source || ""} onChange={(e) => setSource(e.target.value)}>
-                  {sources.sources.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </label>
-              <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>
-            </div>
-            <pre className="logs-view">{lines.length > 0 ? lines.join("\n") : "(no log lines)"}</pre>
-          </>
-        )}
-      </Box>
+    <main className="logs-page">
+      <div className="content-header">
+        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Logs</Typography>
+      </div>
+      {!sources.enabled && (
+        <Alert severity="info" sx={{ mx: "1.75rem", mt: "1rem" }}>
+          Not available: this deployment has no log sources configured (bwsalmon/agents#444).
+        </Alert>
+      )}
+      {sources.enabled && (
+        <>
+          <div className="logs-toolbar">
+            <FormControl size="small" sx={{ minWidth: 220 }}>
+              <InputLabel id="logs-source-label">Source</InputLabel>
+              <Select
+                labelId="logs-source-label"
+                label="Source"
+                value={source || ""}
+                onChange={(e) => setSource(e.target.value)}
+              >
+                {sources.sources.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}
+              </Select>
+            </FormControl>
+            <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>
+          </div>
+          <pre className="logs-view">{lines.length > 0 ? lines.join("\n") : "(no log lines)"}</pre>
+        </>
+      )}
     </main>
   );
 }
