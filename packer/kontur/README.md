@@ -72,6 +72,38 @@ VM's SSH-exposed sandbox tools from the controller/orchestrator side, not
 on the guest, so there is nothing here worth a credential leak protecting
 in the first place.
 
+## Running a custom setup script
+
+To customize the image beyond `provision.sh`'s own fixed package list --
+installing extra packages, dropping in config files, enabling services,
+etc -- without forking this directory, set `SANDBOX_SETUP_SCRIPT` to a
+script's contents (not a path) before running `build.sh`:
+
+```sh
+export SANDBOX_SETUP_SCRIPT="$(cat my-setup.sh)"
+./build.sh
+```
+
+`provision.sh` runs it, as root, once the built-in provisioning above has
+finished but before the operator-key/cloud-init finalization below --
+see that script's own comment on the section for exactly where and why.
+This is bwsalmon/kontur's own `GUEST_SETUP_SCRIPT` build arg's idiom
+(`third_party/kontur/deploy/guest-image/README.md`, "Running a custom
+setup script"), applied to this directory's own build instead: same
+"an env var holds the script's contents, not a path" shape, so it needs
+no extra `packer build`/`docker build` context-wrangling either way. The
+mechanics differ where the two builds do -- that one's `chroot`s into an
+as-yet-unbooted rootfs (no `/proc`, `/sys`, or running service manager);
+this one runs over SSH against a live booted VM, the same as every other
+step `provision.sh` already takes, so none of that chroot's caveats apply
+here. Leave `SANDBOX_SETUP_SCRIPT` unset (the default) to build exactly
+what `provision.sh` already bakes in on its own.
+
+Like everything else in this image, the rule from "What's in the image,
+and why" above still applies: no secret belongs in a script baked in at
+build time, since it ends up in the shipped qcow2 for anyone with that
+image to read back out.
+
 ## How the image gets built and published
 
 `image.pkr.hcl` (Packer, `qemu` builder) boots the same stock Debian 12

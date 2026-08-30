@@ -82,6 +82,32 @@ echo \
 apt-get update
 apt-get install -y --no-install-recommends google-cloud-cli terraform
 
+# --- Optional operator-supplied customization, run once the built-in
+# provisioning above has finished but before the security-critical
+# finalization below (operator key, cloud-init disable) -- so a custom
+# script can rely on everything above already being in place, and can't
+# itself interfere with either finalization step by, say, leaving its own
+# stray authorized_keys entry or re-enabling cloud-init. SANDBOX_SETUP_
+# SCRIPT arrives as a build-time-only environment variable the same way
+# OPERATOR_SSH_PUBLIC_KEY does below (Packer's shell provisioner,
+# image.pkr.hcl's environment_vars) -- holding the script's own contents
+# rather than a path, the same idiom bwsalmon/kontur's own GUEST_SETUP_
+# SCRIPT build arg uses for its Dockerfile-based guest image build
+# (third_party/kontur/deploy/guest-image/README.md, "Running a custom
+# setup script"). Unlike that one, this runs against a live booted VM
+# over SSH -- this whole script's own delivery mechanism -- rather than a
+# chroot, so it has a running service manager, /proc, /sys, and network
+# access all as themselves, no different from provision.sh's own
+# apt-get/curl calls above; there is nothing analogous to that feature's
+# "no /proc, /sys, or running service manager" caveat here.
+if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
+  script="$(mktemp)"
+  printf '%s\n' "${SANDBOX_SETUP_SCRIPT}" > "${script}"
+  chmod 0755 "${script}"
+  "${script}"
+  rm -f "${script}"
+fi
+
 # --- sshd: enabled and running, matching the assumption pkg/kontur's own
 # package doc comment and v2/README.md both state a kontur guest image
 # has to satisfy on its own, since nothing analogous to
