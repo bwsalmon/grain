@@ -42,7 +42,7 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 11
+const SchemaVersion = 12
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -235,6 +235,7 @@ var Tables = []string{
   ` + "`target_name`" + `           TEXT     NOT NULL,
   ` + "`base`" + `                  TEXT     NULL,
   ` + "`auto_merge`" + `            INTEGER  NOT NULL,
+  ` + "`template_id`" + `           TEXT     NULL,
   ` + "`recurrence_kind`" + `       TEXT     NOT NULL,
   ` + "`every_n_hours`" + `         INTEGER  NULL,
   ` + "`time_of_day_minutes`" + `   INTEGER  NULL,
@@ -276,6 +277,50 @@ var Tables = []string{
   ` + "`via`" + `               TEXT NOT NULL,
   ` + "`folder`" + `            TEXT NULL,
   PRIMARY KEY (` + "`scheduled_task_id`" + `, ` + "`capability`" + `)
+)`,
+
+	// One row per template (bwsalmon/agents#516) -- task_sequence's own
+	// "identity allocated here, not borrowed" reasoning applies again:
+	// name/title/body/target/base/auto_merge are exactly the fields a
+	// schedule already carried inline, now given a row of their own so
+	// more than one schedule (scheduled_task.template_id) can point at
+	// the same one instead of repeating it.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_template`" + ` (
+  ` + "`id`" + `           TEXT     NOT NULL,
+  ` + "`name`" + `         TEXT     NOT NULL,
+  ` + "`title`" + `        TEXT     NOT NULL,
+  ` + "`body`" + `         TEXT     NOT NULL,
+  ` + "`target_owner`" + ` TEXT     NOT NULL,
+  ` + "`target_name`" + `  TEXT     NOT NULL,
+  ` + "`base`" + `         TEXT     NULL,
+  ` + "`auto_merge`" + `   INTEGER  NOT NULL,
+  ` + "`created_at`" + `   DATETIME NOT NULL,
+  PRIMARY KEY (` + "`id`" + `)
+)`,
+
+	// scheduled_task_sequence's own doc comment gives the reasoning for a
+	// dedicated allocator rather than a counter column.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_template_sequence`" + ` (
+  ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`issued_at`" + ` DATETIME NOT NULL
+)`,
+
+	// scheduled_task_read's own doc comment gives the reasoning for a
+	// table rather than a JSON column, ported onto a template's own id.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_template_read`" + ` (
+  ` + "`task_template_id`" + ` TEXT NOT NULL,
+  ` + "`owner`" + `            TEXT NOT NULL,
+  ` + "`name`" + `             TEXT NOT NULL,
+  PRIMARY KEY (` + "`task_template_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
+)`,
+
+	// scheduled_task_grant's own shape, for a template's own capabilities.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_template_grant`" + ` (
+  ` + "`task_template_id`" + ` TEXT NOT NULL,
+  ` + "`capability`" + `       TEXT NOT NULL,
+  ` + "`via`" + `              TEXT NOT NULL,
+  ` + "`folder`" + `           TEXT NULL,
+  PRIMARY KEY (` + "`task_template_id`" + `, ` + "`capability`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (

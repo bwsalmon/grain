@@ -11,7 +11,7 @@ import RepoField from "./RepoField.jsx";
 // list-plus-form shape (bwsalmon/agents#376) almost exactly, adding only
 // a per-row "Edit" mode -- the PATCH endpoint it uses already accepted
 // every field, just unreachable from the old overlay's UI.
-export default function SchedulesList({ schedules, config, tasks, onRefresh, showError }) {
+export default function SchedulesList({ schedules, templates = [], config, tasks, onRefresh, showError }) {
   const [editingId, setEditingId] = useState(null);
   const repoOptions = knownRepos(config, tasks);
 
@@ -69,6 +69,7 @@ export default function SchedulesList({ schedules, config, tasks, onRefresh, sho
                 <ScheduleForm
                   schedule={s}
                   repoOptions={repoOptions}
+                  templates={templates}
                   config={config}
                   submitLabel="Save"
                   onCancel={() => setEditingId(null)}
@@ -80,6 +81,7 @@ export default function SchedulesList({ schedules, config, tasks, onRefresh, sho
                     <span className="schedule-title">{s.title}</span>
                     <Chip size="small" label={s.repo} />
                     <Chip size="small" label={describeRecurrence(s.recurrence)} />
+                    {s.templateId && <Chip size="small" variant="outlined" label={`Template: ${s.templateName || s.templateId}`} />}
                     {!s.enabled && <Chip size="small" color="error" label="Paused" />}
                   </div>
                   <div className="schedule-meta hint">
@@ -105,7 +107,7 @@ export default function SchedulesList({ schedules, config, tasks, onRefresh, sho
         {schedules.length === 0 && <p className="empty">No scheduled tasks.</p>}
 
         <Typography variant="subtitle1" sx={{ mt: 2 }}>New schedule</Typography>
-        <ScheduleForm repoOptions={repoOptions} config={config} submitLabel="Add schedule" onSubmit={create} isNew />
+        <ScheduleForm repoOptions={repoOptions} templates={templates} config={config} submitLabel="Add schedule" onSubmit={create} isNew />
       </Box>
     </main>
   );
@@ -219,18 +221,25 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 // CreateScheduleRequest's own doc comment explains why: a one-shot
 // dependency link makes no sense against a task this schedule refiles
 // indefinitely, and a firing always lands already approved by design.
-function ScheduleForm({ schedule, repoOptions, config, submitLabel, onSubmit, onCancel, isNew }) {
+//
+// templateId (bwsalmon/agents#516) is its own bit of state, not a plain
+// form field, because it decides whether the title/description/repo/
+// base/reads/capabilities/auto-merge fields below even render: picking a
+// template hands that content over entirely (ui.CreateScheduleRequest's
+// own doc comment on why a template and per-field overrides do not mix),
+// so this form hides them rather than showing fields the request would
+// silently ignore.
+function ScheduleForm({ schedule, repoOptions, templates = [], config, submitLabel, onSubmit, onCancel, isNew }) {
   const [capabilities, setCapabilities] = useState(schedule?.capabilities || []);
   const [kind, setKind] = useState(schedule?.recurrence?.kind || "everyNHours");
   const [weekday, setWeekday] = useState(schedule?.recurrence?.weekday || "monday");
+  const [templateId, setTemplateId] = useState(schedule?.templateId || "");
   const margin = isNew ? "normal" : "dense";
 
   const submit = async (evt) => {
     evt.preventDefault();
     const form = evt.target;
     const data = new FormData(form);
-    const reads = (data.get("reads") || "")
-      .split(",").map((r) => r.trim()).filter((r) => r !== "");
 
     const recurrence = { kind };
     if (kind === "everyNHours") {
@@ -241,76 +250,108 @@ function ScheduleForm({ schedule, repoOptions, config, submitLabel, onSubmit, on
       if (kind === "monthly") recurrence.dayOfMonth = Number(data.get("dayOfMonth"));
     }
 
-    const payload = {
-      title: data.get("title"),
-      description: data.get("description") || "",
-      repo: data.get("repo") || "",
-      base: data.get("base") || "",
-      autoMerge: form.elements.autoMerge.checked,
-      reads,
-      capabilities,
-      recurrence,
-    };
+    // templateId is always sent, even "" -- CreateScheduleRequest reads
+    // "" as "no template"; UpdateScheduleRequest reads a given-at-all
+    // templateId (its own doc comment) the same way, "" meaning detach
+    // rather than leave alone, which is exactly what re-submitting this
+    // form with "None" selected should do.
+    const payload = { templateId, recurrence };
+    if (templateId === "") {
+      const reads = (data.get("reads") || "")
+        .split(",").map((r) => r.trim()).filter((r) => r !== "");
+      payload.title = data.get("title");
+      payload.description = data.get("description") || "";
+      payload.repo = data.get("repo") || "";
+      payload.base = data.get("base") || "";
+      payload.autoMerge = form.elements.autoMerge.checked;
+      payload.reads = reads;
+      payload.capabilities = capabilities;
+    }
+
     const ok = await onSubmit(payload);
     if (isNew && ok !== false) {
       form.reset();
       setCapabilities([]);
       setKind("everyNHours");
       setWeekday("monday");
+      setTemplateId("");
     }
   };
 
   return (
     <form onSubmit={submit}>
-      <TextField name="title" label="Title" defaultValue={schedule?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin={margin} />
-      <TextField name="description" label="Description" defaultValue={schedule?.description} multiline rows={isNew ? 4 : 3} fullWidth margin={margin} />
-      <Box component="label" sx={{ display: "block", mt: isNew ? 2 : 1.5, mb: 1 }}>
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-          Target repo <span className="hint">owner/name</span>
-        </Typography>
-        <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
-      </Box>
-      <TextField name="base" label="Base branch" defaultValue={schedule?.base} helperText="optional" placeholder="main" autoComplete="off" fullWidth margin={margin} />
-      <TextField
-        name="reads"
-        label="Read-only repos"
-        defaultValue={(schedule?.reads || []).join(", ")}
-        helperText="owner/name, comma-separated, optional"
-        placeholder="owner/shared-lib, owner/schema"
-        autoComplete="off"
-        fullWidth
-        margin={margin}
-      />
-      <FormControlLabel
-        control={<Checkbox name="autoMerge" defaultChecked={schedule?.autoMerge} />}
-        label="Auto-merge once checks pass"
-        sx={{ display: "flex", mt: 1 }}
-      />
       <FormControl fullWidth margin={margin} size="small">
-        <InputLabel id={`schedule-capabilities-label-${schedule?.id || "new"}`}>Capabilities</InputLabel>
+        <InputLabel id={`schedule-template-label-${schedule?.id || "new"}`}>Template</InputLabel>
         <Select
-          labelId={`schedule-capabilities-label-${schedule?.id || "new"}`}
-          label="Capabilities"
-          multiple
-          value={capabilities}
-          onChange={(e) => setCapabilities(e.target.value)}
-          renderValue={(selected) => (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-              {selected.map((id) => {
-                const c = (config?.capabilities || []).find((cap) => cap.id === id);
-                return <Chip key={id} size="small" label={c ? c.name : id} />;
-              })}
-            </Box>
-          )}
+          labelId={`schedule-template-label-${schedule?.id || "new"}`}
+          label="Template"
+          value={templateId}
+          onChange={(e) => setTemplateId(e.target.value)}
         >
-          {(config?.capabilities || []).map((c) => (
-            <MenuItem key={c.id} value={c.id} title={c.description}>
-              <Checkbox checked={capabilities.includes(c.id)} size="small" />
-              <ListItemText primary={c.name} />
-            </MenuItem>
+          <MenuItem value="">None -- fill in the fields below</MenuItem>
+          {templates.map((t) => (
+            <MenuItem key={t.id} value={t.id}>{t.name}</MenuItem>
           ))}
         </Select>
       </FormControl>
+      {templateId !== "" ? (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
+          Title, description, repo, base branch, reads, capabilities and auto-merge
+          all come from the selected template, and stay in sync with it.
+        </Typography>
+      ) : (
+        <>
+          <TextField name="title" label="Title" defaultValue={schedule?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin={margin} />
+          <TextField name="description" label="Description" defaultValue={schedule?.description} multiline rows={isNew ? 4 : 3} fullWidth margin={margin} />
+          <Box component="label" sx={{ display: "block", mt: isNew ? 2 : 1.5, mb: 1 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+              Target repo <span className="hint">owner/name</span>
+            </Typography>
+            <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
+          </Box>
+          <TextField name="base" label="Base branch" defaultValue={schedule?.base} helperText="optional" placeholder="main" autoComplete="off" fullWidth margin={margin} />
+          <TextField
+            name="reads"
+            label="Read-only repos"
+            defaultValue={(schedule?.reads || []).join(", ")}
+            helperText="owner/name, comma-separated, optional"
+            placeholder="owner/shared-lib, owner/schema"
+            autoComplete="off"
+            fullWidth
+            margin={margin}
+          />
+          <FormControlLabel
+            control={<Checkbox name="autoMerge" defaultChecked={schedule?.autoMerge} />}
+            label="Auto-merge once checks pass"
+            sx={{ display: "flex", mt: 1 }}
+          />
+          <FormControl fullWidth margin={margin} size="small">
+            <InputLabel id={`schedule-capabilities-label-${schedule?.id || "new"}`}>Capabilities</InputLabel>
+            <Select
+              labelId={`schedule-capabilities-label-${schedule?.id || "new"}`}
+              label="Capabilities"
+              multiple
+              value={capabilities}
+              onChange={(e) => setCapabilities(e.target.value)}
+              renderValue={(selected) => (
+                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                  {selected.map((id) => {
+                    const c = (config?.capabilities || []).find((cap) => cap.id === id);
+                    return <Chip key={id} size="small" label={c ? c.name : id} />;
+                  })}
+                </Box>
+              )}
+            >
+              {(config?.capabilities || []).map((c) => (
+                <MenuItem key={c.id} value={c.id} title={c.description}>
+                  <Checkbox checked={capabilities.includes(c.id)} size="small" />
+                  <ListItemText primary={c.name} />
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </>
+      )}
       <RecurrenceFields defaultValue={schedule?.recurrence} kind={kind} setKind={setKind} weekday={weekday} setWeekday={setWeekday} />
       <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 2 }}>
         {onCancel && <Button size="small" onClick={onCancel}>Cancel</Button>}

@@ -240,3 +240,87 @@ day-of-month field added for monthly).
 
 Still open, unchanged from before: no CLI, and no per-schedule approval
 gate.
+
+## Update: task templates (bwsalmon/agents#516)
+
+A schedule's own content -- title, description, target repo, base
+branch, auto-merge, read-only repos, and capabilities -- used to exist
+only inline on the schedule itself, one copy per schedule with no way to
+share it. `TaskTemplate` (`pkg/model/template.go`) is that content pulled
+out into its own store row, `task_template` plus its own `task_template_
+read`/`task_template_grant` child tables (`SchemaVersion` 11 → 12), so
+more than one schedule can point at the same declaration -- and, per this
+issue's own framing ("we will add more places to use them in the
+future"), so a later caller beyond schedules has somewhere to point too,
+without this type or its store surface changing shape for that caller.
+
+**A schedule optionally references a template rather than always
+carrying its own copy.** `ScheduledTask.TemplateID` (nullable
+`scheduled_task.template_id`, a database created before this migrates in
+place via `ensureScheduledTaskTemplateColumn` the same probe-then-`ALTER
+TABLE` approach every other migration in `store.go` already uses) is
+`nil` for a schedule that still declares its content inline, exactly as
+every schedule always has; set, it names the template that content comes
+from instead. `ui.CreateScheduleRequest`/`UpdateScheduleRequest` treat
+the two as mutually exclusive -- a `templateId` given at creation takes
+over Title/Description/Repo/Base/AutoMerge/Reads/Capabilities entirely
+rather than letting a caller mix a template with its own per-field
+overrides, a combination deliberately unsupported so "what does this
+schedule actually file" never depends on resolving a merge between two
+sources. `UpdateScheduleRequest.TemplateID` adds one more case an
+ordinary nilable pointer already covers reasonably: given as `""` it
+detaches a schedule from its template, leaving whatever content was last
+synced onto the row in place as an independent, directly-editable copy
+rather than blanking it out.
+
+**Resolved fresh at firing time, not copied in once.**
+`orchestrator.fireScheduledTask` re-reads a template-backed schedule's
+`TaskTemplate` from the store on every firing rather than trusting
+`ScheduledTask`'s own inline columns, so editing a template changes what
+every schedule pointing at it files *next*, with no separate "push the
+edit out" step -- the entire reason a template is worth having over
+copy-paste. Those inline columns are not dead weight even so: the same
+firing writes the template's current content back onto them, so
+`ui.scheduleFrom` can still render a schedule's effective title, repo,
+and the rest with no join, and a template deleted or otherwise
+unresolvable out from under a schedule fails that one firing with a
+plain error (`reconcileSchedule`'s own "one schedule failing does not
+stop the others" tolerance already covers this) rather than filing a task
+with no content.
+
+**Deleting a template in use is refused, not silently orphaning.**
+`Store.SchedulesUsingTemplate` is what `ui.Client.DeleteTemplate` checks
+before deleting: a template still named by a live schedule cannot be
+removed until that schedule is repointed or deleted first, since deleting
+it anyway would strand that schedule's next firing far more silently than
+the plain 404 a stale reference would otherwise surface only days or
+weeks later.
+
+**HTTP API** (`pkg/ui/templates.go`, wired in `server.go`): `GET
+/api/templates`, `POST /api/templates`, `PATCH /api/templates/{id}`,
+`DELETE /api/templates/{id}` -- `schedules.go`'s own four-route shape,
+with no per-template `GET` for the same reason schedules have none.
+
+**Frontend** (`TemplatesList.jsx`): its own pane, alongside Scheduled
+tasks in the sidebar, following `SchedulesList.jsx`'s own list-plus-form
+shape minus `RecurrenceFields` -- a template carries no cadence of its
+own. `SchedulesList.jsx`'s `ScheduleForm` gained a "Template" picker
+ahead of its other fields: choosing one hides Title/Description/Repo/
+Base/Reads/Capabilities/Auto-merge outright (rather than showing fields
+a template-backed request would silently ignore) and shows a short note
+that they come from the template instead.
+
+Tests: `pkg/model/sqlite/template_store_test.go` (round trips, the
+schema-12 migration), `pkg/orchestrator/schedule_test.go` (fresh
+resolution across an edit between two firings, the missing-template
+failure path), `pkg/ui/templates_test.go` and `server_templates_test.go`
+(the `Client` methods and the four HTTP routes, plus the delete-while-in-
+use guard), `pkg/ui/schedules_test.go` (attach/detach, the unknown-
+template rejection), and `TemplatesList.test.jsx` plus the
+`SchedulesList.test.jsx`/`App.test.jsx` additions for the picker.
+
+Left open: no CLI for templates (`HTTPClient` gains no matching methods,
+the same gap schedules already have); no UI affordance yet for the "more
+places to use them" this issue asks for beyond schedules -- creating an
+ordinary task from a template, most plausibly, is left for whenever a
+concrete caller actually needs it.

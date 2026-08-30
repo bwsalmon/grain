@@ -17,9 +17,10 @@ const initialTasks = [
 // overlays it can open touch, backed by a mutable task list so actions
 // that mutate (create, approve, ...) are reflected the next time the
 // list is refetched -- the same way the real store behaves.
-function setupApi(tasks = initialTasks, schedules = []) {
+function setupApi(tasks = initialTasks, schedules = [], templates = []) {
   let tasksState = [...tasks];
   let schedulesState = [...schedules];
+  let templatesState = [...templates];
   api.mockImplementation((path, opts) => {
     const method = opts?.method || "GET";
     if (path === "/api/config") return Promise.resolve(config);
@@ -53,7 +54,21 @@ function setupApi(tasks = initialTasks, schedules = []) {
     if (path === "/api/schedules" && method === "GET") return Promise.resolve(schedulesState);
     if (path === "/api/schedules" && method === "POST") {
       const body = JSON.parse(opts.body);
-      const newSchedule = { id: "sched-2", enabled: true, nextRunAt: "2026-08-30T00:00:00Z", ...body };
+      // A templateId, given, drives title/repo/etc the same way
+      // ui.Client.CreateSchedule does server-side (schedules.go's own
+      // scheduleContentFromTemplate) -- the fake needs to reproduce that
+      // so a test creating a template-backed schedule sees the same
+      // content a real server would hand back.
+      const fromTemplate = body.templateId ? templatesState.find((t) => t.id === body.templateId) : null;
+      const newSchedule = {
+        id: "sched-2", enabled: true, nextRunAt: "2026-08-30T00:00:00Z",
+        ...(fromTemplate && {
+          title: fromTemplate.title, description: fromTemplate.description, repo: fromTemplate.repo,
+          base: fromTemplate.base, autoMerge: fromTemplate.autoMerge, capabilities: fromTemplate.capabilities,
+          templateId: fromTemplate.id, templateName: fromTemplate.name,
+        }),
+        ...body,
+      };
       schedulesState = [...schedulesState, newSchedule];
       return Promise.resolve(newSchedule);
     }
@@ -67,11 +82,32 @@ function setupApi(tasks = initialTasks, schedules = []) {
       schedulesState = schedulesState.filter((s) => s.id !== scheduleMatch[1]);
       return Promise.resolve(null);
     }
+    if (path === "/api/templates" && method === "GET") return Promise.resolve(templatesState);
+    if (path === "/api/templates" && method === "POST") {
+      const body = JSON.parse(opts.body);
+      const newTemplate = { id: "template-2", capabilities: [], ...body };
+      templatesState = [...templatesState, newTemplate];
+      return Promise.resolve(newTemplate);
+    }
+    const templateMatch = path.match(/^\/api\/templates\/([\w-]+)$/);
+    if (templateMatch && method === "PATCH") {
+      const body = JSON.parse(opts.body);
+      templatesState = templatesState.map((t) => (t.id === templateMatch[1] ? { ...t, ...body } : t));
+      return Promise.resolve(templatesState.find((t) => t.id === templateMatch[1]));
+    }
+    if (templateMatch && method === "DELETE") {
+      templatesState = templatesState.filter((t) => t.id !== templateMatch[1]);
+      return Promise.resolve(null);
+    }
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
     return Promise.resolve(null);
   });
-  return { get tasksState() { return tasksState; }, get schedulesState() { return schedulesState; } };
+  return {
+    get tasksState() { return tasksState; },
+    get schedulesState() { return schedulesState; },
+    get templatesState() { return templatesState; },
+  };
 }
 
 describe("App", () => {
@@ -262,6 +298,41 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("Weekly dependency bump")).toBeInTheDocument();
+  });
+
+  it("switches to the templates pane, showing its own list and count in the sidebar", async () => {
+    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", repo: "acme/widgets", base: "", autoMerge: false, capabilities: [] };
+    setupApi(initialTasks, [], [template]);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Task templates/ }));
+
+    expect(await screen.findByRole("heading", { name: "Task templates" })).toBeInTheDocument();
+    expect(screen.getByText("Dependency bump")).toBeInTheDocument();
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+  });
+
+  it("creates a schedule from a template, hiding the content fields", async () => {
+    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", repo: "acme/widgets", base: "", autoMerge: false, capabilities: [] };
+    setupApi(initialTasks, [], [template]);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await screen.findByText("New schedule");
+
+    await user.click(screen.getByLabelText("Template"));
+    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+
+    expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
+    expect(screen.getByText(/come from the selected template/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    expect(await screen.findByText("Bump dependencies")).toBeInTheDocument();
   });
 
   it.each([

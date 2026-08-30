@@ -186,3 +186,133 @@ func TestReconcileScheduleWaitsForThePreviousFiringToFinish(t *testing.T) {
 		t.Fatalf("filed %d tasks once the first closed, want 2", len(filed))
 	}
 }
+
+// TestReconcileScheduleFiresFromATemplateResolvedFresh is
+// bwsalmon/agents#516's central guarantee: fireScheduledTask reads a
+// template-backed schedule's content off the template at firing time, not
+// off whatever the schedule's own row last cached, so a template edited
+// between two firings changes what the second one files -- and the
+// schedule's own display cache (Title/Body/Target/...) is kept in sync
+// with it too.
+func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
+	store, ctx := openStore(t)
+	tmpl := model.TaskTemplate{
+		ID:     "template-1",
+		Name:   "Dependency bump",
+		Title:  "Bump dependencies",
+		Body:   "Bump every dependency to its latest patch release.",
+		Target: model.RepoRef{Owner: "acme", Name: "widgets"},
+		Reads:  []model.RepoRef{{Owner: "acme", Name: "shared-lib"}},
+		Grants: []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}},
+	}
+	if err := store.PutTaskTemplate(ctx, tmpl); err != nil {
+		t.Fatal(err)
+	}
+	templateID := tmpl.ID
+	sched := model.ScheduledTask{
+		ID:         "sched-1",
+		TemplateID: &templateID,
+		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
+		Enabled:    true,
+		NextRunAt:  baseTime.Add(-time.Minute),
+		CreatedAt:  baseTime,
+	}
+	if err := store.PutScheduledTask(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScheduleOnly(t, store, baseTime); err != nil {
+		t.Fatalf("first RunCycle: %v", err)
+	}
+	first := scheduledTasksTagged(t, store, "schedule:"+sched.ID)
+	if len(first) != 1 {
+		t.Fatalf("filed %d tasks on the first cycle, want 1", len(first))
+	}
+	if first[0].Title != tmpl.Title || first[0].Body != tmpl.Body {
+		t.Errorf("first firing title/body = %q/%q, want the template's own", first[0].Title, first[0].Body)
+	}
+	if len(first[0].Reads) != 1 || first[0].Reads[0] != tmpl.Reads[0] {
+		t.Errorf("first firing reads = %+v, want %+v", first[0].Reads, tmpl.Reads)
+	}
+
+	got, err := store.GetScheduledTask(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != tmpl.Title {
+		t.Errorf("schedule's own display cache = %q after firing, want %q synced from the template", got.Title, tmpl.Title)
+	}
+
+	// Edit the template, close out the first firing, and force the
+	// schedule due again -- the second firing should reflect the edit,
+	// not the schedule's own now-stale cache.
+	if err := store.UpdateTaskTemplate(ctx, templateID, func(t *model.TaskTemplate) error {
+		t.Title = "Bump dependencies (patch only)"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	later := baseTime.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{TaskID: first[0].ID, ClosedAt: &later}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
+		s.NextRunAt = baseTime
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runScheduleOnly(t, store, later); err != nil {
+		t.Fatalf("second RunCycle: %v", err)
+	}
+	filed := scheduledTasksTagged(t, store, "schedule:"+sched.ID)
+	if len(filed) != 2 {
+		t.Fatalf("filed %d tasks after the second cycle, want 2", len(filed))
+	}
+	var second model.Task
+	for _, tk := range filed {
+		if tk.ID != first[0].ID {
+			second = tk
+		}
+	}
+	if second.Title != "Bump dependencies (patch only)" {
+		t.Errorf("second firing title = %q, want the freshly-edited template title", second.Title)
+	}
+}
+
+// TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing checks
+// fireScheduledTask's own defensive path: a schedule whose TemplateID no
+// longer resolves (ui.Client.DeleteTemplate tries to prevent this, but
+// nothing in the store itself enforces it) fails that one firing rather
+// than filing a task with no content, and does not advance NextRunAt --
+// reconcileSchedule's own doc comment: one schedule failing to file does
+// not stop the others, and is tried again next cycle exactly as it stood.
+func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
+	store, ctx := openStore(t)
+	missing := "template-does-not-exist"
+	sched := model.ScheduledTask{
+		ID:         "sched-1",
+		TemplateID: &missing,
+		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
+		Enabled:    true,
+		NextRunAt:  baseTime.Add(-time.Minute),
+		CreatedAt:  baseTime,
+	}
+	if err := store.PutScheduledTask(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScheduleOnly(t, store, baseTime); err == nil {
+		t.Fatal("want RunCycle to report an error for a schedule whose template is missing")
+	}
+	if filed := scheduledTasksTagged(t, store, "schedule:"+sched.ID); len(filed) != 0 {
+		t.Fatalf("filed %d tasks for a schedule with a missing template, want 0", len(filed))
+	}
+	got, err := store.GetScheduledTask(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.NextRunAt.Equal(sched.NextRunAt) {
+		t.Errorf("nextRunAt = %v, want it left untouched at %v after a failed firing", got.NextRunAt, sched.NextRunAt)
+	}
+}

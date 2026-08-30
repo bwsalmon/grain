@@ -173,13 +173,16 @@ func monthlyOccurrence(y int, m time.Month, dayOfMonth, timeOfDay int) time.Time
 	return time.Date(y, m, day, timeOfDay/60, timeOfDay%60, 0, 0, time.UTC)
 }
 
-// ScheduledTask is a task template a human sets up once and grain refiles
-// as a real Task on a fixed cadence -- bwsalmon/agents#376's v2
-// equivalent of v1's scheduled_jobs.py, with one deliberate difference:
-// there is no template directory here, because the whole point of this
-// package's own shape (README, "Input is a model update, not a GitHub
-// issue") is that a schedule is a store row a UI can create, edit and
-// delete, not a file an operator drops on a server's disk.
+// ScheduledTask is what a human sets up once and grain refiles as a real
+// Task on a fixed cadence -- bwsalmon/agents#376's v2 equivalent of v1's
+// scheduled_jobs.py, with one deliberate difference: there is no template
+// directory here, because the whole point of this package's own shape
+// (README, "Input is a model update, not a GitHub issue") is that a
+// schedule is a store row a UI can create, edit and delete, not a file an
+// operator drops on a server's disk. ("Template" here used to describe
+// this type itself, before TaskTemplate (bwsalmon/agents#516,
+// template.go) existed to name the reusable half of a schedule's own
+// content -- TemplateID below is what points at one.)
 //
 // docs/data-model.md's "the SCHEDULED special case dissolves" is why
 // firing carries no approval flag of its own: creating a schedule is
@@ -206,6 +209,20 @@ type ScheduledTask struct {
 	AutoMerge bool
 	Reads     []RepoRef
 	Grants    []Grant
+
+	// TemplateID, if set, names the TaskTemplate (template.go) this
+	// schedule fires from instead of its own Title/Body/Target/Base/
+	// AutoMerge/Reads/Grants above (bwsalmon/agents#516). It is resolved
+	// fresh at firing time (orchestrator.fireScheduledTask), not copied in
+	// once, so editing the template changes what every schedule pointing
+	// at it files next -- the same way editing this schedule's own fields
+	// already changes what it itself files next. The fields above still
+	// hold a value even when this is set: fireScheduledTask keeps them in
+	// sync as a display cache each time it fires, so ui.scheduleFrom can
+	// render a schedule's effective title, repo, and the rest with no
+	// extra lookup, but while TemplateID is set they are not what decides
+	// what gets filed.
+	TemplateID *string
 
 	// Recurrence is how often this schedule fires.
 	Recurrence Recurrence

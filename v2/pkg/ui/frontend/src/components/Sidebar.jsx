@@ -12,7 +12,7 @@ const SIDEBAR_WIDTH = 232;
 // bwsalmon/agents#398, bwsalmon/agents#457) and Secrets and Upgrade live
 // as tabs inside Settings (bwsalmon/agents#456), rather than their own
 // buttons here.
-export default function Sidebar({ config, tasks, schedules = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenNewTask }) {
+export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenNewTask }) {
   const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
 
   const counts = {};
@@ -100,6 +100,11 @@ export default function Sidebar({ config, tasks, schedules = [], view, onSetView
           <span className="dot dot-all" />
           <ListItemText primary="Scheduled tasks" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{schedules.length}</Typography>
+        </ListItemButton>
+        <ListItemButton selected={view === "templates"} onClick={() => onSetView("templates")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="dot dot-all" />
+          <ListItemText primary="Task templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+          <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
         </ListItemButton>
         <ListItemButton selected={view === "logs"} onClick={() => onSetView("logs")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />

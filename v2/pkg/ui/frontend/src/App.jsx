@@ -5,6 +5,7 @@ import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import RepoList from "./components/RepoList.jsx";
 import SchedulesList from "./components/SchedulesList.jsx";
+import TemplatesList from "./components/TemplatesList.jsx";
 import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
@@ -26,6 +27,7 @@ export default function App() {
   const [config, setConfig] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [schedules, setSchedules] = useState([]);
+  const [templates, setTemplates] = useState([]);
   const [stateFilter, setStateFilter] = useState("all");
   // view switches the main pane between the flat task list, the repo
   // page, and the schedules page; repoFilter is orthogonal to
@@ -75,6 +77,10 @@ export default function App() {
 
   const refreshSchedules = useCallback(async () => {
     setSchedules(await api("/api/schedules"));
+  }, []);
+
+  const refreshTemplates = useCallback(async () => {
+    setTemplates(await api("/api/templates"));
   }, []);
 
   // refreshConfig re-fetches /api/config -- needed after adding or
@@ -208,12 +214,12 @@ export default function App() {
       try {
         const cfg = await api("/api/config");
         setConfig(cfg);
-        await Promise.all([refreshList(), refreshSchedules()]);
+        await Promise.all([refreshList(), refreshSchedules(), refreshTemplates()]);
       } catch (err) {
         showError(err);
       }
     })();
-  }, [refreshList, refreshSchedules, showError]);
+  }, [refreshList, refreshSchedules, refreshTemplates, showError]);
 
   useEffect(() => {
     async function poll() {
@@ -225,7 +231,13 @@ export default function App() {
           setDetail(await api(`/api/tasks/${openTaskId}`));
         }
         if (view === "schedules") {
-          await refreshSchedules();
+          // Both, not just schedules: ScheduleForm's own "Template" picker
+          // (SchedulesList.jsx) needs an up-to-date template list too,
+          // since it is rendered right alongside the schedule list on this
+          // same pane.
+          await Promise.all([refreshSchedules(), refreshTemplates()]);
+        } else if (view === "templates") {
+          await refreshTemplates();
         }
       } catch (err) {
         // Deliberately quiet -- see app.js's own poll for why.
@@ -243,7 +255,7 @@ export default function App() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [openTaskId, refreshList, refreshSchedules, view]);
+  }, [openTaskId, refreshList, refreshSchedules, refreshTemplates, view]);
 
   const scopedTasks = repoFilter ? tasks.filter((t) => t.repo === repoFilter) : tasks;
 
@@ -255,6 +267,7 @@ export default function App() {
         onSetView={setViewAndCloseReleases}
         tasks={tasks}
         schedules={schedules}
+        templates={templates}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
         onOpenSettings={() => setShowSettings(true)}
@@ -274,7 +287,16 @@ export default function App() {
           onNewTask={openNewTaskForRepo}
         />
       ) : view === "schedules" ? (
-        <SchedulesList schedules={schedules} config={config} tasks={tasks} onRefresh={refreshSchedules} showError={showError} />
+        <SchedulesList
+          schedules={schedules}
+          templates={templates}
+          config={config}
+          tasks={tasks}
+          onRefresh={refreshSchedules}
+          showError={showError}
+        />
+      ) : view === "templates" ? (
+        <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
       ) : view === "logs" ? (
         <LogsPage showError={showError} />
       ) : (

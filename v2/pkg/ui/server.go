@@ -72,6 +72,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/schedules/{id}", s.handleUpdateSchedule)
 	s.mux.HandleFunc("DELETE /api/schedules/{id}", s.handleDeleteSchedule)
 
+	s.mux.HandleFunc("GET /api/templates", s.handleListTemplates)
+	s.mux.HandleFunc("POST /api/templates", s.handleCreateTemplate)
+	s.mux.HandleFunc("PATCH /api/templates/{id}", s.handleUpdateTemplate)
+	s.mux.HandleFunc("DELETE /api/templates/{id}", s.handleDeleteTemplate)
+
 	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
