@@ -337,9 +337,26 @@ its own doc comment. The cost is auto-merge: a task with `AutoMerge`
 never merges, because a PR whose checks cannot be read is never `PrClean`
 (reading it as clean is how you merge a PR with CI red). Dispatch, the
 push, and opening the pull request are a separate reconciler and are
-unaffected. A deployment that genuinely needs auto-merge needs an App
-installation token for the REST client, which is a code change, not
-configuration.
+unaffected.
+
+**A deployment that genuinely needs auto-merge needs a GitHub App
+installation token instead of this PAT** (bwsalmon/agents#491) --
+`pkg/gitproxy` now has that credential kind, so this is configuration
+after all rather than the code change it used to be. Create the App on
+`test_repos`' own org with Contents, Pull requests and Checks read
+(-and-write for the first two, the same levels the PAT table above
+grants), install it on `test_repos`, and put its App ID, installation ID
+and downloaded private key in a `<name>.app.json` file next to this
+deployment's `*.token` files under `secrets/github/` --
+`{"app_id": "...", "installation_id": "...", "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"}`
+-- with `credentials.json` pointing at `<name>` the same way it names any
+other credential. `pkg/gitproxy.CredentialSet` mints and refreshes an
+installation token from that key itself (`apptoken.go`); nothing else
+about the ladder, the proxy, or `push-secrets.sh` changes. This is not
+wired into Terraform here since App creation needs a manual step on
+GitHub's own side (see `docs/design.md`, "Auth model") -- add the file by
+hand and restart `grain-daemon.service` and `grain-git-proxy.service` the
+same way rotating any other credential here already requires.
 
 "A scoped PAT to a few test repos" -- the PAT itself being a GitHub
 fine-grained token limited, on GitHub's own side, to `test_repos` -- is
