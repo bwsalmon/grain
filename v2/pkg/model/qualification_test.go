@@ -115,3 +115,17 @@ func TestQualificationStatusRunningWhileStillInFlight(t *testing.T) {
 		t.Fatalf("got %v, want running", got)
 	}
 }
+
+// A task closed without ever completing counts as a failure, the same as
+// one that ran out of retries and failed outright -- QualificationStatus's
+// own doc comment on why StateClosed is folded into anyFailed rather than
+// treated as just another non-terminal state.
+func TestQualificationStatusFailedOnATaskClosedWithoutCompleting(t *testing.T) {
+	tasks := []model.QualificationTaskStatus{
+		status(model.StateCompleted, true),
+		status(model.StateClosed, true),
+	}
+	if got := model.QualificationStatus(tasks); got != model.QualificationFailed {
+		t.Fatalf("got %v, want failed", got)
+	}
+}

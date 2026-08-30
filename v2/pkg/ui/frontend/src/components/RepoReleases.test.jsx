@@ -169,6 +169,24 @@ describe("RepoReleases", () => {
     expect(await screen.findByText(/ready to promote/)).toBeInTheDocument();
   });
 
+  it("shows a failed banner, with the failing task's own badge, when qualification fails", async () => {
+    const run = {
+      id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "failed",
+      tasks: [
+        { taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 2, approved: true, state: "failed" },
+        { taskId: "11", templateId: "template-1", templateName: "Smoke test", instanceIndex: 2, repeat: 2, approved: true, state: "completed" },
+      ],
+    };
+    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, run);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
+
+    expect(await screen.findByText(/Qualification failed/)).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    // The failed instance's own "1/2" -- the ui.QualificationRun's own
+    // failures-first ordering already sorted it first among the two.
+    expect(screen.getByText("(1/2)")).toBeInTheDocument();
+  });
+
   it("only offers templates that target this repo, and saves a new qualification item", async () => {
     queueRefresh(releaseConfig, [activeCandidate]);
     api.mockResolvedValueOnce({});
