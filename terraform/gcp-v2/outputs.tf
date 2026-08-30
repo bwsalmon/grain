@@ -56,3 +56,8 @@ output "ssh_command" {
   value       = "gcloud compute ssh ${google_compute_instance.host.name} --zone ${var.zone} --project ${var.project_id} --tunnel-through-iap"
   description = "How to get a shell on the host despite it having no external IP and no open SSH port."
 }
+
+output "cloudrun_proxy_service" {
+  value       = var.use_cloudrun_iap_proxy ? google_cloud_run_v2_service.proxy[0].name : null
+  description = "The Cloud Run proxy's own service name (cloudrun-proxy.tf), for `gcloud run services logs`/`describe`. Null when use_cloudrun_iap_proxy is off -- the url and tunnel_command outputs above are the same either way."
+}
