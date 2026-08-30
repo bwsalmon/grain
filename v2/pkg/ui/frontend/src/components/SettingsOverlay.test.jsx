@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SettingsOverlay from "./SettingsOverlay.jsx";
+import { ThemeModeProvider } from "../ThemeModeContext.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -180,5 +181,47 @@ describe("SettingsOverlay", () => {
 
     expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+  });
+
+  // bwsalmon/agents#535: light/dark/auto is a per-browser preference
+  // (ThemeModeContext, localStorage), not a deployment-wide setting, so
+  // it applies immediately instead of going through the Save/PUT flow
+  // the rest of this tab uses.
+  describe("appearance", () => {
+    afterEach(() => {
+      localStorage.clear();
+    });
+
+    it("defaults to Auto and applies a choice immediately without saving", async () => {
+      api.mockResolvedValueOnce(settings);
+      const user = userEvent.setup();
+      render(
+        <ThemeModeProvider>
+          <SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />
+        </ThemeModeProvider>,
+      );
+      await screen.findByDisplayValue("30s");
+
+      expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
+
+      await user.click(screen.getByRole("radio", { name: "Dark" }));
+
+      expect(screen.getByRole("radio", { name: "Dark" })).toBeChecked();
+      expect(localStorage.getItem("grain.themeMode")).toBe("dark");
+      expect(api).not.toHaveBeenCalledWith("/api/settings", expect.objectContaining({ method: "PUT" }));
+    });
+
+    it("reflects a previously stored mode", async () => {
+      localStorage.setItem("grain.themeMode", "light");
+      api.mockResolvedValueOnce(settings);
+      render(
+        <ThemeModeProvider>
+          <SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />
+        </ThemeModeProvider>,
+      );
+      await screen.findByDisplayValue("30s");
+
+      expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
+    });
   });
 });
