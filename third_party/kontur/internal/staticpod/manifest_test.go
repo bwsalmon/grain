@@ -51,6 +51,9 @@ func TestRender_Basic(t *testing.T) {
 	if got, want := envValue(t, out, "CHV_CMDLINE"), s.Cmdline; got != want {
 		t.Errorf("CHV_CMDLINE = %q, want %q", got, want)
 	}
+	if got, want := envValue(t, out, "KONTUR_EXEC_ADDR"), "169.254.100.2:22"; got != want {
+		t.Errorf("KONTUR_EXEC_ADDR = %q, want %q", got, want)
+	}
 }
 
 func TestRender_OmitsUnsetOptionalFields(t *testing.T) {
@@ -84,6 +87,45 @@ func TestRender_QuotesSpecialCharacters(t *testing.T) {
 	}
 	if !strings.Contains(out, `image: "weird\"image\\ref:latest"`) {
 		t.Errorf("image field not safely quoted, got:\n%s", out)
+	}
+}
+
+func TestRender_ReadOnlyDiskHasNoWritableMount(t *testing.T) {
+	s := baseSpec()
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if strings.Contains(out, "mountPath: /disk") || strings.Contains(out, "name: disk") {
+		t.Errorf("manifest for a read-only disk unexpectedly has a /disk mount:\n%s", out)
+	}
+	if got, want := envValue(t, out, "CHV_DISK_IMAGE"), "/images/disk.img"; got != want {
+		t.Errorf("CHV_DISK_IMAGE = %q, want %q", got, want)
+	}
+}
+
+func TestRender_WritableDiskAddsWritableMount(t *testing.T) {
+	s := baseSpec()
+	s.DiskReadOnly = false
+	s.DiskHostPath = "/var/lib/kontur/vm-disks"
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if got, want := envValue(t, out, "CHV_DISK_IMAGE"), "/disk/disk.qcow2"; got != want {
+		t.Errorf("CHV_DISK_IMAGE = %q, want %q", got, want)
+	}
+	if !strings.Contains(out, "mountPath: /disk") {
+		t.Errorf("manifest missing /disk volumeMount:\n%s", out)
+	}
+	if !strings.Contains(out, `path: "/var/lib/kontur/vm-disks/web"`) {
+		t.Errorf("manifest missing writable disk hostPath:\n%s", out)
 	}
 }
 

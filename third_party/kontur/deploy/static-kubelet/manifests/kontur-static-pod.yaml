@@ -36,8 +36,7 @@ spec:
         - name: NETSHIM_GUEST_PORT
           value: "8080"
       securityContext:
-        capabilities:
-          add: ["NET_ADMIN", "NET_RAW"]
+        privileged: true
   containers:
     - name: web
       image: localhost:5000/kontur:latest

@@ -146,6 +146,15 @@ GRAIN_KONTUR_REQUESTED="$GRAIN_KONTUR_ENABLE"
 GRAIN_KONTUR_IMAGE_BUCKET="${GRAIN_KONTUR_IMAGE_BUCKET:-}"
 GRAIN_KONTUR_OCI_IMAGE="${GRAIN_KONTUR_OCI_IMAGE:-}"
 GRAIN_KONTUR_IMAGES_HOSTPATH="${GRAIN_KONTUR_IMAGES_HOSTPATH:-/var/lib/vm-images}"
+# -images-hostpath is always mounted read-only (it's a shared, node-local
+# image cache several VMs may read from concurrently -- see
+# third_party/kontur/README.md, "Operating a node (konturctl CLI)"), so a
+# VM's own writable root filesystem instead lives here: a per-VM qcow2 overlay
+# konturctl creates under -disk-hostpath, backed by the shared read-only
+# disk image (bwsalmon/agents#510). Must be owned by $GRAIN_USER --
+# ensure_kontur_kvm_access creates it -- since konturctl runs directly as
+# that user, not inside a container the way -disk itself is read.
+GRAIN_KONTUR_DISK_HOSTPATH="${GRAIN_KONTUR_DISK_HOSTPATH:-/var/lib/kontur/vm-disks}"
 GRAIN_KONTUR_VM_NAME_PREFIX="${GRAIN_KONTUR_VM_NAME_PREFIX:-kontur-}"
 GRAIN_KONTUR_SSH_USER="${GRAIN_KONTUR_SSH_USER:-debian}"
 GRAIN_KONTUR_SSH_KEY_FILE="${GRAIN_KONTUR_SSH_KEY_FILE:-}"
@@ -259,6 +268,12 @@ Recognized variables:
   GRAIN_KONTUR_IMAGES_HOSTPATH  where the fetched guest image lands, bind-
                              mounted read-only into each VM's container
                              (default: /var/lib/vm-images, konturctl's own default)
+  GRAIN_KONTUR_DISK_HOSTPATH  host directory each kontur VM's own private,
+                             writable qcow2 disk overlay is created under
+                             (default: /var/lib/kontur/vm-disks, konturctl's
+                             own default) -- without this, a VM's root
+                             filesystem is read-only, since
+                             GRAIN_KONTUR_IMAGES_HOSTPATH always is
   GRAIN_KONTUR_VM_NAME_PREFIX  prefix for each slot's kontur VM name (default: kontur-)
   GRAIN_KONTUR_SSH_USER      username to SSH into each kontur VM as (default: debian)
   GRAIN_KONTUR_SSH_KEY_FILE  path to the private half of the SSH keypair whose
@@ -626,10 +641,17 @@ ensure_kontur_images() {
 }
 
 # ensure_kontur_kvm_access grants $GRAIN_USER /dev/kvm (for the nested
-# cloud-hypervisor guest itself) and the docker group (for the docker
+# cloud-hypervisor guest itself), the docker group (for the docker
 # kontur backend's own `docker run`) -- the same grant
 # ensure_self_upgrade gives for an unrelated reason, and safe to grant
-# twice: usermod -aG only ever adds.
+# twice: usermod -aG only ever adds -- and ownership of
+# GRAIN_KONTUR_DISK_HOSTPATH, where konturctl (run directly as
+# $GRAIN_USER, not inside a container) creates each VM's own writable
+# disk overlay (bwsalmon/agents#510). Unlike GRAIN_KONTUR_IMAGES_HOSTPATH
+# (populated by this script, running as root, before grain-daemon ever
+# runs), that directory is created lazily by konturctl itself on a VM's
+# first "vm create" -- $GRAIN_USER needs to own its parent so that
+# mkdir succeeds unprivileged.
 ensure_kontur_kvm_access() {
   if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     return
@@ -643,6 +665,7 @@ ensure_kontur_kvm_access() {
     usermod -aG kvm "$GRAIN_USER"
   fi
   grant_docker_group
+  install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_KONTUR_DISK_HOSTPATH"
 }
 
 # seed_kontur_ssh_key writes GRAIN_KONTUR_SSH_KEY_FILE's contents to
@@ -995,6 +1018,12 @@ write_systemd_units() {
   # -guest-port 22 is not optional: konturctl's own default is 80, which
   # silently refuses every connection to this image's actual sshd
   # (packer/kontur/README.md, "guest-port 22 is not optional").
+  # -disk-readonly=false/-disk-hostpath give each VM a genuinely
+  # persistent, writable root filesystem instead of the read-only one
+  # -images-hostpath alone provides (bwsalmon/agents#510):
+  # third_party/kontur/README.md's "Operating a node (konturctl CLI)"
+  # section explains why -images-hostpath itself can never be made
+  # writable.
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
     daemon_args+=(
       -kontur-vm-name-prefix "$GRAIN_KONTUR_VM_NAME_PREFIX"
@@ -1009,6 +1038,8 @@ write_systemd_units() {
       -kontur-create-arg -kernel -kontur-create-arg /images/current/vmlinuz
       -kontur-create-arg -initramfs -kontur-create-arg /images/current/initrd.img
       -kontur-create-arg -guest-port -kontur-create-arg 22
+      -kontur-create-arg -disk-readonly=false
+      -kontur-create-arg -disk-hostpath -kontur-create-arg "$GRAIN_KONTUR_DISK_HOSTPATH"
     )
   fi
 

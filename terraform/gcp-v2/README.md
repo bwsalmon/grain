@@ -359,6 +359,18 @@ host-directory sandboxing indefinitely -- nothing above is required then,
 and `enable_nested_virtualization` can come off with it if nothing else
 on this host needs `/dev/kvm`.
 
+Each VM's root filesystem is genuinely persistent and writable, not just
+readable: `write_systemd_units` passes `-disk-readonly=false` and
+`-disk-hostpath` (bwsalmon/agents#510), so `konturctl` gives every VM its
+own private qcow2 overlay under `GRAIN_KONTUR_DISK_HOSTPATH` (default
+`/var/lib/kontur/vm-disks`, created and owned by `$GRAIN_USER` by
+`ensure_kontur_kvm_access`), backed by the shared, read-only guest image
+under `GRAIN_KONTUR_IMAGES_HOSTPATH`. That split exists because the
+latter is a node-local cache several VMs may read from concurrently, so
+it is never made writable regardless of `-disk-readonly` -- see
+`third_party/kontur/README.md`'s own "Operating a node (`konturctl`
+CLI)" section for the full mechanism.
+
 A freshly created VM's container/pod getting an IP is not the same moment
 as its nested guest actually accepting SSH connections -- confirmed by
 hand, a docker-backed VM's container is reachable well before the guest

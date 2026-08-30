@@ -123,6 +123,22 @@ func TestBuildArgs_MultipleDisksAndNet(t *testing.T) {
 	}
 }
 
+// A writable disk overlay (internal/staticpod's PrepareWritableDisk,
+// upstream) is qcow2, not raw -- the local image_type=raw patch (this
+// repo's own VENDORED.md) must not force it too, or cloud-hypervisor
+// refuses to open it at all ("Maximum disk nesting depth exceeded",
+// confirmed by hand against a real cloud-hypervisor v53.0 binary).
+func TestBuildArgs_Qcow2DiskHasNoImageTypeRaw(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Disks = []config.Disk{{Path: "/disk/disk.qcow2"}}
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--disk"); got != "path=/disk/disk.qcow2,readonly=off,image_type=qcow2,backing_files=on" {
+		t.Errorf("--disk = %q, want path=/disk/disk.qcow2,readonly=off,image_type=qcow2,backing_files=on", got)
+	}
+}
+
 func TestBuildArgs_NoNetFlagWhenUnset(t *testing.T) {
 	args := BuildArgs(baseConfig())
 	for _, a := range args {

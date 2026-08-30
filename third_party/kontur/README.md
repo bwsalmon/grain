@@ -22,9 +22,9 @@ and manage the VM pods `kontur` runs. See "Operating a node" below.
 
 The image contains three things:
 
-- `kontur` (this repo, Go): a single binary with three modes, selected by
-  the first argument (`run`, the default if none is given; `netshim`; or
-  `sleep`):
+- `kontur` (this repo, Go): a single binary with four modes, selected by
+  the first argument (`run`, the default if none is given; `netshim`;
+  `exec`; or `sleep`):
   - **`run`** reads configuration from the environment, execs
     `cloud-hypervisor` with the resulting arguments, streams the guest's
     serial console to the container's stdout/stderr so it shows up under
@@ -34,6 +34,10 @@ The image contains three things:
     that lets several VM containers in the same pod share the pod's IP;
     see "Pod-local networking" below. It's meant to run once, to
     completion, as an init container.
+  - **`exec`** runs a command inside the VM guest itself, over SSH to its
+    already-running `sshd`, rather than in this otherwise-empty
+    container -- meant to be `kubectl exec`'s own command, so that ends
+    up in the guest too; see "Execing into a VM" below.
   - **`sleep`** just blocks until killed. It exists purely so
     `-backend docker` (see "Operating a node" below) can hold a network
     namespace open with the `kontur` image itself, without needing a
@@ -41,7 +45,7 @@ The image contains three things:
 
   `netshim` talks to the kernel directly via netlink/nftables (see
   "Pod-local networking" below) rather than shelling out to `ip`/
-  `iptables`, so none of the three modes needs anything beyond the two
+  `iptables`, so none of the four modes needs anything beyond the two
   statically linked binaries themselves -- the image's base is `scratch`
   (see "Building" below).
 - `cloud-hypervisor`: the actual VMM, fetched from the upstream static
@@ -121,6 +125,38 @@ set, `CHV_KERNEL`/`CHV_INITRAMFS`/`CHV_FIRMWARE` -- must already exist on
 disk: `kontur run` checks this at startup and fails fast with a clear
 error rather than letting cloud-hypervisor fail deeper into boot.
 
+## Execing into a VM
+
+`kubectl exec`/`docker exec` normally lands inside the container itself
+-- for kontur, that's just the `scratch` image wrapping `cloud-hypervisor`,
+not the actual workload running inside the guest. `kontur exec` (see
+`internal/guestexec`) closes that gap by running the given command inside
+the guest instead, over SSH to its already-running `sshd` (see "Guest
+disk image" below), the same way `run` already makes the guest's console
+show up under `kubectl logs`:
+
+```sh
+kubectl exec -it <pod> -c <container> -- kontur exec -- <command> [args...]
+```
+
+Leaving off `-- <command>` (i.e. just `kontur exec`) opens an interactive
+login shell instead, the same as an ordinary `ssh <host>` with no command.
+Since the container ships no shell of its own (see "Building" below),
+`kontur exec` -- not e.g. `/bin/sh` -- is always the command
+`kubectl exec`/`docker exec` itself needs to run.
+
+| Variable                      | Required | Default                          | Description |
+|--------------------------------|:--------:|-----------------------------------|--------------|
+| `KONTUR_EXEC_ADDR`             | yes      | —                                 | The guest's own address, e.g. `169.254.100.2:22` -- the same address `CHV_CMDLINE`'s `ip=` configures on the guest, reachable directly since this container shares netshim's network namespace (see "Pod-local networking" below). `konturctl vm` sets this automatically. |
+| `KONTUR_EXEC_USER`             | no       | `root`                            | The guest account to log in as. |
+| `KONTUR_EXEC_KEY`              | no       | `/etc/kontur/exec_id_ed25519`     | Private key authorized on the guest for `KONTUR_EXEC_USER`. The default is a keypair generated at image build time (see the Dockerfile's `exec-keypair` stage) and authorized on the reference guest image regardless of `GUEST_SSH_AUTHORIZED_KEY`; a custom `CHV_DISK_IMAGE` needs to authorize the same public key itself (or point this at a key it does authorize) for `kontur exec` to work against it. |
+| `KONTUR_EXEC_CONNECT_TIMEOUT`  | no       | `30s` (Go duration syntax)        | How long to keep retrying the initial connection -- the guest's `sshd` may not be up yet immediately after the container starts. |
+
+This depends on `CHV_NET` actually giving the guest a reachable address
+(e.g. via `netshim`, as `konturctl vm` sets up automatically) -- a guest
+booted with no network device at all has no path in for `kontur exec`
+either.
+
 ## Building
 
 ```sh
@@ -193,8 +229,9 @@ a separate log shipper inside it. See
 [`deploy/guest-image/README.md`](deploy/guest-image/README.md) for
 exactly how (the `ForceCommand`/`script` wrapper), how to get SSH access
 at all (root has no password; `GUEST_SSH_AUTHORIZED_KEY` bakes in a key
-at build time), and how host keys avoid being shared across every VM
-booted from the image.
+at build time, alongside a keypair generated for `kontur exec`'s own use
+-- see "Execing into a VM" above), and how host keys avoid being shared
+across every VM booted from the image.
 
 ## Running on Kubernetes
 
@@ -301,6 +338,26 @@ management into a day-to-day workflow, against either of two backends:
 - `konturctl vm list`: lists the VMs `konturctl` currently knows about,
   regardless of backend.
 
+`-images-hostpath` (default `/var/lib/vm-images`) is always mounted
+read-only under both backends -- it's a shared, node-local image cache
+several VMs may read `-disk`/`-kernel`/`-firmware` from concurrently, so
+it's never made writable, regardless of `-disk-readonly`. A VM that needs
+a genuinely writable root filesystem (to persist installed packages or
+other state across reboots) instead passes `-disk-readonly=false`: before
+the VM starts, `konturctl` creates a small qcow2 overlay file in its own
+private directory under `-disk-hostpath` (default
+`/var/lib/kontur/vm-disks/<name>`), with `-disk` itself as the overlay's
+qcow2 backing file, and mounts that overlay read-write instead. The
+guest's writes land in the overlay as new qcow2 clusters; anything it
+hasn't written yet still reads straight through to the shared,
+read-only `-disk`. Creating the overlay costs a fixed few hundred KiB
+regardless of `-disk`'s size, unlike copying it. The overlay is created
+once: a later `vm update` or container restart leaves it alone rather
+than overwriting whatever the guest has since written to it, and
+`vm delete` removes it. `-disk` must be a path under `-images-hostpath`
+for this to work, since that's the only place `konturctl` ever mounts a
+source image from.
+
 Each VM's parameters (including which backend it uses) are saved as JSON
 under `-state-dir` (default `/var/lib/kontur/vms`) so a later `update` or
 `delete` only needs the flags that are actually changing, and doesn't need
@@ -348,14 +405,18 @@ container) and the VM container to it the same way. `konturctl vm delete`
 removes both; `konturctl vm update` tears both down and recreates them,
 since there's no manifest for a kubelet to reconcile.
 
-One difference from the static pod backend worth knowing: `netshim`'s
-container there only needs the `NET_ADMIN`/`NET_RAW` capabilities a real
-kubelet's CRI runtime grants it (see "Pod-local networking" above). Plain
-`docker run` is stricter -- it masks `/proc/sys/net` read-only regardless
-of capabilities added, which blocks the `net.ipv4.ip_forward` write
-`netshim` needs for its `MASQUERADE`/DNAT rules to actually forward
-traffic -- so under this backend `netshim`'s container runs
-`--privileged` instead. The VM container already ran `--privileged` under
+`netshim`'s container runs `--privileged` under this backend, same as the
+static pod backend's own manifest (see "Pod-local networking" above and
+`deploy/k8s/pod-example.yaml`): the `NET_ADMIN`/`NET_RAW` capabilities
+alone are enough to create the tap/bridge/nftables rules, but not enough
+for the `net.ipv4.ip_forward` write `netshim` needs for its
+`MASQUERADE`/DNAT rules to actually forward traffic -- the container
+runtime's default runc-style OCI spec mounts `/proc/sys/net` read-only
+regardless of capabilities granted, and that turned out to be true of a
+real standalone kubelet/containerd CRI pod just as much as plain `docker
+run`, contradicting what an earlier version of this doc claimed (an
+untested assumption, not something actually validated against a real
+kubelet at the time). The VM container already ran `--privileged` under
 both backends (for `/dev/kvm`), so this doesn't add a new class of
 privilege escalation to the workflow, just extends it to one more
 container.
@@ -510,3 +571,100 @@ against the resulting image, with `NETSHIM_EXTERNAL_IFACE`/
 `NETSHIM_BRIDGE_CIDR`/`NETSHIM_VMS` set, successfully created the bridge,
 tap and nftables rules with no userland present beyond the `kontur` and
 `cloud-hypervisor` binaries themselves.
+
+### Validated on a real VM with nested virtualization
+
+The rest of this section's smoke tests either ran without a bootable
+kernel+virtio-blk/virtio-net combination on hand, or (per
+`deploy/static-kubelet/README.md`) inside a container standing in for a
+node rather than a real one. This pass instead ran on an actual VM with
+nested virtualization enabled (real `/dev/kvm`, confirmed `vmx`/`svm` CPU
+flags), using cloud-hypervisor's own published PVH-entry kernel
+(`cloud-hypervisor/linux`'s `ch-release-v6.16.9-*` release, which has
+virtio-pci/virtio-blk/virtio-net built in) instead of hand-building one,
+so it could go further: a full Debian and Alpine guest boot to a working
+SSH login, `netshim`'s bridge/tap/DNAT forwarding a real SSH session
+end-to-end, and the static pod backend exercised against a real
+standalone kubelet (`deploy/static-kubelet/`) rather than by hand. It
+found two real bugs, now fixed, and one earlier doc claim that turned out
+to be wrong:
+
+- The Debian guest rootfs (`guest-rootfs-debian`) didn't include `udev`:
+  `debootstrap --variant=minbase` skips Recommends, and without
+  `systemd-udevd` running, `dev-ttyS0.device` never got marked ready,
+  stalling every boot for `DefaultDeviceTimeoutSec` (90s) with the
+  console showing nothing but a spinner, after which
+  `serial-getty@ttyS0.service` gave up -- so the console (this guest's
+  only other point of entry besides SSH) never showed a login prompt at
+  all. Fixed by adding `udev` to the `debootstrap --include` list (see
+  `deploy/guest-image/README.md`); confirmed `dev-ttyS0.device` now
+  resolves in well under a second and the guest reaches
+  `multi-user.target` with a working console login and SSH both, in
+  roughly 18s to `serial-getty@ttyS0.service` on 1 vCPU / 1024MiB.
+- `netshim`'s init container, both in `internal/staticpod`'s generated
+  manifests and in `deploy/k8s/pod-example.yaml`, ran with only the
+  `NET_ADMIN`/`NET_RAW` capabilities added -- documented (incorrectly, it
+  turns out) as sufficient under a real kubelet's CRI runtime, unlike the
+  `-backend docker` path which was already known to need
+  `privileged: true` for the same reason. Running the static pod backend
+  against a real standalone kubelet + containerd (not a container
+  standing in for one) reproduced the exact same failure `-backend
+  docker` has: `open /proc/sys/net/ipv4/ip_forward: read-only file
+  system`, since the container runtime's default runc-style OCI spec
+  mounts `/proc/sys/net` read-only regardless of capabilities granted,
+  on both runtimes alike. `deploy/static-kubelet/README.md`'s own
+  "Validated" section had actually hit this same error before, but
+  dismissed it as an artifact of testing inside a container standing in
+  for a node rather than a real one -- that dismissal was wrong; it
+  reproduces identically on a real node. Fixed by giving `netshim`
+  `privileged: true` in `internal/staticpod/manifest.go`,
+  `deploy/k8s/pod-example.yaml`, and
+  `deploy/static-kubelet/manifests/kontur-static-pod.yaml`, matching what
+  `-backend docker` already did; confirmed the static pod backend now
+  runs `netshim` to completion and boots the VM container successfully
+  against a real kubelet.
+- Not a bug, but worth being explicit about since it wasn't obvious going
+  in: `konturctl vm create`'s `-disk` flag is mandatory, and both
+  backends mount `-images-hostpath` read-only into the container (a
+  shared node-local image cache several VMs may read at once -- see
+  `staticpod.Defaults`'s doc comment). That means a VM created through
+  `konturctl` can never get a writable root filesystem, regardless of
+  `-disk-readonly`, which in turn means the bundled reference/demo guest
+  image's first-boot SSH host key generation (`ssh-keygen -A` in
+  `kontur-ssh-host-keys.service`) can never succeed there: it fails to
+  write the keys, doesn't treat that as fatal, and `sshd` then refuses to
+  start at all ("no hostkeys available"). SSH into the bundled guest only
+  works through the direct `kontur run`/`docker run` path described under
+  "Running locally" above (which is how the SSH validation in this
+  section was actually done), not through `konturctl` -- `konturctl` is
+  built around production disk images that don't need to write to
+  themselves, and the demo guest doesn't fit that mold. `DiskReadOnly`
+  defaulting to `true` in `staticpod.Defaults()` is correct as-is; it was
+  double-checked (and briefly, incorrectly, "fixed" to `false` during
+  this pass) before landing back on `true`, since a writable default
+  would have made `-disk-readonly=false` fail outright with "Read-only
+  file system" the moment `-images-hostpath` is a real read-only mount,
+  which it always is.
+
+Also found and fixed as a smaller usability issue while doing the above:
+`konturctl vm create`/`vm update` accepted VM names that produce a
+`tap-<name>` device name over Linux's 15-character interface name limit,
+which previously only surfaced as a `netshim` crash loop after the pod
+was already submitted (`internal/netshim` itself already checked this,
+just not early enough to help). `staticpod.Validate()` now checks it
+upfront and fails the CLI command immediately with a clear message
+instead.
+
+Separately, running `deploy/static-kubelet/install.sh` on a node that
+already has Docker CE installed removes it: the Debian `containerd`
+package `install.sh` installs and Docker's own `containerd.io` package
+both provide `/usr/bin/containerd` and the same `containerd.service`
+unit, so `apt` resolves the conflict by removing `docker-ce`. This
+directly undermines the "on a machine with Docker (can be the same
+node)" local registry workflow `deploy/static-kubelet/README.md`
+describes, unless the two are reinstalled together afterward (`apt-get
+install docker-ce docker-ce-cli containerd.io`, keeping the containerd
+config `install.sh` wrote when prompted) so `containerd.io`'s newer
+binary ends up serving both Docker and the CRI socket kubelet uses, under
+one config. See `deploy/static-kubelet/README.md` for the same note
+closer to where it matters.

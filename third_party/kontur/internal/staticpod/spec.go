@@ -17,8 +17,40 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+)
+
+const (
+	// ImagesMountPath is the container path -images-hostpath is always
+	// mounted at, read-only, under both backends: it's a shared
+	// node-local image cache several VMs may read from concurrently, so
+	// it's never made writable regardless of -disk-readonly (see
+	// manifest.go and internal/dockervm). A writable -disk must live
+	// under this path, since it's the only place konturctl's backends
+	// ever mount images from.
+	//
+	// Must match the literal "/images" mountPath/hostPath entries in
+	// manifestTemplateSrc (manifest.go) and the literal ":/images:ro"
+	// mount in internal/dockervm/docker.go.
+	ImagesMountPath = "/images"
+
+	// DiskMountPath is the container path a VM's own private writable
+	// qcow2 overlay (see WritableDiskDir, PrepareWritableDisk) is mounted
+	// read-write at, used only when DiskReadOnly is false.
+	//
+	// Must match the literal "/disk" mountPath/hostPath entries in
+	// manifestTemplateSrc (manifest.go).
+	DiskMountPath = "/disk"
+
+	// writableDiskFileName is the fixed name a VM's private writable
+	// qcow2 overlay is stored under within WritableDiskDir, regardless of
+	// the source image's own filename under ImagesMountPath -- so
+	// ResolvedDiskImage stays stable even if -disk changes across a "vm
+	// update".
+	writableDiskFileName = "disk.qcow2"
 )
 
 // VMSpec holds every parameter needed to run one VM, under either
@@ -56,6 +88,14 @@ type VMSpec struct {
 
 	ImagesHostPath string `json:"imagesHostPath"`
 
+	// DiskHostPath is the host directory a VM's own private writable
+	// qcow2 overlay is stored under (see WritableDiskDir), one
+	// subdirectory per VM name. Only used when DiskReadOnly is false:
+	// ImagesHostPath itself is always mounted read-only (see
+	// ImagesMountPath), so a genuinely writable disk needs to live
+	// somewhere else entirely.
+	DiskHostPath string `json:"diskHostPath,omitempty"`
+
 	// KonturImage is the single OCI image used for both the netshim init
 	// container and the VM container: the same kontur binary, invoked
 	// with different args ("netshim" vs "run") for each role.
@@ -92,7 +132,14 @@ const (
 
 // Defaults returns a VMSpec with every field the CLI defaults if left
 // unset, matching the defaults documented for kontur in the top-level
-// README.
+// README wherever konturctl's own architecture doesn't force a stricter
+// choice. DiskReadOnly is the one field that diverges from kontur run's
+// own CHV_DISK_READONLY=false default: both backends mount -images-hostpath
+// read-only into the container (a shared node-local image cache several
+// VMs may read at once), so a writable disk is never actually possible
+// through konturctl regardless of this flag -- defaulting it to true
+// avoids a boot failure ("Read-only file system") on the flag's own
+// default value.
 func Defaults() VMSpec {
 	return VMSpec{
 		DiskReadOnly:                  true,
@@ -104,6 +151,7 @@ func Defaults() VMSpec {
 		BridgeCIDR:                    "169.254.100.1/24",
 		ExternalIface:                 "eth0",
 		ImagesHostPath:                "/var/lib/vm-images",
+		DiskHostPath:                  "/var/lib/kontur/vm-disks",
 		KonturImage:                   "localhost:5000/kontur:latest",
 		TerminationGracePeriodSeconds: 40,
 		StaticPodPath:                 "/etc/kubernetes/manifests",
@@ -132,8 +180,24 @@ func (s *VMSpec) Validate() error {
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+	// netshim names each VM's tap device "tap-<name>" and Linux interface
+	// names are capped at 15 characters (IFNAMSIZ-1); catch an
+	// over-length name here, at "vm create"/"vm update" time, rather than
+	// as a netshim init container crash loop once the pod's already been
+	// submitted.
+	if tapName := "tap-" + s.Name; len(tapName) > 15 {
+		return fmt.Errorf("name %q too long: tap device name %q would exceed 15 characters", s.Name, tapName)
+	}
 	if s.DiskImage == "" {
 		return fmt.Errorf("disk image is required")
+	}
+	if !s.DiskReadOnly {
+		if !strings.HasPrefix(s.DiskImage, ImagesMountPath+"/") {
+			return fmt.Errorf("a writable disk (-disk-readonly=false) must be under %s (the shared -images-hostpath mount, the only place a source image can be used as a qcow2 backing file from), got %q", ImagesMountPath, s.DiskImage)
+		}
+		if s.DiskHostPath == "" {
+			return fmt.Errorf("disk-hostpath is required when disk-readonly is false")
+		}
 	}
 	if s.IP == "" {
 		return fmt.Errorf("ip is required")
@@ -178,6 +242,25 @@ func (s *VMSpec) Validate() error {
 		s.CmdlineAuto = true
 	}
 	return nil
+}
+
+// WritableDiskDir is the host directory holding this VM's own private,
+// writable qcow2 overlay of its disk image (see PrepareWritableDisk), one
+// subdirectory per VM name so several VMs' overlays never collide. Only
+// meaningful when DiskReadOnly is false.
+func (s VMSpec) WritableDiskDir() string {
+	return filepath.Join(s.DiskHostPath, s.Name)
+}
+
+// ResolvedDiskImage is this VM's disk path as seen inside its container:
+// DiskImage unchanged when DiskReadOnly is true (read directly from the
+// shared, read-only ImagesMountPath mount), or the path of this VM's own
+// writable qcow2 overlay under DiskMountPath otherwise.
+func (s VMSpec) ResolvedDiskImage() string {
+	if s.DiskReadOnly {
+		return s.DiskImage
+	}
+	return filepath.Join(DiskMountPath, writableDiskFileName)
 }
 
 // gatewayAndNetmask returns the address and dotted-decimal netmask encoded

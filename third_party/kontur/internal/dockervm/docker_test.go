@@ -120,6 +120,9 @@ func TestCreate_RunsNetnsHolderNetshimThenVM(t *testing.T) {
 	if !containsArg(vmCall, "CHV_KERNEL=/images/vmlinux") {
 		t.Errorf("VM call = %v, missing expected CHV_KERNEL", vmCall)
 	}
+	if !containsArg(vmCall, "KONTUR_EXEC_ADDR=169.254.100.2:22") {
+		t.Errorf("VM call = %v, missing expected KONTUR_EXEC_ADDR", vmCall)
+	}
 	if !containsArg(vmCall, "--privileged") || !containsArg(vmCall, "/dev/kvm") {
 		t.Errorf("VM call = %v, want --privileged and /dev/kvm", vmCall)
 	}
@@ -145,6 +148,43 @@ func TestCreate_OmitsUnsetOptionalEnv(t *testing.T) {
 	}
 	if !containsArg(vmCall, "CHV_FIRMWARE=/images/CLOUDHV.fd") {
 		t.Errorf("VM call = %v, missing expected CHV_FIRMWARE", vmCall)
+	}
+}
+
+func TestCreate_WritableDiskMountsDiskHostPathReadWrite(t *testing.T) {
+	d, calls := testDocker(t)
+	spec := testSpec()
+	spec.DiskReadOnly = false
+	spec.DiskHostPath = "/var/lib/kontur/vm-disks"
+
+	if err := Create(context.Background(), d, spec, &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	vmCall := calls()[2]
+	if !containsArg(vmCall, "-v") || !containsArg(vmCall, "/var/lib/kontur/vm-disks/web:/disk") {
+		t.Errorf("VM call = %v, want a read-write /disk mount of the writable disk dir", vmCall)
+	}
+	if !containsArg(vmCall, "CHV_DISK_IMAGE=/disk/disk.qcow2") {
+		t.Errorf("VM call = %v, want CHV_DISK_IMAGE pointing at the writable overlay", vmCall)
+	}
+}
+
+func TestCreate_ReadOnlyDiskHasNoDiskMount(t *testing.T) {
+	d, calls := testDocker(t)
+
+	if err := Create(context.Background(), d, testSpec(), &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	vmCall := calls()[2]
+	for _, a := range vmCall {
+		if strings.HasSuffix(a, ":/disk") {
+			t.Errorf("VM call = %v, unexpectedly contains a /disk mount for a read-only disk", vmCall)
+		}
+	}
+	if !containsArg(vmCall, "CHV_DISK_IMAGE=/images/disk.img") {
+		t.Errorf("VM call = %v, want CHV_DISK_IMAGE unchanged for a read-only disk", vmCall)
 	}
 }
 

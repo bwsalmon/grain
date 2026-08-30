@@ -41,6 +41,20 @@ sudo ./install.sh
 sudo cp manifests/kontur-static-pod.yaml /etc/kubernetes/manifests/
 ```
 
+If Docker is already installed on the node you're about to run
+`install.sh` on: `apt-get install containerd` (what `install.sh` does)
+and Docker's own `containerd.io` package both provide `/usr/bin/containerd`
+and the same `containerd.service` unit, so `apt` resolves the conflict by
+silently removing `docker-ce` -- which breaks the "can be the same node"
+option above the moment it happens. If that's already bitten you,
+`apt-get install docker-ce docker-ce-cli containerd.io` afterward brings
+Docker back; when apt prompts about `/etc/containerd/config.toml` having
+changed, keep the version `install.sh` wrote (it's the one with the CRI
+plugin and the registry mirror this page depends on) -- `containerd.io`'s
+newer binary then ends up serving both Docker and kubelet's CRI socket
+under that one config, which is a fine end state, just one apt won't
+reach on its own without that prompt answered.
+
 `install.sh` and hand-copying manifests is the from-source path. Once
 `konturctl` (built from `cmd/konturctl` at the repo root) is on the node,
 `sudo konturctl setup` does the same thing as `install.sh` -- it's the
@@ -58,6 +72,13 @@ journalctl -u kubelet -f
 crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -a
 crictl --runtime-endpoint unix:///run/containerd/containerd.sock logs <container-id>
 ```
+
+`crictl` isn't installed by `install.sh`; grab it from
+https://github.com/kubernetes-sigs/cri-tools/releases if it's not already
+on the node. Container logs are also readable without it, straight from
+`/var/log/pods/<namespace>_<pod>_<uid>/<container>/*.log` (what kubelet
+itself writes them to), which is enough for a one-off look without
+installing anything extra.
 
 `kubectl` doesn't work here — there's no apiserver for it to talk to.
 `crictl` (https://github.com/kubernetes-sigs/cri-tools) talks to
@@ -123,12 +144,27 @@ involved, created the pod sandbox with a real CNI-assigned IP, mounted the
 hostPath volumes (including `/dev/kvm`), and started the netshim-mode init
 container with the requested `NET_ADMIN`/`NET_RAW` capabilities. It ran
 but failed inside that harness on `open
-/proc/sys/net/ipv4/ip_forward: read-only file system` — an artifact of
-nested containerization (the stand-in "node" was itself a container), not
-something expected on a real node; netshim-mode establishing a real
-bridge/NAT setup is already covered by the smoke test described in the
-top-level README. This hasn't been re-run against real hardware/VM node
-with a persistent systemd, which would be the next thing to confirm
-`install.sh`'s systemd units specifically (rather than the equivalent
-commands run by hand, as here), nor re-run since the merge into a single
-`kontur` image.
+/proc/sys/net/ipv4/ip_forward: read-only file system`, which was assumed
+at the time to be an artifact of nested containerization (the stand-in
+"node" was itself a container) rather than something expected on a real
+node.
+
+That assumption was wrong. This was re-run against a real VM node with
+nested virtualization enabled and a persistent systemd (see the top-level
+README's "Validated on a real VM with nested virtualization"), running
+`install.sh` for real -- not the equivalent commands by hand -- against a
+real standalone kubelet + containerd. The exact same `/proc/sys/net`
+read-only failure reproduced identically: it's not a nested-containerization
+artifact, it's that a real kubelet's CRI runtime masks `/proc/sys/net`
+read-only for any non-privileged container regardless of capabilities
+granted, same as plain `docker run` does. `internal/staticpod`'s generated
+manifest (and `manifests/kontur-static-pod.yaml` in this directory) now
+give `netshim` `privileged: true` instead of just those two capabilities,
+and with that fix the static pod backend runs end-to-end against this
+real standalone kubelet: `install.sh`, `local-registry.sh`,
+`build-and-push.sh`, and `konturctl vm create/update/delete/list` (all
+with `-backend static-pod`, the default) all worked as documented, the
+netshim init container now completes successfully, and the VM container
+boots a real guest under KVM (console output visible via
+`/var/log/pods/.../*.log`, since `crictl` isn't installed by `install.sh`
+itself -- see "Usage" above for that caveat).

@@ -54,6 +54,7 @@ type vmFlags struct {
 	bridgeCIDR                    *string
 	externalIface                 *string
 	imagesHostPath                *string
+	diskHostPath                  *string
 	konturImage                   *string
 	terminationGracePeriodSeconds *int
 	staticPodPath                 *string
@@ -67,8 +68,8 @@ type vmFlags struct {
 // repeated.
 func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v := &vmFlags{}
-	v.diskImage = fs.String("disk", d.DiskImage, "path to the VM's disk image, as seen inside the kontur container (e.g. /images/disk.img)")
-	v.diskReadOnly = fs.Bool("disk-readonly", d.DiskReadOnly, "attach the disk read-only")
+	v.diskImage = fs.String("disk", d.DiskImage, "path to the VM's disk image under -images-hostpath, as seen inside the kontur container (e.g. /images/disk.img)")
+	v.diskReadOnly = fs.Bool("disk-readonly", d.DiskReadOnly, "attach the disk read-only; if false, a private writable qcow2 overlay backed by -disk is created under -disk-hostpath before the VM starts, since -images-hostpath itself is always mounted read-only")
 	v.kernel = fs.String("kernel", d.Kernel, "path to a kernel for direct boot, as seen inside the container (mutually exclusive with -firmware)")
 	v.initramfs = fs.String("initramfs", d.Initramfs, "path to an initramfs, used with -kernel")
 	v.firmware = fs.String("firmware", d.Firmware, "path to firmware for firmware boot, as seen inside the container (mutually exclusive with -kernel)")
@@ -83,6 +84,7 @@ func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v.bridgeCIDR = fs.String("bridge-cidr", d.BridgeCIDR, "the bridge's own address and subnet; -ip must fall within it")
 	v.externalIface = fs.String("external-iface", d.ExternalIface, "the pod's primary interface")
 	v.imagesHostPath = fs.String("images-hostpath", d.ImagesHostPath, "host directory mounted read-only at /images in the kontur container")
+	v.diskHostPath = fs.String("disk-hostpath", d.DiskHostPath, "host directory where each VM's own writable qcow2 overlay is stored, one subdirectory per VM name; only used when -disk-readonly=false")
 	v.konturImage = fs.String("kontur-image", d.KonturImage, "kontur image reference, used for both the netshim init container and the VM container")
 	v.terminationGracePeriodSeconds = fs.Int("termination-grace-period", d.TerminationGracePeriodSeconds, "pod terminationGracePeriodSeconds; must comfortably exceed -shutdown-timeout")
 	v.staticPodPath = fs.String("static-pod-path", d.StaticPodPath, "directory the standalone kubelet watches for static pod manifests")
@@ -108,6 +110,7 @@ func (v *vmFlags) toSpec(name string) staticpod.VMSpec {
 		BridgeCIDR:                    *v.bridgeCIDR,
 		ExternalIface:                 *v.externalIface,
 		ImagesHostPath:                *v.imagesHostPath,
+		DiskHostPath:                  *v.diskHostPath,
 		KonturImage:                   *v.konturImage,
 		TerminationGracePeriodSeconds: *v.terminationGracePeriodSeconds,
 		StaticPodPath:                 *v.staticPodPath,
@@ -223,6 +226,9 @@ func submitVM(ctx context.Context, spec staticpod.VMSpec, stateDir string, stdou
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+	if err := staticpod.PrepareWritableDisk(spec); err != nil {
+		return err
+	}
 
 	switch spec.Backend {
 	case staticpod.BackendDocker:
@@ -281,6 +287,12 @@ func runVMDelete(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 	default:
 		return err
+	}
+
+	if err == nil && !existing.DiskReadOnly {
+		if rmErr := os.RemoveAll(existing.WritableDiskDir()); rmErr != nil {
+			return fmt.Errorf("removing writable disk overlay for %q: %w", name, rmErr)
+		}
 	}
 
 	switch backend {
