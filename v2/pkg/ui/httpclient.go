@@ -202,6 +202,7 @@ func (c *HTTPClient) Config(ctx context.Context) (Config, error) {
 	cfg := Config{
 		Actor:        model.Principal{Kind: model.PrincipalKind(resp.ActorKind), ID: resp.Actor},
 		Capabilities: resp.Capabilities,
+		TargetRepos:  resp.TargetRepos,
 	}
 	if resp.DefaultTarget != "" {
 		target, err := model.ParseRepo(resp.DefaultTarget)

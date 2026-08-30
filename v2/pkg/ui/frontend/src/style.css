@@ -624,7 +624,7 @@ main { padding: 0 0 2.5rem; }
 
 form label { display: block; margin-bottom: 1rem; font-weight: 500; font-size: 0.9rem; }
 form label.checkbox { display: flex; align-items: center; gap: 0.5rem; font-weight: normal; }
-form input[type=text], form input[type=password], form input:not([type]), form textarea {
+form input[type=text], form input[type=password], form input:not([type]), form textarea, form select {
   display: block;
   width: 100%;
   margin-top: 0.4rem;
@@ -635,12 +635,28 @@ form input[type=text], form input[type=password], form input:not([type]), form t
   color: inherit;
   font: inherit;
 }
-form input[type=text]:focus, form input[type=password]:focus, form input:not([type]):focus, form textarea:focus {
+form input[type=text]:focus, form input[type=password]:focus, form input:not([type]):focus, form textarea:focus, form select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
   outline: none;
 }
 form .hint { font-weight: normal; color: var(--text-tertiary); font-size: 0.8rem; }
+/* .link-button is RepoField's "Choose from list" toggle back out of its
+   typed-a-custom-repo state -- chip-remove's own button reset, styled to
+   read as a text link rather than a chip's own × since it sits below a
+   full-width field instead of inline with a short label. */
+.link-button {
+  display: block;
+  margin-top: 0.3rem;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
 fieldset { border: none; padding: 0; margin: 0 0 1.1rem; }
 fieldset legend {
   display: block;
