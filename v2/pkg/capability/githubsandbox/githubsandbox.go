@@ -259,6 +259,38 @@ func (p *Provider) Spec() model.CapabilitySpec {
 	}
 }
 
+// Resolve refuses when this deployment has no GitHub App configured,
+// rather than reporting the grant honoured and failing later.
+//
+// The provider registers unconditionally (cmd/grain/daemon.go's
+// capabilityProviders): it needs no deployment-level config beyond its
+// two secrets, and FindInstallation asks GitHub itself which account to
+// act on. So on a deployment where `grain controller
+// bootstrap-github-app` was never run, this capability is offered,
+// attaches like any other, and only the run finds out.
+//
+// Without this, that discovery came from BaseCapability.Resolve saying
+// Honoured and Materialize then failing on a missing credential --
+// which prepareCapabilities reports as "materializing capabilities:
+// resolving credential github-app/app-id", true but naming neither the
+// capability's own state nor what to do. Both endings refuse to run the
+// agent, so nothing about the safety changes here; what changes is that
+// the refusal arrives at the point built for saying a deployment cannot
+// offer something, carrying the command that would make it able to.
+func (p *Provider) Resolve(ctx context.Context, cc model.CapabilityContext) (model.Resolution, error) {
+	if cc.Credentials == nil {
+		return model.RefusedBecause("no credential resolver is configured, so this deployment cannot authenticate as a GitHub App"), nil
+	}
+	for _, name := range []string{p.appIDCredential(), p.privateKeyCredential()} {
+		if _, err := cc.Credentials.Resolve(ctx, name); err != nil {
+			return model.RefusedBecause(fmt.Sprintf(
+				"this deployment has no GitHub App configured (%s is unset) -- run `grain controller bootstrap-github-app` on the host, or detach this capability from the task",
+				name)), nil
+		}
+	}
+	return model.Honoured(), nil
+}
+
 // Materialize creates a fresh private repo, named for cc.Run.ID alone
 // (repoName), under whatever single account the App is installed on,
 // and mints a second, narrower token -- scoped by repo name, not by

@@ -168,18 +168,21 @@ func TestSpecHonoursConfiguredCredentialNames(t *testing.T) {
 	}
 }
 
-// Resolve has nothing deployment-specific to check (unlike gcpkey/
-// geminikey, github-sandbox needs no ProjectID-shaped config -- see
-// githubsandbox.go's doc comment) so BaseCapability's own always-
-// honoured default applies unmodified.
-func TestResolveAlwaysHonours(t *testing.T) {
+// This used to assert the opposite, on the grounds that "Resolve has
+// nothing deployment-specific to check" -- true of *config* (unlike
+// gcpkey/geminikey, github-sandbox needs no ProjectID-shaped setting)
+// but not of credentials, which are exactly deployment-specific and
+// which this capability cannot work without. An empty context carries no
+// resolver, so it now refuses; see Resolve's own doc comment. The
+// honoured path is TestResolveHonoursAConfiguredApp below.
+func TestResolveRefusesAnEmptyContext(t *testing.T) {
 	p := NewProvider(Config{})
 	res, err := p.Resolve(context.Background(), model.CapabilityContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Refused {
-		t.Errorf("got Refused, want Honoured")
+	if !res.Refused {
+		t.Error("got Honoured for a context with no credentials, want Refused")
 	}
 }
 
@@ -437,5 +440,60 @@ func TestRepoNameStaysUnder100Characters(t *testing.T) {
 	got := repoName(strings.Repeat("x", 200))
 	if len(got) > 100 {
 		t.Errorf("repoName(...) is %d characters, want <= 100", len(got))
+	}
+}
+
+// --- Resolve -----------------------------------------------------------
+
+// The provider registers on every deployment, whether or not one ever
+// ran `grain controller bootstrap-github-app`. Without a resolve-time
+// check the grant read as honoured and the run died later on a missing
+// credential, naming neither the capability nor the fix.
+func TestResolveRefusesWithoutAGitHubApp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		creds model.CredentialResolver
+	}{
+		{"no credentials at all", &fakeCredentials{material: map[string]string{}}},
+		{"app id only", &fakeCredentials{material: map[string]string{DefaultAppIDCredential: "app-123"}}},
+		{"private key only", &fakeCredentials{material: map[string]string{DefaultPrivateKeyCredential: "k"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProvider(Config{})
+			res, err := p.Resolve(context.Background(), testContext(tc.creds, time.Now()))
+			if err != nil {
+				t.Fatalf("Resolve returned an error rather than a refusal: %v", err)
+			}
+			if !res.Refused {
+				t.Fatal("Resolve honoured the grant with no GitHub App configured")
+			}
+			if !strings.Contains(res.Reason, "bootstrap-github-app") {
+				t.Errorf("refusal reason does not name the fix: %q", res.Reason)
+			}
+		})
+	}
+}
+
+// A nil resolver is a deployment wiring bug, not a task's fault -- still
+// a refusal rather than a panic one layer up.
+func TestResolveRefusesWithNoResolver(t *testing.T) {
+	p := NewProvider(Config{})
+	res, err := p.Resolve(context.Background(), testContext(nil, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Refused {
+		t.Error("Resolve honoured the grant with no credential resolver")
+	}
+}
+
+func TestResolveHonoursAConfiguredApp(t *testing.T) {
+	p := NewProvider(Config{})
+	res, err := p.Resolve(context.Background(), testContext(testCredentials(), time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Refused {
+		t.Errorf("Resolve refused a fully configured App: %s", res.Reason)
 	}
 }
