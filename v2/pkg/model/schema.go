@@ -42,7 +42,7 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 12
+const SchemaVersion = 13
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -421,6 +421,89 @@ var Tables = []string{
 	// What CurrentCandidate and the releases reconciler both need: every
 	// candidate for one repo, newest first.
 	`CREATE INDEX IF NOT EXISTS ` + "`release_candidate_repo`" + ` ON ` + "`release_candidate`" + ` (` + "`owner`" + `, ` + "`name`" + `, ` + "`id`" + `)`,
+
+	// A repo's qualification setup -- bwsalmon/agents#518's two switches:
+	// require_approval gates every task a run instantiates behind a
+	// human's own bulk approval (Store.ApproveQualificationRun) rather
+	// than landing pre-approved the way a schedule's own firing does, and
+	// auto_promote is what lets the qualifications reconciler promote a
+	// candidate itself the moment its run succeeds instead of leaving
+	// that to a human. One row per repo, the same key release_config
+	// already uses.
+	`CREATE TABLE IF NOT EXISTS ` + "`qualification_config`" + ` (
+  ` + "`owner`" + `            TEXT    NOT NULL,
+  ` + "`name`" + `             TEXT    NOT NULL,
+  ` + "`require_approval`" + ` INTEGER NOT NULL,
+  ` + "`auto_promote`" + `     INTEGER NOT NULL,
+  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
+)`,
+
+	// One entry in a repo's qualification plan -- a task_template
+	// (bwsalmon/agents#516) this plan schedules, referenced by id rather
+	// than copied: content lives on the template, and
+	// CreateQualificationRun resolves it fresh every time a candidate is
+	// qualified, the same "not a stale copy" discipline
+	// fireScheduledTask already holds a schedule's own TemplateID to.
+	// repeat_count is model.QualificationItem's own Repeat; order_key is
+	// display order only -- unlike task.order_key it decides nothing
+	// about dispatch, since an item's actual scheduling order comes from
+	// the dependency graph below, not from this column.
+	`CREATE TABLE IF NOT EXISTS ` + "`qualification_item`" + ` (
+  ` + "`owner`" + `        TEXT    NOT NULL,
+  ` + "`name`" + `         TEXT    NOT NULL,
+  ` + "`template_id`" + `  TEXT    NOT NULL,
+  ` + "`repeat_count`" + ` INTEGER NOT NULL,
+  ` + "`order_key`" + `    REAL    NOT NULL,
+  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `, ` + "`template_id`" + `)
+)`,
+
+	// One dependency edge between two items in the same plan --
+	// depends_on_template_id names another item's own template_id, never
+	// a task: the graph lives entirely among a plan's items, and
+	// CreateQualificationRun is what turns an edge here into real
+	// depends-on links between the task instances each side produced.
+	`CREATE TABLE IF NOT EXISTS ` + "`qualification_item_depends_on`" + ` (
+  ` + "`owner`" + `                  TEXT NOT NULL,
+  ` + "`name`" + `                   TEXT NOT NULL,
+  ` + "`template_id`" + `             TEXT NOT NULL,
+  ` + "`depends_on_template_id`" + ` TEXT NOT NULL,
+  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `, ` + "`template_id`" + `, ` + "`depends_on_template_id`" + `)
+)`,
+
+	// One qualification run per candidate -- CreateQualificationRun's own
+	// INSERT, guarded by the unique index below so a reconciler that
+	// finds the same active candidate ready twice in a race can only ever
+	// create one. INTEGER PRIMARY KEY AUTOINCREMENT for the same reason
+	// release_candidate uses it: more than one writer has to stay correct.
+	`CREATE TABLE IF NOT EXISTS ` + "`qualification_run`" + ` (
+  ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`owner`" + `        TEXT     NOT NULL,
+  ` + "`name`" + `         TEXT     NOT NULL,
+  ` + "`candidate_id`" + ` INTEGER  NOT NULL,
+  ` + "`created_at`" + `   DATETIME NOT NULL
+)`,
+
+	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`qualification_run_candidate`" + ` ON ` + "`qualification_run`" + ` (` + "`candidate_id`" + `)`,
+
+	// One task instance a qualification run instantiated from a
+	// template. template_name is a snapshot of the resolved template's
+	// own Name at the moment this instance was created --
+	// model.QualificationTaskStatus's own doc comment on why -- and
+	// instance_index/repeat_count together are what lets a UI show "2 of
+	// 3" against an item whose Repeat is greater than one. task_id is
+	// unique: a task belongs to at most one run, ever.
+	`CREATE TABLE IF NOT EXISTS ` + "`qualification_task`" + ` (
+  ` + "`id`" + `             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`run_id`" + `        INTEGER NOT NULL,
+  ` + "`task_id`" + `       TEXT    NOT NULL,
+  ` + "`template_id`" + `   TEXT    NOT NULL,
+  ` + "`template_name`" + ` TEXT    NOT NULL,
+  ` + "`instance_index`" + ` INTEGER NOT NULL,
+  ` + "`repeat_count`" + `  INTEGER NOT NULL
+)`,
+
+	`CREATE INDEX IF NOT EXISTS ` + "`qualification_task_run`" + ` ON ` + "`qualification_task`" + ` (` + "`run_id`" + `)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`qualification_task_task`" + ` ON ` + "`qualification_task`" + ` (` + "`task_id`" + `)`,
 }
 
 // Views is the derivations, each a (name, DDL) pair so Init can drop and

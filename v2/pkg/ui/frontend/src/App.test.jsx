@@ -51,6 +51,10 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
       return Promise.resolve({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 });
     }
     if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/qualification-plan$/.test(path)) {
+      return Promise.resolve({ configured: false, repo: "", requireApproval: false, autoPromote: false, items: [] });
+    }
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/[^/]+\/qualification$/.test(path)) return Promise.resolve(null);
     if (path === "/api/schedules" && method === "GET") return Promise.resolve(schedulesState);
     if (path === "/api/schedules" && method === "POST") {
       const body = JSON.parse(opts.body);

@@ -553,6 +553,11 @@ func writeClientError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	var qnf *qualificationRunNotFoundError
+	if errors.As(err, &qnf) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
 	// A conflict that survived the store's own retries: the change did not
 	// land, and saying so plainly beats retrying forever or calling it a
 	// server fault. It should be vanishingly rare -- it needs another

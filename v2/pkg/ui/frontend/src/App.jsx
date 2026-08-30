@@ -274,7 +274,7 @@ export default function App() {
         onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
       />
       {view === "repos" && releasesRepo !== null ? (
-        <RepoReleases repo={releasesRepo} onBack={() => setReleasesRepo(null)} showError={showError} />
+        <RepoReleases repo={releasesRepo} templates={templates} onBack={() => setReleasesRepo(null)} showError={showError} />
       ) : view === "repos" ? (
         <RepoList
           tasks={tasks}
