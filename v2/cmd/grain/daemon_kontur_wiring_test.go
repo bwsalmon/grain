@@ -100,7 +100,10 @@ func install(t *testing.T, dir, name, script string) {
 }
 
 func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
-	const slot = "vm-0"
+	// One slot, maxConcurrent 1: model.SlotNames(1) is "1", so that is the
+	// slot name this test's own expectations (the VM name, its .git-
+	// credentials file) key off below.
+	const slot = "1"
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKonturBinary(t, argvLog, 30080)
 	writeFakeCrictlBinary(t, "10.100.5.7")
@@ -120,7 +123,7 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	}
 
 	cfg := config{
-		dataDir: dataDir, slots: []string{slot}, pollInterval: time.Hour,
+		dataDir: dataDir, maxConcurrent: 1, pollInterval: time.Hour,
 		geminiAPIKeyFile: geminiKeyFile,
 		githubHost:       "127.0.0.1:0", githubInsecureHTTP: true,
 

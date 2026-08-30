@@ -58,11 +58,17 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigTargetReposColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigMaxConcurrentColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
 	if err := s.ensureTaskRunTranscriptColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
+	}
+	if err := s.ensureScheduledTaskRecurrenceColumns(ctx); err != nil {
+		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
@@ -104,6 +110,45 @@ func (s *Store) ensureConfigTargetReposColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureConfigMaxConcurrentColumn replaces grain_config's old slots column
+// (a comma-separated list of operator-chosen concurrency-slot names,
+// bwsalmon/agents#320) with max_concurrent (a plain count, bwsalmon/
+// agents#461) on a database created before that switch -- the same
+// probe-then-ALTER approach ensureConfigTargetReposColumn already uses,
+// since CREATE TABLE IF NOT EXISTS never alters a table that is already
+// there. max_concurrent is backfilled from however many comma-separated
+// names the old slots column held (its LENGTH-vs-REPLACE arithmetic is
+// just "count the commas, plus one", the same thing splitCSV would do in
+// Go against the same string), so a deployment's dispatch pool stays the
+// same size across the upgrade even though the individual slots it names
+// no longer exist. The old column is then dropped: leaving it in place,
+// still NOT NULL with no default, would break every later PutConfig,
+// which stops supplying it.
+func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
+	if rows, err := s.db.QueryContext(ctx, "SELECT `max_concurrent` FROM `grain_config` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `max_concurrent` INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT `slots` FROM `grain_config` WHERE 1 = 0")
+	if err != nil {
+		// No old slots column either -- a database that never had one --
+		// so the DEFAULT above already leaves max_concurrent at 1.
+		return nil
+	}
+	rows.Close()
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `grain_config` SET `max_concurrent` = "+
+			"LENGTH(`slots`) - LENGTH(REPLACE(`slots`, ',', '')) + 1 "+
+			"WHERE `slots` IS NOT NULL AND `slots` != ''"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `slots`")
+	return err
+}
+
 // ensureTaskApprovedAtColumn adds task.approved_at (schema.go's own DDL
 // comment on the table has the reasoning) to a database created before
 // this column existed, the same probe-then-ALTER approach
@@ -131,6 +176,45 @@ func (s *Store) ensureTaskRunTranscriptColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `transcript` TEXT NULL")
 	return err
+}
+
+// ensureScheduledTaskRecurrenceColumns replaces scheduled_task's original
+// interval_ms (every N hours since it last fired, no wall-clock
+// alignment) with model.Recurrence's own columns (bwsalmon/agents#464),
+// the same probe-then-ALTER approach ensureConfigMaxConcurrentColumn
+// already uses for the same reason: CREATE TABLE IF NOT EXISTS never
+// alters a table that is already there. Every existing row is backfilled
+// as RecurrenceEveryNHours, rounded down from its old interval_ms to the
+// nearest whole hour (minimum 1) -- the same cadence it already had,
+// expressed as hours rather than milliseconds, since bwsalmon/agents#464
+// only ever asks for hour granularity on this cadence.
+func (s *Store) ensureScheduledTaskRecurrenceColumns(ctx context.Context) error {
+	if rows, err := s.db.QueryContext(ctx,
+		"SELECT `recurrence_kind` FROM `scheduled_task` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
+	for _, stmt := range []string{
+		"ALTER TABLE `scheduled_task` ADD COLUMN `recurrence_kind` TEXT NOT NULL DEFAULT 'everyNHours'",
+		"ALTER TABLE `scheduled_task` ADD COLUMN `every_n_hours` INTEGER NULL",
+		"ALTER TABLE `scheduled_task` ADD COLUMN `time_of_day_minutes` INTEGER NULL",
+		"ALTER TABLE `scheduled_task` ADD COLUMN `weekday` INTEGER NULL",
+		"ALTER TABLE `scheduled_task` ADD COLUMN `day_of_month` INTEGER NULL",
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	if rows, err := s.db.QueryContext(ctx, "SELECT `interval_ms` FROM `scheduled_task` WHERE 1 = 0"); err == nil {
+		rows.Close()
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `scheduled_task` SET `every_n_hours` = MAX(1, `interval_ms` / 3600000)"); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE `scheduled_task` DROP COLUMN `interval_ms`"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ErrConflict reports that an operation could not get a write in even
@@ -1196,21 +1280,20 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 	return &c, nil
 }
 
-const configColumns = "`poll_interval_ms`,`slots`,`gemini_model`,`max_agent_turns`," +
+const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
 	var pollMS int64
-	var slots, targetRepos string
-	if err := scan(&pollMS, &slots, &c.GeminiModel, &c.MaxAgentTurns,
+	var targetRepos string
+	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
-	c.Slots = splitSlots(slots)
-	c.TargetRepos = splitSlots(targetRepos)
+	c.TargetRepos = splitCSV(targetRepos)
 	return c, nil
 }
 
@@ -1222,21 +1305,20 @@ func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?)",
-			c.PollInterval.Milliseconds(), joinSlots(c.Slots), c.GeminiModel, c.MaxAgentTurns,
+			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinSlots(c.TargetRepos))
+			joinCSV(c.TargetRepos))
 		return err
 	})
 }
 
-// joinSlots/splitSlots round-trip Config.Slots, and equally Config.
-// TargetRepos (an owner/name repo can never contain a comma), through
-// the same comma-separated shape the daemon's own -slots/-target-repos
-// flags already parse, so a value written by one reads back identically
-// through the other.
-func joinSlots(slots []string) string { return strings.Join(slots, ",") }
+// joinCSV/splitCSV round-trip Config.TargetRepos (an owner/name repo can
+// never contain a comma) through the same comma-separated shape the
+// daemon's own -target-repos flag already parses, so a value written by
+// one reads back identically through the other.
+func joinCSV(items []string) string { return strings.Join(items, ",") }
 
-func splitSlots(s string) []string {
+func splitCSV(s string) []string {
 	if s == "" {
 		return nil
 	}
@@ -1271,42 +1353,138 @@ func newScheduledTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
 }
 
 const scheduledTaskColumns = "`id`,`title`,`body`,`target_owner`,`target_name`,`base`," +
-	"`auto_merge`,`interval_ms`,`enabled`,`next_run_at`,`last_run_at`,`created_at`"
+	"`auto_merge`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`," +
+	"`enabled`,`next_run_at`,`last_run_at`,`created_at`"
 
 func scanScheduledTask(scan func(...any) error) (ScheduledTask, error) {
 	var t ScheduledTask
 	var base sql.NullString
-	var intervalMS int64
+	var kind string
+	var everyNHours, timeOfDay, weekday, dayOfMonth sql.NullInt64
 	var lastRun sql.NullTime
 	if err := scan(&t.ID, &t.Title, &t.Body, &t.Target.Owner, &t.Target.Name, &base,
-		&t.AutoMerge, &intervalMS, &t.Enabled, &t.NextRunAt, &lastRun, &t.CreatedAt); err != nil {
+		&t.AutoMerge, &kind, &everyNHours, &timeOfDay, &weekday, &dayOfMonth,
+		&t.Enabled, &t.NextRunAt, &lastRun, &t.CreatedAt); err != nil {
 		return ScheduledTask{}, err
 	}
 	t.Base = base.String
-	t.Interval = time.Duration(intervalMS) * time.Millisecond
+	t.Recurrence = Recurrence{
+		Kind:        RecurrenceKind(kind),
+		EveryNHours: int(everyNHours.Int64),
+		TimeOfDay:   int(timeOfDay.Int64),
+		Weekday:     time.Weekday(weekday.Int64),
+		DayOfMonth:  int(dayOfMonth.Int64),
+	}
 	t.LastRunAt = timePtr(lastRun)
 	return t, nil
 }
 
-// PutScheduledTask inserts or replaces a schedule wholesale -- there are
-// no child rows the way a task has, so this is a single REPLACE rather
-// than putTask's own multi-table dance.
+// PutScheduledTask inserts or replaces a schedule wholesale -- putTask's
+// own multi-table dance, now that Reads and Grants give a schedule child
+// rows of its own (bwsalmon/agents#464).
 func (s *Store) PutScheduledTask(ctx context.Context, t ScheduledTask) error {
 	return s.write(ctx, "put scheduled task "+t.ID,
 		func(tx *sql.Tx) error { return putScheduledTask(ctx, tx, t) })
 }
 
 func putScheduledTask(ctx context.Context, tx *sql.Tx, t ScheduledTask) error {
+	r := t.Recurrence
+	var everyNHours, timeOfDay, weekday, dayOfMonth any
+	switch r.Kind {
+	case RecurrenceEveryNHours:
+		everyNHours = r.EveryNHours
+	case RecurrenceDaily:
+		timeOfDay = r.TimeOfDay
+	case RecurrenceWeekly:
+		timeOfDay, weekday = r.TimeOfDay, int(r.Weekday)
+	case RecurrenceMonthly:
+		timeOfDay, dayOfMonth = r.TimeOfDay, r.DayOfMonth
+	}
 	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`scheduled_task`"+` (
   `+"`id`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
-		"`auto_merge`,`interval_ms`,`enabled`,`next_run_at`,`last_run_at`,`created_at`"+`
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"`auto_merge`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`,"+
+		"`enabled`,`next_run_at`,`last_run_at`,`created_at`"+`
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Title, t.Body, t.Target.Owner, t.Target.Name, nullable(t.Base),
-		t.AutoMerge, t.Interval.Milliseconds(), t.Enabled,
-		t.NextRunAt.UTC(), timeOf(t.LastRunAt), t.CreatedAt.UTC())
+		t.AutoMerge, string(r.Kind), everyNHours, timeOfDay, weekday, dayOfMonth,
+		t.Enabled, t.NextRunAt.UTC(), timeOf(t.LastRunAt), t.CreatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("writing scheduled task %s: %w", t.ID, err)
 	}
+
+	for _, table := range []string{"scheduled_task_read", "scheduled_task_grant"} {
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM `"+table+"` WHERE `scheduled_task_id` = ?", t.ID); err != nil {
+			return err
+		}
+	}
+	for _, r := range t.Reads {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO `scheduled_task_read` (`scheduled_task_id`, `owner`, `name`) VALUES (?,?,?)",
+			t.ID, r.Owner, r.Name); err != nil {
+			return err
+		}
+	}
+	for _, g := range t.Grants {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO `scheduled_task_grant` (`scheduled_task_id`, `capability`, `via`, `folder`) VALUES (?,?,?,?)",
+			t.ID, g.Capability, string(g.Via), folderOf(g.Folder)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scheduledReadsOf and scheduledGrantsOf are a schedule's Reads and
+// Grants, read straight off their own tables -- task.go's grantsOf and
+// GetTask's own reads query, ported onto scheduled_task_id.
+func scheduledReadsOf(ctx context.Context, q querier, id string) ([]RepoRef, error) {
+	var reads []RepoRef
+	err := each(ctx, q,
+		"SELECT `owner`,`name` FROM `scheduled_task_read` WHERE `scheduled_task_id` = ? ORDER BY `owner`,`name`",
+		id, func(rows *sql.Rows) error {
+			var r RepoRef
+			if err := rows.Scan(&r.Owner, &r.Name); err != nil {
+				return err
+			}
+			reads = append(reads, r)
+			return nil
+		})
+	return reads, err
+}
+
+func scheduledGrantsOf(ctx context.Context, q querier, id string) ([]Grant, error) {
+	var grants []Grant
+	err := each(ctx, q,
+		"SELECT `capability`,`via`,`folder` FROM `scheduled_task_grant` WHERE `scheduled_task_id` = ? ORDER BY `capability`",
+		id, func(rows *sql.Rows) error {
+			var g Grant
+			var via string
+			var folder sql.NullString
+			if err := rows.Scan(&g.Capability, &via, &folder); err != nil {
+				return err
+			}
+			g.Via, g.Folder = GrantSource(via), ParseFolder(folder.String)
+			grants = append(grants, g)
+			return nil
+		})
+	return grants, err
+}
+
+// hydrateScheduledTask fills in t's Reads and Grants, read off their own
+// tables -- scanScheduledTask itself only ever reads scheduled_task's own
+// columns, the same split scanning a Task's own row has from grantsOf/its
+// reads query.
+func hydrateScheduledTask(ctx context.Context, q querier, t *ScheduledTask) error {
+	reads, err := scheduledReadsOf(ctx, q, t.ID)
+	if err != nil {
+		return fmt.Errorf("reading reads of scheduled task %s: %w", t.ID, err)
+	}
+	grants, err := scheduledGrantsOf(ctx, q, t.ID)
+	if err != nil {
+		return fmt.Errorf("reading grants of scheduled task %s: %w", t.ID, err)
+	}
+	t.Reads, t.Grants = reads, grants
 	return nil
 }
 
@@ -1317,6 +1495,9 @@ func getScheduledTask(ctx context.Context, q querier, id string) (*ScheduledTask
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if err := hydrateScheduledTask(ctx, q, &t); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -1335,16 +1516,27 @@ func (s *Store) ListScheduledTasks(ctx context.Context) ([]ScheduledTask, error)
 	if err != nil {
 		return nil, fmt.Errorf("listing scheduled tasks: %w", err)
 	}
-	defer rows.Close()
 	var out []ScheduledTask
 	for rows.Next() {
 		t, err := scanScheduledTask(rows.Scan)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	for i := range out {
+		if err := hydrateScheduledTask(ctx, s.db, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // DueScheduledTasks is every enabled schedule whose next run has come --
@@ -1358,16 +1550,27 @@ func (s *Store) DueScheduledTasks(ctx context.Context, now time.Time) ([]Schedul
 	if err != nil {
 		return nil, fmt.Errorf("listing due scheduled tasks: %w", err)
 	}
-	defer rows.Close()
 	var out []ScheduledTask
 	for rows.Next() {
 		t, err := scanScheduledTask(rows.Scan)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	for i := range out {
+		if err := hydrateScheduledTask(ctx, s.db, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // UpdateScheduledTask reads a schedule, applies mutate, and writes it

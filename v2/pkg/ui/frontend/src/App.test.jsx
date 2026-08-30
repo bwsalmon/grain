@@ -180,7 +180,7 @@ describe("App", () => {
   });
 
   it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
@@ -194,7 +194,7 @@ describe("App", () => {
   });
 
   it("edits a schedule from the schedules pane", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
@@ -216,7 +216,6 @@ describe("App", () => {
     ["Secrets", "Secrets"],
     ["Settings", "Settings"],
     ["Upgrade", "Upgrade"],
-    ["Logs", "Logs"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
     const user = userEvent.setup();
@@ -226,6 +225,18 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: button }));
 
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("switches to the logs page, hiding the task list", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "Logs" }));
+
+    expect(await screen.findByRole("heading", { name: "Logs" })).toBeInTheDocument();
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {
