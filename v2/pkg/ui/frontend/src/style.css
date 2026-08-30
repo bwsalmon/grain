@@ -225,6 +225,17 @@ main { padding: 0 0 2.5rem; }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
 
+/* .badge-static is for a "running" badge that records a past moment
+   (e.g. a Timeline entry once superseded by a later transition) rather
+   than the task's live status -- it should read as the same solid dot
+   every other historical state gets, not keep spinning as if that run
+   were still happening. */
+.badge-static.badge-running::before {
+  animation: none;
+  border: none;
+  background: var(--state-running);
+}
+
 /* .badge-running still drives the plain CSS status dot (TaskList,
    DetailOverlay) rather than an MUI primitive, so it keeps its own spin
    animation. Blocked/dependency/task-picker chips and inputs were
@@ -243,16 +254,26 @@ main { padding: 0 0 2.5rem; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 0.9rem 1.1rem;
   margin-bottom: 0.6rem;
+  overflow: hidden;
+  transition: box-shadow 120ms ease, border-color 120ms ease;
+}
+.repo-list li:hover { box-shadow: var(--shadow-panel); border-color: transparent; }
+.repo-list-row {
+  padding: 0.9rem 1.1rem;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 0.85rem;
-  transition: box-shadow 120ms ease, border-color 120ms ease;
 }
-.repo-list li:hover { box-shadow: var(--shadow-panel); border-color: transparent; }
 .repo-list-name { flex: 1; font-weight: 500; font-variant-numeric: tabular-nums; }
+/* Tasks folded out under a repo row (bwsalmon/agents#474) sit inside
+   that repo's own card rather than TaskList's page-level sublist, so
+   they get the card's left inset instead of TaskList's deeper one
+   (reserved there for a stacked task nested under its parent). */
+.repo-list .task-sublist { border-top: 1px solid var(--border); }
+.repo-list .task-sublist .task-row { padding-left: 1.1rem; }
+.repo-list .task-sublist li:last-child .task-row { border-bottom: none; }
 
 .repo-scope-bar { padding: 1rem 1.75rem 0; }
 

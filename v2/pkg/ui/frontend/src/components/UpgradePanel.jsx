@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import Overlay from "./Overlay.jsx";
 
-// STATUS_POLL_MS is how often this overlay re-fetches /api/upgrade while
+// STATUS_POLL_MS is how often this panel re-fetches /api/upgrade while
 // an upgrade is running -- fast enough that a restart landing (the
 // daemon process, and this connection to it, both dying mid-poll) is
 // noticed quickly, no faster than App.jsx's own task-list poll.
@@ -14,10 +13,13 @@ const STATUS_POLL_MS = 3000;
 // (if this deployment configured one) a restart to bring the new binary
 // up. GET /api/upgrade's own "enabled" flag says whether that is wired
 // up on this deployment at all; when it isn't, this shows a note instead
-// of a form that could only ever 404, the same convention
-// SettingsOverlay/SecretsOverlay already use for their own optional
-// pieces.
-export default function UpgradeOverlay({ onClose, showError }) {
+// of a form that could only ever 404, the same convention SettingsOverlay/
+// SecretsPanel already use for their own optional pieces.
+//
+// bwsalmon/agents#456: lives as a tab inside SettingsOverlay rather than
+// its own top-level overlay, so it renders its content only -- the
+// shared Overlay/Dialog chrome is SettingsOverlay's.
+export default function UpgradePanel({ showError }) {
   const [status, setStatus] = useState(null);
   const [branch, setBranch] = useState("");
   const polling = useRef(false);
@@ -58,8 +60,7 @@ export default function UpgradeOverlay({ onClose, showError }) {
   const running = status.phase === "running";
 
   return (
-    <Overlay onClose={onClose}>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Upgrade</Typography>
+    <>
       {!status.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this deployment has no -upgrade-src-dir configured (bwsalmon/agents#396), so there is
@@ -104,6 +105,6 @@ export default function UpgradeOverlay({ onClose, showError }) {
           )}
         </>
       )}
-    </Overlay>
+    </>
   );
 }

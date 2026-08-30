@@ -14,9 +14,7 @@ const baseProps = {
   stateFilter: "all",
   onSetView: noop,
   onSetFilter: noop,
-  onOpenSecrets: noop,
   onOpenSettings: noop,
-  onOpenUpgrade: noop,
   onOpenNewTask: noop,
 };
 
@@ -61,9 +59,7 @@ describe("Sidebar", () => {
   });
 
   it("routes the footer and new-task buttons to their own callbacks", async () => {
-    const onOpenSecrets = vi.fn();
     const onOpenSettings = vi.fn();
-    const onOpenUpgrade = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
     render(
@@ -71,22 +67,16 @@ describe("Sidebar", () => {
         {...baseProps}
         config={null}
         tasks={[]}
-        onOpenSecrets={onOpenSecrets}
         onOpenSettings={onOpenSettings}
-        onOpenUpgrade={onOpenUpgrade}
         onOpenNewTask={onOpenNewTask}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
-    await user.click(screen.getByRole("button", { name: "Secrets" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Upgrade" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
-    expect(onOpenSecrets).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(onOpenUpgrade).toHaveBeenCalledTimes(1);
   });
 
   it("switches to the schedules view and shows its count when clicked", async () => {

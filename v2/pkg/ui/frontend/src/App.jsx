@@ -10,9 +10,7 @@ import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
-import SecretsOverlay from "./components/SecretsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
-import UpgradeOverlay from "./components/UpgradeOverlay.jsx";
 import LogsPage from "./components/LogsPage.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
@@ -44,9 +42,12 @@ export default function App() {
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [showNewTask, setShowNewTask] = useState(false);
+  // newTaskRepo is the repo the "+" on a repo page row was opened from
+  // (bwsalmon/agents#474); null means "no override", so the overlay
+  // falls back to repoFilter the same way it always has for the
+  // sidebar's own "+ New task" button.
+  const [newTaskRepo, setNewTaskRepo] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [showSecrets, setShowSecrets] = useState(false);
-  const [showUpgrade, setShowUpgrade] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -118,6 +119,15 @@ export default function App() {
     setRepoFilter(repo);
     setReleasesRepo(null);
     setView("tasks");
+  }, []);
+
+  // openNewTaskForRepo is the repo page's own "+" button: file a task
+  // against that specific repo without disturbing repoFilter, which is
+  // "what the tasks view is scoped to" and has nothing to do with which
+  // repo's row happened to be clicked here.
+  const openNewTaskForRepo = useCallback((repo) => {
+    setNewTaskRepo(repo);
+    setShowNewTask(true);
   }, []);
 
   // setViewAndCloseReleases is Sidebar's onSetView: any nav click leaves
@@ -220,15 +230,20 @@ export default function App() {
         schedules={schedules}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
-        onOpenSecrets={() => setShowSecrets(true)}
         onOpenSettings={() => setShowSettings(true)}
-        onOpenUpgrade={() => setShowUpgrade(true)}
-        onOpenNewTask={() => setShowNewTask(true)}
+        onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
       />
       {view === "repos" && releasesRepo !== null ? (
         <RepoReleases repo={releasesRepo} onBack={() => setReleasesRepo(null)} showError={showError} />
       ) : view === "repos" ? (
-        <RepoList tasks={tasks} onOpenRepo={openRepo} onOpenReleases={setReleasesRepo} />
+        <RepoList
+          tasks={tasks}
+          config={config}
+          onOpenRepo={openRepo}
+          onOpenReleases={setReleasesRepo}
+          onOpenTask={openTask}
+          onNewTask={openNewTaskForRepo}
+        />
       ) : view === "schedules" ? (
         <SchedulesList schedules={schedules} config={config} tasks={tasks} onRefresh={refreshSchedules} showError={showError} />
       ) : view === "logs" ? (
@@ -261,11 +276,16 @@ export default function App() {
         <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />
       )}
       {showNewTask && (
-        <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
+        <NewTaskOverlay
+          tasks={tasks}
+          config={config}
+          defaultRepo={newTaskRepo !== null ? newTaskRepo : repoFilter}
+          onClose={() => setShowNewTask(false)}
+          onCreated={refreshList}
+          showError={showError}
+        />
       )}
       {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
-      {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
-      {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
     </div>
   );
 }
