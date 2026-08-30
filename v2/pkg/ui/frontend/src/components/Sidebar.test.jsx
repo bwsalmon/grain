@@ -16,7 +16,6 @@ const baseProps = {
   onSetFilter: noop,
   onOpenSecrets: noop,
   onOpenSettings: noop,
-  onOpenReleases: noop,
   onOpenUpgrade: noop,
   onOpenLogs: noop,
   onOpenNewTask: noop,
@@ -65,7 +64,6 @@ describe("Sidebar", () => {
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSecrets = vi.fn();
     const onOpenSettings = vi.fn();
-    const onOpenReleases = vi.fn();
     const onOpenUpgrade = vi.fn();
     const onOpenLogs = vi.fn();
     const onOpenNewTask = vi.fn();
@@ -77,7 +75,6 @@ describe("Sidebar", () => {
         tasks={[]}
         onOpenSecrets={onOpenSecrets}
         onOpenSettings={onOpenSettings}
-        onOpenReleases={onOpenReleases}
         onOpenUpgrade={onOpenUpgrade}
         onOpenLogs={onOpenLogs}
         onOpenNewTask={onOpenNewTask}
@@ -87,14 +84,12 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Secrets" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Releases" }));
     await user.click(screen.getByRole("button", { name: "Upgrade" }));
     await user.click(screen.getByRole("button", { name: "Logs" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSecrets).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(onOpenReleases).toHaveBeenCalledTimes(1);
     expect(onOpenUpgrade).toHaveBeenCalledTimes(1);
     expect(onOpenLogs).toHaveBeenCalledTimes(1);
   });
