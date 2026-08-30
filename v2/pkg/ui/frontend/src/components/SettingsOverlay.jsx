@@ -8,16 +8,44 @@ function parseCommaList(value) {
 
 export default function SettingsOverlay({ config, onClose, showError }) {
   const [settings, setSettings] = useState(null);
+  const [targetRepos, setTargetRepos] = useState([]);
+  const [newRepo, setNewRepo] = useState("");
 
   useEffect(() => {
     (async () => {
       try {
-        setSettings(await api("/api/settings"));
+        const s = await api("/api/settings");
+        setSettings(s);
+        setTargetRepos(s.targetRepos || []);
       } catch (err) {
         showError(err);
       }
     })();
   }, [showError]);
+
+  // addTargetRepo/removeTargetRepo only touch local state -- like every
+  // other field here, the list is only sent to the server when Save is
+  // pressed, so adding or removing an entry can be undone by closing the
+  // overlay without saving.
+  const addTargetRepo = () => {
+    const repo = newRepo.trim();
+    if (repo === "" || targetRepos.includes(repo)) {
+      setNewRepo("");
+      return;
+    }
+    setTargetRepos([...targetRepos, repo]);
+    setNewRepo("");
+  };
+
+  const removeTargetRepo = (repo) => {
+    setTargetRepos(targetRepos.filter((r) => r !== repo));
+  };
+
+  const newRepoKeyDown = (evt) => {
+    if (evt.key !== "Enter") return;
+    evt.preventDefault();
+    addTargetRepo();
+  };
 
   // submitSettings only puts a field in the request when it differs from
   // what was last loaded, so an operator changing one field never
@@ -56,7 +84,6 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const gcpServiceAccountEmail = form.elements.gcpServiceAccountEmail.value.trim();
     if (gcpServiceAccountEmail !== (settings.gcpServiceAccountEmail || "")) payload.gcpServiceAccountEmail = gcpServiceAccountEmail;
 
-    const targetRepos = parseCommaList(form.elements.targetRepos.value);
     if (JSON.stringify(targetRepos) !== JSON.stringify(settings.targetRepos || [])) payload.targetRepos = targetRepos;
 
     try {
@@ -120,9 +147,34 @@ export default function SettingsOverlay({ config, onClose, showError }) {
         <label>GCP service account email <span className="hint">optional</span>
           <input name="gcpServiceAccountEmail" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" />
         </label>
-        <label>Target repos <span className="hint">comma-separated owner/name; empty allows any</span>
-          <input name="targetRepos" defaultValue={(settings.targetRepos || []).join(", ")} placeholder="owner/repo, owner/other" autoComplete="off" />
-        </label>
+        <label>Target repos <span className="hint">owner/name; empty allows any</span></label>
+        <ul className="repo-chip-list">
+          {targetRepos.map((repo) => (
+            <li className="repo-chip" key={repo}>
+              {repo}
+              <button
+                className="repo-chip-delete"
+                type="button"
+                title={`remove ${repo}`}
+                onClick={() => removeTargetRepo(repo)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+        {targetRepos.length === 0 && <p className="hint">No repos added -- any repo is allowed.</p>}
+        <div className="repo-chip-add">
+          <input
+            name="newTargetRepo"
+            value={newRepo}
+            onChange={(evt) => setNewRepo(evt.target.value)}
+            onKeyDown={newRepoKeyDown}
+            placeholder="owner/repo"
+            autoComplete="off"
+          />
+          <button type="button" className="secondary" onClick={addTargetRepo}>Add</button>
+        </div>
         <div className="form-actions">
           <button type="submit" className="primary">Save</button>
         </div>
