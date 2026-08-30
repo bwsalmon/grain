@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Credential is a named credential. A nil Token means anonymous -- no
@@ -32,10 +33,17 @@ type Credential struct {
 }
 
 // CredentialSet is the credential ladder loaded from a secrets directory.
+//
+// Select and Get are called from GitProxy.Handle, which NewHandler wires
+// straight into net/http -- one goroutine per inbound request, so every
+// sandbox's concurrent git traffic reaches load's cache at once. mu
+// guards it for exactly that reason.
 type CredentialSet struct {
 	dir      string
 	patterns map[string]string
-	cache    map[string]Credential
+
+	mu    sync.Mutex
+	cache map[string]Credential
 }
 
 // LoadCredentialSet reads credentials.json (a pattern -> credential name
@@ -79,6 +87,8 @@ func (c *CredentialSet) Get(name string) (Credential, bool) {
 }
 
 func (c *CredentialSet) load(name string) Credential {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if cred, ok := c.cache[name]; ok {
 		return cred
 	}
