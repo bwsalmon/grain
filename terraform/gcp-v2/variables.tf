@@ -65,13 +65,16 @@ variable "labels" {
 variable "machine_type" {
   type        = string
   description = <<-EOT
-    Host machine type. Unlike terraform/gcp's v1 host, this VM does not
-    run nested virtualization -- v2's daemon dispatches onto plain host
-    directories by default (v2/README.md, "What this does not have
-    yet") -- so any family works, including E2. e2-standard-2 (2 vCPU,
-    8 GB) is comfortably enough to build grain (`make container-build`:
-    a Go compile plus a Vite frontend build, both inside Docker) and run
-    one daemon against a handful of test repos.
+    Host machine type. With enable_nested_virtualization on (the
+    default) this must be a family that supports it -- N1, N2, N2D, C2,
+    C3 or M-series, never E2, the same constraint terraform/gcp's v1
+    host carries. Turn that off, for a deployment dispatching only into
+    host directories, and any family works including E2.
+
+    n2-standard-2 (2 vCPU, 8 GB) is comfortably enough to build grain
+    (`make container-build`: a Go compile plus a Vite frontend build,
+    both inside Docker) and run one daemon against a handful of test
+    repos.
 
     Size up for real agent work, though. Because dispatch lands in host
     directories rather than in a sandbox guest of its own, whatever an
@@ -80,7 +83,28 @@ variable "machine_type" {
     build and not much more; a deployment whose tasks compile or test
     anything substantial wants several times it.
   EOT
-  default     = "e2-standard-2"
+  default     = "n2-standard-2"
+}
+
+variable "enable_nested_virtualization" {
+  type        = bool
+  description = <<-EOT
+    Give the host /dev/kvm, for a deployment whose sandboxes are VMs
+    rather than plain host directories -- a kontur-managed guest
+    (v2/pkg/kontur) needs it; a dispatch into a host directory does not.
+
+    Two things follow from it, both handled in instance.tf rather than
+    left to you. The machine family must support nested virtualization
+    -- N1, N2, N2D, C2, C3 or M-series, never E2 -- which a precondition
+    checks, because GCP's own failure for an E2 names the maintenance
+    policy instead and reads as an unrelated problem. And
+    on_host_maintenance becomes TERMINATE, matching terraform/gcp's v1
+    host for the reason its own comment gives: nested virtualization and
+    live migration have a history. Turning this off gets MIGRATE back,
+    and the daemon then rides out host maintenance rather than being
+    terminated and reconverging.
+  EOT
+  default     = true
 }
 
 variable "boot_image" {
