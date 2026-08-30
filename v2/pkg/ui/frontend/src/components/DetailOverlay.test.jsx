@@ -44,6 +44,34 @@ describe("DetailOverlay", () => {
     expect(link).toHaveAttribute("href", "https://github.com/acme/widgets/pull/42");
   });
 
+  it("shows the merge-blocked chip over awaiting-submit once the merge queue has given up", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "completed", pullRequest: "acme/widgets#42", autoMerge: true, mergeQueueBlockedAt: "2026-08-01T00:00:00Z" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Merge blocked")).toBeInTheDocument();
+  });
+
+  it("shows an awaiting-submit chip for a completed task with a pull request and no auto-merge", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "completed", pullRequest: "acme/widgets#42", autoMerge: false }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Awaiting submit")).toBeInTheDocument();
+  });
+
   it("opens the originating task when generatedFrom is clicked", async () => {
     const onOpenTask = vi.fn();
     const user = userEvent.setup();

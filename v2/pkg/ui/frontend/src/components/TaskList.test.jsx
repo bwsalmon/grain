@@ -50,6 +50,17 @@ describe("TaskList", () => {
     expect(screen.getByText("Ship the other thing")).toBeInTheDocument();
   });
 
+  it("shows a completion-phase chip for a completed task with an open pull request", () => {
+    renderList({
+      tasks: [
+        { id: 3, title: "Awaiting submit task", state: "completed", pullRequest: "acme/widgets#1", autoMerge: false, capabilities: [], blocked: false },
+        { id: 4, title: "Queued to merge task", state: "completed", pullRequest: "acme/widgets#2", autoMerge: true, capabilities: [], blocked: false },
+      ],
+    });
+    expect(screen.getByText("Awaiting submit")).toBeInTheDocument();
+    expect(screen.getByText("Queued to merge")).toBeInTheDocument();
+  });
+
   it("shows an empty message when nothing matches the filter", () => {
     renderList({ tasks: [] });
     expect(screen.getByText("No tasks in this state.")).toBeInTheDocument();

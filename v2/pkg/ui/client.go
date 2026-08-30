@@ -147,9 +147,20 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	for id, st := range states {
 		closed[id] = st == model.StateClosed
 	}
+	// Same trade for the merge queue's own "gave up on this one" signal:
+	// one query over every task_observation row that has it set, rather
+	// than a per-task read.
+	mergeQueueBlocked, err := c.Store.MergeQueueBlocked(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Task, 0, len(tasks))
 	for _, t := range tasks {
-		out = append(out, taskFrom(t, states[t.ID], closed))
+		var blockedAt *time.Time
+		if at, ok := mergeQueueBlocked[t.ID]; ok {
+			blockedAt = &at
+		}
+		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt))
 	}
 	return out, nil
 }
@@ -188,7 +199,15 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	return taskFrom(*t, state, closed), nil
+	obs, err := c.Store.GetObservation(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	var blockedAt *time.Time
+	if obs != nil {
+		blockedAt = obs.MergeQueueBlockedAt
+	}
+	return taskFrom(*t, state, closed, blockedAt), nil
 }
 
 // closedTargets resolves whether each of a task's own blocking-link
@@ -235,13 +254,17 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	detail := TaskDetail{Task: taskFrom(*t, state, closed), Comments: make([]Comment, 0, len(comments))}
-	for _, cm := range comments {
-		detail.Comments = append(detail.Comments, commentFrom(cm))
-	}
 	obs, err := c.Store.GetObservation(ctx, id)
 	if err != nil {
 		return TaskDetail{}, err
+	}
+	var blockedAt *time.Time
+	if obs != nil {
+		blockedAt = obs.MergeQueueBlockedAt
+	}
+	detail := TaskDetail{Task: taskFrom(*t, state, closed, blockedAt), Comments: make([]Comment, 0, len(comments))}
+	for _, cm := range comments {
+		detail.Comments = append(detail.Comments, commentFrom(cm))
 	}
 	streak, err := c.Store.FailureStreak(ctx, id)
 	if err != nil {

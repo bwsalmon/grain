@@ -65,6 +65,16 @@ type Task struct {
 	DependsOn []string `json:"dependsOn,omitempty"`
 	Blocked   bool     `json:"blocked"`
 	BlockedBy []string `json:"blockedBy,omitempty"`
+	// MergeQueueBlockedAt mirrors model.Observation's own field: non-nil
+	// once the merge queue has tried and failed to fix this task's pull
+	// request automatically, so it needs a human rather than another
+	// automatic attempt. Alongside PullRequest and AutoMerge, this is
+	// what lets the frontend tell a completed task that is merely
+	// waiting on a human's Submit click apart from one already on the
+	// merge queue, or one the queue has given up on -- the distinction
+	// bwsalmon/agents#494 asked for, since State itself stops at
+	// "completed" for a task's entire post-run life.
+	MergeQueueBlockedAt *time.Time `json:"mergeQueueBlockedAt,omitempty"`
 }
 
 // Comment is one entry in a task's conversation.
@@ -165,19 +175,20 @@ type Attempt struct {
 // closed -- the caller resolves it (Client.ListTasks over the whole
 // store in one query, Client.Task over just this task's own targets) so
 // this function stays free of the store itself.
-func taskFrom(t model.Task, state model.State, closed map[string]bool) Task {
+func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueueBlockedAt *time.Time) Task {
 	out := Task{
-		ID:           t.ID,
-		Title:        t.Title,
-		Description:  t.Body,
-		Author:       t.Origin.Attribution.Actor.ID,
-		State:        state,
-		Base:         t.Base,
-		AutoMerge:    t.AutoMerge,
-		Capabilities: []string{},
-		Stacked:      t.Origin.Reason == model.ReasonFix,
-		Scheduled:    t.Origin.Reason == model.ReasonSchedule,
-		CreatedAt:    t.CreatedAt,
+		ID:                  t.ID,
+		Title:               t.Title,
+		Description:         t.Body,
+		Author:              t.Origin.Attribution.Actor.ID,
+		State:               state,
+		Base:                t.Base,
+		AutoMerge:           t.AutoMerge,
+		Capabilities:        []string{},
+		Stacked:             t.Origin.Reason == model.ReasonFix,
+		Scheduled:           t.Origin.Reason == model.ReasonSchedule,
+		CreatedAt:           t.CreatedAt,
+		MergeQueueBlockedAt: mergeQueueBlockedAt,
 	}
 	if t.Target != nil {
 		out.Repo = t.Target.String()

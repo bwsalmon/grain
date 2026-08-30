@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Checkbox, Chip, FormControl, FormControlLabel, InputLabel, MenuItem, Select, TextField, Typography } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName } from "../state.js";
+import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
 
 const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
 
@@ -201,6 +201,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // pane, again) just omits onToggleSelect/draggable and gets a plain row
 // with no checkbox or drag handle rather than a dead one.
 export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging }) {
+  const phase = completionPhase(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
       {draggable && (
@@ -234,6 +235,7 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
           <Chip key={id} size="small" label={capabilityName(config, id)} />
         ))}
       </span>
+      {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
       {t.blocked && (
         <Chip size="small" color="error" title={`Waiting on ${t.blockedBy.join(", ")}`} label="Blocked" />
       )}

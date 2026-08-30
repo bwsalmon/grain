@@ -721,6 +721,9 @@ func taskBlock(t ui.Task) string {
 	if t.PullRequest != "" {
 		fmt.Fprintf(&b, "pull request: %s\n", t.PullRequest)
 	}
+	if t.MergeQueueBlockedAt != nil {
+		fmt.Fprintf(&b, "merge queue blocked since: %s\n", t.MergeQueueBlockedAt.Format(time.RFC3339))
+	}
 	if t.Description != "" {
 		fmt.Fprintf(&b, "\n%s\n", t.Description)
 	}

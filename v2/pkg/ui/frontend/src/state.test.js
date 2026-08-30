@@ -1,5 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { capabilityName, knownRepos, repoRows } from "./state.js";
+import { capabilityName, completionPhase, knownRepos, repoRows } from "./state.js";
+
+describe("completionPhase", () => {
+  it("returns null for a task that is not completed", () => {
+    expect(completionPhase({ state: "queued", pullRequest: "acme/widgets#1" })).toBeNull();
+  });
+
+  it("returns null for a completed task with no pull request", () => {
+    expect(completionPhase({ state: "completed", pullRequest: "" })).toBeNull();
+  });
+
+  it("reports awaiting submit for a completed task with a PR and no auto-merge", () => {
+    const phase = completionPhase({ state: "completed", pullRequest: "acme/widgets#1", autoMerge: false });
+    expect(phase.label).toBe("Awaiting submit");
+  });
+
+  it("reports queued to merge once auto-merge is set", () => {
+    const phase = completionPhase({ state: "completed", pullRequest: "acme/widgets#1", autoMerge: true });
+    expect(phase.label).toBe("Queued to merge");
+  });
+
+  it("reports merge blocked once the merge queue has given up, even with auto-merge set", () => {
+    const phase = completionPhase({
+      state: "completed",
+      pullRequest: "acme/widgets#1",
+      autoMerge: true,
+      mergeQueueBlockedAt: "2026-08-01T00:00:00Z",
+    });
+    expect(phase.label).toBe("Merge blocked");
+  });
+});
 
 describe("capabilityName", () => {
   const config = { capabilities: [{ id: "web-search", name: "Web search" }] };

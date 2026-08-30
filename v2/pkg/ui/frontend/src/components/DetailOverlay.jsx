@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS } from "../state.js";
+import { STATE_LABELS, completionPhase } from "../state.js";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
 import Overlay from "./Overlay.jsx";
 import TaskPicker from "./TaskPicker.jsx";
@@ -11,6 +11,7 @@ import TaskPicker from "./TaskPicker.jsx";
 // state and its declared shape (repo, capabilities, dependencies) in a
 // narrow property column beside it.
 export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
+  const phase = completionPhase(t);
   return (
     <Overlay onClose={onClose} wide>
       <div className="detail-layout">
@@ -45,9 +46,11 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
         <div className="detail-side">
           <div className="detail-state">
             <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
-            {/* Blocked reads as an annotation beside the state dot, not a
+            {/* Both chips read as annotations beside the state dot, not a
                 replacement for it -- a blocked task is still queued
-                (docs/data-model.md). */}
+                (docs/data-model.md), and a completed task's PR phase is
+                still "completed" as far as model.State goes. */}
+            {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>
 
