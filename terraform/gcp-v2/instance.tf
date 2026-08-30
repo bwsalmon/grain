@@ -25,6 +25,7 @@ locals {
     slots                     = var.slots
     poll_interval             = var.poll_interval
     gemini_model              = var.gemini_model
+    max_agent_turns           = var.max_agent_turns
     gcp_project               = local.gcp_project
     gcp_agent_service_account = local.agent_service_account_email
   }
