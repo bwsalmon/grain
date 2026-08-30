@@ -177,12 +177,13 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 	metrics := newLoadMetrics()
 
 	tickerRNG := rand.New(rand.NewPCG(cfg.seed, cfg.seed^0x9e3779b97f4a7c15))
+	var tickerRNGMu sync.Mutex
 	var taskSeq atomic.Int64
 
 	deps := orchestrator.Deps{
 		Store: store, Client: gh, Sandboxes: sandboxes,
 		Framework: func() agent.Framework {
-			return gemini.NewForTest(newLoadGenerator(tickerRNG, metrics))
+			return gemini.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics))
 		},
 		Config: orchestrator.Config{Capabilities: registry},
 		Slots:  slots,
