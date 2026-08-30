@@ -59,10 +59,45 @@ type rawBlock struct {
 // back, in the order they appeared -- the human-readable narrative
 // FinalText and ToolCalls alone do not give a reader (bwsalmon/agents#446).
 func parseTranscript(stdout string) (*agent.Result, error) {
-	result := &agent.Result{}
-	pending := map[string]int{}
-	sawResult := false
-	var transcript strings.Builder
+	p := parseEvents(stdout)
+	if p.resultErr != nil {
+		return nil, p.resultErr
+	}
+	if !p.sawResult {
+		return nil, fmt.Errorf("claude: no result event found in output")
+	}
+	p.result.Transcript = strings.TrimSpace(p.transcript.String())
+	return &p.result, nil
+}
+
+// PartialTranscript renders whatever of a still-in-progress
+// --output-format stream-json capture is on disk so far into the same
+// human-readable narrative parseTranscript builds once a run finishes --
+// what LiveTranscriptDir reads back for a run with no FinishedAt yet
+// (bwsalmon/agents#467). Unlike parseTranscript it never errors: a
+// missing (or not-yet-written) terminal "result" event just means the run
+// is still going, not that anything is wrong, and a truncated final line
+// -- reading a file the whole time claude is still appending to it can
+// always catch mid-write -- is handled the same way parseTranscript
+// already tolerates any other malformed line, by skipping it.
+func PartialTranscript(stdout string) string {
+	return strings.TrimSpace(parseEvents(stdout).transcript.String())
+}
+
+// parsedEvents is one line-by-line pass over a stream-json capture,
+// shared by parseTranscript (the whole thing, once a run has finished)
+// and PartialTranscript (however much exists so far) so the two can never
+// build the transcript text itself two different ways.
+type parsedEvents struct {
+	result     agent.Result
+	pending    map[string]int
+	sawResult  bool
+	resultErr  error
+	transcript strings.Builder
+}
+
+func parseEvents(stdout string) *parsedEvents {
+	p := &parsedEvents{pending: map[string]int{}}
 
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -83,43 +118,39 @@ func parseTranscript(stdout string) (*agent.Result, error) {
 				switch b.Type {
 				case "thinking":
 					if b.Thinking != "" {
-						fmt.Fprintf(&transcript, "%s\n\n", b.Thinking)
+						fmt.Fprintf(&p.transcript, "%s\n\n", b.Thinking)
 					}
 				case "text":
 					if b.Text != "" {
-						fmt.Fprintf(&transcript, "%s\n\n", b.Text)
+						fmt.Fprintf(&p.transcript, "%s\n\n", b.Text)
 					}
 				case "tool_use":
-					result.ToolCalls = append(result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
-					pending[b.ID] = len(result.ToolCalls) - 1
-					fmt.Fprintf(&transcript, "> %s(%s)\n", b.Name, inputSummary(b.Input))
+					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
+					p.pending[b.ID] = len(p.result.ToolCalls) - 1
+					fmt.Fprintf(&p.transcript, "> %s(%s)\n", b.Name, inputSummary(b.Input))
 				case "tool_result":
-					if idx, ok := pending[b.ToolUseID]; ok {
+					if idx, ok := p.pending[b.ToolUseID]; ok {
 						text := toolResultText(b.Content)
-						result.ToolCalls[idx].Text = text
-						result.ToolCalls[idx].IsError = b.IsError
+						p.result.ToolCalls[idx].Text = text
+						p.result.ToolCalls[idx].IsError = b.IsError
 						if b.IsError {
-							fmt.Fprintf(&transcript, "! %s\n\n", text)
+							fmt.Fprintf(&p.transcript, "! %s\n\n", text)
 						} else {
-							fmt.Fprintf(&transcript, "%s\n\n", text)
+							fmt.Fprintf(&p.transcript, "%s\n\n", text)
 						}
 					}
 				}
 			}
 		case "result":
-			sawResult = true
+			p.sawResult = true
 			if ev.IsError {
-				return nil, fmt.Errorf("claude: run ended in error (subtype=%s): %s", ev.Subtype, ev.Result)
+				p.resultErr = fmt.Errorf("claude: run ended in error (subtype=%s): %s", ev.Subtype, ev.Result)
+				continue
 			}
-			result.FinalText = ev.Result
+			p.result.FinalText = ev.Result
 		}
 	}
-
-	if !sawResult {
-		return nil, fmt.Errorf("claude: no result event found in output")
-	}
-	result.Transcript = strings.TrimSpace(transcript.String())
-	return result, nil
+	return p
 }
 
 // inputSummary renders a tool_use block's own input as compact JSON for a

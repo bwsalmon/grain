@@ -462,7 +462,12 @@ fieldset legend {
 .timeline-item { display: flex; gap: 0.75rem; padding-bottom: 1.1rem; }
 .timeline-item:last-child { padding-bottom: 0; }
 .timeline-marker { position: relative; width: 11px; flex: none; display: flex; justify-content: center; padding-top: 0.15rem; }
-.timeline-marker .badge { margin: 0; }
+/* Without this, .badge -- a flex item in .timeline-marker -- stretches
+   to the marker's full (content-driven) height and centers its dot
+   inside that stretched box, so the dot drifts away from the top-aligned
+   timestamp and the fixed-offset connecting line below cuts through it
+   instead of starting just past it. */
+.timeline-marker .badge { margin: 0; align-self: flex-start; }
 .timeline-marker::after {
   content: "";
   position: absolute;

@@ -47,6 +47,29 @@ key at build time to allow key-based root login:
 docker build --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat ~/.ssh/id_ed25519.pub)" -t kontur .
 ```
 
+## Running a custom setup script
+
+To customize the guest beyond what the overlay above does -- installing
+extra packages, dropping in config files, enabling services, etc -- pass
+a shell script's contents at build time:
+
+```sh
+docker build --build-arg GUEST_SETUP_SCRIPT="$(cat my-setup.sh)" -t kontur .
+```
+
+The script runs via `chroot` against the rootfs after the overlay is
+applied but before it's packed into `disk.img`, the same mechanism
+`debootstrap` itself already uses (non-privileged in the sense the top of
+this file describes: no extra `docker build` privileges are needed).
+Network access works fine (`chroot` doesn't create a new network
+namespace, so it's the same connectivity the rest of the build already
+has), so `apt-get install` and the like just work. What the script
+*doesn't* get is `/proc`/`/sys` (nothing mounts them here, so anything
+that reads from them will find those directories empty) or a running
+service manager -- enable units by symlinking into `*.target.wants/` by
+hand instead, the same way `kontur-ssh-host-keys.service` above is
+enabled.
+
 ## Graceful shutdown
 
 `kontur run`'s shutdown path (see the top-level README's "Shutdown"

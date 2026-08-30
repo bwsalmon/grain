@@ -95,6 +95,17 @@ type Config struct {
 	// prove cancellation happens promptly, without waiting seconds for
 	// real, sets this to something much smaller.
 	CancelPollInterval time.Duration
+	// TranscriptDir, if set, is a directory RunDispatch asks each run's
+	// agent.Framework to mirror its own transcript-in-progress into, one
+	// file per run named after d.RunID -- agent.RunConfig.TranscriptPath's
+	// own doc comment says what a Framework does with it. A deployment
+	// wiring this up also wires the very same directory into
+	// ui.Config.LiveTranscripts (e.g. claude.LiveTranscriptDir) so the two
+	// sides agree on where one run's file is; RunDispatch itself never
+	// reads it back, only writes to and then removes it. "" means no
+	// caller wants this, and RunDispatch leaves agent.RunConfig's own
+	// TranscriptPath empty (bwsalmon/agents#467).
+	TranscriptDir string
 }
 
 func (c Config) cancelPollInterval() time.Duration {

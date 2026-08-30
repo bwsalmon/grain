@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -52,16 +53,28 @@ const (
 // runner is the one seam this package needs to actually invoke the claude
 // binary -- narrowed to an interface so a test can supply a canned
 // transcript and exercise the parsing logic below without a real claude
-// binary or a live Claude Code credential.
+// binary or a live Claude Code credential. tee, when non-nil, receives
+// every byte of stdout as the subprocess produces it, alongside the
+// buffer this still accumulates and returns whole once the process exits
+// -- see execRunner.Run's own doc comment on why a live copy of the exact
+// same bytes is worth keeping.
 type runner interface {
-	Run(ctx context.Context, args []string, stdin string, env []string) (stdout string, err error)
+	Run(ctx context.Context, args []string, stdin string, env []string, tee io.Writer) (stdout string, err error)
 }
 
 type execRunner struct {
 	claudePath string
 }
 
-func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []string) (string, error) {
+// Run execs claude and, when tee is non-nil, mirrors its stdout into tee
+// via io.MultiWriter as the subprocess produces it -- not after cmd.Run
+// returns, since exec.Cmd itself copies from the child's stdout pipe into
+// whatever Writer it's given the moment there is anything to copy. That
+// live mirror is what RunConfig.TranscriptPath is for: a caller with
+// filesystem access to that path can read a run's own stream-json output
+// while claude is still running, rather than only once this whole
+// function returns (bwsalmon/agents#467).
+func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []string, tee io.Writer) (string, error) {
 	cmd := exec.CommandContext(ctx, r.claudePath, args...)
 	// claude forks its own mcpserver child once it loads --mcp-config (see
 	// this file's own doc comment); a plain exec.CommandContext cancel
@@ -72,7 +85,11 @@ func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = append(os.Environ(), env...)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	if tee != nil {
+		cmd.Stdout = io.MultiWriter(&stdout, tee)
+	} else {
+		cmd.Stdout = &stdout
+	}
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
@@ -160,6 +177,20 @@ func mcpConfigJSON(grainBinaryPath, sandboxRoot string) ([]byte, error) {
 // tool roster emptied out and only the grain-sandbox MCP tools admitted,
 // and parses the resulting --output-format stream-json transcript into a
 // Result.
+//
+// When cfg.TranscriptPath is set, the raw stream-json this produces is
+// also mirrored there live, one line per event, as claude itself emits
+// them (execRunner.Run's own doc comment) -- the file this package's own
+// LiveTranscriptDir reads back with PartialTranscript to render a
+// still-running run's transcript-in-progress. It is opened O_TRUNC, not
+// O_APPEND: a path is only ever reused across runs by a caller passing
+// the same run ID twice, which should never happen, and starting clean
+// is what makes a stale previous run's bytes never a way to misread this
+// one's. The file is left on disk once Run returns either way -- cleaning
+// it up once its contents no longer matter (the run has finished and
+// Result.Transcript already carries the same story) is the caller's job,
+// the same way orchestrator.RunDispatch owns cfg.SandboxRoot's own
+// lifecycle rather than this package.
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
 	if cfg.SandboxRoot == "" {
 		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot is required")
@@ -170,6 +201,16 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	maxTurns := f.maxTurns
 	if cfg.MaxTurns > 0 {
 		maxTurns = cfg.MaxTurns
+	}
+
+	var tee io.Writer
+	if cfg.TranscriptPath != "" {
+		transcriptFile, err := os.OpenFile(cfg.TranscriptPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("claude: opening transcript file: %w", err)
+		}
+		defer transcriptFile.Close()
+		tee = transcriptFile
 	}
 
 	configJSON, err := mcpConfigJSON(f.grainBinaryPath, cfg.SandboxRoot)
@@ -216,7 +257,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	// must never become a shell- or ps-visible argument (dispatch.py's own
 	// docstring makes the identical point about its `dd`/stdin-redirect
 	// path).
-	stdout, err := f.run.Run(ctx, args, cfg.Prompt, env)
+	stdout, err := f.run.Run(ctx, args, cfg.Prompt, env, tee)
 	if err != nil {
 		return nil, fmt.Errorf("claude: running claude: %w", err)
 	}
