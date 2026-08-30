@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bwsalmon/grain/v2/pkg/capability/githubsandbox"
+	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
 
 func TestAPIHostRewritesGitHubDotComOnly(t *testing.T) {
@@ -24,6 +29,42 @@ func TestManifestSubmissionFormEscapesTheManifest(t *testing.T) {
 	}
 	if !strings.Contains(form, "&quot;") {
 		t.Errorf("form does not escape quotes in the manifest: %s", form)
+	}
+}
+
+// TestWriteAppCredentialsRoundTripsThroughTheSecretsStore is the
+// write-then-resolve round trip bwsalmon/agents#495 found missing:
+// bootstrapGitHubApp used to write plain files under <secrets-dir>/
+// github-app/, which githubsandbox.Provider.Resolve -- backed by
+// pkg/secrets.Store, a SQLite database -- never read. This asserts the
+// credentials writeAppCredentials stores are the exact ones
+// DefaultAppIDCredential and DefaultPrivateKeyCredential resolve back to.
+func TestWriteAppCredentialsRoundTripsThroughTheSecretsStore(t *testing.T) {
+	dataDir := t.TempDir()
+	const wantAppID = "123456"
+	const wantPrivateKey = "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n"
+
+	if err := writeAppCredentials(dataDir, wantAppID, wantPrivateKey); err != nil {
+		t.Fatalf("writeAppCredentials: %v", err)
+	}
+
+	store := secrets.New(filepath.Join(dataDir, "secrets"))
+	ctx := context.Background()
+
+	gotAppID, err := store.Resolve(ctx, githubsandbox.DefaultAppIDCredential)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", githubsandbox.DefaultAppIDCredential, err)
+	}
+	if gotAppID != wantAppID {
+		t.Errorf("resolved app id %q, want %q", gotAppID, wantAppID)
+	}
+
+	gotPrivateKey, err := store.Resolve(ctx, githubsandbox.DefaultPrivateKeyCredential)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", githubsandbox.DefaultPrivateKeyCredential, err)
+	}
+	if gotPrivateKey != wantPrivateKey {
+		t.Errorf("resolved private key %q, want %q", gotPrivateKey, wantPrivateKey)
 	}
 }
 
