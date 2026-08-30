@@ -86,17 +86,33 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // not self-reported" reasoning model.BranchName's own doc comment gives,
 // restated here at the one place those facts reach the prompt.
 //
+// checkoutDir, when non-empty, is the directory RunDispatch already
+// cloned the target into (prepareCheckout's own CheckoutDir) -- said here
+// because an agent that is not told cannot know, which is the whole
+// failure that made the clone happen up front. Empty is a sandbox left
+// bare, and leaves this prompt exactly as it always read.
+//
 // task.Reads is mentioned but not enforced here: the git proxy already
 // allows a fetch against any of them and refuses a push to any but
 // task.Target (gitproxy/authorize.go), so this line is purely
 // informational -- it tells the agent those repos exist and are safe to
 // clone, rather than granting anything itself.
-func BuildPrompt(task model.Task) string {
+func BuildPrompt(task model.Task, checkoutDir string) string {
+	branch := model.BranchName(task.ID)
 	prompt := fmt.Sprintf(
 		"%s\n\n%s\n\nWork in %s. Push your change to a new branch named %q -- "+
 			"never to the repo's default branch directly.",
-		task.Title, task.Body, task.Target, model.BranchName(task.ID),
+		task.Title, task.Body, task.Target, branch,
 	)
+	if checkoutDir != "" {
+		prompt += fmt.Sprintf(
+			"\n\nThat repo is already cloned for you at ./%s, with %q checked out and "+
+				"its remote pointing at the only address you can reach it through -- "+
+				"work in that directory rather than cloning anything yourself, and "+
+				"push with `git push origin %s`.",
+			checkoutDir, branch, branch,
+		)
+	}
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
 		for i, r := range task.Reads {
@@ -208,7 +224,31 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		return nil, fmt.Errorf("orchestrator: reading %s's conversation: %w", task.ID, err)
 	}
 
-	materialized, prompt, prepErr := prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, comments)
+	// Before capabilities, and before the agent's first turn: a run whose
+	// sandbox never got its repo has nothing to do, and there is no point
+	// minting a capability's credentials for it. See prepareCheckout.
+	//
+	// Skipped for a task already closed by the time its dispatch got
+	// here -- the same race the synchronous checkTaskClosed below exists
+	// for (bwsalmon/agents#346), whose rule is that such a run never
+	// reaches its sandbox at all. A clone is the run's own first touch of
+	// that sandbox, so it has to observe the rule too; the closed case
+	// then falls through to the cancellation path below and finishes
+	// "cancelled" exactly as it did before. A read error here is treated
+	// as "not closed": the cancellation path re-reads it anyway, so the
+	// cost of being wrong is one clone, not a run that ignores a close.
+	var checkoutDir string
+	var checkoutErr error
+	if closed, err := taskClosed(ctx, store, task.ID); err != nil || !closed {
+		checkoutDir, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task)
+	}
+
+	var materialized []model.Materialized
+	var prompt string
+	var prepErr error
+	if checkoutErr == nil {
+		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, comments, checkoutDir)
+	}
 
 	var result *agent.Result
 	var runErr error
@@ -225,6 +265,9 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		transcriptPath = filepath.Join(cfg.TranscriptDir, d.RunID)
 	}
 	switch {
+	case checkoutErr != nil:
+		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, checkoutErr)
+		detail = checkoutErr.Error()
 	case prepErr != nil:
 		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, prepErr)
 		detail = prepErr.Error()
@@ -362,9 +405,10 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // not run at all, since the task it would work almost always depends on
 // it. Ported from pkg/orchestrate's own prepare (bwsalmon/agents#254).
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
-	cc model.CapabilityContext, sandboxRoot string, comments []model.Comment) (materialized []model.Materialized, prompt string, err error) {
+	cc model.CapabilityContext, sandboxRoot string, comments []model.Comment,
+	checkoutDir string) (materialized []model.Materialized, prompt string, err error) {
 
-	prompt = BuildPrompt(cc.Task)
+	prompt = BuildPrompt(cc.Task, checkoutDir)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
 	}

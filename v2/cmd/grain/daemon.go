@@ -465,6 +465,11 @@ func run(ctx context.Context, cfg config) error {
 			Credentials:   secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 			MaxAgentTurns: cfg.maxAgentTurns,
 			TranscriptDir: transcriptDir,
+			// The same proxy URL the credential files above are written
+			// for, now also the address each dispatched run's own
+			// checkout is cloned from (orchestrator.prepareCheckout).
+			// Nothing else ever told a sandbox where its repo lives.
+			GitRemoteBase: proxyURL,
 		},
 		Slots: slots,
 	}
