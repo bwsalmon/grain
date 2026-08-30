@@ -95,27 +95,12 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		})
 	}
 
-	pushed, err := branchExistsSettled(client, task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
+	handled, err := salvagePushedBranch(ctx, store, client, task, now)
 	if err != nil {
-		return fmt.Errorf("orchestrator: checking %s's branch: %w", task.ID, err)
+		return err
 	}
-
-	if pushed {
-		// task was read at the top of this cycle, before the run itself
-		// finished, so it cannot see a close that landed while the run was
-		// still live -- re-checking the observation here is what
-		// model/state.go's StateOf precedence (ClosedAt outranks a live
-		// run) actually means for a run that already pushed: nobody wants
-		// this work merged, so the branch is left pushed but unopened
-		// rather than turned into a real pull request on GitHub.
-		closed, err := taskClosed(ctx, store, task.ID)
-		if err != nil {
-			return err
-		}
-		if closed {
-			return nil
-		}
-		return finishWithPullRequest(ctx, store, client, task, now)
+	if handled {
+		return nil
 	}
 
 	if comment, ok := firstToolCallArg(result, "comment_on_issue", "comment"); ok && comment != "" {
@@ -170,6 +155,49 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		return fmt.Errorf("orchestrator: recording %s's outcome: %w", task.ID, err)
 	}
 	return nil
+}
+
+// salvagePushedBranch turns a branch the run left on GitHub into a pull
+// request, reporting whether there was one to turn. It is the only part
+// of a run's outcome that survives the run itself: the sandbox is
+// recreated and agent.Result is never persisted, but a pushed branch is
+// on GitHub whatever happened to the process that pushed it.
+//
+// Three callers need exactly this and used to have two-and-a-half copies
+// of it: ProcessResult for a run that ended cleanly, recoverRun for one
+// whose process died, and runOne for one whose framework returned an
+// error -- the case that had no copy at all, and stranded every branch a
+// run pushed before it ran out of turns.
+//
+// The close re-check is not incidental. task was read at the top of this
+// cycle, before the run finished, so it cannot see a close that landed
+// while the run was still live; re-reading the observation here is what
+// model/state.go's StateOf precedence (ClosedAt outranks a live run)
+// means for a run that already pushed. Nobody wants a closed task's work
+// merged, so the branch is left pushed but unopened rather than turned
+// into a real pull request. It still counts as handled: there was a
+// branch, and the decision about it has been made.
+func salvagePushedBranch(ctx context.Context, store *model.Store, client github.Client,
+	task model.Task, now time.Time) (bool, error) {
+
+	if task.Target == nil {
+		return false, nil
+	}
+	pushed, err := branchExistsSettled(client, task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: checking %s's branch: %w", task.ID, err)
+	}
+	if !pushed {
+		return false, nil
+	}
+	closed, err := taskClosed(ctx, store, task.ID)
+	if err != nil {
+		return true, err
+	}
+	if closed {
+		return true, nil
+	}
+	return true, finishWithPullRequest(ctx, store, client, task, now)
 }
 
 // noActionDetail says what the run did, not only what it did not do.

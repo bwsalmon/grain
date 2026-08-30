@@ -83,6 +83,17 @@ func newFramework(generator contentGenerator, opts ...Option) *Framework {
 // conversation to the model and executing whatever function calls come
 // back until a turn produces a final answer with no more calls, or
 // MaxTurns is exhausted.
+//
+// Once the loop has started, an error is returned *with* the partial
+// result rather than instead of it, and every caller must read both.
+// Returning `nil, err` from here threw away the record of a run that had
+// already done the work: an agent that edits files, commits and pushes
+// and only then runs out of turns pushed a real branch, and the run it
+// belongs to ended with a nil result, so the orchestrator skipped
+// ProcessResult entirely and left that branch on GitHub with no pull
+// request and no trace of the tool calls that made it (bwsalmon/agents
+// task-1). The error still says the run failed; the result says what it
+// managed to do first.
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
 	sandboxTools := cfg.Tools
 	if sandboxTools == nil {
@@ -114,10 +125,10 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	for turn := 0; turn < maxTurns; turn++ {
 		resp, err := f.generator.GenerateContent(ctx, f.model, history, &genai.GenerateContentConfig{Tools: tools})
 		if err != nil {
-			return nil, fmt.Errorf("gemini: generate content: %w", err)
+			return result, fmt.Errorf("gemini: generate content: %w", err)
 		}
 		if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-			return nil, fmt.Errorf("gemini: response had no candidate content")
+			return result, fmt.Errorf("gemini: response had no candidate content")
 		}
 		candidate := resp.Candidates[0]
 		history = append(history, candidate.Content)
@@ -157,5 +168,5 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		history = append(history, genai.NewContentFromParts(responseParts, genai.RoleUser))
 	}
 
-	return nil, fmt.Errorf("gemini: exceeded max turns (%d) without a final answer", maxTurns)
+	return result, fmt.Errorf("gemini: exceeded max turns (%d) without a final answer", maxTurns)
 }
