@@ -475,17 +475,28 @@ lists in sync automatically; an operator who changes one by hand (via
   `prevent_destroy` (`instance.tf`) -- it holds the SQLite store, the
   secrets database, and the sandbox working directories. Remove that
   block first if you really mean to lose it.
+- **The load balancer can front a Cloud Run proxy instead of the VM
+  directly.** Set `use_cloudrun_iap_proxy = true` (needs
+  `expose_ui_publicly = true`) and `google_compute_backend_service.ui`
+  (`iap.tf`) points at a small Cloud Run service (`cloudrun-proxy.tf`)
+  that blind-forwards to the VM's internal IP over a Serverless VPC
+  Access connector, instead of at the VM's own instance group directly.
+  IAP, the DNS name, and the managed certificate are unchanged -- only
+  what backs the load balancer changes. Off by default: the
+  instance-group path is one fewer moving part and is what this module
+  has always done.
 
 ## Layout
 
 ```
 versions.tf     provider/backend requirements
 variables.tf    every knob, with why it exists
-network.tf      VPC, two firewall rules (IAP-tunnel SSH, load-balancer-to-UI), optional Cloud NAT
+network.tf      VPC, firewall rules (IAP-tunnel SSH, load-balancer/connector-to-UI), optional Cloud NAT
 iam.tf          the host/agent/minter service accounts and their roles
 instance.tf     the VM, the data disk, non-secret config as instance metadata
 dns.tf          the reserved static IP and the fixed DNS name
 iap.tf          the load balancer chain and IAP itself
+cloudrun-proxy.tf  optional Cloud Run proxy backing the load balancer instead of the VM directly (use_cloudrun_iap_proxy)
 outputs.tf      instance name, zone, service accounts, URL, ssh command
 files/
   startup.sh      boot: mount the data disk, start config-sync

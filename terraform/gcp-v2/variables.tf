@@ -568,3 +568,85 @@ variable "iap_client_secret" {
   default     = ""
   sensitive   = true
 }
+
+# ---------------------------------------------------- cloud run iap proxy --
+
+variable "use_cloudrun_iap_proxy" {
+  type        = bool
+  description = <<-EOT
+    Front the VM with a Cloud Run reverse-proxy service
+    (cloudrun-proxy.tf) instead of exposing google_compute_instance.host's
+    own instance group as the load balancer's backend directly
+    (instance.tf, iap.tf). The load balancer, its DNS name, its managed
+    certificate and IAP itself (iap.tf) are all unchanged either way --
+    this only swaps what backs google_compute_backend_service.ui: a
+    Cloud Run service, reached through a Serverless NEG, running a small
+    proxy container (cloudrun_proxy_image) that forwards to the VM's
+    *internal* IP over a Serverless VPC Access connector, rather than
+    the load balancer reaching the VM's own instance group directly over
+    the ranges network.tf's lb_to_ui firewall rule admits.
+
+    Off by default -- the direct instance-group path needs one fewer
+    moving part (no Cloud Run service, no VPC connector) and is what
+    this module has always done. Consider turning this on for a
+    deployment that wants the VM to have no inbound firewall rule open
+    to the load balancer's own ranges at all, or that would rather pay
+    for a scale-to-zero Cloud Run service than a permanently-open
+    firewall rule.
+
+    Needs expose_ui_publicly = true: with it off there is no load
+    balancer for this to back, and nothing here is created.
+  EOT
+  default     = false
+
+  validation {
+    condition     = !var.use_cloudrun_iap_proxy || var.expose_ui_publicly
+    error_message = "use_cloudrun_iap_proxy needs expose_ui_publicly = true -- it only changes what backs the load balancer iap.tf creates, and creates nothing on its own when that load balancer does not exist."
+  }
+}
+
+variable "cloudrun_proxy_image" {
+  type        = string
+  description = <<-EOT
+    Container image the Cloud Run proxy runs, when use_cloudrun_iap_proxy
+    is on. Defaults to a plain, well-known socat image doing nothing but
+    a blind TCP forward from the port Cloud Run listens on to the VM's
+    internal IP and ui_port -- deliberately not HTTP-aware, since it does
+    not need to be: IAP and the load balancer in front of it (iap.tf)
+    already terminate TLS and enforce sign-in before a request ever
+    reaches this container, the same as they do for the instance-group
+    path this replaces.
+  EOT
+  default     = "docker.io/alpine/socat:1.7.4.4"
+}
+
+variable "cloudrun_proxy_min_instances" {
+  type        = number
+  description = "Minimum Cloud Run proxy instances. 0 (the default) scales to zero between requests, trading a cold start for no idle cost."
+  default     = 0
+}
+
+variable "cloudrun_proxy_max_instances" {
+  type        = number
+  description = "Maximum Cloud Run proxy instances."
+  default     = 3
+}
+
+variable "cloudrun_connector_cidr" {
+  type        = string
+  description = <<-EOT
+    /28 CIDR for the Serverless VPC Access connector the Cloud Run proxy
+    uses to reach the VM's internal IP -- a fixed size Google requires
+    of the connector's own subnet, not a knob to size up. Must not
+    overlap subnet_cidr. Only used when use_cloudrun_iap_proxy and
+    create_network are both true; see cloudrun_connector_name to attach
+    to an existing connector instead.
+  EOT
+  default     = "10.30.1.0/28"
+}
+
+variable "cloudrun_connector_name" {
+  type        = string
+  description = "Existing Serverless VPC Access connector to use when use_cloudrun_iap_proxy is true and create_network is false."
+  default     = ""
+}

@@ -21,7 +21,7 @@
 #                              google_compute_instance.host:ui_port
 
 resource "google_compute_health_check" "ui" {
-  count = var.expose_ui_publicly ? 1 : 0
+  count = var.expose_ui_publicly && !var.use_cloudrun_iap_proxy ? 1 : 0
   name  = "${var.name_prefix}-ui-health"
 
   http_health_check {
@@ -33,8 +33,14 @@ resource "google_compute_health_check" "ui" {
 # Unmanaged: one fixed instance, not a template a group would scale --
 # this deployment is one VM, on purpose (variables.tf's own machine_type
 # comment on why v2 needs no fleet).
+#
+# Not created when use_cloudrun_iap_proxy is on: the backend service
+# below then points at cloudrun-proxy.tf's Serverless NEG instead, which
+# needs neither this instance group nor the health check above --
+# serverless NEG backends do not support a backend-service health check
+# at all.
 resource "google_compute_instance_group" "host" {
-  count     = var.expose_ui_publicly ? 1 : 0
+  count     = var.expose_ui_publicly && !var.use_cloudrun_iap_proxy ? 1 : 0
   name      = "${var.name_prefix}-ig"
   zone      = var.zone
   instances = [google_compute_instance.host.self_link]
@@ -49,12 +55,12 @@ resource "google_compute_backend_service" "ui" {
   count                 = var.expose_ui_publicly ? 1 : 0
   name                  = "${var.name_prefix}-ui-backend"
   protocol              = "HTTP"
-  port_name             = "http"
+  port_name             = var.use_cloudrun_iap_proxy ? null : "http"
   load_balancing_scheme = "EXTERNAL_MANAGED"
-  health_checks         = [google_compute_health_check.ui[0].id]
+  health_checks         = var.use_cloudrun_iap_proxy ? null : [google_compute_health_check.ui[0].id]
 
   backend {
-    group = google_compute_instance_group.host[0].self_link
+    group = var.use_cloudrun_iap_proxy ? google_compute_region_network_endpoint_group.cloudrun_proxy[0].id : google_compute_instance_group.host[0].self_link
   }
 
   iap {

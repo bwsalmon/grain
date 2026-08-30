@@ -54,12 +54,37 @@ resource "google_compute_firewall" "ssh" {
 # is ever widened by an operator the way ssh_source_ranges might be:
 # the load balancer, gated by IAP, is the only intended path to this
 # port.
+#
+# Not needed, and not created, when use_cloudrun_iap_proxy is on: the
+# load balancer then reaches a Cloud Run service instead of this VM
+# directly (cloudrun-proxy.tf), and connector_to_ui below is the
+# equivalent rule for that path.
 resource "google_compute_firewall" "lb_to_ui" {
-  count         = var.create_network && var.expose_ui_publicly ? 1 : 0
+  count         = var.create_network && var.expose_ui_publicly && !var.use_cloudrun_iap_proxy ? 1 : 0
   name          = "${var.name_prefix}-allow-lb-to-ui"
   network       = google_compute_network.this[0].name
   direction     = "INGRESS"
   source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  target_tags   = [local.host_tag]
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.ui_port)]
+  }
+}
+
+# The Serverless VPC Access connector's own subnet range reaching
+# ui_port -- lb_to_ui's equivalent for the use_cloudrun_iap_proxy path:
+# the load balancer no longer reaches this VM directly (it reaches the
+# Cloud Run proxy instead, over cloudrun-proxy.tf's Serverless NEG), so
+# what needs a path to ui_port is that proxy's own outbound traffic,
+# which egresses through this connector's subnet.
+resource "google_compute_firewall" "connector_to_ui" {
+  count         = var.create_network && var.use_cloudrun_iap_proxy ? 1 : 0
+  name          = "${var.name_prefix}-allow-connector-to-ui"
+  network       = google_compute_network.this[0].name
+  direction     = "INGRESS"
+  source_ranges = [var.cloudrun_connector_cidr]
   target_tags   = [local.host_tag]
 
   allow {
