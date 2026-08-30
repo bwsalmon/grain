@@ -218,10 +218,17 @@ func TestChecksUnavailableReflectsAForbiddenRead(t *testing.T) {
 	}
 }
 
-// Only the one permission GitHub offers no way to hold is tolerated.
-// Anything else -- a 404, a 500, a transport failure -- is still a real
-// error, and swallowing it would hide a broken deployment behind the
-// same silent "unknown".
+// Only the one permission a deployment can be configured without is
+// tolerated. Anything else -- a 404, a 500, a transport failure -- is
+// still a real error, and swallowing it would hide a broken deployment
+// behind the same silent "unknown".
+//
+// The 403s below are the reason IsPermissionDenied reads the body rather
+// than the status. Each one clears -- on its own, or with a change the
+// operator can make -- but checksUnavailable never clears within a
+// process, so classifying one as a missing permission would switch
+// auto-merge off until the next restart over a condition that had
+// already resolved. A propagated error costs one retried cycle instead.
 func TestCheckRunsForStillFailsOnEveryOtherError(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -230,6 +237,23 @@ func TestCheckRunsForStillFailsOnEveryOtherError(t *testing.T) {
 		{"not found", &github.Error{Status: 404}},
 		{"server error", &github.Error{Status: 500}},
 		{"transport", errors.New("dial tcp: connection refused")},
+		{
+			"a rate-limited 403",
+			&github.Error{Status: 403, Body: []byte(`{"message":"API rate limit exceeded for user ID 1."}`)},
+		},
+		{
+			"a secondary rate limit's 403",
+			&github.Error{Status: 403, Body: []byte(`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`)},
+		},
+		{
+			"a SAML-enforcement 403",
+			&github.Error{Status: 403, Body: []byte(`{"message":"Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization."}`)},
+		},
+		{
+			"an IP-allow-list 403",
+			&github.Error{Status: 403, Body: []byte(`{"message":"Although you appear to have the correct authorization credentials, the organization has an IP allow list enabled, and your IP address is not permitted to access this resource."}`)},
+		},
+		{"a 403 with a body that cannot be read", &github.Error{Status: 403, Body: []byte("<html>403 Forbidden</html>")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &checkRunsClient{err: tc.err}
