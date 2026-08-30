@@ -27,6 +27,7 @@ import (
 	"github.com/pkg/browser"
 
 	"github.com/bwsalmon/grain/v2/pkg/capability/githubsandbox"
+	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
 
 // manifestPermissions is exactly what pkg/capability/githubsandbox's own
@@ -92,13 +93,13 @@ func bootstrapGitHubApp(args []string) error {
 	fs := flag.NewFlagSet("grain controller bootstrap-github-app", flag.ExitOnError)
 	name := fs.String("name", "grain-sandbox", "name for the new GitHub App")
 	homepage := fs.String("url", "https://github.com/bwsalmon/grain", "homepage URL the App manifest requires")
-	secretsDir := fs.String("secrets-dir", "", "directory to write github-app/app-id and github-app/private-key into (required)")
+	dataDir := fs.String("data-dir", "", "root directory a colocated `grain daemon` was started with -- the App's credentials are written into <data-dir>/secrets, the same store `grain daemon` and `grain secrets` read and write (required)")
 	githubHost := fs.String("github-host", "github.com", "GitHub host to run the manifest flow against")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *secretsDir == "" {
-		return fmt.Errorf("-secrets-dir is required")
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
 	}
 
 	state, err := randomHex(16)
@@ -173,27 +174,42 @@ func bootstrapGitHubApp(args []string) error {
 		return fmt.Errorf("exchanging the manifest code: %w", err)
 	}
 
-	appDir := filepath.Join(*secretsDir, "github-app")
-	if err := os.MkdirAll(appDir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", appDir, err)
-	}
-	if err := os.WriteFile(filepath.Join(appDir, "app-id"), []byte(appID), 0o600); err != nil {
-		return fmt.Errorf("writing app-id: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(appDir, "private-key"), []byte(privateKey), 0o600); err != nil {
-		return fmt.Errorf("writing private-key: %w", err)
+	if err := writeAppCredentials(*dataDir, appID, privateKey); err != nil {
+		return err
 	}
 
 	fmt.Printf(
-		"\nWrote %s/{app-id,private-key} -- the github-sandbox capability's\n"+
-			"%s and %s secrets.\n\n"+
+		"\nWrote the %s and %s secrets to %s --\n"+
+			"the github-sandbox capability's own credentials, ready for a `grain daemon`\n"+
+			"(or `grain secrets list`) started against the same -data-dir to pick up.\n\n"+
 			"One step left: the App exists but is not installed anywhere yet. Visit\n"+
 			"%s, choose \"Install App\", and install it on the same bot\n"+
 			"account -- \"All repositories\" (there is nothing to select yet, since this\n"+
 			"capability creates repos on demand). Nothing dispatches against\n"+
 			"github-sandbox until that install completes.\n",
-		appDir, githubsandbox.DefaultAppIDCredential, githubsandbox.DefaultPrivateKeyCredential, htmlURL,
+		githubsandbox.DefaultAppIDCredential, githubsandbox.DefaultPrivateKeyCredential, filepath.Join(*dataDir, "secrets"), htmlURL,
 	)
+	return nil
+}
+
+// writeAppCredentials stores appID and privateKey in the same
+// pkg/secrets database (<data-dir>/secrets/secrets.db) that
+// githubsandbox.Provider.Resolve -- and `grain secrets` -- read from,
+// under the one "github-app" secret's "app-id" and "private-key" keys:
+// exactly the pair DefaultAppIDCredential and DefaultPrivateKeyCredential
+// name. Earlier, this command wrote plain files under <secrets-dir>/
+// github-app/ instead, which nothing that resolves credentials through
+// pkg/secrets.Store (a SQLite database, not a directory of files) ever
+// read -- an operator had to separately run `grain secrets set` by hand
+// for bootstrap-github-app's output to take effect at all.
+func writeAppCredentials(dataDir, appID, privateKey string) error {
+	store := secrets.New(filepath.Join(dataDir, "secrets"))
+	if err := store.Set("github-app", "app-id", []byte(appID)); err != nil {
+		return fmt.Errorf("writing app-id: %w", err)
+	}
+	if err := store.Set("github-app", "private-key", []byte(privateKey)); err != nil {
+		return fmt.Errorf("writing private-key: %w", err)
+	}
 	return nil
 }
 
