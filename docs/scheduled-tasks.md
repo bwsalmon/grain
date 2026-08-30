@@ -165,3 +165,17 @@ addition for the new entry point.
   `time.Time` throughout, same as every other timestamp in this store;
   "every N hours/minutes since it last fired" is the whole of what a
   schedule can express, not "at 09:00 local time."
+
+## Update: schedules got their own pane (bwsalmon/agents#455)
+
+The "Frontend" bullet above and `ScheduledTasksOverlay.jsx` describe how
+this first shipped; bwsalmon/agents#455 moved the UI from a modal opened
+by a footer button to a full pane (`SchedulesList.jsx`), selected the
+same way the repo page already is: a `ListItemButton` alongside "Repos"
+in `Sidebar.jsx`, switching `App.jsx`'s `view` state to `"schedules"`
+rather than toggling an overlay's visibility. This also closed the gap
+the original overlay left open -- editing an existing schedule's title,
+description, repo, base branch, auto-merge, or interval, which
+`UpdateSchedule`/`PATCH /api/schedules/{id}` already accepted but no UI
+exposed beyond the enabled toggle. No backend change was needed; the API
+surface was already complete.
