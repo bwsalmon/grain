@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
@@ -122,8 +123,21 @@ func reconcileReleases(ctx context.Context, deps Deps, now time.Time) error {
 	return SyncReleases(ctx, deps.Store, deps.Client, now)
 }
 
-// reconcileDispatch lets dispatch.Cycle decide what runs, then runs each
-// dispatch it decided on.
+// reconcileDispatch lets dispatch.Cycle decide what runs, then runs every
+// dispatch it decided on concurrently, one goroutine per dispatch.
+//
+// This is what actually makes -slots/GRAIN_SLOTS a concurrency knob rather
+// than just a scheduling one (bwsalmon/agents#435): each Dispatch names a
+// distinct, free slot (dispatch.Cycle's own loop draws each one from
+// store.OccupiedSlots-filtered "free" without repeats), so two dispatches
+// from the same Cycle call never touch the same sandbox, the same
+// model.Run row, or the same task -- there is nothing for concurrent
+// runOne calls to race over. HostSandboxes and KonturSandboxes both guard
+// their own per-slot state with a mutex keyed by slot, and model.Store is
+// already built for concurrent callers (pkg/model/sqlite's own doc
+// comment: "the single writer for the whole store" -- serialization
+// happens inside Store, not by a caller taking turns), so nothing here
+// needs to hold a lock of its own.
 //
 // One dispatch failing does not abandon the others. Every Dispatch
 // dispatch.Cycle returns already has its own durable store row (its own
@@ -131,23 +145,33 @@ func reconcileReleases(ctx context.Context, deps Deps, now time.Time) error {
 // is returned"), so a slot whose run fails here is a slot whose task is
 // recorded as attempted either way — dropping the remaining dispatches on
 // the floor would leave their slots idle for a tick without changing
-// anything about the one that failed.
+// anything about the one that failed. errs is appended to under errsMu
+// since the goroutines below share it; ctx itself (passed to every
+// runOne unchanged) is what stops them early on cancellation -- framework.
+// Run and the store calls underneath it all already respect it, so there
+// is no separate ctx.Err() check to make before launching them the way
+// the old sequential loop needed one before each iteration.
 func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.Slots, now)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
 
+	var errsMu sync.Mutex
 	var errs []error
+	var wg sync.WaitGroup
 	for _, d := range dispatches {
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, err)
-			break
-		}
-		if err := runOne(ctx, deps, d, now); err != nil {
-			errs = append(errs, err)
-		}
+		wg.Add(1)
+		go func(d dispatch.Dispatch) {
+			defer wg.Done()
+			if err := runOne(ctx, deps, d, now); err != nil {
+				errsMu.Lock()
+				errs = append(errs, err)
+				errsMu.Unlock()
+			}
+		}(d)
 	}
+	wg.Wait()
 	return errors.Join(errs...)
 }
 

@@ -61,6 +61,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,11 +224,20 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	mergedBranches := map[string]string{} // taskID -> branch, once this loop actually merged it
 	coverage := &clusterCoverage{}
 
+	// genMu guards rng, roundAttempts and coverage below: orchestrator.
+	// RunCycle now runs a tick's dispatches concurrently
+	// (bwsalmon/agents#435), so the several randomGenerator instances
+	// Framework hands out within one tick -- one per dispatch, all
+	// sharing these same three closed-over values -- can genuinely call
+	// GenerateContent from different goroutines at once, unlike every
+	// scripted generator elsewhere in this package that is only ever
+	// used by one run at a time.
+	var genMu sync.Mutex
 	deps := orchestrator.Deps{
 		Client: client, Sandboxes: sandboxes, Slots: slots,
 		Framework: func() agent.Framework {
 			return gemini.NewForTest(&randomGenerator{
-				rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,
+				mu: &genMu, rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,
 			})
 		},
 	}
@@ -462,6 +472,13 @@ var promptRe = regexp.MustCompile(`Work in (\S+)\. Push your change to a new bra
 // script for every further call the way scriptedGenerator does, since one
 // Framework (and so one randomGenerator) is only ever used for one run.
 type randomGenerator struct {
+	// mu guards every access below to rng, pushed and coverage: they are
+	// shared across every randomGenerator a tick's Framework factory
+	// hands out, one per concurrently dispatched task, unlike script and
+	// calls below, which are this randomGenerator's own and never touched
+	// by any other goroutine (one Framework, and so one randomGenerator,
+	// is only ever used for one run -- see this type's own doc comment).
+	mu         *sync.Mutex
 	rng        *rand.Rand
 	githubHost string
 	pushed     map[string]string // taskID -> branch, written on a push decision (an attempt, not yet a confirmed one -- see runRandomizedCluster's roundAttempts)
@@ -481,24 +498,33 @@ func (g *randomGenerator) GenerateContent(_ context.Context, _ string, contents 
 		repo, branch := m[1], m[2]
 		taskID := strings.TrimPrefix(branch, "grain/task-")
 		remote := "http://" + g.githubHost + "/" + repo + ".git"
+
+		g.mu.Lock()
 		// clonePrefix folds in a fresh random token, not just taskID: a
 		// task whose scripted push script gets run more than once (a
 		// retry after an earlier attempt's clone itself failed, leaving a
 		// same-named directory behind half-populated) must still get a
 		// directory git is willing to clone into.
 		clonePrefix := fmt.Sprintf("work-%s-%x", taskID, g.rng.Uint64())
-
-		switch r := g.rng.Float64(); {
+		r := g.rng.Float64()
+		switch {
 		case r < 0.55:
-			g.script = randomPushScript(remote, branch, taskID, clonePrefix)
 			g.pushed[taskID] = branch
 			g.coverage.pushed = true
 		case r < 0.8:
-			g.script = failScript("simulated failure")
 			g.coverage.failed = true
 		default:
-			g.script = askScript("need direction on " + taskID)
 			g.coverage.asked = true
+		}
+		g.mu.Unlock()
+
+		switch {
+		case r < 0.55:
+			g.script = randomPushScript(remote, branch, taskID, clonePrefix)
+		case r < 0.8:
+			g.script = failScript("simulated failure")
+		default:
+			g.script = askScript("need direction on " + taskID)
 		}
 	}
 	if g.calls >= len(g.script) {

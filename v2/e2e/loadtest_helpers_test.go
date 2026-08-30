@@ -244,6 +244,14 @@ const (
 // run_command, standing in for the real work a dispatched agent would
 // spend most of its own wall time doing.
 type loadGenerator struct {
+	// rngMu guards every rng access below: orchestrator.RunCycle now runs
+	// a tick's dispatches concurrently (bwsalmon/agents#435), and every
+	// loadGenerator a tick's Framework factory hands out -- one per
+	// dispatch -- shares this same tickerRNG (loadtest_test.go), unlike
+	// script/calls/start/reported below, which are this loadGenerator's
+	// own and never touched by any other goroutine (one Framework, and so
+	// one loadGenerator, is only ever used for one run).
+	rngMu   *sync.Mutex
 	rng     *rand.Rand
 	metrics *loadMetrics
 
@@ -253,8 +261,8 @@ type loadGenerator struct {
 	reported bool
 }
 
-func newLoadGenerator(rng *rand.Rand, metrics *loadMetrics) *loadGenerator {
-	return &loadGenerator{rng: rng, metrics: metrics}
+func newLoadGenerator(rngMu *sync.Mutex, rng *rand.Rand, metrics *loadMetrics) *loadGenerator {
+	return &loadGenerator{rngMu: rngMu, rng: rng, metrics: metrics}
 }
 
 // GenerateContent's own timing -- start at the first call, reported once
@@ -269,9 +277,12 @@ func newLoadGenerator(rng *rand.Rand, metrics *loadMetrics) *loadGenerator {
 func (g *loadGenerator) GenerateContent(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 	if g.script == nil {
 		g.start = time.Now()
+		g.rngMu.Lock()
 		workSeconds := 0.01 + g.rng.Float64()*0.04
+		r := g.rng.Float64()
+		g.rngMu.Unlock()
 		work := toolCall("run_command", map[string]any{"command": fmt.Sprintf("sleep %.3f", workSeconds)})
-		switch r := g.rng.Float64(); {
+		switch {
 		case r < 0.5:
 			g.script = []*genai.GenerateContentResponse{
 				work,
