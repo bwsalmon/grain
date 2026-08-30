@@ -14,12 +14,30 @@ const releaseConfig = {
   majorVersion: 1,
 };
 
+const unconfiguredQualificationPlan = {
+  configured: false, repo: "acme/widgets", requireApproval: false, autoPromote: false, items: [],
+};
+
+const smokeTemplate = { id: "template-1", name: "Smoke test", title: "Smoke test", repo: "acme/widgets", autoMerge: false, capabilities: [] };
+const otherRepoTemplate = { id: "template-2", name: "Unrelated", title: "Unrelated", repo: "acme/other", autoMerge: false, capabilities: [] };
+
 // Distinct labels for the active vs. promoted candidate below -- a real
 // cut always produces a fresh label, and giving the two fixtures the
 // same one only makes "current candidate" vs. "history" harder to tell
 // apart in a rendered tree that shows the current one in both places.
-const activeCandidate = { id: "c2", label: "v1.1.0-rc1", status: "active", branch: "rc", releaseBranch: "" };
-const promotedCandidate = { id: "c1", label: "v1.0.0-rc1", status: "promoted", branch: "rc", releaseBranch: "release/v1" };
+const activeCandidate = { id: 2, label: "v1.1.0-rc1", status: "active", branch: "rc", releaseBranch: "" };
+const promotedCandidate = { id: 1, label: "v1.0.0-rc1", status: "promoted", branch: "rc", releaseBranch: "release/v1" };
+
+// queueRefresh queues exactly the sequence of api() calls RepoReleases'
+// own refresh() makes: release-config, candidates and the qualification
+// plan concurrently (Promise.all, so in that array order), then --
+// only when there is a current candidate -- its qualification run.
+function queueRefresh(cfg, candidates, plan = unconfiguredQualificationPlan, run = null) {
+  api.mockResolvedValueOnce(cfg).mockResolvedValueOnce(candidates).mockResolvedValueOnce(plan);
+  if (candidates.length > 0) {
+    api.mockResolvedValueOnce(run);
+  }
+}
 
 function current() {
   return within(document.body.querySelector(".candidate-current"));
@@ -31,7 +49,7 @@ describe("RepoReleases", () => {
   });
 
   it("loads the given repo's config and shows its current candidate", async () => {
-    api.mockResolvedValueOnce(releaseConfig).mockResolvedValueOnce([activeCandidate]);
+    queueRefresh(releaseConfig, [activeCandidate]);
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
@@ -40,10 +58,12 @@ describe("RepoReleases", () => {
     expect(current().getByText(/active/)).toBeInTheDocument();
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/release-config");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates");
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/qualification-plan");
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates/2/qualification");
   });
 
   it("enables Promote but not Cut when the current candidate is still active", async () => {
-    api.mockResolvedValueOnce(releaseConfig).mockResolvedValueOnce([activeCandidate]);
+    queueRefresh(releaseConfig, [activeCandidate]);
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
@@ -52,9 +72,7 @@ describe("RepoReleases", () => {
   });
 
   it("shows a note and no candidate history when the repo has no release config yet", async () => {
-    api
-      .mockResolvedValueOnce({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 })
-      .mockResolvedValueOnce([]);
+    queueRefresh({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 }, []);
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/has no release configuration yet/)).toBeInTheDocument();
@@ -63,12 +81,9 @@ describe("RepoReleases", () => {
   });
 
   it("saves the release config form and reloads it", async () => {
-    api
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([activeCandidate])
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ ...releaseConfig, prodBranch: "production" })
-      .mockResolvedValueOnce([activeCandidate]);
+    queueRefresh(releaseConfig, [activeCandidate]);
+    api.mockResolvedValueOnce({});
+    queueRefresh({ ...releaseConfig, prodBranch: "production" }, [activeCandidate]);
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByLabelText(/Prod branch/);
@@ -85,12 +100,9 @@ describe("RepoReleases", () => {
   });
 
   it("cuts a new RC when eligible", async () => {
-    api
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([promotedCandidate])
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([activeCandidate, promotedCandidate]);
+    queueRefresh(releaseConfig, [promotedCandidate]);
+    api.mockResolvedValueOnce({});
+    queueRefresh(releaseConfig, [activeCandidate, promotedCandidate], unconfiguredQualificationPlan, null);
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
@@ -102,12 +114,9 @@ describe("RepoReleases", () => {
   });
 
   it("promotes the current RC when eligible", async () => {
-    api
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([activeCandidate])
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce(releaseConfig)
-      .mockResolvedValueOnce([{ ...activeCandidate, status: "promoted" }]);
+    queueRefresh(releaseConfig, [activeCandidate]);
+    api.mockResolvedValueOnce({});
+    queueRefresh(releaseConfig, [{ ...activeCandidate, status: "promoted" }]);
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
@@ -119,7 +128,7 @@ describe("RepoReleases", () => {
   });
 
   it("calls onBack when the back button is clicked", async () => {
-    api.mockResolvedValueOnce(releaseConfig).mockResolvedValueOnce([activeCandidate]);
+    queueRefresh(releaseConfig, [activeCandidate]);
     const onBack = vi.fn();
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={onBack} showError={() => {}} />);
@@ -128,5 +137,62 @@ describe("RepoReleases", () => {
     await user.click(screen.getByRole("button", { name: /Repos/ }));
 
     expect(onBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a pending-approval banner and approves the run's tasks in bulk", async () => {
+    const run = {
+      id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "pending_approval",
+      tasks: [{ taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 1, approved: false, state: "proposed" }],
+    };
+    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, run);
+    api.mockResolvedValueOnce({});
+    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, { ...run, status: "running", tasks: [{ ...run.tasks[0], approved: true, state: "queued" }] });
+    const user = userEvent.setup();
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
+    await screen.findByText("Smoke test");
+
+    expect(screen.getByText(/need approval before any of them can run/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Approve all" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates/2/qualification/approve", { method: "POST" });
+    expect(await screen.findByText("Running")).toBeInTheDocument();
+  });
+
+  it("shows a ready-to-promote banner once qualification succeeds", async () => {
+    const run = {
+      id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "succeeded",
+      tasks: [{ taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 1, approved: true, state: "completed" }],
+    };
+    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, run);
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
+
+    expect(await screen.findByText(/ready to promote/)).toBeInTheDocument();
+  });
+
+  it("only offers templates that target this repo, and saves a new qualification item", async () => {
+    queueRefresh(releaseConfig, [activeCandidate]);
+    api.mockResolvedValueOnce({});
+    queueRefresh(releaseConfig, [activeCandidate]);
+    const user = userEvent.setup();
+    render(
+      <RepoReleases repo="acme/widgets" templates={[smokeTemplate, otherRepoTemplate]} onBack={() => {}} showError={() => {}} />
+    );
+    await screen.findByRole("button", { name: "Add item" });
+
+    await user.click(screen.getByRole("button", { name: "Add item" }));
+    await user.click(screen.getByLabelText("Template"));
+    expect(screen.getByRole("option", { name: "Smoke test" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Unrelated" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "Smoke test" }));
+    await user.click(screen.getByRole("button", { name: "Save qualification plan" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/qualification-plan", {
+      method: "PUT",
+      body: JSON.stringify({
+        requireApproval: false,
+        autoPromote: false,
+        items: [{ templateId: "template-1", repeat: 1, dependsOn: [] }],
+      }),
+    });
   });
 });

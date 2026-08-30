@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Box, Button, Stack, TextField, Typography } from "@mui/material";
+import {
+  Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel,
+  InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography,
+} from "@mui/material";
 import api from "../api.js";
+import { STATE_LABELS } from "../state.js";
 
 // RepoReleases is a single repo's release pane (bwsalmon/agents#459):
 // configure its prod/rc branches, release branch prefix and major
@@ -9,19 +13,35 @@ import api from "../api.js";
 // asked the caller to type an owner/name even though releases are a
 // property of a repo -- this only ever renders from the repo pane
 // (RepoList's own "Releases" button), already knowing which repo it means.
-export default function RepoReleases({ repo, onBack, showError }) {
+//
+// bwsalmon/agents#518 adds the qualification plan editor and, for the
+// current candidate, its qualification run's own summary -- see
+// QualificationPlanEditor and QualificationSummary below. A qualification
+// item always names a task_template (bwsalmon/agents#516) rather than
+// carrying its own content, which is why this component needs the same
+// `templates` list App.jsx already fetches for SchedulesList's own
+// picker.
+export default function RepoReleases({ repo, templates = [], onBack, showError }) {
   const [owner, name] = repo.split("/");
   const [releaseConfig, setReleaseConfig] = useState(null);
   const [candidates, setCandidates] = useState([]);
+  const [qualificationPlan, setQualificationPlan] = useState(null);
+  const [qualificationRun, setQualificationRun] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, list] = await Promise.all([
+      const [cfg, list, plan] = await Promise.all([
         api(`/api/repos/${owner}/${name}/release-config`),
         api(`/api/repos/${owner}/${name}/candidates`),
+        api(`/api/repos/${owner}/${name}/qualification-plan`),
       ]);
       setReleaseConfig(cfg);
       setCandidates(list);
+      setQualificationPlan(plan);
+      const current = list.length > 0 ? list[0] : null;
+      setQualificationRun(
+        current ? await api(`/api/repos/${owner}/${name}/candidates/${current.id}/qualification`) : null
+      );
     } catch (err) {
       showError(err);
     }
@@ -64,11 +84,30 @@ export default function RepoReleases({ repo, onBack, showError }) {
     }
   };
 
-  if (releaseConfig === null) return null;
+  const savePlan = async (payload) => {
+    try {
+      await api(`/api/repos/${owner}/${name}/qualification-plan`, { method: "PUT", body: JSON.stringify(payload) });
+      await refresh();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const approveQualification = async (candidateId) => {
+    try {
+      await api(`/api/repos/${owner}/${name}/candidates/${candidateId}/qualification/approve`, { method: "POST" });
+      await refresh();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  if (releaseConfig === null || qualificationPlan === null) return null;
 
   const current = candidates.length > 0 ? candidates[0] : null;
   const canCut = releaseConfig.configured && (!current || current.status === "promoted");
   const canPromote = current && current.status === "active";
+  const ownTemplates = templates.filter((tmpl) => tmpl.repo === repo);
 
   return (
     <main>
@@ -109,7 +148,14 @@ export default function RepoReleases({ repo, onBack, showError }) {
           <Button variant="outlined" disabled={!canPromote} onClick={promote}>Promote current RC</Button>
         </Stack>
 
-        <Typography variant="subtitle1">History</Typography>
+        {current && (
+          <QualificationSummary
+            run={qualificationRun}
+            onApprove={() => approveQualification(current.id)}
+          />
+        )}
+
+        <Typography variant="subtitle1" sx={{ mt: 2 }}>History</Typography>
         {candidates.length === 0 && <p className="empty">No candidates yet.</p>}
         {candidates.length > 0 && (
           <ul className="candidate-history">
@@ -121,7 +167,198 @@ export default function RepoReleases({ repo, onBack, showError }) {
             ))}
           </ul>
         )}
+
+        <Typography variant="subtitle1" sx={{ mt: 3 }}>Qualification plan</Typography>
+        <p className="hint">
+          Task templates a fresh, active release candidate schedules automatically -- run this many
+          times each, in dependency order, against the candidate's own branch. Pick from the
+          templates already declared for {repo} under Templates.
+        </p>
+        <QualificationPlanEditor plan={qualificationPlan} templates={ownTemplates} onSave={savePlan} />
       </Box>
     </main>
+  );
+}
+
+const QUALIFICATION_STATUS_LABELS = {
+  pending_approval: "Pending approval",
+  running: "Running",
+  succeeded: "Succeeded",
+  failed: "Failed",
+};
+
+const QUALIFICATION_STATUS_COLORS = {
+  pending_approval: "warning",
+  running: "info",
+  succeeded: "success",
+  failed: "error",
+};
+
+// QualificationSummary is the current candidate's own qualification
+// progress: a status chip, an action or outcome banner, and every task
+// instance a run has scheduled -- ordered failures first by the API, so
+// the issue's own "show...any failures up front" needs no sort here.
+// run is null both before a plan has ever scheduled one for this
+// candidate and when the repo has no plan configured at all -- rendering
+// nothing either way, since there is nothing yet to summarize.
+function QualificationSummary({ run, onApprove }) {
+  if (!run) return null;
+  const label = QUALIFICATION_STATUS_LABELS[run.status] || run.status;
+  const color = QUALIFICATION_STATUS_COLORS[run.status] || "default";
+
+  return (
+    <Box sx={{ mb: 2 }}>
+      <Stack direction="row" spacing={1} alignItems="center">
+        <Typography variant="subtitle1" sx={{ mt: 0 }}>Qualification</Typography>
+        <Chip size="small" color={color} label={label} />
+      </Stack>
+      {run.status === "pending_approval" && (
+        <Alert severity="warning" sx={{ mt: 1 }} action={<Button size="small" onClick={onApprove}>Approve all</Button>}>
+          This candidate's qualification tasks need approval before any of them can run.
+        </Alert>
+      )}
+      {run.status === "succeeded" && (
+        <Alert severity="success" sx={{ mt: 1 }}>Qualification passed -- ready to promote.</Alert>
+      )}
+      {run.status === "failed" && (
+        <Alert severity="error" sx={{ mt: 1 }}>Qualification failed -- see below.</Alert>
+      )}
+      <ul className="qualification-task-list">
+        {run.tasks.map((t) => (
+          <li key={t.taskId}>
+            <span className={`badge badge-${t.state}`} title={STATE_LABELS[t.state] || t.state} />
+            {t.templateName}
+            {t.repeat > 1 && <span className="hint"> ({t.instanceIndex}/{t.repeat})</span>}
+            {!t.approved && <Chip size="small" label="Unapproved" sx={{ ml: 1 }} />}
+          </li>
+        ))}
+      </ul>
+    </Box>
+  );
+}
+
+function emptyItem() {
+  return { templateId: "", repeat: 1, dependsOn: [] };
+}
+
+// QualificationPlanEditor is the whole-plan form: the two switches
+// bwsalmon/agents#518 asks for, and every item, added, edited and
+// removed in place -- PutQualificationPlan replaces the whole plan
+// wholesale on Save, so there is no separate per-item save action.
+//
+// Each item's own content -- title, body, reads, capabilities -- comes
+// entirely from the template it names (bwsalmon/agents#516); this form
+// only ever picks which template, how many times, and what it waits on,
+// the same "template takes over the content fields" split ScheduleForm's
+// own picker already draws.
+function QualificationPlanEditor({ plan, templates, onSave }) {
+  const [requireApproval, setRequireApproval] = useState(plan.requireApproval);
+  const [autoPromote, setAutoPromote] = useState(plan.autoPromote);
+  const [items, setItems] = useState(
+    plan.items.map((it) => ({ templateId: it.templateId, repeat: it.repeat, dependsOn: it.dependsOn || [] }))
+  );
+
+  const updateItem = (i, patch) => {
+    setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  };
+  const removeItem = (i) => {
+    setItems((prev) => prev.filter((_, idx) => idx !== i));
+  };
+  const addItem = () => {
+    setItems((prev) => [...prev, emptyItem()]);
+  };
+
+  const submit = async (evt) => {
+    evt.preventDefault();
+    const payload = {
+      requireApproval,
+      autoPromote,
+      items: items
+        .filter((it) => it.templateId !== "")
+        .map((it) => ({ templateId: it.templateId, repeat: Number(it.repeat) || 1, dependsOn: it.dependsOn || [] })),
+    };
+    await onSave(payload);
+  };
+
+  const templateName = (id) => (templates.find((tmpl) => tmpl.id === id) || {}).name || id;
+
+  return (
+    <form onSubmit={submit}>
+      <FormControlLabel
+        control={<Checkbox checked={requireApproval} onChange={(e) => setRequireApproval(e.target.checked)} />}
+        label="Require approval before running qualification tasks"
+        sx={{ display: "flex", mt: 1 }}
+      />
+      <FormControlLabel
+        control={<Checkbox checked={autoPromote} onChange={(e) => setAutoPromote(e.target.checked)} />}
+        label="Promote automatically once qualification succeeds"
+        sx={{ display: "flex" }}
+      />
+
+      {templates.length === 0 && (
+        <Alert severity="info" sx={{ mt: 2 }}>
+          No task templates target this repo yet -- create one under Templates first.
+        </Alert>
+      )}
+
+      {items.map((it, i) => {
+        const otherItems = items.filter((_, idx) => idx !== i && items[idx].templateId !== "");
+        return (
+          <Box key={i} className="qualification-item-row" sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.5, mt: 1.5 }}>
+            <Stack direction="row" spacing={1} alignItems="flex-start">
+              <FormControl size="small" sx={{ flex: 2 }}>
+                <InputLabel id={`qualification-template-label-${i}`}>Template</InputLabel>
+                <Select
+                  labelId={`qualification-template-label-${i}`}
+                  label="Template"
+                  value={it.templateId}
+                  onChange={(e) => updateItem(i, { templateId: e.target.value })}
+                >
+                  <MenuItem value="" disabled>Choose a template</MenuItem>
+                  {templates.map((tmpl) => (
+                    <MenuItem key={tmpl.id} value={tmpl.id}>{tmpl.name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <TextField
+                label="Repeat" type="number" inputProps={{ min: 1 }} value={it.repeat}
+                onChange={(e) => updateItem(i, { repeat: e.target.value })} size="small" sx={{ width: 90 }}
+              />
+            </Stack>
+            <FormControl fullWidth size="small" margin="dense">
+              <InputLabel id={`qualification-dependson-label-${i}`}>Depends on</InputLabel>
+              <Select
+                labelId={`qualification-dependson-label-${i}`}
+                label="Depends on"
+                multiple
+                value={it.dependsOn}
+                onChange={(e) => updateItem(i, { dependsOn: e.target.value })}
+                renderValue={(selected) => (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                    {selected.map((id) => <Chip key={id} size="small" label={templateName(id)} />)}
+                  </Box>
+                )}
+              >
+                {otherItems.length === 0 && <MenuItem disabled value="">No other items yet</MenuItem>}
+                {otherItems.map((other) => (
+                  <MenuItem key={other.templateId} value={other.templateId}>
+                    <Checkbox checked={it.dependsOn.includes(other.templateId)} size="small" />
+                    <ListItemText primary={templateName(other.templateId)} />
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 0.5 }}>
+              <Button size="small" color="error" onClick={() => removeItem(i)}>Remove</Button>
+            </Stack>
+          </Box>
+        );
+      })}
+
+      <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+        <Button size="small" variant="outlined" onClick={addItem} disabled={templates.length === 0}>Add item</Button>
+        <Button size="small" type="submit" variant="contained">Save qualification plan</Button>
+      </Stack>
+    </form>
   );
 }

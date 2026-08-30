@@ -63,9 +63,17 @@ type Reconciler struct {
 // fresh row in the store, not an outside event to poll for, the same
 // "the store is the record" shape everything else here already holds to.
 //
+// "qualifications" (bwsalmon/agents#518) is the newest, and runs right
+// after "releases" on purpose: a candidate "releases" has just advanced
+// to CandidateActive this same cycle gets its qualification run
+// instantiated the same tick rather than waiting a cycle to be noticed,
+// and a run whose last task "sync" observed completing earlier this same
+// cycle is promoted (when its plan's AutoPromote asks for it) without a
+// tick's delay either.
+//
 // The order among the rest is a latency preference, not a dependency:
 // syncing pull requests last lets a merge this very cycle just performed
-// be picked up without a tick's delay. All four read their own inputs
+// be picked up without a tick's delay. All five read their own inputs
 // from the store, so a different order produces the same state one cycle
 // later — which is exactly why one failing does not invalidate another.
 func Reconcilers() []Reconciler {
@@ -74,6 +82,7 @@ func Reconcilers() []Reconciler {
 		{Name: "dispatch", Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
 		{Name: "releases", Reconcile: reconcileReleases},
+		{Name: "qualifications", Reconcile: reconcileQualifications},
 	}
 }
 
@@ -121,6 +130,13 @@ func reconcileSync(ctx context.Context, deps Deps, now time.Time) error {
 // performed -- cutting its own branch, or promoting it.
 func reconcileReleases(ctx context.Context, deps Deps, now time.Time) error {
 	return SyncReleases(ctx, deps.Store, deps.Client, now)
+}
+
+// reconcileQualifications schedules and, once successful, auto-promotes
+// each repo's qualification plan (bwsalmon/agents#518) against its own
+// active release candidate.
+func reconcileQualifications(ctx context.Context, deps Deps, now time.Time) error {
+	return SyncQualifications(ctx, deps.Store, now)
 }
 
 // reconcileDispatch lets dispatch.Cycle decide what runs, then runs every

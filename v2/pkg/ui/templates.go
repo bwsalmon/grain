@@ -230,12 +230,15 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 // DeleteTemplate removes a template outright -- DeleteScheduledTask's own
 // "no history worth keeping" reasoning applies again here, except a
 // template additionally refuses to delete out from under a schedule that
-// still fires from it: unlike editing a template (which every schedule
-// pointing at it is meant to pick up), deleting one out from under a live
-// schedule would silently strand that schedule's next firing with no
-// content to file, worse than the plain 404 fireScheduledTask would
-// otherwise have to surface days or weeks later. A human wanting to
-// delete it anyway repoints or deletes those schedules first.
+// still fires from it, or a qualification plan (bwsalmon/agents#518)
+// that still schedules from it: unlike editing a template (which every
+// schedule or plan pointing at it is meant to pick up), deleting one out
+// from under either would silently strand its next firing -- a
+// schedule's with no content to file, a plan's with no template for
+// CreateQualificationRun to resolve -- worse than the plain, retried
+// error fireScheduledTask/CreateQualificationRun would otherwise have to
+// surface days or weeks later. A human wanting to delete it anyway
+// repoints or deletes those schedules and plans first.
 func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	existing, err := c.Store.GetTaskTemplate(ctx, id)
 	if err != nil {
@@ -251,6 +254,14 @@ func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	if len(inUse) > 0 {
 		return validationErrorf(
 			"template is used by %d schedule(s); repoint or delete those first", len(inUse))
+	}
+	usedBy, err := c.Store.QualificationPlansUsingTemplate(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(usedBy) > 0 {
+		return validationErrorf(
+			"template is used by %d repo's qualification plan; remove it from those first", len(usedBy))
 	}
 	return c.Store.DeleteTaskTemplate(ctx, id)
 }

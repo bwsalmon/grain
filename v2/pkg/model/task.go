@@ -74,16 +74,17 @@ type Attribution struct {
 type OriginReason string
 
 const (
-	ReasonDirect   OriginReason = "direct"   // somebody just filed it
-	ReasonSchedule OriginReason = "schedule" // a scheduled job fired
-	ReasonFix      OriginReason = "fix"      // filed for a broken PR
-	ReasonReview   OriginReason = "review"   // review threads asked for it
-	ReasonProposal OriginReason = "proposal" // an agent or parent proposed it
+	ReasonDirect        OriginReason = "direct"        // somebody just filed it
+	ReasonSchedule      OriginReason = "schedule"      // a scheduled job fired
+	ReasonFix           OriginReason = "fix"           // filed for a broken PR
+	ReasonReview        OriginReason = "review"        // review threads asked for it
+	ReasonProposal      OriginReason = "proposal"      // an agent or parent proposed it
+	ReasonQualification OriginReason = "qualification" // a release candidate's qualification plan fired it
 )
 
 func (r OriginReason) Valid() bool {
 	switch r {
-	case ReasonDirect, ReasonSchedule, ReasonFix, ReasonReview, ReasonProposal:
+	case ReasonDirect, ReasonSchedule, ReasonFix, ReasonReview, ReasonProposal, ReasonQualification:
 		return true
 	}
 	return false
