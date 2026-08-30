@@ -169,14 +169,18 @@ resource "google_compute_instance" "host" {
       error_message = "enable_gemini_key, agent_can_manage_compute_instances, and agent_can_manage_gke all need a real key on the agent account to do anything -- set deployer_member so push-secrets.sh can mint one after apply (see iam.tf's deployer_manages_minter_keys)."
     }
 
-    # grain-github-token, grain-gemini-api-key, and grain-gcp-minter-key
-    # are never declared here -- push-secrets.sh adds them directly with
+    # grain-github-token, grain-github-app-id/installation-id/private-key,
+    # grain-gemini-api-key, and grain-gcp-minter-key are never declared
+    # here -- push-secrets.sh adds them directly with
     # `gcloud compute instances add-metadata` once this resource exists,
-    # so none of the three ever passes through Terraform or lands in the
+    # so none of them ever passes through Terraform or lands in the
     # state file. Without this, the next apply would see them as drift
     # and remove them.
     ignore_changes = [
       metadata["grain-github-token"],
+      metadata["grain-github-app-id"],
+      metadata["grain-github-app-installation-id"],
+      metadata["grain-github-app-private-key"],
       metadata["grain-gemini-api-key"],
       metadata["grain-gcp-minter-key"],
     ]

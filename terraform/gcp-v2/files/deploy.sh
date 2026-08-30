@@ -144,6 +144,9 @@ cleanup() { rm -rf "$SECRET_DIR"; }
 trap cleanup EXIT
 
 GITHUB_TOKEN="$(md_optional instance/attributes/grain-github-token)"
+GITHUB_APP_ID="$(md_optional instance/attributes/grain-github-app-id)"
+GITHUB_APP_INSTALLATION_ID="$(md_optional instance/attributes/grain-github-app-installation-id)"
+GITHUB_APP_PRIVATE_KEY="$(md_optional instance/attributes/grain-github-app-private-key)"
 GEMINI_API_KEY="$(md_optional instance/attributes/grain-gemini-api-key)"
 
 MINTER_KEY_FILE=""
@@ -154,8 +157,8 @@ if [ -n "$minter_key_json" ]; then
   printf '%s' "$minter_key_json" > "$MINTER_KEY_FILE"
 fi
 
-if [ -z "$GITHUB_TOKEN" ]; then
-  log "no grain-github-token in instance metadata yet -- deploying with no GitHub credential; run push-secrets.sh once it's ready"
+if [ -z "$GITHUB_TOKEN" ] && [ -z "$GITHUB_APP_ID" ]; then
+  log "no grain-github-token or grain-github-app-id in instance metadata yet -- deploying with no GitHub credential; run push-secrets.sh once one is ready"
 fi
 if [ -z "$GEMINI_API_KEY" ] && [ -n "$MINTER_KEY_FILE" ]; then
   log "no grain-gemini-api-key in instance metadata -- setup.sh will mint the daemon's own key with the minter credential (terraform/gcp-v2 README, \"The daemon's own Gemini key\")"
@@ -176,7 +179,8 @@ log "  target_repos=${TARGET_REPOS:-<empty: every task parks>}"
 log "  default_target_repo=${DEFAULT_TARGET_REPO:-<empty: a task with no repo parks>}"
 log "  gcp_project=${GCP_PROJECT:-<empty: gcp-key and gemini-key are disabled>}"
 log "  gcp_agent_service_account=${GCP_AGENT_SERVICE_ACCOUNT:-<empty>}"
-log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo MISSING)" \
+log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
+    "| github app: $([ -n "$GITHUB_APP_ID" ] && echo present || echo absent)" \
     "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
     "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
 
@@ -206,6 +210,9 @@ env \
   GRAIN_GITHUB_HOST="$GITHUB_HOST" \
   GRAIN_GITHUB_TOKEN="$GITHUB_TOKEN" \
   GRAIN_GITHUB_CREDENTIAL_NAME="$CREDENTIAL_NAME" \
+  GRAIN_GITHUB_APP_ID="$GITHUB_APP_ID" \
+  GRAIN_GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID" \
+  GRAIN_GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
   GRAIN_GEMINI_API_KEY="$GEMINI_API_KEY" \
   GRAIN_GEMINI_MODEL="$GEMINI_MODEL" \
   GRAIN_MAX_AGENT_TURNS="$MAX_AGENT_TURNS" \
