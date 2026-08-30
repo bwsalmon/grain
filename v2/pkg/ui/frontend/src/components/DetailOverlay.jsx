@@ -1,7 +1,10 @@
 import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import fileToAttachment from "../attachments.js";
 import { STATE_LABELS, completionPhase } from "../state.js";
+import AttachmentLinks from "./AttachmentLinks.jsx";
+import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
 import Overlay from "./Overlay.jsx";
 import TaskPicker from "./TaskPicker.jsx";
@@ -42,6 +45,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
               </div>
 
               <div className="description">{t.description || "(no description)"}</div>
+              <AttachmentLinks taskId={t.id} attachments={t.attachments} />
             </>
           )}
 
@@ -353,7 +357,8 @@ function timelineEvents(t) {
       render: () => (
         <>
           <div className="timeline-meta">{who} · {c.authorKind}</div>
-          <div className="timeline-comment-body">{c.body}</div>
+          {c.body && <div className="timeline-comment-body">{c.body}</div>}
+          <AttachmentLinks taskId={t.id} attachments={c.attachments} />
         </>
       ),
     });
@@ -487,12 +492,20 @@ function Timeline({ t, act, showError }) {
   // off t.attempts) whose transcript is open, or null -- local to
   // Timeline, since nothing outside it needs to know.
   const [openAttempt, setOpenAttempt] = useState(null);
+  // attachments is File objects picked for the reply not yet sent --
+  // AttachmentPicker's own doc comment on why reading them is deferred.
+  const [attachments, setAttachments] = useState([]);
 
   const send = async () => {
     const body = textareaRef.current.value;
-    if (!body.trim()) return;
-    await act(() => api(`/api/tasks/${t.id}/comments`, { method: "POST", body: JSON.stringify({ body }) }), t.id);
+    if (!body.trim() && attachments.length === 0) return;
+    const uploaded = await Promise.all(attachments.map((f) => fileToAttachment(f)));
+    await act(() => api(`/api/tasks/${t.id}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body, attachments: uploaded }),
+    }), t.id);
     textareaRef.current.value = "";
+    setAttachments([]);
   };
 
   return (
@@ -541,6 +554,7 @@ function Timeline({ t, act, showError }) {
           textarea's own DOM value, so an unsent draft survives it. */}
       <div className="comment-form">
         <TextField multiline rows={2} placeholder="Reply..." inputRef={textareaRef} fullWidth size="small" />
+        <AttachmentPicker files={attachments} onChange={setAttachments} />
         <Button variant="outlined" onClick={send}>Comment</Button>
       </div>
     </div>

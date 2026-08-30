@@ -1,7 +1,9 @@
 import { useRef, useState } from "react";
 import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import fileToAttachment from "../attachments.js";
 import { knownRepos } from "../state.js";
+import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
@@ -14,6 +16,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // thing" instead of a bare number nobody can place.
   const [dependsOn, setDependsOn] = useState([]);
   const [capabilities, setCapabilities] = useState([]);
+  // attachments is File objects, not yet read -- AttachmentPicker's own
+  // doc comment on why that read is deferred to submit.
+  const [attachments, setAttachments] = useState([]);
 
   const addDependency = (t) => {
     setDependsOn((prev) => (prev.some((p) => p.id === t.id) ? prev : [...prev, t]));
@@ -38,12 +43,14 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       dependsOn: dependsOn.map((t) => t.id),
       reads,
       approved: form.elements.approved.checked,
+      attachments: await Promise.all(attachments.map((f) => fileToAttachment(f))),
     };
     try {
       await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
       form.reset();
       setDependsOn([]);
       setCapabilities([]);
+      setAttachments([]);
       onClose();
       await onCreated();
     } catch (err) {
@@ -57,6 +64,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       <form ref={formRef} onSubmit={submit}>
         <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
+        <AttachmentPicker files={attachments} onChange={setAttachments} />
         <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
             Target repo <span className="hint">owner/name, optional</span>

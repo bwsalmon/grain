@@ -170,8 +170,9 @@ func (c *HTTPClient) Submit(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/submit", nil, nil)
 }
 
-func (c *HTTPClient) AddComment(ctx context.Context, id, body string) error {
-	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/comments", addCommentRequest{Body: body}, nil)
+func (c *HTTPClient) AddComment(ctx context.Context, id, body string, attachments []AttachmentUpload) error {
+	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/comments",
+		addCommentRequest{Body: body, Attachments: attachments}, nil)
 }
 
 func (c *HTTPClient) Close(ctx context.Context, id string) error {

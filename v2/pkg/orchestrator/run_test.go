@@ -11,6 +11,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
@@ -211,6 +212,54 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 	}
 	if len(live) != 0 {
 		t.Errorf("live leases after revoke = %+v, want none", live)
+	}
+}
+
+// TestRunDispatchPlacesAttachmentsAndMentionsThemInThePrompt covers
+// bwsalmon/agents#522: a file the task carries (or one carried by a
+// comment in its conversation) lands in the sandbox and is named in the
+// prompt, even for a task with no capability Grants at all -- unlike a
+// capability's own SideSandbox placement, an attachment is written via
+// the slot's own write_file tool (orchestrator.placeAttachments), not
+// applyPlacements, which is why this test passes real tools rather than
+// the nil every other RunDispatch test in this file gets away with.
+func TestRunDispatchPlacesAttachmentsAndMentionsThemInThePrompt(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	if _, err := store.AddAttachment(ctx, model.Attachment{
+		TaskID: "t1", Filename: "repro.zip", ContentType: "application/zip",
+		Content: []byte("PK\x03\x04fake"), Size: 9, CreatedAt: baseTime,
+	}); err != nil {
+		t.Fatalf("adding attachment: %v", err)
+	}
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	root := t.TempDir()
+	var gotPrompt string
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPrompt = cfg.Prompt
+		return pushed(), nil
+	})
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, mcp.NewSandboxTools(root), root, baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	wantPath := orchestrator.AttachmentsDir + "/1-repro.zip"
+	if !strings.Contains(gotPrompt, wantPath) {
+		t.Errorf("prompt %q does not mention %q", gotPrompt, wantPath)
+	}
+	got, err := os.ReadFile(filepath.Join(root, wantPath))
+	if err != nil {
+		t.Fatalf("attachment was not written into the sandbox: %v", err)
+	}
+	if string(got) != "PK\x03\x04fake" {
+		t.Errorf("attachment content = %q", got)
 	}
 }
 

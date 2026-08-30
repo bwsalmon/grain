@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -82,6 +83,65 @@ func TestCreateThenListAndGet(t *testing.T) {
 	}
 	if detail := decode[ui.TaskDetail](t, rec); detail.ID != created.ID {
 		t.Fatalf("got task %q, want %q", detail.ID, created.ID)
+	}
+}
+
+// TestAttachmentRoutesRoundTripThroughCreateCommentAndDownload is the HTTP
+// surface for bwsalmon/agents#522: a base64 upload on POST /api/tasks
+// lands as metadata on GET /api/tasks/{id} (never content -- Attachment's
+// own doc comment), one on POST .../comments lands on that comment
+// instead, and GET .../attachments/{attachmentId} is the one route that
+// serves an attachment's actual bytes back, with its own content type.
+func TestAttachmentRoutesRoundTripThroughCreateCommentAndDownload(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{
+		"title":"fix it","approved":true,
+		"attachments":[{"filename":"repro.zip","contentType":"application/zip","content":"UEsDBA=="}]
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	created := decode[ui.Task](t, rec)
+
+	rec = do(t, srv, http.MethodPost, "/api/tasks/"+created.ID+"/comments", `{
+		"attachments":[{"filename":"screenshot.png","contentType":"image/png","content":"ZmFrZQ=="}]
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("comment status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/tasks/"+created.ID, "")
+	detail := decode[ui.TaskDetail](t, rec)
+	if len(detail.Attachments) != 1 || detail.Attachments[0].Filename != "repro.zip" {
+		t.Fatalf("task attachments = %+v, want one repro.zip", detail.Attachments)
+	}
+	if len(detail.Comments) != 1 || len(detail.Comments[0].Attachments) != 1 ||
+		detail.Comments[0].Attachments[0].Filename != "screenshot.png" {
+		t.Fatalf("comment attachments = %+v, want one screenshot.png", detail.Comments)
+	}
+
+	rec = do(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/tasks/%s/attachments/%d", created.ID, detail.Attachments[0].ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/zip" {
+		t.Errorf("content type = %q, want application/zip", got)
+	}
+	if rec.Body.String() != "PK\x03\x04" {
+		t.Errorf("body = %q, want the decoded attachment bytes", rec.Body.String())
+	}
+}
+
+func TestAttachmentDownloadUnknownIDIs404(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it","approved":true}`)
+	created := decode[ui.Task](t, rec)
+
+	rec = do(t, srv, http.MethodGet, "/api/tasks/"+created.ID+"/attachments/999", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }
 
