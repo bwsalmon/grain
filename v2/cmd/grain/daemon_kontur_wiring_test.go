@@ -6,7 +6,7 @@ package main
 // itself does the right thing over SSH; this proves run() -- the exact
 // function daemon() (daemon.go) calls -- actually reaches it when
 // -kontur-vm-name-prefix is set, with -kontur-create-arg's values landing
-// in the real `kontur vm create` invocation verbatim. That plumbing
+// in the real `konturctl vm create` invocation verbatim. That plumbing
 // (flags into a real KonturConfig.CreateArgs, in a binary that actually
 // constructs orchestrator.KonturSandboxes) is what bwsalmon/agents#274
 // asked this repo to wire up, once bwsalmon/kontur's own image flag was
@@ -15,14 +15,16 @@ package main
 // confirms against bwsalmon/kontur's own `-h` output, rather than a guess
 // baked in here.
 //
-// It fakes `kontur`, `crictl` and `ssh` on PATH (the same style
-// kontur_sandboxes_test.go's own writeFakeKontur/writeFakeCrictl use, plus
-// an ssh double), so it runs fast and needs neither a real kontur VM nor a
-// real GitHub/Gemini endpoint: run() only needs to get through its own
-// setup (git proxy, per-slot sandbox token, git credential configuration)
-// before this test cancels its context, since that setup -- not a
-// completed dispatch cycle -- is where -kontur-create-arg's plumbing
-// actually happens.
+// It fakes `konturctl` (the operator-facing binary Create/Delete actually
+// exec -- not the distinct, container-facing "kontur" binary bwsalmon/
+// kontur's own cmd/kontur is, per pkg/kontur's package doc comment),
+// `crictl` and `ssh` on PATH (the same style kontur_sandboxes_test.go's
+// own writeFakeKontur/writeFakeCrictl use, plus an ssh double), so it runs
+// fast and needs neither a real kontur VM nor a real GitHub/Gemini
+// endpoint: run() only needs to get through its own setup (git proxy,
+// per-slot sandbox token, git credential configuration) before this test
+// cancels its context, since that setup -- not a completed dispatch cycle
+// -- is where -kontur-create-arg's plumbing actually happens.
 
 import (
 	"context"
@@ -37,7 +39,7 @@ import (
 func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fake kontur script is POSIX shell only")
+		t.Skip("fake konturctl script is POSIX shell only")
 	}
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
@@ -55,7 +57,7 @@ if [ "$1" = "vm" ] && [ "$2" = "create" ]; then
   echo "{\"port\": %d}" > "$statedir/$name.json"
 fi
 `, argvLog, port)
-	install(t, dir, "kontur", script)
+	install(t, dir, "konturctl", script)
 }
 
 func writeFakeCrictlBinary(t *testing.T, ip string) {
