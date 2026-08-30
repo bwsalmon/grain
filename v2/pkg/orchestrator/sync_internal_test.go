@@ -115,6 +115,20 @@ func TestCheckRunsForReportsAForbiddenReadAsUnknownNotAnError(t *testing.T) {
 	}
 }
 
+// ChecksUnavailable is what lets pkg/ui warn an operator that Submit will
+// never actually merge anything on this deployment (bwsalmon/agents#483)
+// -- it has to flip alongside the log line checkRunsFor already prints on
+// a 403, or that warning would never appear either.
+func TestChecksUnavailableReflectsAForbiddenRead(t *testing.T) {
+	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
+	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch"); err != nil {
+		t.Fatalf("a 403 must not fail the sync: %v", err)
+	}
+	if !ChecksUnavailable() {
+		t.Error("ChecksUnavailable() = false after a 403 from ListCheckRuns, want true")
+	}
+}
+
 // Only the one permission GitHub offers no way to hold is tolerated.
 // Anything else -- a 404, a 500, a transport failure -- is still a real
 // error, and swallowing it would hide a broken deployment behind the

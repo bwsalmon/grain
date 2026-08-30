@@ -51,7 +51,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>
 
-          <Actions t={t} act={act} />
+          <Actions t={t} config={config} act={act} />
           <Declared t={t} />
           <CapabilityToggles t={t} config={config} act={act} />
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
@@ -89,7 +89,7 @@ function Declared({ t }) {
   );
 }
 
-function Actions({ t, act }) {
+function Actions({ t, config, act }) {
   return (
     <Stack className="actions" spacing={1}>
       {t.state === "proposed" && (
@@ -105,6 +105,17 @@ function Actions({ t, act }) {
         <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/submit`, { method: "POST" }), t.id)}>
           Submit
         </Button>
+      )}
+      {/* Submit still sets autoMerge -- it just never resolves into an
+          actual merge on a deployment whose GitHub credential can't read
+          check runs (config.autoMergeDegraded, ui.Config.
+          AutoMergeDegraded's own doc comment). Without this, clicking
+          Submit here looked identical to clicking nothing at all
+          (bwsalmon/agents#483). */}
+      {t.autoMerge && config?.autoMergeDegraded && (
+        <Alert severity="warning" sx={{ fontSize: "0.8rem" }}>
+          Queued for auto-merge, but this deployment can't read pull request checks, so it will never merge automatically.
+        </Alert>
       )}
       {t.state === "failed" && (
         <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/retry`, { method: "POST" }), t.id)}>

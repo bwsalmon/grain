@@ -511,6 +511,39 @@ func TestRebootCallsConfiguredFunc(t *testing.T) {
 	}
 }
 
+// --- auto-merge degraded -------------------------------------------------
+//
+// bwsalmon/agents#483: Submit sets AutoMerge, but on a deployment whose
+// GitHub credential can't read check runs (Config.AutoMergeDegraded's own
+// doc comment), the merge that's supposed to follow never happens, and
+// nothing said so anywhere the UI could see -- Submit looked like a
+// no-op. These assert /api/config reports the (un)availability nil vs.
+// a real func each give, the same "expose the func, don't hardcode true"
+// shape TestRebootDisabledByDefault/TestRebootCallsConfiguredFunc already
+// give Config.Reboot above.
+
+func TestAutoMergeNotDegradedByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["autoMergeDegraded"] != nil && got["autoMergeDegraded"] != false {
+		t.Fatalf("autoMergeDegraded = %v, want false or omitted", got["autoMergeDegraded"])
+	}
+}
+
+func TestAutoMergeDegradedReportsConfiguredFunc(t *testing.T) {
+	client, _, _ := testClient(t)
+	client.Config.AutoMergeDegraded = func() bool { return true }
+	srv := ui.NewServerWithClient(client)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["autoMergeDegraded"] != true {
+		t.Fatalf("autoMergeDegraded = %v, want true", got["autoMergeDegraded"])
+	}
+}
+
 func TestRebootSurfacesError(t *testing.T) {
 	client, _, _ := testClient(t)
 	client.Config.Reboot = func(ctx context.Context) error {

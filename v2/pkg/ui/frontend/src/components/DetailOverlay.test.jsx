@@ -99,6 +99,52 @@ describe("DetailOverlay", () => {
     expect(screen.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument();
   });
 
+  // bwsalmon/agents#483: on a deployment whose GitHub credential can't
+  // read pull request checks, Submit still flips autoMerge but nothing
+  // ever merges -- without this warning that looked identical to Submit
+  // doing nothing at all.
+  it("warns that auto-merge is degraded once a task is submitted on a deployment that can't read checks", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: true }}
+        tasks={[]}
+        config={{ ...config, autoMergeDegraded: true }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/can't read pull request checks/)).toBeInTheDocument();
+  });
+
+  it("shows no auto-merge warning on a deployment that can read checks", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: true }}
+        tasks={[]}
+        config={{ ...config, autoMergeDegraded: false }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.queryByText(/can't read pull request checks/)).not.toBeInTheDocument();
+  });
+
+  it("shows no auto-merge warning before a task has been submitted, even when degraded", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: false }}
+        tasks={[]}
+        config={{ ...config, autoMergeDegraded: true }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.queryByText(/can't read pull request checks/)).not.toBeInTheDocument();
+  });
+
   it("shows a Retry button for a failed task, wired to the retry endpoint", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
