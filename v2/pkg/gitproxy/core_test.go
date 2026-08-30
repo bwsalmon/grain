@@ -182,6 +182,16 @@ func TestHandleNoConfiguredCredentialIs500NotForwarded(t *testing.T) {
 	if len(forwarder.Calls) != 0 {
 		t.Error("expected no forward call")
 	}
+	// bwsalmon/agents#427: this is exactly the shape a widened-targetRepos/
+	// stale-credentials.json drift takes at the proxy, so the message
+	// needs to name the repo and point at the likely fix rather than
+	// leaving an operator to guess what "no credential configured" means.
+	if !strings.Contains(string(resp.Body), "owner/repo") {
+		t.Errorf("body = %q, want it to name the repo", resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "credentials.json") {
+		t.Errorf("body = %q, want a pointer at credentials.json", resp.Body)
+	}
 }
 
 func TestHandleSurfacesAnAuthorizerErrorAs500(t *testing.T) {

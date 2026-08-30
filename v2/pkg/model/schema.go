@@ -223,6 +223,19 @@ var Tables = []string{
 	// One row, like grain_schema: there is exactly one of these per
 	// deployment, not one per something else, so there is nothing for a
 	// second row to key against.
+	//
+	// target_repos was missing here from grain_config's very first
+	// version (schema version 6, bwsalmon/agents#320) even though
+	// Config.TargetRepos was already meant to be store-backed like every
+	// other field: store.go's scanConfig/PutConfig never selected or
+	// bound it, so a Settings change widening it was echoed back at
+	// once but was never durable, silently reverting to unrestricted on
+	// the very next read or restart -- bwsalmon/agents#427's actual root
+	// cause, not merely a PAT-scope/credential-ladder mismatch. CREATE
+	// TABLE IF NOT EXISTS does not add a column to a table that already
+	// exists, so an already-created grain_config gets this one from
+	// Store.Init's own migration step (store.go's
+	// ensureConfigTargetReposColumn) instead of from this DDL.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -233,6 +246,7 @@ var Tables = []string{
   ` + "`github_insecure_http`" + `        INTEGER NOT NULL,
   ` + "`gcp_project`" + `                 TEXT    NOT NULL,
   ` + "`gcp_service_account_email`" + `   TEXT    NOT NULL,
+  ` + "`target_repos`" + `                TEXT    NOT NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

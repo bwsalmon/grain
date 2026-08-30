@@ -55,6 +55,9 @@ func (s *Store) Init(ctx context.Context) error {
 			return fmt.Errorf("applying schema: %w", err)
 		}
 	}
+	if err := s.ensureConfigTargetReposColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -71,6 +74,28 @@ func (s *Store) Init(ctx context.Context) error {
 			ErrSchemaTooNew, version, SchemaVersion)
 	}
 	return nil
+}
+
+// ensureConfigTargetReposColumn adds grain_config.target_repos (schema.go's
+// own doc comment on the table has the history) to a database created
+// before bwsalmon/agents#427, when this column did not exist anywhere --
+// neither in the DDL Statements() above applies (CREATE TABLE IF NOT
+// EXISTS never alters a table that is already there) nor in configColumns/
+// scanConfig/PutConfig below, which is why a Settings change widening
+// Config.TargetRepos was never actually durable. Probing with a
+// zero-row SELECT rather than a dialect-specific PRAGMA/information_schema
+// query keeps this portable across whatever database/sql driver Store is
+// opened against (this file's own doc comment: "any database/sql
+// database"), the same reasoning schema.go gives backtick quoting; ALTER
+// TABLE ADD COLUMN is standard SQL either way.
+func (s *Store) ensureConfigTargetReposColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `target_repos` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `target_repos` TEXT NOT NULL DEFAULT ''")
+	return err
 }
 
 // ErrConflict reports that an operation could not get a write in even
@@ -1055,18 +1080,20 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 }
 
 const configColumns = "`poll_interval_ms`,`slots`,`gemini_model`,`max_agent_turns`," +
-	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`"
+	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
 	var pollMS int64
-	var slots string
+	var slots, targetRepos string
 	if err := scan(&pollMS, &slots, &c.GeminiModel, &c.MaxAgentTurns,
-		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail); err != nil {
+		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
+		&targetRepos); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
 	c.Slots = splitSlots(slots)
+	c.TargetRepos = splitSlots(targetRepos)
 	return c, nil
 }
 
@@ -1077,16 +1104,19 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), joinSlots(c.Slots), c.GeminiModel, c.MaxAgentTurns,
-			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail)
+			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
+			joinSlots(c.TargetRepos))
 		return err
 	})
 }
 
-// joinSlots/splitSlots round-trip Config.Slots through the same
-// comma-separated shape the daemon's own -slots flag already parses, so
-// a value written by one reads back identically through the other.
+// joinSlots/splitSlots round-trip Config.Slots, and equally Config.
+// TargetRepos (an owner/name repo can never contain a comma), through
+// the same comma-separated shape the daemon's own -slots/-target-repos
+// flags already parse, so a value written by one reads back identically
+// through the other.
 func joinSlots(slots []string) string { return strings.Join(slots, ",") }
 
 func splitSlots(s string) []string {
