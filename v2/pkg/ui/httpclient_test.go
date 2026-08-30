@@ -201,6 +201,28 @@ func TestHTTPClientConfigReadsActorAndDefaultTarget(t *testing.T) {
 	}
 }
 
+// TestHTTPClientConfigReadsTargetRepos is
+// TestHTTPClientConfigReadsActorAndDefaultTarget's own proof, extended
+// to TargetRepos: it too rides configResponse's wire shape rather than
+// GetSettings' (a daemon's TargetRepos is fixed at startup -- see
+// cmd/grain/daemon.go's loadConfig doc comment -- so the CLI and the
+// frontend both read it from here, not from the store-backed Settings).
+func TestHTTPClientConfigReadsTargetRepos(t *testing.T) {
+	storeClient, _, ctx := testClient(t)
+	storeClient.Config.TargetRepos = []string{"acme/widgets", "acme/other"}
+	srv := httptest.NewServer(ui.NewServerWithClient(storeClient))
+	t.Cleanup(srv.Close)
+	c := ui.NewHTTPClient(srv.URL)
+
+	cfg, err := c.Config(ctx)
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if len(cfg.TargetRepos) != 2 || cfg.TargetRepos[0] != "acme/widgets" || cfg.TargetRepos[1] != "acme/other" {
+		t.Fatalf("targetRepos = %v, want [acme/widgets acme/other]", cfg.TargetRepos)
+	}
+}
+
 func TestHTTPClientSettingsRoundTrip(t *testing.T) {
 	c, ctx := testHTTPClient(t)
 	before, err := c.GetSettings(ctx)

@@ -188,6 +188,12 @@ type configResponse struct {
 	// Config.Reboot is set, so the frontend can hide the reboot button
 	// entirely rather than show one that can only ever 404.
 	RebootEnabled bool `json:"rebootEnabled"`
+	// TargetRepos mirrors Client.Config.TargetRepos -- the same list
+	// CreateTask enforces a task's repo against -- so the frontend can
+	// offer a dropdown of known repos on the task and schedule forms
+	// instead of a bare text field (bwsalmon/agents#447). Empty means
+	// unrestricted, same as everywhere else this field appears.
+	TargetRepos []string `json:"targetRepos,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -196,6 +202,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		ActorKind:     string(s.tasks.Config.Actor.Kind),
 		Capabilities:  s.tasks.Config.Capabilities,
 		RebootEnabled: s.tasks.Config.Reboot != nil,
+		TargetRepos:   s.tasks.Config.TargetRepos,
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()

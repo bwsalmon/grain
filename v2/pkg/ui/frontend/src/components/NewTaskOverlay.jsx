@@ -1,10 +1,13 @@
 import { useRef, useState } from "react";
 import api from "../api.js";
+import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
+import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
 export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, showError }) {
   const formRef = useRef(null);
+  const repoOptions = knownRepos(config, tasks);
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
@@ -63,7 +66,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               from -- the repo-centric task list's whole point is filing
               work against the repo you're already looking at without
               retyping it. */}
-          <input name="repo" placeholder="owner/name" defaultValue={defaultRepo || ""} autoComplete="off" />
+          <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} />
         </label>
         <label>Base branch <span className="hint">optional</span>
           <input name="base" placeholder="main" autoComplete="off" />

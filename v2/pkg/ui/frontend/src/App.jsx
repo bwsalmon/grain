@@ -238,7 +238,7 @@ export default function App() {
       {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
       {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
-      {showSchedules && <ScheduledTasksOverlay onClose={() => setShowSchedules(false)} showError={showError} />}
+      {showSchedules && <ScheduledTasksOverlay config={config} tasks={tasks} onClose={() => setShowSchedules(false)} showError={showError} />}
       {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
     </div>
   );

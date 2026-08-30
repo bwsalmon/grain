@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import api from "../api.js";
+import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
+import RepoField from "./RepoField.jsx";
 
 // ScheduledTasksOverlay manages schedules (bwsalmon/agents#376): each row
 // is a standing declaration -- "file this task every N" -- that graind's
 // own schedule reconciler turns into a real task each time it comes due.
 // SecretsOverlay's own shape fits here almost exactly: a list fetched on
 // open, refreshed after every mutation, plus a form that only ever adds.
-export default function ScheduledTasksOverlay({ onClose, showError }) {
+export default function ScheduledTasksOverlay({ config, tasks, onClose, showError }) {
   const [schedules, setSchedules] = useState(null);
+  const repoOptions = knownRepos(config, tasks);
 
   const refresh = useCallback(async () => {
     try {
@@ -101,7 +104,7 @@ export default function ScheduledTasksOverlay({ onClose, showError }) {
           <textarea name="description" rows="4" />
         </label>
         <label>Target repo <span className="hint">owner/name</span>
-          <input name="repo" placeholder="owner/name" required autoComplete="off" />
+          <RepoField name="repo" options={repoOptions} required />
         </label>
         <label>Base branch <span className="hint">optional</span>
           <input name="base" placeholder="main" autoComplete="off" />
