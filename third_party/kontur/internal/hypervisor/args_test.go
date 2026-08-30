@@ -51,8 +51,8 @@ func TestBuildArgs_FirmwareBoot(t *testing.T) {
 			}
 		}
 	}
-	if got := argValue(t, args, "--disk"); got != "path=/data/disk.img,readonly=off" {
-		t.Errorf("--disk = %q, want path=/data/disk.img,readonly=off", got)
+	if got := argValue(t, args, "--disk"); got != "path=/data/disk.img,readonly=off,image_type=raw" {
+		t.Errorf("--disk = %q, want path=/data/disk.img,readonly=off,image_type=raw", got)
 	}
 	if got := argValue(t, args, "--cpus"); got != "boot=2" {
 		t.Errorf("--cpus = %q, want boot=2", got)
@@ -109,7 +109,7 @@ func TestBuildArgs_MultipleDisksAndNet(t *testing.T) {
 			disks = append(disks, args[i+1])
 		}
 	}
-	want := []string{"path=/data/disk.img,readonly=off", "path=/data/extra.img,readonly=on"}
+	want := []string{"path=/data/disk.img,readonly=off,image_type=raw", "path=/data/extra.img,readonly=on,image_type=raw"}
 	if len(disks) != len(want) {
 		t.Fatalf("disks = %v, want %v", disks, want)
 	}
