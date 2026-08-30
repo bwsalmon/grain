@@ -84,6 +84,8 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		Target:    &target,
 		Binding:   model.BindingDirective,
 		Base:      sched.Base,
+		Reads:     sched.Reads,
+		Grants:    sched.Grants,
 		AutoMerge: sched.AutoMerge,
 		Tags:      []string{tag},
 		CreatedAt: &now,
@@ -92,18 +94,15 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		return fmt.Errorf("filing task: %w", err)
 	}
 
-	// Interval is validated positive at creation (ui.Client.CreateSchedule/
-	// UpdateSchedule) and never zero or negative in a row this reads back
-	// -- the fallback below only guards against that invariant somehow not
-	// holding, since Add-ing a non-positive interval in a loop would never
-	// terminate.
-	interval := sched.Interval
-	if interval <= 0 {
-		interval = time.Hour
-	}
+	// Recurrence is validated at creation (ui.Client.CreateSchedule/
+	// UpdateSchedule), so Next always moves strictly forward -- the loop
+	// below is what gives a schedule paused (or a daemon down) through
+	// several missed occurrences exactly one firing on resume, resynced to
+	// its normal cadence, rather than one firing per missed occurrence or
+	// drift against wall-clock time (Recurrence.Next's own doc comment).
 	next := sched.NextRunAt
 	for !next.After(now) {
-		next = next.Add(interval)
+		next = sched.Recurrence.Next(next)
 	}
 	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
 		s.LastRunAt = &now

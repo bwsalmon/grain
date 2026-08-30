@@ -180,7 +180,7 @@ describe("App", () => {
   });
 
   it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
@@ -194,7 +194,7 @@ describe("App", () => {
   });
 
   it("edits a schedule from the schedules pane", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
