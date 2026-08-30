@@ -254,8 +254,13 @@ name is actually configured for that deployment shape.
 still left to the environment rather than a repo file, so it's the
 deployment's own operator key and not one hand-picked here -- see
 `terraform/gcp-v2/README.md`, "Kontur sandboxing", for where that keypair
-comes from on that deployment shape (the private half also has to reach
-`grain daemon`'s own `-kontur-ssh-key`, via `push-secrets.sh`).
+comes from on that deployment shape. A deployment building its own guest
+image (`v2/scripts/setup.sh`'s own `ensure_kontur_ssh_key`/
+`ensure_kontur_images`, bwsalmon/agents#531) generates one itself and
+never needs this reaching `push-secrets.sh` at all; an operator pinning a
+specific keypair instead still has to push its private half as
+`grain daemon`'s own `-kontur-ssh-key`, via that script's own
+`GRAIN_KONTUR_SSH_KEY`.
 
 The other half of what a deployment needs published -- the `kontur`
 binary and the cloud-hypervisor release bundled with it, not the guest

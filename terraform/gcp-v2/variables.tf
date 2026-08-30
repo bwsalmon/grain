@@ -481,11 +481,12 @@ variable "poll_interval" {
 # this deployment dispatches onto real bwsalmon/kontur-managed VMs
 # (orchestrator.KonturSandboxes) instead of plain host directories
 # (orchestrator.HostSandboxes) -- see packer/kontur/README.md for the
-# guest image, third_party/kontur/VENDORED.md for the vendored source,
-# and this module's own README, "Kontur sandboxing", for the one-time
-# build-and-publish step and SSH keypair that make enable_kontur_sandboxes
-# (on by default below) actually work rather than fail its own
-# precondition in instance.tf.
+# guest image, third_party/kontur/VENDORED.md for the vendored source, and
+# this module's own README, "Kontur sandboxing", for what
+# enable_kontur_sandboxes (on by default below) actually costs on a first
+# deploy now that v2/scripts/setup.sh builds both images itself
+# (bwsalmon/agents#531) rather than needing them built and published by
+# hand first.
 
 variable "enable_kontur_sandboxes" {
   type        = bool
@@ -496,19 +497,21 @@ variable "enable_kontur_sandboxes" {
     default", now that build.sh/setup.sh actually wire the rest of this
     section through.
 
-    On by default, but instance.tf's own precondition refuses to apply at
-    all unless kontur_image_bucket and kontur_oci_image are also set: a
-    guest image and an OCI image have to actually exist somewhere for a
-    freshly created host to fetch, and neither has a project-independent
-    default this module could supply on your behalf. Build and publish
-    them once (see this module's own README, "Kontur sandboxing") before
-    a first apply with this left on, or set it false to keep dispatching
-    into host directories the way every deployment before bwsalmon/agents#504
-    did.
+    On by default, and needs no other setup: left with kontur_image_bucket
+    and kontur_oci_image both at their empty defaults,
+    v2/scripts/setup.sh's own ensure_kontur_images builds the guest image
+    and the OCI image itself, on the host, the first time it runs
+    (bwsalmon/agents#531) -- see this module's own README, "Kontur
+    sandboxing", for what that costs and how the result is cached. Set
+    kontur_image_bucket/kontur_oci_image together instead to fetch a
+    pre-built pair from somewhere shared, or set this false to keep
+    dispatching into host directories the way every deployment before
+    bwsalmon/agents#504 did.
 
     Needs enable_nested_virtualization too (on by default, and checked by
-    the same precondition) -- a kontur VM is a nested cloud-hypervisor
-    guest, and without /dev/kvm on the host it cannot boot at all.
+    instance.tf's own precondition) -- a kontur VM is a nested
+    cloud-hypervisor guest, and without /dev/kvm on the host it cannot
+    boot at all.
   EOT
   default     = true
 }
@@ -516,17 +519,22 @@ variable "enable_kontur_sandboxes" {
 variable "kontur_image_bucket" {
   type        = string
   description = <<-EOT
-    GCS bucket (name only, no gs:// prefix) that packer/kontur/build.sh's
-    own KONTUR_IMAGE_BUCKET publishes the guest image to -- vmlinuz,
-    initrd.img and disk.img, under both a versioned prefix and a "latest"
-    alias setup.sh always fetches (see build.sh's own comment on why the
-    alias exists). Required when enable_kontur_sandboxes is true; this
-    module does not create the bucket for you, so create one by hand
-    (`gsutil mb`) and grant the host service account read access to it
-    yourself, or via a `google_storage_bucket_iam_member` alongside this
-    module referencing google_service_account.host.email -- see iam.tf's
-    own host_reads_kontur_images for exactly that grant, conditioned on
-    this variable being non-empty.
+    GCS bucket (name only, no gs:// prefix) to fetch a pre-built guest
+    image from instead of building one on the host -- vmlinuz, initrd.img
+    and disk.img, under a "latest" alias setup.sh always fetches (see
+    packer/kontur/build.sh's own KONTUR_IMAGE_BUCKET, and its comment on
+    why the alias exists). Optional: left empty (the default),
+    v2/scripts/setup.sh's own ensure_kontur_images builds the guest image
+    itself instead (bwsalmon/agents#531) and this is never read. Set this
+    together with kontur_oci_image (both empty, or both set -- one alone
+    is a misconfiguration) for an operator who would rather build once,
+    centrally, and share the result across many hosts than pay that build
+    cost on each of them; this module does not create the bucket for you,
+    so create one by hand (`gsutil mb`) and grant the host service account
+    read access to it yourself, or via a `google_storage_bucket_iam_member`
+    alongside this module referencing google_service_account.host.email --
+    see iam.tf's own host_reads_kontur_images for exactly that grant,
+    conditioned on this variable being non-empty.
   EOT
   default     = ""
 }
@@ -535,16 +543,22 @@ variable "kontur_oci_image" {
   type        = string
   description = <<-EOT
     Full reference (e.g. "us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest")
-    of the pre-built bwsalmon/kontur OCI image (third_party/kontur's own
-    Dockerfile) setup.sh pulls and retags as konturctl's own default
+    of a pre-built bwsalmon/kontur OCI image (third_party/kontur's own
+    Dockerfile) to fetch instead of building one on the host -- setup.sh
+    pulls and retags it as konturctl's own default
     "localhost:5000/kontur:latest" -- see that script's own
-    ensure_kontur_images for why a real registry at :5000 is never
-    actually needed for this. Required when enable_kontur_sandboxes is
-    true; build and push it with a plain `docker build`/`docker push`
-    against an Artifact Registry repository you create once (this module
-    grants the host service account project-wide roles/artifactregistry.reader
-    when this is set -- see iam.tf's host_reads_kontur_registry -- but does
-    not create the repository itself).
+    ensure_kontur_images_fetch for why a real registry at :5000 is never
+    actually needed for this. Optional: left empty (the default),
+    v2/scripts/setup.sh's own ensure_kontur_images builds the OCI image
+    itself instead (bwsalmon/agents#531) and this is never read. Set this
+    together with kontur_image_bucket (both empty, or both set -- one
+    alone is a misconfiguration) for an operator who would rather build
+    once, centrally, and share the result across many hosts: build and
+    push it with a plain `docker build`/`docker push` against an Artifact
+    Registry repository you create once (this module grants the host
+    service account project-wide roles/artifactregistry.reader when this
+    is set -- see iam.tf's host_reads_kontur_registry -- but does not
+    create the repository itself).
   EOT
   default     = ""
 }

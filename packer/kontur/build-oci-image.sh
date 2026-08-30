@@ -26,7 +26,10 @@
 # Needs: docker, authenticated to push to KONTUR_OCI_IMAGE's own registry
 # (e.g. `gcloud auth configure-docker <region>-docker.pkg.dev` for
 # Artifact Registry) -- this script does not attempt that itself, since
-# the right auth depends on where you're pushing from.
+# the right auth depends on where you're pushing from. Not needed at all
+# when KONTUR_OCI_SKIP_PUSH=1 (below) -- v2/scripts/setup.sh's own
+# ensure_kontur_images sets exactly that to build straight into the local
+# docker image store, with no registry involved.
 #
 # Usage:
 #   KONTUR_OCI_IMAGE=us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest \
@@ -43,6 +46,16 @@ fi
 
 echo "building ${KONTUR_OCI_IMAGE} from $(pwd)"
 docker build -t "$KONTUR_OCI_IMAGE" .
+
+# KONTUR_OCI_SKIP_PUSH=1 stops here, leaving the image built but only in
+# this host's own local docker image store -- exactly what a deployment
+# building its own image on the target host itself (rather than pushing
+# it somewhere for that host to pull back down again) needs, and nothing
+# else in this script's contract changes either way.
+if [ "${KONTUR_OCI_SKIP_PUSH:-0}" = "1" ]; then
+  echo "built: ${KONTUR_OCI_IMAGE} (KONTUR_OCI_SKIP_PUSH=1 -- not pushed)"
+  exit 0
+fi
 
 echo "pushing ${KONTUR_OCI_IMAGE}"
 docker push "$KONTUR_OCI_IMAGE"
