@@ -9,7 +9,7 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 const settings = {
   configured: true,
   pollInterval: "30s",
-  slots: ["a", "b"],
+  maxConcurrent: 2,
   geminiModel: "gemini-2.5-pro",
   maxAgentTurns: 40,
   githubHost: "github.com",
@@ -29,7 +29,7 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("a, b")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("2")).toBeInTheDocument();
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
     expect(screen.getByText("acme/widgets")).toBeInTheDocument();
   });

@@ -5,10 +5,6 @@ import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
 
-function parseCommaList(value) {
-  return value.split(",").map((item) => item.trim()).filter((item) => item !== "");
-}
-
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
 // sidebar overlays; they live here now as tabs alongside the general
 // deployment settings, since all three are the same kind of
@@ -74,8 +70,11 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || "")) payload.pollInterval = pollInterval;
 
-    const slots = parseCommaList(form.elements.slots.value);
-    if (JSON.stringify(slots) !== JSON.stringify(settings.slots || [])) payload.slots = slots;
+    const maxConcurrentRaw = form.elements.maxConcurrent.value.trim();
+    if (maxConcurrentRaw !== "") {
+      const maxConcurrent = parseInt(maxConcurrentRaw, 10);
+      if (maxConcurrent !== (settings.maxConcurrent || 0)) payload.maxConcurrent = maxConcurrent;
+    }
 
     const geminiModel = form.elements.geminiModel.value.trim();
     if (geminiModel !== (settings.geminiModel || "")) payload.geminiModel = geminiModel;
@@ -124,6 +123,8 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     }
   };
 
+  if (settings === null) return null;
+
   return (
     <Overlay onClose={onClose}>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Settings</Typography>
@@ -132,17 +133,17 @@ export default function SettingsOverlay({ config, onClose, showError }) {
           <Tab key={t.id} value={t.id} label={t.label} />
         ))}
       </Tabs>
-      {tab === "general" && settings !== null && (
+      {tab === "general" && (
         <>
           {!settings.configured && (
             <Alert severity="info" sx={{ mb: 2 }}>
-              Not configured yet -- nothing has been saved for this deployment. Poll interval, slots, Gemini model
-              and GitHub host are required the first time.
+              Not configured yet -- nothing has been saved for this deployment. Poll interval, max concurrent, Gemini
+              model and GitHub host are required the first time.
             </Alert>
           )}
           <form onSubmit={submit}>
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="slots" label="Slots" helperText="comma-separated slot names" defaultValue={(settings.slots || []).join(", ")} placeholder="a, b, c" autoComplete="off" fullWidth margin="normal" />
+            <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
             <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
             <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />

@@ -1164,7 +1164,7 @@ func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
 
 func testConfig() model.Config {
 	return model.Config{
-		PollInterval: 30 * time.Second, Slots: []string{"a", "b"},
+		PollInterval: 30 * time.Second, MaxConcurrent: 2,
 		GeminiModel: "gemini-2.5-pro", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
@@ -1197,7 +1197,7 @@ func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
 	}
 	updated := testConfig()
 	updated.PollInterval = time.Minute
-	updated.Slots = []string{"only-one"}
+	updated.MaxConcurrent = 1
 	if err := store.PutConfig(ctx, updated); err != nil {
 		t.Fatalf("second put: %v", err)
 	}
@@ -1256,12 +1256,79 @@ func TestInitMigratesAnExistingDatabaseMissingTargetRepos(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 {
-		t.Fatalf("got %+v, want the pre-existing row intact and targetRepos empty", got)
+	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 || got.MaxConcurrent != 2 {
+		t.Fatalf("got %+v, want the pre-existing row intact, targetRepos empty, and maxConcurrent migrated from the old two-name slots column", got)
 	}
 
 	// And it's not just readable -- PutConfig can now actually make
 	// targetRepos durable, which is the whole bug this migration fixes.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+}
+
+// bwsalmon/agents#461: grain_config.slots (a comma-separated list of
+// operator-chosen concurrency-slot names) became max_concurrent (a plain
+// count) instead. This simulates a database built with the pre-#461
+// column set -- slots present, max_concurrent absent -- directly rather
+// than through Store, and checks Store.Init's own migration step
+// (ensureConfigMaxConcurrentColumn) both backfills max_concurrent from
+// however many names the old column held and drops that column, without
+// disturbing the rest of the row.
+func TestInitMigratesAnExistingDatabaseWithNamedSlots(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`slots`"+`                      TEXT    NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#461 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`slots`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`) "+
+			"VALUES (1,30000,'a,b,c','gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','')"); err != nil {
+		t.Fatalf("seeding a pre-#461 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing max_concurrent: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.GeminiModel != "gemini-2.5-pro" || got.MaxConcurrent != 3 {
+		t.Fatalf("got %+v, want the pre-existing row intact and maxConcurrent migrated from the old three-name slots column", got)
+	}
+
+	// The old column is gone, not merely ignored -- PutConfig stops
+	// supplying it, so it would otherwise fail every write with a NOT
+	// NULL constraint violation.
 	want := testConfig()
 	if err := store.PutConfig(ctx, want); err != nil {
 		t.Fatalf("put after migrating: %v", err)

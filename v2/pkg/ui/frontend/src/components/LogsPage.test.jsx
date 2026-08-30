@@ -1,19 +1,19 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import LogsOverlay from "./LogsOverlay.jsx";
+import LogsPage from "./LogsPage.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-describe("LogsOverlay", () => {
+describe("LogsPage", () => {
   afterEach(() => {
     api.mockReset();
   });
 
   it("shows a note instead of a source picker when no log sources are configured", async () => {
     api.mockResolvedValueOnce({ enabled: false });
-    render(<LogsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<LogsPage showError={() => {}} />);
 
     expect(await screen.findByText(/not available/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Source/)).not.toBeInTheDocument();
@@ -23,7 +23,7 @@ describe("LogsOverlay", () => {
     api
       .mockResolvedValueOnce({ enabled: true, sources: ["daemon", "git-proxy-audit"] })
       .mockResolvedValueOnce({ lines: ["one", "two"] });
-    render(<LogsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<LogsPage showError={() => {}} />);
 
     expect(await screen.findByText(/one/)).toBeInTheDocument();
     expect(screen.getByText(/two/)).toBeInTheDocument();
@@ -36,7 +36,7 @@ describe("LogsOverlay", () => {
       .mockResolvedValueOnce({ lines: ["first"] })
       .mockResolvedValueOnce({ lines: ["first", "second"] });
     const user = userEvent.setup();
-    render(<LogsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<LogsPage showError={() => {}} />);
 
     expect(await screen.findByText(/first/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Refresh" }));
@@ -50,7 +50,7 @@ describe("LogsOverlay", () => {
       .mockResolvedValueOnce({ lines: ["daemon line"] })
       .mockResolvedValueOnce({ lines: ["audit line"] });
     const user = userEvent.setup();
-    render(<LogsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<LogsPage showError={() => {}} />);
 
     expect(await screen.findByText(/daemon line/)).toBeInTheDocument();
 
@@ -64,7 +64,7 @@ describe("LogsOverlay", () => {
     api
       .mockResolvedValueOnce({ enabled: true, sources: ["daemon"] })
       .mockResolvedValueOnce({ lines: [] });
-    render(<LogsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<LogsPage showError={() => {}} />);
 
     expect(await screen.findByText("(no log lines)")).toBeInTheDocument();
   });
