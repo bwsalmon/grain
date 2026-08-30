@@ -134,6 +134,23 @@ func getEnvDefault(key, def string) string {
 // non-nil (a non-zero remote exit is reported through the code, not
 // err).
 func Run(ctx context.Context, cfg Config, command []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	return RunLine(ctx, cfg, shellJoin(command), stdin, stdout, stderr)
+}
+
+// RunLine behaves exactly like Run, except line is already the single
+// command line to send verbatim as the SSH "exec" request's command,
+// rather than discrete arguments for Run to shell-quote and join itself.
+// An empty line requests an interactive login shell, exactly like
+// Run(ctx, cfg, nil, ...) does.
+//
+// This exists for callers that already have a shell command line in
+// hand -- namely ShellCommandLine, used by cmd/kontur's "sh"/"bash"
+// shims -- and would otherwise have Run's own shellJoin re-quote (and so
+// corrupt: single-quoting the whole line defeats any variable expansion
+// or word splitting a real sh/bash -c would have applied) a string
+// that's already meant to be interpreted by a shell, not treated as a
+// single literal argument.
+func RunLine(ctx context.Context, cfg Config, line string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	signer, err := loadKey(cfg.KeyPath)
 	if err != nil {
 		return 0, fmt.Errorf("loading %s: %w", cfg.KeyPath, err)
@@ -174,11 +191,10 @@ func Run(ctx context.Context, cfg Config, command []string, stdin io.Reader, std
 		session.Stderr = stderr
 	}
 
-	cmd := shellJoin(command)
-	if cmd == "" {
+	if line == "" {
 		err = session.Shell()
 	} else {
-		err = session.Start(cmd)
+		err = session.Start(line)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("starting remote command: %w", err)
@@ -186,6 +202,52 @@ func Run(ctx context.Context, cfg Config, command []string, stdin io.Reader, std
 
 	waitErr := session.Wait()
 	return exitCode(waitErr), sessionErr(waitErr)
+}
+
+// ShellCommandLine translates argv a POSIX sh/bash would receive as its
+// own os.Args[1:] into the command line RunLine should send to the
+// guest, for cmd/kontur's "sh"/"bash" shims (see the Dockerfile's
+// "final" stage, which symlinks /bin/sh and /bin/bash to the same kontur
+// binary): docker/kubectl's "exec" always resolves and runs a command
+// already present in the container by name, never through this binary's
+// own mode dispatch, so a bare `kubectl exec -it <pod> -- sh` (or
+// "bash") lands on that symlink and needs to look enough like a real
+// shell invocation to be worth shimming at all.
+//
+// Only the two shapes docker/kubectl's own generated commands (and
+// scripts built on top of them) actually produce are supported:
+//
+//   - No arguments at all: returns "", requesting an interactive login
+//     shell the same way Run(ctx, cfg, nil, ...) does.
+//   - "-c <command>", optionally with other short flags fused in front
+//     of the "c" (e.g. "-ec", the way real sh/bash accept elsewhere):
+//     returns command verbatim, so RunLine sends it to the guest exactly
+//     as a real "sh -c"/"bash -c" would have interpreted it (variable
+//     expansion, word splitting, and so on happen guest-side, not here).
+//
+// Anything else -- a script file argument, "--login" alone, or
+// positional arguments after -c's command (which would become $0/$1/...
+// for a real sh/bash -c, but can't be threaded through the guest's own
+// ForceCommand wrapper the same way since the SSH "exec" request only
+// ever carries a single command string) -- returns an error naming
+// "kontur exec" as the alternative that does support it, rather than
+// silently behaving unlike a real sh/bash would.
+func ShellCommandLine(args []string) (string, error) {
+	if len(args) == 0 {
+		return "", nil
+	}
+
+	flag := args[0]
+	if len(flag) < 2 || flag[0] != '-' || flag[1] == '-' || flag[len(flag)-1] != 'c' {
+		return "", fmt.Errorf("unsupported shell invocation %q: only no arguments (interactive shell) or \"-c <command>\" are supported here -- use \"kontur exec\" directly for anything else", strings.Join(args, " "))
+	}
+	if len(args) < 2 {
+		return "", fmt.Errorf("%q requires a command argument", flag)
+	}
+	if len(args) > 2 {
+		return "", fmt.Errorf("unsupported shell invocation: positional arguments after -c's command (%q) aren't supported here -- use \"kontur exec\" directly", strings.Join(args[2:], " "))
+	}
+	return args[1], nil
 }
 
 // attachTTY puts f (stdin, already known to be a terminal) into raw mode,

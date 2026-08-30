@@ -1,0 +1,6 @@
+#!/sbin/openrc-run
+
+description="Signal host-side kontur listener when this guest is under memory pressure"
+command="/usr/local/bin/kontur-mem-agent"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"

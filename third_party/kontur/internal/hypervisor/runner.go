@@ -28,6 +28,11 @@ type Runner struct {
 	cmd *exec.Cmd
 	api *APIClient
 
+	// restored records whether Start booted by restoring cfg.SnapshotPath
+	// (see BuildArgs and SnapshotExists) rather than booting fresh. Only
+	// meaningful after Start returns.
+	restored bool
+
 	// done is closed once the process has exited; exitErr is only safe
 	// to read after done is closed.
 	done    chan struct{}
@@ -57,6 +62,7 @@ func (r *Runner) Start(stdout, stderr io.Writer) error {
 		return fmt.Errorf("removing stale api socket: %w", err)
 	}
 
+	r.restored = SnapshotExists(r.cfg.SnapshotPath)
 	args := BuildArgs(r.cfg)
 	log.Printf("starting: %s", String(r.cfg.BinaryPath, args))
 
@@ -76,6 +82,66 @@ func (r *Runner) Start(stdout, stderr io.Writer) error {
 		close(r.done)
 	}()
 
+	return nil
+}
+
+// Restored reports whether Start booted this VM by restoring a
+// previously suspended snapshot (see Suspend) rather than booting it
+// fresh. A restored VM has already been through whatever one-time setup
+// produced that snapshot, so callers (cmd/kontur's runVM) skip
+// re-running it.
+func (r *Runner) Restored() bool {
+	return r.restored
+}
+
+// Suspend pauses the running guest, writes a full snapshot of its state
+// to cfg.SnapshotPath (see BuildArgs, which restores from it on a later
+// run instead of booting fresh), and resumes it -- so this run carries
+// on exactly as if Suspend had never been called. It only leaves behind
+// a checkpoint for the *next* kontur run to pick up.
+func (r *Runner) Suspend(ctx context.Context) error {
+	if r.cfg.SnapshotPath == "" {
+		return fmt.Errorf("no snapshot path configured")
+	}
+
+	if err := r.api.Pause(ctx); err != nil {
+		return fmt.Errorf("pausing vm: %w", err)
+	}
+
+	err := r.snapshot(ctx)
+
+	if resumeErr := r.api.Resume(ctx); resumeErr != nil {
+		if err == nil {
+			return fmt.Errorf("resuming vm after snapshot: %w", resumeErr)
+		}
+		log.Printf("resuming vm after failed snapshot also failed: %v", resumeErr)
+	}
+	return err
+}
+
+// snapshot performs the actual vm.snapshot call and publishes its result
+// at cfg.SnapshotPath. cloud-hypervisor requires the destination
+// directory to already exist, so this snapshots into a fresh sibling
+// directory first and renames it into place only once it's complete --
+// a reader (BuildArgs's SnapshotExists check) never sees a partial
+// snapshot, even if this process is killed mid-write.
+func (r *Runner) snapshot(ctx context.Context) error {
+	tmp := r.cfg.SnapshotPath + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("clearing stale snapshot staging directory %s: %w", tmp, err)
+	}
+	if err := os.Mkdir(tmp, 0o755); err != nil {
+		return fmt.Errorf("creating snapshot staging directory: %w", err)
+	}
+
+	if err := r.api.Snapshot(ctx, tmp); err != nil {
+		os.RemoveAll(tmp)
+		return fmt.Errorf("snapshotting vm: %w", err)
+	}
+
+	if err := os.Rename(tmp, r.cfg.SnapshotPath); err != nil {
+		return fmt.Errorf("publishing snapshot to %s: %w", r.cfg.SnapshotPath, err)
+	}
 	return nil
 }
 

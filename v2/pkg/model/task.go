@@ -359,7 +359,35 @@ type Task struct {
 	Tags   []string
 
 	AutoMerge bool
-	CreatedAt *time.Time
+	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override
+	// Config.SandboxCPUs/SandboxMemoryMB for this task's own dispatch
+	// only -- the per-job escape hatch alongside the deployment-wide
+	// setting, for a task that is known ahead of time to need more (or
+	// less) than the default shape, e.g. a build-heavy repo or a task
+	// deliberately run on a constrained VM to reproduce a memory-pressure
+	// bug. Zero, the default for both, means "use the deployment
+	// default" -- the same "zero means unset" contract
+	// Config.SandboxCPUs/SandboxMemoryMB itself uses, chosen so a task
+	// created before this field existed reads back as unset rather than
+	// as an explicit "shrink this VM to nothing."
+	//
+	// Applied by orchestrator.runOne, once per dispatch, immediately
+	// before the sandbox is handed to the run: a slot's sandbox is
+	// otherwise sized once, at VM-create time, from
+	// orchestrator.KonturConfig's own deployment-wide default and never
+	// revisited, so a task asking for a different shape needs its own
+	// hook rather than reusing that one-time creation path. Only
+	// orchestrator.KonturSandboxes can honour it (see that package's
+	// shapedSandboxes interface) -- a task with either field set,
+	// dispatched onto the default orchestrator.HostSandboxes backend
+	// (no VM to resize), fails that dispatch outright rather than
+	// silently running at whatever shape the host itself happens to be,
+	// the same "refuse rather than silently do something else" choice
+	// runOne already makes for a task that requests a capability with no
+	// local directory to place it in.
+	SandboxCPUs     int
+	SandboxMemoryMB int
+	CreatedAt       *time.Time
 
 	// OrderKey is this task's position in the backlog -- Store.Ready
 	// dispatches ascending, so the task with the smallest OrderKey among

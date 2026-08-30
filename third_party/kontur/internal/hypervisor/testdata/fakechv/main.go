@@ -1,9 +1,10 @@
 // Command fakechv stands in for the cloud-hypervisor binary in tests of
-// the Runner's process and shutdown handling. It understands just enough
-// of the real CLI and API to exercise Runner: it parses --api-socket from
-// argv, serves the same vm.power-button / vmm.shutdown endpoints, and its
-// behaviour is tuned through environment variables rather than flags so
-// tests can drive it without inventing a parallel CLI.
+// the Runner's process, shutdown and suspend handling. It understands
+// just enough of the real CLI and API to exercise Runner: it parses
+// --api-socket from argv, serves the same vm.power-button / vmm.shutdown
+// / vm.pause / vm.resume / vm.snapshot endpoints, and its behaviour is
+// tuned through environment variables rather than flags so tests can
+// drive it without inventing a parallel CLI.
 //
 //   - FAKECHV_SERVE_API=0   don't start the API socket at all
 //   - FAKECHV_EXIT_ON_POWER_BUTTON=0   ack vm.power-button but keep running
@@ -50,6 +51,15 @@ func main() {
 			if envBool("FAKECHV_EXIT_ON_VMM_SHUTDOWN", true) {
 				go delayedExit(0)
 			}
+		})
+		mux.HandleFunc("/api/v1/vm.pause", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+		mux.HandleFunc("/api/v1/vm.resume", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+		mux.HandleFunc("/api/v1/vm.snapshot", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
 		})
 		go http.Serve(l, mux)
 	}

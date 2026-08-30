@@ -39,6 +39,8 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       repo: data.get("repo") || "",
       base: data.get("base") || "",
       autoMerge: form.elements.autoMerge.checked,
+      sandboxCpus: parseInt(data.get("sandboxCpus"), 10) || 0,
+      sandboxMemoryMb: parseInt(data.get("sandboxMemoryMb"), 10) || 0,
       capabilities,
       dependsOn: dependsOn.map((t) => t.id),
       reads,
@@ -90,6 +92,31 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           label="Auto-merge once checks pass"
           sx={{ display: "flex", mt: 1 }}
         />
+        <fieldset>
+          <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>
+          <TextField
+            name="sandboxCpus"
+            label="vCPUs"
+            helperText="blank/0 uses the deployment default"
+            type="number"
+            inputProps={{ min: 0, step: 1 }}
+            autoComplete="off"
+            fullWidth
+            margin="normal"
+            size="small"
+          />
+          <TextField
+            name="sandboxMemoryMb"
+            label="Memory (MiB)"
+            helperText="blank/0 uses the deployment default"
+            type="number"
+            inputProps={{ min: 0, step: 1 }}
+            autoComplete="off"
+            fullWidth
+            margin="normal"
+            size="small"
+          />
+        </fieldset>
         <FormControl fullWidth margin="normal" size="small">
           <InputLabel id="new-task-capabilities-label">Capabilities</InputLabel>
           <Select

@@ -71,6 +71,23 @@ type Config struct {
 	// flips to match -- top-to-bottom is dispatch order either way, this
 	// only decides which end a new task joins.
 	NewestFirst bool
+	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) are the
+	// deployment-wide default VM shape orchestrator.KonturConfig passes
+	// `konturctl vm create` as `-cpus`/`-memory-mb` when creating a
+	// slot's VM -- an alternative, store-backed way to set what an
+	// operator could already pass by hand as -kontur-create-arg=-cpus
+	// -kontur-create-arg=<n>, surfaced in the settings UI instead of a
+	// daemon flag. Zero, the default for both, leaves bwsalmon/kontur's
+	// own `konturctl vm create` default in place (2 vCPUs, 2048 MiB --
+	// third_party/kontur/internal/staticpod/spec.go's own Defaults) and
+	// omits the corresponding flag entirely, rather than passing a
+	// literal "-cpus 0" that VMSpec.Validate would refuse. Both are
+	// meaningless under the default orchestrator.HostSandboxes backend
+	// (local directories have no CPU/memory shape of their own) and
+	// simply go unread there, the same way the kontur* daemon flags do.
+	SandboxCPUs int
+	// SandboxMemoryMB is SandboxCPUs' memory counterpart, in MiB.
+	SandboxMemoryMB int
 }
 
 // SlotNames returns the n dispatch.Cycle slot identifiers a deployment

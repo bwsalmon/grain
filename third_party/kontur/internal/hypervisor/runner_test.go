@@ -158,3 +158,57 @@ func TestRunner_Start_InvalidBinary(t *testing.T) {
 		t.Fatal("expected Start() to fail for a nonexistent binary")
 	}
 }
+
+func TestRunner_Suspend_PublishesSnapshotAndResumes(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.SnapshotPath = filepath.Join(t.TempDir(), "snapshot")
+	r := startRunner(t, cfg, nil)
+
+	if r.Restored() {
+		t.Error("Restored() = true for a fresh boot with no existing snapshot")
+	}
+
+	readyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := r.api.WaitReady(readyCtx); err != nil {
+		t.Fatalf("waiting for fakechv's api socket: %v", err)
+	}
+
+	if err := r.Suspend(context.Background()); err != nil {
+		t.Fatalf("Suspend() error = %v", err)
+	}
+
+	if _, err := os.Stat(cfg.SnapshotPath); err != nil {
+		t.Errorf("snapshot not published at %s: %v", cfg.SnapshotPath, err)
+	}
+	if _, err := os.Stat(cfg.SnapshotPath + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("staging directory %s.tmp should not remain after a successful Suspend", cfg.SnapshotPath)
+	}
+
+	// fakechv's vm.pause/vm.resume just ack unconditionally, so the only
+	// way to tell Suspend actually resumed (rather than leaving the vm
+	// paused) is that a subsequent graceful shutdown still works.
+	done := make(chan struct{})
+	go func() {
+		r.Shutdown(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not return in time after Suspend")
+	}
+}
+
+func TestRunner_Restored_TrueWhenSnapshotAlreadyExists(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.SnapshotPath = filepath.Join(t.TempDir(), "snapshot")
+	if err := os.Mkdir(cfg.SnapshotPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := startRunner(t, cfg, nil)
+	if !r.Restored() {
+		t.Error("Restored() = false with a pre-existing snapshot at cfg.SnapshotPath")
+	}
+}

@@ -203,6 +203,16 @@ type recreatingSandboxes interface {
 	Recreate(ctx context.Context, slot string) error
 }
 
+// shapedSandboxes is implemented by a Sandboxes backend that supports
+// resizing a slot's sandbox to a task-specific CPU/memory shape ahead of
+// that task's own run -- KonturSandboxes' own Reshape (bwsalmon/
+// agents#534), via "konturctl vm update". HostSandboxes does not
+// implement it: the local-directory stand-in has no VM to size in the
+// first place, the same reason it has no Recreate either.
+type shapedSandboxes interface {
+	Reshape(ctx context.Context, slot string, cpus, memoryMB int) error
+}
+
 func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) error {
 	task, err := deps.Store.GetTask(ctx, d.TaskID)
 	if err != nil {
@@ -210,6 +220,25 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	}
 	if task == nil {
 		return fmt.Errorf("orchestrator: dispatch.Cycle dispatched unknown task %s", d.TaskID)
+	}
+
+	// A task's own SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534)
+	// resizes this slot's sandbox before it is handed to the run below --
+	// the one place a per-task override can still take effect, since a
+	// slot's VM is otherwise sized once, at create time, from the
+	// deployment's own default and never revisited. Recreate (below,
+	// after this task finishes) rebuilds from that default again, so the
+	// override applies to this task's run alone. A task with neither
+	// field set never reaches this at all, so a deployment using no
+	// per-task overrides sees no behavior change here.
+	if task.SandboxCPUs != 0 || task.SandboxMemoryMB != 0 {
+		reshaper, ok := deps.Sandboxes.(shapedSandboxes)
+		if !ok {
+			return fmt.Errorf("orchestrator: task %s overrides its sandbox shape but slot %s's sandbox backend does not support resizing", task.ID, d.Slot)
+		}
+		if err := reshaper.Reshape(ctx, d.Slot, task.SandboxCPUs, task.SandboxMemoryMB); err != nil {
+			return fmt.Errorf("orchestrator: applying task %s's sandbox shape override: %w", task.ID, err)
+		}
 	}
 
 	tools, err := deps.Sandboxes.ToolsFor(ctx, d.Slot)

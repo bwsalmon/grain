@@ -80,6 +80,12 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureScheduledTaskTemplateColumn(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
+	if err := s.ensureConfigSandboxShapeColumns(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureTaskSandboxShapeColumns(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -299,6 +305,48 @@ func (s *Store) ensureConfigNewestFirstColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureConfigSandboxShapeColumns adds grain_config.sandbox_cpus/
+// sandbox_memory_mb (schema.go's own DDL comment on the table has the
+// reasoning -- bwsalmon/agents#534) to a database created before these
+// columns existed, the same probe-then-ALTER approach every other
+// ensure*Column migration here uses. Both default to 0, Config.
+// SandboxCPUs/SandboxMemoryMB's own "unset, use bwsalmon/kontur's own
+// default" zero value, so a database migrated from before this setting
+// existed reads back exactly as if nobody had ever configured either.
+func (s *Store) ensureConfigSandboxShapeColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_cpus`, `sandbox_memory_mb` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `sandbox_cpus` INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `sandbox_memory_mb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureTaskSandboxShapeColumns adds task.sandbox_cpus/sandbox_memory_mb
+// (schema.go's own DDL comment on the table has the reasoning --
+// bwsalmon/agents#534) to a database created before these columns
+// existed, the same probe-then-ALTER approach ensureTaskApprovedAtColumn
+// already uses. Both default to 0, Task.SandboxCPUs/SandboxMemoryMB's own
+// "unset, use the deployment default" zero value.
+func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_cpus`, `sandbox_memory_mb` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `sandbox_cpus` INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `sandbox_memory_mb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
 // ErrConflict reports that an operation could not get a write in even
 // after retrying -- the store stayed busy with some other writer for
 // longer than it was willing to wait. A caller seeing it should tell
@@ -424,13 +472,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey,
+		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -705,7 +753,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`"
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -721,7 +769,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey); err != nil {
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB); err != nil {
 		return Task{}, err
 	}
 
@@ -1728,7 +1776,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`"
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -1736,7 +1784,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var targetRepos string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst); err != nil {
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -1751,10 +1799,10 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst)
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB)
 		return err
 	})
 }

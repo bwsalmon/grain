@@ -2,10 +2,25 @@ package hypervisor
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/bwsalmon/kontur/internal/config"
 )
+
+// SnapshotExists reports whether path already holds a complete VM
+// snapshot for BuildArgs to restore from (see its "--restore" branch
+// below) rather than booting fresh. Runner.Suspend only ever makes a
+// snapshot visible at its final path by renaming a finished staging
+// directory into place, so simple existence is enough to know it's
+// complete.
+func SnapshotExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 // BuildArgs turns a Config into the argv for the cloud-hypervisor binary.
 //
@@ -18,8 +33,19 @@ func BuildArgs(cfg config.Config) []string {
 
 	args = append(args, "--api-socket", "path="+cfg.APISocket)
 
+	if SnapshotExists(cfg.SnapshotPath) {
+		// A restored VM's CPUs, memory, disks, kernel/firmware, net and
+		// console are all replayed from the snapshot's own config.json
+		// rather than given again here -- see Runner.Suspend and
+		// cloud-hypervisor's snapshot/restore docs. "resume=true" starts
+		// it running immediately, matching the running state it was in
+		// right before Suspend paused it to take the snapshot.
+		args = append(args, "--restore", "source_url=file://"+cfg.SnapshotPath+",resume=true")
+		return args
+	}
+
 	args = append(args, "--cpus", fmt.Sprintf("boot=%d", cfg.CPUs))
-	args = append(args, "--memory", fmt.Sprintf("size=%dM,shared=%s", cfg.MemoryMB, onOff(cfg.MemoryShared)))
+	args = append(args, "--memory", memoryArg(cfg))
 
 	for _, d := range cfg.Disks {
 		// image_type=raw is a local addition (bwsalmon/agents#478, see
@@ -87,6 +113,26 @@ func BuildArgs(cfg config.Config) []string {
 	args = append(args, cfg.ExtraArgs...)
 
 	return args
+}
+
+// memoryArg builds --memory's value: a fixed starting size, plus (when
+// MemoryHotplug is set and there's actually room to grow into) a
+// virtio-mem hotplug device sized for growth up to MemoryMaxMB. virtio-mem
+// is used over cloud-hypervisor's other hotplug mechanism (ACPI-based DIMM
+// hotplug) because it needs no guest-side udev rule to online newly added
+// memory and supports shrinking back down again, not just growing -- at
+// the cost of requiring a guest kernel built with CONFIG_VIRTIO_MEM
+// (Linux 5.8+) to actually make use of it; a guest without that support
+// still boots fine at MemoryMB, it just can't grow beyond it. Live
+// resizing (up to MemoryMaxMB, down to MemoryMB) works via the
+// cloud-hypervisor API's vm.resize (see APIClient.Resize / "kontur
+// resize").
+func memoryArg(cfg config.Config) string {
+	arg := fmt.Sprintf("size=%dM,shared=%s", cfg.MemoryMB, onOff(cfg.MemoryShared))
+	if cfg.MemoryHotplug && cfg.MemoryMaxMB > cfg.MemoryMB {
+		arg += fmt.Sprintf(",hotplug_method=virtio-mem,hotplug_size=%dM", cfg.MemoryMaxMB-cfg.MemoryMB)
+	}
+	return arg
 }
 
 func onOff(b bool) string {

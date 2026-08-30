@@ -2,6 +2,7 @@ package hypervisor
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,83 @@ func TestAPIClient_ShutdownVMM(t *testing.T) {
 	}
 	if gotPath != "/api/v1/vmm.shutdown" {
 		t.Errorf("got path %s, want /api/v1/vmm.shutdown", gotPath)
+	}
+}
+
+func TestAPIClient_PauseAndResume(t *testing.T) {
+	var gotMethods, gotPaths []string
+	socket := newFakeAPIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethods = append(gotMethods, r.Method)
+		gotPaths = append(gotPaths, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	c := NewAPIClient(socket)
+	if err := c.Pause(context.Background()); err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	if err := c.Resume(context.Background()); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+
+	wantPaths := []string{"/api/v1/vm.pause", "/api/v1/vm.resume"}
+	if len(gotPaths) != len(wantPaths) {
+		t.Fatalf("got paths %v, want %v", gotPaths, wantPaths)
+	}
+	for i, want := range wantPaths {
+		if gotPaths[i] != want || gotMethods[i] != http.MethodPut {
+			t.Errorf("request %d = %s %s, want PUT %s", i, gotMethods[i], gotPaths[i], want)
+		}
+	}
+}
+
+func TestAPIClient_Snapshot(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	socket := newFakeAPIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	c := NewAPIClient(socket)
+	if err := c.Snapshot(context.Background(), "/var/lib/kontur/snapshot"); err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/api/v1/vm.snapshot" {
+		t.Errorf("got %s %s, want PUT /api/v1/vm.snapshot", gotMethod, gotPath)
+	}
+	if want := `{"destination_url":"file:///var/lib/kontur/snapshot"}`; gotBody != want {
+		t.Errorf("body = %s, want %s", gotBody, want)
+	}
+}
+
+func TestAPIClient_Resize(t *testing.T) {
+	var gotMethod, gotPath, gotContentType string
+	var gotBody []byte
+	socket := newFakeAPIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	c := NewAPIClient(socket)
+	if err := c.Resize(context.Background(), 2*1024*1024*1024); err != nil {
+		t.Fatalf("Resize() error = %v", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/api/v1/vm.resize" {
+		t.Errorf("got %s %s, want PUT /api/v1/vm.resize", gotMethod, gotPath)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	wantBody := `{"desired_ram":2147483648}`
+	if string(gotBody) != wantBody {
+		t.Errorf("body = %s, want %s", gotBody, wantBody)
 	}
 }
 

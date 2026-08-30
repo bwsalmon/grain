@@ -111,6 +111,41 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // bwsalmon/agents#534: the deployment-wide default sandbox shape.
+  it("sets sandboxCpus/sandboxMemoryMb and includes them in the payload only when changed", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
+    await user.clear(cpusInput);
+    await user.type(cpusInput, "4");
+    const memoryInput = screen.getByLabelText(/Sandbox memory/);
+    await user.clear(memoryInput);
+    await user.type(memoryInput, "8192");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxCpus: 4, sandboxMemoryMb: 8192 }),
+    });
+  });
+
+  it("leaves sandboxCpus/sandboxMemoryMb out of the payload when unchanged", async () => {
+    api.mockResolvedValueOnce({ ...settings, sandboxCpus: 4, sandboxMemoryMb: 8192 }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByLabelText(/Sandbox vCPUs/)).toHaveValue(4);
+    expect(screen.getByLabelText(/Sandbox memory/)).toHaveValue(8192);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+  });
+
   it("reports the error and does not close on a failed save", async () => {
     api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("pollInterval must be positive"));
     const showError = vi.fn();

@@ -14,8 +14,11 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		envDiskImage, envDiskReadonly, envExtraDisks, envKernel, envInitramfs,
-		envFirmware, envCmdline, envCPUs, envMemoryMB, envMemoryShared, envNet,
+		envFirmware, envCmdline, envCPUs, envMemoryMB, envMemoryMaxMB,
+		envMemoryHotplug, envMemoryShared, envNet,
 		envAPISocket, envBinaryPath, envExtraArgs, envShutdownTimeout,
+		envSetupScript, envSnapshotPath,
+		envMemAgent, envMemAgentAddr, envMemAgentStepMB, envMemAgentCooldown,
 	} {
 		os.Unsetenv(k)
 	}
@@ -53,6 +56,12 @@ func TestFromEnv_MinimalKernelBoot(t *testing.T) {
 	}
 	if cfg.MemoryMB != defaultMemoryMB {
 		t.Errorf("MemoryMB = %d, want default %d", cfg.MemoryMB, defaultMemoryMB)
+	}
+	if cfg.MemoryMaxMB != defaultMemoryMaxMB {
+		t.Errorf("MemoryMaxMB = %d, want default %d", cfg.MemoryMaxMB, defaultMemoryMaxMB)
+	}
+	if !cfg.MemoryHotplug {
+		t.Errorf("MemoryHotplug = false, want default true")
 	}
 	if cfg.ShutdownTimeout != defaultShutdownTimeout {
 		t.Errorf("ShutdownTimeout = %s, want default %s", cfg.ShutdownTimeout, defaultShutdownTimeout)
@@ -184,6 +193,65 @@ func TestFromEnv_InvalidExtraDiskMode(t *testing.T) {
 	}
 }
 
+func TestFromEnv_SetupScriptWithoutSnapshotPath(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envSetupScript, "echo hi")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v, want CHV_SETUP_SCRIPT to be usable without CHV_SNAPSHOT_PATH", err)
+	}
+	if cfg.SetupScript != "echo hi" {
+		t.Errorf("SetupScript = %q, want %q", cfg.SetupScript, "echo hi")
+	}
+	if cfg.SnapshotPath != "" {
+		t.Errorf("SnapshotPath = %q, want empty", cfg.SnapshotPath)
+	}
+}
+
+func TestFromEnv_SnapshotPathMustBeAbsolute(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envSnapshotPath, "relative/path")
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error for a relative CHV_SNAPSHOT_PATH, got nil")
+	}
+}
+
+func TestFromEnv_SnapshotPathParentMustExist(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envSnapshotPath, filepath.Join(t.TempDir(), "does-not-exist", "snapshot"))
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error when CHV_SNAPSHOT_PATH's parent directory doesn't exist, got nil")
+	}
+}
+
+func TestFromEnv_SetupScriptAndSnapshotPath(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envSetupScript, "apt-get install -y foo")
+	t.Setenv(envSnapshotPath, filepath.Join(t.TempDir(), "snapshot"))
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.SetupScript != "apt-get install -y foo" {
+		t.Errorf("SetupScript = %q, want %q", cfg.SetupScript, "apt-get install -y foo")
+	}
+	if cfg.SnapshotPath == "" {
+		t.Error("SnapshotPath is empty, want it set")
+	}
+}
+
 func TestFromEnv_RejectsTooFewCPUs(t *testing.T) {
 	clearEnv(t)
 	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
@@ -192,5 +260,149 @@ func TestFromEnv_RejectsTooFewCPUs(t *testing.T) {
 
 	if _, err := FromEnv(); err == nil {
 		t.Fatal("expected error for 0 cpus, got nil")
+	}
+}
+
+func TestFromEnv_MemoryMaxDefaultTracksOverriddenStartingSize(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemoryMB, "4096")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.MemoryMaxMB != 4096 {
+		t.Errorf("MemoryMaxMB = %d, want 4096 (tracking the overridden starting size, since it exceeds the default max)", cfg.MemoryMaxMB)
+	}
+}
+
+func TestFromEnv_MemoryHotplugExplicit(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemoryMB, "512")
+	t.Setenv(envMemoryMaxMB, "1024")
+	t.Setenv(envMemoryHotplug, "false")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.MemoryMB != 512 {
+		t.Errorf("MemoryMB = %d, want 512", cfg.MemoryMB)
+	}
+	if cfg.MemoryMaxMB != 1024 {
+		t.Errorf("MemoryMaxMB = %d, want 1024", cfg.MemoryMaxMB)
+	}
+	if cfg.MemoryHotplug {
+		t.Errorf("MemoryHotplug = true, want false")
+	}
+}
+
+func TestFromEnv_RejectsMemoryMaxBelowStart(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemoryMB, "1024")
+	t.Setenv(envMemoryMaxMB, "512")
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error when CHV_MEMORY_MAX_MB is below CHV_MEMORY_MB, got nil")
+	}
+}
+
+func TestFromEnv_HotplugWithGrowthRoomRequiresSharedMemory(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemoryMB, "512")
+	t.Setenv(envMemoryMaxMB, "1024")
+	t.Setenv(envMemoryShared, "false")
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error for hotplug enabled with growth room but shared memory disabled, got nil")
+	}
+
+	// Disabling hotplug altogether lifts the shared-memory requirement,
+	// since no virtio-mem device gets attached at all.
+	t.Setenv(envMemoryHotplug, "false")
+	if _, err := FromEnv(); err != nil {
+		t.Errorf("FromEnv() error = %v, want nil once hotplug is disabled", err)
+	}
+}
+
+func TestFromEnv_MemAgentDefaultsOffAndDoesNotRequireHotplugUnlessEnabled(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemoryHotplug, "false")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.MemAgent {
+		t.Errorf("MemAgent = true, want false by default")
+	}
+	if cfg.MemAgentAddr != defaultMemAgentAddr {
+		t.Errorf("MemAgentAddr = %q, want %q", cfg.MemAgentAddr, defaultMemAgentAddr)
+	}
+	if cfg.MemAgentStepMB != defaultMemAgentStepMB {
+		t.Errorf("MemAgentStepMB = %d, want %d", cfg.MemAgentStepMB, defaultMemAgentStepMB)
+	}
+	if cfg.MemAgentCooldown != defaultMemAgentCooldown {
+		t.Errorf("MemAgentCooldown = %s, want %s", cfg.MemAgentCooldown, defaultMemAgentCooldown)
+	}
+}
+
+func TestFromEnv_MemAgentRequiresMemoryHotplug(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemAgent, "true")
+	t.Setenv(envMemoryHotplug, "false")
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error for CHV_MEM_AGENT=true with memory hotplug disabled, got nil")
+	}
+}
+
+func TestFromEnv_MemAgentExplicitValues(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemAgent, "true")
+	t.Setenv(envMemAgentAddr, "169.254.100.1:12345")
+	t.Setenv(envMemAgentStepMB, "128")
+	t.Setenv(envMemAgentCooldown, "1m")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if !cfg.MemAgent {
+		t.Errorf("MemAgent = false, want true")
+	}
+	if cfg.MemAgentAddr != "169.254.100.1:12345" {
+		t.Errorf("MemAgentAddr = %q, want 169.254.100.1:12345", cfg.MemAgentAddr)
+	}
+	if cfg.MemAgentStepMB != 128 {
+		t.Errorf("MemAgentStepMB = %d, want 128", cfg.MemAgentStepMB)
+	}
+	if cfg.MemAgentCooldown != time.Minute {
+		t.Errorf("MemAgentCooldown = %s, want 1m", cfg.MemAgentCooldown)
+	}
+}
+
+func TestFromEnv_RejectsNonPositiveMemAgentStepMB(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envMemAgentStepMB, "0")
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error for CHV_MEM_AGENT_STEP_MB=0, got nil")
 	}
 }

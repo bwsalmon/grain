@@ -48,6 +48,7 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 | `overlay-debian/etc/acpi/powerbtn.sh` | Runs `systemctl poweroff`. |
 | `overlay-debian/etc/systemd/system/kontur-ssh-host-keys.service` | Regenerates SSH host keys on first boot (`ssh-keygen -A`, `Before=ssh.service`), since the Dockerfile deletes whatever `openssh-server`'s postinst generated at build time -- otherwise every VM booted from this image would share the same host keys. |
 | `overlay-alpine/etc/acpi/powerbtn.sh` | Runs `poweroff` (busybox's applet, which signals `/sbin/init` rather than powering off directly -- see "Graceful shutdown"). |
+| `overlay-debian/etc/systemd/system/kontur-mem-agent.service`, `overlay-alpine/etc/init.d/kontur-mem-agent` | Run `kontur-mem-agent` (copied into both variants straight from the top-level Dockerfile's own `build` stage, not part of either overlay) as a restart-always service. See the top-level README's "Memory hotplug". |
 
 The Alpine variant has no equivalent of `kontur-ssh-host-keys.service`:
 unlike Debian's, Alpine's `openssh-server` package doesn't generate host
@@ -65,11 +66,12 @@ normal tooling (`systemctl enable`, `rc-update add`), since neither has
 a running service manager during the build to ask -- each is just a
 symlink, written directly:
 
-- Debian: `kontur-ssh-host-keys.service` is symlinked into
-  `multi-user.target.wants/`. `acpid.socket`/`acpid.path` don't need the
-  same treatment -- `acpid`'s own postinst already enables them via
-  `deb-systemd-helper`, which (like `systemctl enable`) just writes
-  symlinks and doesn't need a running systemd to do it.
+- Debian: `kontur-ssh-host-keys.service` and `kontur-mem-agent.service`
+  are both symlinked into `multi-user.target.wants/`. `acpid.socket`/
+  `acpid.path` don't need the same treatment -- `acpid`'s own postinst
+  already enables them via `deb-systemd-helper`, which (like `systemctl
+  enable`) just writes symlinks and doesn't need a running systemd to do
+  it.
 - Alpine: nothing is enabled automatically by `apk add` the way Debian's
   postinst scripts do, so every service this guest needs is symlinked by
   hand from `/etc/init.d/<service>` into a runlevel directory --
@@ -77,8 +79,9 @@ symlink, written directly:
   reach a usable state at all (device nodes, `/proc`/`/sys`, hostname,
   clearing `/tmp`, syslog -- Debian's systemd does the equivalent
   internally, with nothing to enable by hand for it), and `default` for
-  `sshd`/`acpid` themselves. See the `guest-rootfs-alpine` stage in the
-  top-level `Dockerfile` for the exact list.
+  `sshd`/`acpid`/`kontur-mem-agent` themselves. See the
+  `guest-rootfs-alpine` stage in the top-level `Dockerfile` for the exact
+  list.
 
 ## Why SSH output goes to the console
 
@@ -111,26 +114,15 @@ This works the same way on both `GUEST_DISTRO` variants.
 ## Running a custom setup script
 
 To customize the guest beyond what the overlays above do -- installing
-extra packages, dropping in config files, enabling services, etc -- pass
-a shell script's contents at build time:
-
-```sh
-docker build --build-arg GUEST_SETUP_SCRIPT="$(cat my-setup.sh)" -t kontur .
-```
-
-The script runs via `chroot` against the rootfs (from within whichever of
-`guest-rootfs-debian`/`guest-rootfs-alpine` `GUEST_DISTRO` selected) after
-the overlays are applied but before it's packed into `disk.img`, the same
-mechanism `debootstrap`/`apk` themselves already use to configure
-packages (non-privileged in the sense the top of this file describes: no
-extra `docker build` privileges are needed). Network access works fine
-(`chroot` doesn't create a new network namespace, so it's the same
-connectivity the rest of the build already has), so `apt-get install` /
-`apk add` and the like just work. What the script *doesn't* get is
-`/proc`/`/sys` (nothing mounts them here, so anything that reads from
-them will find those directories empty) or a running service manager --
-enable units/services by hand instead, the same way described in
-"Enabling services" above.
+extra packages, dropping in config files, enabling services, etc -- use
+`CHV_SETUP_SCRIPT` (see the top-level README's "Suspend and resume")
+instead of a build-time mechanism: it boots the actual guest and runs
+your script over SSH once, which -- unlike a build-time `chroot` -- gets
+a running kernel, service manager, and network stack to work with, so
+there's nothing it can't do that an interactively-administered guest
+could. Pair it with `CHV_SNAPSHOT_PATH` to pay that cost only once: the
+suspended snapshot after the first run stands in for what would
+otherwise be a customized `disk.img` baked at build time.
 
 ## Graceful shutdown
 

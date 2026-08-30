@@ -55,6 +55,16 @@ type Settings struct {
 	// shows up first in the task list; true moves it to the front of
 	// both instead.
 	NewestFirst bool `json:"newestFirst"`
+	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) are the
+	// deployment-wide default shape a kontur-managed sandbox VM is
+	// created with -- model.Config's own fields of the same name. Zero
+	// (the default for both) means "use bwsalmon/kontur's own default"
+	// rather than a deliberately tiny VM. Meaningless, and simply unused,
+	// under a deployment running the default local-directory sandboxing
+	// (no -kontur-vm-name-prefix); GetSettings still reports whatever is
+	// stored either way, the same as every other kontur* setting here.
+	SandboxCPUs     int `json:"sandboxCpus"`
+	SandboxMemoryMB int `json:"sandboxMemoryMb"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -71,6 +81,8 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		TargetRepos:                   cfg.TargetRepos,
 		TargetReposMissingCredentials: c.targetReposMissingCredentials(cfg.TargetRepos),
 		NewestFirst:                   cfg.NewestFirst,
+		SandboxCPUs:                   cfg.SandboxCPUs,
+		SandboxMemoryMB:               cfg.SandboxMemoryMB,
 	}
 }
 
@@ -131,6 +143,8 @@ type UpdateSettingsRequest struct {
 	GCPServiceAccountEmail *string   `json:"gcpServiceAccountEmail"`
 	TargetRepos            *[]string `json:"targetRepos"`
 	NewestFirst            *bool     `json:"newestFirst"`
+	SandboxCPUs            *int      `json:"sandboxCpus"`
+	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -212,6 +226,24 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	}
 	if req.NewestFirst != nil {
 		cfg.NewestFirst = *req.NewestFirst
+	}
+	if req.SandboxCPUs != nil {
+		// Bounds mirror bwsalmon/kontur's own staticpod.VMSpec.Validate
+		// ("cpus must be at least 1") -- 0 is the one value this rejects
+		// that Validate would not, since 0 means "unset" here rather
+		// than a literal request for a zero-vCPU VM.
+		if *req.SandboxCPUs != 0 && *req.SandboxCPUs < 1 {
+			return Settings{}, validationErrorf("sandboxCpus must be 0 (unset) or at least 1")
+		}
+		cfg.SandboxCPUs = *req.SandboxCPUs
+	}
+	if req.SandboxMemoryMB != nil {
+		// Mirrors staticpod.VMSpec.Validate's own "memory-mb must be at
+		// least 128" for the same reason SandboxCPUs' check does.
+		if *req.SandboxMemoryMB != 0 && *req.SandboxMemoryMB < 128 {
+			return Settings{}, validationErrorf("sandboxMemoryMb must be 0 (unset) or at least 128")
+		}
+		cfg.SandboxMemoryMB = *req.SandboxMemoryMB
 	}
 
 	if firstTime {
