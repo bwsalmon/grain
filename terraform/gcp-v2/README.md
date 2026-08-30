@@ -291,27 +291,60 @@ real `bwsalmon/kontur`-managed VMs, one per slot, over SSH
 this deployment shape (bwsalmon/agents#504) rather than only configurable
 by hand-editing the systemd unit afterward.
 
-Unlike everything else in this module, a first `terraform apply` with
-this left on will not by itself produce a working deployment: a guest
-image and an OCI image have to exist somewhere for the host to fetch, and
-neither has a project-independent default this module could supply on
-your behalf (`instance.tf`'s own `precondition` refuses to `apply` at all
-without them, rather than leaving you to discover that from a host that
-installs and then can never create a VM). Three one-time steps, in order:
+Unlike most of this module, a first `terraform apply` with this left on
+pays a real, one-time cost on the host itself before it produces a fully
+working deployment -- but it no longer needs anything built or published
+by hand first (bwsalmon/agents#531): `v2/scripts/setup.sh`'s own
+`ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_kontur_kvm_access`
+generate an SSH keypair, build the guest image (`packer/kontur/build.sh`
+-- `debootstrap`+`chroot`, no VM boot, several minutes against a real
+Debian mirror) and the OCI image (`build-oci-image.sh` -- a plain `docker
+build`, no push), grant `$GRAIN_USER` `/dev/kvm` and `docker` group
+access, and seed the generated SSH key, all before `write_systemd_units`
+wires up `grain daemon`'s own `-kontur-*` flags. This runs every deploy
+generation, not just the first, but `ensure_kontur_images`'s own
+`kontur_image_tag` -- a hash of `packer/kontur`'s own git tree (what the
+guest image is provisioned from), `third_party/kontur`'s own vendored git
+tree (the kontur version baked into the OCI image), and the SSH public
+key in play -- names and caches the result, so a re-run with nothing
+changed rebuilds neither image; only a `provision.sh` edit, a
+`third_party/kontur` vendor bump, or a rotated keypair does. See
+`packer/kontur/README.md` for what the guest-image build actually does
+and why.
+
+Any one of those steps failing (debootstrap unable to reach a Debian
+mirror, say) leaves `enable_kontur_sandboxes`'s intent unmet *for that run
+only*: the host still comes up dispatching into host directories, with a
+line in `journalctl -u grain-daemon -f`'s own deploy log and `setup.sh`'s
+own readiness report naming which prerequisite was not ready, rather than
+failing the whole install. Re-running `setup.sh` (or waiting for the next
+`config-sync` pass) picks it back up once it is.
+
+An operator who would rather build the guest/OCI image pair once,
+centrally, and share the result across many hosts than pay that build
+cost on each of them still can, the way every deployment before
+bwsalmon/agents#531 had to:
 
 1. **Build and publish the guest image.** Needs root (`debootstrap`,
-   bind-mounts, `mke2fs`) and an SSH keypair -- see step 3 below for the
-   keypair, then:
+   bind-mounts, `mke2fs`) and an SSH keypair:
 
    ```sh
    sudo apt-get install -y debootstrap e2fsprogs
+   ssh-keygen -t ed25519 -N '' -f kontur_key   # -> kontur_key, kontur_key.pub
    export OPERATOR_SSH_PUBLIC_KEY="$(cat kontur_key.pub)"
    export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
    sudo -E ../../packer/kontur/build.sh
    ```
 
-   See `packer/kontur/README.md` for what this actually does and why. Set
-   `kontur_image_bucket` to the same bucket name.
+   Set `kontur_image_bucket` to the same bucket name, and push the
+   private half of that keypair as this deployment's own secret:
+
+   ```sh
+   GRAIN_KONTUR_SSH_KEY="$(cat kontur_key)" PROJECT=... INSTANCE=... ZONE=... ./push-secrets.sh
+   ```
+
+   Never regenerate this keypair without also rebuilding the guest image
+   -- both halves have to match, and nothing checks that they still do.
 
 2. **Build and push the OCI image** (the `kontur` binary and the pinned
    cloud-hypervisor release, from `third_party/kontur`'s own Dockerfile --
@@ -327,32 +360,11 @@ installs and then can never create a VM). Three one-time steps, in order:
    <region>-docker.pkg.dev` -- this script does neither for you.) Set
    `kontur_oci_image` to the same reference.
 
-3. **Generate the SSH keypair** step 1 needed the public half of, and
-   push the private half as this deployment's own secret:
-
-   ```sh
-   ssh-keygen -t ed25519 -N '' -f kontur_key   # -> kontur_key, kontur_key.pub
-   GRAIN_KONTUR_SSH_KEY="$(cat kontur_key)" PROJECT=... INSTANCE=... ZONE=... ./push-secrets.sh
-   ```
-
-   Never regenerate this keypair without also rebuilding the guest image
-   (step 1) -- both halves have to match, and nothing checks that they
-   still do.
-
-With all three in place (and `enable_nested_virtualization` on, the
-default, for `/dev/kvm`), `v2/scripts/setup.sh`'s own
-`ensure_kontur_images`/`ensure_kontur_kvm_access`/`seed_kontur_ssh_key`
-fetch the guest image, pull and retag the OCI image, grant `$GRAIN_USER`
-`/dev/kvm` and `docker` group access, and seed the SSH key -- every deploy
-generation, not just the first -- before `write_systemd_units` wires up
-`grain daemon`'s own `-kontur-*` flags. Any one of those three steps
-failing (a bucket that is not readable yet, say) leaves
-`enable_kontur_sandboxes`'s intent unmet *for that run only*: the host
-still comes up dispatching into host directories, with a line in
-`journalctl -u grain-daemon -f`'s own deploy log and `setup.sh`'s own
-readiness report naming which prerequisite was not ready, rather than
-failing the whole install. Re-running `setup.sh` (or waiting for the next
-`config-sync` pass) picks it back up once it is.
+`kontur_image_bucket` and `kontur_oci_image` are both-or-neither: set
+together, `ensure_kontur_images` fetches this bucket's `latest` alias and
+pulls this OCI image on every run instead of building either itself; left
+at their empty defaults (the common case now), it builds both locally
+instead, as described above.
 
 Set `enable_kontur_sandboxes = false` to keep a deployment on
 host-directory sandboxing indefinitely -- nothing above is required then,

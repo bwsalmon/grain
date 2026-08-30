@@ -79,7 +79,13 @@ fi
 
 image_name="${IMAGE_NAME:-kontur-guest}"
 version="$(git -C .. rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date -u +%Y%m%d%H%M%S)"
-output_dir="output/${image_name}-${version}"
+# OUTPUT_DIR lets a caller that already knows exactly where it wants the
+# result -- v2/scripts/setup.sh's own ensure_kontur_images, building this
+# locally on every host and caching the result by a content hash of its
+# own choosing -- skip parsing this script's stdout (or the timestamp in
+# $version, different on every invocation) to find it afterward. Unset,
+# this is exactly the path a human running this by hand always got.
+output_dir="${OUTPUT_DIR:-output/${image_name}-${version}}"
 mkdir -p "$output_dir"
 
 cp "$kernel_path" "${output_dir}/vmlinuz"

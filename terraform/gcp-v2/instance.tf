@@ -29,9 +29,10 @@ locals {
     gcp_project               = local.gcp_project
     gcp_agent_service_account = local.agent_service_account_email
 
-    # See variables.tf's own "kontur" section -- enable_kontur_sandboxes
-    # on with these otherwise empty is refused by this resource's own
-    # precondition below, not left to fail confusingly on the host.
+    # See variables.tf's own "kontur" section -- enable_kontur_sandboxes on
+    # with these otherwise empty (the default) is not a misconfiguration:
+    # it tells v2/scripts/setup.sh's own ensure_kontur_images to build both
+    # images itself rather than fetch a pair published elsewhere.
     enable_kontur_sandboxes = var.enable_kontur_sandboxes
     kontur_image_bucket     = var.kontur_image_bucket
     kontur_oci_image        = var.kontur_oci_image
@@ -181,16 +182,20 @@ resource "google_compute_instance" "host" {
       error_message = "enable_gemini_key, agent_can_manage_compute_instances, and agent_can_manage_gke all need a real key on the agent account to do anything -- set deployer_member so push-secrets.sh can mint one after apply (see iam.tf's deployer_manages_minter_keys)."
     }
 
-    # A guest image and an OCI image have to actually exist somewhere for
-    # setup.sh to fetch -- neither has a project-independent default this
-    # module could supply, so enable_kontur_sandboxes (on by default)
-    # fails loudly here rather than applying a host that can never
-    # actually create a VM. See variables.tf's own kontur_image_bucket/
-    # kontur_oci_image and this module's README, "Kontur sandboxing".
-    precondition {
-      condition     = !var.enable_kontur_sandboxes || (var.kontur_image_bucket != "" && var.kontur_oci_image != "")
-      error_message = "enable_kontur_sandboxes needs kontur_image_bucket and kontur_oci_image set -- see terraform/gcp-v2/README.md, \"Kontur sandboxing\", for the one-time build-and-publish step that creates them, or set enable_kontur_sandboxes = false to keep this deployment on host-directory sandboxing."
-    }
+    # A guest image and an OCI image used to have to exist somewhere for
+    # setup.sh to fetch before it could bring up a single kontur VM, and
+    # neither had a project-independent default this module could supply
+    # -- so this precondition used to fail loudly here rather than
+    # applying a host that could never actually create one. That is no
+    # longer true (bwsalmon/agents#531): v2/scripts/setup.sh's own
+    # ensure_kontur_images now builds both images itself, on the host, the
+    # first time it runs, when kontur_image_bucket/kontur_oci_image are
+    # left at their empty defaults -- see this module's README, "Kontur
+    # sandboxing", and that script's own kontur_image_tag for how the
+    # result is named and cached so a later apply does not rebuild it for
+    # nothing. Setting kontur_image_bucket/kontur_oci_image together still
+    # works, for an operator who would rather build once centrally and
+    # share the result across many hosts than pay that cost on each.
 
     # A kontur VM is a nested cloud-hypervisor guest -- no /dev/kvm, no
     # boot, regardless of anything else here.

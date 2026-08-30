@@ -48,16 +48,21 @@
 #                                      Gemini key". Set it only to use a key of your own.
 #   GRAIN_KONTUR_SSH_KEY                the private half of the SSH keypair
 #                                      orchestrator.KonturSandboxes authenticates to each
-#                                      kontur VM with (-kontur-ssh-key) -- required for
-#                                      enable_kontur_sandboxes to work at all. The public
-#                                      half is baked into the guest image separately, at
-#                                      build time, via packer/kontur/build.sh's own
-#                                      OPERATOR_SSH_PUBLIC_KEY -- both halves come from the
-#                                      same keypair, generated once (e.g. `ssh-keygen -t
-#                                      ed25519 -N '' -f kontur_key`) and never regenerated
-#                                      without also rebuilding the guest image, or the two
-#                                      halves stop matching. See this directory's README,
-#                                      "Kontur sandboxing".
+#                                      kontur VM with (-kontur-ssh-key). Optional: with
+#                                      enable_kontur_sandboxes on and this unset,
+#                                      v2/scripts/setup.sh's own ensure_kontur_ssh_key
+#                                      generates a keypair itself and bakes its public half
+#                                      into the guest image it builds (bwsalmon/agents#531)
+#                                      -- set this only to pin a specific keypair instead,
+#                                      e.g. one shared across a fleet building its guest
+#                                      image once, centrally (see this directory's README,
+#                                      "Kontur sandboxing"). The public half then has to be
+#                                      baked into the guest image separately, at build time,
+#                                      via packer/kontur/build.sh's own
+#                                      OPERATOR_SSH_PUBLIC_KEY -- both halves have to come
+#                                      from the same keypair, and rotating one without also
+#                                      rebuilding the guest image with the other leaves them
+#                                      mismatched.
 #   MINTER_SERVICE_ACCOUNT             terraform output minter_service_account -- if set,
 #                                      mints a fresh key for it and pushes that too (see below)
 set -euo pipefail
