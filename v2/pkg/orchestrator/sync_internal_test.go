@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 
@@ -223,5 +224,92 @@ func TestTruncateBoundsModelOutput(t *testing.T) {
 	}
 	if len(got) > 10+len(`""... (truncated)`) {
 		t.Errorf("long text = %q, longer than the bound plus its marker", got)
+	}
+}
+
+// --- re-checking a branch that is not there yet ------------------------
+
+type branchClient struct {
+	github.Client
+	answers []bool
+	err     error
+	calls   int
+}
+
+func (b *branchClient) BranchExists(owner, repo, branch string) (bool, error) {
+	b.calls++
+	if b.err != nil {
+		return false, b.err
+	}
+	if b.calls-1 < len(b.answers) {
+		return b.answers[b.calls-1], nil
+	}
+	return false, nil
+}
+
+func withNoSleep(t *testing.T) {
+	t.Helper()
+	prev := branchExistsSleep
+	branchExistsSleep = func(time.Duration) {}
+	t.Cleanup(func() { branchExistsSleep = prev })
+}
+
+// The case this exists for: the push landed, GitHub had not caught up on
+// the first read. Believing that first answer records no_action and
+// abandons work already on the remote.
+func TestBranchExistsSettledReChecksANegative(t *testing.T) {
+	withNoSleep(t)
+	c := &branchClient{answers: []bool{false, false, true}}
+	exists, err := branchExistsSettled(c, "o", "r", "grain/task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Error("gave up on a branch that appeared on the third read")
+	}
+	if c.calls != 3 {
+		t.Errorf("calls = %d, want 3", c.calls)
+	}
+}
+
+// A positive costs nothing extra: it is taken at once.
+func TestBranchExistsSettledReturnsAPositiveImmediately(t *testing.T) {
+	withNoSleep(t)
+	c := &branchClient{answers: []bool{true}}
+	if _, err := branchExistsSettled(c, "o", "r", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if c.calls != 1 {
+		t.Errorf("calls = %d, want 1 -- a positive must not be re-checked", c.calls)
+	}
+}
+
+// A branch that genuinely is not there still comes back false, bounded.
+func TestBranchExistsSettledGivesUpBounded(t *testing.T) {
+	withNoSleep(t)
+	c := &branchClient{}
+	exists, err := branchExistsSettled(c, "o", "r", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Error("reported a branch that never appeared")
+	}
+	if c.calls != branchExistsRetries {
+		t.Errorf("calls = %d, want %d", c.calls, branchExistsRetries)
+	}
+}
+
+// An error is the caller's to report, not something to sit on: 404 is
+// already handled inside BranchExists, so anything reaching here is a
+// real failure.
+func TestBranchExistsSettledDoesNotRetryAnError(t *testing.T) {
+	withNoSleep(t)
+	c := &branchClient{err: errors.New("500 from github")}
+	if _, err := branchExistsSettled(c, "o", "r", "b"); err == nil {
+		t.Fatal("expected the error to propagate")
+	}
+	if c.calls != 1 {
+		t.Errorf("calls = %d, want 1 -- an error must not be retried", c.calls)
 	}
 }
