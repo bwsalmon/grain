@@ -270,7 +270,19 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	if streak != nil && streak.Count > 0 {
+	// Guarded the same way model.StateOf and model.Transitions both guard
+	// a failure streak against a task that has since completed or closed:
+	// orchestrator.salvagePushedBranch turns a pushed branch into a pull
+	// request (and the task into StateCompleted) even for a run whose own
+	// outcome stays "failed" forever -- see model.Transitions' own doc
+	// comment on why (bwsalmon/agents#502) -- which leaves task_streak
+	// sitting at 1 or more permanently, since only a "succeeded" outcome
+	// ever resets it. Left unguarded, GetTask kept reporting "1
+	// consecutive failed attempt" on a task that plainly succeeded
+	// (bwsalmon/agents#514), the same bogus signal #502 already fixed for
+	// the task's state and its timeline, just surfacing here instead.
+	completedOrClosed := obs != nil && (obs.CompletedAt != nil || obs.ClosedAt != nil)
+	if streak != nil && streak.Count > 0 && !completedOrClosed {
 		detail.FailedAttempts = streak.Count
 		lastFailureAt := streak.LastFinishedAt
 		detail.LastFailureAt = &lastFailureAt
