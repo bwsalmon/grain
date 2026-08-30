@@ -174,12 +174,19 @@ function outcomeLabel(outcome) {
 // chase.
 function timelineEvents(t) {
   const events = [];
+  const transitions = t.transitions || [];
+  const lastTransitionIndex = transitions.length - 1;
 
-  (t.transitions || []).forEach((tr, i) => {
+  transitions.forEach((tr, i) => {
     events.push({
       key: `transition-${i}`,
       at: new Date(tr.at),
       badge: tr.state,
+      // Only the most recent transition can still be "now" -- a running
+      // entry earlier in the list is over and done, so its dot should
+      // read as static rather than keep spinning as if the task were
+      // still running that far in the past.
+      current: i === lastTransitionIndex,
       render: () => <div className="timeline-title">{STATE_LABELS[tr.state] || tr.state}</div>,
     });
   });
@@ -194,6 +201,9 @@ function timelineEvents(t) {
       // on a task attempt is how AttemptTranscriptOverlay opens
       // (bwsalmon/agents#446).
       attempt: a,
+      // Same reasoning as transitions above: a "running" badge only
+      // belongs to an attempt that hasn't finished yet, never a past one.
+      current: !a.finishedAt,
       render: () => (
         <>
           <div className="timeline-title">Attempt #{a.number} · {outcomeLabel(a.outcome)}</div>
@@ -372,7 +382,7 @@ function Timeline({ t, act, showError }) {
               })}
             >
               <div className="timeline-marker">
-                <span className={`badge badge-${e.badge}`} />
+                <span className={`badge badge-${e.badge}${e.badge === "running" && !e.current ? " badge-static" : ""}`} />
               </div>
               <div className="timeline-body">
                 {e.at && <div className="timeline-when">{e.at.toLocaleString()}</div>}

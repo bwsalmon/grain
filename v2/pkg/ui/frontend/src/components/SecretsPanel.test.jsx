@@ -1,19 +1,19 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import SecretsOverlay from "./SecretsOverlay.jsx";
+import SecretsPanel from "./SecretsPanel.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-describe("SecretsOverlay", () => {
+describe("SecretsPanel", () => {
   afterEach(() => {
     api.mockReset();
   });
 
   it("shows a note instead of the list and form when not enabled", async () => {
     api.mockResolvedValueOnce({ enabled: false });
-    render(<SecretsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<SecretsPanel showError={() => {}} />);
 
     expect(await screen.findByText(/not available/i)).toBeInTheDocument();
     expect(screen.queryByLabelText("Secret")).not.toBeInTheDocument();
@@ -24,7 +24,7 @@ describe("SecretsOverlay", () => {
       enabled: true,
       secrets: [{ name: "github", keys: ["token", "webhook-secret"] }],
     });
-    render(<SecretsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<SecretsPanel showError={() => {}} />);
 
     expect(await screen.findByText("github")).toBeInTheDocument();
     expect(screen.getByText("token")).toBeInTheDocument();
@@ -33,7 +33,7 @@ describe("SecretsOverlay", () => {
 
   it("shows an empty message when enabled with no secrets", async () => {
     api.mockResolvedValueOnce({ enabled: true, secrets: [] });
-    render(<SecretsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<SecretsPanel showError={() => {}} />);
 
     expect(await screen.findByText("No secrets set.")).toBeInTheDocument();
   });
@@ -44,7 +44,7 @@ describe("SecretsOverlay", () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ enabled: true, secrets: [{ name: "github", keys: ["token"] }] });
     const user = userEvent.setup();
-    render(<SecretsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<SecretsPanel showError={() => {}} />);
     await screen.findByText("No secrets set.");
 
     await user.type(screen.getByLabelText("Secret"), "github");
@@ -65,7 +65,7 @@ describe("SecretsOverlay", () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ enabled: true, secrets: [] });
     const user = userEvent.setup();
-    render(<SecretsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<SecretsPanel showError={() => {}} />);
     await screen.findByText("github");
 
     await user.click(screen.getByTitle("delete github/token"));
@@ -80,7 +80,7 @@ describe("SecretsOverlay", () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ enabled: true, secrets: [] });
     const user = userEvent.setup();
-    render(<SecretsOverlay onClose={() => {}} showError={() => {}} />);
+    render(<SecretsPanel showError={() => {}} />);
     await screen.findByText("github");
 
     await user.click(screen.getByRole("button", { name: "Delete secret" }));
@@ -93,7 +93,7 @@ describe("SecretsOverlay", () => {
     api.mockResolvedValueOnce({ enabled: true, secrets: [] }).mockRejectedValueOnce(new Error("value is required"));
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<SecretsOverlay onClose={() => {}} showError={showError} />);
+    render(<SecretsPanel showError={showError} />);
     await screen.findByText("No secrets set.");
 
     await user.type(screen.getByLabelText("Secret"), "github");

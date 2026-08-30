@@ -86,7 +86,7 @@ import (
 // stringSliceFlag collects every occurrence of a repeatable flag, in
 // order, into a []string -- flag.String only ever keeps the last one,
 // which -kontur-create-arg (an ordered sequence of flag/value pairs
-// passed straight through to `kontur vm create`) can't use.
+// passed straight through to `konturctl vm create`) can't use.
 type stringSliceFlag []string
 
 func (s *stringSliceFlag) String() string { return strings.Join(*s, " ") }
@@ -152,7 +152,7 @@ func daemon(args []string) {
 		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
 	konturBackend := fs.String("kontur-backend", kontur.BackendDocker,
-		"backend `kontur vm create -backend` builds each slot's VM with (only used with -kontur-vm-name-prefix): "+
+		"backend `konturctl vm create -backend` builds each slot's VM with (only used with -kontur-vm-name-prefix): "+
 			"\"docker\" (the default -- bwsalmon/agents#353: no konturctl setup, containerd, CNI or kubelet needed on "+
 			"the host, just a local docker daemon) or \"static-pod\" to run under a standalone kubelet instead")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
@@ -168,13 +168,23 @@ func daemon(args []string) {
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
 	fs.Var(&konturCreateArgs, "kontur-create-arg",
-		"one argument appended verbatim to `kontur vm create <name> -state-dir <dir>` when a slot's VM does not "+
-			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `kontur vm create -h` calls for "+
+		"one argument appended verbatim to `konturctl vm create <name> -state-dir <dir>` when a slot's VM does not "+
+			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
-			"-kontur-create-arg=-image -kontur-create-arg=gs://bucket/kontur-guest-....qcow2 to point at "+
-			"packer/kontur/build.sh's published output using whatever flag bwsalmon/kontur's own CLI turns out "+
-			"to call that (see packer/kontur/README.md, \"What isn't settled here\"). Only used with "+
-			"-kontur-vm-name-prefix.")
+			"-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images -kontur-create-arg=-disk "+
+			"-kontur-create-arg=/images/kontur-guest-....qcow2 to point at packer/kontur/build.sh's published "+
+			"output, already copied onto this host under -images-hostpath's directory (see packer/kontur/README.md, "+
+			"\"Building and publishing\"). Only used with -kontur-vm-name-prefix. Leave -ip/-port out of this list "+
+			"and set -kontur-base-ip/-kontur-base-port instead once -max-concurrent is more than 1 -- konturctl has "+
+			"no default for either and no way to vary a value shared verbatim across every slot's create call, so "+
+			"without one of those two, every slot's VM would otherwise be created with the exact same address.")
+	konturBaseIP := fs.String("kontur-base-ip", "",
+		"the -ip slot \"1\"'s kontur VM gets on netshim's bridge; every later slot's is the next IPv4 address after "+
+			"it. Leave unset for a single-slot (-max-concurrent 1) deployment content to put a literal -ip in "+
+			"-kontur-create-arg itself. Only used with -kontur-vm-name-prefix.")
+	konturBasePort := fs.Int("kontur-base-port", 0,
+		"the -port slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own "+
+			"number minus one, the same derivation -kontur-base-ip uses. Only used with -kontur-vm-name-prefix.")
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -226,7 +236,7 @@ func daemon(args []string) {
 		konturVMNamePrefix: *konturVMNamePrefix, konturBackend: *konturBackend,
 		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
-		konturCreateArgs: konturCreateArgs,
+		konturCreateArgs: konturCreateArgs, konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
@@ -281,6 +291,8 @@ type config struct {
 	konturSSHKey       string
 	konturWorkspace    string
 	konturCreateArgs   []string
+	konturBaseIP       string
+	konturBasePort     int
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -326,6 +338,8 @@ func run(ctx context.Context, cfg config) error {
 			SSHUser:         cfg.konturSSHUser,
 			SSHKey:          cfg.konturSSHKey,
 			Workspace:       cfg.konturWorkspace,
+			BaseIP:          cfg.konturBaseIP,
+			BasePort:        cfg.konturBasePort,
 		})
 		sandboxes = konturSandboxes
 	} else {
