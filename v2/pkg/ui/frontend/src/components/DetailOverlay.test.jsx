@@ -194,12 +194,13 @@ describe("DetailOverlay", () => {
     });
   });
 
-  it("shows nothing under Attempts when the task has never run", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
-    expect(screen.queryByText(/Attempts/)).not.toBeInTheDocument();
+  it("shows no timeline entries when the task has no history", () => {
+    const { container } = render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.getByText("Timeline")).toBeInTheDocument();
+    expect(container.querySelectorAll(".timeline-item")).toHaveLength(0);
   });
 
-  it("lists every attempt in order, with its number, status and timing", () => {
+  it("lists every attempt on the timeline in order, with its number, status and timing", () => {
     render(
       <DetailOverlay
         task={{
@@ -217,20 +218,12 @@ describe("DetailOverlay", () => {
       />
     );
 
-    expect(screen.getByText("Attempts (2)")).toBeInTheDocument();
-    expect(screen.getByText("#1")).toBeInTheDocument();
-    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Attempt #1 · Failed")).toBeInTheDocument();
     expect(screen.getByText("build error")).toBeInTheDocument();
-    expect(screen.getByText("#2")).toBeInTheDocument();
-    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByText("Attempt #2 · Running")).toBeInTheDocument();
   });
 
-  it("shows nothing under History when there are no transitions", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
-    expect(screen.queryByText("History")).not.toBeInTheDocument();
-  });
-
-  it("lists every transition in order, with its state and time", () => {
+  it("lists every transition on the timeline in order, with its label and time", () => {
     render(
       <DetailOverlay
         task={{
@@ -249,11 +242,35 @@ describe("DetailOverlay", () => {
       />
     );
 
-    const history = screen.getByText("History").closest("fieldset");
+    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
     const labels = ["Proposed", "Queued", "Running"];
     for (const label of labels) {
-      expect(within(history).getByText(label)).toBeInTheDocument();
+      expect(within(list).getByText(label)).toBeInTheDocument();
     }
+  });
+
+  it("interleaves transitions, attempts and comments by their own timestamps", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          transitions: [
+            { state: "proposed", at: "2026-08-28T09:00:00Z" },
+            { state: "closed", at: "2026-08-28T15:00:00Z" },
+          ],
+          attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "succeeded" }],
+          comments: [{ author: "alice", authorKind: "human", body: "looks good", createdAt: "2026-08-28T13:00:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const titles = screen.getAllByText(/^Proposed$|^Attempt #1 · Succeeded$|^looks good$|^Closed$/).map((el) => el.textContent);
+    expect(titles).toEqual(["Proposed", "Attempt #1 · Succeeded", "looks good", "Closed"]);
   });
 
   it("shows a hint when there are no dependencies", () => {
