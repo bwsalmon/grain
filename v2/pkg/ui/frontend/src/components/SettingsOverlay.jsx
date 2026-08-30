@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, FormControlLabel, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
+import { useThemeMode } from "../ThemeModeContext.jsx";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
 // sidebar overlays; they live here now as tabs alongside the general
@@ -18,6 +19,7 @@ const TABS = [
 export default function SettingsOverlay({ config, onClose, showError }) {
   const [tab, setTab] = useState("general");
   const [settings, setSettings] = useState(null);
+  const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
 
   useEffect(() => {
     (async () => {
@@ -108,6 +110,18 @@ export default function SettingsOverlay({ config, onClose, showError }) {
       </Tabs>
       {tab === "general" && (
         <>
+          <Typography variant="subtitle2">Appearance</Typography>
+          <RadioGroup
+            row
+            aria-label="Appearance"
+            value={themeMode}
+            onChange={(evt) => setThemeMode(evt.target.value)}
+            sx={{ mb: 2 }}
+          >
+            <FormControlLabel value="auto" control={<Radio />} label="Auto" />
+            <FormControlLabel value="light" control={<Radio />} label="Light" />
+            <FormControlLabel value="dark" control={<Radio />} label="Dark" />
+          </RadioGroup>
           {!settings.configured && (
             <Alert severity="info" sx={{ mb: 2 }}>
               Not configured yet -- nothing has been saved for this deployment. Poll interval, max concurrent, Gemini

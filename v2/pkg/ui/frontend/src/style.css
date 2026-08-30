@@ -47,40 +47,51 @@
   --shadow-toast: 0 10px 28px rgba(20, 21, 26, 0.28);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --canvas: #101115;
-    --surface: #18191e;
-    --surface-hover: #212228;
-    --surface-active: #1c2740;
-    --border: #2b2c33;
-    --border-strong: #3a3b43;
+/* AppThemeProvider sets data-theme on <html> to "light" or "dark" --
+   resolving "auto" against prefers-color-scheme itself -- so this
+   attribute, not the media query directly, is what light/dark/auto in
+   Settings (bwsalmon/agents#535) actually switches on. There is no
+   plain-CSS fallback for a pre-JS paint because index.html renders
+   nothing (a bare #root) until React mounts, so there is nothing to
+   flash between. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
 
-    --text: #e8e8ec;
-    --text-secondary: #9799a3;
-    --text-tertiary: #6d6f78;
-    --text-placeholder: #55565f;
+:root[data-theme="dark"] {
+  color-scheme: dark;
 
-    --accent: #6f95ff;
-    --accent-hover: #85a5ff;
-    --on-accent: #0c1730;
-    --accent-subtle: #1a2338;
+  --canvas: #101115;
+  --surface: #18191e;
+  --surface-hover: #212228;
+  --surface-active: #1c2740;
+  --border: #2b2c33;
+  --border-strong: #3a3b43;
 
-    --danger: #ec7469;
-    --danger-subtle: #3a201e;
+  --text: #e8e8ec;
+  --text-secondary: #9799a3;
+  --text-tertiary: #6d6f78;
+  --text-placeholder: #55565f;
 
-    --state-proposed: #83848d;
-    --state-queued: #9799a3;
-    --state-running: #f0ad3f;
-    --state-awaiting: #c084fc;
-    --state-failed: var(--danger);
-    --state-completed: #3ec573;
-    --state-closed: #83848d;
-    --pr-merged: #a371f7;
+  --accent: #6f95ff;
+  --accent-hover: #85a5ff;
+  --on-accent: #0c1730;
+  --accent-subtle: #1a2338;
 
-    --shadow-panel: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
-    --shadow-toast: 0 10px 28px rgba(0, 0, 0, 0.6);
-  }
+  --danger: #ec7469;
+  --danger-subtle: #3a201e;
+
+  --state-proposed: #83848d;
+  --state-queued: #9799a3;
+  --state-running: #f0ad3f;
+  --state-awaiting: #c084fc;
+  --state-failed: var(--danger);
+  --state-completed: #3ec573;
+  --state-closed: #83848d;
+  --pr-merged: #a371f7;
+
+  --shadow-panel: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-toast: 0 10px 28px rgba(0, 0, 0, 0.6);
 }
 
 * { box-sizing: border-box; }
