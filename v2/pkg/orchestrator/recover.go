@@ -74,28 +74,9 @@ func recoverRun(ctx context.Context, store *model.Store, client github.Client, r
 	if err != nil {
 		return fmt.Errorf("reading task %s: %w", r.TaskID, err)
 	}
-	if task == nil || task.Target == nil {
+	if task == nil {
 		return nil
 	}
-
-	pushed, err := client.BranchExists(task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
-	if err != nil {
-		return fmt.Errorf("checking %s's branch: %w", task.ID, err)
-	}
-	if !pushed {
-		return nil
-	}
-
-	// The same race ProcessResult's own doc comment describes -- a close
-	// that landed while the crashed run was still (nominally) live -- is
-	// checked the same way here: nobody wants a closed task's work merged,
-	// so a branch it left behind is not turned into a pull request.
-	closed, err := taskClosed(ctx, store, task.ID)
-	if err != nil {
-		return err
-	}
-	if closed {
-		return nil
-	}
-	return finishWithPullRequest(ctx, store, client, *task, now)
+	_, err = salvagePushedBranch(ctx, store, client, *task, now)
+	return err
 }

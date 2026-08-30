@@ -55,6 +55,14 @@ type Result struct {
 // Framework drives one agent run to completion, using only the tools its
 // own MCP server exposes -- see v2/mcp. Run should not return until the
 // agent has produced a final answer or RunConfig.MaxTurns is exhausted.
+//
+// Run may return a non-nil Result together with a non-nil error, and a
+// caller must read both: an error means the run did not finish, not that
+// it did nothing. A run that edits files, commits, pushes and only then
+// exhausts MaxTurns has already changed the world, and a caller that
+// treats the error as "no result" strands that work -- see
+// gemini.Framework.Run's own comment for the failure that taught this.
+// A nil Result with an error means the run never started.
 type Framework interface {
 	Run(ctx context.Context, cfg RunConfig) (*Result, error)
 }

@@ -1174,3 +1174,29 @@ func TestIsPermissionDeniedUnwraps(t *testing.T) {
 		t.Error("a wrapped 403 was not recognized")
 	}
 }
+
+// The bug this exists to prevent: a daemon configured with the correct
+// git host (github.com) sent every REST path to https://github.com/repos/...,
+// which answers 404, and BranchExists reads 404 as "no such branch". Runs
+// that had just pushed were recorded as having done nothing.
+func TestAPIHostSeparatesTheAPIHostFromTheGitHost(t *testing.T) {
+	if got := APIHost("github.com"); got != "api.github.com" {
+		t.Errorf("APIHost(github.com) = %q, want api.github.com -- REST paths do not exist on the git host", got)
+	}
+	// A mock (githubsim on a local port) serves API paths at its own
+	// root; rewriting its host would point the client at nothing.
+	for _, host := range []string{"127.0.0.1:8080", "localhost:9999", "github.example.com"} {
+		if got := APIHost(host); got != host {
+			t.Errorf("APIHost(%q) = %q, want it left alone", host, got)
+		}
+	}
+}
+
+func TestNewRealTransportAimsAtTheAPIHost(t *testing.T) {
+	if got := NewRealTransport("github.com").Host; got != "api.github.com" {
+		t.Errorf("NewRealTransport(github.com).Host = %q, want api.github.com", got)
+	}
+	if got := NewRealTransport("127.0.0.1:8080").Host; got != "127.0.0.1:8080" {
+		t.Errorf("NewRealTransport(127.0.0.1:8080).Host = %q, want it left alone", got)
+	}
+}

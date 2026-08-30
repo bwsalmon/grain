@@ -14,9 +14,7 @@ const baseProps = {
   stateFilter: "all",
   onSetView: noop,
   onSetFilter: noop,
-  onOpenSchedules: noop,
   onOpenSettings: noop,
-  onOpenReleases: noop,
   onOpenLogs: noop,
   onOpenNewTask: noop,
 };
@@ -62,9 +60,7 @@ describe("Sidebar", () => {
   });
 
   it("routes the footer and new-task buttons to their own callbacks", async () => {
-    const onOpenSchedules = vi.fn();
     const onOpenSettings = vi.fn();
-    const onOpenReleases = vi.fn();
     const onOpenLogs = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
@@ -73,24 +69,30 @@ describe("Sidebar", () => {
         {...baseProps}
         config={null}
         tasks={[]}
-        onOpenSchedules={onOpenSchedules}
         onOpenSettings={onOpenSettings}
-        onOpenReleases={onOpenReleases}
         onOpenLogs={onOpenLogs}
         onOpenNewTask={onOpenNewTask}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
-    await user.click(screen.getByRole("button", { name: "Scheduled tasks" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Releases" }));
     await user.click(screen.getByRole("button", { name: "Logs" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
-    expect(onOpenSchedules).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(onOpenReleases).toHaveBeenCalledTimes(1);
     expect(onOpenLogs).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches to the schedules view and shows its count when clicked", async () => {
+    const onSetView = vi.fn();
+    const schedules = [{ id: "sched-1" }, { id: "sched-2" }];
+    const user = userEvent.setup();
+    render(<Sidebar {...baseProps} config={null} tasks={[]} schedules={schedules} onSetView={onSetView} />);
+
+    const button = screen.getByRole("button", { name: /Scheduled tasks 2/ });
+    await user.click(button);
+
+    expect(onSetView).toHaveBeenCalledWith("schedules");
   });
 });

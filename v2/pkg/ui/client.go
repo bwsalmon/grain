@@ -153,17 +153,33 @@ func (c *Client) closedTargets(ctx context.Context, links []model.Link) (map[str
 
 // GetTask returns one task plus its conversation.
 func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
-	task, err := c.Task(ctx, id)
+	t, err := c.Store.GetTask(ctx, id)
 	if err != nil {
 		return TaskDetail{}, err
 	}
+	if t == nil {
+		return TaskDetail{}, &NotFoundError{ID: id}
+	}
+	state, err := c.Store.State(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
+	}
+	closed, err := c.closedTargets(ctx, t.Links)
+	if err != nil {
+		return TaskDetail{}, err
+	}
+
 	comments, err := c.Store.Comments(ctx, id)
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	detail := TaskDetail{Task: task, Comments: make([]Comment, 0, len(comments))}
+	detail := TaskDetail{Task: taskFrom(*t, state, closed), Comments: make([]Comment, 0, len(comments))}
 	for _, cm := range comments {
 		detail.Comments = append(detail.Comments, commentFrom(cm))
+	}
+	obs, err := c.Store.GetObservation(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
 	}
 	streak, err := c.Store.FailureStreak(ctx, id)
 	if err != nil {
@@ -183,7 +199,30 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	for _, r := range runs {
 		detail.Attempts = append(detail.Attempts, attemptFrom(r))
 	}
+
+	transitions := model.Transitions(*t, obs, runs, streak, askedAt(obs, comments))
+	detail.Transitions = make([]Transition, 0, len(transitions))
+	for _, tr := range transitions {
+		detail.Transitions = append(detail.Transitions, transitionFrom(tr))
+	}
 	return detail, nil
+}
+
+// askedAt is the currently pending question's own CreatedAt, or nil once
+// there is none -- model.Transitions' own askedAt parameter, resolved
+// against the same comment list GetTask already fetched rather than a
+// second query.
+func askedAt(obs *model.Observation, comments []model.Comment) *time.Time {
+	if obs == nil || obs.PendingQuestionCommentID == nil {
+		return nil
+	}
+	for _, c := range comments {
+		if c.ID == *obs.PendingQuestionCommentID {
+			at := c.CreatedAt
+			return &at
+		}
+	}
+	return nil
 }
 
 // CreateTaskRequest is a new task's fields. Repo, Base and AutoMerge were
@@ -277,6 +316,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	}
 	if req.Approved {
 		task.Approval = &model.Attribution{Actor: c.Config.Actor}
+		task.ApprovedAt = &now
 	}
 	if err := c.Store.PutTask(ctx, task); err != nil {
 		return Task{}, err
@@ -578,7 +618,7 @@ func (c *Client) Approve(ctx context.Context, id string) error {
 	if task.Approval != nil {
 		return nil
 	}
-	return c.Store.Approve(ctx, id, model.Attribution{Actor: c.Config.Actor})
+	return c.Store.Approve(ctx, id, model.Attribution{Actor: c.Config.Actor}, c.now())
 }
 
 // Submit is the UI's own "submit" button: once a task has a pull request

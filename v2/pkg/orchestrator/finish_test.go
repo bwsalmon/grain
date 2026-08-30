@@ -2,6 +2,8 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
@@ -387,5 +389,70 @@ func TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent
 	}
 	if proposal.AutoMerge {
 		t.Error("AutoMerge = true, want false -- nothing here opted this proposal into the merge queue")
+	}
+}
+
+// A run that pushed a branch and then failed must still get its pull
+// request opened. This is the failure that produced grain/task-1 on
+// bwsalmon/grain: the agent edited, committed and pushed, then spent the
+// rest of its turn budget and the framework returned an error. RunCycle
+// treated the error as "nothing happened", skipped ProcessResult
+// entirely, recreated the sandbox, and left a real branch on GitHub with
+// no pull request, no comment, and nothing pointing at it -- while the
+// task went back to the queue to do the same work again.
+func TestRunCycleOpensAPullRequestForABranchAFailedRunAlreadyPushed(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	// The shape of a real max-turns ending: the work is on GitHub, and
+	// the framework reports the failure with what it managed to do first
+	// (see agent.Framework's own contract).
+	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
+	ranOutOfTurns := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return &agent.Result{ToolCalls: []agent.ToolCall{
+			{Name: "run_command", Text: "pushed"},
+			{Name: "run_command", Text: "ok"},
+		}}, errors.New("gemini: exceeded max turns (2) without a final answer")
+	})
+
+	deps := orchestrator.Deps{
+		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework: func() agent.Framework { return ranOutOfTurns },
+		Slots:     []string{"slot-0"},
+	}
+
+	err := orchestrator.RunCycle(ctx, deps, baseTime)
+	if err == nil {
+		t.Fatal("expected RunCycle to report the framework's failure")
+	}
+	if !strings.Contains(err.Error(), "exceeded max turns") {
+		t.Errorf("error = %v, want the framework's own diagnosis preserved", err)
+	}
+
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v, want one for the branch the run pushed before it failed", sim.PullRequests)
+	}
+	if sim.PullRequests[0].Head != model.BranchName(task.ID) {
+		t.Errorf("pull request = %+v, want head %s", sim.PullRequests[0], model.BranchName(task.ID))
+	}
+
+	// The run itself stays failed with the real reason: salvaging the
+	// branch does not turn a run that ran out of turns into a success,
+	// and the detail now names what it spent them on.
+	runs, err := store.Runs(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v, want one", runs)
+	}
+	if runs[0].Outcome != "failed" {
+		t.Errorf("outcome = %q, want failed", runs[0].Outcome)
+	}
+	if !strings.Contains(runs[0].Detail, "exceeded max turns") ||
+		!strings.Contains(runs[0].Detail, "2 tool call(s)") {
+		t.Errorf("detail = %q, want both the failure and what the run did first", runs[0].Detail)
 	}
 }

@@ -62,6 +62,7 @@ var Tables = []string{
   ` + "`approval_actor_id`" + `     TEXT    NULL,
   ` + "`approval_behalf_kind`" + `  TEXT    NULL,
   ` + "`approval_behalf_id`" + `    TEXT    NULL,
+  ` + "`approved_at`" + `           DATETIME NULL,
 
   ` + "`target_owner`" + `          TEXT    NULL,
   ` + "`target_name`" + `           TEXT    NULL,

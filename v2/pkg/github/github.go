@@ -68,9 +68,41 @@ type RealTransport struct {
 	Client *http.Client
 }
 
-// NewRealTransport returns a transport aimed at host over HTTPS.
+// NewRealTransport returns a transport aimed at host's REST API over
+// HTTPS. host is a *git* host -- what a clone URL names -- and APIHost
+// turns it into the host that actually answers REST paths.
 func NewRealTransport(host string) *RealTransport {
-	return &RealTransport{Host: host, UseTLS: true}
+	return &RealTransport{Host: APIHost(host), UseTLS: true}
+}
+
+// APIHost maps a GitHub git host to the host serving its REST API.
+//
+// For github.com those are two different names: git lives on github.com,
+// the REST API on api.github.com. Everything in this package builds paths
+// like "/repos/{owner}/{repo}/branches/{branch}", which are API paths, so
+// a transport pointed at github.com sends them to
+// https://github.com/repos/... -- a URL that has no API behind it and
+// answers 404 to every one of them.
+//
+// That 404 is indistinguishable from a real one, and BranchExists
+// (deliberately) reads 404 as "no such branch". A daemon configured with
+// the correct git host therefore reported every branch as unpushed:
+// pushes succeeded, since the git proxy forwards to the same host and for
+// git that host is right, and then the run that had just pushed was
+// recorded as having done nothing. No test caught it because the live
+// tests point this at a githubsim on 127.0.0.1:port, which serves API
+// paths at its root -- the one shape where git host and API host coincide.
+//
+// Anything that is not github.com is left alone: that is either such a
+// mock or a GitHub Enterprise host. Enterprise is not actually supported
+// by this mapping -- its API lives under a /api/v3 path prefix, not on a
+// separate hostname, and Transport has no place to put a base path yet.
+// Naming that here rather than silently pretending otherwise.
+func APIHost(host string) string {
+	if host == "github.com" {
+		return "api.github.com"
+	}
+	return host
 }
 
 func (t *RealTransport) Request(method, path string, headers map[string]string, body []byte) (ApiResponse, error) {

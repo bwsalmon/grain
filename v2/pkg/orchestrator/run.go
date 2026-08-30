@@ -249,7 +249,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			// "exceeded max turns (20) without a final answer", a tool
 			// framework's own connection error) under two layers of
 			// "orchestrator: running ...: ".
-			detail = runErr.Error()
+			//
+			// A framework may hand back what the run managed to do before
+			// it broke (see agent.Framework), and that half answers the
+			// question the error itself raises. "exceeded max turns (100)
+			// without a final answer" says only that the budget ran out;
+			// followed by the tools it spent that budget on, it says
+			// whether the run was working or spinning.
+			detail = runErr.Error() + partialWorkSuffix(result)
 			runErr = fmt.Errorf("orchestrator: running %s: %w", d.RunID, runErr)
 		default:
 			outcome, detail = outcomeOf(result)
@@ -262,9 +269,24 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		return nil, fmt.Errorf("orchestrator: finishing run %s: %w", d.RunID, finishErr)
 	}
 	if runErr != nil {
-		return nil, runErr
+		// result, not nil: a failed run that pushed a branch before it
+		// broke still left work on GitHub, and the caller needs the
+		// result to find it. See agent.Framework.
+		return result, runErr
 	}
 	return result, nil
+}
+
+// partialWorkSuffix names what a failed run got done before it failed, or
+// nothing at all when the framework returned no result to say. Kept to
+// names and counts, like noActionDetail: this lands in a stored outcome
+// column that `grain get` prints, not a transcript.
+func partialWorkSuffix(result *agent.Result) string {
+	if result == nil || len(result.ToolCalls) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; the run made %d tool call(s)%s first",
+		len(result.ToolCalls), toolCallSummary(result))
 }
 
 // outcomeOf reads agent.Result.ToolCalls -- the only record of what
