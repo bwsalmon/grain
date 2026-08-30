@@ -381,6 +381,21 @@ lists in sync automatically; an operator who changes one by hand (via
   (`grain secrets delete gcp-key-minter key.json`, over
   `gcloud compute ssh --tunnel-through-iap`) and bump `deploy_generation`
   if a rotated key genuinely needs to take effect.
+- **The host's journal reaches Cloud Logging.** `files/deploy.sh`
+  installs `google-cloud-ops-agent` early, before anything that can
+  fail, which is what the host account's `roles/logging.logWriter`
+  grant is for. So a failed rollout is readable without a shell on the
+  box -- filter to this deployment in the Logs Explorer with
+  `jsonPayload._SYSTEMD_UNIT="grain-v2-config-sync.service"`, or:
+
+  ```sh
+  gcloud logging read \
+    'resource.type="gce_instance" jsonPayload._SYSTEMD_UNIT="grain-v2-config-sync.service"' \
+    --project YOUR_PROJECT --freshness=1h
+  ```
+
+  `config-sync` also publishes the tail of a failed deploy as a guest
+  attribute, which is what CI prints when a rollout fails.
 - **Convergence is polling, not instant**, but close to it:
   `grain-v2-config-sync.service` hangs on the metadata server's
   `wait_for_change` endpoint (`files/config-sync.sh`, ported from v1's

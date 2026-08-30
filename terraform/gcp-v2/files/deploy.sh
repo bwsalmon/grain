@@ -29,6 +29,60 @@ install_prerequisites() {
   apt-get install -y --no-install-recommends git docker.io python3 ca-certificates
 }
 
+# Ship this host's systemd journal to Cloud Logging, so a failed deploy
+# can be read without a shell on the box. The host service account
+# already carries roles/logging.logWriter (iam.tf) for exactly this;
+# until now nothing used it.
+#
+# Runs here rather than in startup.sh, and early rather than late, for
+# one reason: the failures worth reading happen *below this line*. A
+# startup-script install would not take effect until the next boot, and
+# a call at the end of this file would never run on the deploys that
+# need it. It re-runs on every generation and is retried by
+# config-sync's own wake-up loop, so a transient apt or network failure
+# heals on its own.
+#
+# Never fatal. A diagnostic that can abort the deploy it exists to
+# debug is the wrong trade -- the same rule terraform/gcp's own
+# ensure_ops_agent follows.
+ensure_ops_agent() {
+  if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+    log "installing google-cloud-ops-agent"
+    local script="/tmp/add-google-cloud-ops-agent-repo.sh"
+    if ! curl -fsS -o "$script" https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh \
+       || ! bash "$script" --also-install; then
+      log "WARNING: could not install google-cloud-ops-agent; this host's logs will not reach Cloud Logging"
+    fi
+    rm -f "$script"
+  fi
+  dpkg -s google-cloud-ops-agent >/dev/null 2>&1 || return 0
+
+  # The whole journal, filtered at query time rather than here --
+  # upstream offers no unit filter on the receiver. In the Logs
+  # Explorer:
+  #   jsonPayload._SYSTEMD_UNIT="grain-v2-config-sync.service"
+  # There is no second receiver for a nested guest's console, unlike
+  # v1: this host runs the daemon directly, so its own journal is the
+  # whole story.
+  install -d -m 0755 /etc/google-cloud-ops-agent
+  cat > /etc/google-cloud-ops-agent/config.yaml <<'YAML'
+logging:
+  receivers:
+    journald:
+      type: systemd_journald
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: [journald]
+YAML
+
+  if systemctl restart google-cloud-ops-agent; then
+    log "google-cloud-ops-agent configured; this host's journal now reaches Cloud Logging"
+  else
+    log "WARNING: could not restart google-cloud-ops-agent; Cloud Logging will not reflect this config"
+  fi
+}
+
 # Before anything below, because `cfg` shells out to python3 and this is
 # what guarantees python3 exists. It used to run after the block that
 # reads the config, which meant every cfg call on a fresh host ran
@@ -37,6 +91,11 @@ install_prerequisites() {
 # reported by config-sync only as "exit=127" with nothing naming the
 # missing command.
 install_prerequisites
+
+# Immediately after, so everything below this line is readable off-host
+# if it fails. Guarded: ensure_ops_agent is written never to fail, and
+# `|| true` makes that true even of a bug in it.
+ensure_ops_agent || true
 
 # --- read this deployment's configuration off the instance's own metadata --
 

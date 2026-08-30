@@ -90,8 +90,18 @@ run_deploy() {
   guest_attr deploy-status "running"
   guest_attr deploy-generation "$generation"
 
-  rc=0
-  timeout --signal=TERM --kill-after=60 "$DEPLOY_TIMEOUT_SECS" "$DEPLOY" || rc=$?
+  # Tee'd rather than run bare so a failure can publish its own last
+  # words. "exit=127 generation=..." alone says a command was not found
+  # but never which one, and reading the journal that does say needs SSH
+  # to the host -- which is exactly what an operator locked out by OS
+  # Login, or debugging from CI, does not have. The tail goes into a
+  # guest attribute, which is readable with
+  # `gcloud compute instances get-guest-attributes` and no shell at all.
+  local out rc=0
+  out="$(mktemp)"
+  timeout --signal=TERM --kill-after=60 "$DEPLOY_TIMEOUT_SECS" "$DEPLOY" 2>&1 \
+    | tee /dev/stderr > "$out" || true
+  rc="${PIPESTATUS[0]}"
 
   if [ "$rc" -eq 0 ]; then
     log "generation $generation deployed"
@@ -101,8 +111,13 @@ run_deploy() {
     log "generation $generation FAILED (exit $rc); will retry"
     echo "failed $generation" > "$STATE"
     guest_attr deploy-status "failed"
+    # Bounded hard: a guest attribute is a small value, and this is a
+    # pointer at the failure, not a log shipper. The journal remains the
+    # full record.
+    guest_attr deploy-tail "$(tail -c 1200 "$out" | tr -d '\000')"
   fi
   guest_attr deploy-detail "exit=$rc generation=$generation"
+  rm -f "$out"
   return "$rc"
 }
 
