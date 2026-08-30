@@ -1159,6 +1159,27 @@ _RUNNER_PROVIDED = {"GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "GITHUB_REPOSITORY"}
 _OPTIONAL_TUNING = {"TF_APPLY_MAX_ATTEMPTS", "TF_APPLY_RETRY_DELAY", "POLL_SECONDS"}
 
 
+# ci/ holds two families of script now. The v1 ones are driven by this
+# template's own deploy.yml, which is what the test below reads. The v2
+# staging ones (ci/v2-staging-*.sh) are driven by a workflow that lives
+# in a config repo -- bwsalmon/agents' deploy-v2-staging.yml -- which
+# this repository cannot see, so there is nothing here to check them
+# against.
+#
+# They are excluded rather than checked against v1's deploy.yml, which
+# would be worse than not checking them at all: CONFIG_DIR and
+# DEPLOY_GENERATION happen to appear in both workflows, so a v2 script
+# would pass for reasons having nothing to do with the workflow that
+# actually runs it -- a false negative in exactly the bug class this
+# test exists to catch.
+_V2_STAGING_PREFIX = "v2-staging-"
+
+
+def _v1_ci_scripts() -> list[Path]:
+    return [s for s in sorted(CI.glob("*.sh"))
+            if not s.name.startswith(_V2_STAGING_PREFIX)]
+
+
 def _env_reads(script: Path) -> set[str]:
     """Env vars a ci/ script reads, by their `${VAR:-}`/`${VAR:?}` sites --
     which is exactly where each script takes a value from its caller."""
@@ -1178,9 +1199,17 @@ def test_the_workflow_passes_every_value_the_ci_scripts_read():
     that falls behind -- push-host-secrets.sh's own runtime warning is what
     covers that -- but it does stop the template from being the thing that
     is wrong.
+
+    Covers the v1 scripts only. The v2 staging scripts have no equivalent
+    check anywhere, because the workflow driving them lives in a config
+    repo rather than here -- see _V2_STAGING_PREFIX above. Shipping a
+    templates/gcp-v2 workflow the way v1 ships one would close that gap.
     """
+    scripts = _v1_ci_scripts()
+    assert scripts, \
+        "no v1 ci/ scripts found -- has _V2_STAGING_PREFIX swallowed all of them?"
     deploy = (WORKFLOWS / "deploy.yml").read_text()
-    for script in sorted(CI.glob("*.sh")):
+    for script in scripts:
         for name in sorted(_env_reads(script)):
             if name in _RUNNER_PROVIDED or name in _OPTIONAL_TUNING:
                 continue
