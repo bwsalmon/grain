@@ -1170,6 +1170,125 @@ func TestAFailedWriteLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+// TestFailureStreakCountsConsecutiveFailuresAndStopsAtASuccess is
+// Store.FailureStreak's own baseline: it walks task_run newest-first and
+// counts up until (and not including) the first "succeeded" outcome, the
+// same cutoff model.MaxConsecutiveFailures compares against.
+func TestFailureStreakCountsConsecutiveFailuresAndStopsAtASuccess(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	if streak, err := store.FailureStreak(ctx, "a1b2"); err != nil {
+		t.Fatal(err)
+	} else if streak != nil {
+		t.Fatalf("FailureStreak with no runs = %+v, want nil", streak)
+	}
+
+	starts := []time.Time{
+		now, now.Add(time.Hour), now.Add(2 * time.Hour), now.Add(3 * time.Hour),
+	}
+	outcomes := []string{"succeeded", "failed", "failed", "failed"}
+	for i, at := range starts {
+		id := fmt.Sprintf("r%d", i+1)
+		if err := store.StartRun(ctx, model.Run{
+			ID: id, TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.FinishRun(ctx, id, at.Add(time.Minute), outcomes[i], "boom"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	streak, err := store.FailureStreak(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streak == nil || streak.Count != 3 {
+		t.Fatalf("FailureStreak = %+v, want Count 3 (the three failures after the one success)", streak)
+	}
+	if streak.LastOutcome != "failed" || streak.LastDetail != "boom" {
+		t.Fatalf("FailureStreak = %+v, want the most recent run's own outcome and detail", streak)
+	}
+}
+
+// TestFailureStreakIsNarrowedByARetryRequest covers bwsalmon/agents#403's
+// "Retry" button end to end at the store layer: RetryRequestedAt does not
+// delete or rewrite any task_run row, it only tells FailureStreak to stop
+// counting once it reaches a run that started at or before the retry
+// request -- so a run that already failed before the retry stays in the
+// record (Runs, GetTask's own attempt history) but no longer contributes
+// to the count that trips StateFailed.
+func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < model.MaxConsecutiveFailures; i++ {
+		id := fmt.Sprintf("r%d", i+1)
+		at := now.Add(time.Duration(i) * time.Hour)
+		if err := store.StartRun(ctx, model.Run{
+			ID: id, TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.FinishRun(ctx, id, at.Add(time.Minute), "failed", "boom"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if streak, err := store.FailureStreak(ctx, "a1b2"); err != nil {
+		t.Fatal(err)
+	} else if streak == nil || streak.Count != model.MaxConsecutiveFailures {
+		t.Fatalf("FailureStreak before retrying = %+v, want Count %d", streak, model.MaxConsecutiveFailures)
+	}
+
+	retryAt := now.Add(model.MaxConsecutiveFailures * time.Hour)
+	if err := store.Observe(ctx, model.Observation{TaskID: "a1b2", RetryRequestedAt: &retryAt}); err != nil {
+		t.Fatal(err)
+	}
+
+	streak, err := store.FailureStreak(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streak == nil || streak.Count != 0 {
+		t.Fatalf("FailureStreak after retrying = %+v, want Count 0: every prior failure started before the retry request", streak)
+	}
+	if streak.LastOutcome != "failed" {
+		t.Fatalf("FailureStreak after retrying = %+v, want LastOutcome still reporting the last run's own outcome", streak)
+	}
+
+	runs, err := store.Runs(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != model.MaxConsecutiveFailures {
+		t.Fatalf("Runs after retrying = %d, want the retry to narrow the streak without deleting any run", len(runs))
+	}
+
+	// A run that starts after the retry request still counts: retrying
+	// forgives the past, it does not disable the cap going forward.
+	freshID := "r" + fmt.Sprint(model.MaxConsecutiveFailures+1)
+	freshAt := retryAt.Add(time.Hour)
+	if err := store.StartRun(ctx, model.Run{
+		ID: freshID, TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+		Attempt: model.MaxConsecutiveFailures + 1, StartedAt: freshAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, freshID, freshAt.Add(time.Minute), "failed", "boom again"); err != nil {
+		t.Fatal(err)
+	}
+	if streak, err := store.FailureStreak(ctx, "a1b2"); err != nil {
+		t.Fatal(err)
+	} else if streak == nil || streak.Count != 1 {
+		t.Fatalf("FailureStreak after a fresh post-retry failure = %+v, want Count 1", streak)
+	}
+}
+
 // TestStartRunRejectsASecondOpenRunOnTheSameSlot pins the bwsalmon/
 // agents#434 guard: dispatch.Cycle reads OccupiedSlots and Ready outside
 // of any one transaction, so nothing stops two overlapping callers from
