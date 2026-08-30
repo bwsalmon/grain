@@ -313,3 +313,38 @@ func TestBranchExistsSettledDoesNotRetryAnError(t *testing.T) {
 		t.Errorf("calls = %d, want 1 -- an error must not be retried", c.calls)
 	}
 }
+
+// --- what the no_action detail records ---------------------------------
+
+// outcomeOf already distinguishes "called tools and achieved nothing"
+// from "made no tool calls at all", and the no_action overwrite used to
+// replace both with one fixed sentence -- destroying the more useful of
+// the two on its way past.
+func TestNoActionDetailKeepsTheDiagnosis(t *testing.T) {
+	got := noActionDetail(&agent.Result{})
+	if !strings.Contains(got, "no tool calls at all") {
+		t.Errorf("detail = %q, want it to say the run made no tool calls", got)
+	}
+
+	got = noActionDetail(&agent.Result{ToolCalls: []agent.ToolCall{
+		{Name: "run_command"}, {Name: "run_command"}, {Name: "read_file"},
+	}})
+	for _, want := range []string{"3 tool call", "run_command x2", "read_file x1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("detail = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// Both forms still say what did not happen -- that is the part a reader
+// is looking for when a task shows no pull request.
+func TestNoActionDetailStillNamesWhatIsMissing(t *testing.T) {
+	for _, r := range []*agent.Result{
+		{},
+		{ToolCalls: []agent.ToolCall{{Name: "run_command"}}},
+	} {
+		if got := noActionDetail(r); !strings.Contains(got, "without pushing a branch") {
+			t.Errorf("detail = %q, want it to still name the missing ending", got)
+		}
+	}
+}

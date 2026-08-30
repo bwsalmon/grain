@@ -166,11 +166,32 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		task.ID, runID, len(result.ToolCalls), toolCallSummary(result), len(result.FinalText),
 		truncate(result.FinalText, 500))
 
-	if err := store.SetRunOutcome(ctx, runID, "no_action",
-		"the run finished without pushing a branch, asking a question, or leaving a closing comment"); err != nil {
+	if err := store.SetRunOutcome(ctx, runID, "no_action", noActionDetail(result)); err != nil {
 		return fmt.Errorf("orchestrator: recording %s's outcome: %w", task.ID, err)
 	}
 	return nil
+}
+
+// noActionDetail says what the run did, not only what it did not do.
+//
+// This overwrites whatever RunDispatch's outcomeOf already recorded, and
+// the sentence alone used to throw that away. outcomeOf distinguishes a
+// run that called tools and achieved nothing from one that "made no tool
+// calls at all" -- a real diagnosis, since an agent that never called a
+// tool did not fail at the work so much as never attempt it -- and
+// replacing it with a fixed string about pushes and questions left both
+// looking identical to whoever read `grain get` afterwards.
+//
+// Names and counts only. The detail is a stored column read in a task
+// listing, not a transcript: the run's final text goes to the log line
+// above, bounded, for the same reason.
+func noActionDetail(result *agent.Result) string {
+	const ending = "finished without pushing a branch, asking a question, or leaving a closing comment"
+	if len(result.ToolCalls) == 0 {
+		return "the run made no tool calls at all, and " + ending
+	}
+	return fmt.Sprintf("the run made %d tool call(s)%s, and %s",
+		len(result.ToolCalls), toolCallSummary(result), ending)
 }
 
 // toolCallSummary names every tool the run called and how often, in a
