@@ -170,4 +170,28 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
+
+  it("switches to the Secrets tab and shows its panel", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "Secrets" }));
+
+    expect(await screen.findByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+  });
+
+  it("switches to the Upgrade tab and shows its panel", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "Upgrade" }));
+
+    expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+  });
 });
