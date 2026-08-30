@@ -74,7 +74,8 @@ func TestHostSandboxesRootForIsSafeForConcurrentCallers(t *testing.T) {
 func TestKonturSandboxesToolsForIsSafeForManyConcurrentDistinctSlots(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",

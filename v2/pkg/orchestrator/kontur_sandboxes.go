@@ -352,17 +352,17 @@ func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
 // almost always lose the race with, so ToolsFor waits it out here instead
 // of surfacing that as a caller-visible error on every freshly created VM.
 //
-// Note this only waits for the container/pod to get an IP, not for the
-// cloud-hypervisor guest inside it to finish booting to sshd -- those are
-// different points in time (confirmed by hand against a real guest,
-// bwsalmon/agents#478): a docker-backed VM's container is reachable by IP
-// the moment "docker run" starts it, well before the nested guest has
-// actually booted. A caller's first SSH-backed tool call against a
-// just-created VM can still race that gap --
+// Getting a pod/container IP is not the same as the cloud-hypervisor
+// guest inside it being ready for SSH -- those are different points in
+// time (confirmed by hand against a real guest, bwsalmon/agents#478): a
+// docker-backed VM's container is reachable by IP the moment "docker run"
+// starts it, well before the nested guest has actually booted to sshd. So
+// once host/port resolve, resolveEndpoint also waits (against the same
+// deadline) for a plain TCP dial to host:port to succeed, the same signal
 // TestKonturSandboxesToolsForAgainstARealDockerBackedVM's own retry loop
-// around its first run_command call works around it for that test, but
-// nothing in this package or mcp.SSHRunner retries it for a real
-// deployment yet.
+// around its first run_command call used to work around this by hand --
+// this makes that retry unnecessary for any real caller, not just that
+// test.
 func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (host string, port int, err error) {
 	port, err = kontur.Port(k.cfg.stateDir(), name)
 	if err != nil {
@@ -377,7 +377,7 @@ func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (hos
 			host, err = kontur.PodIP(ctx, k.cfg.runtimeEndpoint(), name)
 		}
 		if err == nil {
-			return host, port, nil
+			break
 		}
 		if time.Now().After(deadline) {
 			return "", 0, fmt.Errorf("orchestrator: waiting for kontur VM %q to become ready: %w", name, err)
@@ -385,6 +385,40 @@ func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (hos
 		select {
 		case <-ctx.Done():
 			return "", 0, ctx.Err()
+		case <-time.After(k.cfg.readyPollInterval()):
+		}
+	}
+
+	if err := k.waitForSSHPort(ctx, host, port, deadline); err != nil {
+		return "", 0, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest sshd to become reachable: %w", name, err)
+	}
+	return host, port, nil
+}
+
+// waitForSSHPort polls a plain TCP dial against host:port until it
+// succeeds or deadline passes -- a lightweight stand-in for "sshd is
+// actually accepting connections," cheap enough to poll on the same
+// interval resolveEndpoint's own IP wait uses, and enough to close the
+// boot-time gap described on resolveEndpoint's own doc comment: a refused
+// or timed-out connection means the guest has not finished booting yet,
+// not that anything is actually wrong.
+func (k *KonturSandboxes) waitForSSHPort(ctx context.Context, host string, port int, deadline time.Time) error {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	dialer := net.Dialer{Timeout: k.cfg.readyPollInterval()}
+	var lastErr error
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s: %w", addr, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(k.cfg.readyPollInterval()):
 		}
 	}

@@ -29,12 +29,29 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 )
+
+// listenTCP opens a real TCP listener at 127.0.0.1:port, closed
+// automatically when t ends -- KonturSandboxes.resolveEndpoint
+// (bwsalmon/agents#504) now dials the resolved host:port for real once
+// the pod/container IP itself resolves (closing the gap where a fresh
+// VM's container is reachable well before the guest has actually booted
+// to sshd), so any test driving that path past IP resolution needs
+// something real listening there, standing in for the guest's sshd.
+func listenTCP(t *testing.T, port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("listening on 127.0.0.1:%d: %v", port, err)
+	}
+	t.Cleanup(func() { ln.Close() })
+}
 
 func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	t.Helper()
@@ -108,7 +125,8 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	const slot = "1"
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKonturBinary(t, argvLog, 30080)
-	writeFakeCrictlBinary(t, "10.100.5.7")
+	writeFakeCrictlBinary(t, "127.0.0.1")
+	listenTCP(t, 30080)
 	vmHome := t.TempDir()
 	writeFakeSSHBinary(t, vmHome)
 

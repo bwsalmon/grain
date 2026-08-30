@@ -48,3 +48,16 @@ create_iap_brand = false
 # dns_managed_zone = "CHANGE-ME-zone"
 
 grain_ref = "main" # pin a tag or SHA for a reproducible staging build
+
+# -- Kontur sandboxing --------------------------------------------------
+#
+# enable_kontur_sandboxes defaults to true (variables.tf), but needs a
+# guest image and an OCI image published somewhere first, or this apply
+# fails its own precondition -- see this directory's README, "Kontur
+# sandboxing", for the one-time build-and-publish steps that produce
+# them. Fill these in once you've run those, or set
+# enable_kontur_sandboxes = false below to keep this deployment on
+# host-directory sandboxing (bwsalmon/agents#504) instead.
+# kontur_image_bucket = "CHANGE-ME-kontur-images"
+# kontur_oci_image    = "us-central1-docker.pkg.dev/CHANGE-ME-gcp-project/CHANGE-ME-repo/kontur:latest"
+# enable_kontur_sandboxes = false

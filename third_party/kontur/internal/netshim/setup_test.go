@@ -4,22 +4,18 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
-	"strings"
 	"testing"
+
+	"github.com/google/nftables"
+	"github.com/vishvananda/netlink"
 )
 
 // requireRoot skips tests that need to create real network interfaces and
-// iptables rules, which requires CAP_NET_ADMIN (in practice, root).
+// nftables rules, which requires CAP_NET_ADMIN (in practice, root).
 func requireRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("requires root/CAP_NET_ADMIN to manipulate network interfaces")
-	}
-	for _, bin := range []string{"ip", "iptables"} {
-		if _, err := exec.LookPath(bin); err != nil {
-			t.Skipf("%s not found on PATH", bin)
-		}
 	}
 }
 
@@ -33,22 +29,17 @@ func TestSetup_Idempotent(t *testing.T) {
 
 	bridge := fmt.Sprintf("nst-%d", os.Getpid()%10000)
 	t.Cleanup(func() {
-		// Delete every rule Setup could have added; -D only removes one
-		// match at a time, so loop until none are left.
-		for _, args := range [][]string{
-			{"-t", "nat", "-D", "PREROUTING", "-i", "lo", "-d", "127.0.0.1", "-p", "tcp", "--dport", "30080", "-j", "DNAT", "--to-destination", "169.254.100.2:8080"},
-			{"-t", "nat", "-D", "PREROUTING", "-i", "lo", "-d", "127.0.0.1", "-p", "udp", "--dport", "30080", "-j", "DNAT", "--to-destination", "169.254.100.2:8080"},
-			{"-t", "nat", "-D", "OUTPUT", "-d", "127.0.0.1", "-p", "tcp", "--dport", "30080", "-j", "DNAT", "--to-destination", "169.254.100.2:8080"},
-			{"-t", "nat", "-D", "OUTPUT", "-d", "127.0.0.1", "-p", "udp", "--dport", "30080", "-j", "DNAT", "--to-destination", "169.254.100.2:8080"},
-			{"-t", "nat", "-D", "POSTROUTING", "-s", "169.254.100.0/24", "-o", "lo", "-j", "MASQUERADE"},
-			{"-D", "FORWARD", "-i", bridge, "-j", "ACCEPT"},
-			{"-D", "FORWARD", "-o", bridge, "-j", "ACCEPT"},
-		} {
-			for exec.Command("iptables", args...).Run() == nil {
+		conn := &nftables.Conn{}
+		if tables, err := conn.ListTables(); err == nil {
+			for _, tbl := range tables {
+				if tbl.Name == natTable {
+					conn.DelTable(tbl)
+				}
 			}
+			conn.Flush()
 		}
-		exec.Command("ip", "link", "del", bridge).Run()
-		exec.Command("ip", "link", "del", tapPrefix+"vm1").Run()
+		netlink.LinkDel(&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridge}})
+		netlink.LinkDel(&netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: tapPrefix + "vm1"}})
 	})
 
 	cfg := Config{
@@ -81,17 +72,43 @@ func TestSetup_Idempotent(t *testing.T) {
 		t.Fatalf("Setup() second run error = %v", err)
 	}
 
-	out, err := exec.Command("iptables", "-t", "nat", "-S", "PREROUTING").CombinedOutput()
+	conn := &nftables.Conn{}
+	tables, err := conn.ListTables()
 	if err != nil {
-		t.Fatalf("iptables -S PREROUTING: %v: %s", err, out)
+		t.Fatalf("ListTables(): %v", err)
 	}
-	rules := string(out)
-	// One DNAT rule per protocol (tcp, udp) for port 30080, and no more:
-	// each must appear exactly once even though Setup ran twice.
-	for _, proto := range []string{"tcp", "udp"} {
-		want := fmt.Sprintf("-p %s -m %s --dport 30080", proto, proto)
-		if n := strings.Count(rules, want); n != 1 {
-			t.Errorf("PREROUTING rules contain %d occurrences of %q, want exactly 1 (Setup should be idempotent):\n%s", n, want, rules)
+	var found int
+	for _, tbl := range tables {
+		if tbl.Name == natTable && tbl.Family == nftables.TableFamilyIPv4 {
+			found++
 		}
+	}
+	// Setup rebuilds the table from scratch each run, so re-running must
+	// not leave a duplicate table (or duplicate rules within it) behind.
+	if found != 1 {
+		t.Errorf("found %d %q nftables tables, want exactly 1", found, natTable)
+	}
+
+	chains, err := conn.ListChainsOfTableFamily(nftables.TableFamilyIPv4)
+	if err != nil {
+		t.Fatalf("ListChainsOfTableFamily(): %v", err)
+	}
+	var preroutingChain *nftables.Chain
+	for _, c := range chains {
+		if c.Table.Name == natTable && c.Name == "prerouting" {
+			preroutingChain = c
+		}
+	}
+	if preroutingChain == nil {
+		t.Fatal("prerouting chain not found in kontur table")
+	}
+	rules, err := conn.GetRules(preroutingChain.Table, preroutingChain)
+	if err != nil {
+		t.Fatalf("GetRules(prerouting): %v", err)
+	}
+	// One DNAT rule per protocol (tcp, udp) for vm1, and no more, even
+	// though Setup ran twice.
+	if len(rules) != 2 {
+		t.Errorf("prerouting chain has %d rules, want exactly 2 (Setup should be idempotent)", len(rules))
 	}
 }

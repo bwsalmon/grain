@@ -1,10 +1,15 @@
 // Command kontur is the container-facing binary for kontur: it either
 // boots a single cloud-hypervisor VM as PID 1 of a container ("run", the
-// default) or sets up pod-local networking as a Kubernetes init container
-// ("netshim"), configured entirely from the environment either way. Both
-// modes live in the same binary and the same OCI image so a VM pod only
-// ever pulls one image, invoked with different args for its init
-// container vs. its VM container. See README.md for the environment
+// default), sets up pod-local networking as a Kubernetes init container
+// ("netshim"), or blocks forever ("sleep", used by -backend docker to
+// hold a network namespace open in place of a pod sandbox -- see
+// internal/dockervm), configured entirely from the environment where
+// applicable. All three modes live in the same binary and the same OCI
+// image -- which, since internal/netshim talks to the kernel directly via
+// netlink/nftables rather than exec'ing external CLIs, ships from
+// "scratch" with no shell or coreutils of its own, so "sleep" exists
+// here rather than relying on one being present in the image -- invoked
+// with different args per role. See README.md for the environment
 // variables each mode understands.
 //
 // This is distinct from cmd/konturctl, which is the operator-facing CLI
@@ -45,8 +50,18 @@ func main() {
 		if err := runNetshim(); err != nil {
 			log.Fatalf("%v", err)
 		}
+	case "sleep":
+		// A bare "select {}" here would make Go's deadlock detector kill
+		// the process immediately (nothing else could ever wake the sole
+		// goroutine), so block on an explicit signal instead: "docker
+		// stop" sends SIGTERM (then SIGKILL after its grace period if
+		// this doesn't exit first), matching how "sleep infinity" would
+		// have responded.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		<-sigCh
 	default:
-		log.Fatalf("kontur: unknown mode %q (want \"run\" or \"netshim\")", mode)
+		log.Fatalf("kontur: unknown mode %q (want \"run\", \"netshim\" or \"sleep\")", mode)
 	}
 }
 

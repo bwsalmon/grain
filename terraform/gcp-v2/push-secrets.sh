@@ -46,6 +46,18 @@
 #                                      itself from the minter credential pushed below --
 #                                      see this directory's README, "The daemon's own
 #                                      Gemini key". Set it only to use a key of your own.
+#   GRAIN_KONTUR_SSH_KEY                the private half of the SSH keypair
+#                                      orchestrator.KonturSandboxes authenticates to each
+#                                      kontur VM with (-kontur-ssh-key) -- required for
+#                                      enable_kontur_sandboxes to work at all. The public
+#                                      half is baked into the guest image separately, at
+#                                      build time, via packer/kontur/build.sh's own
+#                                      OPERATOR_SSH_PUBLIC_KEY -- both halves come from the
+#                                      same keypair, generated once (e.g. `ssh-keygen -t
+#                                      ed25519 -N '' -f kontur_key`) and never regenerated
+#                                      without also rebuilding the guest image, or the two
+#                                      halves stop matching. See this directory's README,
+#                                      "Kontur sandboxing".
 #   MINTER_SERVICE_ACCOUNT             terraform output minter_service_account -- if set,
 #                                      mints a fresh key for it and pushes that too (see below)
 set -euo pipefail
@@ -76,6 +88,7 @@ push_secret "grain-github-app-id" "${GRAIN_GITHUB_APP_ID:-}"
 push_secret "grain-github-app-installation-id" "${GRAIN_GITHUB_APP_INSTALLATION_ID:-}"
 push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
+push_secret "grain-kontur-ssh-key" "${GRAIN_KONTUR_SSH_KEY:-}"
 
 # The credential pkg/capability/gcpkey authenticates as to mint (and
 # revoke) the agent account's per-task keys. Minted fresh on every run of

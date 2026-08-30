@@ -11,9 +11,11 @@
 // container that uses them ever starts. Plain docker containers have no
 // such sandbox, and a container's network namespace disappears with it,
 // so this package starts a third, otherwise-idle container per VM --
-// the same kontur image, entrypoint overridden to "sleep infinity" --
-// purely to hold that namespace open for netshim and the VM container to
-// share, standing in for the pod sandbox.
+// the same kontur image, entrypoint overridden to its own "sleep" mode
+// (see cmd/kontur; the image ships from "scratch" with no coreutils
+// "sleep" binary of its own to exec instead) -- purely to hold that
+// namespace open for netshim and the VM container to share, standing in
+// for the pod sandbox.
 package dockervm
 
 import (
@@ -108,8 +110,8 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 	if err := d.run(ctx, io.Discard, "run", "-d",
 		"--name", netnsName,
 		"--label", "kontur.dev/vm="+spec.Name,
-		"--entrypoint", "sleep",
-		spec.KonturImage, "infinity",
+		"--entrypoint", "/usr/local/bin/kontur",
+		spec.KonturImage, "sleep",
 	); err != nil {
 		return fmt.Errorf("starting network namespace holder %s: %w", netnsName, err)
 	}

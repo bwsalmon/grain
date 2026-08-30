@@ -28,6 +28,18 @@ locals {
     max_agent_turns           = var.max_agent_turns
     gcp_project               = local.gcp_project
     gcp_agent_service_account = local.agent_service_account_email
+
+    # See variables.tf's own "kontur" section -- enable_kontur_sandboxes
+    # on with these otherwise empty is refused by this resource's own
+    # precondition below, not left to fail confusingly on the host.
+    enable_kontur_sandboxes = var.enable_kontur_sandboxes
+    kontur_image_bucket     = var.kontur_image_bucket
+    kontur_oci_image        = var.kontur_oci_image
+    kontur_vm_name_prefix   = var.kontur_vm_name_prefix
+    kontur_ssh_user         = var.kontur_ssh_user
+    kontur_workspace        = var.kontur_workspace
+    kontur_base_ip          = var.kontur_base_ip
+    kontur_base_port        = var.kontur_base_port
   }
 }
 
@@ -169,9 +181,27 @@ resource "google_compute_instance" "host" {
       error_message = "enable_gemini_key, agent_can_manage_compute_instances, and agent_can_manage_gke all need a real key on the agent account to do anything -- set deployer_member so push-secrets.sh can mint one after apply (see iam.tf's deployer_manages_minter_keys)."
     }
 
+    # A guest image and an OCI image have to actually exist somewhere for
+    # setup.sh to fetch -- neither has a project-independent default this
+    # module could supply, so enable_kontur_sandboxes (on by default)
+    # fails loudly here rather than applying a host that can never
+    # actually create a VM. See variables.tf's own kontur_image_bucket/
+    # kontur_oci_image and this module's README, "Kontur sandboxing".
+    precondition {
+      condition     = !var.enable_kontur_sandboxes || (var.kontur_image_bucket != "" && var.kontur_oci_image != "")
+      error_message = "enable_kontur_sandboxes needs kontur_image_bucket and kontur_oci_image set -- see terraform/gcp-v2/README.md, \"Kontur sandboxing\", for the one-time build-and-publish step that creates them, or set enable_kontur_sandboxes = false to keep this deployment on host-directory sandboxing."
+    }
+
+    # A kontur VM is a nested cloud-hypervisor guest -- no /dev/kvm, no
+    # boot, regardless of anything else here.
+    precondition {
+      condition     = !var.enable_kontur_sandboxes || var.enable_nested_virtualization
+      error_message = "enable_kontur_sandboxes needs enable_nested_virtualization (for /dev/kvm) -- set both, or turn enable_kontur_sandboxes off."
+    }
+
     # grain-github-token, grain-github-app-id/installation-id/private-key,
-    # grain-gemini-api-key, and grain-gcp-minter-key are never declared
-    # here -- push-secrets.sh adds them directly with
+    # grain-gemini-api-key, grain-gcp-minter-key, and grain-kontur-ssh-key
+    # are never declared here -- push-secrets.sh adds them directly with
     # `gcloud compute instances add-metadata` once this resource exists,
     # so none of them ever passes through Terraform or lands in the
     # state file. Without this, the next apply would see them as drift
@@ -183,6 +213,7 @@ resource "google_compute_instance" "host" {
       metadata["grain-github-app-private-key"],
       metadata["grain-gemini-api-key"],
       metadata["grain-gcp-minter-key"],
+      metadata["grain-kontur-ssh-key"],
     ]
   }
 }
