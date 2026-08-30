@@ -311,6 +311,13 @@ type PullRequestDetail struct {
 	Body    string
 	HTMLURL string
 	HeadRef string
+	// HeadSHA is the PR head branch's current tip. Free on this same
+	// response, and what scopes a workflow-run read to the commit the PR
+	// actually points at -- filtering Actions runs by branch instead
+	// would let a run from an older commit stand in for one the newest
+	// push has not triggered yet, which is exactly the stale "passing"
+	// that must never reach the merge gate.
+	HeadSHA string
 	BaseRef string
 	// State is GitHub's own field, "open" or "closed" -- "closed" covers
 	// both merged and closed-without-merging, which a caller closing out
@@ -326,6 +333,18 @@ type PullRequestDetail struct {
 	// clean merge, since guessing either way could file a needless fix or
 	// auto-merge something broken.
 	Mergeable *bool
+	// MergeableState is GitHub's own summary of why a PR can or cannot
+	// merge -- "clean", "unstable", "blocked", "dirty", "behind",
+	// "draft", "unknown". Parsed and carried because it needs no
+	// permission beyond the Pull requests read this response already
+	// costs, unlike either CI read.
+	//
+	// Deliberately NOT wired into the merge gate: "clean" is documented
+	// only loosely, and whether it accounts for check runs or merely for
+	// the older commit statuses decides whether trusting it would
+	// auto-merge a PR with red CI. Confirm that against a live PR with a
+	// deliberately failing check before any caller reads it as passing.
+	MergeableState string
 }
 
 // Comment is a plain top-level comment on an issue or PR -- GitHub's own
@@ -453,6 +472,7 @@ type Client interface {
 	DefaultBranch(owner, repo string) (string, error)
 	ListReviewComments(owner, repo string, number int) ([]ReviewComment, error)
 	ListCheckRuns(owner, repo, ref string) ([]CheckRun, error)
+	ListWorkflowRuns(owner, repo, headSHA string) ([]CheckRun, error)
 	ListComments(owner, repo string, number int) ([]Comment, error)
 	CreateComment(owner, repo string, number int, body string) (int, error)
 	CreateReview(owner, repo string, number int, body string, comments []NewReviewComment) (int, error)
@@ -936,11 +956,13 @@ func (c *RESTClient) GetPullRequest(owner, repo string, number int) (PullRequest
 		State   string `json:"state"`
 		Head    struct {
 			Ref string `json:"ref"`
+			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
-		Mergeable *bool `json:"mergeable"`
+		Mergeable      *bool  `json:"mergeable"`
+		MergeableState string `json:"mergeable_state"`
 	}
 	if err := json.Unmarshal(resp.Body, &data); err != nil {
 		return PullRequestDetail{}, err
@@ -951,7 +973,8 @@ func (c *RESTClient) GetPullRequest(owner, repo string, number int) (PullRequest
 	}
 	return PullRequestDetail{
 		Number: data.Number, Title: data.Title, Body: data.Body, HTMLURL: data.HTMLURL,
-		HeadRef: data.Head.Ref, BaseRef: data.Base.Ref, State: state, Mergeable: data.Mergeable,
+		HeadRef: data.Head.Ref, HeadSHA: data.Head.SHA, BaseRef: data.Base.Ref,
+		State: state, Mergeable: data.Mergeable, MergeableState: data.MergeableState,
 	}, nil
 }
 
@@ -1049,6 +1072,67 @@ func (c *RESTClient) ListCheckRuns(owner, repo, ref string) ([]CheckRun, error) 
 		}
 		for _, item := range data.CheckRuns {
 			runs = append(runs, CheckRun{Name: item.Name, Status: item.Status, Conclusion: item.Conclusion})
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return runs, nil
+}
+
+// ListWorkflowRuns returns the GitHub Actions workflow runs against one
+// commit, shaped as CheckRuns so a caller can treat them exactly like the
+// check runs ListCheckRuns returns.
+//
+// This is the fallback for a credential that cannot reach the Checks API.
+// Reading check runs needs the `repo` scope on a classic PAT, and on a
+// fine-grained PAT it cannot be granted at all -- GitHub offered a
+// "Checks" permission for fine-grained tokens, withdrew it over "some
+// edge cases", and has said only GitHub Apps may use that API in the
+// meantime. This endpoint sits behind the "Actions" repository
+// permission instead, which a fine-grained token *can* hold, so between
+// the two every credential type a deployment might use has some way to
+// read CI.
+//
+// What it costs is generality, not accuracy: Actions runs are all this
+// sees, so CI reported through the Checks API by a third party
+// (Buildkite, CircleCI, a review bot) is invisible here where
+// ListCheckRuns would have shown it. A deployment whose checks are
+// GitHub Actions loses nothing; one that adds another CI provider needs
+// a credential that can read checks properly.
+//
+// headSHA is a commit sha, not a branch: filtering by branch would
+// return runs from older commits too, and the newest run for a workflow
+// on a branch is not necessarily a run of the commit the PR now points
+// at. Reading a stale pass as this commit's pass is the one error that
+// would auto-merge untested code.
+//
+// The response is {"total_count": N, "workflow_runs": [...]}, the same
+// wrapped shape the Checks API uses rather than a bare array.
+func (c *RESTClient) ListWorkflowRuns(owner, repo, headSHA string) ([]CheckRun, error) {
+	var runs []CheckRun
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs?head_sha=%s&per_page=100",
+		owner, repo, url.QueryEscape(headSHA))
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var data struct {
+			WorkflowRuns []struct {
+				Name       string  `json:"name"`
+				Status     string  `json:"status"`
+				Conclusion *string `json:"conclusion"`
+			} `json:"workflow_runs"`
+		}
+		if err := json.Unmarshal(resp.Body, &data); err != nil {
+			return nil, err
+		}
+		for _, item := range data.WorkflowRuns {
+			runs = append(runs, CheckRun{
+				Name: item.Name, Status: item.Status, Conclusion: item.Conclusion,
+			})
 		}
 		path = nextPagePath(resp.Headers["Link"])
 	}
@@ -1242,6 +1326,10 @@ func (d DryRunClient) ListReviewComments(owner, repo string, number int) ([]Revi
 
 func (d DryRunClient) ListCheckRuns(owner, repo, ref string) ([]CheckRun, error) {
 	return d.Inner.ListCheckRuns(owner, repo, ref)
+}
+
+func (d DryRunClient) ListWorkflowRuns(owner, repo, headSHA string) ([]CheckRun, error) {
+	return d.Inner.ListWorkflowRuns(owner, repo, headSHA)
 }
 
 func (d DryRunClient) ListComments(owner, repo string, number int) ([]Comment, error) {

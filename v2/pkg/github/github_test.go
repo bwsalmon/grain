@@ -637,6 +637,125 @@ func TestListCheckRunsFollowsLinkHeaderPagination(t *testing.T) {
 	}
 }
 
+// The Actions fallback for a credential that cannot reach the Checks API.
+// Its response is wrapped in "workflow_runs" rather than being a bare
+// array, and it is mapped onto CheckRun so a caller handles one shape.
+func TestListWorkflowRunsReadsTheWorkflowRunShape(t *testing.T) {
+	body := map[string]any{"total_count": 2, "workflow_runs": []any{
+		map[string]any{"name": "tests", "status": "completed", "conclusion": "success"},
+		map[string]any{"name": "lint", "status": "completed", "conclusion": "failure"},
+	}}
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, body)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	runs, err := client.ListWorkflowRuns("o", "r", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs, want 2", len(runs))
+	}
+	if runs[0].Name != "tests" || runs[0].Status != "completed" || *runs[0].Conclusion != "success" {
+		t.Errorf("first run = %+v", runs[0])
+	}
+	if runs[1].Conclusion == nil || *runs[1].Conclusion != "failure" {
+		t.Errorf("second run = %+v, want a failure conclusion", runs[1])
+	}
+}
+
+// Scoped to a commit, never a branch: runs for an older commit on the
+// same branch must not stand in for the commit the PR points at now.
+func TestListWorkflowRunsScopesToTheHeadSHA(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte(`{"workflow_runs":[]}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if _, err := client.ListWorkflowRuns("o", "r", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	want := "/repos/o/r/actions/runs?head_sha=abc123&per_page=100"
+	if transport.Calls[0].Path != want {
+		t.Fatalf("got %s, want %s", transport.Calls[0].Path, want)
+	}
+}
+
+func TestListWorkflowRunsToleratesAStillRunningRunWithNoConclusion(t *testing.T) {
+	body := map[string]any{"workflow_runs": []any{
+		map[string]any{"name": "tests", "status": "in_progress", "conclusion": nil},
+	}}
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, body)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	runs, err := client.ListWorkflowRuns("o", "r", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Conclusion != nil || runs[0].Status != "in_progress" {
+		t.Fatalf("got %+v", runs)
+	}
+}
+
+func TestListWorkflowRunsFollowsLinkHeaderPagination(t *testing.T) {
+	transport := NewFakeTransport(
+		ApiResponse{Status: 200,
+			Headers: map[string]string{"Link": `<https://api.github.com/repos/o/r/actions/runs?page=2>; rel="next"`},
+			Body:    []byte(`{"workflow_runs":[{"name":"tests","status":"completed","conclusion":"success"}]}`)},
+		ApiResponse{Status: 200,
+			Body: []byte(`{"workflow_runs":[{"name":"lint","status":"completed","conclusion":"success"}]}`)},
+	)
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	runs, err := client.ListWorkflowRuns("o", "r", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs across two pages, want 2", len(runs))
+	}
+}
+
+// A 403 here has to reach the caller as a *github.Error so
+// IsPermissionDenied can classify it -- that is what tells checkRunsFor
+// the Actions read is unavailable too, rather than merely empty.
+func TestListWorkflowRunsRaisesOnANon200(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 403,
+		Body: []byte(`{"message":"Resource not accessible by personal access token"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	_, err := client.ListWorkflowRuns("o", "r", "abc123")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !IsPermissionDenied(err) {
+		t.Errorf("a 403 from the Actions API was not classified as a permission denial: %v", err)
+	}
+}
+
+// mergeable_state comes free on a response grain already makes, under a
+// permission it already holds. Parsed and carried, but see
+// PullRequestDetail.MergeableState: not yet trusted by the merge gate.
+func TestGetPullRequestReadsMergeableState(t *testing.T) {
+	body := prJSON(5, "feature-branch", "main")
+	body["mergeable_state"] = "unstable"
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, body)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	pr, err := client.GetPullRequest("o", "r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.MergeableState != "unstable" {
+		t.Fatalf("MergeableState = %q, want unstable", pr.MergeableState)
+	}
+}
+
+// The head sha scopes the Actions fallback, so it has to survive the PR
+// read that supplies it.
+func TestGetPullRequestReadsHeadSHA(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, prJSON(5, "feature-branch", "main"))})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	pr, err := client.GetPullRequest("o", "r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.HeadSHA != "abc123" {
+		t.Fatalf("HeadSHA = %q, want abc123", pr.HeadSHA)
+	}
+}
+
 func TestListCheckRunsRaisesOnANon200(t *testing.T) {
 	transport := NewFakeTransport(ApiResponse{Status: 500, Body: []byte("boom")})
 	client := NewClient(transport, StaticToken{strPtr("t")})
@@ -689,7 +808,7 @@ func TestGetPullRequestReadsHeadAndBaseRef(t *testing.T) {
 	}
 	want := PullRequestDetail{
 		Number: 5, Title: "pr", Body: "please review", HTMLURL: "https://github.com/o/r/pull/5",
-		HeadRef: "feature-branch", BaseRef: "main", State: "open",
+		HeadRef: "feature-branch", HeadSHA: "abc123", BaseRef: "main", State: "open",
 	}
 	if pr != want {
 		t.Fatalf("got %+v want %+v", pr, want)

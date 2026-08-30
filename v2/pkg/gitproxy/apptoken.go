@@ -6,13 +6,20 @@ package gitproxy
 //
 // terraform/gcp-v2/README.md's "What the PAT needs" section explains why
 // this exists: a fine-grained PAT has no "Checks" permission to grant at
-// all (GitHub offered one initially and withdrew it -- the Checks API now
-// takes GitHub App installation tokens only), so ListCheckRuns returns a
-// permanent 403 to a PAT-backed deployment and pkg/orchestrator's
-// healthFrom can never read a PR as PrClean -- the fact bwsalmon/agents
-// #483 surfaced as a UI warning (AutoMergeDegraded) rather than fixed,
-// because fixing it needed a credential kind this package didn't have
-// yet. This is that credential kind (bwsalmon/agents#491).
+// all (GitHub offered one initially and withdrew it -- only GitHub Apps
+// may use that API in the meantime), so ListCheckRuns returns a permanent
+// 403 to a PAT-backed deployment -- the fact bwsalmon/agents#483 surfaced
+// as a UI warning (AutoMergeDegraded) rather than fixed, because fixing
+// it needed a credential kind this package didn't have yet. This is that
+// credential kind (bwsalmon/agents#491).
+//
+// An App is no longer the *only* way to get auto-merge working, though:
+// pkg/orchestrator's checkRunsFor now falls back to the Actions API,
+// which a fine-grained PAT can reach with "Actions" read, so a deployment
+// whose CI is GitHub Actions needs no App. What still needs one is CI
+// reported through the Checks API by anything other than Actions -- a
+// third-party provider, or a review bot -- which that fallback cannot
+// see and only a checks-capable credential can.
 //
 // GitHub's own flow ("Authenticating as a GitHub App" in its REST API
 // docs): sign a short-lived RS256 JWT claiming iss=<app ID>, then

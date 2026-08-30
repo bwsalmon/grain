@@ -101,6 +101,9 @@ func (g *loadGitHub) ListReviewComments(owner, repo string, number int) ([]githu
 func (g *loadGitHub) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
 	return nil, g.unsupported("ListCheckRuns")
 }
+func (g *loadGitHub) ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error) {
+	return nil, g.unsupported("ListWorkflowRuns")
+}
 func (g *loadGitHub) ListComments(owner, repo string, number int) ([]github.Comment, error) {
 	return nil, g.unsupported("ListComments")
 }
