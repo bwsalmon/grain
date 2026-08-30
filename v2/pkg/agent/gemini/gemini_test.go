@@ -305,6 +305,39 @@ func TestRunTranscriptMarksAFailedToolCall(t *testing.T) {
 	}
 }
 
+// TestRunMirrorsTheTranscriptToTranscriptPath proves Run writes its own
+// transcript-in-progress to cfg.TranscriptPath as it goes, the same
+// live-mirror contract claude.Framework.Run gives its own subprocess's
+// stdout (bwsalmon/agents#467, extended to this package by bwsalmon/
+// agents#513) -- gemini.LiveTranscriptDir.Tail is what a caller reads that
+// file back with while the run is still in progress.
+func TestRunMirrorsTheTranscriptToTranscriptPath(t *testing.T) {
+	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{
+		toolCallResponse("run_command", map[string]any{"command": "true"}),
+		textResponse("all done"),
+	}}
+	f := newFramework(fake)
+	path := filepath.Join(t.TempDir(), "r1")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "x", SandboxRoot: t.TempDir(), TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading TranscriptPath: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(data)), result.Transcript; got != want {
+		t.Errorf("transcript file = %q, want it to match Result.Transcript %q", got, want)
+	}
+	if !strings.Contains(string(data), "run_command") {
+		t.Errorf("transcript file = %q, want it to contain the tool call", string(data))
+	}
+}
+
 // TestRunTranscriptSurvivesMaxTurns proves a run that exhausts MaxTurns
 // still hands back a transcript of what it did, the same way it still
 // hands back ToolCalls -- see Run's own doc comment on why an error must

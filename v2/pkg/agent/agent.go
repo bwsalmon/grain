@@ -38,12 +38,16 @@ type RunConfig struct {
 	// handing one back in Result.Transcript once Run returns -- what
 	// lets a caller with filesystem access to that path show a
 	// still-running run's output, not just a finished one's
-	// (bwsalmon/agents#467). "" means no caller wants this; a Framework
-	// that does not populate Result.Transcript at all (agent/gemini, for
-	// now) need not do anything with this either. The exact file format
-	// is a Framework's own business -- pkg/agent/claude's own doc
-	// comment on Framework.Run says what it writes there and how a
-	// reader gets a still-in-progress run's transcript back out of it.
+	// (bwsalmon/agents#467, extended to agent/gemini by bwsalmon/
+	// agents#513). "" means no caller wants this. The exact file format
+	// is a Framework's own business -- pkg/agent/claude and pkg/agent/
+	// gemini's own doc comments on Framework.Run say what each writes
+	// there and how a reader gets a still-in-progress run's transcript
+	// back out of it; the two formats differ (claude mirrors its
+	// subprocess's raw stream-json, gemini writes the same
+	// already-human-readable narrative it builds Result.Transcript
+	// from), so each package also owns its own reader rather than
+	// sharing one.
 	TranscriptPath string
 }
 
