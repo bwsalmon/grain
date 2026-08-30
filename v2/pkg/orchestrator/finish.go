@@ -95,27 +95,12 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		})
 	}
 
-	pushed, err := branchExistsSettled(client, task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
+	handled, err := salvagePushedBranch(ctx, store, client, task, now)
 	if err != nil {
-		return fmt.Errorf("orchestrator: checking %s's branch: %w", task.ID, err)
+		return err
 	}
-
-	if pushed {
-		// task was read at the top of this cycle, before the run itself
-		// finished, so it cannot see a close that landed while the run was
-		// still live -- re-checking the observation here is what
-		// model/state.go's StateOf precedence (ClosedAt outranks a live
-		// run) actually means for a run that already pushed: nobody wants
-		// this work merged, so the branch is left pushed but unopened
-		// rather than turned into a real pull request on GitHub.
-		closed, err := taskClosed(ctx, store, task.ID)
-		if err != nil {
-			return err
-		}
-		if closed {
-			return nil
-		}
-		return finishWithPullRequest(ctx, store, client, task, now)
+	if handled {
+		return nil
 	}
 
 	if comment, ok := firstToolCallArg(result, "comment_on_issue", "comment"); ok && comment != "" {
@@ -170,6 +155,49 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		return fmt.Errorf("orchestrator: recording %s's outcome: %w", task.ID, err)
 	}
 	return nil
+}
+
+// salvagePushedBranch turns a branch the run left on GitHub into a pull
+// request, reporting whether there was one to turn. It is the only part
+// of a run's outcome that survives the run itself: the sandbox is
+// recreated and agent.Result is never persisted, but a pushed branch is
+// on GitHub whatever happened to the process that pushed it.
+//
+// Three callers need exactly this and used to have two-and-a-half copies
+// of it: ProcessResult for a run that ended cleanly, recoverRun for one
+// whose process died, and runOne for one whose framework returned an
+// error -- the case that had no copy at all, and stranded every branch a
+// run pushed before it ran out of turns.
+//
+// The close re-check is not incidental. task was read at the top of this
+// cycle, before the run finished, so it cannot see a close that landed
+// while the run was still live; re-reading the observation here is what
+// model/state.go's StateOf precedence (ClosedAt outranks a live run)
+// means for a run that already pushed. Nobody wants a closed task's work
+// merged, so the branch is left pushed but unopened rather than turned
+// into a real pull request. It still counts as handled: there was a
+// branch, and the decision about it has been made.
+func salvagePushedBranch(ctx context.Context, store *model.Store, client github.Client,
+	task model.Task, now time.Time) (bool, error) {
+
+	if task.Target == nil {
+		return false, nil
+	}
+	pushed, err := branchExistsSettled(client, task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: checking %s's branch: %w", task.ID, err)
+	}
+	if !pushed {
+		return false, nil
+	}
+	closed, err := taskClosed(ctx, store, task.ID)
+	if err != nil {
+		return true, err
+	}
+	if closed {
+		return true, nil
+	}
+	return true, finishWithPullRequest(ctx, store, client, task, now)
 }
 
 // noActionDetail says what the run did, not only what it did not do.
@@ -276,6 +304,29 @@ func branchExistsSettled(client github.Client, owner, repo, branch string) (bool
 		if exists {
 			return true, nil
 		}
+	}
+
+	// Every attempt said no. Confirm the client can see the repository at
+	// all before believing it: BranchExists reads a 404 as "no such
+	// branch", and every other way of failing to reach a repo -- a
+	// transport aimed at the wrong host, a revoked or unscoped token, a
+	// repo turned private -- 404s in exactly the same way. A negative
+	// that means "I cannot look" is then indistinguishable from one that
+	// means "I looked and it is not there", and this caller acts on the
+	// difference: the second ends the task as no_action, the first throws
+	// away work the agent really did push.
+	//
+	// That is not hypothetical. github.NewRealTransport pointed the REST
+	// client at github.com rather than api.github.com, so every API path
+	// 404'd, so every branch read as unpushed, and runs that had just
+	// pushed were recorded as having done nothing at all -- with no error
+	// anywhere to say so. A cheap read of the repo itself, on the
+	// negative path only, is what turns that class of failure from a
+	// wrong answer into a reported one.
+	if _, err := client.DefaultBranch(owner, repo); err != nil {
+		return false, fmt.Errorf(
+			"orchestrator: cannot read %s/%s, so %q cannot be treated as unpushed: %w",
+			owner, repo, branch, err)
 	}
 	return false, nil
 }

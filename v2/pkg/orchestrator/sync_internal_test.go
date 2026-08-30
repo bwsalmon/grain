@@ -234,6 +234,19 @@ type branchClient struct {
 	answers []bool
 	err     error
 	calls   int
+	// repoErr, when set, is what the repository-visibility probe on the
+	// negative path returns -- the "this client cannot see the repo at
+	// all, so its 404s mean nothing" case.
+	repoErr   error
+	repoCalls int
+}
+
+func (b *branchClient) DefaultBranch(owner, repo string) (string, error) {
+	b.repoCalls++
+	if b.repoErr != nil {
+		return "", b.repoErr
+	}
+	return "main", nil
 }
 
 func (b *branchClient) BranchExists(owner, repo, branch string) (bool, error) {
@@ -346,5 +359,38 @@ func TestNoActionDetailStillNamesWhatIsMissing(t *testing.T) {
 		if got := noActionDetail(r); !strings.Contains(got, "without pushing a branch") {
 			t.Errorf("detail = %q, want it to still name the missing ending", got)
 		}
+	}
+}
+
+// A negative is only believed once the repository itself reads back. A
+// client that cannot see the repo 404s identically to one looking at a
+// repo with no such branch, and the caller ends the task on that
+// difference -- see branchExistsSettled's own comment for the live
+// failure (a REST transport aimed at github.com rather than
+// api.github.com) this catches.
+func TestBranchExistsSettledRefusesToBelieveAnUnreadableRepo(t *testing.T) {
+	withNoSleep(t)
+	c := &branchClient{repoErr: &github.Error{Status: 404, Body: []byte("Not Found")}}
+	exists, err := branchExistsSettled(c, "o", "r", "grain/task-1")
+	if err == nil {
+		t.Fatal("a branch absent from a repo the client cannot read must not come back as a plain negative")
+	}
+	if exists {
+		t.Error("exists = true")
+	}
+	if !strings.Contains(err.Error(), "o/r") {
+		t.Errorf("error = %v, want it to name the repo it could not read", err)
+	}
+}
+
+// The probe costs one call, on the negative path only.
+func TestBranchExistsSettledDoesNotProbeTheRepoOnAPositive(t *testing.T) {
+	withNoSleep(t)
+	c := &branchClient{answers: []bool{true}}
+	if _, err := branchExistsSettled(c, "o", "r", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if c.repoCalls != 0 {
+		t.Errorf("repo probes = %d, want 0 -- a branch that is there needs no confirmation the repo is", c.repoCalls)
 	}
 }

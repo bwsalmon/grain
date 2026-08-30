@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
@@ -17,8 +17,9 @@ const initialTasks = [
 // overlays it can open touch, backed by a mutable task list so actions
 // that mutate (create, approve, ...) are reflected the next time the
 // list is refetched -- the same way the real store behaves.
-function setupApi(tasks = initialTasks) {
+function setupApi(tasks = initialTasks, schedules = []) {
   let tasksState = [...tasks];
+  let schedulesState = [...schedules];
   api.mockImplementation((path, opts) => {
     const method = opts?.method || "GET";
     if (path === "/api/config") return Promise.resolve(config);
@@ -37,17 +38,32 @@ function setupApi(tasks = initialTasks) {
     if (/^\/api\/tasks\/\w+\/(approve|submit|retry|close|reopen)$/.test(path)) return Promise.resolve({});
     if (path === "/api/secrets") return Promise.resolve({ enabled: false });
     if (path === "/api/settings") return Promise.resolve({ configured: false });
-    if (path === "/api/release-configs") return Promise.resolve([]);
     if (/^\/api\/repos\/[^/]+\/[^/]+\/release-config$/.test(path)) {
       return Promise.resolve({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 });
     }
     if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
-    if (path === "/api/schedules") return Promise.resolve([]);
+    if (path === "/api/schedules" && method === "GET") return Promise.resolve(schedulesState);
+    if (path === "/api/schedules" && method === "POST") {
+      const body = JSON.parse(opts.body);
+      const newSchedule = { id: "sched-2", enabled: true, nextRunAt: "2026-08-30T00:00:00Z", ...body };
+      schedulesState = [...schedulesState, newSchedule];
+      return Promise.resolve(newSchedule);
+    }
+    const scheduleMatch = path.match(/^\/api\/schedules\/([\w-]+)$/);
+    if (scheduleMatch && method === "PATCH") {
+      const body = JSON.parse(opts.body);
+      schedulesState = schedulesState.map((s) => (s.id === scheduleMatch[1] ? { ...s, ...body } : s));
+      return Promise.resolve(schedulesState.find((s) => s.id === scheduleMatch[1]));
+    }
+    if (scheduleMatch && method === "DELETE") {
+      schedulesState = schedulesState.filter((s) => s.id !== scheduleMatch[1]);
+      return Promise.resolve(null);
+    }
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
     return Promise.resolve(null);
   });
-  return { get tasksState() { return tasksState; } };
+  return { get tasksState() { return tasksState; }, get schedulesState() { return schedulesState; } };
 }
 
 describe("App", () => {
@@ -145,9 +161,58 @@ describe("App", () => {
     expect(screen.queryByText(/Repo: acme\/other/)).not.toBeInTheDocument();
   });
 
+  it("opens a repo's release pane from the repo view and back out of it", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+    const row = (await screen.findByText("acme/other")).closest("li");
+    await user.click(within(row).getByRole("button", { name: "Releases" }));
+
+    expect(await screen.findByRole("heading", { name: "acme/other releases" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Releases" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+
+    expect(await screen.findByText("acme/other")).toBeInTheDocument();
+  });
+
+  it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    setupApi(initialTasks, [schedule]);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+
+    expect(await screen.findByRole("heading", { name: "Scheduled tasks" })).toBeInTheDocument();
+    expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+  });
+
+  it("edits a schedule from the schedules pane", async () => {
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, interval: "24h0m0s", enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    setupApi(initialTasks, [schedule]);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await screen.findByText("Nightly dependency bump");
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const titleField = screen.getAllByLabelText(/Title/)[0];
+    await user.clear(titleField);
+    await user.type(titleField, "Weekly dependency bump");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Weekly dependency bump")).toBeInTheDocument();
+  });
+
   it.each([
-    ["Releases", "Releases"],
-    ["Scheduled tasks", "Scheduled tasks"],
     ["Settings", "Settings"],
     ["Logs", "Logs"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {

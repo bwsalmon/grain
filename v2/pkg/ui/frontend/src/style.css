@@ -422,13 +422,6 @@ fieldset legend {
 
 .detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
 
-.attempts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
-.attempt { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.6rem; }
-.attempt-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-.attempt-number { font-size: 0.82rem; font-weight: 600; color: var(--text-secondary); }
-.attempt-meta { color: var(--text-tertiary); font-size: 0.78rem; margin-top: 0.2rem; }
-.attempt-detail { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.3rem; word-break: break-word; }
-
 .declared { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.1rem; }
 .declared-row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.82rem; }
 .declared-key { color: var(--text-tertiary); }
@@ -438,9 +431,35 @@ fieldset legend {
 .detail-side .actions { flex-direction: column; }
 .detail-side .actions button { width: 100%; }
 
-.comments { border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 1rem; }
-.comments h3 { font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-tertiary); margin: 0 0 0.75rem; }
-.comment { padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
-.comment .meta { color: var(--text-tertiary); font-size: 0.8rem; margin-bottom: 0.15rem; }
+/* Timeline merges every state transition, attempt result and comment
+   into one time-ordered feed (bwsalmon/agents#453). Each entry is a dot
+   (reusing .badge's own colours) in a fixed-width marker column, joined
+   to the next by a connecting line drawn on the marker itself, with a
+   timestamp and its content beside it. */
+.timeline { border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 1rem; }
+.timeline h3 { font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-tertiary); margin: 0 0 0.75rem; }
+.timeline-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+.timeline-item { display: flex; gap: 0.75rem; padding-bottom: 1.1rem; }
+.timeline-item:last-child { padding-bottom: 0; }
+.timeline-marker { position: relative; width: 11px; flex: none; display: flex; justify-content: center; padding-top: 0.15rem; }
+.timeline-marker .badge { margin: 0; }
+.timeline-marker::after {
+  content: "";
+  position: absolute;
+  top: 15px;
+  bottom: -1.1rem;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--border);
+}
+.timeline-item:last-child .timeline-marker::after { display: none; }
+.badge-comment::before { background: var(--text-placeholder); }
+.timeline-body { flex: 1; min-width: 0; }
+.timeline-when { color: var(--text-tertiary); font-size: 0.75rem; margin-bottom: 0.15rem; }
+.timeline-title { font-weight: 600; font-size: 0.85rem; color: var(--text-secondary); }
+.timeline-meta { color: var(--text-tertiary); font-size: 0.8rem; }
+.timeline-detail { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.3rem; word-break: break-word; }
+.timeline-comment-body { color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.15rem; word-break: break-word; }
 .comment-form { display: flex; gap: 0.6rem; margin-top: 0.85rem; align-items: flex-end; }
 .comment-form textarea { flex: 1; }

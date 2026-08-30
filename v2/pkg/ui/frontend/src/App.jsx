@@ -4,13 +4,13 @@ import api from "./api.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import RepoList from "./components/RepoList.jsx";
+import SchedulesList from "./components/SchedulesList.jsx";
 import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
-import ReleasesOverlay from "./components/ReleasesOverlay.jsx";
-import ScheduledTasksOverlay from "./components/ScheduledTasksOverlay.jsx";
+import RepoReleases from "./components/RepoReleases.jsx";
 import LogsOverlay from "./components/LogsOverlay.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
@@ -25,20 +25,24 @@ const POLL_INTERVAL_MS = 3000;
 export default function App() {
   const [config, setConfig] = useState(null);
   const [tasks, setTasks] = useState([]);
+  const [schedules, setSchedules] = useState([]);
   const [stateFilter, setStateFilter] = useState("all");
-  // view switches the main pane between the flat task list and the repo
-  // page; repoFilter is orthogonal to stateFilter and survives a trip
-  // through the repo page and back, since "which repo" and "which
-  // state" are two independent questions about the same task list.
+  // view switches the main pane between the flat task list, the repo
+  // page, and the schedules page; repoFilter is orthogonal to
+  // stateFilter and survives a trip through the repo page and back,
+  // since "which repo" and "which state" are two independent questions
+  // about the same task list.
   const [view, setView] = useState("tasks");
   const [repoFilter, setRepoFilter] = useState(null);
+  // releasesRepo is which repo's release pane is open within the repos
+  // view (null shows the repo list instead) -- see RepoList's own
+  // "Releases" button.
+  const [releasesRepo, setReleasesRepo] = useState(null);
   const [error, setError] = useState(null);
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [showNewTask, setShowNewTask] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showReleases, setShowReleases] = useState(false);
-  const [showSchedules, setShowSchedules] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
@@ -63,6 +67,10 @@ export default function App() {
       const kept = new Set([...prev].filter((id) => ids.has(id)));
       return kept.size === prev.size ? prev : kept;
     });
+  }, []);
+
+  const refreshSchedules = useCallback(async () => {
+    setSchedules(await api("/api/schedules"));
   }, []);
 
   const toggleSelect = useCallback((id) => {
@@ -105,7 +113,16 @@ export default function App() {
   // anywhere else would.
   const openRepo = useCallback((repo) => {
     setRepoFilter(repo);
+    setReleasesRepo(null);
     setView("tasks");
+  }, []);
+
+  // setViewAndCloseReleases is Sidebar's onSetView: any nav click leaves
+  // the repos view's release pane behind, so returning to "repos" later
+  // should land back on the repo list rather than a stale release pane.
+  const setViewAndCloseReleases = useCallback((v) => {
+    setReleasesRepo(null);
+    setView(v);
   }, []);
 
   // act runs a mutation, then re-fetches the task (and the list behind
@@ -151,12 +168,12 @@ export default function App() {
       try {
         const cfg = await api("/api/config");
         setConfig(cfg);
-        await refreshList();
+        await Promise.all([refreshList(), refreshSchedules()]);
       } catch (err) {
         showError(err);
       }
     })();
-  }, [refreshList, showError]);
+  }, [refreshList, refreshSchedules, showError]);
 
   useEffect(() => {
     async function poll() {
@@ -166,6 +183,9 @@ export default function App() {
         await refreshList();
         if (openTaskId !== null) {
           setDetail(await api(`/api/tasks/${openTaskId}`));
+        }
+        if (view === "schedules") {
+          await refreshSchedules();
         }
       } catch (err) {
         // Deliberately quiet -- see app.js's own poll for why.
@@ -183,7 +203,7 @@ export default function App() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [openTaskId, refreshList]);
+  }, [openTaskId, refreshList, refreshSchedules, view]);
 
   const scopedTasks = repoFilter ? tasks.filter((t) => t.repo === repoFilter) : tasks;
 
@@ -192,18 +212,21 @@ export default function App() {
       <Sidebar
         config={config}
         view={view}
-        onSetView={setView}
+        onSetView={setViewAndCloseReleases}
         tasks={tasks}
+        schedules={schedules}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
-        onOpenSchedules={() => setShowSchedules(true)}
         onOpenSettings={() => setShowSettings(true)}
-        onOpenReleases={() => setShowReleases(true)}
         onOpenLogs={() => setShowLogs(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
-      {view === "repos" ? (
-        <RepoList tasks={tasks} onOpenRepo={openRepo} />
+      {view === "repos" && releasesRepo !== null ? (
+        <RepoReleases repo={releasesRepo} onBack={() => setReleasesRepo(null)} showError={showError} />
+      ) : view === "repos" ? (
+        <RepoList tasks={tasks} onOpenRepo={openRepo} onOpenReleases={setReleasesRepo} />
+      ) : view === "schedules" ? (
+        <SchedulesList schedules={schedules} config={config} tasks={tasks} onRefresh={refreshSchedules} showError={showError} />
       ) : (
         <div className="main-column">
           {repoFilter !== null && (
@@ -235,8 +258,6 @@ export default function App() {
         <NewTaskOverlay tasks={tasks} config={config} defaultRepo={repoFilter} onClose={() => setShowNewTask(false)} onCreated={refreshList} showError={showError} />
       )}
       {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
-      {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
-      {showSchedules && <ScheduledTasksOverlay config={config} tasks={tasks} onClose={() => setShowSchedules(false)} showError={showError} />}
       {showLogs && <LogsOverlay onClose={() => setShowLogs(false)} showError={showError} />}
     </div>
   );

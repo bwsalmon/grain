@@ -339,6 +339,13 @@ type Task struct {
 
 	// nil means not approved, which is what makes a task proposed.
 	Approval *Attribution
+	// ApprovedAt is when Approval was set, display-only -- nothing in
+	// StateOf or task_state reads it, the same way CreatedAt decides
+	// nothing about a task's state. It exists for Transitions, which needs
+	// a "queued since" timestamp Approval's own Attribution has no room
+	// for. nil alongside a non-nil Approval means a task approved before
+	// this field existed, not that it was never approved.
+	ApprovedAt *time.Time
 
 	Target  *RepoRef // the one write target
 	Binding RepoBinding

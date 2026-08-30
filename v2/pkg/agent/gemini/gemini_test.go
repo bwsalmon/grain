@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,15 +18,19 @@ import (
 // live API key or any network access.
 type fakeGenerator struct {
 	responses []*genai.GenerateContentResponse
-	calls     int
-	gotTools  [][]*genai.Tool
+	// err, when set, is what the generator returns once responses runs
+	// out -- the "the model broke partway through" case, as opposed to
+	// the silent nil below.
+	err      error
+	calls    int
+	gotTools [][]*genai.Tool
 }
 
 func (f *fakeGenerator) GenerateContent(_ context.Context, _ string, _ []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 	f.gotTools = append(f.gotTools, config.Tools)
 	if f.calls >= len(f.responses) {
 		f.calls++
-		return nil, nil
+		return nil, f.err
 	}
 	resp := f.responses[f.calls]
 	f.calls++
@@ -167,12 +172,48 @@ func TestRunGivesUpAfterMaxTurns(t *testing.T) {
 	fake := &fakeGenerator{responses: responses}
 	f := newFramework(fake, WithMaxTurns(3))
 
-	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "loop forever", SandboxRoot: t.TempDir()})
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "loop forever", SandboxRoot: t.TempDir()})
 	if err == nil {
 		t.Fatal("expected an error once MaxTurns is exhausted")
 	}
 	if fake.calls != 3 {
 		t.Errorf("GenerateContent called %d times, want 3", fake.calls)
+	}
+
+	// The error says the run did not finish; the result says what it did
+	// before running out of budget. Returning nil here threw that away,
+	// and with it every trace of a run that had already pushed a branch
+	// -- see Run's own comment.
+	if result == nil {
+		t.Fatal("Run returned no result alongside the max-turns error; a caller cannot tell a run that spun from one that worked and ran out of turns")
+	}
+	if len(result.ToolCalls) != 3 {
+		t.Errorf("result.ToolCalls = %d, want the 3 calls the run actually made", len(result.ToolCalls))
+	}
+}
+
+// A run that breaks mid-loop keeps the same contract as one that runs out
+// of turns: the generator failing on the third call must not erase the two
+// tool calls that already happened.
+func TestRunKeepsWhatItDidWhenTheGeneratorFails(t *testing.T) {
+	fake := &fakeGenerator{
+		responses: []*genai.GenerateContentResponse{
+			toolCallResponse("run_command", map[string]any{"command": "true"}),
+			toolCallResponse("run_command", map[string]any{"command": "true"}),
+		},
+		err: errors.New("model unavailable"),
+	}
+	f := newFramework(fake)
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "work", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected the generator's error")
+	}
+	if result == nil {
+		t.Fatal("Run returned no result alongside the generator error")
+	}
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("result.ToolCalls = %d, want 2", len(result.ToolCalls))
 	}
 }
 

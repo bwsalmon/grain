@@ -627,6 +627,12 @@ func (p *printer) detail(d ui.TaskDetail) {
 			fmt.Printf("last failure:    %s\n", d.LastFailureReason)
 		}
 	}
+	if len(d.Transitions) > 0 {
+		fmt.Println("\nhistory:")
+		for _, tr := range d.Transitions {
+			fmt.Printf("  -> %-14s %s\n", tr.State, tr.At.Format(time.RFC3339))
+		}
+	}
 	for _, cm := range d.Comments {
 		who := cm.Author
 		if cm.OnBehalfOf != "" {
