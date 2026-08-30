@@ -122,7 +122,7 @@ func TestBuildPromptMentionsReadOnlyRepos(t *testing.T) {
 			{Owner: "acme", Name: "schema"},
 		},
 	}
-	prompt := orchestrator.BuildPrompt(task)
+	prompt := orchestrator.BuildPrompt(task, "")
 	if !strings.Contains(prompt, "acme/shared-lib") || !strings.Contains(prompt, "acme/schema") {
 		t.Fatalf("prompt does not mention both read-only repos: %q", prompt)
 	}
@@ -131,12 +131,33 @@ func TestBuildPromptMentionsReadOnlyRepos(t *testing.T) {
 	}
 }
 
+// With a checkout prepared for it (RunDispatch's own prepareCheckout),
+// the prompt says so -- where the clone is, which branch is checked out,
+// and that pushing is all the git the agent has left to do. Without one
+// the wording is unchanged, which is what every deployment running no
+// proxy, and every other test here, still gets.
+func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir)
+	for _, want := range []string{"./" + orchestrator.CheckoutDir, model.BranchName("t1"), "rather than cloning"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+	if bare := orchestrator.BuildPrompt(task, ""); strings.Contains(bare, orchestrator.CheckoutDir) {
+		t.Fatalf("prompt mentions a checkout that was never prepared: %q", bare)
+	}
+}
+
 func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 	task := model.Task{
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task)
+	prompt := orchestrator.BuildPrompt(task, "")
 	if strings.Contains(prompt, "read") {
 		t.Fatalf("prompt mentions reading a repo with no Reads set: %q", prompt)
 	}
@@ -410,7 +431,7 @@ func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
-	if gotPrompt != orchestrator.BuildPrompt(*task) {
+	if gotPrompt != orchestrator.BuildPrompt(*task, "") {
 		t.Errorf("prompt = %q, want exactly BuildPrompt's own prompt with no conversation yet", gotPrompt)
 	}
 }

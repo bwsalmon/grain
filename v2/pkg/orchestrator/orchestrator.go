@@ -78,6 +78,14 @@ type Config struct {
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
 	// agent framework's own default in place.
 	MaxAgentTurns int
+	// GitRemoteBase is the base URL of this deployment's git proxy
+	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into
+	// a task's own clone URL to prepare its sandbox's checkout with --
+	// see prepareCheckout. Empty skips that preparation entirely and
+	// leaves the sandbox as it always was, an empty directory the agent
+	// has to populate itself: the default for a test, and for a
+	// deployment running no proxy.
+	GitRemoteBase string
 	// CancelPollInterval is how often RunDispatch re-reads its task's
 	// state from store while a run is live, to notice the task being
 	// closed out from under it -- bwsalmon/agents#346's own store-polled

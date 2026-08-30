@@ -602,6 +602,34 @@ expected to arrive already carrying the operator's SSH key and a running
 sshd, the same assumption v1's own sandbox provisioning stood in for —
 `../packer/kontur/` is that successor (bwsalmon/agents#267).
 
+Whichever backend a slot uses, `RunDispatch` now clones the task's target
+into it before the agent's first turn (`orchestrator.prepareCheckout`):
+`Config.GitRemoteBase` — the daemon's own git proxy URL, the same one the
+credential files above are written for — plus the task's repo makes the
+clone URL, and the sandbox is left holding a checkout in `./work` with the
+branch the task will be pushed to already checked out (its `/base` when it
+has one, or the previous attempt's branch when the remote already carries
+it, so a redispatch fast-forwards its own work instead of colliding with
+it). `BuildPrompt` says so, in place of the nothing it used to say. This
+closes a gap live dispatch found the hard way: a sandbox starts empty, the
+prompt named the repo and the branch but never said to clone, and the
+proxy URL — the only address the sandbox can reach the repo through, since
+`ConfigureGitCredentials` writes the host but never a URL — reached the
+agent nowhere at all. An attempt's first tool call was a git command in
+an empty directory, "not a git repository", and the agent gave up there;
+only the redispatch behind it carried the task. It runs through the
+sandbox's own `run_command` tool rather than a second path into the
+sandbox, so one call covers a local directory and a kontur VM alike, and
+an empty `GitRemoteBase` (every test, and any deployment running no proxy)
+skips it and leaves the sandbox exactly as bare as it was before. What it
+does make load-bearing is an assumption `ConfigureGitCredentials` has
+always made quietly: that the sandbox can actually reach the proxy's
+address. The daemon binds it to `127.0.0.1:0`, which a local directory
+shares and a kontur VM does not — a slot that cannot reach it now fails
+its dispatch with a clone error naming the repo, where before it failed
+later and less legibly, on whatever the agent tried against a host its
+credential file matched but nothing could route to.
+
 bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
 `KonturConfig.Backend` selects the value `konturctl vm create -backend`
 builds each slot's VM with, and defaults (`-kontur-backend`'s own default)
