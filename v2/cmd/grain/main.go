@@ -127,7 +127,9 @@ const usage = `usage: grain [global flags] <command> [args]
        grain schema-version    print pkg/model.SchemaVersion and exit (see schemaversion.go)
 
 Global flags (must come before the command):
-  -server string  base URL of a running "grain daemon"'s UI/API (default "http://127.0.0.1:8420")
+  -server string  base URL of a running "grain daemon"'s UI/API. Defaults to
+                  $GRAIN_SERVER when that is set, else http://127.0.0.1:8420 --
+                  a host installed by v2/scripts/setup.sh exports it already
   -json           print machine-readable JSON instead of a human-readable table
 
 Commands:
@@ -148,10 +150,33 @@ Commands:
 
 const defaultServerURL = "http://127.0.0.1:8420"
 
+// serverEnvVar overrides defaultServerURL, so a deployment serving the
+// UI on any other port does not make every CLI invocation on its own
+// host carry a -server flag. A deployment sets it once, for every shell
+// on the box, rather than each operator remembering the port: v2/scripts/
+// setup.sh writes /etc/profile.d/grain.sh from the -ui-addr it started
+// the daemon with.
+//
+// An explicit -server still wins -- see serverDefault, which supplies
+// this only as the flag's default.
+const serverEnvVar = "GRAIN_SERVER"
+
+// serverDefault is what -server defaults to: GRAIN_SERVER if it is set
+// to anything non-empty, defaultServerURL otherwise. Empty is treated as
+// unset rather than as a request to talk to no server at all, since an
+// exported-but-empty variable is a broken profile script, not an
+// intention.
+func serverDefault() string {
+	if v := strings.TrimSpace(os.Getenv(serverEnvVar)); v != "" {
+		return v
+	}
+	return defaultServerURL
+}
+
 func runCLI(args []string) error {
 	fs := flag.NewFlagSet("grain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	server := fs.String("server", defaultServerURL, "base URL of a running \"grain daemon\"'s UI/API")
+	server := fs.String("server", serverDefault(), "base URL of a running \"grain daemon\"'s UI/API ($"+serverEnvVar+" overrides the default)")
 	jsonOutput := fs.Bool("json", false, "print machine-readable JSON instead of a human-readable table")
 	if err := fs.Parse(args); err != nil {
 		return err
