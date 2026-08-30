@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -25,11 +26,38 @@ type Client struct {
 	// Now is the clock, injectable so tests get deterministic timestamps.
 	// nil means time.Now().UTC().
 	Now func() time.Time
+	// targetReposMu guards Config.TargetRepos specifically -- the one
+	// Config field a running server ever mutates after construction
+	// (AddTargetRepo/RemoveTargetRepo, bwsalmon/agents#473, via
+	// setTargetRepos), unlike every other Config field, which is set once
+	// by NewClient's caller and read unguarded from then on.
+	targetReposMu sync.RWMutex
 }
 
 // NewClient builds a Client over a store.
 func NewClient(cfg Config, store *model.Store) *Client {
 	return &Client{Config: cfg, Store: store}
+}
+
+// targetRepos reads Config.TargetRepos -- the accessor every read of it
+// outside NewClient's own construction must use, now that
+// setTargetRepos can change it while a request is in flight.
+func (c *Client) targetRepos() []string {
+	c.targetReposMu.RLock()
+	defer c.targetReposMu.RUnlock()
+	return c.Config.TargetRepos
+}
+
+// setTargetRepos updates Config.TargetRepos in place -- called once
+// UpdateSettings has already written the same value to the store, so a
+// GET /api/config or a CreateTask racing the update in the same process
+// sees it immediately rather than only after a restart picks the stored
+// value back up (cmd/grain/daemon.go's loadConfig, the only other place
+// Config.TargetRepos is ever set, explicitly does not reload mid-run).
+func (c *Client) setTargetRepos(repos []string) {
+	c.targetReposMu.Lock()
+	defer c.targetReposMu.Unlock()
+	c.Config.TargetRepos = repos
 }
 
 func (c *Client) now() time.Time {
@@ -242,14 +270,40 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	return detail, nil
 }
 
-// AttemptTranscript returns one attempt's own recorded agent transcript
-// -- the full narrative record GetTask's own Attempts list never carries
+// AttemptTranscript returns one attempt's own agent transcript -- the
+// full narrative record GetTask's own Attempts list never carries
 // (attemptFrom's own doc comment: TaskDetail stays cheap to fetch), for a
 // caller that wants to read one attempt's whole story rather than just
-// its outcome (bwsalmon/agents#446). "", nil means the attempt exists but
-// has nothing recorded yet -- still running, or run by a framework that
-// never populates one (agent.Result.Transcript's own doc comment).
+// its outcome (bwsalmon/agents#446). For an attempt still running,
+// Config.LiveTranscripts (when set) is tried first -- a still-running
+// attempt's own transcript-in-progress, straight from whatever file its
+// framework has been mirroring it into (bwsalmon/agents#467) -- falling
+// back to Store.RunTranscript, which "" (with no error) until the
+// attempt finishes, or forever for a framework that never populates one
+// (agent.Result.Transcript's own doc comment) or a deployment with no
+// LiveTranscripts configured at all.
 func (c *Client) AttemptTranscript(ctx context.Context, taskID string, number int) (string, error) {
+	runs, err := c.Store.Runs(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	var run *model.Run
+	for i := range runs {
+		if runs[i].Attempt == number {
+			run = &runs[i]
+			break
+		}
+	}
+	if run == nil {
+		return "", &NotFoundError{message: fmt.Sprintf("no attempt %d for task %s", number, taskID)}
+	}
+
+	if run.FinishedAt == nil && c.Config.LiveTranscripts != nil {
+		if text, ok, err := c.Config.LiveTranscripts.Tail(run.ID); err == nil && ok {
+			return text, nil
+		}
+	}
+
 	transcript, ok, err := c.Store.RunTranscript(ctx, taskID, number)
 	if err != nil {
 		return "", err
@@ -387,7 +441,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err := c.Store.PutTask(ctx, task); err != nil {
 		return Task{}, err
 	}
-	if !targetAllowed(c.Config.TargetRepos, *target) {
+	if !targetAllowed(c.targetRepos(), *target) {
 		if err := c.parkOffAllowlist(ctx, id, *target, now); err != nil {
 			return Task{}, err
 		}

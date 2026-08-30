@@ -1244,7 +1244,13 @@ VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
 not have either way yet). It builds with `make container-build`, so a
 working `docker` is the one thing it assumes about the host at build
-time; there used to be a second service (`grain-ui.service`) and, before
+time -- `make` itself it installs when the host has none, since the
+compile happens inside Docker and make is the one piece of that
+toolchain the host still needs, which no Debian cloud image carries
+(`ensure_make`); it also re-runs itself when the update it just pulled
+replaced the script mid-run, so a deploy never builds with the copy it
+started with (`reexec_if_updated`). There used to be a second service
+(`grain-ui.service`) and, before
 bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt sql-server`
 container behind it, needed only because a daemon and a UI writing the
 same store used to mean two writers ("The UI and the CLI talk to the

@@ -3,13 +3,15 @@ import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
 // REFRESH_MS mirrors LogsOverlay's own polling interval (bwsalmon/
-// agents#444) -- but unlike a system log, an attempt's transcript is
-// written once, by RunDispatch's own SetRunTranscript call, only after
-// framework.Run returns (pkg/orchestrator/run.go). Polling while the
-// attempt is still running is not tailing a growing file; it is waiting
-// for that one write to land, which is what actually makes "checking up
-// on a long-running agent" (bwsalmon/agents#446) work from here: leave
-// this open and the transcript appears the moment the attempt finishes.
+// agents#444). For a finished attempt this is just re-fetching the same
+// Store.RunTranscript row RunDispatch wrote once, after framework.Run
+// returned (pkg/orchestrator/run.go) -- but while an attempt is still
+// running, the backend serves whatever its framework has mirrored to a
+// live transcript file so far (ui.Config.LiveTranscripts,
+// bwsalmon/agents#467), so each poll here genuinely picks up new content
+// rather than re-reading an empty row until the attempt finishes. Leaving
+// this open on a long-running attempt is what "checking up on a
+// long-running agent" (bwsalmon/agents#446) means in practice.
 const REFRESH_MS = 5000;
 
 // AttemptTranscriptOverlay is what typing on a task attempt in
@@ -18,7 +20,8 @@ const REFRESH_MS = 5000;
 // call interleaved, in the order the agent produced them
 // (pkg/agent/claude/transcript.go's own doc comment on how it is built)
 // -- useful for debugging why an attempt failed, or for watching one
-// still in flight without reaching for a shell (bwsalmon/agents#446).
+// still in flight without reaching for a shell (bwsalmon/agents#446,
+// bwsalmon/agents#467).
 export default function AttemptTranscriptOverlay({ taskId, attempt, onClose, showError }) {
   const [transcript, setTranscript] = useState(null);
 
@@ -47,7 +50,7 @@ export default function AttemptTranscriptOverlay({ taskId, attempt, onClose, sho
           ? "Loading…"
           : transcript || (attempt.finishedAt
             ? "(no transcript recorded)"
-            : "Still running -- the transcript appears once this attempt finishes.")}
+            : "Still running -- nothing written yet.")}
       </pre>
     </Overlay>
   );

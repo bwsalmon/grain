@@ -14,6 +14,10 @@ ARG GUEST_SUITE=bookworm
 # deploy/guest-image/README.md), not a secret, so baking it into the image
 # history via a plain ARG is fine.
 ARG GUEST_SSH_AUTHORIZED_KEY=""
+# GUEST_SETUP_SCRIPT, if set, is the text of a script run (via chroot) against
+# the guest rootfs before it's packed into disk.img -- see
+# deploy/guest-image/README.md for what it can and can't do there.
+ARG GUEST_SETUP_SCRIPT=""
 
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
@@ -54,6 +58,7 @@ RUN set -eux; \
 FROM debian:bookworm-slim AS guest-image
 ARG GUEST_SUITE
 ARG GUEST_SSH_AUTHORIZED_KEY
+ARG GUEST_SETUP_SCRIPT
 RUN apt-get update && apt-get install -y --no-install-recommends \
       debootstrap e2fsprogs ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -89,6 +94,21 @@ RUN set -eux; \
       install -d -m0700 /rootfs/root/.ssh; \
       printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" > /rootfs/root/.ssh/authorized_keys; \
       chmod 0600 /rootfs/root/.ssh/authorized_keys; \
+    fi
+
+# Runs GUEST_SETUP_SCRIPT, if given, against the rootfs via chroot -- the
+# same mechanism debootstrap itself already used above to configure
+# packages, so this needs no privileges beyond what this stage already
+# has, and network access works fine (chroot doesn't touch the network
+# namespace). See deploy/guest-image/README.md for what it can't do
+# (no /proc, /sys, or running service manager).
+RUN set -eux; \
+    if [ -n "${GUEST_SETUP_SCRIPT}" ]; then \
+      script=/rootfs/tmp/kontur-setup-script; \
+      printf '%s\n' "${GUEST_SETUP_SCRIPT}" > "${script}"; \
+      chmod 0755 "${script}"; \
+      chroot /rootfs /tmp/kontur-setup-script; \
+      rm -f "${script}"; \
     fi
 
 # Size the image to the rootfs plus 20% headroom for logs/growth, rounded
