@@ -218,7 +218,7 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 	ctx := context.Background()
 
 	flagCfg := config{
-		slots: []string{"a", "b"}, pollInterval: time.Minute,
+		maxConcurrent: 2, pollInterval: time.Minute,
 		geminiModel: "gemini-2.5-pro", maxAgentTurns: 10,
 		githubHost: "github.example.com", githubInsecureHTTP: true,
 		gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com",
@@ -253,7 +253,7 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	ctx := context.Background()
 
 	stored := model.Config{
-		Slots: []string{"only-one"}, PollInterval: 5 * time.Second,
+		MaxConcurrent: 1, PollInterval: 5 * time.Second,
 		GeminiModel: "gemini-2.5-flash", MaxAgentTurns: 99,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "stored-proj", GCPServiceAccountEmail: "stored@stored-proj.iam.gserviceaccount.com",
@@ -263,8 +263,8 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	}
 
 	flagCfg := config{
-		dataDir: "/should/be/left/alone",
-		slots:   []string{"whatever", "the", "flags", "say"}, pollInterval: time.Hour,
+		dataDir:       "/should/be/left/alone",
+		maxConcurrent: 4, pollInterval: time.Hour,
 		geminiModel: "ignored", maxAgentTurns: -1,
 		githubHost: "ignored.example.com", githubInsecureHTTP: true,
 		gcpProject: "ignored-proj", gcpServiceAccountEmail: "ignored@example.com",

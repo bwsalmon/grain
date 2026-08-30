@@ -15,7 +15,7 @@ func TestSchedulesCreateListUpdateDelete(t *testing.T) {
 	srv, _ := testServer(t)
 
 	rec := do(t, srv, http.MethodPost, "/api/schedules",
-		`{"title":"nightly bump","repo":"acme/widgets","interval":"24h"}`)
+		`{"title":"nightly bump","repo":"acme/widgets","recurrence":{"kind":"everyNHours","everyNHours":24}}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201: %s", rec.Code, rec.Body)
 	}
@@ -59,7 +59,8 @@ func TestSchedulesCreateListUpdateDelete(t *testing.T) {
 
 func TestSchedulesCreateRejectsAMissingTitleWith400(t *testing.T) {
 	srv, _ := testServer(t)
-	rec := do(t, srv, http.MethodPost, "/api/schedules", `{"repo":"acme/widgets","interval":"24h"}`)
+	rec := do(t, srv, http.MethodPost, "/api/schedules",
+		`{"repo":"acme/widgets","recurrence":{"kind":"everyNHours","everyNHours":24}}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
 	}

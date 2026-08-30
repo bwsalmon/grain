@@ -49,7 +49,7 @@ switch" fit that world. v2 already moved task creation onto the store
 involved) specifically so a UI or the CLI could create one without a
 redeploy; a `ScheduledTask` (`pkg/model/schedule.go`) is the same idea —
 `ScheduledTasksOverlay.jsx` creates, pauses/resumes, and deletes one the
-same way `SecretsOverlay.jsx` already manages secrets.
+same way `SecretsPanel.jsx` already manages secrets.
 
 **No `needs_approval` field.** v1's design draft called `SCHEDULED` "the
 one origin that chooses per instance" before `docs/data-model.md`
@@ -131,8 +131,8 @@ UI's "Pause"/"Resume" button rather than "Delete" for that case.
   gains no matching methods, so a schedule can be managed from the web
   UI but not yet from `grain` on the command line — see "Left open."
 - **Frontend** (`ScheduledTasksOverlay.jsx`): a list-plus-form overlay
-  following `SecretsOverlay.jsx`'s pattern exactly, opened from a new
-  sidebar entry alongside Secrets/Settings. A task the overlay's own
+  following `SecretsPanel.jsx`'s pattern exactly, opened from a new
+  sidebar entry alongside Settings. A task the overlay's own
   schedule fired shows a "Scheduled" badge in the ordinary task list
   (`Task.Scheduled`, off `Origin.Reason == ReasonSchedule` — the same
   treatment `Task.Stacked` already gives `ReasonFix`).
@@ -179,3 +179,64 @@ description, repo, base branch, auto-merge, or interval, which
 `UpdateSchedule`/`PATCH /api/schedules/{id}` already accepted but no UI
 exposed beyond the enabled toggle. No backend change was needed; the API
 surface was already complete.
+
+## Update: cadences beyond "every N hours", and the rest of Task's own field set (bwsalmon/agents#464)
+
+Two of this document's own "Left open" items from when the feature first
+shipped are closed as of here.
+
+**A schedule is no longer only "every N hours/minutes since it last
+fired."** `model.ScheduledTask.Interval` (a bare `time.Duration`) is
+replaced by `Recurrence` (`pkg/model/schedule.go`), a small sum type: `Kind`
+is one of `RecurrenceEveryNHours`, `RecurrenceDaily`, `RecurrenceWeekly`, or
+`RecurrenceMonthly`, and the fields that apply depend on which -- the same
+"column per case, most left unset" shape `Task.Origin`/`Task.Approval`
+already use for a different sum type. `Recurrence.Next(after)` is the
+whole of the new logic: the first occurrence strictly after `after`,
+wall-clock aligned for the three new kinds (a calendar month is not a
+fixed number of hours, so `RecurrenceMonthly` walks actual months rather
+than adding an approximate duration, clamping a day-of-month past a
+shorter month's own last day rather than overflowing into the next one).
+`fireScheduledTask`'s loop is otherwise unchanged in shape -- it still
+walks forward from the schedule's own `NextRunAt` (never from "now"
+directly) until back in the future, so a schedule paused, or a daemon
+down, through several missed occurrences still fires exactly once on
+resume. `EveryNHours` keeps hour granularity rather than the old
+`Interval`'s arbitrary duration string, matching v1's own
+`Interval-Hours` header and what this issue itself asks for; the
+still-open "no per-schedule timezone" bullet below is otherwise
+unchanged, since `TimeOfDay`/`Weekday`/`DayOfMonth` are read against UTC,
+same as `NextRunAt`/`LastRunAt` always have been.
+
+A database created before this migrates in place
+(`ensureScheduledTaskRecurrenceColumns`, `pkg/model/store.go`): its old
+`interval_ms` column is read once, backfilled into `every_n_hours`
+(rounded down to whole hours, matching `RecurrenceEveryNHours`'s own
+granularity) and dropped, the same probe-then-`ALTER TABLE` approach
+`ensureConfigMaxConcurrentColumn` already established for `grain_config`.
+`SchemaVersion` 9 → 10.
+
+**Reads and Grants join Target/Base/AutoMerge on a schedule.** The
+former "Left open" bullet on this narrowed: a schedule's own `Reads`
+(read-only repos, `scheduled_task_read`) and `Grants` (capabilities,
+`scheduled_task_grant`) are new child tables, `task_read`/`task_grant`'s
+own shape ported onto `scheduled_task_id`, and `fireScheduledTask` copies
+both onto the filed `Task` the same way it already copies `Target`/
+`Base`/`AutoMerge`. `DependsOn` and `Approved` remain deliberately absent
+-- `ui.CreateScheduleRequest`'s own doc comment explains why: a one-shot
+dependency link makes no sense against a task a schedule refiles
+indefinitely, and a firing lands already approved by design regardless of
+what a per-task `Approved` flag would otherwise ask for.
+
+**`SchedulesList.jsx`'s create and edit forms are now one component**
+(`ScheduleForm`), rather than two independently maintained copies of the
+same field list -- worth doing now that the field list grew to match
+`NewTaskOverlay.jsx`'s own (title, description, repo, base, read-only
+repos, capabilities, auto-merge), plus a new `RecurrenceFields` picker:
+a "Repeat" select for the four `Kind`s, showing only the inputs that
+apply to whichever is chosen (an hours field for every-N-hours; a time
+field for the other three; a weekday select added for weekly; a
+day-of-month field added for monthly).
+
+Still open, unchanged from before: no CLI, and no per-schedule approval
+gate.
