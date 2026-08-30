@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import RepoReleases from "./RepoReleases.jsx";
@@ -14,6 +14,8 @@ const releaseConfig = {
   majorVersion: 1,
 };
 
+const unconfiguredReleaseConfig = { configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 };
+
 const unconfiguredQualificationPlan = {
   configured: false, repo: "acme/widgets", requireApproval: false, autoPromote: false, items: [],
 };
@@ -28,15 +30,71 @@ const otherRepoTemplate = { id: "template-2", name: "Unrelated", title: "Unrelat
 const activeCandidate = { id: 2, label: "v1.1.0-rc1", status: "active", branch: "rc", releaseBranch: "" };
 const promotedCandidate = { id: 1, label: "v1.0.0-rc1", status: "promoted", branch: "rc", releaseBranch: "release/v1" };
 
-// queueRefresh queues exactly the sequence of api() calls RepoReleases'
-// own refresh() makes: release-config, candidates and the qualification
-// plan concurrently (Promise.all, so in that array order), then --
-// only when there is a current candidate -- its qualification run.
-function queueRefresh(cfg, candidates, plan = unconfiguredQualificationPlan, run = null) {
-  api.mockResolvedValueOnce(cfg).mockResolvedValueOnce(candidates).mockResolvedValueOnce(plan);
-  if (candidates.length > 0) {
-    api.mockResolvedValueOnce(run);
-  }
+// setupApi wires a routing fake covering every endpoint RepoReleases
+// touches, backed by mutable state, the same way App.test.jsx's own
+// setupApi does -- unlike a finite chain of api.mockResolvedValueOnce
+// calls, this keeps answering correctly no matter how many times the
+// component's own poll (bwsalmon/agents#530) re-fetches in the
+// background while a test is still running.
+function setupApi({
+  releaseConfig: releaseConfigInit = unconfiguredReleaseConfig,
+  candidates = [],
+  qualificationPlan = unconfiguredQualificationPlan,
+  qualificationRuns = {},
+  nextCut = null,
+} = {}) {
+  let releaseConfigState = { ...releaseConfigInit };
+  let candidatesState = [...candidates];
+  let qualificationPlanState = { ...qualificationPlan };
+  let runsState = { ...qualificationRuns };
+
+  api.mockImplementation((path, opts) => {
+    const method = opts?.method || "GET";
+
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/release-config$/.test(path)) {
+      if (method === "PUT") {
+        releaseConfigState = { ...JSON.parse(opts.body), configured: true };
+      }
+      return Promise.resolve(releaseConfigState);
+    }
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/promote$/.test(path) && method === "POST") {
+      candidatesState = candidatesState.map((c, i) => (i === 0 ? { ...c, status: "promoted" } : c));
+      return Promise.resolve(candidatesState[0]);
+    }
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates$/.test(path)) {
+      if (method === "POST") {
+        if (nextCut) candidatesState = [nextCut, ...candidatesState];
+        return Promise.resolve(candidatesState[0]);
+      }
+      return Promise.resolve(candidatesState);
+    }
+    const approveMatch = path.match(/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/([^/]+)\/qualification\/approve$/);
+    if (approveMatch && method === "POST") {
+      const run = runsState[approveMatch[1]];
+      if (run) {
+        runsState = {
+          ...runsState,
+          [approveMatch[1]]: { ...run, status: "running", tasks: run.tasks.map((t) => ({ ...t, approved: true })) },
+        };
+      }
+      return Promise.resolve(runsState[approveMatch[1]] || null);
+    }
+    const runMatch = path.match(/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/([^/]+)\/qualification$/);
+    if (runMatch && method === "GET") {
+      return Promise.resolve(runsState[runMatch[1]] || null);
+    }
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/qualification-plan$/.test(path)) {
+      if (method === "PUT") {
+        qualificationPlanState = { ...qualificationPlanState, ...JSON.parse(opts.body) };
+      }
+      return Promise.resolve(qualificationPlanState);
+    }
+    return Promise.resolve(null);
+  });
+
+  return {
+    get candidatesState() { return candidatesState; },
+  };
 }
 
 function current() {
@@ -49,7 +107,7 @@ describe("RepoReleases", () => {
   });
 
   it("loads the given repo's config and shows its current candidate", async () => {
-    queueRefresh(releaseConfig, [activeCandidate]);
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
@@ -63,7 +121,7 @@ describe("RepoReleases", () => {
   });
 
   it("enables Promote but not Cut when the current candidate is still active", async () => {
-    queueRefresh(releaseConfig, [activeCandidate]);
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
@@ -72,7 +130,7 @@ describe("RepoReleases", () => {
   });
 
   it("shows a note and no candidate history when the repo has no release config yet", async () => {
-    queueRefresh({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 }, []);
+    setupApi({ releaseConfig: unconfiguredReleaseConfig, candidates: [] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/has no release configuration yet/)).toBeInTheDocument();
@@ -81,9 +139,7 @@ describe("RepoReleases", () => {
   });
 
   it("saves the release config form and reloads it", async () => {
-    queueRefresh(releaseConfig, [activeCandidate]);
-    api.mockResolvedValueOnce({});
-    queueRefresh({ ...releaseConfig, prodBranch: "production" }, [activeCandidate]);
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByLabelText(/Prod branch/);
@@ -100,9 +156,7 @@ describe("RepoReleases", () => {
   });
 
   it("cuts a new RC when eligible", async () => {
-    queueRefresh(releaseConfig, [promotedCandidate]);
-    api.mockResolvedValueOnce({});
-    queueRefresh(releaseConfig, [activeCandidate, promotedCandidate], unconfiguredQualificationPlan, null);
+    setupApi({ releaseConfig, candidates: [promotedCandidate], nextCut: activeCandidate });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
@@ -114,9 +168,7 @@ describe("RepoReleases", () => {
   });
 
   it("promotes the current RC when eligible", async () => {
-    queueRefresh(releaseConfig, [activeCandidate]);
-    api.mockResolvedValueOnce({});
-    queueRefresh(releaseConfig, [{ ...activeCandidate, status: "promoted" }]);
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
@@ -128,7 +180,7 @@ describe("RepoReleases", () => {
   });
 
   it("calls onBack when the back button is clicked", async () => {
-    queueRefresh(releaseConfig, [activeCandidate]);
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
     const onBack = vi.fn();
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={onBack} showError={() => {}} />);
@@ -144,9 +196,7 @@ describe("RepoReleases", () => {
       id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "pending_approval",
       tasks: [{ taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 1, approved: false, state: "proposed" }],
     };
-    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, run);
-    api.mockResolvedValueOnce({});
-    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, { ...run, status: "running", tasks: [{ ...run.tasks[0], approved: true, state: "queued" }] });
+    setupApi({ releaseConfig, candidates: [activeCandidate], qualificationRuns: { 2: run } });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByText("Smoke test");
@@ -163,7 +213,7 @@ describe("RepoReleases", () => {
       id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "succeeded",
       tasks: [{ taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 1, approved: true, state: "completed" }],
     };
-    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, run);
+    setupApi({ releaseConfig, candidates: [activeCandidate], qualificationRuns: { 2: run } });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/ready to promote/)).toBeInTheDocument();
@@ -177,7 +227,7 @@ describe("RepoReleases", () => {
         { taskId: "11", templateId: "template-1", templateName: "Smoke test", instanceIndex: 2, repeat: 2, approved: true, state: "completed" },
       ],
     };
-    queueRefresh(releaseConfig, [activeCandidate], unconfiguredQualificationPlan, run);
+    setupApi({ releaseConfig, candidates: [activeCandidate], qualificationRuns: { 2: run } });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/Qualification failed/)).toBeInTheDocument();
@@ -188,9 +238,7 @@ describe("RepoReleases", () => {
   });
 
   it("only offers templates that target this repo, and saves a new qualification item", async () => {
-    queueRefresh(releaseConfig, [activeCandidate]);
-    api.mockResolvedValueOnce({});
-    queueRefresh(releaseConfig, [activeCandidate]);
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
     const user = userEvent.setup();
     render(
       <RepoReleases repo="acme/widgets" templates={[smokeTemplate, otherRepoTemplate]} onBack={() => {}} showError={() => {}} />
@@ -213,4 +261,17 @@ describe("RepoReleases", () => {
       }),
     });
   });
+
+  it("polls the candidate and qualification state on an interval", async () => {
+    setupApi({ releaseConfig, candidates: [activeCandidate] });
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
+    await screen.findByRole("button", { name: "Promote current RC" });
+
+    const callsBefore = api.mock.calls.filter((c) => c[0] === "/api/repos/acme/widgets/candidates").length;
+
+    await waitFor(() => {
+      const callsAfter = api.mock.calls.filter((c) => c[0] === "/api/repos/acme/widgets/candidates").length;
+      expect(callsAfter).toBeGreaterThan(callsBefore);
+    }, { timeout: 4000 });
+  }, 6000);
 });
