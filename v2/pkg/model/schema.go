@@ -262,10 +262,20 @@ var Tables = []string{
 	// exists, so an already-created grain_config gets this one from
 	// Store.Init's own migration step (store.go's
 	// ensureConfigTargetReposColumn) instead of from this DDL.
+	//
+	// max_concurrent replaced a slots column (a comma-separated list of
+	// operator-chosen concurrency-slot names) here for bwsalmon/agents#461:
+	// Config.MaxConcurrent is a plain count now, and dispatch.Cycle's own
+	// slot identifiers are generated from it (model.SlotNames) rather than
+	// configured. The same CREATE TABLE IF NOT EXISTS limitation applies,
+	// so an already-created grain_config gets max_concurrent added, and
+	// backfilled from however many names its old slots column held, by
+	// Store.Init's own ensureConfigMaxConcurrentColumn, which also drops
+	// that now-unused column.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
-  ` + "`slots`" + `                      TEXT    NOT NULL,
+  ` + "`max_concurrent`" + `              INTEGER NOT NULL,
   ` + "`gemini_model`" + `                TEXT    NOT NULL,
   ` + "`max_agent_turns`" + `             INTEGER NOT NULL,
   ` + "`github_host`" + `                 TEXT    NOT NULL,
