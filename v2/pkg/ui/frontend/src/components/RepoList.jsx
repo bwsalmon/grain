@@ -75,7 +75,7 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
 
   return (
     <main>
-      <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ px: "1.5rem", pt: "1.2rem" }}>
+      <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ px: "1.75rem", pt: "1.2rem" }}>
         <TextField
           value={newRepo}
           onChange={(evt) => setNewRepo(evt.target.value)}
