@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
@@ -24,12 +26,23 @@ import (
 // this package's; treating every non-"success" completed run as failing
 // would make a merge queue's own "cancelled, will retry" check block a PR
 // this package has no business blocking.
-func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun) model.PrHealth {
+func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, checksKnown bool) model.PrHealth {
 	if detail.State == "closed" {
 		return model.PrClosed
 	}
 	if detail.Mergeable != nil && !*detail.Mergeable {
 		return model.PrConflicted
+	}
+	// Checks we could not read are not checks that passed. Both of the
+	// facts above are read straight off the PR and stay authoritative
+	// without them, but everything below this line is a judgement about
+	// CI, and an empty `checks` is how a genuinely clean PR looks too --
+	// so a deployment whose credential cannot reach the Checks API at
+	// all (checkRunsFor, on a scoped PAT) would otherwise read every PR
+	// as PrClean and merge it with CI red. PrUnknown is the honest
+	// answer, and the one syncEntry declines to act on.
+	if !checksKnown {
+		return model.PrUnknown
 	}
 	for _, c := range checks {
 		if c.Status != "completed" {
@@ -43,6 +56,46 @@ func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun) model
 		return model.PrUnknown
 	}
 	return model.PrClean
+}
+
+// checksUnavailableOnce keeps the "no Checks access" notice below to one
+// line per process rather than one per pull request per cycle: it is a
+// standing property of the deployment's credential, not an event, and it
+// never resolves on its own while that credential is in use.
+var checksUnavailableOnce sync.Once
+
+// checkRunsFor reads ref's check runs, reporting whether the answer is
+// known at all.
+//
+// A 403 here is not a failure to handle but a fact about the credential:
+// the Checks API takes GitHub App installation tokens only, and a
+// fine-grained PAT has no permission to grant for it (see
+// github.IsPermissionDenied). A deployment authenticating with the
+// scoped PAT terraform/gcp-v2 documents therefore gets one on every
+// call, forever. Failing the sync on it would leave every tracked pull
+// request erroring every cycle, so instead the health of those PRs goes
+// unknown -- which costs auto-merge, and nothing else: dispatch, the
+// push, and opening the PR are a separate reconciler that never reads a
+// check run.
+//
+// Every other error is still an error. This deliberately does not widen
+// to 404 or to a failure of any other call: it is exactly the one
+// permission GitHub offers no way to hold.
+func checkRunsFor(client github.Client, ref model.PullRequestRef, head string) ([]github.CheckRun, bool, error) {
+	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, head)
+	if err == nil {
+		return checks, true, nil
+	}
+	if !github.IsPermissionDenied(err) {
+		return nil, false, fmt.Errorf("orchestrator: reading check runs for %s: %w", ref, err)
+	}
+	checksUnavailableOnce.Do(func() {
+		log.Printf("orchestrator: this deployment's GitHub credential cannot read check runs " +
+			"(the Checks API takes GitHub App installation tokens only, and a fine-grained PAT " +
+			"has no permission for it) -- pull request health stays unknown and nothing is " +
+			"auto-merged. Everything else is unaffected.")
+	})
+	return nil, false, nil
 }
 
 // queueEntry is one still-open tracked pull request, everything syncEntry
@@ -190,11 +243,11 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	if err != nil {
 		return fmt.Errorf("orchestrator: reading %s: %w", ref, err)
 	}
-	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, detail.HeadRef)
+	checks, checksKnown, err := checkRunsFor(client, ref, detail.HeadRef)
 	if err != nil {
-		return fmt.Errorf("orchestrator: reading check runs for %s: %w", ref, err)
+		return err
 	}
-	health := healthFrom(detail, checks)
+	health := healthFrom(detail, checks, checksKnown)
 
 	isFixTask := task.Origin.Reason == model.ReasonFix
 	isHead := heads[ref.Repo.String()] == task.ID
@@ -224,7 +277,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		if err != nil {
 			return fmt.Errorf("orchestrator: re-reading %s after merge: %w", ref, err)
 		}
-		health = healthFrom(detail, checks)
+		health = healthFrom(detail, checks, checksKnown)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
 		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, now); err != nil {

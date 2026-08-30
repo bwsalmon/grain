@@ -26,7 +26,11 @@
 #   GRAIN_GEMINI_API_KEY               the daemon's own operating key (pkg/agent/gemini) --
 #                                      distinct from the gemini-key *capability*, which
 #                                      mints its own short-lived keys per task once this
-#                                      one gets the daemon running at all
+#                                      one gets the daemon running at all. Optional: with
+#                                      enable_gemini_key on, the host mints this key for
+#                                      itself from the minter credential pushed below --
+#                                      see this directory's README, "The daemon's own
+#                                      Gemini key". Set it only to use a key of your own.
 #   MINTER_SERVICE_ACCOUNT             terraform output minter_service_account -- if set,
 #                                      mints a fresh key for it and pushes that too (see below)
 set -euo pipefail

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
@@ -11,14 +12,14 @@ func TestHealthFromClosedStateReadsClosedRegardlessOfChecks(t *testing.T) {
 	failure := "failure"
 	got := healthFrom(github.PullRequestDetail{State: "closed"}, []github.CheckRun{
 		{Status: "completed", Conclusion: &failure},
-	})
+	}, true)
 	if got != model.PrClosed {
 		t.Fatalf("got %q, want closed", got)
 	}
 }
 
 func TestHealthFromUnknownMergeabilityWithNoFailingChecksIsUnknown(t *testing.T) {
-	got := healthFrom(github.PullRequestDetail{State: "open"}, nil)
+	got := healthFrom(github.PullRequestDetail{State: "open"}, nil, true)
 	if got != model.PrUnknown {
 		t.Fatalf("got %q, want unknown", got)
 	}
@@ -26,7 +27,7 @@ func TestHealthFromUnknownMergeabilityWithNoFailingChecksIsUnknown(t *testing.T)
 
 func TestHealthFromNotMergeableIsConflicted(t *testing.T) {
 	no := false
-	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil)
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil, true)
 	if got != model.PrConflicted {
 		t.Fatalf("got %q, want conflicted", got)
 	}
@@ -37,7 +38,7 @@ func TestHealthFromAFailedCompletedCheckIsFailing(t *testing.T) {
 	failure := "failure"
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "completed", Conclusion: &failure},
-	})
+	}, true)
 	if got != model.PrFailing {
 		t.Fatalf("got %q, want failing", got)
 	}
@@ -47,7 +48,7 @@ func TestHealthFromAnInProgressCheckIsNotYetFailing(t *testing.T) {
 	yes := true
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "in_progress"},
-	})
+	}, true)
 	if got != model.PrClean {
 		t.Fatalf("got %q, want clean (an in-progress check is not a failure)", got)
 	}
@@ -57,10 +58,114 @@ func TestHealthFromMergeableWithNoFailingChecksIsClean(t *testing.T) {
 	yes := true
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "completed", Conclusion: strPtr("success")},
-	})
+	}, true)
 	if got != model.PrClean {
 		t.Fatalf("got %q, want clean", got)
 	}
 }
 
 func strPtr(s string) *string { return &s }
+
+// --- checks the credential cannot read ----------------------------------
+
+// The dangerous reading of an unreadable Checks API is "no checks came
+// back, so nothing is failing" -- identical, at this function, to a
+// genuinely green PR. A deployment on a scoped PAT gets that answer for
+// every PR forever, so reading it as clean would auto-merge PRs with CI
+// red.
+func TestHealthFromUnknownChecksIsNeverClean(t *testing.T) {
+	yes := true
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, nil, false)
+	if got == model.PrClean {
+		t.Fatal("unreadable check runs read as clean: a PR with failing CI would be auto-merged")
+	}
+	if got != model.PrUnknown {
+		t.Fatalf("got %q, want unknown", got)
+	}
+}
+
+// Both facts healthFrom reads straight off the PR stay authoritative
+// without checks: neither needs the Checks API, and a deployment that
+// cannot reach it must still close out merged PRs and notice conflicts.
+func TestHealthFromClosedAndConflictedSurviveUnknownChecks(t *testing.T) {
+	if got := healthFrom(github.PullRequestDetail{State: "closed"}, nil, false); got != model.PrClosed {
+		t.Errorf("closed PR with unreadable checks = %q, want closed", got)
+	}
+	no := false
+	if got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil, false); got != model.PrConflicted {
+		t.Errorf("conflicted PR with unreadable checks = %q, want conflicted", got)
+	}
+}
+
+func TestCheckRunsForReportsAForbiddenReadAsUnknownNotAnError(t *testing.T) {
+	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
+	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch")
+	if err != nil {
+		t.Fatalf("a 403 must not fail the sync: %v", err)
+	}
+	if known {
+		t.Error("checks reported known after a 403")
+	}
+	if checks != nil {
+		t.Errorf("checks = %v, want nil", checks)
+	}
+}
+
+// Only the one permission GitHub offers no way to hold is tolerated.
+// Anything else -- a 404, a 500, a transport failure -- is still a real
+// error, and swallowing it would hide a broken deployment behind the
+// same silent "unknown".
+func TestCheckRunsForStillFailsOnEveryOtherError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"not found", &github.Error{Status: 404}},
+		{"server error", &github.Error{Status: 500}},
+		{"transport", errors.New("dial tcp: connection refused")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &checkRunsClient{err: tc.err}
+			if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch"); err == nil {
+				t.Fatal("expected the error to propagate")
+			}
+		})
+	}
+}
+
+func TestCheckRunsForPassesASuccessfulReadThrough(t *testing.T) {
+	client := &checkRunsClient{checks: []github.CheckRun{{Name: "build", Status: "completed"}}}
+	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !known {
+		t.Error("a successful read must report the checks as known")
+	}
+	if len(checks) != 1 || checks[0].Name != "build" {
+		t.Errorf("checks = %v, want the one build run", checks)
+	}
+}
+
+func testPullRequestRef() model.PullRequestRef {
+	return model.PullRequestRef{
+		Repo:   model.RepoRef{Owner: "owner", Name: "repo"},
+		Number: 1,
+	}
+}
+
+// checkRunsClient is a github.Client that only ListCheckRuns is ever
+// called on -- every other method is embedded and would panic on a nil
+// interface, which is the point: checkRunsFor must touch nothing else.
+type checkRunsClient struct {
+	github.Client
+	checks []github.CheckRun
+	err    error
+}
+
+func (c *checkRunsClient) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.checks, nil
+}

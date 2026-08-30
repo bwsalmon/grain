@@ -30,6 +30,7 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -171,6 +172,29 @@ func (e *Error) Error() string {
 		body = body[:200]
 	}
 	return fmt.Sprintf("GitHub API error %d: %q", e.Status, body)
+}
+
+// IsPermissionDenied reports whether err is GitHub refusing the call for
+// want of a permission, rather than failing it -- a 403, which for a
+// token is "Resource not accessible by personal access token".
+//
+// It exists because one endpoint here is unreachable by a whole class of
+// credential: the Checks API accepts GitHub App installation tokens
+// only, and a fine-grained personal access token has no permission to
+// grant for it at all (GitHub offered "Checks" for fine-grained tokens
+// initially and withdrew it). So a deployment authenticating with a
+// scoped PAT gets a permanent 403 from ListCheckRuns that no
+// configuration on its side can clear -- unlike an ordinary transient
+// error, retrying never helps, and unlike a missing scope on any other
+// endpoint here, there is no box to tick.
+//
+// A caller that can carry on without whatever the call would have told
+// it should treat this as "unknown", never as "nothing found": the two
+// differ exactly where it matters, since a 403 read as an empty result
+// is indistinguishable from a genuinely clean answer.
+func IsPermissionDenied(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == 403
 }
 
 // Issue is one issue or pull request from the issues endpoint (GitHub

@@ -23,6 +23,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +32,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
+	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
 )
 
@@ -45,6 +48,7 @@ Commands:
   list                          list every secret and the keys it holds (never values)
   set [-value-file F] S K       write key K's value in secret S, from -value-file or stdin
   delete <secret> [key]         delete one key, or (with no key given) the whole secret
+  mint-gemini-key -project P    mint the daemon's own Gemini API key, if it has none yet
 `
 
 func secretsCmd(args []string) {
@@ -81,6 +85,8 @@ func runSecrets(args []string) error {
 		return secretsSet(store, cmdArgs)
 	case "delete":
 		return secretsDelete(store, cmdArgs)
+	case "mint-gemini-key":
+		return secretsMintGeminiKey(store, *dataDir, cmdArgs)
 	default:
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -156,6 +162,96 @@ func secretsDelete(store *secrets.Store, args []string) error {
 	default:
 		fs.Usage()
 		return errors.New("usage: grain secrets delete <secret> [key]")
+	}
+	return nil
+}
+
+// secretsMintGeminiKey mints the daemon's own operating Gemini API key
+// using the standing minter credential already in the secrets database,
+// and writes it to the file `grain daemon -gemini-api-key-file` reads.
+//
+// This closes the deploy-time gap terraform/gcp-v2 otherwise leaves: a
+// deployment whose minter already holds roles/serviceusage.apiKeysAdmin
+// (that module's enable_gemini_key, on by default) has, on the host,
+// every permission needed to mint this key -- so requiring an operator
+// to paste one in by hand before grain-daemon.service will start is a
+// step the deployment can take for itself. Nothing here widens any
+// grant: it is the same credential, the same API, and the same
+// per-service restriction the gemini-key capability already mints under.
+//
+// Seed-once, deliberately, mirroring v2/scripts/setup.sh's own
+// seed_secret and seed_gcp_minter_key: an existing non-empty key file is
+// left exactly as it is and reported, never overwritten. A redeploy
+// therefore does not mint a fresh key on every convergence pass, and a
+// key an operator placed by hand always wins. Rotating means deleting
+// the file first (and the old key in GCP, which this does not do for
+// you -- the reaper never touches an operating key).
+func secretsMintGeminiKey(store *secrets.Store, dataDir string, args []string) error {
+	fs := flag.NewFlagSet("grain secrets mint-gemini-key", flag.ContinueOnError)
+	project := fs.String("project", "", "GCP project to mint the key in (required)")
+	credential := fs.String("credential", gcpkey.DefaultMinterCredential, "name of the standing minter credential in this secrets store")
+	out := fs.String("out", "", "file to write the key to; defaults to <data-dir>/secrets/gemini-api-key")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		fs.Usage()
+		return errors.New("usage: grain secrets mint-gemini-key -project PROJECT [-credential NAME] [-out FILE]")
+	}
+	if *project == "" {
+		return errors.New("-project is required")
+	}
+
+	path := *out
+	if path == "" {
+		path = filepath.Join(dataDir, "secrets", "gemini-api-key")
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		fmt.Printf("%s already holds a key; leaving it untouched\n", path)
+		return nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("checking %s: %w", path, err)
+	}
+
+	ctx := context.Background()
+	name, key, err := geminikey.MintOperatingKey(ctx, store, *credential, *project)
+	if err != nil {
+		return err
+	}
+
+	// Written 0600 through a temporary file in the same directory, so a
+	// reader never observes a half-written key and the value never
+	// exists at the final path with looser permissions -- the same care
+	// pkg/secrets and setup.sh's own seed_secret take with a credential.
+	if err := writeSecretFile(path, key); err != nil {
+		return err
+	}
+	fmt.Printf("minted %s and wrote it to %s\n", name, path)
+	return nil
+}
+
+func writeSecretFile(path, value string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gemini-api-key-*")
+	if err != nil {
+		return fmt.Errorf("creating a temporary file next to %s: %w", path, err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("securing %s: %w", tmp.Name(), err)
+	}
+	if _, err := tmp.WriteString(value); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing %s: %w", tmp.Name(), err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing %s: %w", tmp.Name(), err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("moving the key into place at %s: %w", path, err)
 	}
 	return nil
 }

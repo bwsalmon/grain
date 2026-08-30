@@ -17,8 +17,20 @@ GITHUB_REPO=""
 REGION="us-central1"
 NAME_PREFIX="grain-v2-staging"
 BUCKET=""
-POOL_ID="github"
-PROVIDER_ID="github"
+# Name-prefixed, unlike v1's bootstrap, which hardcodes "github" for
+# both. That difference is deliberate and load-bearing: a staging
+# deployment is expected to share a project with a v1 deployment (and
+# with another v2 one), and a workload identity pool is a project-level
+# resource. Defaulting these to "github" would make this script *update*
+# whatever provider v1's own bootstrap created there -- rewriting its
+# attribute condition to name whatever --repo was passed here. Same repo,
+# and that is a no-op nobody notices; a different one, and v1's deploy
+# workflow silently loses its ability to authenticate at all. Prefixing
+# means the two never touch. Override only to share a pool deliberately.
+# Empty here, derived from NAME_PREFIX after argument parsing (--prefix
+# may not have been seen yet) unless --pool/--provider say otherwise.
+POOL_ID=""
+PROVIDER_ID=""
 
 usage() {
   sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
@@ -33,6 +45,11 @@ Options:
   --prefix     PREFIX         resource-name prefix, must match name_prefix in
                               your tfvars. default: grain-v2-staging
   --bucket     NAME           Terraform state bucket. default: PROJECT-PREFIX-tfstate
+  --pool       ID             workload identity pool id. default: PREFIX. Prefixed
+                              rather than "github" so bootstrapping this in a
+                              project that already runs v1 never rewrites v1's own
+                              provider -- see the comment on POOL_ID
+  --provider   ID             workload identity provider id. default: PREFIX
 USAGE
 }
 
@@ -43,6 +60,8 @@ while [ "$#" -gt 0 ]; do
     --region)  REGION="$2"; shift 2 ;;
     --prefix)  NAME_PREFIX="$2"; shift 2 ;;
     --bucket)  BUCKET="$2"; shift 2 ;;
+    --pool)    POOL_ID="$2"; shift 2 ;;
+    --provider) PROVIDER_ID="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -56,6 +75,12 @@ if [ -n "$GITHUB_REPO" ]; then
   esac
 fi
 BUCKET="${BUCKET:-${PROJECT_ID}-${NAME_PREFIX}-tfstate}"
+POOL_ID="${POOL_ID:-$NAME_PREFIX}"
+PROVIDER_ID="${PROVIDER_ID:-$NAME_PREFIX}"
+
+# No adoption of an unprefixed "github" pool here, deliberately, unlike
+# terraform/gcp/bootstrap-gcp.sh: in a shared project that pool is v1's,
+# and adopting it is precisely the collision these names prevent.
 
 DEPLOYER="${NAME_PREFIX}-deployer"
 DEPLOYER_EMAIL="${DEPLOYER}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -173,3 +198,23 @@ Next: terraform init -backend-config=backend.hcl, terraform apply, then
 run push-secrets.sh once (see this directory's README) to give the host
 a GitHub token and a Gemini API key.
 DONE
+
+# The two values a config repo's deploy workflow needs as secrets, which
+# only exist when --repo wired workload identity at all. Printed here
+# rather than left to be reconstructed by hand: the provider is a long
+# resource name with a project *number* in it, and getting it wrong
+# surfaces as an authentication failure in CI rather than anything that
+# points back here.
+if [ -n "$GITHUB_REPO" ]; then
+  cat <<DONE
+Set these two repository secrets on ${GITHUB_REPO} (the names are the
+ones terraform/gcp-v2's own deploy workflow reads):
+
+  GCP_V2_WORKLOAD_IDENTITY_PROVIDER
+    ${PROVIDER_NAME}
+
+  GCP_V2_DEPLOYER_SERVICE_ACCOUNT
+    ${DEPLOYER_EMAIL}
+
+DONE
+fi

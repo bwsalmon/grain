@@ -374,4 +374,11 @@ terraform/gcp/
   anything else; the service replaces itself and systemd restarts it.
 - **One deployment per state prefix.** Two deployments in one project work
   fine — give them different `name_prefix` values and different
-  `backend.hcl` prefixes.
+  `backend.hcl` prefixes. Everything else derives from `name_prefix`
+  already, including the workload identity pool and provider
+  `bootstrap-gcp.sh` creates, so the second deployment cannot take over
+  the first's. (Deployments bootstrapped before that was true are wired
+  to an unprefixed `github` pool; the script recognises and keeps using
+  it, so re-running changes nothing. Move onto a prefixed pool with
+  `--pool`/`--provider` before adding a second deployment to that
+  project.)

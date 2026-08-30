@@ -86,9 +86,13 @@ export INSTANCE="$(terraform output -raw instance_name)"
 export ZONE="$(terraform output -raw zone)"
 export MINTER_SERVICE_ACCOUNT="$(terraform output -raw minter_service_account)"
 export GRAIN_GITHUB_TOKEN="ghp_..."      # a fine-grained PAT scoped to test_repos
-export GRAIN_GEMINI_API_KEY="..."
 ./push-secrets.sh
 ```
+
+`GRAIN_GEMINI_API_KEY` is optional: with `enable_gemini_key` on (the
+default) the host mints the daemon's own key for itself -- see "The
+daemon's own Gemini key" below. Export one anyway to use a key of your
+own instead.
 
 Watch it converge with:
 
@@ -98,6 +102,72 @@ gcloud compute ssh "$INSTANCE" --zone "$ZONE" --project "$PROJECT" \
 ```
 
 **6. Open it.** `terraform output url` -- sign in as one of `iap_members`.
+
+## Deploying it from CI
+
+Everything above is the by-hand path. To have a config repo's GitHub
+Actions apply it instead, pass `--repo owner/name` to the bootstrap
+script and wire a workflow to the step scripts in grain's `ci/`:
+
+```
+ci/v2-staging-terraform-apply.sh    init, validate, apply (with stock-out retries)
+ci/v2-staging-read-outputs.sh       Terraform outputs -> Actions step outputs
+push-secrets.sh                     this directory's own, called with env
+ci/v2-staging-wait-for-host.sh      block until the host reports it converged
+ci/v2-staging-write-summary.sh      the job summary
+```
+
+The step bodies live in grain, and the config repo's workflow only wires
+them up -- supplying which secrets, which config directory, which
+generation. That is the same split `terraform/gcp/`'s own template
+argues for: a workflow file is forked and then owned by the config repo,
+so anything written *there* is something nobody re-syncs, while a fix
+here reaches every deployment on its next `grain_ref` bump. See
+`bwsalmon/agents`'s `.github/workflows/deploy-v2-staging.yml` for a
+worked example.
+
+Two things differ from a by-hand deploy:
+
+- **`deployer_member` must be the CI service account**, not a human --
+  `push-secrets.sh` mints the minter's key, which needs
+  `deployer_manages_minter_keys` (iam.tf) on whoever runs it.
+- **The workflow supplies `deploy_generation`**, so a manual re-run
+  redeploys rather than no-oping. `wait-for-host` then blocks on the host
+  reporting *that* generation, and CI goes green only once the rollout
+  actually landed.
+
+### Sharing a project with a v1 deployment
+
+Supported, and the reason `bootstrap-gcp.sh` derives its workload
+identity pool and provider from `name_prefix`. A pool is a project-level
+resource, and both bootstrap scripts once hardcoded "github" for it: on
+those names, bootstrapping staging into a project already running v1
+took the *update* branch on v1's provider and rewrote its attribute
+condition to name whatever `--repo` was passed here -- a no-op while both
+name the same repo, and a v1 deploy that can no longer authenticate at
+all the moment they differ.
+
+Both scripts now prefix, so the two never touch. `--pool`/`--provider`
+override it for a pool shared deliberately.
+
+One asymmetry is deliberate: v1's script *adopts* an existing unprefixed
+`github` pool when that pool's provider already names its own `--repo`,
+because a deployment bootstrapped before prefixing is still wired to it
+and its `GCP_WORKLOAD_IDENTITY_PROVIDER` secret still points there. This
+script never adopts. In a shared project that pool is v1's, and taking
+it over is exactly the collision the prefixing exists to prevent.
+
+The state bucket, the deployer account, the instance, and the guest
+attribute namespace (`grain-v2` here against v1's `grain`) are already
+distinct for the same reason.
+
+What is *not* separated by any of this is the agent account's reach.
+`agent_can_manage_gke` grants `roles/container.admin` project-wide with
+no exclusion, and `agent_can_manage_compute_instances`'s exclusion names
+only this deployment's own host -- so in a shared project a staging
+agent can reach a v1 deployment's host VM and any cluster in the
+project. Set both to `false` while sharing, or give staging its own
+project.
 
 ## Secrets never touch Terraform
 
@@ -112,7 +182,8 @@ Terraform state:
   (`pkg/agent/gemini`), needed before `grain-daemon.service` will even
   start. Distinct from the gemini-key *capability*
   (`pkg/capability/geminikey`), which mints its own short-lived keys per
-  task once this one has the daemon running at all.
+  task once this one has the daemon running at all. Optional to supply:
+  see "The daemon's own Gemini key" below.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
 
@@ -125,6 +196,50 @@ keeps a later `terraform apply` from treating them as drift and erasing
 them. `files/deploy.sh` reads them back purely locally, over the instance
 metadata server, with no GCP credential of the host's own required to do
 it.
+
+## The daemon's own Gemini key
+
+With `enable_gemini_key` on (the default here), the minter account
+already holds `roles/serviceusage.apiKeysAdmin` project-wide -- that is
+what lets the gemini-key *capability* mint a short-lived key per task.
+The same grant is all it takes to mint the daemon's own long-lived
+operating key, and `push-secrets.sh` has already put the minter's
+credential on the host. So the host mints that key for itself:
+`v2/scripts/setup.sh`'s `mint_gemini_operating_key` runs
+`grain secrets mint-gemini-key` when no key is in place yet, right after
+seeding the minter credential it authenticates with.
+
+Nothing about this widens a grant. It is the same credential, the same
+API, and the same `generativelanguage.googleapis.com` restriction every
+per-task key is minted under -- which also makes a minted operating key
+narrower than a hand-made one, since a key created by hand in the
+console is unrestricted unless someone remembers to restrict it.
+
+What it removes is a first-deploy footgun: without it, applying and
+pushing secrets leaves you with a daemon that installs and then silently
+never starts, because the one credential it cannot come up without is
+the one nobody has pasted in yet.
+
+Three things worth knowing:
+
+- **It is seed-once.** An existing non-empty key is never overwritten,
+  so `config-sync` re-running `setup.sh` on every convergence pass does
+  not issue a fresh key each time, and a key you placed by hand always
+  wins.
+- **Rotating is manual**, the same as the minter key above: delete
+  `<data-dir>/secrets/gemini-api-key` on the host, delete the old key in
+  GCP, and bump `deploy_generation` so the next pass mints a new one.
+- **The reaper never touches it.** `geminikey.DeleteExpired` deletes
+  `grain-`prefixed keys older than 24 hours; the operating key carries
+  that prefix too and is exempted by exact name
+  (`geminikey.OperatingKeyDisplayName`), because it is the credential
+  the daemon runs as rather than a per-task lease that leaked. That
+  exemption is what keeps the reap from stopping the daemon a day after
+  every deploy -- so the constant must keep its prefix, and the
+  exemption must keep matching it.
+
+Set `enable_gemini_key = false`, or supply `GRAIN_GEMINI_API_KEY`
+yourself, and none of this runs.
 
 ## What the deployment is allowed to do
 
@@ -159,6 +274,44 @@ than dispatched" v1's `terraform/gcp/variables.tf` `target_repos`
 documents. `default_target_repo`'s own validation, above, already
 requires it be a member of `test_repos` (or empty), so the two variables
 stay consistent with each other by construction.
+
+### What the PAT needs
+
+A **fine-grained** token, with repository access limited to exactly
+`test_repos`, and three repository permissions:
+
+| Permission | Level | What needs it |
+|---|---|---|
+| Metadata | Read | mandatory for every fine-grained token; also `GET /repos/{owner}/{repo}`, behind `DefaultBranch` |
+| Contents | Read and write | the git proxy's fetch and push, plus creating and updating refs (`CreateBranch`, `UpdateBranch`, `BranchExists`, `GetBranchHead`) |
+| Pull requests | Read and write | `CreatePullRequest`, `FindOpenPullRequestForBranch`, `GetPullRequest`, `MergePullRequest` |
+
+**Do not grant `Workflows`.** `pkg/gitproxy` authorizes by repository and
+by push-versus-fetch, never by what a commit touches -- nothing in v2
+stops an agent editing `.github/workflows/**`, so the token not holding
+the permission is the whole of the enforcement, exactly as v1 withholds
+the classic `workflow` scope. GitHub rejects such a push server-side.
+
+**`Issues` is not needed either**, unlike v1, where the GitHub issue list
+*was* the task queue. v2 reads no issue, writes no comment and moves no
+label: tasks arrive by being written to the store (`pkg/ui`), and the
+agent's own escape-hatch tools become effects on the task, not GitHub
+API calls. `pkg/github` still implements that surface -- it is built, not
+wired -- so grant `Issues` only if something later routes those effects
+back to GitHub.
+
+**There is no `Checks` permission to grant.** GitHub offered one for
+fine-grained tokens initially and withdrew it; the Checks API now takes
+GitHub App installation tokens only. So `ListCheckRuns` returns 403 to
+this deployment permanently, and `pkg/orchestrator`'s `checkRunsFor`
+treats that one status as "health unknown" rather than an error -- see
+its own doc comment. The cost is auto-merge: a task with `AutoMerge`
+never merges, because a PR whose checks cannot be read is never `PrClean`
+(reading it as clean is how you merge a PR with CI red). Dispatch, the
+push, and opening the pull request are a separate reconciler and are
+unaffected. A deployment that genuinely needs auto-merge needs an App
+installation token for the REST client, which is a code change, not
+configuration.
 
 "A scoped PAT to a few test repos" -- the PAT itself being a GitHub
 fine-grained token limited, on GitHub's own side, to `test_repos` -- is
@@ -197,7 +350,9 @@ lists in sync automatically; an operator who changes one by hand (via
 - **One deployment per state prefix.** Running more than one of these in
   the same project needs a different `name_prefix`, a different
   `backend.hcl` prefix, and (since `agent_account_id`/`minter_account_id`
-  default to fixed names) distinct values for those two as well.
+  default to fixed names) distinct values for those two as well. The
+  state bucket, the deployer account, and the workload identity pool and
+  provider all derive from `name_prefix` already.
 - **Destroying it is deliberately awkward.** The data disk carries
   `prevent_destroy` (`instance.tf`) -- it holds the SQLite store, the
   secrets database, and the sandbox working directories. Remove that

@@ -80,8 +80,10 @@ fi
 if [ -z "$GITHUB_TOKEN" ]; then
   log "no grain-github-token in instance metadata yet -- deploying with no GitHub credential; run push-secrets.sh once it's ready"
 fi
-if [ -z "$GEMINI_API_KEY" ]; then
-  log "no grain-gemini-api-key in instance metadata yet -- grain-daemon.service will install but stay stopped; run push-secrets.sh once it's ready"
+if [ -z "$GEMINI_API_KEY" ] && [ -n "$MINTER_KEY_FILE" ]; then
+  log "no grain-gemini-api-key in instance metadata -- setup.sh will mint the daemon's own key with the minter credential (terraform/gcp-v2 README, \"The daemon's own Gemini key\")"
+elif [ -z "$GEMINI_API_KEY" ]; then
+  log "no grain-gemini-api-key in instance metadata and no minter key either -- grain-daemon.service will install but stay stopped; run push-secrets.sh once one of them is ready"
 fi
 
 # --- run v2/scripts/setup.sh, which does everything else --------------
