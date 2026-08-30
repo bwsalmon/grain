@@ -173,13 +173,15 @@ func daemon(args []string) {
 			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
 			"-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images -kontur-create-arg=-disk "+
-			"-kontur-create-arg=/images/<version>/disk.img -kontur-create-arg=-kernel "+
-			"-kontur-create-arg=/images/<version>/vmlinuz -kontur-create-arg=-initramfs "+
-			"-kontur-create-arg=/images/<version>/initrd.img -kontur-create-arg=-guest-port "+
+			"-kontur-create-arg=/images/current/disk.img -kontur-create-arg=-kernel "+
+			"-kontur-create-arg=/images/current/vmlinuz -kontur-create-arg=-initramfs "+
+			"-kontur-create-arg=/images/current/initrd.img -kontur-create-arg=-guest-port "+
 			"-kontur-create-arg=22 to point at packer/kontur/build.sh's published output, already copied onto "+
 			"this host under -images-hostpath's directory (see packer/kontur/README.md, \"Building and "+
-			"publishing\" -- -guest-port 22 is not optional: konturctl's own default is 80, which silently "+
-			"refuses every connection to this image's actual sshd). Only used with -kontur-vm-name-prefix. "+
+			"publishing\", and v2/scripts/setup.sh's own ensure_kontur_images, which is what actually copies "+
+			"it there for terraform/gcp-v2 -- -guest-port 22 is not optional: konturctl's own default is 80, "+
+			"which silently refuses every connection to this image's actual sshd). Only used with "+
+			"-kontur-vm-name-prefix. "+
 			"Leave -ip/-port out of this list "+
 			"and set -kontur-base-ip/-kontur-base-port instead once -max-concurrent is more than 1 -- konturctl has "+
 			"no default for either and no way to vary a value shared verbatim across every slot's create call, so "+

@@ -22,8 +22,9 @@ and manage the VM pods `kontur` runs. See "Operating a node" below.
 
 The image contains three things:
 
-- `kontur` (this repo, Go): a single binary with two modes, selected by
-  the first argument (`run`, the default if none is given, or `netshim`):
+- `kontur` (this repo, Go): a single binary with three modes, selected by
+  the first argument (`run`, the default if none is given; `netshim`; or
+  `sleep`):
   - **`run`** reads configuration from the environment, execs
     `cloud-hypervisor` with the resulting arguments, streams the guest's
     serial console to the container's stdout/stderr so it shows up under
@@ -33,11 +34,16 @@ The image contains three things:
     that lets several VM containers in the same pod share the pod's IP;
     see "Pod-local networking" below. It's meant to run once, to
     completion, as an init container.
+  - **`sleep`** just blocks until killed. It exists purely so
+    `-backend docker` (see "Operating a node" below) can hold a network
+    namespace open with the `kontur` image itself, without needing a
+    coreutils `sleep` binary the image doesn't otherwise carry.
 
-  Both modes need `ip`/`iptables` on `PATH` (only `netshim` uses them,
-  but they're part of the same binary and image now), so unlike the
-  distroless image this used to ship as when `run` and `netshim` were
-  separate binaries, the base here is `debian:bookworm-slim`.
+  `netshim` talks to the kernel directly via netlink/nftables (see
+  "Pod-local networking" below) rather than shelling out to `ip`/
+  `iptables`, so none of the three modes needs anything beyond the two
+  statically linked binaries themselves -- the image's base is `scratch`
+  (see "Building" below).
 - `cloud-hypervisor`: the actual VMM, fetched from the upstream static
   release build and pinned by checksum in the `Dockerfile`.
 - A reference guest disk image (see "Guest disk image" below): a minimal
@@ -123,10 +129,34 @@ docker build -t kontur .
 
 The `cloud-hypervisor` release version and checksums are pinned via
 `CLOUD_HYPERVISOR_VERSION` and the `sha256` values in the `Dockerfile`'s
-`fetch-chv` stage; bump both together when upgrading. See
+`fetch-chv` stage; bump both together when upgrading.
+
+The `kontur` image's own base is fixed to `scratch` and isn't a build
+option: both `kontur` and `cloud-hypervisor` are statically linked, and
+`netshim` mode sets up the bridge/taps/NAT rules via netlink/nftables Go
+libraries rather than exec'ing `ip`/`iptables`, so nothing here needs a
+real userland to run in -- there's no smaller-but-still-working option to
+trade off against, unlike the guest disk image below. The cost is
+`ip`/`iptables`-style debuggability: there's no shell or package manager
+in the final image to `apk add` a debugging tool into.
+
+The guest disk image baked into `kontur` (not the `kontur` image's own
+base above) *is* configurable, via `GUEST_DISTRO`: `debian` (the
+default, via `debootstrap`) or `alpine` (via `apk`) --
+
+```sh
+docker build --build-arg GUEST_DISTRO=alpine -t kontur .
+```
+
+-- trading off the same way `BASE_DISTRO` used to for the outer image:
+the Alpine guest is smaller (its `disk.img` comes out roughly an order
+of magnitude smaller than the Debian guest's) at the cost of being a
+less commonly-run-as-a-guest distro. See
 [`deploy/guest-image/README.md`](deploy/guest-image/README.md) for the
-guest disk image build (`guest-image` stage) and its own build args
-(`GUEST_SUITE`, `GUEST_SSH_AUTHORIZED_KEY`, `GUEST_SETUP_SCRIPT`).
+guest disk image build (`guest-image`/`guest-rootfs-*` stages), how the
+two variants differ beyond package manager, and their own build args
+(`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`,
+`GUEST_SETUP_SCRIPT`).
 
 ## Running locally
 
@@ -148,9 +178,11 @@ instead to boot a different guest.
 ## Guest disk image
 
 The disk image baked into `kontur` at `/var/lib/kontur/guest/disk.img`
-(built by the `Dockerfile`'s `guest-image` stage) is a minimal Debian
-system with `sshd`, meant as a reference/demo guest usable without
-managing a separate disk image -- not a production guest; bring your own
+(built by the `Dockerfile`'s `guest-image` stage, from whichever of the
+`guest-rootfs-debian`/`guest-rootfs-alpine` stages `GUEST_DISTRO`
+selected -- see "Building" above) is a minimal Debian or Alpine system
+with `sshd`, meant as a reference/demo guest usable without managing a
+separate disk image -- not a production guest; bring your own
 `CHV_DISK_IMAGE` for that. Its `sshd` is configured so that every SSH
 session's output is also mirrored onto the guest's serial console
 (`/dev/console`, i.e. `ttyS0`) in addition to reaching the actual SSH
@@ -197,10 +229,11 @@ A pod normally gets one IP, but a pod can run several VMs -- one per
   namespace.
 - One tap device per VM, attached to that bridge, named `tap-<name>` for
   a VM called `<name>`.
-- `iptables` DNAT rules forwarding each VM's own external port on the pod
-  IP to a single fixed port inside that VM (`NETSHIM_GUEST_PORT`), plus
-  `MASQUERADE` so VM-initiated outbound traffic leaves via the pod's own
-  IP.
+- nftables DNAT rules (via the `google/nftables` Go library, in a
+  dedicated `kontur` table) forwarding each VM's own external port on the
+  pod IP to a single fixed port inside that VM (`NETSHIM_GUEST_PORT`),
+  plus a MASQUERADE rule so VM-initiated outbound traffic leaves via the
+  pod's own IP.
 
 Because init containers share the pod's network namespace with the
 containers that follow them, everything `netshim` mode creates is already
@@ -306,8 +339,10 @@ pod sandbox for as long as the pod exists, which is what lets the
 container then uses. Plain docker containers have no such sandbox, and a
 container's network namespace disappears with it, so this backend starts
 a third, otherwise-idle container per VM (`<name>-netns`, the same
-`kontur` image with its entrypoint overridden to `sleep infinity`) purely
-to hold that namespace open, and attaches both `netshim` (`--network
+`kontur` image with its entrypoint overridden to its own `sleep` mode --
+see "How it works" above for why the image has no coreutils `sleep` of
+its own to use instead) purely to hold that namespace open, and attaches
+both `netshim` (`--network
 container:<name>-netns`, run once to completion, same as an init
 container) and the VM container to it the same way. `konturctl vm delete`
 removes both; `konturctl vm update` tears both down and recreates them,
@@ -355,8 +390,9 @@ go test ./...
 `internal/hypervisor`'s tests exercise the process/shutdown state machine
 against a fake `cloud-hypervisor` stand-in (`testdata/fakechv`) that speaks
 the same API, so they run without KVM. `internal/netshim`'s integration
-test creates a real bridge/tap/iptables setup and is skipped unless run as
-root with `ip`/`iptables` on `PATH` (`sudo go test ./internal/netshim/...`).
+test creates a real bridge/tap/nftables setup via the same netlink/nftables
+Go libraries `netshim` itself uses (no `ip`/`iptables` binaries needed) and
+is skipped unless run as root (`sudo go test ./internal/netshim/...`).
 The Dockerfile and the resulting image have additionally been smoke-tested
 against the real `cloud-hypervisor` binary under KVM (kernel + initramfs
 boot, console streamed to stdout, and the SIGTERM → power-button →
@@ -409,3 +445,68 @@ sequence and arguments of the `docker` commands `-backend docker` issues
 are covered without a real daemon. That backend has additionally been
 smoke-tested end-to-end against a real local docker daemon, described
 under "Docker backend" above.
+
+The `kontur` image's now-fixed Alpine base was originally built and
+smoke-tested end-to-end against a real local docker daemon alongside a
+Debian build (back when the base was still a `BASE_DISTRO` build-arg
+choice rather than fixed): both `docker build` succeeded (Alpine's
+compressed image came out about 120MB smaller), `file`/`cloud-hypervisor
+--version` confirmed the statically-linked `kontur` and `cloud-hypervisor`
+binaries run unmodified under Alpine's musl libc, and `kontur run` failed
+fast with the expected error on a missing `CHV_KERNEL` path just as it
+did on Debian. `netshim` mode was exercised the same way as the "Docker
+backend" validation above -- a netns-holder container plus a
+`--privileged` `netshim` container built from the alpine image -- and
+produced the same bridge/tap/DNAT/MASQUERADE state confirmed with `ip
+addr`/`iptables -t nat -S`, showing Alpine's `iptables` package
+(`nf_tables` backend) is compatible with the exact rules `netshim`
+installs.
+
+The `GUEST_DISTRO=alpine` guest disk image was built with `docker build
+--build-arg GUEST_DISTRO=alpine` alongside the default Debian build, and
+the resulting `disk.img` (about 90MB vs. the Debian guest's roughly
+390MB, both sized per the Dockerfile's 20%-headroom-plus-64MiB-floor
+rule against a 22MB Alpine rootfs vs. a 264MB Debian one) was inspected
+directly with `debugfs` rather than booted: the console-wrapper and
+`powerbtn.sh` scripts carried their executable bit, `/etc/apk/repositories`
+was populated for the pinned `GUEST_ALPINE_VERSION`, no SSH host keys
+were present (Alpine's `openssh-server` package doesn't generate them at
+install time the way Debian's does, and its own `sshd` OpenRC init
+script regenerates whatever's missing on every start, so this guest
+needs no equivalent of `kontur-ssh-host-keys.service` at all -- see
+`deploy/guest-image/README.md`), and the `sysinit`/`boot`/`default`
+runlevels contained exactly the hand-enabled services the Dockerfile
+symlinks in (`devfs`/`dmesg`/`mdev`/`hwdrivers`,
+`hwclock`/`modules`/`sysctl`/`hostname`/`bootmisc`/`syslog`, and
+`local`/`sshd`/`acpid` respectively). A full guest boot under KVM was not
+run for the Alpine guest specifically: the only kernel available in this
+environment (the benchmark suite's PVH marker kernel, see `benchmarks/`)
+has no virtio-blk driver and so can't mount *any* real root filesystem,
+Alpine or Debian's -- the same limitation noted for it elsewhere in this
+file. The `guest-image` stage's own logic (sizing and `mke2fs -d`
+packing) and everything downstream of `disk.img` in `kontur`/
+cloud-hypervisor (attaching, booting, console streaming) don't
+distinguish between the two rootfs images beyond their size, and are
+exactly what the existing Debian-based KVM boot smoke test above already
+covers.
+
+`netshim`'s move from exec'ing `ip`/`iptables` to the `vishvananda/netlink`
+and `google/nftables` Go libraries (and the outer `kontur` image's
+resulting move from `alpine:3.20` to `scratch`) was validated beyond
+`TestSetup_Idempotent` (which only asserts real interfaces/rules get
+created and that re-running doesn't duplicate them) with an actual
+end-to-end packet test: a throwaway `kpod` network namespace connected to
+the root namespace by a veth pair standing in for the pod's `eth0`, with
+`netshim.Setup` run inside it exactly as it runs in production. `nft list
+ruleset` inside `kpod` showed the expected `dnat`/`masquerade`/`accept`
+rules; a real `curl` from the root namespace to the "pod IP" landed, after
+DNAT, on a plain `nc` listener bound to the VM's bridge address,
+delivering the actual HTTP request bytes; and a connection opened from
+the VM's bridge address outward was observed by a listener in the root
+namespace arriving from the pod IP, confirming MASQUERADE. Separately, the
+full multi-stage `Dockerfile` was built end-to-end against `scratch` (no
+`apk add` of anything in the final stage) and `docker run --privileged`
+against the resulting image, with `NETSHIM_EXTERNAL_IFACE`/
+`NETSHIM_BRIDGE_CIDR`/`NETSHIM_VMS` set, successfully created the bridge,
+tap and nftables rules with no userland present beyond the `kontur` and
+`cloud-hypervisor` binaries themselves.

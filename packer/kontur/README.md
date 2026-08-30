@@ -235,16 +235,36 @@ rootfs plus 20% headroom and a 64MiB floor -- the same formula
 `third_party/kontur`'s own guest-image Dockerfile stage uses, for the same
 reason), and writes all three under
 `output/kontur-guest-<git-sha>-<UTC timestamp>/`. If `KONTUR_IMAGE_BUCKET`
-is set, `gsutil cp`s all three to
-`gs://$KONTUR_IMAGE_BUCKET/kontur-guest/<same name>/`. No bucket name is
-hardcoded here -- this repo doesn't otherwise touch GCS for artifacts, and
-`terraform/gcp/versions.tf`'s own comment on its Terraform state bucket
-("the bucket name lives in the repo as configuration, not here") is the
-precedent to follow rather than inventing a project-specific bucket name a
-deployment didn't choose. `OPERATOR_SSH_PUBLIC_KEY` is not a secret (it's
-a public key), but is still left to the environment rather than a repo
-file, so it's the deployment's own operator key and not one hand-picked
-here.
+is set, `gsutil cp`s all three to both
+`gs://$KONTUR_IMAGE_BUCKET/kontur-guest/<same name>/` (a permanent,
+versioned copy) and `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/latest/` (a
+fixed alias overwritten by every build) -- the second is what
+`v2/scripts/setup.sh`'s own `ensure_kontur_images` always fetches
+(bwsalmon/agents#504), so a fresh build actually reaches a deployment on
+its next `setup.sh` run without that script having to discover or
+hardcode today's `<git-sha>-<timestamp>` version string itself. No bucket
+name is hardcoded here -- this repo doesn't otherwise touch GCS for
+artifacts, and `terraform/gcp/versions.tf`'s own comment on its Terraform
+state bucket ("the bucket name lives in the repo as configuration, not
+here") is the precedent to follow rather than inventing a
+project-specific bucket name a deployment didn't choose; see
+`terraform/gcp-v2/variables.tf`'s own `kontur_image_bucket` for where that
+name is actually configured for that deployment shape.
+`OPERATOR_SSH_PUBLIC_KEY` is not a secret (it's a public key), but is
+still left to the environment rather than a repo file, so it's the
+deployment's own operator key and not one hand-picked here -- see
+`terraform/gcp-v2/README.md`, "Kontur sandboxing", for where that keypair
+comes from on that deployment shape (the private half also has to reach
+`grain daemon`'s own `-kontur-ssh-key`, via `push-secrets.sh`).
+
+The other half of what a deployment needs published -- the `kontur`
+binary and the cloud-hypervisor release bundled with it, not the guest
+disk this directory builds -- is `third_party/kontur`'s own Dockerfile, a
+plain `docker build`/`docker push` with no root and no debootstrap of its
+own needed; see this directory's sibling `build-oci-image.sh` for exactly
+that, and `v2/scripts/setup.sh`'s own `ensure_kontur_images` for how a
+deployment pulls it back down and retags it to `konturctl`'s own default
+image reference.
 
 **The flags `konturctl vm create` takes to point at a built image**,
 resolved by reading bwsalmon/kontur's own source directly
@@ -256,17 +276,20 @@ container") are paths inside a host directory `-images-hostpath` (default
 `/var/lib/vm-images`, `internal/staticpod/spec.go`'s own default) mounts
 read-only at `/images` in the VM's container. So a deployment publishing
 this directory's `build.sh` output has to land all three files on the
-kontur host's own local disk under that directory (`gsutil cp`/`gcloud
-storage cp` from wherever `KONTUR_IMAGE_BUCKET` published them, e.g. via a
-startup script or provisioning step, since nothing downstream of
-`konturctl vm create` fetches them there on its own) and then pass:
+kontur host's own local disk under that directory -- `v2/scripts/
+setup.sh`'s own `ensure_kontur_images` is that provisioning step
+(bwsalmon/agents#504: nothing downstream of `konturctl vm create` fetches
+them there on its own), always landing them at a fixed `<hostpath>/current/`
+regardless of the version string `build.sh` gave them in GCS, so
+`write_systemd_units`'s own `-kontur-create-arg` construction never has to
+discover or hardcode one either:
 
 ```sh
 konturctl vm create <name> -backend docker \
   -images-hostpath /var/lib/vm-images \
-  -disk /images/<version-dir>/disk.img \
-  -kernel /images/<version-dir>/vmlinuz \
-  -initramfs /images/<version-dir>/initrd.img \
+  -disk /images/current/disk.img \
+  -kernel /images/current/vmlinuz \
+  -initramfs /images/current/initrd.img \
   -guest-port 22
 ```
 
@@ -293,13 +316,16 @@ passthrough a deployment sets this through -- `grain daemon` constructs a
 real `KonturSandboxes`/`KonturConfig` from it (bwsalmon/agents#274) via
 `-kontur-vm-name-prefix` and a repeatable `-kontur-create-arg` flag, e.g.
 `-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images
--kontur-create-arg=-disk -kontur-create-arg=/images/<version-dir>/disk.img
--kontur-create-arg=-kernel -kontur-create-arg=/images/<version-dir>/vmlinuz
--kontur-create-arg=-initramfs -kontur-create-arg=/images/<version-dir>/initrd.img
+-kontur-create-arg=-disk -kontur-create-arg=/images/current/disk.img
+-kontur-create-arg=-kernel -kontur-create-arg=/images/current/vmlinuz
+-kontur-create-arg=-initramfs -kontur-create-arg=/images/current/initrd.img
 -kontur-create-arg=-guest-port -kontur-create-arg=22` (see "`-guest-port 22`
 is required" above -- easy to leave out, since a refused connection gives
 no hint that the guest is listening on the wrong port rather than still
-booting).
+booting). `v2/scripts/setup.sh`'s own `write_systemd_units` builds exactly
+this list whenever `GRAIN_KONTUR_ENABLE=1` (bwsalmon/agents#504) -- see
+`terraform/gcp-v2/README.md`, "Kontur sandboxing", rather than wiring it
+by hand.
 That vendored copy is a point-in-time snapshot with no automation keeping
 it current (see its own `VENDORED.md`), so a deployment wiring
 `-kontur-create-arg` for the first time should still treat bwsalmon/

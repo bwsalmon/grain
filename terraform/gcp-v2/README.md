@@ -223,8 +223,11 @@ Terraform state:
   see "The daemon's own Gemini key" below.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
+- **The kontur SSH private key** (with `enable_kontur_sandboxes`, the
+  default) -- what `grain daemon`'s own `-kontur-ssh-key` authenticates
+  to each slot's VM with. See "Kontur sandboxing" below.
 
-All three go straight into the host instance's own metadata via
+All four go straight into the host instance's own metadata via
 `push-secrets.sh`, which any identity with `deployer_manages_minter_keys`
 (iam.tf) and edit access to the instance can run -- never through Secret
 Manager, so nothing needs a project-wide secret-reading grant, and never
@@ -277,6 +280,98 @@ Three things worth knowing:
 
 Set `enable_gemini_key = false`, or supply `GRAIN_GEMINI_API_KEY`
 yourself, and none of this runs.
+
+## Kontur sandboxing
+
+`enable_kontur_sandboxes` (on by default, `variables.tf`) dispatches onto
+real `bwsalmon/kontur`-managed VMs, one per slot, over SSH
+(`orchestrator.KonturSandboxes`) instead of plain host directories
+(`orchestrator.HostSandboxes`) -- the same nested cloud-hypervisor guest
+`packer/kontur/README.md` documents building, now actually wired through
+this deployment shape (bwsalmon/agents#504) rather than only configurable
+by hand-editing the systemd unit afterward.
+
+Unlike everything else in this module, a first `terraform apply` with
+this left on will not by itself produce a working deployment: a guest
+image and an OCI image have to exist somewhere for the host to fetch, and
+neither has a project-independent default this module could supply on
+your behalf (`instance.tf`'s own `precondition` refuses to `apply` at all
+without them, rather than leaving you to discover that from a host that
+installs and then can never create a VM). Three one-time steps, in order:
+
+1. **Build and publish the guest image.** Needs root (`debootstrap`,
+   bind-mounts, `mke2fs`) and an SSH keypair -- see step 3 below for the
+   keypair, then:
+
+   ```sh
+   sudo apt-get install -y debootstrap e2fsprogs
+   export OPERATOR_SSH_PUBLIC_KEY="$(cat kontur_key.pub)"
+   export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
+   sudo -E ../../packer/kontur/build.sh
+   ```
+
+   See `packer/kontur/README.md` for what this actually does and why. Set
+   `kontur_image_bucket` to the same bucket name.
+
+2. **Build and push the OCI image** (the `kontur` binary and the pinned
+   cloud-hypervisor release, from `third_party/kontur`'s own Dockerfile --
+   a plain `docker build`/`docker push`, no root needed):
+
+   ```sh
+   export KONTUR_OCI_IMAGE="us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest"
+   ../../packer/kontur/build-oci-image.sh
+   ```
+
+   (Create the Artifact Registry repository yourself first, and
+   authenticate docker to it -- e.g. `gcloud auth configure-docker
+   <region>-docker.pkg.dev` -- this script does neither for you.) Set
+   `kontur_oci_image` to the same reference.
+
+3. **Generate the SSH keypair** step 1 needed the public half of, and
+   push the private half as this deployment's own secret:
+
+   ```sh
+   ssh-keygen -t ed25519 -N '' -f kontur_key   # -> kontur_key, kontur_key.pub
+   GRAIN_KONTUR_SSH_KEY="$(cat kontur_key)" PROJECT=... INSTANCE=... ZONE=... ./push-secrets.sh
+   ```
+
+   Never regenerate this keypair without also rebuilding the guest image
+   (step 1) -- both halves have to match, and nothing checks that they
+   still do.
+
+With all three in place (and `enable_nested_virtualization` on, the
+default, for `/dev/kvm`), `v2/scripts/setup.sh`'s own
+`ensure_kontur_images`/`ensure_kontur_kvm_access`/`seed_kontur_ssh_key`
+fetch the guest image, pull and retag the OCI image, grant `$GRAIN_USER`
+`/dev/kvm` and `docker` group access, and seed the SSH key -- every deploy
+generation, not just the first -- before `write_systemd_units` wires up
+`grain daemon`'s own `-kontur-*` flags. Any one of those three steps
+failing (a bucket that is not readable yet, say) leaves
+`enable_kontur_sandboxes`'s intent unmet *for that run only*: the host
+still comes up dispatching into host directories, with a line in
+`journalctl -u grain-daemon -f`'s own deploy log and `setup.sh`'s own
+readiness report naming which prerequisite was not ready, rather than
+failing the whole install. Re-running `setup.sh` (or waiting for the next
+`config-sync` pass) picks it back up once it is.
+
+Set `enable_kontur_sandboxes = false` to keep a deployment on
+host-directory sandboxing indefinitely -- nothing above is required then,
+and `enable_nested_virtualization` can come off with it if nothing else
+on this host needs `/dev/kvm`.
+
+A freshly created VM's container/pod getting an IP is not the same moment
+as its nested guest actually accepting SSH connections -- confirmed by
+hand, a docker-backed VM's container is reachable well before the guest
+has finished booting to sshd. `orchestrator.KonturSandboxes.resolveEndpoint`
+now waits out that gap too (bwsalmon/agents#504: a plain TCP dial against
+the resolved host:port, polled the same way it already polled for the
+container IP itself), bounded by the same `ReadyTimeout` (2 minutes by
+default) as the IP wait -- so the first dispatched tool call against a
+brand new slot no longer races a guest that is still booting. A guest
+that genuinely takes longer than that to boot (a cold local disk, a busy
+host) still fails clearly, naming the address it could not reach, rather
+than the ambiguous "connection refused" a bare SSH client would have
+given no hint about.
 
 ## What the deployment is allowed to do
 
@@ -417,9 +512,11 @@ lists in sync automatically; an operator who changes one by hand (via
 - **The host runs nested guests by default.**
   `enable_nested_virtualization` is on, so `machine_type` must be a
   family that supports it -- N1, N2, N2D, C2, C3 or M-series, never E2 --
-  and `on_host_maintenance` is `TERMINATE` in consequence. A deployment
-  dispatching only into host directories can turn it off and get MIGRATE,
-  E2, and a daemon that survives host maintenance.
+  and `on_host_maintenance` is `TERMINATE` in consequence. It has to stay
+  on for `enable_kontur_sandboxes` (also on by default -- "Kontur
+  sandboxing" above) to work at all; a deployment dispatching only into
+  host directories can turn both off together and get MIGRATE, E2, and a
+  daemon that survives host maintenance.
 - **The load balancer and managed SSL certificate cost more to run than
   the VM does**, and are most of what this module spends. Set
   `expose_ui_publicly = false` and none of it is created: no load
@@ -503,6 +600,6 @@ files/
   config-sync.sh  watch metadata, run a deploy when it changes
   deploy.sh       translate this deployment's config into a v2/scripts/setup.sh call
 bootstrap-gcp.sh   one-time: state bucket, deployer service account, optional WIF
-push-secrets.sh    post-apply: push the GitHub PAT, the Gemini key, and a minted minter key
+push-secrets.sh    post-apply: push the GitHub PAT, the Gemini key, the kontur SSH key, and a minted minter key
 example.tfvars, backend.hcl.example
 ```

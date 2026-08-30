@@ -105,6 +105,16 @@ if [ -n "${KONTUR_IMAGE_BUCKET:-}" ]; then
   dest="gs://${KONTUR_IMAGE_BUCKET}/kontur-guest/${image_name}-${version}"
   gsutil -m cp "${output_dir}/vmlinuz" "${output_dir}/initrd.img" "${output_dir}/disk.img" "${dest}/"
   echo "published: ${dest}/{vmlinuz,initrd.img,disk.img}"
+
+  # Also publish under a stable "latest" prefix, alongside the versioned
+  # one above -- v2/scripts/setup.sh's own ensure_kontur_images always
+  # fetches this fixed location rather than discovering or hardcoding
+  # today's <git-sha>-<timestamp> version string itself. The versioned
+  # copy above is kept too, so a previous guest image is still there to
+  # roll back to by hand if a new one turns out to be broken.
+  latest="gs://${KONTUR_IMAGE_BUCKET}/kontur-guest/latest"
+  gsutil -m cp "${output_dir}/vmlinuz" "${output_dir}/initrd.img" "${output_dir}/disk.img" "${latest}/"
+  echo "published: ${latest}/{vmlinuz,initrd.img,disk.img} (alias for ${image_name}-${version})"
 else
   echo "KONTUR_IMAGE_BUCKET not set -- not published, image left at ${output_dir}"
 fi

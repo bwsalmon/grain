@@ -3,6 +3,7 @@ package orchestrator_test
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,22 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
+
+// listenTCP opens a real TCP listener at 127.0.0.1:port, closed
+// automatically when t ends -- resolveEndpoint's own guest-sshd wait
+// (bwsalmon/agents#504) dials the resolved host:port for real once the
+// pod/container IP itself resolves, so any test exercising that path past
+// IP resolution needs something real listening there, standing in for
+// the guest's sshd the same way writeFakeSSH stands in for the SSH
+// client's own binary.
+func listenTCP(t *testing.T, port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("listening on 127.0.0.1:%d: %v", port, err)
+	}
+	t.Cleanup(func() { ln.Close() })
+}
 
 // writeFakeKontur installs a shell script named "konturctl" on PATH --
 // the operator-facing binary orchestrator.KonturSandboxes actually execs
@@ -142,7 +159,8 @@ cd %q && exec bash -c "${@: -1}"
 func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 	home := t.TempDir()
 	writeFakeSSH(t, home)
 
@@ -182,7 +200,8 @@ func TestKonturSandboxesRecreateDeletesAndRecreatesTheVM(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
@@ -229,7 +248,8 @@ func TestKonturSandboxesRecreateDeletesAndRecreatesTheVM(t *testing.T) {
 func TestKonturSandboxesRecreateReappliesGitCredentials(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 	home := t.TempDir()
 	writeFakeSSH(t, home)
 
@@ -270,7 +290,8 @@ func TestKonturSandboxesDockerBackendPassesBackendFlagAndResolvesViaDockerInspec
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
 	dockerLog := filepath.Join(t.TempDir(), "docker-argv.log")
-	writeFakeDocker(t, dockerLog, "172.17.0.9")
+	writeFakeDocker(t, dockerLog, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
@@ -307,7 +328,8 @@ func TestKonturSandboxesCreatesVMOnFirstUseAndReusesAfter(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
@@ -358,7 +380,8 @@ func TestKonturSandboxesReusesAnAlreadyExistingVMWithoutCreating(t *testing.T) {
 	}
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix: "grain-test-",
@@ -381,7 +404,8 @@ func TestKonturSandboxesReusesAnAlreadyExistingVMWithoutCreating(t *testing.T) {
 func TestKonturSandboxesWaitsForVMToBecomeReady(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 3, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 3, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
@@ -401,7 +425,7 @@ func TestKonturSandboxesWaitsForVMToBecomeReady(t *testing.T) {
 func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 1000, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 1000, "127.0.0.1")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
@@ -422,7 +446,8 @@ func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "10.100.5.7")
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain",

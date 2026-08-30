@@ -8,17 +8,25 @@
 #
 # Unlike terraform/gcp/ (v1: a controller running nested libvirt guests,
 # meant to be forked as a generic, any-org deployment via templates/gcp/)
-# this module is deliberately narrower: v2 has no host adapter yet
-# (v2/README.md, "What this does not have yet") and its daemon already
-# defaults to plain host directories for sandboxing (no nested
-# virtualization needed at all), so there is no controller/sandbox fleet
-# here to generalize over -- just the one VM v2/scripts/setup.sh already
-# knows how to install and update.
+# this module is still just the one VM v2/scripts/setup.sh already knows
+# how to install and update -- no separate controller, no fleet of
+# sandbox VMs Terraform itself creates or tears down. But it is no longer
+# narrower in the way it once was: v2's daemon no longer only dispatches
+# into plain host directories on that one VM. enable_kontur_sandboxes (on
+# by default, bwsalmon/agents#504) opts into orchestrator.KonturSandboxes
+# instead -- one real bwsalmon/kontur-managed VM per slot, nested inside
+# this same host via /dev/kvm (enable_nested_virtualization, also on by
+# default) -- so v2/README.md's own "no host adapter yet" is about there
+# being no separate fleet-management layer, not about there being no VM
+# isolation at all any more. See variables.tf's own "kontur" section and
+# this module's README, "Kontur sandboxing", for what a first apply with
+# that on needs beyond `terraform apply` itself.
 #
 # Nothing secret lives here, the same split terraform/gcp/variables.tf
-# documents: the GitHub token, and (if minted) the GCP key-minter's own
-# key, are never Terraform inputs -- see push-secrets.sh and instance.tf's
-# own lifecycle.ignore_changes for how they reach the VM instead.
+# documents: the GitHub token, the GCP key-minter's own key (if minted),
+# and the kontur SSH private key (if enable_kontur_sandboxes) are never
+# Terraform inputs -- see push-secrets.sh and instance.tf's own
+# lifecycle.ignore_changes for how they reach the VM instead.
 
 # ---------------------------------------------------------------- project --
 
@@ -465,6 +473,124 @@ variable "poll_interval" {
   type        = string
   description = "How often the daemon runs a reconcile cycle."
   default     = "30s"
+}
+
+# --------------------------------------------------------------- kontur ---
+#
+# Wires the daemon's -kontur-* flags (v2/cmd/grain/daemon.go) through so
+# this deployment dispatches onto real bwsalmon/kontur-managed VMs
+# (orchestrator.KonturSandboxes) instead of plain host directories
+# (orchestrator.HostSandboxes) -- see packer/kontur/README.md for the
+# guest image, third_party/kontur/VENDORED.md for the vendored source,
+# and this module's own README, "Kontur sandboxing", for the one-time
+# build-and-publish step and SSH keypair that make enable_kontur_sandboxes
+# (on by default below) actually work rather than fail its own
+# precondition in instance.tf.
+
+variable "enable_kontur_sandboxes" {
+  type        = bool
+  description = <<-EOT
+    Dispatch onto real bwsalmon/kontur-managed VMs, one per slot, over SSH
+    (orchestrator.KonturSandboxes) instead of plain host directories
+    (orchestrator.HostSandboxes) -- bwsalmon/agents#504's own "flip the
+    default", now that build.sh/setup.sh actually wire the rest of this
+    section through.
+
+    On by default, but instance.tf's own precondition refuses to apply at
+    all unless kontur_image_bucket and kontur_oci_image are also set: a
+    guest image and an OCI image have to actually exist somewhere for a
+    freshly created host to fetch, and neither has a project-independent
+    default this module could supply on your behalf. Build and publish
+    them once (see this module's own README, "Kontur sandboxing") before
+    a first apply with this left on, or set it false to keep dispatching
+    into host directories the way every deployment before bwsalmon/agents#504
+    did.
+
+    Needs enable_nested_virtualization too (on by default, and checked by
+    the same precondition) -- a kontur VM is a nested cloud-hypervisor
+    guest, and without /dev/kvm on the host it cannot boot at all.
+  EOT
+  default     = true
+}
+
+variable "kontur_image_bucket" {
+  type        = string
+  description = <<-EOT
+    GCS bucket (name only, no gs:// prefix) that packer/kontur/build.sh's
+    own KONTUR_IMAGE_BUCKET publishes the guest image to -- vmlinuz,
+    initrd.img and disk.img, under both a versioned prefix and a "latest"
+    alias setup.sh always fetches (see build.sh's own comment on why the
+    alias exists). Required when enable_kontur_sandboxes is true; this
+    module does not create the bucket for you, so create one by hand
+    (`gsutil mb`) and grant the host service account read access to it
+    yourself, or via a `google_storage_bucket_iam_member` alongside this
+    module referencing google_service_account.host.email -- see iam.tf's
+    own host_reads_kontur_images for exactly that grant, conditioned on
+    this variable being non-empty.
+  EOT
+  default     = ""
+}
+
+variable "kontur_oci_image" {
+  type        = string
+  description = <<-EOT
+    Full reference (e.g. "us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest")
+    of the pre-built bwsalmon/kontur OCI image (third_party/kontur's own
+    Dockerfile) setup.sh pulls and retags as konturctl's own default
+    "localhost:5000/kontur:latest" -- see that script's own
+    ensure_kontur_images for why a real registry at :5000 is never
+    actually needed for this. Required when enable_kontur_sandboxes is
+    true; build and push it with a plain `docker build`/`docker push`
+    against an Artifact Registry repository you create once (this module
+    grants the host service account project-wide roles/artifactregistry.reader
+    when this is set -- see iam.tf's host_reads_kontur_registry -- but does
+    not create the repository itself).
+  EOT
+  default     = ""
+}
+
+variable "kontur_vm_name_prefix" {
+  type        = string
+  description = <<-EOT
+    Prefix for each slot's kontur VM name (orchestrator.KonturConfig.NamePrefix)
+    -- kept short by default (7 bytes) because the docker backend's netshim
+    names each VM's tap device "tap-"+prefix+slot, and Linux caps interface
+    names at 15 bytes; see that field's own doc comment for the exact
+    arithmetic. Only takes effect when enable_kontur_sandboxes is true.
+  EOT
+  default     = "kontur-"
+}
+
+variable "kontur_ssh_user" {
+  type        = string
+  description = "Username KonturSandboxes authenticates to each VM as -- matches packer/kontur/provision.sh's own baked-in account. Only used when enable_kontur_sandboxes is true."
+  default     = "debian"
+}
+
+variable "kontur_workspace" {
+  type        = string
+  description = "Working directory run_command/read_file/edit_file/write_file operate in on each kontur VM -- matches kontur_ssh_user's own home directory. Only used when enable_kontur_sandboxes is true."
+  default     = "/home/debian"
+}
+
+variable "kontur_base_ip" {
+  type        = string
+  description = <<-EOT
+    The "-ip" slot "1"'s kontur VM gets on netshim's bridge subnet; every
+    later slot's is the next IPv4 address after it
+    (orchestrator.KonturConfig.BaseIP). 169.254.100.10 is inside netshim's
+    own default bridge CIDR (169.254.100.1/24, internal/netshim/config.go's
+    defaultBridgeCIDR) with room after it for slots is safely below
+    var.slots' own realistic range. Only used when enable_kontur_sandboxes
+    is true.
+  EOT
+  default     = "169.254.100.10"
+}
+
+variable "kontur_base_port" {
+  type        = number
+  description = "The \"-port\" slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own number minus one (orchestrator.KonturConfig.BasePort). Only used when enable_kontur_sandboxes is true."
+  default     = 12000
 }
 
 # --------------------------------------------------------------------- dns --

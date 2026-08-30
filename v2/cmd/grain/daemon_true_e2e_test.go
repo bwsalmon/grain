@@ -174,7 +174,8 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFakeKonturBinary(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictlBinary(t, "10.100.5.7")
+	writeFakeCrictlBinary(t, "127.0.0.1")
+	listenTCP(t, 30080)
 	installFakeSSHBinaryWithHome(t, vmHome)
 
 	uiAddr := freeTCPAddr(t)

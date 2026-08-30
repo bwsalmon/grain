@@ -1,30 +1,78 @@
 # Guest disk image
 
-The `guest-image` stage in the top-level `Dockerfile` builds the disk image
-baked into the final `kontur` image at `/var/lib/kontur/guest/disk.img`,
-used automatically when a VM container doesn't set `CHV_DISK_IMAGE` (see
-`internal/config`). It's a minimal Debian rootfs (`debootstrap
---variant=minbase`) with `openssh-server`, `systemd-sysv` (for
-`/sbin/init`), `iproute2` and `acpid`, packed directly into an ext4
-filesystem image with `mke2fs -d` -- no loop-mount or `chroot` needed on
-the build host beyond what `debootstrap`/`mke2fs` already do, so `docker
-build` doesn't need extra privileges for this stage.
+The `guest-image` stage in the top-level `Dockerfile` (packing) plus one
+of the two `guest-rootfs-debian`/`guest-rootfs-alpine` stages (building
+the rootfs `guest-image` packs) build the disk image baked into the
+final `kontur` image at `/var/lib/kontur/guest/disk.img`, used
+automatically when a VM container doesn't set `CHV_DISK_IMAGE` (see
+`internal/config`). `GUEST_DISTRO` (default `debian`) picks which of the
+two rootfs stages runs:
+
+- `debian` (default): a minimal Debian rootfs (`debootstrap
+  --variant=minbase`) with `openssh-server`, `systemd-sysv` (for
+  `/sbin/init`), `iproute2` and `acpid`. `GUEST_SUITE` (default
+  `bookworm`) picks the Debian suite.
+- `alpine`: a minimal Alpine rootfs (`apk add --root`, the same technique
+  Alpine's own official base image is built with) with `openssh-server`,
+  `alpine-base` (for `busybox`/`openrc`, standing in for `systemd-sysv`),
+  `iproute2` and `acpid`. `GUEST_ALPINE_VERSION` (default `3.20`) picks
+  the Alpine version.
+
+Both variants pack their rootfs directly into an ext4 filesystem image
+with `mke2fs -d` -- no loop-mount or `chroot` needed on the build host
+beyond what `debootstrap`/`apk`/`mke2fs` already do, so `docker build`
+doesn't need extra privileges for either.
 
 This is a reference/demo guest, not a production one: any real workload
 should bring its own `CHV_DISK_IMAGE` (see the top-level README's
 "Configuration" table and `deploy/k8s/pod-example.yaml`) rather than
 relying on what's baked in here.
 
-## What's in `overlay/`
+## What's in the overlays
 
 Copied verbatim into the rootfs before it's packed into `disk.img`:
+`overlay-common/` on both variants, then whichever of
+`overlay-debian/`/`overlay-alpine/` matches `GUEST_DISTRO`.
 
 | File | Purpose |
 |---|---|
-| `etc/ssh/sshd_config.d/10-console.conf` | Forces every SSH session through the wrapper below and disables password auth (root has no password at all, only whatever key `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
-| `usr/local/libexec/kontur-ssh-console-wrap` | Runs the session under `script`, which mirrors its output to `/dev/console` (ttyS0) in addition to the real SSH client. |
-| `etc/systemd/system/kontur-ssh-host-keys.service` | Regenerates SSH host keys on first boot (`ssh-keygen -A`, `Before=ssh.service`), since the Dockerfile deletes whatever `openssh-server`'s postinst generated at build time -- otherwise every VM booted from this image would share the same host keys. |
-| `etc/acpi/events/powerbtn`, `etc/acpi/powerbtn.sh` | `acpid` event/action pair that runs `systemctl poweroff` on an ACPI power-button press -- see "Graceful shutdown" below. |
+| `overlay-common/etc/ssh/sshd_config.d/10-console.conf` | Forces every SSH session through the wrapper below and disables password auth (root has no password at all, only whatever key `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
+| `overlay-common/usr/local/libexec/kontur-ssh-console-wrap` | Runs the session under `script`, which mirrors its output to `/dev/console` (ttyS0) in addition to the real SSH client. |
+| `overlay-common/etc/acpi/events/powerbtn` | `acpid` event config matching the ACPI power button, pointing at `/etc/acpi/powerbtn.sh` -- see "Graceful shutdown" below for why that script's own contents differ per variant. |
+| `overlay-debian/etc/acpi/powerbtn.sh` | Runs `systemctl poweroff`. |
+| `overlay-debian/etc/systemd/system/kontur-ssh-host-keys.service` | Regenerates SSH host keys on first boot (`ssh-keygen -A`, `Before=ssh.service`), since the Dockerfile deletes whatever `openssh-server`'s postinst generated at build time -- otherwise every VM booted from this image would share the same host keys. |
+| `overlay-alpine/etc/acpi/powerbtn.sh` | Runs `poweroff` (busybox's applet, which signals `/sbin/init` rather than powering off directly -- see "Graceful shutdown"). |
+
+The Alpine variant has no equivalent of `kontur-ssh-host-keys.service`:
+unlike Debian's, Alpine's `openssh-server` package doesn't generate host
+keys at install time at all (nothing to delete), and its own `sshd`
+OpenRC init script (`checkconfig` -> `generate_host_keys`) already runs
+`ssh-keygen -A` on every start, filling in whatever's missing -- so the
+same first-boot regeneration Debian needs a dedicated unit for comes for
+free on Alpine.
+
+## Enabling services
+
+Debian's `systemd-sysv` and Alpine's `busybox`/`openrc` both need
+services enabled by hand in the Dockerfile rather than through their
+normal tooling (`systemctl enable`, `rc-update add`), since neither has
+a running service manager during the build to ask -- each is just a
+symlink, written directly:
+
+- Debian: `kontur-ssh-host-keys.service` is symlinked into
+  `multi-user.target.wants/`. `acpid.socket`/`acpid.path` don't need the
+  same treatment -- `acpid`'s own postinst already enables them via
+  `deb-systemd-helper`, which (like `systemctl enable`) just writes
+  symlinks and doesn't need a running systemd to do it.
+- Alpine: nothing is enabled automatically by `apk add` the way Debian's
+  postinst scripts do, so every service this guest needs is symlinked by
+  hand from `/etc/init.d/<service>` into a runlevel directory --
+  `sysinit`/`boot` for the baseline a busybox-init/OpenRC system needs to
+  reach a usable state at all (device nodes, `/proc`/`/sys`, hostname,
+  clearing `/tmp`, syslog -- Debian's systemd does the equivalent
+  internally, with nothing to enable by hand for it), and `default` for
+  `sshd`/`acpid` themselves. See the `guest-rootfs-alpine` stage in the
+  top-level `Dockerfile` for the exact list.
 
 ## Why SSH output goes to the console
 
@@ -47,9 +95,11 @@ key at build time to allow key-based root login:
 docker build --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat ~/.ssh/id_ed25519.pub)" -t kontur .
 ```
 
+This works the same way on both `GUEST_DISTRO` variants.
+
 ## Running a custom setup script
 
-To customize the guest beyond what the overlay above does -- installing
+To customize the guest beyond what the overlays above do -- installing
 extra packages, dropping in config files, enabling services, etc -- pass
 a shell script's contents at build time:
 
@@ -57,18 +107,19 @@ a shell script's contents at build time:
 docker build --build-arg GUEST_SETUP_SCRIPT="$(cat my-setup.sh)" -t kontur .
 ```
 
-The script runs via `chroot` against the rootfs after the overlay is
-applied but before it's packed into `disk.img`, the same mechanism
-`debootstrap` itself already uses (non-privileged in the sense the top of
-this file describes: no extra `docker build` privileges are needed).
-Network access works fine (`chroot` doesn't create a new network
-namespace, so it's the same connectivity the rest of the build already
-has), so `apt-get install` and the like just work. What the script
-*doesn't* get is `/proc`/`/sys` (nothing mounts them here, so anything
-that reads from them will find those directories empty) or a running
-service manager -- enable units by symlinking into `*.target.wants/` by
-hand instead, the same way `kontur-ssh-host-keys.service` above is
-enabled.
+The script runs via `chroot` against the rootfs (from within whichever of
+`guest-rootfs-debian`/`guest-rootfs-alpine` `GUEST_DISTRO` selected) after
+the overlays are applied but before it's packed into `disk.img`, the same
+mechanism `debootstrap`/`apk` themselves already use to configure
+packages (non-privileged in the sense the top of this file describes: no
+extra `docker build` privileges are needed). Network access works fine
+(`chroot` doesn't create a new network namespace, so it's the same
+connectivity the rest of the build already has), so `apt-get install` /
+`apk add` and the like just work. What the script *doesn't* get is
+`/proc`/`/sys` (nothing mounts them here, so anything that reads from
+them will find those directories empty) or a running service manager --
+enable units/services by hand instead, the same way described in
+"Enabling services" above.
 
 ## Graceful shutdown
 
@@ -78,13 +129,23 @@ waits for the guest to power off on its own before forcing it. Reacting
 to that button press needs *something* running in the guest to catch it
 -- normally `systemd-logind` via `dbus`, but pulling those in just for a
 power button is significant extra weight for a minimal image, so this
-guest uses `acpid` instead (a few hundred KB, no `dbus` dependency).
-`overlay/etc/acpi/events/powerbtn` and `overlay/etc/acpi/powerbtn.sh`
-are the event/action pair acpid needs to turn that button press into
-`systemctl poweroff`; `acpid.socket`/`acpid.path` are enabled
-automatically by `acpid`'s own postinst during `debootstrap` (unlike
-`kontur-ssh-host-keys.service` above, which isn't a packaged unit and so
-needs enabling by hand in the Dockerfile).
+guest uses `acpid` instead (a few hundred KB, no `dbus` dependency) on
+both variants. `overlay-common/etc/acpi/events/powerbtn` is the event
+config acpid needs to match the button press (same config format on
+both variants -- Debian's `acpid` and Alpine's busybox `acpid` applet are
+config-compatible), pointing at `/etc/acpi/powerbtn.sh`:
+
+- Debian: that script runs `systemctl poweroff`. `acpid.socket`/
+  `acpid.path` are enabled automatically, as described in "Enabling
+  services" above.
+- Alpine: that script runs `poweroff` (busybox's applet). With busybox as
+  PID 1 (`/sbin/init -> /bin/busybox`), `poweroff` doesn't call
+  `reboot(2)` directly -- it signals init, which (per `/etc/inittab`'s
+  `::shutdown:/sbin/openrc shutdown` line) runs the OpenRC `shutdown`
+  runlevel, the same stop-services/unmount/sync sequence `systemctl
+  poweroff` triggers on Debian. `acpid` itself is enabled by hand, as
+  described in "Enabling services" above (Alpine has no
+  `deb-systemd-helper` equivalent that would do it automatically).
 
 ## Networking
 
@@ -93,4 +154,5 @@ built-in `ip=` boot-time autoconfiguration (see the top-level README's
 `CHV_CMDLINE` default and `deploy/k8s/pod-example.yaml`), same as every
 other guest example in this repo, so no extra guest-side networking setup
 was needed for SSH to be reachable once a caller has configured
-`CHV_CMDLINE`/`netshim` port forwarding.
+`CHV_CMDLINE`/`netshim` port forwarding. This is also why neither
+variant enables an OpenRC/systemd `networking` service.

@@ -128,6 +128,15 @@ MAX_AGENT_TURNS="$(cfg max_agent_turns)"
 GCP_PROJECT="$(cfg gcp_project)"
 GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
 
+ENABLE_KONTUR_SANDBOXES="$(cfg enable_kontur_sandboxes)"
+KONTUR_IMAGE_BUCKET="$(cfg kontur_image_bucket)"
+KONTUR_OCI_IMAGE="$(cfg kontur_oci_image)"
+KONTUR_VM_NAME_PREFIX="$(cfg kontur_vm_name_prefix)"
+KONTUR_SSH_USER="$(cfg kontur_ssh_user)"
+KONTUR_WORKSPACE="$(cfg kontur_workspace)"
+KONTUR_BASE_IP="$(cfg kontur_base_ip)"
+KONTUR_BASE_PORT="$(cfg kontur_base_port)"
+
 # --- clone (once) or leave the update to setup.sh's own sync_repo -----
 
 if [ ! -d "$SRC_DIR/.git" ]; then
@@ -157,6 +166,17 @@ if [ -n "$minter_key_json" ]; then
   printf '%s' "$minter_key_json" > "$MINTER_KEY_FILE"
 fi
 
+KONTUR_SSH_KEY_FILE=""
+kontur_ssh_key="$(md_optional instance/attributes/grain-kontur-ssh-key)"
+if [ -n "$kontur_ssh_key" ]; then
+  KONTUR_SSH_KEY_FILE="$SECRET_DIR/kontur-ssh-key"
+  umask 077
+  printf '%s' "$kontur_ssh_key" > "$KONTUR_SSH_KEY_FILE"
+fi
+if [ "$ENABLE_KONTUR_SANDBOXES" = "True" ] && [ -z "$KONTUR_SSH_KEY_FILE" ]; then
+  log "enable_kontur_sandboxes is on but no grain-kontur-ssh-key is in instance metadata yet -- setup.sh will leave kontur sandboxing off until push-secrets.sh has pushed one (see terraform/gcp-v2 README, \"Kontur sandboxing\")"
+fi
+
 if [ -z "$GITHUB_TOKEN" ] && [ -z "$GITHUB_APP_ID" ]; then
   log "no grain-github-token or grain-github-app-id in instance metadata yet -- deploying with no GitHub credential; run push-secrets.sh once one is ready"
 fi
@@ -183,6 +203,8 @@ log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
     "| github app: $([ -n "$GITHUB_APP_ID" ] && echo present || echo absent)" \
     "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
     "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
+log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_image_bucket=${KONTUR_IMAGE_BUCKET:-<empty>} kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}" \
+    "| kontur ssh key: $([ -n "$KONTUR_SSH_KEY_FILE" ] && echo present || echo MISSING)"
 
 # --- run v2/scripts/setup.sh, which does everything else --------------
 #
@@ -221,4 +243,13 @@ env \
   GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="$MINTER_KEY_FILE" \
   GRAIN_TARGET_REPO="$DEFAULT_TARGET_REPO" \
   GRAIN_TARGET_REPOS="$TARGET_REPOS" \
+  GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "True" ] && echo 1 || echo 0)" \
+  GRAIN_KONTUR_IMAGE_BUCKET="$KONTUR_IMAGE_BUCKET" \
+  GRAIN_KONTUR_OCI_IMAGE="$KONTUR_OCI_IMAGE" \
+  GRAIN_KONTUR_VM_NAME_PREFIX="$KONTUR_VM_NAME_PREFIX" \
+  GRAIN_KONTUR_SSH_USER="$KONTUR_SSH_USER" \
+  GRAIN_KONTUR_SSH_KEY_FILE="$KONTUR_SSH_KEY_FILE" \
+  GRAIN_KONTUR_WORKSPACE="$KONTUR_WORKSPACE" \
+  GRAIN_KONTUR_BASE_IP="$KONTUR_BASE_IP" \
+  GRAIN_KONTUR_BASE_PORT="$KONTUR_BASE_PORT" \
   "$SRC_DIR/v2/scripts/setup.sh"

@@ -125,6 +125,34 @@ GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
+# See "Kontur sandboxing" below (ensure_kontur_images/ensure_kontur_kvm_access)
+# and terraform/gcp-v2/README.md's own section of the same name for the
+# one-time build-and-publish step that makes GRAIN_KONTUR_ENABLE=1 (off
+# by default here -- terraform/gcp-v2's own enable_kontur_sandboxes
+# variable is what actually turns this on for that deployment shape)
+# actually able to create a VM rather than fail loudly at this script's
+# own hands. GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE name where
+# packer/kontur/build.sh and third_party/kontur's own Dockerfile publish
+# to; GRAIN_KONTUR_SSH_KEY_FILE is the private half of the keypair whose
+# public half is baked into the guest image (packer/kontur/build.sh's own
+# OPERATOR_SSH_PUBLIC_KEY).
+GRAIN_KONTUR_ENABLE="${GRAIN_KONTUR_ENABLE:-0}"
+# Remembers what was actually asked for, since ensure_kontur_images/
+# ensure_kontur_kvm_access/seed_kontur_ssh_key overwrite GRAIN_KONTUR_ENABLE
+# itself back to 0 on a failure partway through -- report_readiness uses
+# this to tell "kontur was never requested" apart from "kontur was
+# requested but a prerequisite wasn't ready this run".
+GRAIN_KONTUR_REQUESTED="$GRAIN_KONTUR_ENABLE"
+GRAIN_KONTUR_IMAGE_BUCKET="${GRAIN_KONTUR_IMAGE_BUCKET:-}"
+GRAIN_KONTUR_OCI_IMAGE="${GRAIN_KONTUR_OCI_IMAGE:-}"
+GRAIN_KONTUR_IMAGES_HOSTPATH="${GRAIN_KONTUR_IMAGES_HOSTPATH:-/var/lib/vm-images}"
+GRAIN_KONTUR_VM_NAME_PREFIX="${GRAIN_KONTUR_VM_NAME_PREFIX:-kontur-}"
+GRAIN_KONTUR_SSH_USER="${GRAIN_KONTUR_SSH_USER:-debian}"
+GRAIN_KONTUR_SSH_KEY_FILE="${GRAIN_KONTUR_SSH_KEY_FILE:-}"
+GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
+GRAIN_KONTUR_BASE_IP="${GRAIN_KONTUR_BASE_IP:-169.254.100.10}"
+GRAIN_KONTUR_BASE_PORT="${GRAIN_KONTUR_BASE_PORT:-12000}"
+
 # On by default -- the common case is a single, directly-managed host
 # with no rollout mechanism of its own, where the UI's Upgrade button
 # (bwsalmon/agents#396) is the only way to ship a new build. Set to 0 by
@@ -211,6 +239,38 @@ Recognized variables:
                              rollout mechanism (e.g. terraform/gcp-v2's
                              config-sync.sh/deploy.sh), so the two cannot
                              race or drift out of sync with each other
+
+  GRAIN_KONTUR_ENABLE        1 to dispatch onto real bwsalmon/kontur-managed
+                             VMs over SSH (orchestrator.KonturSandboxes)
+                             instead of host directories (default: 0). Needs
+                             a real guest image and OCI image already
+                             published -- see packer/kontur/README.md and
+                             this repo's terraform/gcp-v2/README.md, "Kontur
+                             sandboxing" -- and /dev/kvm on this host
+                             (nested virtualization). Left off (with a
+                             logged reason) if any prerequisite below is
+                             missing, rather than failing the whole run.
+  GRAIN_KONTUR_IMAGE_BUCKET  GCS bucket packer/kontur/build.sh's own
+                             KONTUR_IMAGE_BUCKET published the guest image
+                             to; this script fetches its "latest" alias
+  GRAIN_KONTUR_OCI_IMAGE     full reference of the pre-built kontur OCI image
+                             (third_party/kontur's own Dockerfile), pulled
+                             and retagged to konturctl's own default image
+  GRAIN_KONTUR_IMAGES_HOSTPATH  where the fetched guest image lands, bind-
+                             mounted read-only into each VM's container
+                             (default: /var/lib/vm-images, konturctl's own default)
+  GRAIN_KONTUR_VM_NAME_PREFIX  prefix for each slot's kontur VM name (default: kontur-)
+  GRAIN_KONTUR_SSH_USER      username to SSH into each kontur VM as (default: debian)
+  GRAIN_KONTUR_SSH_KEY_FILE  path to the private half of the SSH keypair whose
+                             public half is baked into the guest image; seeded
+                             once into $GRAIN_DATA_DIR/secrets/kontur-ssh-key
+  GRAIN_KONTUR_WORKSPACE     working directory tools operate in on each kontur
+                             VM (default: /home/debian, GRAIN_KONTUR_SSH_USER's own home)
+  GRAIN_KONTUR_BASE_IP       "-ip" slot 1's kontur VM gets; every later slot's
+                             is the next address after it (default: 169.254.100.10)
+  GRAIN_KONTUR_BASE_PORT     "-port" slot 1's kontur VM forwards; every later
+                             slot's is this plus its own number minus one
+                             (default: 12000)
 EOF
 }
 
@@ -443,21 +503,163 @@ SUDOERS
 # a previous run's build_and_install (root, via sudo) would otherwise
 # leave $GRAIN_SRC_DIR's freshly fetched/built files root-owned again on
 # every single upgrade.
+# grant_docker_group adds $GRAIN_USER to the docker group if it exists --
+# shared by ensure_self_upgrade (make container-build needs it with no
+# sudo of its own) and ensure_kontur_kvm_access (the docker kontur backend
+# needs it to run each slot's VM container), so either feature alone is
+# enough to grant it rather than each needing its own copy of the
+# getent-guard idiom.
+grant_docker_group() {
+  if getent group docker >/dev/null 2>&1; then
+    usermod -aG docker "$GRAIN_USER"
+  fi
+}
+
 ensure_self_upgrade() {
   if [ "$GRAIN_ENABLE_UI_UPGRADE" != "1" ]; then
     log "GRAIN_ENABLE_UI_UPGRADE=$GRAIN_ENABLE_UI_UPGRADE -- skipping the UI Upgrade button's self-upgrade grant"
     return
   fi
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_SRC_DIR"
-  if getent group docker >/dev/null 2>&1; then
-    usermod -aG docker "$GRAIN_USER"
-  fi
+  grant_docker_group
 
   cat > /etc/sudoers.d/grain-daemon-upgrade <<SUDOERS
 $GRAIN_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-daemon.service
 SUDOERS
   chmod 0440 /etc/sudoers.d/grain-daemon-upgrade
   visudo -cf /etc/sudoers.d/grain-daemon-upgrade
+}
+
+# --- kontur sandboxing ---------------------------------------------------
+#
+# Everything below is skipped, with a logged reason, unless
+# GRAIN_KONTUR_ENABLE=1 -- turning it off after a prior successful run
+# leaves whatever it already did in place (a fetched guest image, a
+# pulled OCI image, group memberships); it just stops write_systemd_units
+# from wiring up the -kontur-* flags that would use them. A failure in
+# any step below also flips GRAIN_KONTUR_ENABLE back to 0 for the rest of
+# this run, the same "converge with what's ready, don't fail the whole
+# install" choice mint_gemini_operating_key already makes for a missing
+# Gemini key: a deployment whose kontur image is not ready yet still gets
+# a working host-directory-backed daemon out of this run rather than
+# nothing at all.
+
+# kontur_gcp_access_token fetches a short-lived OAuth2 access token for
+# this host's own attached service account from the metadata server --
+# enough to read the guest image out of GCS (gcs_fetch) and to
+# authenticate docker to Artifact Registry (ensure_kontur_images) without
+# installing the whole gcloud SDK just for those two things. iam.tf's own
+# host_reads_kontur_images/host_reads_kontur_registry are what make the
+# token itself actually able to do either.
+kontur_gcp_access_token() {
+  curl -fsS -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
+}
+
+# gcs_fetch downloads gs://$1/$2 to file $3 using kontur_gcp_access_token,
+# the GCS JSON API's own object-download endpoint (the "alt=media" query
+# parameter) rather than gsutil -- see kontur_gcp_access_token's own
+# comment on why.
+gcs_fetch() {
+  local bucket="$1" object="$2" dest="$3" encoded_object
+  encoded_object="$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
+  curl -fsS -H "Authorization: Bearer $(kontur_gcp_access_token)" \
+    "https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encoded_object}?alt=media" \
+    -o "$dest"
+}
+
+# ensure_kontur_images fetches the guest image build.sh published
+# (packer/kontur/build.sh's own "latest" alias -- see that script's own
+# comment on why one exists) and pulls+retags the OCI image
+# (third_party/kontur's own Dockerfile) -- both needed before
+# write_systemd_units can wire up -kontur-create-arg with anything real
+# for `konturctl vm create` to actually find. Never installs or builds
+# either itself: that is packer/kontur/build.sh and a plain `docker
+# build`/`docker push` against third_party/kontur, run once, separately,
+# ahead of any deploy (terraform/gcp-v2/README.md, "Kontur sandboxing") --
+# this only ever fetches what that step already published.
+ensure_kontur_images() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+  if [ -z "$GRAIN_KONTUR_IMAGE_BUCKET" ] || [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
+    log "GRAIN_KONTUR_ENABLE=1 but GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE are not both set -- leaving kontur sandboxing off this run"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+
+  log "Fetching kontur guest image from gs://${GRAIN_KONTUR_IMAGE_BUCKET}/kontur-guest/latest"
+  local img_dir="${GRAIN_KONTUR_IMAGES_HOSTPATH}/current" tmp_dir f
+  tmp_dir="$(mktemp -d)"
+  for f in vmlinuz initrd.img disk.img; do
+    if ! gcs_fetch "$GRAIN_KONTUR_IMAGE_BUCKET" "kontur-guest/latest/$f" "$tmp_dir/$f"; then
+      log "  could not fetch kontur-guest/latest/$f from gs://${GRAIN_KONTUR_IMAGE_BUCKET} -- leaving kontur sandboxing off this run"
+      rm -rf "$tmp_dir"
+      GRAIN_KONTUR_ENABLE=0
+      return
+    fi
+  done
+  install -d -m0755 "$img_dir"
+  mv -f "$tmp_dir"/vmlinuz "$tmp_dir"/initrd.img "$tmp_dir"/disk.img "$img_dir/"
+  rmdir "$tmp_dir"
+
+  log "Pulling kontur OCI image $GRAIN_KONTUR_OCI_IMAGE"
+  local registry_host="${GRAIN_KONTUR_OCI_IMAGE%%/*}"
+  if ! docker login -u oauth2accesstoken -p "$(kontur_gcp_access_token)" "https://${registry_host}" >/dev/null 2>&1; then
+    log "  could not authenticate docker to ${registry_host} -- leaving kontur sandboxing off this run"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+  if ! docker pull "$GRAIN_KONTUR_OCI_IMAGE"; then
+    log "  could not pull $GRAIN_KONTUR_OCI_IMAGE -- leaving kontur sandboxing off this run"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+  # konturctl's own default -kontur-image is localhost:5000/kontur:latest
+  # (bwsalmon/kontur's own internal/staticpod/spec.go) -- retagging here
+  # means write_systemd_units needs no -kontur-create-arg=-kontur-image of
+  # its own, and no registry actually has to run at :5000 for it: docker
+  # only resolves a tag's registry host when it has to push or pull that
+  # exact tag, never for a local retag of an image already present.
+  docker tag "$GRAIN_KONTUR_OCI_IMAGE" localhost:5000/kontur:latest
+}
+
+# ensure_kontur_kvm_access grants $GRAIN_USER /dev/kvm (for the nested
+# cloud-hypervisor guest itself) and the docker group (for the docker
+# kontur backend's own `docker run`) -- the same grant
+# ensure_self_upgrade gives for an unrelated reason, and safe to grant
+# twice: usermod -aG only ever adds.
+ensure_kontur_kvm_access() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+  if [ ! -e /dev/kvm ]; then
+    log "GRAIN_KONTUR_ENABLE=1 but /dev/kvm does not exist on this host -- terraform/gcp-v2's enable_nested_virtualization must be on and machine_type must support it (see that variable's own doc); leaving kontur sandboxing off this run"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+  if getent group kvm >/dev/null 2>&1; then
+    usermod -aG kvm "$GRAIN_USER"
+  fi
+  grant_docker_group
+}
+
+# seed_kontur_ssh_key writes GRAIN_KONTUR_SSH_KEY_FILE's contents to
+# $GRAIN_DATA_DIR/secrets/kontur-ssh-key, the same never-overwrite
+# contract seed_secret gives every other plain-file secret -- reused
+# directly here since an SSH private key is just another multi-line
+# value, nothing seed_secret's own printf '%s' needs to treat specially.
+seed_kontur_ssh_key() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+  if [ -z "$GRAIN_KONTUR_SSH_KEY_FILE" ] || [ ! -s "$GRAIN_KONTUR_SSH_KEY_FILE" ]; then
+    log "GRAIN_KONTUR_ENABLE=1 but GRAIN_KONTUR_SSH_KEY_FILE is not set (or empty) -- leaving kontur sandboxing off this run; see push-secrets.sh's own GRAIN_KONTUR_SSH_KEY"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+  seed_secret "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" "$(cat "$GRAIN_KONTUR_SSH_KEY_FILE")"
 }
 
 # --- 6. data directory and secrets --------------------------------------
@@ -564,6 +766,8 @@ setup_data_dir() {
   seed_gcp_minter_key
 
   mint_gemini_operating_key
+
+  seed_kontur_ssh_key
 
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ]; then
     log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN, or all three of"
@@ -775,6 +979,39 @@ write_systemd_units() {
   [ -n "$GRAIN_TARGET_REPO" ] && daemon_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
   [ -n "$GRAIN_TARGET_REPOS" ] && daemon_args+=(-target-repos "$GRAIN_TARGET_REPOS")
 
+  # -kontur-vm-name-prefix is what actually selects orchestrator.
+  # KonturSandboxes over HostSandboxes (cmd/grain/daemon.go's run()) --
+  # only ever passed once ensure_kontur_images/ensure_kontur_kvm_access/
+  # seed_kontur_ssh_key have all actually succeeded this run (each resets
+  # GRAIN_KONTUR_ENABLE to 0 on its own failure), so a host that cannot
+  # yet dispatch onto a real VM keeps dispatching into host directories
+  # instead of installing a daemon that would fail every task. -backend
+  # docker matches ensure_kontur_images' own retag (localhost:5000/
+  # kontur:latest) and needs no konturctl setup/containerd/CNI/kubelet on
+  # this host (bwsalmon/agents#353). -disk/-kernel/-initramfs are
+  # container-internal paths, resolved against -images-hostpath mounted
+  # read-only at /images -- "current" is ensure_kontur_images' own fixed
+  # destination directory, not a version string this script has to track.
+  # -guest-port 22 is not optional: konturctl's own default is 80, which
+  # silently refuses every connection to this image's actual sshd
+  # (packer/kontur/README.md, "guest-port 22 is not optional").
+  if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
+    daemon_args+=(
+      -kontur-vm-name-prefix "$GRAIN_KONTUR_VM_NAME_PREFIX"
+      -kontur-backend docker
+      -kontur-ssh-user "$GRAIN_KONTUR_SSH_USER"
+      -kontur-ssh-key "$GRAIN_DATA_DIR/secrets/kontur-ssh-key"
+      -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
+      -kontur-base-ip "$GRAIN_KONTUR_BASE_IP"
+      -kontur-base-port "$GRAIN_KONTUR_BASE_PORT"
+      -kontur-create-arg -images-hostpath -kontur-create-arg "$GRAIN_KONTUR_IMAGES_HOSTPATH"
+      -kontur-create-arg -disk -kontur-create-arg /images/current/disk.img
+      -kontur-create-arg -kernel -kontur-create-arg /images/current/vmlinuz
+      -kontur-create-arg -initramfs -kontur-create-arg /images/current/initrd.img
+      -kontur-create-arg -guest-port -kontur-create-arg 22
+    )
+  fi
+
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
 [Unit]
 Description=grain daemon (task orchestrator, UI and API)
@@ -858,6 +1095,11 @@ report_readiness() {
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: every task parks>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
   echo "    max concurrent:    ${GRAIN_MAX_CONCURRENT:-<default>}"
+  if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
+    echo "    sandboxing:        kontur VMs (prefix '${GRAIN_KONTUR_VM_NAME_PREFIX}', over SSH as ${GRAIN_KONTUR_SSH_USER})"
+  else
+    echo "    sandboxing:        host directories (orchestrator.HostSandboxes)"
+  fi
 
   if [ "$github" = "MISSING" ]; then
     ready=0
@@ -877,6 +1119,12 @@ report_readiness() {
   if [ "$daemon" != "active" ]; then
     ready=0
     echo "    !! grain-daemon.service is $daemon -- see: journalctl -u grain-daemon -n 50"
+  fi
+  if [ "$GRAIN_KONTUR_REQUESTED" = "1" ] && [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    ready=0
+    echo "    !! GRAIN_KONTUR_ENABLE=1 was requested but a prerequisite wasn't ready this run"
+    echo "       (see the earlier log line naming which one) -- dispatching into host"
+    echo "       directories instead. Re-run once it is; nothing else needs to change."
   fi
   [ "$ready" -eq 1 ] && echo "    all runtime prerequisites are in place"
   return 0
@@ -902,6 +1150,8 @@ main() {
   ensure_user
   grant_reboot_sudo
   ensure_self_upgrade
+  ensure_kontur_images
+  ensure_kontur_kvm_access
   setup_data_dir
   reformat_store_if_schema_changed
   format_target_repo_if_empty

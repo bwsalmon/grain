@@ -48,7 +48,7 @@ spec:
         - name: NETSHIM_GUEST_PORT
           value: "8080"
       securityContext:
-        # netshim creates network interfaces and iptables rules in the
+        # netshim creates network interfaces and nftables rules in the
         # pod's network namespace, which needs these capabilities (or
         # privileged: true on a CNI/runtime that doesn't grant them
         # individually).
