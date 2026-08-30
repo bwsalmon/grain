@@ -179,21 +179,23 @@ func TestDockerPodIPErrorsWhenNoAddressYet(t *testing.T) {
 	}
 }
 
-// writeFakeKontur installs a shell script named "kontur" on PATH (same
-// technique as writeFakeCrictl above), which appends every invocation's
-// argv to argvLog (one line per call, space-joined) and exits with
-// exitCode.
-func writeFakeKontur(t *testing.T, argvLog string, exitCode int) {
+// writeFakeKonturctl installs a shell script named "konturctl" on PATH
+// (same technique as writeFakeCrictl above) -- the operator-facing binary
+// vm's Create/Delete actually exec, not the container-facing "kontur"
+// binary bwsalmon/kontur's own cmd/kontur is a different program entirely
+// (see the package doc comment) -- which appends every invocation's argv
+// to argvLog (one line per call, space-joined) and exits with exitCode.
+func writeFakeKonturctl(t *testing.T, argvLog string, exitCode int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fake kontur script is POSIX shell only")
+		t.Skip("fake konturctl script is POSIX shell only")
 	}
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$*" >> %s
 exit %d
 `, argvLog, exitCode)
-	path := filepath.Join(dir, "kontur")
+	path := filepath.Join(dir, "konturctl")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +204,7 @@ exit %d
 
 func TestCreateRunsKonturVMCreate(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "argv.log")
-	writeFakeKontur(t, log, 0)
+	writeFakeKonturctl(t, log, 0)
 
 	if err := Create(context.Background(), "/var/lib/kontur/vms", "sandbox-0", "-image", "grain-sandbox.qcow2"); err != nil {
 		t.Fatal(err)
@@ -219,7 +221,7 @@ func TestCreateRunsKonturVMCreate(t *testing.T) {
 }
 
 func TestCreateReturnsErrorOnFailure(t *testing.T) {
-	writeFakeKontur(t, filepath.Join(t.TempDir(), "argv.log"), 1)
+	writeFakeKonturctl(t, filepath.Join(t.TempDir(), "argv.log"), 1)
 
 	if err := Create(context.Background(), "/var/lib/kontur/vms", "sandbox-0"); err == nil {
 		t.Error("Create() with a failing kontur binary: got nil error, want one")
@@ -228,7 +230,7 @@ func TestCreateReturnsErrorOnFailure(t *testing.T) {
 
 func TestDeleteRunsKonturVMDelete(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "argv.log")
-	writeFakeKontur(t, log, 0)
+	writeFakeKonturctl(t, log, 0)
 
 	if err := Delete(context.Background(), "/var/lib/kontur/vms", "sandbox-0"); err != nil {
 		t.Fatal(err)

@@ -126,7 +126,7 @@ The `cloud-hypervisor` release version and checksums are pinned via
 `fetch-chv` stage; bump both together when upgrading. See
 [`deploy/guest-image/README.md`](deploy/guest-image/README.md) for the
 guest disk image build (`guest-image` stage) and its own build args
-(`GUEST_SUITE`, `GUEST_SSH_AUTHORIZED_KEY`).
+(`GUEST_SUITE`, `GUEST_SSH_AUTHORIZED_KEY`, `GUEST_SETUP_SCRIPT`).
 
 ## Running locally
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -46,6 +47,21 @@ func textResponse(text string) *genai.GenerateContentResponse {
 func toolCallResponse(name string, args map[string]any) *genai.GenerateContentResponse {
 	return &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{Content: genai.NewContentFromFunctionCall(name, args, genai.RoleModel)}},
+	}
+}
+
+// thoughtAndToolCallResponse builds a response with a thought part ahead of
+// the function call it explains -- the shape Gemini uses when thinking is
+// enabled, and what TestRunBuildsAHumanReadableTranscript exercises.
+func thoughtAndToolCallResponse(thought, name string, args map[string]any) *genai.GenerateContentResponse {
+	return &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{Content: &genai.Content{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{
+				{Text: thought, Thought: true},
+				genai.NewPartFromFunctionCall(name, args),
+			},
+		}}},
 	}
 }
 
@@ -235,5 +251,77 @@ func TestMockToolCallsNeverReachAnyNetwork(t *testing.T) {
 	}
 	if len(result.ToolCalls) != 1 || result.ToolCalls[0].IsError {
 		t.Fatalf("ToolCalls = %+v", result.ToolCalls)
+	}
+}
+
+func TestRunBuildsAHumanReadableTranscript(t *testing.T) {
+	root := t.TempDir()
+	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{
+		thoughtAndToolCallResponse("let me check the file first", "read_file", map[string]any{"file_path": "out.txt"}),
+		textResponse("found it"),
+	}}
+	f := newFramework(fake)
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"let me check the file first", "read_file", "out.txt", "found it"} {
+		if !strings.Contains(result.Transcript, want) {
+			t.Errorf("Transcript = %q, want it to contain %q", result.Transcript, want)
+		}
+	}
+	// Chronological: the thought precedes the tool call it explains, which
+	// precedes the final text produced on the next turn.
+	thinkAt := strings.Index(result.Transcript, "let me check the file first")
+	toolAt := strings.Index(result.Transcript, "read_file")
+	textAt := strings.Index(result.Transcript, "found it")
+	if !(thinkAt < toolAt && toolAt < textAt) {
+		t.Errorf("Transcript not in chronological order: %q", result.Transcript)
+	}
+	// The thought must not have leaked into the final answer.
+	if strings.Contains(result.FinalText, "let me check the file first") {
+		t.Errorf("FinalText = %q, should not include the thought", result.FinalText)
+	}
+}
+
+func TestRunTranscriptMarksAFailedToolCall(t *testing.T) {
+	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{
+		toolCallResponse("run_command", map[string]any{"command": "false"}),
+		textResponse("done"),
+	}}
+	f := newFramework(fake)
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ToolCalls[0].IsError {
+		t.Fatalf("expected run_command with `false` to report an error, got %+v", result.ToolCalls[0])
+	}
+	if !strings.Contains(result.Transcript, "! ") {
+		t.Errorf("Transcript = %q, want an error-marked line for the failed call", result.Transcript)
+	}
+}
+
+// TestRunTranscriptSurvivesMaxTurns proves a run that exhausts MaxTurns
+// still hands back a transcript of what it did, the same way it still
+// hands back ToolCalls -- see Run's own doc comment on why an error must
+// not erase the record of a run that already did real work.
+func TestRunTranscriptSurvivesMaxTurns(t *testing.T) {
+	responses := make([]*genai.GenerateContentResponse, 3)
+	for i := range responses {
+		responses[i] = toolCallResponse("run_command", map[string]any{"command": "true"})
+	}
+	fake := &fakeGenerator{responses: responses}
+	f := newFramework(fake, WithMaxTurns(3))
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "loop forever", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error once MaxTurns is exhausted")
+	}
+	if result.Transcript == "" {
+		t.Error("Transcript is empty, want a record of the 3 tool calls the run made before running out of turns")
 	}
 }
