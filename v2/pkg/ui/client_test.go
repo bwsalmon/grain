@@ -649,6 +649,39 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	}
 }
 
+// AttemptTranscript is a single attempt's own recorded agent transcript,
+// fetched on demand rather than carried on every Attempt GetTask already
+// lists (bwsalmon/agents#446 -- "show attempt agent logs").
+func TestAttemptTranscript(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRunTranscript(ctx, "r1", "read the file, then pushed"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.AttemptTranscript(ctx, task.ID, 1)
+	if err != nil || got != "read the file, then pushed" {
+		t.Fatalf("AttemptTranscript = (%q, %v), want the transcript SetRunTranscript recorded", got, err)
+	}
+
+	if _, err := c.AttemptTranscript(ctx, task.ID, 2); err == nil {
+		t.Fatal("expected an error for an attempt number with no run behind it")
+	}
+	if _, err := c.AttemptTranscript(ctx, "nonexistent", 1); err == nil {
+		t.Fatal("expected an error for a nonexistent task")
+	}
+}
+
 // Replying to a parked task resumes it. This used to take two separate
 // acts -- post a comment AND re-apply the trigger label so the next poll
 // would notice -- and forgetting the second left the task parked forever.

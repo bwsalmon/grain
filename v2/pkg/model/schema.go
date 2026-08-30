@@ -42,7 +42,7 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -125,6 +125,15 @@ var Tables = []string{
 
 	// detail is a short human-readable reason behind outcome -- see
 	// model.Run.Detail's own doc comment on why it exists at all.
+	//
+	// transcript is the full narrative record of what the agent said and
+	// did over the run -- model.Run.Transcript's own doc comment explains
+	// why it is worth a column of its own rather than folding into detail
+	// (bwsalmon/agents#446). It is written once, by SetRunTranscript,
+	// after FinishRun has already recorded outcome/detail -- the same
+	// after-the-fact shape SetRunOutcome already uses -- and stays NULL
+	// for a run still in flight, or one whose framework never populated
+	// agent.Result.Transcript at all.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
   ` + "`id`" + `          TEXT     NOT NULL,
   ` + "`task_id`" + `     TEXT     NOT NULL,
@@ -136,6 +145,7 @@ var Tables = []string{
   ` + "`finished_at`" + ` DATETIME NULL,
   ` + "`outcome`" + `     TEXT     NULL,
   ` + "`detail`" + `      TEXT     NULL,
+  ` + "`transcript`" + `  TEXT     NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

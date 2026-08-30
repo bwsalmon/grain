@@ -1,7 +1,8 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
+import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
 import Overlay from "./Overlay.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
@@ -9,7 +10,7 @@ import TaskPicker from "./TaskPicker.jsx";
 // the conversation in a main column, everything about the task's current
 // state and its declared shape (repo, capabilities, dependencies) in a
 // narrow property column beside it.
-export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act }) {
+export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
   return (
     <Overlay onClose={onClose} wide>
       <div className="detail-layout">
@@ -38,7 +39,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             </Alert>
           )}
 
-          <Timeline t={t} act={act} />
+          <Timeline t={t} act={act} showError={showError} />
         </div>
 
         <div className="detail-side">
@@ -188,6 +189,11 @@ function timelineEvents(t) {
       key: `attempt-${a.number}`,
       at: new Date(a.startedAt),
       badge: OUTCOME_BADGES[a.outcome || ""] || "queued",
+      // attempt, not set on any other kind of event, is what tells
+      // Timeline's own render loop which <li> to make interactive: typing
+      // on a task attempt is how AttemptTranscriptOverlay opens
+      // (bwsalmon/agents#446).
+      attempt: a,
       render: () => (
         <>
           <div className="timeline-title">Attempt #{a.number} · {outcomeLabel(a.outcome)}</div>
@@ -328,9 +334,13 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
 // (reusing the existing badge-<state> dot styling) with the comment box
 // fixed at the bottom, the same spot Comments used to keep it in under
 // the conversation-only list this replaces.
-function Timeline({ t, act }) {
+function Timeline({ t, act, showError }) {
   const textareaRef = useRef(null);
   const events = timelineEvents(t);
+  // openAttempt is the attempt (bwsalmon/agents#446's own Attempt shape,
+  // off t.attempts) whose transcript is open, or null -- local to
+  // Timeline, since nothing outside it needs to know.
+  const [openAttempt, setOpenAttempt] = useState(null);
 
   const send = async () => {
     const body = textareaRef.current.value;
@@ -345,7 +355,22 @@ function Timeline({ t, act }) {
       {events.length > 0 && (
         <ul className="timeline-list">
           {events.map((e) => (
-            <li className="timeline-item" key={e.key}>
+            <li
+              className={e.attempt ? "timeline-item timeline-item-attempt" : "timeline-item"}
+              key={e.key}
+              {...(e.attempt && {
+                tabIndex: 0,
+                role: "button",
+                title: "View this attempt's agent transcript",
+                onClick: () => setOpenAttempt(e.attempt),
+                onKeyDown: (ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    setOpenAttempt(e.attempt);
+                  }
+                },
+              })}
+            >
               <div className="timeline-marker">
                 <span className={`badge badge-${e.badge}`} />
               </div>
@@ -356,6 +381,14 @@ function Timeline({ t, act }) {
             </li>
           ))}
         </ul>
+      )}
+      {openAttempt && (
+        <AttemptTranscriptOverlay
+          taskId={t.id}
+          attempt={openAttempt}
+          onClose={() => setOpenAttempt(null)}
+          showError={showError}
+        />
       )}
       {/* Uncontrolled on purpose: a poll landing mid-reply re-renders
           this component with fresh props, but never touches the

@@ -454,6 +454,13 @@ fieldset legend {
   background: var(--border);
 }
 .timeline-item:last-child .timeline-marker::after { display: none; }
+/* An attempt's own row opens AttemptTranscriptOverlay on click or on
+   Enter/Space while focused (bwsalmon/agents#446) -- cursor and a subtle
+   hover background are this row's only visual difference from a plain
+   (non-interactive) transition or comment entry; :focus-visible (above)
+   already covers the focus ring. */
+.timeline-item-attempt { cursor: pointer; border-radius: 6px; margin: 0 -0.4rem; padding-left: 0.4rem; padding-right: 0.4rem; }
+.timeline-item-attempt:hover { background: var(--canvas); }
 .badge-comment::before { background: var(--text-placeholder); }
 .timeline-body { flex: 1; min-width: 0; }
 .timeline-when { color: var(--text-tertiary); font-size: 0.75rem; margin-bottom: 0.15rem; }

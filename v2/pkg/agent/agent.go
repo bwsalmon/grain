@@ -50,6 +50,14 @@ type ToolCall struct {
 type Result struct {
 	FinalText string
 	ToolCalls []ToolCall
+	// Transcript is a human-readable, chronological narrative of the run
+	// -- its thinking and text output interleaved with each tool call and
+	// what it got back -- for a caller that wants to read the whole story
+	// rather than just its outcome (bwsalmon/agents#446's "show attempt
+	// agent logs": a single scrolling pane to debug or check up on a run
+	// with). It is best-effort: "" means the framework that produced this
+	// Result does not build one, not that the run said nothing.
+	Transcript string
 }
 
 // Framework drives one agent run to completion, using only the tools its

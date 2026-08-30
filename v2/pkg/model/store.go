@@ -61,6 +61,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureTaskRunTranscriptColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -112,6 +115,21 @@ func (s *Store) ensureTaskApprovedAtColumn(ctx context.Context) error {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task` ADD COLUMN `approved_at` DATETIME NULL")
+	return err
+}
+
+// ensureTaskRunTranscriptColumn adds task_run.transcript (schema.go's own
+// DDL comment on the table has the reasoning) to a database created
+// before bwsalmon/agents#446, the same probe-then-ALTER approach
+// ensureConfigTargetReposColumn and ensureTaskApprovedAtColumn already
+// use for the same reason: CREATE TABLE IF NOT EXISTS never alters a
+// table that is already there.
+func (s *Store) ensureTaskRunTranscriptColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `transcript` FROM `task_run` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `transcript` TEXT NULL")
 	return err
 }
 
@@ -746,6 +764,45 @@ func (s *Store) SetRunOutcome(ctx context.Context, runID, outcome, detail string
 			outcome, nullable(detail), runID)
 		return err
 	})
+}
+
+// SetRunTranscript records a run's own agent transcript -- the full
+// narrative record (agent.Result.Transcript) that FinishRun's own
+// outcome/detail only summarise. It is its own write, called after
+// FinishRun rather than folded into it, for the same reason SetRunOutcome
+// is: RunDispatch only has a transcript to record once framework.Run has
+// already returned, by which point FinishRun's own outcome/detail have
+// already been decided from it (bwsalmon/agents#446 -- "Show attempt
+// agent logs").
+func (s *Store) SetRunTranscript(ctx context.Context, runID, transcript string) error {
+	return s.write(ctx, "set run "+runID+" transcript", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `transcript` = ? WHERE `id` = ?",
+			nullable(transcript), runID)
+		return err
+	})
+}
+
+// RunTranscript returns the transcript recorded for taskID's numbered
+// attempt, and whether such an attempt exists at all -- taskID+attempt
+// rather than a bare run ID, since that pair (model.Run.Attempt) is the
+// only handle on a run the wire's own Attempt shape ever gives a caller
+// (ui.Attempt carries no run ID). The transcript itself may be "" either
+// because the attempt has not finished yet or because its framework
+// never populated one; both look the same here, and ui.Client tells them
+// apart against the attempt's own FinishedAt.
+func (s *Store) RunTranscript(ctx context.Context, taskID string, attempt int) (transcript string, found bool, err error) {
+	var t sql.NullString
+	err = s.db.QueryRowContext(ctx,
+		"SELECT `transcript` FROM `task_run` WHERE `task_id` = ? AND `attempt` = ?",
+		taskID, attempt).Scan(&t)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return t.String, true, nil
 }
 
 // DropLease forgets a lease once its resource is actually revoked.

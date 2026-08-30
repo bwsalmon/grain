@@ -374,4 +374,67 @@ describe("DetailOverlay", () => {
 
     expect(act).not.toHaveBeenCalled();
   });
+
+  // bwsalmon/agents#446: typing on a task attempt opens a window over its
+  // own agent transcript.
+  it("opens an attempt's transcript when its timeline row is clicked", async () => {
+    api.mockResolvedValue({ transcript: "found it" });
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "succeeded" }] }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByText("Attempt #1 · Succeeded"));
+
+    expect(await screen.findByText("Attempt #1 transcript")).toBeInTheDocument();
+    expect(await screen.findByText("found it")).toBeInTheDocument();
+    expect(api).toHaveBeenLastCalledWith("/api/tasks/12/attempts/1/transcript");
+  });
+
+  it("opens an attempt's transcript when its timeline row is focused and Enter is pressed", async () => {
+    api.mockResolvedValue({ transcript: "found it" });
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z" }] }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={vi.fn()}
+      />
+    );
+
+    screen.getByText("Attempt #1 · Running").closest(".timeline-item-attempt").focus();
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("Attempt #1 transcript")).toBeInTheDocument();
+  });
+
+  it("does not make a plain transition or comment row interactive", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, transitions: [{ state: "queued", at: "2026-08-28T12:00:00Z" }] }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={vi.fn()}
+      />
+    );
+
+    const row = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-item");
+    expect(row).not.toHaveClass("timeline-item-attempt");
+    expect(row).not.toHaveAttribute("tabindex");
+  });
 });

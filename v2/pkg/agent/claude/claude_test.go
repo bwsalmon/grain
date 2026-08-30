@@ -152,6 +152,63 @@ func TestRunReportsToolResultContentGivenAsBlocksNotAPlainString(t *testing.T) {
 	}
 }
 
+func TestRunBuildsAHumanReadableTranscript(t *testing.T) {
+	fake := &fakeRunner{stdout: strings.Join([]string{
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{"type": "thinking", "thinking": "let me check the file first"}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "tool_use", "id": "call-1", "name": "read_file",
+					"input": map[string]any{"file_path": "out.txt"},
+				}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "user",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "tool_result", "tool_use_id": "call-1", "content": "PONG",
+				}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "found it"}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{"type": "result", "result": "done"}),
+	}, "\n")}
+	f := newFramework(fake, "mcpserver-path")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"let me check the file first", "read_file", "out.txt", "PONG", "found it"} {
+		if !strings.Contains(result.Transcript, want) {
+			t.Errorf("Transcript = %q, want it to contain %q", result.Transcript, want)
+		}
+	}
+	// Chronological: the thinking block precedes the tool call it explains,
+	// which precedes the result it read, which precedes the final text
+	// that used it.
+	thinkAt := strings.Index(result.Transcript, "let me check the file first")
+	toolAt := strings.Index(result.Transcript, "read_file")
+	resultAt := strings.Index(result.Transcript, "PONG")
+	textAt := strings.Index(result.Transcript, "found it")
+	if !(thinkAt < toolAt && toolAt < resultAt && resultAt < textAt) {
+		t.Errorf("Transcript not in chronological order: %q", result.Transcript)
+	}
+}
+
 func TestRunReportsAnErrorResultEvent(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{
 		"type": "result", "subtype": "error_max_turns", "is_error": true, "result": "",
