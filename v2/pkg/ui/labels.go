@@ -138,6 +138,28 @@ type Config struct {
 	// attempt is read the way bwsalmon/agents#446 originally left it,
 	// nothing to show until it finishes (bwsalmon/agents#467).
 	LiveTranscripts LiveTranscript
+	// Sandboxes, when set, is what GET /api/sandboxes calls to report
+	// every dispatch slot's own live sandbox status -- cmd/grain/daemon.go's
+	// sandboxHealthAdapter over whichever of orchestrator.KonturSandboxes/
+	// HostSandboxes this deployment actually runs (run()'s own doc
+	// comment: exactly one of the two). nil means this deployment's UI
+	// was not handed one (`grain demo`'s throwaway UI, or any UI not
+	// colocated with the orchestrator that owns a real sandbox pool), and
+	// the sandbox health pane reports itself unavailable rather than
+	// erroring on every call, the same nil-means-unavailable contract
+	// Logs above already gives the debug section it now sits alongside
+	// (bwsalmon/agents#536).
+	Sandboxes SandboxHealth
+	// HostStats, when set, is what GET /api/sandboxes' own host section
+	// calls to report this deployment's daemon's own CPU-load/memory
+	// pressure -- pkg/sysstat.Read wrapped to return HostPressure, in a
+	// real deployment. A sandbox that looks stuck is often really the
+	// host it runs on being starved, which is a question about this
+	// process's own machine rather than about any one sandbox
+	// (SandboxHealth above), so it is reported separately. nil means no
+	// reading is available, the same nil-means-unavailable contract every
+	// other optional field here already gives (bwsalmon/agents#536).
+	HostStats func() (HostPressure, error)
 	// AutoMergeDegraded, when set, is polled by GET /api/config to report
 	// whether this deployment's GitHub credential can read pull request
 	// check runs at all -- orchestrator.ChecksUnavailable's own doc

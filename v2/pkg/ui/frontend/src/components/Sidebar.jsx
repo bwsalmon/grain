@@ -7,11 +7,17 @@ const SIDEBAR_WIDTH = 232;
 // view around: a fixed rail with the workspace identity up top, a state
 // list styled like Plane's own status groups (a dot standing in for the
 // state's badge color, a count on the right), and the deployment-level
-// actions (settings) pinned to the bottom. Scheduled tasks, Releases and
-// Logs live in their own nav pane / the repo pane (bwsalmon/agents#455,
-// bwsalmon/agents#398, bwsalmon/agents#457) and Secrets and Upgrade live
-// as tabs inside Settings (bwsalmon/agents#456), rather than their own
-// buttons here.
+// actions (settings) pinned to the bottom. Scheduled tasks and Releases
+// live in their own nav pane / the repo pane (bwsalmon/agents#455,
+// bwsalmon/agents#398) and Secrets and Upgrade live as tabs inside
+// Settings (bwsalmon/agents#456), rather than their own buttons here.
+//
+// Logs and Sandbox health (bwsalmon/agents#457, bwsalmon/agents#536) sit
+// under their own "Debug" label rather than as flat entries alongside
+// Repos/Scheduled tasks/Task templates above -- both exist purely to
+// diagnose a deployment gone wrong, not to manage day-to-day task flow,
+// so grouping them apart makes that distinction visible in the nav
+// itself rather than only in each pane's own content.
 export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenNewTask }) {
   const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
 
@@ -106,9 +112,20 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           <ListItemText primary="Task templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
         </ListItemButton>
+        <Typography
+          variant="overline"
+          color="text.secondary"
+          sx={{ px: 0.9, mt: 0.4, fontSize: "0.7rem", fontWeight: 600, letterSpacing: "0.04em" }}
+        >
+          Debug
+        </Typography>
         <ListItemButton selected={view === "logs"} onClick={() => onSetView("logs")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />
           <ListItemText primary="Logs" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+        </ListItemButton>
+        <ListItemButton selected={view === "sandboxes"} onClick={() => onSetView("sandboxes")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="dot dot-all" />
+          <ListItemText primary="Sandbox health" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
         </ListItemButton>
       </List>
 

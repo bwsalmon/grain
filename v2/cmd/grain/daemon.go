@@ -78,6 +78,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
+	"github.com/bwsalmon/grain/v2/pkg/sysstat"
 	"github.com/bwsalmon/grain/v2/pkg/systemlog"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 	"github.com/bwsalmon/grain/v2/pkg/upgrade"
@@ -408,7 +409,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg, store, transcriptDir)
+		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -747,7 +748,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(cfg config, store *model.Store, transcriptDir string) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes) (stop func(context.Context) error, err error) {
 	// A second CredentialSet, loaded the same way BuildProxy (above) and
 	// run's own githubClient each load their own: not hot-reloaded,
 	// cheap to load again, and this is the one Settings checks
@@ -790,6 +791,17 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string) (stop f
 		// check-runs read against this deployment's credential -- see its
 		// own doc comment and Config.AutoMergeDegraded's.
 		AutoMergeDegraded: orchestrator.ChecksUnavailable,
+		// sandboxHealthAdapter wraps whichever of orchestrator.
+		// KonturSandboxes/HostSandboxes run() built as sandboxes (exactly
+		// one, per run()'s own doc comment) -- both implement Health, just
+		// not the interface ui.Config.Sandboxes actually names, since ui
+		// does not import pkg/orchestrator (see ui/sandbox_health.go's own
+		// doc comment). The sandbox health pane (bwsalmon/agents#536).
+		Sandboxes: sandboxHealthAdapter{sandboxes},
+		// hostStats reads this same process's own machine, not any one
+		// sandbox -- see pkg/sysstat's own doc comment on why that's a
+		// separate reading from Sandboxes above.
+		HostStats: hostStats,
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
@@ -844,6 +856,60 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string) (stop f
 // gave its own self-repair sudoers file.
 func rebootHost(ctx context.Context) error {
 	return exec.CommandContext(ctx, "sudo", "systemctl", "reboot").Run()
+}
+
+// sandboxHealthAdapter adapts orchestrator's own SlotHealth (a core
+// dispatch type) onto ui.SandboxSnapshot (a presentation DTO) field by
+// field -- the one place both types are ever in scope together, so
+// neither package needs to import the other (see ui/sandbox_health.go's
+// own doc comment). inner is run()'s own sandboxes value; it may be nil
+// (a test or a future backend with no Sandboxes yet) or simply not
+// implement Health, either of which Health below reports as "nothing to
+// show" rather than a panic.
+type sandboxHealthAdapter struct {
+	inner orchestrator.Sandboxes
+}
+
+func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
+	reporter, ok := a.inner.(interface {
+		Health(context.Context) []orchestrator.SlotHealth
+	})
+	if !ok {
+		return nil
+	}
+	slots := reporter.Health(ctx)
+	out := make([]ui.SandboxSnapshot, len(slots))
+	for i, s := range slots {
+		out[i] = ui.SandboxSnapshot{
+			Slot:          s.Slot,
+			Backend:       s.Backend,
+			Name:          s.Name,
+			Ready:         s.Ready,
+			Error:         s.Error,
+			LoadAverage:   s.LoadAverage,
+			MemoryUsedMB:  s.MemoryUsedMB,
+			MemoryTotalMB: s.MemoryTotalMB,
+		}
+	}
+	return out
+}
+
+// hostStats is startUIServer's ui.Config.HostStats: this machine's own
+// CPU-load/memory pressure, read straight out of /proc by pkg/sysstat --
+// see that package's own doc comment for why this, not any one sandbox,
+// is what it reports.
+func hostStats() (ui.HostPressure, error) {
+	snap, err := sysstat.Read()
+	if err != nil {
+		return ui.HostPressure{}, err
+	}
+	return ui.HostPressure{
+		LoadAverage1:  snap.LoadAverage1,
+		LoadAverage5:  snap.LoadAverage5,
+		LoadAverage15: snap.LoadAverage15,
+		MemoryUsedMB:  snap.MemUsedMB,
+		MemoryTotalMB: snap.MemTotalMB,
+	}, nil
 }
 
 // openBrowser best-effort launches url in the system's default browser --
