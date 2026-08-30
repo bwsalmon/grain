@@ -29,6 +29,15 @@ install_prerequisites() {
   apt-get install -y --no-install-recommends git docker.io python3 ca-certificates
 }
 
+# Before anything below, because `cfg` shells out to python3 and this is
+# what guarantees python3 exists. It used to run after the block that
+# reads the config, which meant every cfg call on a fresh host ran
+# against an interpreter that might not be installed yet -- and under
+# `set -e` the first one took the whole deploy down with status 127,
+# reported by config-sync only as "exit=127" with nothing naming the
+# missing command.
+install_prerequisites
+
 # --- read this deployment's configuration off the instance's own metadata --
 
 CONFIG_JSON="$(md instance/attributes/grain-config)"
@@ -48,8 +57,6 @@ POLL_INTERVAL="$(cfg poll_interval)"
 GEMINI_MODEL="$(cfg gemini_model)"
 GCP_PROJECT="$(cfg gcp_project)"
 GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
-
-install_prerequisites
 
 # --- clone (once) or leave the update to setup.sh's own sync_repo -----
 
