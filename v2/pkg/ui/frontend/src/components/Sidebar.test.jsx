@@ -17,7 +17,6 @@ const baseProps = {
   onOpenSecrets: noop,
   onOpenSettings: noop,
   onOpenUpgrade: noop,
-  onOpenLogs: noop,
   onOpenNewTask: noop,
 };
 
@@ -65,7 +64,6 @@ describe("Sidebar", () => {
     const onOpenSecrets = vi.fn();
     const onOpenSettings = vi.fn();
     const onOpenUpgrade = vi.fn();
-    const onOpenLogs = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
     render(
@@ -76,7 +74,6 @@ describe("Sidebar", () => {
         onOpenSecrets={onOpenSecrets}
         onOpenSettings={onOpenSettings}
         onOpenUpgrade={onOpenUpgrade}
-        onOpenLogs={onOpenLogs}
         onOpenNewTask={onOpenNewTask}
       />,
     );
@@ -85,13 +82,11 @@ describe("Sidebar", () => {
     await user.click(screen.getByRole("button", { name: "Secrets" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
     await user.click(screen.getByRole("button", { name: "Upgrade" }));
-    await user.click(screen.getByRole("button", { name: "Logs" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSecrets).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onOpenUpgrade).toHaveBeenCalledTimes(1);
-    expect(onOpenLogs).toHaveBeenCalledTimes(1);
   });
 
   it("switches to the schedules view and shows its count when clicked", async () => {
@@ -104,5 +99,15 @@ describe("Sidebar", () => {
     await user.click(button);
 
     expect(onSetView).toHaveBeenCalledWith("schedules");
+  });
+
+  it("switches to the logs view when clicked", async () => {
+    const onSetView = vi.fn();
+    const user = userEvent.setup();
+    render(<Sidebar {...baseProps} config={null} tasks={[]} onSetView={onSetView} />);
+
+    await user.click(screen.getByRole("button", { name: "Logs" }));
+
+    expect(onSetView).toHaveBeenCalledWith("logs");
   });
 });
