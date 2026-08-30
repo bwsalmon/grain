@@ -170,17 +170,26 @@ function outcomeLabel(outcome) {
 function Timeline({ t }) {
   const transitions = t.transitions || [];
   if (transitions.length === 0) return null;
+  const lastIndex = transitions.length - 1;
   return (
     <fieldset>
       <legend>History</legend>
       <ul className="transitions">
-        {transitions.map((tr, i) => (
-          <li className="transition" key={i}>
-            <span className="transition-arrow">→</span>
-            <span className={`badge badge-${tr.state}`}>{STATE_LABELS[tr.state] || tr.state}</span>
-            <span className="transition-at">{new Date(tr.at).toLocaleString()}</span>
-          </li>
-        ))}
+        {transitions.map((tr, i) => {
+          // Only the most recent transition can still be "now" -- a
+          // running entry earlier in the list is over and done, so it
+          // should read as a static dot rather than keep spinning as if
+          // the task were still running that far in the past.
+          const isCurrent = i === lastIndex;
+          const badgeClass = `badge badge-${tr.state}${isCurrent ? "" : " badge-static"}`;
+          return (
+            <li className="transition" key={i}>
+              <span className="transition-arrow">→</span>
+              <span className={badgeClass}>{STATE_LABELS[tr.state] || tr.state}</span>
+              <span className="transition-at">{new Date(tr.at).toLocaleString()}</span>
+            </li>
+          );
+        })}
       </ul>
     </fieldset>
   );

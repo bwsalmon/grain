@@ -225,6 +225,17 @@ main { padding: 0 0 2.5rem; }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
 
+/* .badge-static is for a "running" badge that records a past moment
+   (e.g. a Timeline entry once superseded by a later transition) rather
+   than the task's live status -- it should read as the same solid dot
+   every other historical state gets, not keep spinning as if that run
+   were still happening. */
+.badge-static.badge-running::before {
+  animation: none;
+  border: none;
+  background: var(--state-running);
+}
+
 /* .badge-running still drives the plain CSS status dot (TaskList,
    DetailOverlay) rather than an MUI primitive, so it keeps its own spin
    animation. Blocked/dependency/task-picker chips and inputs were
