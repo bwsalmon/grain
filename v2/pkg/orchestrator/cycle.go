@@ -230,7 +230,30 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	}
 
 	if runErr != nil {
-		return errors.Join(runErr, recreateErr)
+		// A failed run is not necessarily an empty one. The framework
+		// hands back what the agent managed to do before it broke (see
+		// agent.Framework), and the one part of that which outlives the
+		// run is a branch it already pushed -- the sandbox above has just
+		// been recreated, but GitHub still has the commits. Skipping
+		// ProcessResult here left such a branch permanently stranded:
+		// pushed, with no pull request, no closing comment and no second
+		// run able to find it, until a daemon restart happened to run
+		// RecoverOrphanedRuns over a row this one had already finished
+		// and so was no longer live. An agent that commits, pushes and
+		// then runs out of turns did the work; only the ending failed.
+		//
+		// Only the pushed-branch half, not all of ProcessResult: a
+		// question or a proposed task from a run that then failed is a
+		// half-formed intention, and the run's outcome stays "failed"
+		// with the framework's own diagnosis rather than being overwritten
+		// with no_action.
+		var salvageErr error
+		if result != nil {
+			if _, err := salvagePushedBranch(ctx, deps.Store, deps.Client, *task, now); err != nil {
+				salvageErr = err
+			}
+		}
+		return errors.Join(runErr, salvageErr, recreateErr)
 	}
 	return errors.Join(ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now), recreateErr)
 }
