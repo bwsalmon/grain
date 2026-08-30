@@ -95,7 +95,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		})
 	}
 
-	pushed, err := client.BranchExists(task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
+	pushed, err := branchExistsSettled(client, task.Target.Owner, task.Target.Name, model.BranchName(task.ID))
 	if err != nil {
 		return fmt.Errorf("orchestrator: checking %s's branch: %w", task.ID, err)
 	}
@@ -213,6 +213,50 @@ func truncate(s string, max int) string {
 		return strconv.Quote(s)
 	}
 	return strconv.Quote(s[:max]) + "... (truncated)"
+}
+
+// branchExistsRetries and branchExistsBackoff bound how long a negative
+// answer is re-checked before it is believed. Small: this is covering a
+// read that trails a write by a moment, not an outage.
+var (
+	branchExistsRetries = 3
+	branchExistsBackoff = 2 * time.Second
+	branchExistsSleep   = time.Sleep
+)
+
+// branchExistsSettled re-checks a "no such branch" answer before acting
+// on it, because this call runs moments after the agent's own `git push`
+// and GitHub's REST reads can trail a push briefly.
+//
+// The asymmetry is the whole point. A false positive here is caught
+// immediately -- finishWithPullRequest asks GitHub to open a pull request
+// against a branch, and GitHub refuses if it is not there. A false
+// negative is silent and permanent: the run is recorded no_action, the
+// task counts another failed attempt toward its streak cap, and the work
+// the agent actually did sits pushed on the remote with nothing pointing
+// at it. That happened to a task on the v2 staging deployment whose
+// branch was on GitHub, at the right commit, with a push timestamp one
+// second after the commit it carried.
+//
+// So a positive is taken at once and only a negative is paid for, at a
+// few seconds against a dispatch that took minutes. An error is not
+// retried at all: BranchExists already distinguishes 404 (a real "not
+// there") from every other status, and a 500 or a refused connection is
+// the caller's to report rather than to sit on.
+func branchExistsSettled(client github.Client, owner, repo, branch string) (bool, error) {
+	for attempt := 0; attempt < branchExistsRetries; attempt++ {
+		if attempt > 0 {
+			branchExistsSleep(branchExistsBackoff)
+		}
+		exists, err := client.BranchExists(owner, repo, branch)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // relayComment records something a dispatched run said, attributed as
