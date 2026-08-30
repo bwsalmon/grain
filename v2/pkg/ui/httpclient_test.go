@@ -103,8 +103,11 @@ func TestHTTPClientUpdateSetCapabilityCommentCloseReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if len(detail.Comments) != 1 || detail.Comments[0].Body != "hello" {
-		t.Fatalf("comments = %+v, want one saying hello", detail.Comments)
+	// Two, not one: UpdateTask's own title edit above already added the
+	// first, noting the change for the same reason a live run needs to
+	// see it (bwsalmon/agents#523) -- AddComment's "hello" is the second.
+	if len(detail.Comments) != 2 || detail.Comments[0].Body == "" || detail.Comments[1].Body != "hello" {
+		t.Fatalf("comments = %+v, want the title-edit note followed by one saying hello", detail.Comments)
 	}
 
 	if err := c.Close(ctx, created.ID); err != nil {

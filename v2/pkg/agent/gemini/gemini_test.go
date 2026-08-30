@@ -114,6 +114,55 @@ func TestRunExecutesToolCallsThroughTheSandbox(t *testing.T) {
 	}
 }
 
+// TestRunFoldsAnAddendumIntoTheConversationBetweenTurns is bwsalmon/
+// agents#523: this package is the one Framework whose loop actually has
+// a "between turns" to poll RunConfig.Addenda at (see that field's own
+// doc comment on why claude.Framework.Run cannot), so this is the one
+// place that plumbing needs to be proven end to end -- a poll that
+// returns something must land in both the conversation the next
+// GenerateContent call sees and the transcript, not just get thrown away.
+func TestRunFoldsAnAddendumIntoTheConversationBetweenTurns(t *testing.T) {
+	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{
+		toolCallResponse("write_file", map[string]any{"file_path": "out.txt", "content": "PONG"}),
+		textResponse("wrote it, addendum received"),
+	}}
+	f := newFramework(fake)
+
+	const addendum = "a human just added: actually, write PING instead"
+	calls := 0
+	addenda := func(context.Context) ([]string, error) {
+		calls++
+		if calls == 2 {
+			return []string{addendum}, nil
+		}
+		return nil, nil
+	}
+
+	result, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "write PONG to out.txt", SandboxRoot: t.TempDir(), Addenda: addenda,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls < 2 {
+		t.Fatalf("Addenda polled %d time(s), want at least 2 (once per turn)", calls)
+	}
+	if !strings.Contains(result.Transcript, addendum) {
+		t.Errorf("transcript = %q, want it to include the addendum", result.Transcript)
+	}
+}
+
+// TestRunNeverPollsAddendaWhenNoneIsGiven checks the nil case costs
+// nothing: RunConfig.Addenda is optional, and most callers (every test
+// above this one) never set it.
+func TestRunNeverPollsAddendaWhenNoneIsGiven(t *testing.T) {
+	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{textResponse("ok")}}
+	f := newFramework(fake)
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunAdvertisesAllEightToolsToTheModel(t *testing.T) {
 	fake := &fakeGenerator{responses: []*genai.GenerateContentResponse{textResponse("ok")}}
 	f := newFramework(fake)

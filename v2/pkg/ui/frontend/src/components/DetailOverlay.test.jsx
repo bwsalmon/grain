@@ -586,6 +586,58 @@ describe("DetailOverlay", () => {
     expect(textarea).toHaveValue("");
   });
 
+  // bwsalmon/agents#523: "After creating a task the user should be able
+  // to edit it."
+  it("edits the title and description via the PATCH endpoint", async () => {
+    const act = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    const title = screen.getByLabelText("Title");
+    await user.clear(title);
+    await user.type(title, "Fix the login bug for real");
+    const description = screen.getByLabelText("Description");
+    await user.clear(description);
+    await user.type(description, "New repro steps");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12", {
+      method: "PATCH",
+      body: JSON.stringify({ title: "Fix the login bug for real", description: "New repro steps" }),
+    });
+    // Back to the read-only view once saved.
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+    expect(screen.getByText("12 Fix the login bug")).toBeInTheDocument();
+  });
+
+  it("leaves the task unchanged when editing is cancelled", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.type(screen.getByLabelText("Title"), " (draft)");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(act).not.toHaveBeenCalled();
+    expect(screen.getByText("12 Fix the login bug")).toBeInTheDocument();
+  });
+
+  it("disables Save once the title is cleared", async () => {
+    const user = userEvent.setup();
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.clear(screen.getByLabelText("Title"));
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
   it("does not post an empty or whitespace-only comment", async () => {
     const act = vi.fn();
     const user = userEvent.setup();

@@ -159,6 +159,24 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	defer func() { result.Transcript = strings.TrimSpace(transcript.String()) }()
 
 	for turn := 0; turn < maxTurns; turn++ {
+		// Polled before every turn, including the first: cfg.Addenda's
+		// own doc comment is what makes this package the one Framework
+		// that can actually act on a comment posted while its run is
+		// still going, rather than only seeing it on the task's next
+		// dispatch. A poll error is swallowed rather than failing the
+		// run over it -- the same "a transient read failure costs one
+		// interval of latency, not the ability to notice it later"
+		// reasoning orchestrator.checkTaskClosed gives its own store
+		// read, since the next turn's poll gets another chance at
+		// exactly the same comments.
+		if cfg.Addenda != nil {
+			if addenda, err := cfg.Addenda(ctx); err == nil {
+				for _, a := range addenda {
+					history = append(history, genai.NewContentFromText(a, genai.RoleUser))
+					fmt.Fprintf(transcriptOut, "%s\n\n", a)
+				}
+			}
+		}
 		resp, err := f.generator.GenerateContent(ctx, f.model, history, &genai.GenerateContentConfig{Tools: tools})
 		if err != nil {
 			return result, fmt.Errorf("gemini: generate content: %w", err)

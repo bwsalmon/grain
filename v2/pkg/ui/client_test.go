@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -417,6 +418,74 @@ func TestUpdateTaskValidates(t *testing.T) {
 				t.Fatalf("error = %v, want a ValidationError", err)
 			}
 		})
+	}
+}
+
+// TestUpdateTaskNotesAnEditToTitleOrDescriptionAsAComment is bwsalmon/
+// agents#523: a task's title and description are the two fields
+// BuildPrompt actually hands a dispatched run, so an edit to either while
+// a run is in flight has to reach it somehow -- and the mechanism that
+// already exists for reaching a live run (orchestrator.addendaPoller) is
+// "read the conversation," not "read the task's current row." Recording
+// the edit as a Comment is what makes it visible there.
+func TestUpdateTaskNotesAnEditToTitleOrDescriptionAsAComment(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	title := "rename the thing"
+	if _, err := c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	comments, err := store.Comments(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("comments = %+v, want exactly one noting the title edit", comments)
+	}
+	if got := comments[0]; got.Author.Actor.ID != "alice" || !strings.Contains(got.Body, title) {
+		t.Fatalf("comment = %+v, want it attributed to alice and naming the new title", got)
+	}
+
+	description := "please, and hurry"
+	if _, err := c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Description: &description}); err != nil {
+		t.Fatal(err)
+	}
+	comments, err = store.Comments(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("comments = %+v, want a second one noting the description edit", comments)
+	}
+	if !strings.Contains(comments[1].Body, description) {
+		t.Fatalf("comment = %+v, want it to include the new description", comments[1])
+	}
+}
+
+// TestUpdateTaskNotesNothingWhenTitleAndDescriptionAreUnchanged checks the
+// other half of the same rule: a request that only touches other fields,
+// or that names a title/description identical to what is already stored,
+// adds no comment -- an edit form that always submits every field on save
+// must not spam a task's conversation on every save that changed nothing.
+func TestUpdateTaskNotesNothingWhenTitleAndDescriptionAreUnchanged(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	base := "release"
+	if _, err := c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Base: &base}); err != nil {
+		t.Fatal(err)
+	}
+	sameTitle, sameDescription := task.Title, task.Description
+	if _, err := c.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Title: &sameTitle, Description: &sameDescription}); err != nil {
+		t.Fatal(err)
+	}
+	comments, err := store.Comments(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Fatalf("comments = %+v, want none: nothing BuildPrompt reads ever changed", comments)
 	}
 }
 

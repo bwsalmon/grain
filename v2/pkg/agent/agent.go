@@ -49,6 +49,23 @@ type RunConfig struct {
 	// from), so each package also owns its own reader rather than
 	// sharing one.
 	TranscriptPath string
+	// Addenda, if set, is polled by a Framework whose own loop has a
+	// "between turns" to poll at (agent/gemini's Run) for anything a
+	// human has added to the task's conversation since the last poll --
+	// a comment posted while this very run is still in flight, not just
+	// the ones already folded into Prompt at dispatch. It returns new
+	// addenda oldest first, or nil if there are none; a Framework that
+	// finds one folds it into the conversation as a fresh user turn, the
+	// same way a redispatch already folds the whole thread in up front
+	// (orchestrator.commentThreadSection).
+	//
+	// claude.Framework.Run never calls this: `claude -p` is one blocking
+	// subprocess call with its whole prompt written to stdin before the
+	// process starts, so there is no turn boundary here to poll at. A
+	// comment posted while a claude run is in flight waits for the
+	// task's next dispatch instead, exactly as it always has -- see that
+	// package's own Run doc comment.
+	Addenda func(ctx context.Context) ([]string, error)
 }
 
 // ToolCall records one function call an agent made and what it got back,
