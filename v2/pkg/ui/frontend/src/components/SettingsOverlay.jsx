@@ -99,6 +99,9 @@ export default function SettingsOverlay({ config, onClose, showError }) {
 
     if (JSON.stringify(targetRepos) !== JSON.stringify(settings.targetRepos || [])) payload.targetRepos = targetRepos;
 
+    const newestFirst = form.elements.newestFirst.checked;
+    if (newestFirst !== !!settings.newestFirst) payload.newestFirst = newestFirst;
+
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
       onClose();
@@ -154,6 +157,19 @@ export default function SettingsOverlay({ config, onClose, showError }) {
             />
             <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
+            <FormControlLabel
+              control={<Checkbox name="newestFirst" defaultChecked={!!settings.newestFirst} />}
+              label={(
+                <>
+                  Work through the backlog newest-first
+                  <span className="hint">
+                    off (default): a new task is added to the top of the list but dispatched last, behind
+                    everything already queued. on: it is dispatched next instead, ahead of everything queued.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
 
             <Typography variant="body2" sx={{ mt: 2, fontWeight: 500 }}>
               Target repos <span className="hint">owner/name; empty allows any</span>

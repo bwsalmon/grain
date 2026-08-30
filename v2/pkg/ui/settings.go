@@ -49,6 +49,12 @@ type Settings struct {
 	// which reads from JSON exactly like "no gaps found" -- there is
 	// nothing actionable to tell those two cases apart on.
 	TargetReposMissingCredentials []string `json:"targetReposMissingCredentials,omitempty"`
+	// NewestFirst is model.Config's own field of the same name
+	// (bwsalmon/agents#476): false, the default, keeps a new task's
+	// place at the back of the dispatch queue even though it always
+	// shows up first in the task list; true moves it to the front of
+	// both instead.
+	NewestFirst bool `json:"newestFirst"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -64,6 +70,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		GCPServiceAccountEmail:        cfg.GCPServiceAccountEmail,
 		TargetRepos:                   cfg.TargetRepos,
 		TargetReposMissingCredentials: c.targetReposMissingCredentials(cfg.TargetRepos),
+		NewestFirst:                   cfg.NewestFirst,
 	}
 }
 
@@ -123,6 +130,7 @@ type UpdateSettingsRequest struct {
 	GCPProject             *string   `json:"gcpProject"`
 	GCPServiceAccountEmail *string   `json:"gcpServiceAccountEmail"`
 	TargetRepos            *[]string `json:"targetRepos"`
+	NewestFirst            *bool     `json:"newestFirst"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -201,6 +209,9 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			}
 		}
 		cfg.TargetRepos = *req.TargetRepos
+	}
+	if req.NewestFirst != nil {
+		cfg.NewestFirst = *req.NewestFirst
 	}
 
 	if firstTime {

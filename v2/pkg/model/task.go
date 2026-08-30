@@ -359,6 +359,15 @@ type Task struct {
 
 	AutoMerge bool
 	CreatedAt *time.Time
+
+	// OrderKey is this task's position in the backlog -- Store.Ready
+	// dispatches ascending, so the task with the smallest OrderKey among
+	// everything queued runs next (bwsalmon/agents#476). It is never a
+	// timestamp: Store.OrderKeyForNewTask assigns a fresh one a fixed
+	// step past whichever extreme is currently in play, and Store.Reorder
+	// (a drag-and-drop move) rewrites it directly, so two tasks created
+	// or moved in the same instant still compare distinctly.
+	OrderKey float64
 }
 
 // Observation is the half grain writes: what it has seen happen.

@@ -84,11 +84,28 @@ func (c *Client) capabilityByID(id string) (Capability, bool) {
 	return Capability{}, false
 }
 
-// ListTasks returns every task, newest first.
+// ListTasks returns every task in this deployment's default backlog
+// order: newest first, unless model.Config.NewestFirst says otherwise,
+// in which case it is Store.ListTasks' own order untouched -- ascending
+// OrderKey, top-to-bottom the same order Store.Ready dispatches in
+// (bwsalmon/agents#476).
 func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	tasks, err := c.Store.ListTasks(ctx)
 	if err != nil {
 		return nil, err
+	}
+	newestFirst, err := c.newestFirst(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Store.ListTasks already hands back ascending OrderKey -- Ready's
+	// own order, and NewestFirst's own "read it as-is" case. The
+	// traditional default (false) is that order's reverse: whichever
+	// task joined the backlog most recently sorts first.
+	if !newestFirst {
+		for i, j := 0, len(tasks)-1; i < j; i, j = i+1, j-1 {
+			tasks[i], tasks[j] = tasks[j], tasks[i]
+		}
 	}
 	states, err := c.Store.States(ctx)
 	if err != nil {
@@ -107,6 +124,23 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 		out = append(out, taskFrom(t, states[t.ID], closed))
 	}
 	return out, nil
+}
+
+// newestFirst reads model.Config.NewestFirst fresh from the store on
+// every call, deliberately unlike the deployment-wide settings Config
+// (this package's own type) mirrors from it: those need a daemon restart
+// to pick up a change (cmd/grain daemon's own loadConfig doc comment),
+// which is the wrong trade for a setting a UI toggles and expects the
+// very next task list (or task creation) to honour, rather than only the
+// next full restart of the deployment. A fresh deployment with no
+// grain_config row yet (nil) reads as false -- model.Config's own zero
+// value, and the backlog order grain has always defaulted to.
+func (c *Client) newestFirst(ctx context.Context) (bool, error) {
+	cfg, err := c.Store.GetConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	return cfg != nil && cfg.NewestFirst, nil
 }
 
 // Task returns one task's list-shaped view.
@@ -313,6 +347,19 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
+	newestFirst, err := c.newestFirst(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	// atFront: NewestFirst asks a new task to dispatch ahead of
+	// everything already queued (Store.OrderKeyForNewTask's own doc
+	// comment), not merely to display first -- the default (false) files
+	// it behind everything queued instead, the FIFO backlog grain has
+	// always defaulted to.
+	orderKey, err := c.Store.OrderKeyForNewTask(ctx, newestFirst)
+	if err != nil {
+		return Task{}, err
+	}
 	now := c.now()
 	task := model.Task{
 		ID:     id,
@@ -331,6 +378,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Links:     links,
 		Reads:     reads,
 		CreatedAt: &now,
+		OrderKey:  orderKey,
 	}
 	if req.Approved {
 		task.Approval = &model.Attribution{Actor: c.Config.Actor}
@@ -619,6 +667,40 @@ func (c *Client) SetDependency(ctx context.Context, id, dependsOnID string, atta
 		task.Links = append(task.Links, links...)
 		return nil
 	})
+}
+
+// ReorderRequest is a drag-and-drop move (bwsalmon/agents#476): ids, in
+// the order they should keep relative to each other, dropped between
+// whatever AfterID and BeforeID currently name. Either may be empty --
+// AfterID empty means ids become the new minimum, dropped at the head of
+// a list ("just before the following job"), BeforeID empty means they
+// become the new maximum. Both resolve against the full backlog, not
+// whatever view the drag happened in: TaskList.jsx computes them from the
+// nearest neighbours still visible under its current filter, which is
+// what lets a filtered drag land the dragged task(s) correctly in the
+// unfiltered order even though it never saw most of that order.
+type ReorderRequest struct {
+	IDs      []string `json:"ids"`
+	AfterID  string   `json:"afterId"`
+	BeforeID string   `json:"beforeId"`
+}
+
+// Reorder applies a ReorderRequest. A blank AfterID/BeforeID means "no
+// bound on this side" (Store.Reorder's own nil), not "the task with the
+// empty string id" -- task ids are never empty (model.BranchName's own
+// doc comment: NewTaskID allocates them, decimal and always non-empty).
+func (c *Client) Reorder(ctx context.Context, req ReorderRequest) error {
+	if len(req.IDs) == 0 {
+		return validationErrorf("ids is required")
+	}
+	var afterID, beforeID *string
+	if req.AfterID != "" {
+		afterID = &req.AfterID
+	}
+	if req.BeforeID != "" {
+		beforeID = &req.BeforeID
+	}
+	return c.Store.Reorder(ctx, req.IDs, afterID, beforeID)
 }
 
 // Approve records approval on a proposed task, which is what makes it

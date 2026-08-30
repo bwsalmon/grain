@@ -774,6 +774,114 @@ func TestListTasksCarriesEveryTaskWithItsState(t *testing.T) {
 	}
 }
 
+// TestListTasksDefaultsToNewestFirst is grain's original shape
+// (bwsalmon/agents#476), unchanged by OrderKey's arrival: three tasks
+// created in order end up listed in the reverse of that order, even
+// though Store.ListTasks itself now hands back the opposite (ascending
+// OrderKey, dispatch order) and this package's own ListTasks reverses it.
+func TestListTasksDefaultsToNewestFirst(t *testing.T) {
+	c, _, ctx := testClient(t)
+	first := create(t, c, ctx)
+	second := create(t, c, ctx)
+	third := create(t, c, ctx)
+
+	tasks, err := c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
+	want := []string{third.ID, second.ID, first.ID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListTasks order = %v, want newest first %v", got, want)
+	}
+}
+
+// TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue is
+// bwsalmon/agents#476's global switch: with model.Config.NewestFirst set,
+// a task created after two others still shows up first in the task list
+// (same as the default), but Store.Ready now dispatches it before them
+// too, instead of after -- the whole point of the setting.
+func TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue(t *testing.T) {
+	c, store, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	newestFirst := true
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{NewestFirst: &newestFirst}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := create(t, c, ctx)
+	second := create(t, c, ctx)
+	third := create(t, c, ctx)
+
+	tasks, err := c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
+	want := []string{third.ID, second.ID, first.ID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListTasks order under NewestFirst = %v, want still newest first %v", got, want)
+	}
+
+	// Dispatch order, not just display order, now runs newest to oldest.
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready under NewestFirst = %v, want newest dispatched first %v", ready, want)
+	}
+}
+
+// TestReorderMovesATaskInTheBacklog exercises Client.Reorder end to end
+// -- the endpoint TaskList.jsx's drag-and-drop drop handler calls -- and
+// checks the move is visible through both ListTasks (the display) and
+// Ready (the dispatch order), since both read the same OrderKey column.
+func TestReorderMovesATaskInTheBacklog(t *testing.T) {
+	c, store, ctx := testClient(t)
+	first := create(t, c, ctx)
+	second := create(t, c, ctx)
+	third := create(t, c, ctx)
+
+	// Backlog (dispatch) order today is oldest first: first, second, third.
+	// Move third to the very front -- "just before the following job" when
+	// dropped at the head of the list, the same wording the issue uses.
+	if err := c.Reorder(ctx, ui.ReorderRequest{IDs: []string{third.ID}, BeforeID: first.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{third.ID, first.ID, second.ID}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready after Reorder = %v, want %v", ready, want)
+	}
+
+	// And the list a UI shows reflects the same move, oldest-insertion
+	// convention aside: it is still the reverse of Ready, since NewestFirst
+	// was never switched on in this test.
+	tasks, err := c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
+	if want := []string{second.ID, first.ID, third.ID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListTasks after Reorder = %v, want %v", got, want)
+	}
+}
+
+func TestReorderValidatesIDsIsNotEmpty(t *testing.T) {
+	c, _, ctx := testClient(t)
+	err := c.Reorder(ctx, ui.ReorderRequest{})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("Reorder with no ids: error = %v, want a ValidationError", err)
+	}
+}
+
 // GeneratedFrom is read off the task's own LinkProposedBy link -- the
 // same provenance relayProposedTasks (pkg/orchestrator/finish.go) sets
 // automatically on every task a propose_task call files, surfaced here

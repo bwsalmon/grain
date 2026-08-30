@@ -1451,3 +1451,306 @@ func openWithBusyTimeout(t *testing.T, timeout time.Duration) (*sql.DB, func()) 
 	}
 	return db, func() { db.Close() }
 }
+
+// --- backlog order (bwsalmon/agents#476) --------------------------------
+
+func listedIDs(t *testing.T, store *model.Store, ctx context.Context) []string {
+	t.Helper()
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	ids := make([]string, len(tasks))
+	for i, tk := range tasks {
+		ids[i] = tk.ID
+	}
+	return ids
+}
+
+// TestReadyAndListTasksFollowOrderKeyNotID puts three tasks in an order
+// their ids alone would not produce, to pin down that both Ready (the
+// dispatch order) and ListTasks (the backlog order a UI or CLI defaults
+// to) sort by OrderKey rather than id or CreatedAt.
+func TestReadyAndListTasksFollowOrderKeyNotID(t *testing.T) {
+	store, _, ctx := openStore(t)
+	first := task("c3d4", true)
+	first.OrderKey = 10
+	second := task("a1b2", true)
+	second.OrderKey = 20
+	third := task("z9y8", true)
+	third.OrderKey = 30
+	for _, tk := range []model.Task{third, first, second} {
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"c3d4", "a1b2", "z9y8"}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want %v", ready, want)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"c3d4", "a1b2", "z9y8"}) {
+		t.Fatalf("ListTasks = %v, want ascending OrderKey order", got)
+	}
+}
+
+func TestOrderKeyForNewTaskExtendsOrJumpsTheQueue(t *testing.T) {
+	store, _, ctx := openStore(t)
+
+	// An empty backlog has no extreme to step past, either direction.
+	for _, atFront := range []bool{false, true} {
+		key, err := store.OrderKeyForNewTask(ctx, atFront)
+		if err != nil || key != 0 {
+			t.Fatalf("OrderKeyForNewTask(empty, %v) = (%v, %v), want (0, nil)", atFront, key, err)
+		}
+	}
+
+	only := task("a1b2", true)
+	only.OrderKey = 100
+	if err := store.PutTask(ctx, only); err != nil {
+		t.Fatal(err)
+	}
+
+	back, err := store.OrderKeyForNewTask(ctx, false)
+	if err != nil || back <= 100 {
+		t.Fatalf("OrderKeyForNewTask(atFront=false) = (%v, %v), want > 100", back, err)
+	}
+	front, err := store.OrderKeyForNewTask(ctx, true)
+	if err != nil || front >= 100 {
+		t.Fatalf("OrderKeyForNewTask(atFront=true) = (%v, %v), want < 100", front, err)
+	}
+}
+
+// TestReorderPlacesBetweenNeighbours drags one task at a time and checks
+// the resulting backlog order, including the two unbounded cases
+// (dropped at the very head or the very tail of the list) the issue's own
+// "just before the following job if moved to the head of the list" calls
+// out by name.
+func TestReorderPlacesBetweenNeighbours(t *testing.T) {
+	store, _, ctx := openStore(t)
+	for id, key := range map[string]float64{"a": 10, "b": 20, "c": 30} {
+		tk := task(id, true)
+		tk.OrderKey = key
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, before := ptr("a"), ptr("b")
+
+	// c dropped between a and b.
+	if err := store.Reorder(ctx, []string{"c"}, after, before); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"a", "c", "b"}) {
+		t.Fatalf("after dropping c between a and b: %v, want [a c b]", got)
+	}
+
+	// b dropped at the very head -- no preceding job, so it goes just
+	// before the (new) first task, a.
+	if err := store.Reorder(ctx, []string{"b"}, nil, ptr("a")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"b", "a", "c"}) {
+		t.Fatalf("after dropping b at the head: %v, want [b a c]", got)
+	}
+
+	// a dropped at the very tail -- no following job.
+	if err := store.Reorder(ctx, []string{"a"}, ptr("c"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"b", "c", "a"}) {
+		t.Fatalf("after dropping a at the tail: %v, want [b c a]", got)
+	}
+}
+
+// TestReorderMultiSelectKeepsRelativeOrder drags two tasks at once,
+// passed in the opposite order from how they currently sit in the
+// backlog, and checks Reorder still lands them as a block in their own
+// existing relative order (a before c) rather than in whatever order the
+// ids argument happened to list them.
+func TestReorderMultiSelectKeepsRelativeOrder(t *testing.T) {
+	store, _, ctx := openStore(t)
+	for id, key := range map[string]float64{"a": 10, "b": 20, "c": 30, "d": 40} {
+		tk := task(id, true)
+		tk.OrderKey = key
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ids names c before a -- the reverse of their current order -- to
+	// prove Reorder sorts by OrderKey rather than trusting this order.
+	if err := store.Reorder(ctx, []string{"c", "a"}, ptr("d"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"b", "d", "a", "c"}) {
+		t.Fatalf("after multi-select drag: %v, want [b d a c] -- a and c keep their own relative order", got)
+	}
+}
+
+// TestReorderRejectsAnUnknownID is TestReorderRejectsAStaleNeighbour's
+// counterpart for ids itself: a task named in the drag rather than as a
+// neighbour it was dropped against.
+func TestReorderRejectsAnUnknownID(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Reorder(ctx, []string{"gone"}, ptr("a1b2"), nil); err == nil {
+		t.Fatal("Reorder with an unknown id succeeded, want an error")
+	}
+}
+
+// TestReorderRejectsAStaleNeighbour is what a caller sees when the
+// neighbour it computed the drop against (afterID or beforeID) no longer
+// names a task -- closed, or reordered out from under it, between when it
+// built the request and when this ran.
+func TestReorderRejectsAStaleNeighbour(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Reorder(ctx, []string{"a1b2"}, ptr("gone"), nil); err == nil {
+		t.Fatal("Reorder with an unknown afterID succeeded, want an error")
+	}
+}
+
+// TestReorderRebalancesWhenNeighboursAreCrowded forces two neighbours'
+// OrderKey closer together than minOrderKeyGap allows splitting again,
+// directly through the database rather than through repeated drags, and
+// checks Reorder still lands a task strictly between them -- proof the
+// rebalance backstop actually ran rather than Reorder simply producing an
+// indistinguishable float and silently misplacing the drop.
+func TestReorderRebalancesWhenNeighboursAreCrowded(t *testing.T) {
+	store, db, ctx := openStore(t)
+	for id, key := range map[string]float64{"a": 10, "b": 10 + 1e-9, "c": 30} {
+		tk := task(id, true)
+		tk.OrderKey = key
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Belt and braces: pin the two neighbours' keys directly, in case a
+	// future change to PutTask ever stopped taking OrderKey as given.
+	if _, err := db.ExecContext(ctx, "UPDATE `task` SET `order_key` = 10 WHERE `id` = 'a'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE `task` SET `order_key` = 10.0000001 WHERE `id` = 'b'"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Reorder(ctx, []string{"c"}, ptr("a"), ptr("b")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"a", "c", "b"}) {
+		t.Fatalf("after dropping c into a crowded gap: %v, want [a c b]", got)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// --- backlog order settings (bwsalmon/agents#476) ------------------------
+
+func TestInitMigratesAnExistingDatabaseMissingOrderKey(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task`"+` (
+  `+"`id`"+`                    TEXT    NOT NULL,
+  `+"`intent`"+`                TEXT    NOT NULL,
+  `+"`title`"+`                 TEXT    NOT NULL,
+  `+"`body`"+`                  TEXT    NOT NULL,
+  `+"`origin_actor_kind`"+`     TEXT    NOT NULL,
+  `+"`origin_actor_id`"+`       TEXT    NOT NULL,
+  `+"`origin_behalf_kind`"+`    TEXT    NULL,
+  `+"`origin_behalf_id`"+`      TEXT    NULL,
+  `+"`origin_reason`"+`         TEXT    NOT NULL,
+  `+"`approval_actor_kind`"+`   TEXT    NULL,
+  `+"`approval_actor_id`"+`     TEXT    NULL,
+  `+"`approval_behalf_kind`"+`  TEXT    NULL,
+  `+"`approval_behalf_id`"+`    TEXT    NULL,
+  `+"`approved_at`"+`           DATETIME NULL,
+  `+"`target_owner`"+`          TEXT    NULL,
+  `+"`target_name`"+`           TEXT    NULL,
+  `+"`binding`"+`               TEXT    NOT NULL,
+  `+"`base`"+`                  TEXT    NULL,
+  `+"`folder`"+`                TEXT    NULL,
+  `+"`auto_merge`"+`            INTEGER  NOT NULL,
+  `+"`created_at`"+`            DATETIME NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#476 task table: %v", err)
+	}
+	for _, id := range []string{"9", "10", "2"} {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO `task` (`id`,`intent`,`title`,`body`,`origin_actor_kind`,`origin_actor_id`,"+
+				"`origin_reason`,`binding`,`auto_merge`,`created_at`) "+
+				"VALUES (?,'implement','t','','human','bwsalmon','direct','directive',0,?)", id, now); err != nil {
+			t.Fatalf("seeding a pre-#476 task row: %v", err)
+		}
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task.order_key: %v", err)
+	}
+
+	// Backfilled in the same lexical id order Ready already dispatched in
+	// before OrderKey existed -- "10" < "2" < "9" as strings -- so an
+	// upgraded deployment's dispatch order is unchanged by this migration.
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"10", "2", "9"}) {
+		t.Fatalf("ListTasks after migrating = %v, want [10 2 9] (lexical id order preserved)", got)
+	}
+}
+
+func TestInitMigratesAnExistingDatabaseMissingNewestFirst(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#476 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','')"); err != nil {
+		t.Fatalf("seeding a pre-#476 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.newest_first: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.NewestFirst {
+		// false is what keeps an upgraded deployment's backlog order
+		// unchanged -- the whole point of this migration's default.
+		t.Fatalf("NewestFirst after migrating = true, want false")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +70,12 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if err := s.ensureScheduledTaskRecurrenceColumns(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
+	}
+	if err := s.ensureTaskOrderKeyColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
+	if err := s.ensureConfigNewestFirstColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
 	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
@@ -217,6 +224,62 @@ func (s *Store) ensureScheduledTaskRecurrenceColumns(ctx context.Context) error 
 	return nil
 }
 
+// ensureTaskOrderKeyColumn adds task.order_key (schema.go's own DDL
+// comment on the table has the reasoning) to a database created before
+// bwsalmon/agents#476, the same probe-then-ALTER approach every ensure*
+// migration above already uses. Existing rows are backfilled in ascending
+// id order and spaced by orderKeySpacing, the exact tiebreak Store.Ready's
+// own ORDER BY used for task id before OrderKey existed -- so a database
+// upgraded through this sees no change in dispatch order, only a new
+// column recording what that order already was.
+func (s *Store) ensureTaskOrderKeyColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `order_key` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `order_key` REAL NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	var ids []string
+	if err := each(ctx, s.db, "SELECT `id` FROM `task` ORDER BY `id`", nil,
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+			return nil
+		}); err != nil {
+		return err
+	}
+	for i, id := range ids {
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `task` SET `order_key` = ? WHERE `id` = ?",
+			orderKeySpacing*float64(i+1), id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureConfigNewestFirstColumn adds grain_config.newest_first
+// (model.Config.NewestFirst's own doc comment has the reasoning) to a
+// database created before bwsalmon/agents#476, the same probe-then-ALTER
+// approach ensureConfigTargetReposColumn already uses. Defaulting to 0
+// (false) is what keeps an upgraded deployment's backlog order exactly as
+// it was -- NewestFirst false is grain's original "new task dispatches
+// last" shape.
+func (s *Store) ensureConfigNewestFirstColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `newest_first` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `newest_first` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
 // ErrConflict reports that an operation could not get a write in even
 // after retrying -- the store stayed busy with some other writer for
 // longer than it was willing to wait. A caller seeing it should tell
@@ -342,13 +405,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, timeOf(t.CreatedAt),
+		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -513,7 +576,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`"
+	"`auto_merge`,`created_at`,`order_key`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -529,7 +592,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt); err != nil {
+		&t.AutoMerge, &createdAt, &t.OrderKey); err != nil {
 		return Task{}, err
 	}
 
@@ -559,7 +622,8 @@ func scanTask(scan func(...any) error) (Task, error) {
 	return t, nil
 }
 
-// ListTasks returns every task, newest first, fully hydrated.
+// ListTasks returns every task in backlog order -- ascending OrderKey,
+// the same order Store.Ready dispatches in -- fully hydrated.
 //
 // This is what a UI or a CLI lists, and it is deliberately the whole
 // table: grain's task count is bounded by what a small team files by
@@ -572,12 +636,17 @@ func scanTask(scan func(...any) error) (Task, error) {
 // per grant per link and need de-duplicating in Go, which is more code
 // to get wrong than the extra round trips are worth at this size.
 //
-// Ties on created_at break by id, lexically -- ids are decimal strings,
-// so that is not numeric order. Nothing depends on the tie-break beyond
-// it being stable.
+// A caller wanting the traditional newest-first list (ui.Client.ListTasks,
+// unless model.Config.NewestFirst says otherwise -- bwsalmon/agents#476)
+// reverses this slice rather than asking for a second order here: OrderKey
+// ascending is the one order Ready also needs, so it is the one this
+// store computes. Ties break by id, ascending: OrderKey is unique in
+// practice (Store.OrderKeyForNewTask and Store.Reorder both space new
+// values away from their neighbours) but nothing enforces it, so a tie
+// still needs a stable, deterministic break.
 func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+taskColumns+" FROM `task` ORDER BY `created_at` DESC, `id` DESC")
+		"SELECT "+taskColumns+" FROM `task` ORDER BY `order_key`, `id`")
 	if err != nil {
 		return nil, fmt.Errorf("listing tasks: %w", err)
 	}
@@ -1045,12 +1114,14 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 }
 
 // Ready is every task dispatchable right now: approved, not running, with
-// no open blocker -- in dispatch order. A fix task (Origin.Reason ==
-// ReasonFix) sorts before everything else: it exists only because
-// orchestrator.queueHeads found its repo's merge queue head broken, and
-// queueHeads already guarantees at most one such task per repo at a
-// time, so there is never more than a handful competing for this and
-// nothing else to weigh them against. Leaving one to wait behind
+// no open blocker -- in dispatch order, which is the backlog's own order
+// (bwsalmon/agents#476): ascending OrderKey, the same order ListTasks
+// hands a UI or CLI before any newest-first display flip. A fix task
+// (Origin.Reason == ReasonFix) sorts before everything else: it exists
+// only because orchestrator.queueHeads found its repo's merge queue head
+// broken, and queueHeads already guarantees at most one such task per
+// repo at a time, so there is never more than a handful competing for
+// this and nothing else to weigh them against. Leaving one to wait behind
 // unrelated new work is what bwsalmon/agents#389 asks to avoid: the
 // longer a queue head's repair sits queued, the more likely something
 // else lands on the branch it targets first and the fix has to be
@@ -1061,7 +1132,7 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	err := each(ctx, s.db,
 		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
-			"ORDER BY (`t`.`origin_reason` = ?) DESC, `r`.`task_id`",
+			"ORDER BY (`t`.`origin_reason` = ?) DESC, `t`.`order_key`, `r`.`task_id`",
 		[]any{string(ReasonFix)},
 		func(rows *sql.Rows) error {
 			var id string
@@ -1072,6 +1143,225 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 			return nil
 		})
 	return out, err
+}
+
+// orderKeySpacing is the gap Store.OrderKeyForNewTask and a rebalance
+// (rebalanceOrderKeys) leave between adjacent tasks' OrderKey. It only
+// has to be wide enough that ordinary use doesn't need a rebalance often
+// -- Store.Reorder's own splitOrderKeys still narrows the gap between two
+// neighbours every time something is dropped between them, and
+// rebalanceOrderKeys is what restores it once minOrderKeyGap says that
+// gap is getting too fine to split again.
+const orderKeySpacing = 1 << 20
+
+// minOrderKeyGap is the smallest gap Store.Reorder will still split
+// rather than rebalance first. float64 has roughly 15-17 significant
+// decimal digits; orderKeySpacing's 2^20 leaves this many orders of
+// magnitude of headroom below it before two distinct float64 values
+// would stop being representably distinct, which is the actual failure
+// this bounds against -- not a UX judgement about how fine a manual
+// reorder is allowed to get.
+const minOrderKeyGap = 1e-6
+
+// OrderKeyForNewTask returns the OrderKey a newly filed task should take:
+// one orderKeySpacing step past whichever extreme of the backlog
+// model.Config.NewestFirst currently asks new work to join. atFront asks
+// for the low end -- Ready dispatches ascending OrderKey, so a task
+// placed there runs before everything already queued, which is what
+// NewestFirst true means. atFront false (NewestFirst's own default) is
+// the opposite end: last in line, behind everything already queued, the
+// FIFO backlog grain has always defaulted to. An empty task table (no
+// extreme to step past) returns 0, same as OrderKey's own zero value.
+func (s *Store) OrderKeyForNewTask(ctx context.Context, atFront bool) (float64, error) {
+	q := "SELECT MAX(`order_key`) FROM `task`"
+	if atFront {
+		q = "SELECT MIN(`order_key`) FROM `task`"
+	}
+	var extreme sql.NullFloat64
+	if err := s.db.QueryRowContext(ctx, q).Scan(&extreme); err != nil {
+		return 0, fmt.Errorf("computing a new task's order key: %w", err)
+	}
+	if !extreme.Valid {
+		return 0, nil
+	}
+	if atFront {
+		return extreme.Float64 - orderKeySpacing, nil
+	}
+	return extreme.Float64 + orderKeySpacing, nil
+}
+
+// Reorder moves ids to sit between whatever afterID and beforeID
+// currently name -- a drag-and-drop move (bwsalmon/agents#476), against
+// the same OrderKey column ListTasks and Ready both already read, so a
+// move here is immediately visible to both. Either bound may be nil: no
+// afterID means ids become the new minimum -- dropped at the head of a
+// list, "just before the following job" -- and no beforeID means they
+// become the new maximum. Both nil is only reachable by dropping into an
+// empty list, which cannot happen through the UI (there would be nothing
+// to drop onto) but is handled the same as any other unbounded case
+// rather than rejected. ids keep their relative order among themselves,
+// so dragging a multi-selection reorders it as a block rather than by id.
+//
+// A neighbour named by afterID or beforeID that does not exist is an
+// error: both are read fresh from the store inside this call's own
+// transaction, so this can only mean the caller's own view was already
+// stale (the task was closed or reordered out from under it) between
+// when it computed the request and when this ran. So is an id among ids
+// that does not exist, for the same reason.
+//
+// ids is re-sorted by each task's own current OrderKey before anything is
+// written, rather than trusted to already be in that order -- a
+// multi-select drag's relative order is a property of the backlog these
+// ids already had, not an incidental fact about Set iteration order or
+// click order a caller would otherwise have to get right itself.
+func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return s.write(ctx, "reorder tasks", func(tx *sql.Tx) error {
+		ordered, err := sortByOrderKey(ctx, tx, ids)
+		if err != nil {
+			return err
+		}
+		lower, upper, err := orderKeyBounds(ctx, tx, afterID, beforeID)
+		if err != nil {
+			return err
+		}
+		if !orderKeysFitBetween(lower, upper, len(ordered)) {
+			if err := rebalanceOrderKeys(ctx, tx); err != nil {
+				return err
+			}
+			if lower, upper, err = orderKeyBounds(ctx, tx, afterID, beforeID); err != nil {
+				return err
+			}
+		}
+		for i, key := range splitOrderKeys(lower, upper, len(ordered)) {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `task` SET `order_key` = ? WHERE `id` = ?", key, ordered[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// sortByOrderKey returns ids sorted ascending by each task's current
+// OrderKey -- Reorder's own "the block keeps its existing relative order"
+// guarantee.
+func sortByOrderKey(ctx context.Context, tx *sql.Tx, ids []string) ([]string, error) {
+	keys := make(map[string]float64, len(ids))
+	for _, id := range ids {
+		k, err := orderKeyOf(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		keys[id] = k
+	}
+	ordered := append([]string(nil), ids...)
+	sort.SliceStable(ordered, func(i, j int) bool { return keys[ordered[i]] < keys[ordered[j]] })
+	return ordered, nil
+}
+
+// orderKeyBounds resolves Reorder's afterID/beforeID to the OrderKey
+// values already in the store -- read inside Reorder's own transaction,
+// never trusted from an earlier read, the same "re-read, never pin"
+// discipline IsBlocked's own doc comment argues for.
+func orderKeyBounds(ctx context.Context, tx *sql.Tx, afterID, beforeID *string) (lower, upper *float64, err error) {
+	if afterID != nil {
+		k, err := orderKeyOf(ctx, tx, *afterID)
+		if err != nil {
+			return nil, nil, err
+		}
+		lower = &k
+	}
+	if beforeID != nil {
+		k, err := orderKeyOf(ctx, tx, *beforeID)
+		if err != nil {
+			return nil, nil, err
+		}
+		upper = &k
+	}
+	return lower, upper, nil
+}
+
+func orderKeyOf(ctx context.Context, tx *sql.Tx, taskID string) (float64, error) {
+	var k float64
+	err := tx.QueryRowContext(ctx, "SELECT `order_key` FROM `task` WHERE `id` = ?", taskID).Scan(&k)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("reordering: no such task %s", taskID)
+	}
+	return k, err
+}
+
+// orderKeysFitBetween reports whether n new, distinct OrderKey values can
+// still be split out of (lower, upper) without any pair closer than
+// minOrderKeyGap -- Reorder's own signal that a rebalance has to run
+// before it can compute keys, not after. An unbounded side (either nil)
+// always fits: Reorder only ever narrows a gap by splitting between two
+// existing neighbours, so the only way to run out of room is repeated
+// splits of the same bounded interval.
+func orderKeysFitBetween(lower, upper *float64, n int) bool {
+	if lower == nil || upper == nil {
+		return true
+	}
+	return (*upper-*lower)/float64(n+1) >= minOrderKeyGap
+}
+
+// splitOrderKeys computes n OrderKey values strictly between lower and
+// upper (whichever are non-nil), evenly spaced and in ascending order --
+// Reorder's own ids keep this order, which is what keeps a multi-select
+// drag's relative order intact.
+func splitOrderKeys(lower, upper *float64, n int) []float64 {
+	keys := make([]float64, n)
+	switch {
+	case lower != nil && upper != nil:
+		step := (*upper - *lower) / float64(n+1)
+		for i := range keys {
+			keys[i] = *lower + step*float64(i+1)
+		}
+	case lower != nil:
+		for i := range keys {
+			keys[i] = *lower + orderKeySpacing*float64(i+1)
+		}
+	case upper != nil:
+		for i := range keys {
+			keys[i] = *upper - orderKeySpacing*float64(n-i)
+		}
+	default:
+		for i := range keys {
+			keys[i] = orderKeySpacing * float64(i+1)
+		}
+	}
+	return keys
+}
+
+// rebalanceOrderKeys renumbers every task's OrderKey, ascending and
+// spaced by orderKeySpacing, without changing their relative order --
+// Reorder's own backstop against minOrderKeyGap, restoring room to split
+// between two neighbours that repeated drops have crowded together. It
+// runs inside Reorder's own transaction, so the renumbering and the move
+// that triggered it land together or not at all.
+func rebalanceOrderKeys(ctx context.Context, tx *sql.Tx) error {
+	var ids []string
+	if err := each(ctx, tx, "SELECT `id` FROM `task` ORDER BY `order_key`, `id`", nil,
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+			return nil
+		}); err != nil {
+		return err
+	}
+	for i, id := range ids {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `task` SET `order_key` = ? WHERE `id` = ?",
+			orderKeySpacing*float64(i+1), id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // OccupiedSlots is every slot currently holding a live run — a run with
@@ -1281,7 +1571,8 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 }
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
-	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`"
+	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
+	"`newest_first`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -1289,7 +1580,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var targetRepos string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos); err != nil {
+		&targetRepos, &c.NewestFirst); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -1304,10 +1595,10 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos))
+			joinCSV(c.TargetRepos), c.NewestFirst)
 		return err
 	})
 }
