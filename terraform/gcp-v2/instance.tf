@@ -96,7 +96,18 @@ resource "google_compute_instance" "host" {
   }
 
   scheduling {
-    on_host_maintenance = "TERMINATE"
+    # MIGRATE, unlike terraform/gcp's v1 host, which sets TERMINATE
+    # because "nested virtualization and live migration have a history"
+    # (that file's own comment). This VM runs no nested guests, so that
+    # reason does not carry over -- and TERMINATE did carry over, which
+    # made this module's own default machine type impossible to apply:
+    # E2 rejects TERMINATE unless the instance is spot, so
+    # `machine_type = "e2-standard-2"` failed with "e2 instances do not
+    # support maintenance terminate unless spot" on a first apply.
+    #
+    # Live migration is also simply better here: the daemon survives a
+    # host maintenance event instead of being killed and reconverged.
+    on_host_maintenance = "MIGRATE"
     automatic_restart   = true
   }
 
