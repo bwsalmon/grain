@@ -36,6 +36,12 @@
   --state-failed: var(--danger);
   --state-completed: #1a9c53;
   --state-closed: #9a9ba4;
+  /* pr-merged is GitHub's own colour for a merged pull request -- the
+     one timeline dot (Timeline's own "PR merged" event, bwsalmon/
+     agents#493) that state-completed's green would otherwise collide
+     with a task's own "completed" transition, so it gets a colour of
+     its own instead. */
+  --pr-merged: #8250df;
 
   --shadow-panel: 0 16px 40px rgba(20, 21, 26, 0.16), 0 2px 8px rgba(20, 21, 26, 0.08);
   --shadow-toast: 0 10px 28px rgba(20, 21, 26, 0.28);
@@ -70,6 +76,7 @@
     --state-failed: var(--danger);
     --state-completed: #3ec573;
     --state-closed: #83848d;
+    --pr-merged: #a371f7;
 
     --shadow-panel: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
     --shadow-toast: 0 10px 28px rgba(0, 0, 0, 0.6);
@@ -525,6 +532,14 @@ fieldset legend {
 .timeline-item-attempt { cursor: pointer; border-radius: 6px; margin: 0 -0.4rem; padding-left: 0.4rem; padding-right: 0.4rem; }
 .timeline-item-attempt:hover { background: var(--canvas); }
 .badge-comment::before { background: var(--text-placeholder); }
+/* Timeline's own pull request events (bwsalmon/agents#493) -- GitHub's
+   own colours for the three ("PR opened" reuses state-completed's green,
+   the same "something new and live" green an open PR gets on github.com;
+   "PR merged" gets pr-merged's purple; "PR closed unmerged" reuses
+   state-failed's red, github.com's own colour for a closed PR). */
+.badge-pr_opened::before { background: var(--state-completed); }
+.badge-pr_merged::before { background: var(--pr-merged); }
+.badge-pr_closed::before { background: var(--state-failed); }
 .timeline-body { flex: 1; min-width: 0; }
 .timeline-when { color: var(--text-tertiary); font-size: 0.75rem; margin-bottom: 0.15rem; }
 .timeline-title { font-weight: 600; font-size: 0.85rem; color: var(--text-secondary); }

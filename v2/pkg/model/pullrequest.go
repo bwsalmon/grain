@@ -46,13 +46,12 @@ func ParsePullRequestRef(s string) (PullRequestRef, error) {
 // depends on: GitHub computes mergeability asynchronously, so a fresh push
 // reading UNKNOWN means "check again next cycle," never "conflicted."
 //
-// PrMerged exists for documentation parity with docs/data-model.md, but
-// nothing in this codebase can produce it yet: github.RESTClient.
-// GetPullRequest's own doc comment records the deliberate choice not to
-// distinguish a merged PR from a closed-without-merging one at the wire
-// layer, since every caller here treats them identically (neither one
-// takes any more commits). Reaching that distinction later costs adding a
-// field there, not changing this enum.
+// PrMerged is orchestrator.healthFrom's answer for a closed PR GitHub's
+// own Merged field says merged, as opposed to PrClosed for one that
+// closed without merging -- the distinction bwsalmon/agents#493's task
+// timeline needs to tell "PR merged" and "PR closed unmerged" apart, even
+// though every other caller here still treats the two identically
+// (neither one takes any more commits).
 type PrHealth string
 
 const (

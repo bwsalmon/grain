@@ -563,6 +563,35 @@ func TestObservationBaselinesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPullRequestEventTimestampsRoundTrip covers PrOpenedAt/PrMergedAt/
+// PrClosedAt (bwsalmon/agents#493) the same way TestObservationBaselinesRoundTrip
+// already covers BaselineCommentID -- a plain round trip through Observe/
+// GetObservation, since nothing about these three needs the derivation
+// TestStateIsDerivedThroughEveryTransition exercises for ClosedAt.
+func TestPullRequestEventTimestampsRoundTrip(t *testing.T) {
+	store, _, ctx := openStore(t)
+	opened := now.Add(-2 * time.Hour)
+	merged := now
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: "a1b2", PrOpenedAt: &opened, PrMergedAt: &merged, ObservedAt: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if got.PrOpenedAt == nil || !got.PrOpenedAt.Equal(opened) {
+		t.Errorf("PrOpenedAt did not survive: %+v", got.PrOpenedAt)
+	}
+	if got.PrMergedAt == nil || !got.PrMergedAt.Equal(merged) {
+		t.Errorf("PrMergedAt did not survive: %+v", got.PrMergedAt)
+	}
+	if got.PrClosedAt != nil {
+		t.Errorf("expected PrClosedAt to stay nil, got %+v", got.PrClosedAt)
+	}
+}
+
 // --- task identity and the conversation --------------------------------
 
 func TestNewTaskIDAllocatesDistinctIncreasingIDs(t *testing.T) {

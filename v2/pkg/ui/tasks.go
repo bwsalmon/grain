@@ -114,6 +114,22 @@ type TaskDetail struct {
 	// record lets this task's state be pinned to a time, oldest first
 	// (bwsalmon/agents#452 -- "show the state transitions for the task").
 	Transitions []Transition `json:"transitions,omitempty"`
+	// PullRequestEvents is this task's own tracked pull request's history
+	// -- opened, then merged or closed without merging -- off
+	// model.Observation's own PrOpenedAt/PrMergedAt/PrClosedAt, oldest
+	// first (bwsalmon/agents#493 -- "show PR events in the task
+	// timeline"). Empty for a task with no pull request yet, or with one
+	// orchestrator.SyncPullRequests has not synced even once.
+	PullRequestEvents []PullRequestEvent `json:"pullRequestEvents,omitempty"`
+}
+
+// PullRequestEvent is one moment in a task's own tracked pull request's
+// life. Kind is "opened", "merged" or "closed" ("closed" meaning closed
+// *without* merging -- a merged PR is always "merged", never "closed",
+// the same distinction model.Observation.PrMergedAt/PrClosedAt draw).
+type PullRequestEvent struct {
+	Kind string    `json:"kind"`
+	At   time.Time `json:"at"`
 }
 
 // Transition is one entry in a task's timeline, projected from

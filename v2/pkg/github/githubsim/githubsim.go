@@ -39,6 +39,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 )
@@ -109,6 +110,21 @@ type PullRequest struct {
 	// -- nil (unknown) unless a test sets it, since Sim has no real merge
 	// engine to compute it with.
 	Mergeable *bool
+	// Merged and MergedAt are GitHub's own fields for the one thing State
+	// alone cannot say: whether this PR closed by merging rather than
+	// without merging (github.PullRequestDetail.Merged's own doc
+	// comment). MergePullRequest sets both; a test standing in for a
+	// human closing a PR without merging (setting State to "closed"
+	// directly, the same doc comment above already describes) leaves
+	// Merged false, matching GitHub's own field for that case.
+	Merged   bool
+	MergedAt time.Time
+	// CreatedAt is GitHub's own field: when the PR was opened, set by
+	// CreatePullRequest -- Sim's real wall clock rather than a caller's
+	// injected one, since Sim has no clock of its own to inject
+	// (unlike orchestrator.SyncPullRequests, which takes now from its
+	// caller).
+	CreatedAt time.Time
 }
 
 // Call is one request Sim answered, kept for tests that want to assert on
@@ -444,7 +460,8 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			pr := PullRequest{
 				Number: number, Title: payload.Title, Body: payload.Body,
 				Head: payload.Head, Base: payload.Base, State: "open",
-				HTMLURL: fmt.Sprintf("https://github.example/%s/%s/pull/%d", s.Owner, s.Repo, number),
+				HTMLURL:   fmt.Sprintf("https://github.example/%s/%s/pull/%d", s.Owner, s.Repo, number),
+				CreatedAt: time.Now(),
 			}
 			s.PullRequests = append(s.PullRequests, pr)
 			return jsonResponse(201, map[string]any{
@@ -543,6 +560,8 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 						return github.ApiResponse{Status: 405, Body: []byte(err.Error())}, nil
 					}
 					s.PullRequests[i].State = "closed"
+					s.PullRequests[i].Merged = true
+					s.PullRequests[i].MergedAt = time.Now()
 					return github.ApiResponse{Status: 200, Body: []byte("{}")}, nil
 				}
 			}
@@ -606,13 +625,21 @@ func pullRequestDetailJSON(pr PullRequest) map[string]any {
 	if state == "" {
 		state = "open"
 	}
-	return map[string]any{
+	out := map[string]any{
 		"number": pr.Number, "title": pr.Title, "body": pr.Body, "html_url": pr.HTMLURL,
 		"state":     state,
 		"head":      map[string]string{"ref": pr.Head},
 		"base":      map[string]string{"ref": pr.Base},
 		"mergeable": pr.Mergeable,
+		"merged":    pr.Merged,
 	}
+	if !pr.CreatedAt.IsZero() {
+		out["created_at"] = pr.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	if pr.Merged && !pr.MergedAt.IsZero() {
+		out["merged_at"] = pr.MergedAt.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 // commentsJSON is the shape github.RESTClient.ListComments decodes.

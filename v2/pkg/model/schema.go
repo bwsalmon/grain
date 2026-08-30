@@ -121,6 +121,9 @@ var Tables = []string{
   ` + "`merge_queue_blocked_at`" + `      DATETIME NULL,
   ` + "`observed_at`" + `                 DATETIME NULL,
   ` + "`retry_requested_at`" + `          DATETIME NULL,
+  ` + "`pr_opened_at`" + `                DATETIME NULL,
+  ` + "`pr_merged_at`" + `                DATETIME NULL,
+  ` + "`pr_closed_at`" + `                DATETIME NULL,
   PRIMARY KEY (` + "`task_id`" + `)
 )`,
 

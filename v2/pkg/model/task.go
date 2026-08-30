@@ -404,6 +404,26 @@ type Observation struct {
 	// task's last succeeded run, so asking for a retry and then failing
 	// again does not instantly re-cap the task on the very next attempt.
 	RetryRequestedAt *time.Time
+	// PrOpenedAt, PrMergedAt and PrClosedAt are the task's own tracked
+	// pull request's history (LinkFixes), off github.PullRequestDetail's
+	// own CreatedAt/MergedAt -- what lets a task's timeline show "PR
+	// opened"/"PR merged"/"PR closed unmerged" (bwsalmon/agents#493), none
+	// of which TrackedPullRequest itself can answer since that type is
+	// deliberately never stored (its own doc comment). Unlike Health,
+	// which is re-read every cycle because it can still change, these are
+	// each a fact about one moment in the past that orchestrator.
+	// SyncPullRequests writes once, the first cycle it observes each one,
+	// and never revisits.
+	//
+	// PrMergedAt and PrClosedAt are mutually exclusive -- a pull request
+	// either merged or it did not -- and distinct from ClosedAt above:
+	// ClosedAt is this task's own closure, set on a task with no pull
+	// request at all just as often as on one whose PR closed, where
+	// PrClosedAt means specifically "the pull request closed without
+	// merging."
+	PrOpenedAt *time.Time
+	PrMergedAt *time.Time
+	PrClosedAt *time.Time
 }
 
 // Run is one attempt. A live run is a Run with no FinishedAt.

@@ -823,10 +823,11 @@ func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 	_, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
 			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,"+
-			"`retry_requested_at`) VALUES (?,?,?,?,?,?,?,?)",
+			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
 		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
-		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt))
+		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt),
+		timeOf(o.PrOpenedAt), timeOf(o.PrMergedAt), timeOf(o.PrClosedAt))
 	return err
 }
 
@@ -837,12 +838,14 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,`retry_requested_at` "+
+			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,`retry_requested_at`,"+
+			"`pr_opened_at`,`pr_merged_at`,`pr_closed_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
-	var closed, completed, blocked, observed, retried sql.NullTime
+	var closed, completed, blocked, observed, retried, prOpened, prMerged, prClosed sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed, &retried); err != nil {
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed, &retried,
+		&prOpened, &prMerged, &prClosed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -852,6 +855,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
 	o.MergeQueueBlockedAt = timePtr(blocked)
 	o.RetryRequestedAt = timePtr(retried)
+	o.PrOpenedAt, o.PrMergedAt, o.PrClosedAt = timePtr(prOpened), timePtr(prMerged), timePtr(prClosed)
 	return &o, nil
 }
 

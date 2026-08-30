@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ApiResponse is one HTTP response, decoupled from net/http so a Transport
@@ -291,10 +292,23 @@ type PullRequestDetail struct {
 	HeadRef string
 	BaseRef string
 	// State is GitHub's own field, "open" or "closed" -- "closed" covers
-	// both merged and closed-without-merging, which a caller closing out
-	// finished PRs treats the same way: either one means nobody is going
-	// to push more commits to this PR.
+	// both merged and closed-without-merging: a caller closing out a
+	// finished PR treats them the same way (either one means nobody is
+	// going to push more commits to it), but Merged below still tells
+	// them apart for a caller that cares which.
 	State string
+	// Merged is GitHub's own field, meaningful only once State is
+	// "closed" -- false the whole time a PR is open, same as GitHub's own
+	// API returns. It is what lets a caller distinguish a merged PR from
+	// one closed without merging, a distinction State alone collapses.
+	Merged bool
+	// MergedAt is GitHub's own field: when the PR merged, nil until
+	// Merged is true. GitHub also returns it nil for a PR closed without
+	// merging, which is the same nil this stays for that case.
+	MergedAt *time.Time
+	// CreatedAt is GitHub's own field: when the PR was opened. Present
+	// for every PR regardless of state, unlike MergedAt.
+	CreatedAt time.Time
 	// Mergeable is GitHub's own field: true/false once it has finished
 	// computing whether this PR can merge cleanly against its base, nil
 	// while that computation is still in flight -- GitHub does this
@@ -918,7 +932,10 @@ func (c *RESTClient) GetPullRequest(owner, repo string, number int) (PullRequest
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
-		Mergeable *bool `json:"mergeable"`
+		Mergeable *bool      `json:"mergeable"`
+		Merged    bool       `json:"merged"`
+		MergedAt  *time.Time `json:"merged_at"`
+		CreatedAt time.Time  `json:"created_at"`
 	}
 	if err := json.Unmarshal(resp.Body, &data); err != nil {
 		return PullRequestDetail{}, err
@@ -930,6 +947,7 @@ func (c *RESTClient) GetPullRequest(owner, repo string, number int) (PullRequest
 	return PullRequestDetail{
 		Number: data.Number, Title: data.Title, Body: data.Body, HTMLURL: data.HTMLURL,
 		HeadRef: data.Head.Ref, BaseRef: data.Base.Ref, State: state, Mergeable: data.Mergeable,
+		Merged: data.Merged, MergedAt: data.MergedAt, CreatedAt: data.CreatedAt,
 	}, nil
 }
 
