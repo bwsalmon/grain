@@ -162,6 +162,23 @@ elif [ -z "$GEMINI_API_KEY" ]; then
   log "no grain-gemini-api-key in instance metadata and no minter key either -- grain-daemon.service will install but stay stopped; run push-secrets.sh once one of them is ready"
 fi
 
+# What this deploy is about to hand setup.sh, before handing it over.
+# Presence for the three secrets, values for the rest -- none of the
+# latter is sensitive, and every one of them has cost a debugging session
+# by being empty for a reason nothing printed: an unset gcp_project
+# silently skips the Gemini mint, an empty target_repos parks every task,
+# and a missing GitHub token leaves a sandbox with nothing cloned into
+# it.
+log "config for this generation:"
+log "  grain_ref=$GRAIN_REF ui_port=$UI_PORT slots=$SLOTS poll_interval=$POLL_INTERVAL"
+log "  target_repos=${TARGET_REPOS:-<empty: every task parks>}"
+log "  default_target_repo=${DEFAULT_TARGET_REPO:-<empty: a task with no repo parks>}"
+log "  gcp_project=${GCP_PROJECT:-<empty: gcp-key and gemini-key are disabled>}"
+log "  gcp_agent_service_account=${GCP_AGENT_SERVICE_ACCOUNT:-<empty>}"
+log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo MISSING)" \
+    "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
+    "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
+
 # --- run v2/scripts/setup.sh, which does everything else --------------
 #
 # GRAIN_UI_ADDR binds 0.0.0.0, not setup.sh's own loopback-only default

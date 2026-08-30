@@ -668,6 +668,67 @@ enable_services() {
   fi
 }
 
+# report_readiness prints what this host can actually do, as opposed to
+# what this script did. The two have come apart repeatedly: seeding a
+# credential is seed-once, minting the Gemini key is deliberately
+# non-fatal, and a missing GitHub credential only warns -- so a deploy
+# can converge, report success, and leave a host that cannot clone a
+# repo or will not start its daemon.
+#
+# Every line names the consequence, not just the state, because the
+# consequence is what an operator would otherwise have to work backwards
+# from: an agent run that ends without pushing or asking anything looks
+# like a model problem long before it looks like an empty sandbox.
+#
+# Presence only, never values -- the same restriction `grain secrets
+# list` holds to.
+report_readiness() {
+  local github="MISSING" gemini="MISSING" minter="MISSING" daemon ready=1
+
+  if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
+     && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
+    github="present as '${GRAIN_GITHUB_CREDENTIAL_NAME}'"
+  fi
+  [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] && gemini="present"
+  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null \
+     | grep -q '^gcp-key-minter:'; then
+    minter="present"
+  fi
+  daemon="$(systemctl is-active grain-daemon.service 2>/dev/null || echo unknown)"
+
+  echo
+  log "Readiness:"
+  echo "    daemon:            $daemon"
+  echo "    GitHub credential: $github"
+  echo "    Gemini key:        $gemini"
+  echo "    GCP minter key:    $minter"
+  echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: every task parks>}"
+  echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
+  echo "    slots:             ${GRAIN_SLOTS:-<default>}"
+
+  if [ "$github" = "MISSING" ]; then
+    ready=0
+    echo "    !! With no GitHub credential the git proxy cannot clone. A dispatched run"
+    echo "       finds an empty sandbox and ends without pushing or asking anything."
+  fi
+  if [ "$gemini" = "MISSING" ]; then
+    ready=0
+    echo "    !! With no Gemini key grain-daemon.service will not start, so nothing is"
+    echo "       served on ${GRAIN_UI_ADDR} and no task is ever dispatched."
+  fi
+  if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then
+    ready=0
+    echo "    !! With no minter credential the gcp-key and gemini-key capabilities cannot"
+    echo "       mint, so a task granted either will fail to materialize it."
+  fi
+  if [ "$daemon" != "active" ]; then
+    ready=0
+    echo "    !! grain-daemon.service is $daemon -- see: journalctl -u grain-daemon -n 50"
+  fi
+  [ "$ready" -eq 1 ] && echo "    all runtime prerequisites are in place"
+  return 0
+}
+
 print_summary() {
   echo
   log "Done."
@@ -678,6 +739,7 @@ print_summary() {
   echo "             in this one: export GRAIN_SERVER=http://127.0.0.1:${GRAIN_UI_ADDR##*:})"
   echo "    Logs:    journalctl -u grain-daemon.service -f"
   echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts the service"
+  report_readiness
 }
 
 main() {
