@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1138,5 +1139,38 @@ func TestFakeTransportDefaultAnswersOnceResponsesAreExhausted(t *testing.T) {
 	}
 	if resp.Status != 200 || string(resp.Body) != "[]" {
 		t.Fatalf("got %+v", resp)
+	}
+}
+
+func TestIsPermissionDenied(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"a 403 is a permission the credential does not hold", &Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}, true},
+		// 404 is how GitHub hides a private repo from a token that
+		// cannot see it, which is a different problem with a different
+		// fix -- widening test_repos or the token's repository scope,
+		// not a permission that cannot be granted at all.
+		{"a 404 is not", &Error{Status: 404}, false},
+		{"a 500 is not", &Error{Status: 500}, false},
+		{"a transport failure is not", errors.New("dial tcp: connection refused"), false},
+		{"no error at all is not", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsPermissionDenied(tc.err); got != tc.want {
+				t.Errorf("IsPermissionDenied(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// The helper unwraps, so a caller that has already annotated the error
+// with fmt.Errorf(...%w...) still gets the right answer.
+func TestIsPermissionDeniedUnwraps(t *testing.T) {
+	wrapped := fmt.Errorf("reading check runs for owner/repo#1: %w", &Error{Status: 403})
+	if !IsPermissionDenied(wrapped) {
+		t.Error("a wrapped 403 was not recognized")
 	}
 }

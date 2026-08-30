@@ -209,6 +209,44 @@ documents. `default_target_repo`'s own validation, above, already
 requires it be a member of `test_repos` (or empty), so the two variables
 stay consistent with each other by construction.
 
+### What the PAT needs
+
+A **fine-grained** token, with repository access limited to exactly
+`test_repos`, and three repository permissions:
+
+| Permission | Level | What needs it |
+|---|---|---|
+| Metadata | Read | mandatory for every fine-grained token; also `GET /repos/{owner}/{repo}`, behind `DefaultBranch` |
+| Contents | Read and write | the git proxy's fetch and push, plus creating and updating refs (`CreateBranch`, `UpdateBranch`, `BranchExists`, `GetBranchHead`) |
+| Pull requests | Read and write | `CreatePullRequest`, `FindOpenPullRequestForBranch`, `GetPullRequest`, `MergePullRequest` |
+
+**Do not grant `Workflows`.** `pkg/gitproxy` authorizes by repository and
+by push-versus-fetch, never by what a commit touches -- nothing in v2
+stops an agent editing `.github/workflows/**`, so the token not holding
+the permission is the whole of the enforcement, exactly as v1 withholds
+the classic `workflow` scope. GitHub rejects such a push server-side.
+
+**`Issues` is not needed either**, unlike v1, where the GitHub issue list
+*was* the task queue. v2 reads no issue, writes no comment and moves no
+label: tasks arrive by being written to the store (`pkg/ui`), and the
+agent's own escape-hatch tools become effects on the task, not GitHub
+API calls. `pkg/github` still implements that surface -- it is built, not
+wired -- so grant `Issues` only if something later routes those effects
+back to GitHub.
+
+**There is no `Checks` permission to grant.** GitHub offered one for
+fine-grained tokens initially and withdrew it; the Checks API now takes
+GitHub App installation tokens only. So `ListCheckRuns` returns 403 to
+this deployment permanently, and `pkg/orchestrator`'s `checkRunsFor`
+treats that one status as "health unknown" rather than an error -- see
+its own doc comment. The cost is auto-merge: a task with `AutoMerge`
+never merges, because a PR whose checks cannot be read is never `PrClean`
+(reading it as clean is how you merge a PR with CI red). Dispatch, the
+push, and opening the pull request are a separate reconciler and are
+unaffected. A deployment that genuinely needs auto-merge needs an App
+installation token for the REST client, which is a code change, not
+configuration.
+
 "A scoped PAT to a few test repos" -- the PAT itself being a GitHub
 fine-grained token limited, on GitHub's own side, to `test_repos` -- is
 still a second, independent enforcement boundary underneath this one:
