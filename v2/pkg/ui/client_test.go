@@ -649,6 +649,54 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	}
 }
 
+// TestGetTaskListsPullRequestEventsOldestFirst covers bwsalmon/agents#493
+// -- "show PR events in the task timeline" -- the same projection
+// TestGetTaskListsEveryAttemptOldestFirst above already exercises for
+// attempts, but for Observation's own PrOpenedAt/PrMergedAt/PrClosedAt.
+func TestGetTaskListsPullRequestEventsOldestFirst(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	opened := baseTime
+	merged := baseTime.Add(2 * time.Hour)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: task.ID, PrOpenedAt: &opened, PrMergedAt: &merged,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.PullRequestEvents) != 2 {
+		t.Fatalf("pull request events = %+v, want 2", detail.PullRequestEvents)
+	}
+	if got := detail.PullRequestEvents[0]; got.Kind != "opened" || !got.At.Equal(opened) {
+		t.Fatalf("events[0] = %+v, want opened at %v", got, opened)
+	}
+	if got := detail.PullRequestEvents[1]; got.Kind != "merged" || !got.At.Equal(merged) {
+		t.Fatalf("events[1] = %+v, want merged at %v", got, merged)
+	}
+}
+
+// TestGetTaskHasNoPullRequestEventsForATaskWithNoPullRequest is the empty
+// case TestGetTaskListsPullRequestEventsOldestFirst's non-nil Observation
+// does not cover: a task nobody has linked a pull request to yet (and so
+// orchestrator.SyncPullRequests has never observed).
+func TestGetTaskHasNoPullRequestEventsForATaskWithNoPullRequest(t *testing.T) {
+	c, _, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.PullRequestEvents) != 0 {
+		t.Fatalf("pull request events = %+v, want none", detail.PullRequestEvents)
+	}
+}
+
 // AttemptTranscript is a single attempt's own recorded agent transcript,
 // fetched on demand rather than carried on every Attempt GetTask already
 // lists (bwsalmon/agents#446 -- "show attempt agent logs").

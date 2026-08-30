@@ -160,6 +160,14 @@ function Actions({ t, config, act }) {
 const OUTCOME_LABELS = { "": "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled" };
 const OUTCOME_BADGES = { "": "running", succeeded: "completed", failed: "failed", cancelled: "closed" };
 
+// PR_EVENT_LABELS covers ui.PullRequestEvent's own Kind vocabulary
+// (bwsalmon/agents#493) -- "closed" specifically means closed *without*
+// merging, since a merged PR is always "merged" (pullRequestEventsFrom's
+// own doc comment), which the label spells out rather than leaving a
+// reader to infer from "closed" alone what a task's own bare "Closed"
+// state transition already uses that word for.
+const PR_EVENT_LABELS = { opened: "PR opened", merged: "PR merged", closed: "PR closed without merging" };
+
 // outcome is undefined, not "", for a still-running attempt: the API's
 // own Attempt.Outcome carries `omitempty`, so the wire form drops the
 // key entirely rather than sending an empty string.
@@ -173,10 +181,12 @@ function outcomeLabel(outcome) {
 // already covers filed/queued/running/awaiting_reply/failed/completed/
 // closed), every attempt's own result (bwsalmon/agents#445's
 // t.attempts, with the outcome and detail a bare state change doesn't
-// carry), and every comment -- into one list, oldest first, each
-// carrying the timestamp it happened at. There is no unified "history"
-// on the wire: this just interleaves TaskDetail's own separate arrays by
-// their own timestamps, client-side.
+// carry), every pull request event (bwsalmon/agents#493's
+// t.pullRequestEvents -- opened, merged, or closed without merging), and
+// every comment -- into one list, oldest first, each carrying the
+// timestamp it happened at. There is no unified "history" on the wire:
+// this just interleaves TaskDetail's own separate arrays by their own
+// timestamps, client-side.
 //
 // t.transitions omits a state the record has no timestamp for -- most
 // notably a past awaiting_reply period once its question has been
@@ -223,6 +233,24 @@ function timelineEvents(t) {
             {a.finishedAt && <> · finished {new Date(a.finishedAt).toLocaleString()}</>}
           </div>
           {a.detail && <div className="timeline-detail">{a.detail}</div>}
+        </>
+      ),
+    });
+  });
+
+  (t.pullRequestEvents || []).forEach((e, i) => {
+    events.push({
+      key: `pr-event-${i}`,
+      at: e.at ? new Date(e.at) : null,
+      badge: `pr_${e.kind}`,
+      render: () => (
+        <>
+          <div className="timeline-title">{PR_EVENT_LABELS[e.kind] || e.kind}</div>
+          {t.pullRequest && (
+            <div className="timeline-meta">
+              <Link href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</Link>
+            </div>
+          )}
         </>
       ),
     });

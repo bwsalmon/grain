@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- RealTransport: exercised against a real local HTTP server rather
@@ -796,6 +797,58 @@ func TestGetPullRequestDefaultsMergeableToNilWhenAbsent(t *testing.T) {
 	}
 	if pr.Mergeable != nil {
 		t.Fatalf("got %+v", pr.Mergeable)
+	}
+}
+
+func TestGetPullRequestReadsMergedAndMergedAt(t *testing.T) {
+	body := prJSON(5, "feature-branch", "main")
+	body["state"] = "closed"
+	body["merged"] = true
+	body["merged_at"] = "2026-08-28T12:00:00Z"
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, body)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	pr, err := client.GetPullRequest("o", "r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pr.Merged {
+		t.Fatal("expected Merged to be true")
+	}
+	want := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	if pr.MergedAt == nil || !pr.MergedAt.Equal(want) {
+		t.Fatalf("got MergedAt = %v, want %v", pr.MergedAt, want)
+	}
+}
+
+func TestGetPullRequestReadsClosedWithoutMergedAt(t *testing.T) {
+	body := prJSON(5, "feature-branch", "main")
+	body["state"] = "closed"
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, body)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	pr, err := client.GetPullRequest("o", "r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Merged {
+		t.Fatal("expected Merged to be false for a PR closed without merging")
+	}
+	if pr.MergedAt != nil {
+		t.Fatalf("got MergedAt = %v, want nil", pr.MergedAt)
+	}
+}
+
+func TestGetPullRequestReadsCreatedAt(t *testing.T) {
+	body := prJSON(5, "feature-branch", "main")
+	body["created_at"] = "2026-08-20T09:30:00Z"
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: mustJSON(t, body)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	pr, err := client.GetPullRequest("o", "r", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	if !pr.CreatedAt.Equal(want) {
+		t.Fatalf("got CreatedAt = %v, want %v", pr.CreatedAt, want)
 	}
 }
 
