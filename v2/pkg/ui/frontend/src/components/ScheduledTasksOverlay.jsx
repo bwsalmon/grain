@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Checkbox, Chip, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -67,55 +68,46 @@ export default function ScheduledTasksOverlay({ onClose, showError }) {
 
   return (
     <Overlay onClose={onClose}>
-      <h2>Scheduled tasks</h2>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Scheduled tasks</Typography>
       <ul className="schedules-list">
         {schedules.map((s) => (
           <li className="schedule-row" key={s.id}>
             <div className="schedule-summary">
               <span className="schedule-title">{s.title}</span>
-              <span className="chip">{s.repo}</span>
-              <span className="chip">every {s.interval}</span>
-              {!s.enabled && <span className="badge badge-blocked">Paused</span>}
+              <Chip size="small" label={s.repo} />
+              <Chip size="small" label={`every ${s.interval}`} />
+              {!s.enabled && <Chip size="small" color="error" label="Paused" />}
             </div>
             <div className="schedule-meta hint">
               Next run {formatWhen(s.nextRunAt)}
               {s.lastRunAt && <> · last ran {formatWhen(s.lastRunAt)}</>}
             </div>
-            <div className="form-actions">
-              <button type="button" className="secondary" onClick={() => toggleEnabled(s)}>
+            <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
+              <Button size="small" variant="outlined" onClick={() => toggleEnabled(s)}>
                 {s.enabled ? "Pause" : "Resume"}
-              </button>
-              <button type="button" className="danger secondary" onClick={() => remove(s)}>
+              </Button>
+              <Button size="small" variant="outlined" color="error" onClick={() => remove(s)}>
                 Delete
-              </button>
-            </div>
+              </Button>
+            </Stack>
           </li>
         ))}
       </ul>
       {schedules.length === 0 && <p className="empty">No scheduled tasks.</p>}
       <form onSubmit={submit}>
-        <label>Title
-          <input name="title" required autoComplete="off" />
-        </label>
-        <label>Description
-          <textarea name="description" rows="4" />
-        </label>
-        <label>Target repo <span className="hint">owner/name</span>
-          <input name="repo" placeholder="owner/name" required autoComplete="off" />
-        </label>
-        <label>Base branch <span className="hint">optional</span>
-          <input name="base" placeholder="main" autoComplete="off" />
-        </label>
-        <label>Interval <span className="hint">Go duration, e.g. 24h</span>
-          <input name="interval" placeholder="24h" required autoComplete="off" />
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" name="autoMerge" />
-          Auto-merge once checks pass
-        </label>
-        <div className="form-actions">
-          <button type="submit" className="primary">Add schedule</button>
-        </div>
+        <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="description" label="Description" multiline rows={4} fullWidth margin="normal" />
+        <TextField name="repo" label="Target repo" helperText="owner/name" placeholder="owner/name" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="base" label="Base branch" helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
+        <TextField name="interval" label="Interval" helperText="Go duration, e.g. 24h" placeholder="24h" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
+        <FormControlLabel
+          control={<Checkbox name="autoMerge" />}
+          label="Auto-merge once checks pass"
+          sx={{ display: "flex", mt: 1 }}
+        />
+        <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+          <Button type="submit" variant="contained">Add schedule</Button>
+        </Stack>
       </form>
     </Overlay>
   );

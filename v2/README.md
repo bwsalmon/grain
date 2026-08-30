@@ -954,6 +954,24 @@ once, at build time; the artifact `cmd/grain` ships is still the one
 dependency-free Go binary this section opened with, with the built
 frontend baked into it rather than a Node runtime tagging along.
 
+**Material UI (bwsalmon/agents#450) for primitives, not for its default
+look.** Every interactive element — buttons, text fields, checkboxes,
+selects, dialogs, chips, the error toast — is an `@mui/material`
+component now rather than a bespoke `<button className="primary">` or a
+hand-rolled dropdown; that buys the accessibility, keyboard handling and
+focus management (a modal that traps focus and closes on Escape, a
+select that behaves like a native one) those were quietly missing,
+without every screen reinventing it. `AppThemeProvider`
+(`pkg/ui/frontend/src/AppThemeProvider.jsx`) feeds MUI's own
+`ThemeProvider` a theme (`theme.js`) built from the same accent/danger/
+surface values `style.css`'s `:root` tokens already defined
+(bwsalmon/agents#364's Plane-inspired palette), so adopting MUI's
+components didn't also mean adopting Material Design's own visual
+language — the dense, dot-not-pill task rows and status colors this
+section's own screenshots would show are unchanged. `style.css` still
+owns what MUI has no primitive for: the state dot/badge, the sidebar's
+brand mark, and layout for the task list and detail panel.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to

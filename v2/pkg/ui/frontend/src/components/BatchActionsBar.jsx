@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Box, Button, Paper, Select, Stack, Typography } from "@mui/material";
 import api from "../api.js";
 
 // BatchActionsBar is DetailOverlay's Actions and CapabilityToggles, but
@@ -17,50 +18,66 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
   const run = (mutate) => onRun((id) => api(`/api/tasks/${id}${mutate}`, { method: "POST" }));
 
   return (
-    <div className="batch-bar">
-      <span className="batch-count">{count} selected</span>
-      <button className="secondary" onClick={() => run("/approve")}>Approve</button>
-      <button className="secondary" onClick={() => run("/submit")}>Submit</button>
-      <button
-        className="danger secondary"
-        onClick={() => {
-          if (!confirm(`Close ${count} task(s)?`)) return;
-          run("/close");
-        }}
-      >
-        Close
-      </button>
-      <button className="secondary" onClick={() => run("/reopen")}>Reopen</button>
+    <Paper
+      elevation={4}
+      square
+      sx={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4 }}
+    >
+      <Stack direction="row" alignItems="center" spacing={1.2} flexWrap="wrap" sx={{ px: 3, py: 1.3 }}>
+        <Typography fontWeight={500}>{count} selected</Typography>
+        <Button variant="outlined" size="small" onClick={() => run("/approve")}>Approve</Button>
+        <Button variant="outlined" size="small" onClick={() => run("/submit")}>Submit</Button>
+        <Button
+          variant="outlined"
+          size="small"
+          color="error"
+          onClick={() => {
+            if (!confirm(`Close ${count} task(s)?`)) return;
+            run("/close");
+          }}
+        >
+          Close
+        </Button>
+        <Button variant="outlined" size="small" onClick={() => run("/reopen")}>Reopen</Button>
 
-      <select value={capabilityId} onChange={(e) => setCapabilityId(e.target.value)}>
-        <option value="">Capability…</option>
-        {(config?.capabilities || []).map((c) => (
-          <option key={c.id} value={c.id}>{c.name}</option>
-        ))}
-      </select>
-      <button
-        className="secondary"
-        disabled={!capabilityId}
-        onClick={() => onRun((id) => api(`/api/tasks/${id}/capabilities`, {
-          method: "POST",
-          body: JSON.stringify({ id: capabilityId, attach: true }),
-        }))}
-      >
-        Attach
-      </button>
-      <button
-        className="secondary"
-        disabled={!capabilityId}
-        onClick={() => onRun((id) => api(`/api/tasks/${id}/capabilities`, {
-          method: "POST",
-          body: JSON.stringify({ id: capabilityId, attach: false }),
-        }))}
-      >
-        Detach
-      </button>
+        <Select
+          native
+          size="small"
+          value={capabilityId}
+          onChange={(e) => setCapabilityId(e.target.value)}
+          displayEmpty
+        >
+          <option value="">Capability…</option>
+          {(config?.capabilities || []).map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </Select>
+        <Button
+          variant="outlined"
+          size="small"
+          disabled={!capabilityId}
+          onClick={() => onRun((id) => api(`/api/tasks/${id}/capabilities`, {
+            method: "POST",
+            body: JSON.stringify({ id: capabilityId, attach: true }),
+          }))}
+        >
+          Attach
+        </Button>
+        <Button
+          variant="outlined"
+          size="small"
+          disabled={!capabilityId}
+          onClick={() => onRun((id) => api(`/api/tasks/${id}/capabilities`, {
+            method: "POST",
+            body: JSON.stringify({ id: capabilityId, attach: false }),
+          }))}
+        >
+          Detach
+        </Button>
 
-      <div className="spacer" />
-      <button className="secondary" onClick={onClear}>Clear selection</button>
-    </div>
+        <Box sx={{ flex: 1 }} />
+        <Button variant="outlined" size="small" onClick={onClear}>Clear selection</Button>
+      </Stack>
+    </Paper>
   );
 }

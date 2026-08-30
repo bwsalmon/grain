@@ -98,100 +98,17 @@ body {
   align-items: stretch;
 }
 
-.sidebar {
-  width: 232px;
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: 1.1rem;
-  padding: 0.9rem 0.7rem;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-}
-
-.sidebar-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.3rem 0.4rem 0;
-}
-.sidebar-brand .brand-mark {
+/* Sidebar's own layout (width, padding, nav rows) now comes from
+   AppThemeProvider's theme plus MUI primitives (Box, List,
+   ListItemButton) rather than from rules here -- .brand-mark is the one
+   piece with no MUI equivalent worth reaching for. */
+.brand-mark {
   width: 18px;
   height: 18px;
   border-radius: 5px;
   background: var(--accent);
   flex: none;
 }
-.sidebar-brand h1 {
-  font-size: 0.95rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0;
-}
-.sidebar-target {
-  padding: 0 0.4rem;
-  margin-top: -0.7rem;
-  color: var(--text-tertiary);
-  font-size: 0.75rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-nav {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-.sidebar-nav button {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  text-align: left;
-  padding: 0.45rem 0.55rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-.sidebar-nav button:hover { background: var(--surface-hover); color: var(--text); }
-.sidebar-nav button.active { background: var(--accent-subtle); color: var(--accent); }
-.sidebar-nav .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-nav .count {
-  color: var(--text-tertiary);
-  font-size: 0.78rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 400;
-}
-.sidebar-nav button.active .count { color: var(--accent); }
-
-.sidebar-footer {
-  margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  border-top: 1px solid var(--border);
-  padding-top: 0.7rem;
-}
-.sidebar-footer button {
-  display: flex;
-  align-items: center;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  text-align: left;
-  padding: 0.45rem 0.55rem;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-.sidebar-footer button:hover { background: var(--surface-hover); color: var(--text); }
 
 .main-column {
   flex: 1;
@@ -228,47 +145,6 @@ body {
 .dot-completed { background: var(--state-completed); }
 .dot-closed { background: var(--state-closed); }
 .dot-blocked { background: var(--danger); }
-
-.view-tabs { display: flex; gap: 0.25rem; }
-.view-tabs button {
-  background: transparent;
-  color: var(--on-surface-variant);
-  border: none;
-  border-radius: 999px;
-  padding: 0.45rem 1rem;
-  font-size: 0.9rem;
-  font-weight: 500;
-}
-.view-tabs button:hover { background: var(--surface-container-high); }
-.view-tabs button.active { background: var(--primary-container); color: var(--on-primary-container); }
-
-button {
-  font: inherit;
-  cursor: pointer;
-  border-radius: 6px;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-button.primary {
-  background: var(--accent);
-  color: var(--on-accent);
-  border: 1px solid var(--accent);
-  padding: 0.5rem 1rem;
-  font-weight: 500;
-}
-button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-button.primary:active { filter: brightness(0.94); }
-button.primary.new-task { width: 100%; justify-content: center; display: flex; }
-
-button.secondary {
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  padding: 0.45rem 0.9rem;
-}
-button.secondary:hover { background: var(--surface-hover); }
-
-button.danger { color: var(--danger); border-color: var(--danger); }
-button.danger:hover { background: var(--danger-subtle); }
 
 main { padding: 0 0 2.5rem; }
 
@@ -318,14 +194,6 @@ main { padding: 0 0 2.5rem; }
   white-space: nowrap;
 }
 .chips { display: flex; gap: 0.35rem; flex-wrap: nowrap; flex: none; }
-.chip {
-  font-size: 0.72rem;
-  border-radius: 4px;
-  padding: 0.15rem 0.5rem;
-  background: var(--surface-hover);
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
 .badge {
   display: inline-flex;
   align-items: center;
@@ -350,94 +218,6 @@ main { padding: 0 0 2.5rem; }
 .badge-proposed::before { background: var(--state-proposed); }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
-/* Blocked is an annotation next to the state dot, not a state of its
-   own (docs/data-model.md) -- it drops the dot for a small filled chip
-   instead, so it never reads as a second, competing status. */
-.badge-blocked {
-  background: var(--danger-subtle);
-  color: var(--danger);
-  border-radius: 4px;
-  padding: 0.1rem 0.5rem;
-}
-.badge-blocked::before { display: none; }
-
-/* Read-only repos are not the write target, so they get a dashed
-   outline instead of the .chip default's solid fill -- the same
-   "distinct shape" reasoning .badge-blocked's own comment gives, applied
-   here to tell "the repo this task changes" apart from "a repo it may
-   only read". */
-.chip-read {
-  background: transparent;
-  border: 1px dashed var(--border-strong);
-}
-
-.dependency-chip { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
-.dependency-chip.chip-blocking {
-  border: 1px solid var(--border-strong);
-  color: var(--text-secondary);
-}
-.chip-remove {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-  line-height: 1;
-  padding: 0;
-}
-.task-picker { position: relative; margin-top: 0.4rem; }
-.task-picker input {
-  display: block;
-  width: 100%;
-  font: inherit;
-  padding: 0.4rem 0.6rem;
-  border: 1px solid var(--outline-variant);
-  border-radius: 6px;
-  background: var(--surface);
-  color: inherit;
-}
-.task-picker input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
-}
-.task-picker-results {
-  position: absolute;
-  z-index: 10;
-  top: calc(100% + 0.25rem);
-  left: 0;
-  right: 0;
-  margin: 0;
-  padding: 0.25rem 0;
-  list-style: none;
-  background: var(--surface);
-  border: 1px solid var(--outline-variant);
-  border-radius: 8px;
-  box-shadow: var(--elevation-2);
-  max-height: 220px;
-  overflow-y: auto;
-}
-.task-picker-results li {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0.45rem 0.7rem;
-  cursor: pointer;
-  align-items: baseline;
-}
-.task-picker-results li:hover, .task-picker-results li.active { background: var(--surface-container-high); }
-.task-picker-id {
-  color: var(--on-surface-variant);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.8rem;
-  flex-shrink: 0;
-}
-.task-picker-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.task-picker-empty { color: var(--on-surface-variant); cursor: default; }
-.task-picker-empty:hover { background: none; }
 
 .repo-list { list-style: none; margin: 0; padding: 0; }
 .repo-list li {
@@ -454,104 +234,11 @@ main { padding: 0 0 2.5rem; }
 }
 .repo-list li:hover { box-shadow: var(--shadow-panel); border-color: transparent; }
 .repo-list-name { flex: 1; font-weight: 500; font-variant-numeric: tabular-nums; }
-.repo-list-total { color: var(--text-tertiary); font-size: 0.8rem; white-space: nowrap; }
 
 .repo-scope-bar { padding: 1rem 1.75rem 0; }
-.repo-scope-bar .chip { font-size: 0.85rem; padding: 0.3rem 0.5rem 0.3rem 0.8rem; }
 
 .empty { color: var(--text-tertiary); padding: 1.5rem 1.75rem; }
 .hidden { display: none !important; }
-
-.batch-bar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  background: var(--surface);
-  border-top: 1px solid var(--outline-variant);
-  box-shadow: var(--elevation-2);
-  padding: 0.65rem 1.5rem;
-  z-index: 4;
-}
-.batch-count { font-weight: 500; }
-.batch-bar select {
-  font: inherit;
-  padding: 0.4rem 0.6rem;
-  border: 1px solid var(--outline-variant);
-  border-radius: 8px;
-  background: var(--surface);
-  color: inherit;
-}
-
-.error-banner {
-  position: fixed;
-  bottom: 1.25rem;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #26272c;
-  color: #ffffff;
-  padding: 0.7rem 1rem;
-  font-size: 0.85rem;
-  border-radius: 8px;
-  border-left: 4px solid var(--danger);
-  box-shadow: var(--shadow-toast);
-  max-width: min(90vw, 480px);
-  /* Above .batch-bar (z-index 4): a batch action's own failure is the
-     most likely reason the banner and the bar are ever up together, and
-     the message explaining what went wrong should win that overlap. */
-  z-index: 6;
-}
-
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 16, 20, 0.45);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 6vh 1rem;
-  overflow-y: auto;
-}
-.panel {
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1.5rem;
-  width: 100%;
-  max-width: 560px;
-  position: relative;
-  box-shadow: var(--shadow-panel);
-}
-.panel.panel-detail { max-width: 880px; }
-.panel h2 { font-weight: 600; font-size: 1.1rem; margin-top: 0; }
-.panel .close {
-  position: absolute;
-  top: 0.7rem;
-  right: 0.7rem;
-  width: 1.9rem;
-  height: 1.9rem;
-  border-radius: 6px;
-  border: none;
-  background: none;
-  font-size: 1.2rem;
-  line-height: 1;
-  color: var(--text-tertiary);
-}
-.panel .close:hover { background: var(--surface-hover); color: var(--text); }
-
-.unconfigured-note {
-  color: var(--text-secondary);
-  font-size: 0.85rem;
-  background: var(--canvas);
-  border-radius: 8px;
-  padding: 0.6rem 0.8rem;
-  margin: -0.5rem 0 1rem;
-}
 
 .candidate-current { background: var(--canvas); border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0 0 1rem; }
 .candidate-current p { margin: 0.2rem 0; }
@@ -569,27 +256,6 @@ main { padding: 0 0 2.5rem; }
   flex-wrap: wrap;
 }
 .secret-name { font-weight: 500; }
-.secret-keys { display: flex; gap: 0.35rem; flex-wrap: wrap; flex: 1; }
-.secret-key {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-size: 0.8rem;
-  border-radius: 4px;
-  padding: 0.15rem 0.3rem 0.15rem 0.6rem;
-  background: var(--surface-hover);
-  color: var(--text-secondary);
-}
-.secret-key-delete {
-  border: none;
-  background: none;
-  color: inherit;
-  font-size: 0.95rem;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0.1rem 0.3rem;
-}
-.secret-key-delete:hover { color: var(--danger); }
 
 .schedules-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .schedule-row {
@@ -600,33 +266,17 @@ main { padding: 0 0 2.5rem; }
 .schedule-title { font-weight: 500; }
 .schedule-meta { margin: 0.25rem 0 0.4rem; }
 
-/* A schedule-filed task is not the write target and not read-only either
-   -- .chip-read's own "distinct shape" reasoning applies again, this time
-   as a tinted fill rather than an outline, so it reads as its own
-   category of annotation rather than either of those. */
+/* A schedule-filed task is not the write target, so it gets a tinted
+   fill rather than the plain default Chip -- its own category of
+   annotation, distinct from an ordinary repo/capability chip. */
 .chip-scheduled {
   background: var(--accent-subtle);
   color: var(--accent);
 }
 
-form label { display: block; margin-bottom: 1rem; font-weight: 500; font-size: 0.9rem; }
-form label.checkbox { display: flex; align-items: center; gap: 0.5rem; font-weight: normal; }
-form input[type=text], form input[type=password], form input:not([type]), form textarea {
-  display: block;
-  width: 100%;
-  margin-top: 0.4rem;
-  padding: 0.5rem 0.65rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface);
-  color: inherit;
-  font: inherit;
-}
-form input[type=text]:focus, form input[type=password]:focus, form input:not([type]):focus, form textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-  outline: none;
-}
+/* Form fields themselves are MUI's own TextField/Checkbox now; fieldset
+   and legend remain plain HTML (MUI has no fieldset primitive) and keep
+   their own look here. */
 form .hint { font-weight: normal; color: var(--text-tertiary); font-size: 0.8rem; }
 fieldset { border: none; padding: 0; margin: 0 0 1.1rem; }
 fieldset legend {
@@ -640,10 +290,6 @@ fieldset legend {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-fieldset label.checkbox { margin-bottom: 0.4rem; font-size: 0.9rem; font-weight: normal; }
-.form-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 0.5rem; }
-
-.overlay-hint { color: var(--text-secondary); font-size: 0.85rem; margin: -0.5rem 0 1rem; }
 
 .upgrade-status {
   margin: 1rem 0 0;
@@ -676,15 +322,6 @@ fieldset label.checkbox { margin-bottom: 0.4rem; font-size: 0.9rem; font-weight:
   border-radius: 8px;
   padding: 0.85rem 1rem;
   font-size: 0.9rem;
-}
-
-.failure-summary {
-  margin: 0 0 1rem;
-  background: var(--danger-subtle);
-  color: var(--danger);
-  border-radius: 8px;
-  padding: 0.65rem 1rem;
-  font-size: 0.85rem;
 }
 
 .detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }

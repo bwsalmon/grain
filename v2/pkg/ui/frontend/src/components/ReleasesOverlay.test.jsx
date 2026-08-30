@@ -21,8 +21,12 @@ const releaseConfig = {
 const activeCandidate = { id: "c2", label: "v1.1.0-rc1", status: "active", branch: "rc", releaseBranch: "" };
 const promotedCandidate = { id: "c1", label: "v1.0.0-rc1", status: "promoted", branch: "rc", releaseBranch: "release/v1" };
 
-function current(container) {
-  return within(container.querySelector(".candidate-current"));
+// MUI's Dialog renders its content through a portal into document.body
+// rather than into render()'s own container, so lookups here go through
+// document.body (screen already does the same for every other query in
+// this file) instead of the container render() returns.
+function current() {
+  return within(document.body.querySelector(".candidate-current"));
 }
 
 describe("ReleasesOverlay", () => {
@@ -35,11 +39,11 @@ describe("ReleasesOverlay", () => {
       .mockResolvedValueOnce([{ repo: "acme/widgets" }])
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([activeCandidate]);
-    const { container } = render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
-    expect(current(container).getByText("v1.1.0-rc1")).toBeInTheDocument();
-    expect(current(container).getByText(/active/)).toBeInTheDocument();
+    expect(current().getByText("v1.1.0-rc1")).toBeInTheDocument();
+    expect(current().getByText(/active/)).toBeInTheDocument();
     expect(api).toHaveBeenCalledWith("/api/release-configs");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/release-config");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates");
@@ -102,13 +106,13 @@ describe("ReleasesOverlay", () => {
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([activeCandidate, promotedCandidate]);
     const user = userEvent.setup();
-    const { container } = render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     await user.click(screen.getByRole("button", { name: "Cut new RC" }));
 
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates", { method: "POST" });
-    expect(await within(container.querySelector(".candidate-current")).findByText("v1.1.0-rc1")).toBeInTheDocument();
+    expect(await current().findByText("v1.1.0-rc1")).toBeInTheDocument();
   });
 
   it("promotes the current RC when eligible", async () => {
@@ -120,13 +124,13 @@ describe("ReleasesOverlay", () => {
       .mockResolvedValueOnce(releaseConfig)
       .mockResolvedValueOnce([{ ...activeCandidate, status: "promoted" }]);
     const user = userEvent.setup();
-    const { container } = render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<ReleasesOverlay config={null} onClose={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     await user.click(screen.getByRole("button", { name: "Promote current RC" }));
 
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates/promote", { method: "POST" });
-    expect(await current(container).findByText(/promoted/)).toBeInTheDocument();
+    expect(await current().findByText(/promoted/)).toBeInTheDocument();
   });
 
   it("shows no config form for a manually entered repo that isn't owner/name", async () => {

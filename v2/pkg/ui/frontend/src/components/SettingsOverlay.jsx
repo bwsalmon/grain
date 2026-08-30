@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Alert, Button, Checkbox, FormControlLabel, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -87,51 +88,36 @@ export default function SettingsOverlay({ config, onClose, showError }) {
 
   return (
     <Overlay onClose={onClose}>
-      <h2>Settings</h2>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Settings</Typography>
       {!settings.configured && (
-        <p className="unconfigured-note">
+        <Alert severity="info" sx={{ mb: 2 }}>
           Not configured yet -- nothing has been saved for this deployment. Poll interval, slots, Gemini model
           and GitHub host are required the first time.
-        </p>
+        </Alert>
       )}
       <form onSubmit={submit}>
-        <label>Poll interval <span className="hint">Go duration, e.g. 30s</span>
-          <input name="pollInterval" defaultValue={settings.pollInterval || ""} autoComplete="off" />
-        </label>
-        <label>Slots <span className="hint">comma-separated slot names</span>
-          <input name="slots" defaultValue={(settings.slots || []).join(", ")} placeholder="a, b, c" autoComplete="off" />
-        </label>
-        <label>Gemini model
-          <input name="geminiModel" defaultValue={settings.geminiModel || ""} autoComplete="off" />
-        </label>
-        <label>Max agent turns <span className="hint">0 = the agent framework's own default</span>
-          <input name="maxAgentTurns" type="number" min="0" step="1" defaultValue={String(settings.maxAgentTurns || 0)} />
-        </label>
-        <label>GitHub host
-          <input name="githubHost" defaultValue={settings.githubHost || ""} autoComplete="off" />
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />
-          Speak plain HTTP to GitHub host <span className="hint">mock servers only</span>
-        </label>
-        <label>GCP project <span className="hint">optional -- enables the gcp-key/gemini-key capabilities</span>
-          <input name="gcpProject" defaultValue={settings.gcpProject || ""} autoComplete="off" />
-        </label>
-        <label>GCP service account email <span className="hint">optional</span>
-          <input name="gcpServiceAccountEmail" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" />
-        </label>
-        <label>Target repos <span className="hint">comma-separated owner/name; empty allows any</span>
-          <input name="targetRepos" defaultValue={(settings.targetRepos || []).join(", ")} placeholder="owner/repo, owner/other" autoComplete="off" />
-        </label>
-        <div className="form-actions">
-          <button type="submit" className="primary">Save</button>
-        </div>
+        <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="slots" label="Slots" helperText="comma-separated slot names" defaultValue={(settings.slots || []).join(", ")} placeholder="a, b, c" autoComplete="off" fullWidth margin="normal" />
+        <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
+        <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />
+        <FormControlLabel
+          control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
+          label={<>Speak plain HTTP to GitHub host <span className="hint">mock servers only</span></>}
+          sx={{ display: "flex", mt: 1 }}
+        />
+        <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
+        <TextField name="targetRepos" label="Target repos" helperText="comma-separated owner/name; empty allows any" defaultValue={(settings.targetRepos || []).join(", ")} placeholder="owner/repo, owner/other" autoComplete="off" fullWidth margin="normal" />
+        <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+          <Button type="submit" variant="contained">Save</Button>
+        </Stack>
       </form>
       {config && config.rebootEnabled && (
         <fieldset>
           <legend>Danger zone</legend>
           <p className="hint">Reboots the machine grain itself is running on.</p>
-          <button type="button" className="danger secondary" onClick={rebootHost}>Reboot host</button>
+          <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
         </fieldset>
       )}
     </Overlay>

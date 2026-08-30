@@ -1,3 +1,4 @@
+import { Checkbox, Chip, FormControlLabel, Typography } from "@mui/material";
 import { STATE_LABELS, capabilityName } from "../state.js";
 
 const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
@@ -45,18 +46,22 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   return (
     <main>
       <div className="content-header">
-        <h2>{title}</h2>
+        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>{title}</Typography>
         <span className="count">{visibleIds.length}</span>
       </div>
       {visibleIds.length > 0 && (
-        <label className="select-all">
-          <input
-            type="checkbox"
-            checked={allSelected}
-            onChange={(e) => onSelectAll(visibleIds, e.target.checked)}
+        <div className="select-all">
+          <FormControlLabel
+            control={(
+              <Checkbox
+                size="small"
+                checked={allSelected}
+                onChange={(e) => onSelectAll(visibleIds, e.target.checked)}
+              />
+            )}
+            label="Select all"
           />
-          Select all
-        </label>
+        </div>
       )}
       <ul className="task-list">
         {topLevel.map((t) => (
@@ -82,28 +87,29 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 function TaskRow({ t, config, onOpenTask, selected, onToggleSelect }) {
   return (
     <div className="task-row" onClick={() => onOpenTask(t.id)}>
-      <input
-        type="checkbox"
+      <Checkbox
+        size="small"
         className="task-select"
         checked={selected.has(t.id)}
         onClick={(e) => e.stopPropagation()}
         onChange={() => onToggleSelect(t.id)}
+        inputProps={{ "aria-label": `Select ${t.id}` }}
       />
       <span className={`badge badge-${t.state}`} title={STATE_LABELS[t.state] || t.state} />
       <span className="task-number">{t.id}</span>
       <span className="task-title">{t.title}</span>
       <span className="chips">
-        {t.scheduled && <span className="chip chip-scheduled" title="filed automatically by a schedule">scheduled</span>}
-        {t.repo && <span className="chip">{t.repo}</span>}
+        {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
+        {t.repo && <Chip size="small" label={t.repo} />}
         {(t.reads || []).map((repo) => (
-          <span key={repo} className="chip chip-read" title="read-only">{repo} (read)</span>
+          <Chip key={repo} size="small" variant="outlined" title="read-only" label={`${repo} (read)`} />
         ))}
         {t.capabilities.map((id) => (
-          <span key={id} className="chip">{capabilityName(config, id)}</span>
+          <Chip key={id} size="small" label={capabilityName(config, id)} />
         ))}
       </span>
       {t.blocked && (
-        <span className="badge badge-blocked" title={`Waiting on ${t.blockedBy.join(", ")}`}>Blocked</span>
+        <Chip size="small" color="error" title={`Waiting on ${t.blockedBy.join(", ")}`} label="Blocked" />
       )}
     </div>
   );
