@@ -214,7 +214,6 @@ describe("App", () => {
 
   it.each([
     ["Settings", "Settings"],
-    ["Logs", "Logs"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
     const user = userEvent.setup();
@@ -243,6 +242,18 @@ describe("App", () => {
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
     expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
+  });
+
+  it("switches to the logs page, hiding the task list", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "Logs" }));
+
+    expect(await screen.findByRole("heading", { name: "Logs" })).toBeInTheDocument();
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {

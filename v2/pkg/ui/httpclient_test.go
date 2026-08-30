@@ -233,9 +233,9 @@ func TestHTTPClientSettingsRoundTrip(t *testing.T) {
 		t.Fatalf("settings on a fresh store = %+v, want Configured false", before)
 	}
 
-	pollInterval, slots, geminiModel, githubHost := "1m", []string{"a", "b"}, "gemini-2.5-pro", "github.com"
+	pollInterval, maxConcurrent, geminiModel, githubHost := "1m", 2, "gemini-2.5-pro", "github.com"
 	after, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
-		PollInterval: &pollInterval, Slots: &slots, GeminiModel: &geminiModel, GitHubHost: &githubHost,
+		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent, GeminiModel: &geminiModel, GitHubHost: &githubHost,
 	})
 	if err != nil {
 		t.Fatalf("UpdateSettings: %v", err)

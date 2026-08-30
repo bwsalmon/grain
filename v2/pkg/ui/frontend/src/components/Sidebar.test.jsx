@@ -15,7 +15,6 @@ const baseProps = {
   onSetView: noop,
   onSetFilter: noop,
   onOpenSettings: noop,
-  onOpenLogs: noop,
   onOpenNewTask: noop,
 };
 
@@ -61,7 +60,6 @@ describe("Sidebar", () => {
 
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSettings = vi.fn();
-    const onOpenLogs = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
     render(
@@ -70,18 +68,15 @@ describe("Sidebar", () => {
         config={null}
         tasks={[]}
         onOpenSettings={onOpenSettings}
-        onOpenLogs={onOpenLogs}
         onOpenNewTask={onOpenNewTask}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Logs" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(onOpenLogs).toHaveBeenCalledTimes(1);
   });
 
   it("switches to the schedules view and shows its count when clicked", async () => {
@@ -94,5 +89,15 @@ describe("Sidebar", () => {
     await user.click(button);
 
     expect(onSetView).toHaveBeenCalledWith("schedules");
+  });
+
+  it("switches to the logs view when clicked", async () => {
+    const onSetView = vi.fn();
+    const user = userEvent.setup();
+    render(<Sidebar {...baseProps} config={null} tasks={[]} onSetView={onSetView} />);
+
+    await user.click(screen.getByRole("button", { name: "Logs" }));
+
+    expect(onSetView).toHaveBeenCalledWith("logs");
   });
 });
