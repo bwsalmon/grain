@@ -301,11 +301,22 @@ PROFILE
 
 # --- 4. the unprivileged account grain runs as --------------------------
 
+# ensure_user creates $GRAIN_USER and, on every run, makes sure it is in
+# the systemd-journal group -- without it, journalctl refuses outright
+# ("No journal files were opened due to insufficient permission") when
+# the UI's own Logs page (pkg/ui/logs.go, pkg/systemlog.Journalctl) shells
+# out to read grain-daemon.service's own journal, which normally takes
+# membership in adm or systemd-journal. systemd-journal is the narrower
+# of the two -- read access to the journal alone, nothing else adm also
+# carries -- and every distribution this script otherwise assumes (a
+# working systemctl/journalctl) already creates that group by default, so
+# no getent guard is needed the way ensure_self_upgrade's docker one is.
 ensure_user() {
   if ! id -u "$GRAIN_USER" >/dev/null 2>&1; then
     log "Creating system user $GRAIN_USER"
     useradd --system --no-create-home --shell /usr/sbin/nologin "$GRAIN_USER"
   fi
+  usermod -aG systemd-journal "$GRAIN_USER"
 }
 
 # --- 5. sudo to reboot the machine, for the UI's reboot button ----------
