@@ -100,4 +100,14 @@ describe("Sidebar", () => {
 
     expect(onSetView).toHaveBeenCalledWith("logs");
   });
+
+  it("switches to the sandbox health view when clicked", async () => {
+    const onSetView = vi.fn();
+    const user = userEvent.setup();
+    render(<Sidebar {...baseProps} config={null} tasks={[]} onSetView={onSetView} />);
+
+    await user.click(screen.getByRole("button", { name: "Sandbox health" }));
+
+    expect(onSetView).toHaveBeenCalledWith("sandboxes");
+  });
 });

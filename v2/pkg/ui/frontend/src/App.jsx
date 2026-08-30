@@ -13,6 +13,7 @@ import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LogsPage from "./components/LogsPage.jsx";
+import SandboxHealthPage from "./components/SandboxHealthPage.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -299,6 +300,8 @@ export default function App() {
         <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
       ) : view === "logs" ? (
         <LogsPage showError={showError} />
+      ) : view === "sandboxes" ? (
+        <SandboxHealthPage showError={showError} />
       ) : (
         <div className="main-column">
           {repoFilter !== null && (
