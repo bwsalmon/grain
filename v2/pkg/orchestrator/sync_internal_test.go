@@ -191,8 +191,8 @@ func TestHealthFromClosedAndConflictedSurviveUnknownChecks(t *testing.T) {
 }
 
 func TestCheckRunsForReportsAForbiddenReadAsUnknownNotAnError(t *testing.T) {
-	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
-	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch")
+	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}, workflowErr: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
+	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef")
 	if err != nil {
 		t.Fatalf("a 403 must not fail the sync: %v", err)
 	}
@@ -209,12 +209,12 @@ func TestCheckRunsForReportsAForbiddenReadAsUnknownNotAnError(t *testing.T) {
 // -- it has to flip alongside the log line checkRunsFor already prints on
 // a 403, or that warning would never appear either.
 func TestChecksUnavailableReflectsAForbiddenRead(t *testing.T) {
-	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
-	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch"); err != nil {
+	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}, workflowErr: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
+	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef"); err != nil {
 		t.Fatalf("a 403 must not fail the sync: %v", err)
 	}
 	if !ChecksUnavailable() {
-		t.Error("ChecksUnavailable() = false after a 403 from ListCheckRuns, want true")
+		t.Error("ChecksUnavailable() = false after both CI reads 403'd, want true")
 	}
 }
 
@@ -256,17 +256,106 @@ func TestCheckRunsForStillFailsOnEveryOtherError(t *testing.T) {
 		{"a 403 with a body that cannot be read", &github.Error{Status: 403, Body: []byte("<html>403 Forbidden</html>")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &checkRunsClient{err: tc.err}
-			if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch"); err == nil {
+			client := &checkRunsClient{err: tc.err, workflowErr: tc.err}
+			if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef"); err == nil {
 				t.Fatal("expected the error to propagate")
 			}
 		})
 	}
 }
 
+// The whole point of the fallback: a fine-grained PAT cannot be granted
+// the Checks permission at all (GitHub withdrew it and has said only
+// GitHub Apps may use that API), so without this a deployment on one has
+// no CI signal and auto-merge never fires. With "Actions" read it does.
+func TestCheckRunsForFallsBackToWorkflowRunsWhenChecksAreForbidden(t *testing.T) {
+	client := &checkRunsClient{
+		err:          &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)},
+		workflowRuns: []github.CheckRun{{Name: "tests", Status: "completed"}},
+	}
+	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef")
+	if err != nil {
+		t.Fatalf("the fallback must not fail the sync: %v", err)
+	}
+	if !known {
+		t.Fatal("a successful workflow-run read must report the checks as known")
+	}
+	if len(checks) != 1 || checks[0].Name != "tests" {
+		t.Fatalf("checks = %v, want the one workflow run", checks)
+	}
+}
+
+// The fallback reads the commit the PR points at, not its branch. A
+// branch-scoped read could return a run of an older commit, and reading
+// that as this commit's pass is what would auto-merge untested code.
+func TestCheckRunsForScopesTheFallbackToTheHeadSHA(t *testing.T) {
+	client := &checkRunsClient{err: &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}}
+	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	if client.workflowSHASaw != "deadbeef" {
+		t.Errorf("the fallback read %q, want the head sha deadbeef", client.workflowSHASaw)
+	}
+}
+
+// GitHub computes the head sha asynchronously the same way it computes
+// mergeable, so a PR read can legitimately arrive without one. With no
+// commit to scope to, the fallback is skipped rather than widened to a
+// branch-scoped read -- health goes unknown for a cycle instead.
+func TestCheckRunsForSkipsTheFallbackWithNoHeadSHA(t *testing.T) {
+	client := &checkRunsClient{
+		err:          &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)},
+		workflowRuns: []github.CheckRun{{Name: "tests", Status: "completed"}},
+	}
+	_, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if known {
+		t.Error("checks reported known from a fallback that had no commit to scope to")
+	}
+	if client.workflowSHASaw != "" {
+		t.Errorf("the fallback ran anyway, against %q", client.workflowSHASaw)
+	}
+}
+
+// The fallback gets the same treatment as the read it stands in for: a
+// permission error is a fact about the credential, anything else is a
+// real error. A 500 from the Actions API must not read as "no CI".
+func TestCheckRunsForPropagatesANonPermissionFallbackFailure(t *testing.T) {
+	client := &checkRunsClient{
+		err:         &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)},
+		workflowErr: &github.Error{Status: 500, Body: []byte("upstream is unwell")},
+	}
+	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef"); err == nil {
+		t.Fatal("a 500 from the fallback must propagate, not report unknown")
+	}
+}
+
+// A credential that can read checks directly must never pay for the
+// fallback -- the Checks API sees every provider's checks, the Actions
+// API only sees Actions, so preferring it would narrow what CI grain can
+// see on a deployment that had no problem to begin with.
+func TestCheckRunsForDoesNotReachForTheFallbackWhenChecksWork(t *testing.T) {
+	client := &checkRunsClient{
+		checks:       []github.CheckRun{{Name: "buildkite", Status: "completed"}},
+		workflowRuns: []github.CheckRun{{Name: "tests", Status: "completed"}},
+	}
+	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef")
+	if err != nil || !known {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if len(checks) != 1 || checks[0].Name != "buildkite" {
+		t.Fatalf("checks = %v, want the Checks API's own answer", checks)
+	}
+	if client.workflowSHASaw != "" {
+		t.Error("the fallback ran even though the Checks read succeeded")
+	}
+}
+
 func TestCheckRunsForPassesASuccessfulReadThrough(t *testing.T) {
 	client := &checkRunsClient{checks: []github.CheckRun{{Name: "build", Status: "completed"}}}
-	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch")
+	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,13 +374,21 @@ func testPullRequestRef() model.PullRequestRef {
 	}
 }
 
-// checkRunsClient is a github.Client that only ListCheckRuns is ever
+// checkRunsClient is a github.Client that only the two CI reads are ever
 // called on -- every other method is embedded and would panic on a nil
 // interface, which is the point: checkRunsFor must touch nothing else.
+//
+// workflowErr defaults to nothing, so a test that sets only err is
+// asking for "the Checks read failed and the Actions read succeeded".
+// The tests that mean "no CI signal at all" set both.
 type checkRunsClient struct {
 	github.Client
 	checks []github.CheckRun
 	err    error
+
+	workflowRuns   []github.CheckRun
+	workflowErr    error
+	workflowSHASaw string
 }
 
 func (c *checkRunsClient) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
@@ -299,6 +396,14 @@ func (c *checkRunsClient) ListCheckRuns(owner, repo, ref string) ([]github.Check
 		return nil, c.err
 	}
 	return c.checks, nil
+}
+
+func (c *checkRunsClient) ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error) {
+	c.workflowSHASaw = headSHA
+	if c.workflowErr != nil {
+		return nil, c.workflowErr
+	}
+	return c.workflowRuns, nil
 }
 
 // --- what a no-action run reports --------------------------------------

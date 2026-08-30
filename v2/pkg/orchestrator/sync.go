@@ -62,6 +62,11 @@ func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, check
 	return model.PrClean
 }
 
+// workflowFallbackOnce keeps the "falling back to Actions" notice to one
+// line per process: like checksUnavailable below it is a standing
+// property of the deployment's credential, not an event.
+var workflowFallbackOnce sync.Once
+
 // checksUnavailableOnce keeps the "no Checks access" notice below to one
 // line per process rather than one per pull request per cycle: it is a
 // standing property of the deployment's credential, not an event, and it
@@ -85,31 +90,41 @@ func ChecksUnavailable() bool {
 	return checksUnavailable.Load()
 }
 
-// checkRunsFor reads ref's check runs, reporting whether the answer is
-// known at all.
+// checkRunsFor reads ref's CI state, reporting whether the answer is
+// known at all. It tries two endpoints, because no single one is
+// readable by every credential type a deployment might be configured
+// with:
 //
-// A 403 that names a missing permission is not a failure to handle but a
-// fact about the credential: reading the Checks API needs the `repo`
-// scope on a classic PAT, or the "Checks" repository permission on a
-// fine-grained one, and a credential holding neither gets that same
-// refusal on every call, forever (see github.IsPermissionDenied).
-// Failing the sync on it would leave every tracked pull request erroring
-// every cycle, so instead the health of those PRs goes unknown -- which
+//  1. The Checks API, which sees every check on the commit whoever
+//     reported it. Needs the `repo` scope on a classic PAT; a GitHub App
+//     installation token has it too.
+//  2. Failing that with a permission error, the Actions API, which sees
+//     GitHub Actions workflow runs and nothing else. This is the only one
+//     of the two a fine-grained PAT can reach -- "Checks" cannot be
+//     granted to one at all, so a deployment on a fine-grained token
+//     needs "Actions" read or it has no CI signal whatsoever.
+//
+// A permission error from both is a fact about the credential rather
+// than a failure to handle: it will repeat on every call, forever, so
+// failing the sync on it would leave every tracked pull request erroring
+// every cycle. The health of those PRs goes unknown instead -- which
 // costs auto-merge, and nothing else: dispatch, the push, and opening
-// the PR are a separate reconciler that never reads a check run.
+// the PR are a separate reconciler that never reads CI.
 //
 // Every other error is still an error, and that deliberately includes
 // the other conditions GitHub answers 403 for -- rate limits, SAML
 // enforcement, an organization IP allow list. Those clear, on their own
 // or with a change an operator can make, so swallowing one as "this
-// credential cannot read checks" would switch auto-merge off until the
-// next restart over something that had already fixed itself
-// (checksUnavailable below never clears within a process).
-// github.IsPermissionDenied draws that line by message, not by status.
+// credential cannot read CI" would switch auto-merge off until the next
+// restart over something that had already fixed itself (checksUnavailable
+// below never clears within a process). github.IsPermissionDenied draws
+// that line by message, not by status.
 //
-// This also does not widen to 404 or to a failure of any other call: it
-// is exactly the one permission a deployment can be configured without.
-func checkRunsFor(client github.Client, ref model.PullRequestRef, head string) ([]github.CheckRun, bool, error) {
+// headSHA may be empty on a PR read before GitHub filled it in; the
+// Actions fallback needs a commit to scope to, so it is skipped rather
+// than widened to a branch-scoped read that could return an older
+// commit's runs.
+func checkRunsFor(client github.Client, ref model.PullRequestRef, head, headSHA string) ([]github.CheckRun, bool, error) {
 	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, head)
 	if err == nil {
 		return checks, true, nil
@@ -117,16 +132,34 @@ func checkRunsFor(client github.Client, ref model.PullRequestRef, head string) (
 	if !github.IsPermissionDenied(err) {
 		return nil, false, fmt.Errorf("orchestrator: reading check runs for %s: %w", ref, err)
 	}
+	checksErr := err
+
+	if headSHA != "" {
+		runs, err := client.ListWorkflowRuns(ref.Repo.Owner, ref.Repo.Name, headSHA)
+		if err == nil {
+			workflowFallbackOnce.Do(func() {
+				log.Printf("orchestrator: this deployment's GitHub credential cannot read check " +
+					"runs, so pull request health comes from GitHub Actions workflow runs " +
+					"instead. CI reported by anything other than Actions is invisible -- grant " +
+					"the `repo` scope (classic PAT) or install a GitHub App if this deployment " +
+					"has checks from another provider.")
+			})
+			return runs, true, nil
+		}
+		if !github.IsPermissionDenied(err) {
+			return nil, false, fmt.Errorf("orchestrator: reading workflow runs for %s: %w", ref, err)
+		}
+	}
+
 	checksUnavailableOnce.Do(func() {
 		checksUnavailable.Store(true)
 		// GitHub's own refusal goes in the line: it is the only place an
-		// operator can see whether the credential is a classic PAT
-		// missing `repo` or a fine-grained one missing "Checks", and
-		// this is the one time the process ever reports it.
-		log.Printf("orchestrator: this deployment's GitHub credential cannot read check runs "+
-			"-- pull request health stays unknown and nothing is auto-merged. Everything else "+
-			"is unaffected. Grant the `repo` scope (classic PAT) or the \"Checks\" repository "+
-			"permission (fine-grained PAT), then restart. GitHub said: %v", err)
+		// operator can see which permission is missing, and this is the
+		// one time the process ever reports it.
+		log.Printf("orchestrator: this deployment's GitHub credential can read neither check "+
+			"runs nor Actions workflow runs -- pull request health stays unknown and nothing "+
+			"is auto-merged. Everything else is unaffected. Grant the `repo` scope (classic "+
+			"PAT) or \"Actions\" read (fine-grained PAT), then restart. GitHub said: %v", checksErr)
 	})
 	return nil, false, nil
 }
@@ -290,7 +323,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	var checks []github.CheckRun
 	checksKnown := true
 	if detail.State != "closed" {
-		checks, checksKnown, err = checkRunsFor(client, ref, detail.HeadRef)
+		checks, checksKnown, err = checkRunsFor(client, ref, detail.HeadRef, detail.HeadSHA)
 		if err != nil {
 			return err
 		}

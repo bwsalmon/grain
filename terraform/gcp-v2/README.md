@@ -86,7 +86,7 @@ export PROJECT="$(terraform output -raw project_id)"
 export INSTANCE="$(terraform output -raw instance_name)"
 export ZONE="$(terraform output -raw zone)"
 export MINTER_SERVICE_ACCOUNT="$(terraform output -raw minter_service_account)"
-export GRAIN_GITHUB_TOKEN="ghp_..."      # a fine-grained PAT scoped to test_repos
+export GRAIN_GITHUB_TOKEN="github_pat_..."   # a fine-grained PAT scoped to test_repos
 ./push-secrets.sh
 ```
 
@@ -306,13 +306,14 @@ stay consistent with each other by construction.
 ### What the PAT needs
 
 A **fine-grained** token, with repository access limited to exactly
-`test_repos`, and three repository permissions:
+`test_repos`, and four repository permissions:
 
 | Permission | Level | What needs it |
 |---|---|---|
 | Metadata | Read | mandatory for every fine-grained token; also `GET /repos/{owner}/{repo}`, behind `DefaultBranch` |
 | Contents | Read and write | the git proxy's fetch and push, plus creating and updating refs (`CreateBranch`, `UpdateBranch`, `BranchExists`, `GetBranchHead`) |
 | Pull requests | Read and write | `CreatePullRequest`, `FindOpenPullRequestForBranch`, `GetPullRequest`, `MergePullRequest` |
+| Actions | Read | `ListWorkflowRuns` -- the CI read auto-merge gates on, since a fine-grained token cannot reach the Checks API. Omit it and auto-merge never fires; see below |
 
 **Do not grant `Workflows`.** `pkg/gitproxy` authorizes by repository and
 by push-versus-fetch, never by what a commit touches -- nothing in v2
@@ -328,19 +329,39 @@ API calls. `pkg/github` still implements that surface -- it is built, not
 wired -- so grant `Issues` only if something later routes those effects
 back to GitHub.
 
-**There is no `Checks` permission to grant.** GitHub offered one for
-fine-grained tokens initially and withdrew it; the Checks API now takes
-GitHub App installation tokens only. So `ListCheckRuns` returns 403 to
-this deployment permanently, and `pkg/orchestrator`'s `checkRunsFor`
-treats that one status as "health unknown" rather than an error -- see
-its own doc comment. The cost is auto-merge: a task with `AutoMerge`
-never merges, because a PR whose checks cannot be read is never `PrClean`
-(reading it as clean is how you merge a PR with CI red). Dispatch, the
-push, and opening the pull request are a separate reconciler and are
-unaffected.
+**There is no `Checks` permission to grant, which is why `Actions` is on
+the table above.** GitHub offered a `Checks` permission for fine-grained
+tokens initially and withdrew it "due to some edge cases", and has said
+only GitHub Apps may use that API in the meantime -- it is still listed
+in GitHub's own permissions reference, so it looks grantable when it is
+not. `ListCheckRuns` therefore returns 403 to this deployment
+permanently.
 
-**A deployment that genuinely needs auto-merge needs a GitHub App
-installation token instead of this PAT** (bwsalmon/agents#491) --
+`pkg/orchestrator`'s `checkRunsFor` answers that by falling back to
+`ListWorkflowRuns`, which reads GitHub Actions workflow runs from the
+Actions API and sits behind the `Actions` read permission a fine-grained
+token *can* hold. Auto-merge works on this PAT with that permission
+granted. What the fallback cannot see is CI reported through the Checks
+API by anything other than Actions -- a third-party provider like
+Buildkite or CircleCI, or a review bot -- so a deployment whose
+`test_repos` use one of those needs a credential that can read checks
+properly, below.
+
+Grant neither and there is no CI signal at all: a task with `AutoMerge`
+never merges, because a PR whose checks cannot be read is never
+`PrClean` (reading it as clean is how you merge a PR with CI red).
+`checkRunsFor` treats that as "health unknown" rather than an error, and
+`/api/config` reports `autoMergeDegraded` so the UI can say so. Dispatch,
+the push, and opening the pull request are a separate reconciler and are
+unaffected either way.
+
+Note that a **classic** PAT reads the Checks API fine with the `repo`
+scope -- the limitation is specific to fine-grained tokens. `repo` is far
+coarser than the four permissions above, though, so prefer the
+fine-grained token plus `Actions`, or the App below.
+
+**A deployment needing checks from a non-Actions provider needs a GitHub
+App installation token instead of this PAT** (bwsalmon/agents#491) --
 `pkg/gitproxy` now has that credential kind, so this is configuration
 after all rather than the code change it used to be. Create the App on
 `test_repos`' own org with Contents, Pull requests and Checks read
