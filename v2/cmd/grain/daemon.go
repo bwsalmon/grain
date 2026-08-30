@@ -21,7 +21,9 @@
 // fleet this deployment shape has nowhere to run. -kontur-vm-name-prefix
 // is the opt in to the real alternative (bwsalmon/agents#274):
 // orchestrator.KonturSandboxes, one real bwsalmon/kontur-managed VM per
-// slot, reached over SSH. -slots accepts a comma list either way; nothing
+// slot, reached over SSH. -max-concurrent sizes the pool either way
+// (bwsalmon/agents#461: model.SlotNames turns the count into the
+// generated slot identifiers each backend actually keys on); nothing
 // above pkg/orchestrator.Deps needs to change to serve more than one.
 //
 // graind originally drove pkg/orchestrate, a package built independently
@@ -32,7 +34,7 @@
 // resolution/materialization and reconcile-loop shape onto it. See
 // v2/README.md for what that merge kept and dropped.
 //
-// Most of this file's own flags (-slots, -poll-interval, -gemini-model,
+// Most of this file's own flags (-max-concurrent, -poll-interval, -gemini-model,
 // -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
 // -gcp-agent-service-account, -target-repos) are store-backed now
 // (bwsalmon/agents#320):
@@ -105,7 +107,7 @@ func daemon(args []string) {
 
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
-	slotList := fs.String("slots", "local", "comma-separated slot names -- the concurrency pool dispatch.Cycle fills"+seedOnly)
+	maxConcurrent := fs.Int("max-concurrent", 1, "maximum number of tasks dispatched at once -- the size of the concurrency pool dispatch.Cycle fills"+seedOnly)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
 
 	uiAddr := fs.String("ui-addr", "127.0.0.1:8420", "address to serve the UI/API on, in-process, over this same store -- empty disables it")
@@ -202,7 +204,10 @@ func daemon(args []string) {
 			os.Exit(2)
 		}
 	}
-	slots := strings.Split(*slotList, ",")
+	if *maxConcurrent < 1 {
+		fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent must be at least 1")
+		os.Exit(2)
+	}
 	var targetReposList []string
 	if strings.TrimSpace(*targetRepos) != "" {
 		targetReposList = strings.Split(*targetRepos, ",")
@@ -212,7 +217,7 @@ func daemon(args []string) {
 	defer stop()
 
 	if err := run(ctx, config{
-		dataDir: *dataDir, slots: slots, pollInterval: *pollInterval,
+		dataDir: *dataDir, maxConcurrent: *maxConcurrent, pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
@@ -229,9 +234,9 @@ func daemon(args []string) {
 }
 
 type config struct {
-	dataDir      string
-	slots        []string
-	pollInterval time.Duration
+	dataDir       string
+	maxConcurrent int
+	pollInterval  time.Duration
 
 	// uiAddr, uiOpen, actor and defaultTargetRepo configure the in-process
 	// pkg/ui.Server this daemon serves alongside RunCycle (bwsalmon/agents#363);
@@ -294,6 +299,11 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("loading deployment configuration: %w", err)
 	}
+	// slots is the generated set of dispatch.Cycle slot identifiers
+	// cfg.maxConcurrent expands into (model.SlotNames' own doc comment) --
+	// every sandbox/token/git-credential/Deps wiring below that used to
+	// walk an operator-chosen cfg.slots list now walks this instead.
+	slots := model.SlotNames(cfg.maxConcurrent)
 
 	// Sandboxing defaults to orchestrator.HostSandboxes -- one local
 	// directory per slot, no isolation -- exactly as it always has;
@@ -339,7 +349,7 @@ func run(ctx context.Context, cfg config) error {
 	roots := map[string]string{}
 	slotTokens := map[string]string{}
 	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(cfg.dataDir, "secrets", "sandbox-tokens.json"))
-	for _, slot := range cfg.slots {
+	for _, slot := range slots {
 		if hostSandboxes != nil {
 			root, err := hostSandboxes.RootFor(slot)
 			if err != nil {
@@ -384,7 +394,7 @@ func run(ctx context.Context, cfg config) error {
 		defer stopUI(context.Background())
 	}
 
-	for _, slot := range cfg.slots {
+	for _, slot := range slots {
 		// Configuring git credentials is a one-time, per-slot setup step,
 		// not a per-task one -- git-credential-store matches on
 		// protocol+host, not path, so this single line covers every repo
@@ -442,9 +452,9 @@ func run(ctx context.Context, cfg config) error {
 			MaxAgentTurns: cfg.maxAgentTurns,
 			TranscriptDir: transcriptDir,
 		},
-		Slots: cfg.slots,
+		Slots: slots,
 	}
-	log.Printf("grain daemon: reconciling every %s across slots %v", cfg.pollInterval, cfg.slots)
+	log.Printf("grain daemon: reconciling every %s across %d concurrent slot(s) %v", cfg.pollInterval, cfg.maxConcurrent, slots)
 	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
 }
@@ -574,7 +584,7 @@ func loadConfig(ctx context.Context, store *model.Store, flagCfg config) (config
 // stored one.
 func (c config) toModelConfig() model.Config {
 	return model.Config{
-		PollInterval: c.pollInterval, Slots: c.slots,
+		PollInterval: c.pollInterval, MaxConcurrent: c.maxConcurrent,
 		GeminiModel: c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
 		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
 		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
@@ -587,7 +597,7 @@ func (c config) toModelConfig() model.Config {
 // row exists.
 func (c config) withModelConfig(mc model.Config) config {
 	c.pollInterval = mc.PollInterval
-	c.slots = mc.Slots
+	c.maxConcurrent = mc.MaxConcurrent
 	c.geminiModel = mc.GeminiModel
 	c.maxAgentTurns = mc.MaxAgentTurns
 	c.githubHost = mc.GitHubHost

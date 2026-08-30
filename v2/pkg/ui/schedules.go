@@ -2,7 +2,9 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,92 @@ type scheduleNotFoundError struct{ ID string }
 
 func (e *scheduleNotFoundError) Error() string { return "no scheduled task " + e.ID }
 
+// Recurrence is a schedule's cadence, over the wire -- model.Recurrence's
+// fields, with Kind matching model.RecurrenceKind's own string values
+// exactly (no second vocabulary to translate) and TimeOfDay/Weekday
+// rendered the way a human reads them ("14:30", "monday") rather than as
+// minutes-since-midnight or time.Weekday's own int. Which of
+// EveryNHours/TimeOfDay/Weekday/DayOfMonth is meaningful depends on Kind,
+// the same sum-type-as-struct shape model.Recurrence itself uses.
+type Recurrence struct {
+	Kind        string `json:"kind"`
+	EveryNHours int    `json:"everyNHours,omitempty"`
+	TimeOfDay   string `json:"timeOfDay,omitempty"`
+	Weekday     string `json:"weekday,omitempty"`
+	DayOfMonth  int    `json:"dayOfMonth,omitempty"`
+}
+
+var weekdayNames = [...]string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}
+
+func formatTimeOfDay(minutes int) string {
+	return fmt.Sprintf("%02d:%02d", minutes/60, minutes%60)
+}
+
+func parseTimeOfDay(text string) (int, error) {
+	hh, mm, ok := strings.Cut(text, ":")
+	if !ok {
+		return 0, validationErrorf("timeOfDay: want HH:MM, got %q", text)
+	}
+	h, err1 := strconv.Atoi(hh)
+	m, err2 := strconv.Atoi(mm)
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, validationErrorf("timeOfDay: want HH:MM, got %q", text)
+	}
+	return h*60 + m, nil
+}
+
+func parseWeekday(name string) (time.Weekday, error) {
+	for i, n := range weekdayNames {
+		if n == strings.ToLower(strings.TrimSpace(name)) {
+			return time.Weekday(i), nil
+		}
+	}
+	return 0, validationErrorf("weekday: unknown day %q", name)
+}
+
+func recurrenceFrom(r model.Recurrence) Recurrence {
+	out := Recurrence{Kind: string(r.Kind)}
+	switch r.Kind {
+	case model.RecurrenceEveryNHours:
+		out.EveryNHours = r.EveryNHours
+	case model.RecurrenceDaily:
+		out.TimeOfDay = formatTimeOfDay(r.TimeOfDay)
+	case model.RecurrenceWeekly:
+		out.TimeOfDay = formatTimeOfDay(r.TimeOfDay)
+		out.Weekday = weekdayNames[r.Weekday]
+	case model.RecurrenceMonthly:
+		out.TimeOfDay = formatTimeOfDay(r.TimeOfDay)
+		out.DayOfMonth = r.DayOfMonth
+	}
+	return out
+}
+
+// parseRecurrence turns the wire shape back into model.Recurrence,
+// rejecting anything Validate would -- caught here, before the store is
+// touched, the same as parseInterval used to for the plain-duration
+// version this replaces.
+func parseRecurrence(req Recurrence) (model.Recurrence, error) {
+	r := model.Recurrence{Kind: model.RecurrenceKind(req.Kind), EveryNHours: req.EveryNHours, DayOfMonth: req.DayOfMonth}
+	if req.TimeOfDay != "" {
+		minutes, err := parseTimeOfDay(req.TimeOfDay)
+		if err != nil {
+			return model.Recurrence{}, err
+		}
+		r.TimeOfDay = minutes
+	}
+	if req.Weekday != "" {
+		weekday, err := parseWeekday(req.Weekday)
+		if err != nil {
+			return model.Recurrence{}, err
+		}
+		r.Weekday = weekday
+	}
+	if err := r.Validate(); err != nil {
+		return model.Recurrence{}, validationErrorf("recurrence: %v", err)
+	}
+	return r, nil
+}
+
 // Schedule is a schedule's JSON shape -- everything a UI needs to list,
 // create, edit and pause one. There is no separate "run now" or history
 // list here: NextRunAt/LastRunAt are the whole of what a UI can show
@@ -30,31 +118,40 @@ type Schedule struct {
 	Repo        string `json:"repo"`
 	Base        string `json:"base,omitempty"`
 	AutoMerge   bool   `json:"autoMerge"`
-	// Interval is a Go duration string ("24h0m0s"), the same syntax
-	// Settings.PollInterval already uses for the same reason: it is what
-	// -poll-interval and time.ParseDuration both already speak, so there
-	// is no second interval syntax for a caller to learn.
-	Interval  string     `json:"interval"`
-	Enabled   bool       `json:"enabled"`
-	NextRunAt time.Time  `json:"nextRunAt"`
-	LastRunAt *time.Time `json:"lastRunAt,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	// Reads and Capabilities mirror Task's own fields (bwsalmon/agents#464):
+	// every task this schedule files carries them, the same as one filed
+	// by hand through CreateTaskRequest.
+	Reads        []string   `json:"reads,omitempty"`
+	Capabilities []string   `json:"capabilities"`
+	Recurrence   Recurrence `json:"recurrence"`
+	Enabled      bool       `json:"enabled"`
+	NextRunAt    time.Time  `json:"nextRunAt"`
+	LastRunAt    *time.Time `json:"lastRunAt,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
 }
 
 func scheduleFrom(s model.ScheduledTask) Schedule {
-	return Schedule{
-		ID:          s.ID,
-		Title:       s.Title,
-		Description: s.Body,
-		Repo:        s.Target.String(),
-		Base:        s.Base,
-		AutoMerge:   s.AutoMerge,
-		Interval:    s.Interval.String(),
-		Enabled:     s.Enabled,
-		NextRunAt:   s.NextRunAt,
-		LastRunAt:   s.LastRunAt,
-		CreatedAt:   s.CreatedAt,
+	out := Schedule{
+		ID:           s.ID,
+		Title:        s.Title,
+		Description:  s.Body,
+		Repo:         s.Target.String(),
+		Base:         s.Base,
+		AutoMerge:    s.AutoMerge,
+		Capabilities: []string{},
+		Recurrence:   recurrenceFrom(s.Recurrence),
+		Enabled:      s.Enabled,
+		NextRunAt:    s.NextRunAt,
+		LastRunAt:    s.LastRunAt,
+		CreatedAt:    s.CreatedAt,
 	}
+	for _, r := range s.Reads {
+		out.Reads = append(out.Reads, r.String())
+	}
+	for _, g := range s.Grants {
+		out.Capabilities = append(out.Capabilities, g.Capability)
+	}
+	return out
 }
 
 // ListSchedules returns every schedule, newest first.
@@ -71,18 +168,22 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 }
 
 // CreateScheduleRequest is a new schedule's fields -- CreateTaskRequest's
-// own shape, minus DependsOn/Reads/Capabilities/Approved: a schedule
-// fires with no reviewer in the loop each time (see fireScheduledTask's
-// own doc comment on why it needs no approved flag), so those task-only
-// concerns have no home here. Repo and Interval are required: a schedule
-// with no write target or no cadence cannot ever fire.
+// own shape, minus DependsOn and Approved: a schedule fires with no
+// reviewer in the loop each time (see fireScheduledTask's own doc comment
+// on why it needs no approved flag), and a one-shot depends-on link makes
+// no sense against a task this schedule refiles indefinitely, so those
+// two task-only concerns have no home here. Repo and Recurrence are
+// required: a schedule with no write target or no cadence cannot ever
+// fire.
 type CreateScheduleRequest struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Repo        string `json:"repo"`
-	Base        string `json:"base"`
-	AutoMerge   bool   `json:"autoMerge"`
-	Interval    string `json:"interval"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	Repo         string     `json:"repo"`
+	Base         string     `json:"base"`
+	AutoMerge    bool       `json:"autoMerge"`
+	Capabilities []string   `json:"capabilities"`
+	Reads        []string   `json:"reads"`
+	Recurrence   Recurrence `json:"recurrence"`
 	// Enabled, omitted, defaults to true -- a schedule somebody just
 	// created is normally meant to run, not to sit paused until a second
 	// click.
@@ -104,7 +205,15 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	if err != nil {
 		return Schedule{}, &ValidationError{err: err}
 	}
-	interval, err := parseInterval(req.Interval)
+	recurrence, err := parseRecurrence(req.Recurrence)
+	if err != nil {
+		return Schedule{}, err
+	}
+	grants, err := c.grantsFor(req.Capabilities)
+	if err != nil {
+		return Schedule{}, err
+	}
+	reads, err := parseReads(req.Reads)
 	if err != nil {
 		return Schedule{}, err
 	}
@@ -120,16 +229,18 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	}
 	now := c.now()
 	sched := model.ScheduledTask{
-		ID:        id,
-		Title:     req.Title,
-		Body:      req.Description,
-		Target:    target,
-		Base:      req.Base,
-		AutoMerge: req.AutoMerge,
-		Interval:  interval,
-		Enabled:   enabled,
-		NextRunAt: now,
-		CreatedAt: now,
+		ID:         id,
+		Title:      req.Title,
+		Body:       req.Description,
+		Target:     target,
+		Base:       req.Base,
+		AutoMerge:  req.AutoMerge,
+		Reads:      reads,
+		Grants:     grants,
+		Recurrence: recurrence,
+		Enabled:    enabled,
+		NextRunAt:  now,
+		CreatedAt:  now,
 	}
 	if err := c.Store.PutScheduledTask(ctx, sched); err != nil {
 		return Schedule{}, err
@@ -141,15 +252,17 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 // "leave this one alone", UpdateTaskRequest's own convention. Enabled is
 // the pause/resume toggle: setting it false stops this schedule from
 // ever coming due without losing its NextRunAt, so resuming it later
-// picks up rather than firing every interval that elapsed while paused.
+// picks up rather than firing every occurrence that elapsed while paused.
 type UpdateScheduleRequest struct {
-	Title       *string `json:"title,omitempty"`
-	Description *string `json:"description,omitempty"`
-	Repo        *string `json:"repo,omitempty"`
-	Base        *string `json:"base,omitempty"`
-	AutoMerge   *bool   `json:"autoMerge,omitempty"`
-	Interval    *string `json:"interval,omitempty"`
-	Enabled     *bool   `json:"enabled,omitempty"`
+	Title        *string     `json:"title,omitempty"`
+	Description  *string     `json:"description,omitempty"`
+	Repo         *string     `json:"repo,omitempty"`
+	Base         *string     `json:"base,omitempty"`
+	AutoMerge    *bool       `json:"autoMerge,omitempty"`
+	Capabilities *[]string   `json:"capabilities,omitempty"`
+	Reads        *[]string   `json:"reads,omitempty"`
+	Recurrence   *Recurrence `json:"recurrence,omitempty"`
+	Enabled      *bool       `json:"enabled,omitempty"`
 }
 
 // UpdateSchedule edits a schedule's fields in place -- its NextRunAt and
@@ -170,13 +283,29 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
 		return Schedule{}, validationErrorf("title cannot be empty")
 	}
-	var interval *time.Duration
-	if req.Interval != nil {
-		d, err := parseInterval(*req.Interval)
+	var recurrence *model.Recurrence
+	if req.Recurrence != nil {
+		r, err := parseRecurrence(*req.Recurrence)
 		if err != nil {
 			return Schedule{}, err
 		}
-		interval = &d
+		recurrence = &r
+	}
+	var grants []model.Grant
+	if req.Capabilities != nil {
+		var err error
+		grants, err = c.grantsFor(*req.Capabilities)
+		if err != nil {
+			return Schedule{}, err
+		}
+	}
+	var reads []model.RepoRef
+	if req.Reads != nil {
+		var err error
+		reads, err = parseReads(*req.Reads)
+		if err != nil {
+			return Schedule{}, err
+		}
 	}
 
 	existing, err := c.Store.GetScheduledTask(ctx, id)
@@ -203,8 +332,14 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 		if req.AutoMerge != nil {
 			s.AutoMerge = *req.AutoMerge
 		}
-		if interval != nil {
-			s.Interval = *interval
+		if req.Capabilities != nil {
+			s.Grants = grants
+		}
+		if req.Reads != nil {
+			s.Reads = reads
+		}
+		if recurrence != nil {
+			s.Recurrence = *recurrence
 		}
 		if req.Enabled != nil {
 			s.Enabled = *req.Enabled
@@ -234,17 +369,6 @@ func (c *Client) DeleteSchedule(ctx context.Context, id string) error {
 		return &scheduleNotFoundError{ID: id}
 	}
 	return c.Store.DeleteScheduledTask(ctx, id)
-}
-
-func parseInterval(text string) (time.Duration, error) {
-	d, err := time.ParseDuration(text)
-	if err != nil {
-		return 0, validationErrorf("interval: %v", err)
-	}
-	if d <= 0 {
-		return 0, validationErrorf("interval must be positive")
-	}
-	return d, nil
 }
 
 // --- handlers ------------------------------------------------------------
