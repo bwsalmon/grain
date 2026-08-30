@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -434,4 +435,92 @@ func (f *failOnceMinter) DeleteKey(ctx context.Context, name string) error {
 		return errors.New("boom")
 	}
 	return f.fakeMinter.DeleteKey(ctx, name)
+}
+
+// --- the daemon's own operating key --------------------------------------
+
+// The operating key carries displayNamePrefix like every other key this
+// package mints, so the prefix check alone would reap it -- and it is
+// older than any cutoff by design, being minted once at deploy time.
+// Reaping it would stop the running daemon roughly a day after every
+// deploy, which is the whole reason for the exemption.
+func TestDeleteExpiredNeverReapsTheOperatingKey(t *testing.T) {
+	fm := newFakeMinter()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	fm.keys = map[string]mintedKey{
+		"operating": {Name: "operating", DisplayName: OperatingKeyDisplayName, CreateTime: now.Add(-90 * 24 * time.Hour)},
+		"old-task":  {Name: "old-task", DisplayName: "grain-task-1", CreateTime: now.Add(-25 * time.Hour)},
+	}
+
+	deleted, err := deleteExpired(context.Background(), fm, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 1 || deleted[0] != "old-task" {
+		t.Fatalf("deleted = %v, want exactly [old-task]", deleted)
+	}
+	if _, stillThere := fm.keys["operating"]; !stillThere {
+		t.Error("the daemon's operating key was reaped; it must outlive maxLease")
+	}
+}
+
+// The exemption is by exact name, so the constant has to keep the prefix
+// that marks it as grain's at all -- a key without it is invisible to
+// the reaper for a different and much weaker reason (it looks like
+// someone else's), and DeleteExpired would then also stop protecting
+// every other grain key if the prefix were ever dropped here.
+func TestOperatingKeyNameKeepsTheGrainPrefix(t *testing.T) {
+	if !strings.HasPrefix(OperatingKeyDisplayName, displayNamePrefix) {
+		t.Errorf("OperatingKeyDisplayName = %q, want it to keep the %q prefix", OperatingKeyDisplayName, displayNamePrefix)
+	}
+}
+
+func TestMintOperatingKeyNamesAndRestrictsTheKey(t *testing.T) {
+	fm := newFakeMinter()
+	name, key, err := mintOperatingKey(context.Background(), fm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key == "" {
+		t.Error("no key string returned")
+	}
+	minted, ok := fm.keys[name]
+	if !ok {
+		t.Fatalf("CreateKey returned %q, which is not in the minter", name)
+	}
+	if minted.DisplayName != OperatingKeyDisplayName {
+		t.Errorf("display name = %q, want %q", minted.DisplayName, OperatingKeyDisplayName)
+	}
+}
+
+// A minted operating key must carry the same per-service restriction
+// every per-task key does: a leaked key is then useless against
+// anything else enabled in the project.
+func TestMintOperatingKeyRestrictsToTheGenerativeLanguageAPI(t *testing.T) {
+	var gotTarget string
+	fm := &recordingMinter{fakeMinter: newFakeMinter(), target: &gotTarget}
+	if _, _, err := mintOperatingKey(context.Background(), fm); err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget != DefaultAPITargetService {
+		t.Errorf("api target = %q, want %q", gotTarget, DefaultAPITargetService)
+	}
+}
+
+type recordingMinter struct {
+	*fakeMinter
+	target *string
+}
+
+func (r *recordingMinter) CreateKey(ctx context.Context, displayName, apiTargetService string) (string, string, error) {
+	*r.target = apiTargetService
+	return r.fakeMinter.CreateKey(ctx, displayName, apiTargetService)
+}
+
+func TestMintOperatingKeyPropagatesAFailure(t *testing.T) {
+	fm := newFakeMinter()
+	fm.createErr = errors.New("apikeys is angry")
+	if _, _, err := mintOperatingKey(context.Background(), fm); err == nil {
+		t.Fatal("expected the underlying create error to propagate")
+	}
 }

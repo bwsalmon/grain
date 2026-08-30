@@ -86,9 +86,13 @@ export INSTANCE="$(terraform output -raw instance_name)"
 export ZONE="$(terraform output -raw zone)"
 export MINTER_SERVICE_ACCOUNT="$(terraform output -raw minter_service_account)"
 export GRAIN_GITHUB_TOKEN="ghp_..."      # a fine-grained PAT scoped to test_repos
-export GRAIN_GEMINI_API_KEY="..."
 ./push-secrets.sh
 ```
+
+`GRAIN_GEMINI_API_KEY` is optional: with `enable_gemini_key` on (the
+default) the host mints the daemon's own key for itself -- see "The
+daemon's own Gemini key" below. Export one anyway to use a key of your
+own instead.
 
 Watch it converge with:
 
@@ -112,7 +116,8 @@ Terraform state:
   (`pkg/agent/gemini`), needed before `grain-daemon.service` will even
   start. Distinct from the gemini-key *capability*
   (`pkg/capability/geminikey`), which mints its own short-lived keys per
-  task once this one has the daemon running at all.
+  task once this one has the daemon running at all. Optional to supply:
+  see "The daemon's own Gemini key" below.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
 
@@ -125,6 +130,50 @@ keeps a later `terraform apply` from treating them as drift and erasing
 them. `files/deploy.sh` reads them back purely locally, over the instance
 metadata server, with no GCP credential of the host's own required to do
 it.
+
+## The daemon's own Gemini key
+
+With `enable_gemini_key` on (the default here), the minter account
+already holds `roles/serviceusage.apiKeysAdmin` project-wide -- that is
+what lets the gemini-key *capability* mint a short-lived key per task.
+The same grant is all it takes to mint the daemon's own long-lived
+operating key, and `push-secrets.sh` has already put the minter's
+credential on the host. So the host mints that key for itself:
+`v2/scripts/setup.sh`'s `mint_gemini_operating_key` runs
+`grain secrets mint-gemini-key` when no key is in place yet, right after
+seeding the minter credential it authenticates with.
+
+Nothing about this widens a grant. It is the same credential, the same
+API, and the same `generativelanguage.googleapis.com` restriction every
+per-task key is minted under -- which also makes a minted operating key
+narrower than a hand-made one, since a key created by hand in the
+console is unrestricted unless someone remembers to restrict it.
+
+What it removes is a first-deploy footgun: without it, applying and
+pushing secrets leaves you with a daemon that installs and then silently
+never starts, because the one credential it cannot come up without is
+the one nobody has pasted in yet.
+
+Three things worth knowing:
+
+- **It is seed-once.** An existing non-empty key is never overwritten,
+  so `config-sync` re-running `setup.sh` on every convergence pass does
+  not issue a fresh key each time, and a key you placed by hand always
+  wins.
+- **Rotating is manual**, the same as the minter key above: delete
+  `<data-dir>/secrets/gemini-api-key` on the host, delete the old key in
+  GCP, and bump `deploy_generation` so the next pass mints a new one.
+- **The reaper never touches it.** `geminikey.DeleteExpired` deletes
+  `grain-`prefixed keys older than 24 hours; the operating key carries
+  that prefix too and is exempted by exact name
+  (`geminikey.OperatingKeyDisplayName`), because it is the credential
+  the daemon runs as rather than a per-task lease that leaked. That
+  exemption is what keeps the reap from stopping the daemon a day after
+  every deploy -- so the constant must keep its prefix, and the
+  exemption must keep matching it.
+
+Set `enable_gemini_key = false`, or supply `GRAIN_GEMINI_API_KEY`
+yourself, and none of this runs.
 
 ## What the deployment is allowed to do
 

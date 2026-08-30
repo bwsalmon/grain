@@ -51,6 +51,23 @@ const DefaultAPITargetService = "generativelanguage.googleapis.com"
 // DeleteExpired must never delete a key without it.
 const displayNamePrefix = "grain-"
 
+// OperatingKeyDisplayName names the daemon's own long-lived operating
+// key -- the one pkg/agent/gemini runs as, seeded at deploy time by
+// `grain secrets mint-gemini-key` (cmd/grain/secrets.go) rather than
+// supplied by hand.
+//
+// It deliberately keeps displayNamePrefix, because that prefix is what
+// marks a key in this project as grain's at all. That alone would make
+// it reapable, though, and this key must outlive maxLease by design:
+// deleteExpired therefore exempts it by exact name. Renaming this
+// constant out from under that check would delete the running daemon's
+// own key roughly a day after any deploy -- see deleteExpired.
+//
+// The name is fixed rather than derived so the exemption is a literal
+// comparison with no run-shaped input in it: Materialize's own keys are
+// grain-<run id>, and no run id is this string.
+const OperatingKeyDisplayName = displayNamePrefix + "daemon-operating-key"
+
 // maxLease is the unconditional backstop past which a lease is revoked
 // regardless of whether its task ever released cleanly -- "clean up
 // after 24 hours if leaked" (bwsalmon/agents#239). A GCP API key has no
@@ -222,6 +239,42 @@ func (c *Capability) minter(ctx context.Context, cc model.CapabilityContext) (mi
 	return build(ctx, material, c.ProjectID)
 }
 
+// MintOperatingKey mints the daemon's own long-lived Gemini API key --
+// the credential pkg/agent/gemini runs as, distinct from the per-task
+// keys Materialize mints -- authenticating with the credential named
+// credentialName, the same standing minter credential the capability
+// itself uses.
+//
+// This exists so a deployment that already grants its minter
+// roles/serviceusage.apiKeysAdmin (terraform/gcp-v2's enable_gemini_key)
+// does not also need a Gemini key supplied by hand before its daemon
+// will start. It returns the key's resource name alongside the secret so
+// a caller can report what it created; the key is restricted to
+// DefaultAPITargetService exactly like every other key minted here.
+//
+// It is deliberately not a Capability method: nothing about it is
+// per-task, it holds no Lease, and DeleteExpired exempts what it mints
+// -- see OperatingKeyDisplayName.
+func MintOperatingKey(ctx context.Context, credentials model.CredentialResolver, credentialName, projectID string) (name, keyString string, err error) {
+	material, err := credentials.Resolve(ctx, credentialName)
+	if err != nil {
+		return "", "", fmt.Errorf("geminikey: resolving credential %q: %w", credentialName, err)
+	}
+	m, err := newAPIKeysMinter(ctx, material, projectID)
+	if err != nil {
+		return "", "", err
+	}
+	return mintOperatingKey(ctx, m)
+}
+
+func mintOperatingKey(ctx context.Context, m minter) (name, keyString string, err error) {
+	name, keyString, err = m.CreateKey(ctx, OperatingKeyDisplayName, DefaultAPITargetService)
+	if err != nil {
+		return "", "", fmt.Errorf("geminikey: minting the daemon's operating key: %w", err)
+	}
+	return name, keyString, nil
+}
+
 // DeleteExpired deletes every grain-minted key in projectID older than
 // maxAge, authenticating with the credential named credentialName --
 // the safety net for "clean up after 24 hours if leaked"
@@ -255,6 +308,13 @@ func deleteExpired(ctx context.Context, m minter, now time.Time, maxAge time.Dur
 	var deleted []string
 	for _, k := range keys {
 		if !strings.HasPrefix(k.DisplayName, displayNamePrefix) {
+			continue
+		}
+		// The daemon's own operating key is grain's, and old by
+		// design -- it is the credential this process runs as, not a
+		// per-task lease that leaked. Reaping it on age would stop the
+		// daemon a day after every deploy.
+		if k.DisplayName == OperatingKeyDisplayName {
 			continue
 		}
 		if !k.CreateTime.Before(cutoff) {

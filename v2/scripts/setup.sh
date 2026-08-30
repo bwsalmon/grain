@@ -145,8 +145,13 @@ Recognized variables:
                              (only written if no credential is configured yet)
   GRAIN_GITHUB_CREDENTIAL_NAME  name to store that token under (default: bot)
 
-  GRAIN_GEMINI_API_KEY      Gemini API key to seed, once (required for
-                             grain-daemon.service to actually start)
+  GRAIN_GEMINI_API_KEY      Gemini API key to seed, once. Required for
+                             grain-daemon.service to actually start, but
+                             optional when GRAIN_GCP_PROJECT is set and a
+                             minter credential is available (seeded from
+                             GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE below): the
+                             minter then mints the daemon's own key here --
+                             see mint_gemini_operating_key
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model
 
   GRAIN_GCP_PROJECT                  enables the gcp-key/gemini-key capabilities
@@ -339,9 +344,13 @@ setup_data_dir() {
   fi
   seed_secret "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" "$GRAIN_GITHUB_TOKEN"
 
+  # Order matters below: the minter key has to be in the secrets
+  # database before mint_gemini_operating_key can authenticate with it.
   seed_secret "$GRAIN_DATA_DIR/secrets/gemini-api-key" "$GRAIN_GEMINI_API_KEY"
 
   seed_gcp_minter_key
+
+  mint_gemini_operating_key
 
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ]; then
     log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN and re-run, or place"
@@ -369,6 +378,53 @@ seed_gcp_minter_key() {
   /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" set \
     -value-file "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" gcp-key-minter key.json
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+}
+
+# mint_gemini_operating_key mints the daemon's own Gemini API key, using
+# the minter credential seed_gcp_minter_key just placed, when no key is
+# in place yet.
+#
+# A deployment that grants its minter roles/serviceusage.apiKeysAdmin
+# (terraform/gcp-v2's enable_gemini_key, on by default there) already has
+# every permission this needs, on this host -- so an operator does not
+# also have to paste a Gemini key in by hand before grain-daemon.service
+# will start. Where that grant is absent the mint simply fails, and this
+# stays exactly the "install but stay stopped" state the deploy path
+# already handles: it must never fail the whole converge, since the
+# GitHub side of a deployment is useful without it and a half-applied
+# setup.sh is worse than a stopped daemon.
+#
+# Seed-once, like everything else here: `grain secrets mint-gemini-key`
+# leaves an existing non-empty key file untouched, so config-sync
+# re-running this on every convergence pass does not issue a new key each
+# time. To rotate, delete the file (and the old key in GCP -- the
+# capability's own reaper deliberately never touches an operating key)
+# and let the next pass mint a fresh one.
+mint_gemini_operating_key() {
+  if [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ]; then
+    return
+  fi
+  # Guarded on the project alone, not also on
+  # GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE: seed_gcp_minter_key needs that
+  # file to seed a credential, but a re-run where the credential is
+  # already in the secrets database has no key file and can still mint.
+  # A project set with no minter credential anywhere fails fast and
+  # locally, on the resolve, and is reported rather than fatal.
+  if [ -z "$GRAIN_GCP_PROJECT" ]; then
+    return
+  fi
+  log "  no Gemini API key in place -- minting the daemon's own from the GCP minter credential"
+  # Run as root and chown afterward, the same shape seed_gcp_minter_key
+  # above uses -- this script is root already (its own `id -u` check) and
+  # the key file it writes has to end up owned by GRAIN_USER either way.
+  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" \
+     mint-gemini-key -project "$GRAIN_GCP_PROJECT"; then
+    chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+  else
+    log "  could not mint a Gemini API key -- the daemon will install but stay stopped."
+    log "  Check the minter credential holds roles/serviceusage.apiKeysAdmin, or set"
+    log "  GRAIN_GEMINI_API_KEY and re-run."
+  fi
 }
 
 # --- 6. reformat the store if a breaking schema change shipped ---------
@@ -536,6 +592,8 @@ enable_services() {
     log "grain-daemon.service is enabled but not started -- it needs a Gemini API key first."
     log "  Set GRAIN_GEMINI_API_KEY and re-run this script, or place one at"
     log "  $GRAIN_DATA_DIR/secrets/gemini-api-key and run: systemctl restart grain-daemon.service"
+    log "  A deployment whose minter holds roles/serviceusage.apiKeysAdmin can mint one"
+    log "  instead: set GRAIN_GCP_PROJECT and GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE and re-run."
   fi
 }
 
