@@ -52,17 +52,18 @@ and fill in every `CHANGE-ME`. At minimum: `project_id`,
 `deployer_member`, and `iap_members` -- an empty `iap_members` is a valid
 plan, but nobody can reach the UI until it names someone.
 
-**3. Get an IAP OAuth client.** `create_iap_brand` defaults to `false`
-because, as of this writing, the Terraform provider itself warns that
-`google_iap_brand` "will no longer function as intended" for a genuinely
-new brand, following the IAP OAuth Admin API's own deprecation --
-`terraform validate` against this module surfaces that warning directly.
-Create the brand and an OAuth client for it once by hand instead (the GCP
-Console's OAuth consent screen / "Google Auth Platform" page -- check
-current GCP documentation, since this has changed since this module was
-written) and set `iap_client_id`/`iap_client_secret` in your tfvars. See
-`variables.tf`'s own `create_iap_brand` if you want to try the
-Terraform-managed path anyway.
+**3. No OAuth client needed.** IAP uses a Google-managed OAuth client
+when none is configured, which is why the IAP OAuth Admin API was
+deprecated in January 2025 -- there is normally no client to create any
+more. Leave `create_iap_brand`, `iap_client_id` and `iap_client_secret`
+alone and go straight to the apply.
+
+Set `iap_client_id`/`iap_client_secret` only for a client of your own,
+created by hand once (the GCP Console's "Google Auth Platform" page --
+check current GCP guidance, this area of the product has moved). Do not
+set `create_iap_brand` even then: a project may have at most one brand,
+ever, and the provider warns `google_iap_brand` no longer functions as
+intended for a new one.
 
 **4. Apply.**
 
@@ -326,9 +327,9 @@ lists in sync automatically; an operator who changes one by hand (via
 - **The load balancer and managed SSL certificate cost more to run than
   the VM does.** This module is sized for a staging environment working
   against a handful of test repos, not for scaling traffic.
-- **`create_iap_brand`'s Terraform-managed path may not work at all** --
-  see "Get an IAP OAuth client" above. Check current GCP guidance before
-  relying on it.
+- **`create_iap_brand` is not needed and may not work.** IAP falls back
+  to a Google-managed OAuth client when none is configured, which is the
+  normal path -- see "No OAuth client needed" above.
 - **The DNS name defaults to sslip.io**, a third-party public service
   neither this module nor Google controls, resolving purely by encoding
   the reserved IP in the hostname. Set `dns_managed_zone` to use a domain

@@ -55,19 +55,26 @@ resource "google_compute_backend_service" "ui" {
   }
 
   iap {
-    enabled              = true
-    oauth2_client_id     = local.iap_client_id
-    oauth2_client_secret = local.iap_client_secret
+    enabled = true
+
+    # Omitted -- null, not "" -- when no custom client is configured,
+    # which is what makes IAP use its own Google-managed OAuth client
+    # instead. That is the default for browser access, and the reason
+    # the IAP OAuth Admin API (and with it google_iap_brand) was
+    # deprecated in January 2025: there is normally no client to create
+    # any more. The provider made these two optional in 6.0; this module
+    # requires ~> 6.8.
+    #
+    # So the common path needs no OAuth client at all, and none of the
+    # console steps that used to come with one. Set iap_client_id and
+    # iap_client_secret only for a client of your own -- see
+    # variables.tf's own create_iap_brand for when that is still worth
+    # it.
+    oauth2_client_id     = local.iap_client_id != "" ? local.iap_client_id : null
+    oauth2_client_secret = local.iap_client_secret != "" ? local.iap_client_secret : null
   }
 
   depends_on = [google_project_service.iap]
-
-  lifecycle {
-    precondition {
-      condition     = local.iap_client_id != "" && local.iap_client_secret != ""
-      error_message = "No IAP OAuth client available: set create_iap_brand = true (with iap_brand_support_email), or create_iap_brand = false with iap_client_id/iap_client_secret both set to an existing client."
-    }
-  }
 }
 
 resource "google_compute_url_map" "ui" {
@@ -98,16 +105,18 @@ resource "google_compute_global_forwarding_rule" "ui" {
   target                = google_compute_target_https_proxy.ui.id
 }
 
-# --- the OAuth brand/client IAP itself needs ---------------------------
+# --- an OAuth brand/client, for a deployment that wants its own -------
 #
-# Off by default -- see variables.tf's create_iap_brand for why: a
-# project may have at most one brand, ever, and (as of this writing) the
-# provider itself warns this resource no longer functions as intended
-# for a genuinely new brand, following the IAP OAuth Admin API's own
-# deprecation. Left in place for a project where it still works, or
-# where GCP's guidance has moved back onto a Terraform-managed path by
-# the time you are reading this -- check current GCP documentation
-# rather than trusting this comment's own age.
+# Not needed at all in the normal case: with neither this nor
+# iap_client_id/iap_client_secret set, the backend service above omits
+# the client fields and IAP uses its own Google-managed one.
+#
+# Off by default, and doubly so -- a project may have at most one brand,
+# ever, and the provider itself warns this resource no longer functions
+# as intended for a genuinely new brand, following the IAP OAuth Admin
+# API's deprecation. Kept for a project that already has a brand, or one
+# that needs a custom client for something a Google-managed client does
+# not cover.
 
 resource "google_iap_brand" "this" {
   count             = var.create_iap_brand ? 1 : 0

@@ -420,26 +420,30 @@ variable "create_iap_brand" {
   type        = bool
   description = <<-EOT
     Create the project's IAP OAuth brand and an OAuth client for it
-    (iap.tf), instead of using an existing one. Defaults to false, for
-    two independent reasons:
+    (iap.tf), instead of letting IAP use its own Google-managed client.
+
+    Almost certainly leave this false, and leave iap_client_id and
+    iap_client_secret unset with it: IAP uses a Google-managed OAuth
+    client for browser access when no client is configured, which is why
+    the IAP OAuth Admin API was deprecated in January 2025 and why a
+    custom client is no longer part of ordinary setup. The provider made
+    the backend service's client fields optional in 6.0; this module
+    requires ~> 6.8, so the no-client path is available here.
+
+    Two reasons not to turn this on even when you do want a custom
+    client:
 
     1. A GCP project may have at most one brand, ever, and the API has
        no call to delete one, so this only ever works once per project.
-    2. As of this writing, the Terraform provider itself warns that
-       `google_iap_brand` "will no longer function as intended due to
-       the deprecation of the IAP OAuth Admin API" -- `terraform
-       validate` against this module surfaces that warning directly.
-       This module still carries the resource (iap.tf) for a project
-       where it happens to still work, but the safer default is the
-       manual path: create the brand and an OAuth client for it once by
-       hand (the GCP Console's "OAuth consent screen"/"Google Auth
-       Platform" page, or whatever `gcloud` command that console
-       currently documents -- check current GCP guidance, since this
-       area of the product has changed since this module was written)
-       and pass the result as iap_client_id/iap_client_secret below.
-       Re-running this module's iam.tf/iap.tf resources afterward is
-       unaffected either way -- only this one toggle changes which of
-       the two supplies the OAuth client.
+    2. The provider itself warns that `google_iap_brand` "will no longer
+       function as intended due to the deprecation of the IAP OAuth
+       Admin API" -- `terraform validate` surfaces that warning
+       directly.
+
+    So for a custom client, create it by hand once (the GCP Console's
+    "Google Auth Platform" page -- check current GCP guidance, this area
+    of the product has moved) and pass it as iap_client_id and
+    iap_client_secret below, rather than setting this.
   EOT
   default     = false
 }
@@ -458,13 +462,24 @@ variable "iap_brand_application_title" {
 
 variable "iap_client_id" {
   type        = string
-  description = "Existing IAP OAuth client id to use instead of creating one. Required when create_iap_brand is false."
+  description = <<-EOT
+    An existing IAP OAuth client id, for a deployment that wants its own
+    client rather than the Google-managed one. Optional, and normally
+    left empty -- see create_iap_brand above. Set this and
+    iap_client_secret together; setting only one is the same as setting
+    neither, since the backend service omits both unless both are
+    present.
+  EOT
   default     = ""
 }
 
 variable "iap_client_secret" {
   type        = string
-  description = "Existing IAP OAuth client secret to use instead of creating one. Required when create_iap_brand is false. Sensitive: pass via -var or a tfvars file kept out of version control, not a committed one."
+  description = <<-EOT
+    The secret for iap_client_id. Optional, and normally left empty --
+    see create_iap_brand above. Sensitive: pass via -var or a tfvars
+    file kept out of version control, not a committed one.
+  EOT
   default     = ""
   sensitive   = true
 }

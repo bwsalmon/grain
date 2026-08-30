@@ -69,13 +69,16 @@ while true; do
   fi
   if [ "$attempt" -ge "$max_attempts" ] \
      || ! grep -qiE 'RESOURCE_POOL_EXHAUSTED|does not have enough resources available' "$out"; then
-    # The one failure worth naming: a first apply with no IAP OAuth
-    # client set fails a precondition rather than anything Terraform can
-    # retry, and the fix is a console step, not a config edit.
-    if grep -q 'No IAP OAuth client available' "$out"; then
-      echo "::error::No IAP OAuth client is configured. Create one by hand once (see" \
-           "terraform/gcp-v2/README.md, \"Get an IAP OAuth client\") and set iap_client_id" \
-           "and iap_client_secret in $tfvars_file."
+    # A brand failure is worth naming: it is not something Terraform can
+    # retry, and the fix is to stop asking for a brand at all rather than
+    # to edit anything. IAP uses a Google-managed OAuth client when none
+    # is configured, so create_iap_brand should normally be false with
+    # iap_client_id/iap_client_secret unset.
+    if grep -qi 'iap_brand\|OAuth client' "$out"; then
+      echo "::error::This looks like an IAP OAuth client failure. A client is not" \
+           "required: leave create_iap_brand false and iap_client_id/iap_client_secret" \
+           "unset in $tfvars_file, and IAP uses its own Google-managed client. See" \
+           "terraform/gcp-v2/README.md, \"No OAuth client needed\"."
     fi
     exit 1
   fi
