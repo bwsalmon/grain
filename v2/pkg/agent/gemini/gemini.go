@@ -14,6 +14,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"google.golang.org/genai"
@@ -95,6 +97,18 @@ func newFramework(generator contentGenerator, opts ...Option) *Framework {
 // request and no trace of the tool calls that made it (bwsalmon/agents
 // task-1). The error still says the run failed; the result says what it
 // managed to do first.
+//
+// When cfg.TranscriptPath is set, every line this func would otherwise
+// only add to the in-memory transcript builder is also written straight
+// through to that file as it is produced, the same live-mirror contract
+// claude.Framework.Run gives its own subprocess's stdout (RunConfig.
+// TranscriptPath's own doc comment, bwsalmon/agents#467) -- except here
+// there is no subprocess to tee, so the mirror is this package's own
+// fmt.Fprintf calls writing to two places instead of one. Unlike
+// claude's raw --output-format stream-json capture, what lands in the
+// file is already the finished human-readable narrative, one line at a
+// time; a reader needs no parser, just the bytes so far (gemini.
+// LiveTranscriptDir.Tail).
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
 	sandboxTools := cfg.Tools
 	if sandboxTools == nil {
@@ -123,6 +137,20 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	history := []*genai.Content{genai.NewContentFromText(cfg.Prompt, genai.RoleUser)}
 	result := &agent.Result{}
 	var transcript strings.Builder
+	var transcriptOut io.Writer = &transcript
+	if cfg.TranscriptPath != "" {
+		// O_TRUNC, not O_APPEND, for the same reason claude.Framework.Run's
+		// own doc comment gives: a path is only ever reused across runs by
+		// a caller passing the same run ID twice, which should never
+		// happen, so starting clean is what makes a stale previous run's
+		// bytes never a way to misread this one's.
+		transcriptFile, err := os.OpenFile(cfg.TranscriptPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			return nil, fmt.Errorf("gemini: opening transcript file: %w", err)
+		}
+		defer transcriptFile.Close()
+		transcriptOut = io.MultiWriter(&transcript, transcriptFile)
+	}
 	// Result.Transcript is finalized from whatever accumulated no matter
 	// which of Run's several return points is taken -- an error partway
 	// through must not throw away the narrative of what already happened,
@@ -156,11 +184,11 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 			// FinalText, the same split claude/transcript.go draws
 			// between a "thinking" block and a "text" one.
 			if part.Thought {
-				fmt.Fprintf(&transcript, "%s\n\n", part.Text)
+				fmt.Fprintf(transcriptOut, "%s\n\n", part.Text)
 				continue
 			}
 			text.WriteString(part.Text)
-			fmt.Fprintf(&transcript, "%s\n\n", part.Text)
+			fmt.Fprintf(transcriptOut, "%s\n\n", part.Text)
 		}
 		if len(funcCalls) == 0 {
 			result.FinalText = text.String()
@@ -180,11 +208,11 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 			result.ToolCalls = append(result.ToolCalls, agent.ToolCall{
 				Name: fc.Name, Arguments: fc.Args, Text: toolText, IsError: isError,
 			})
-			fmt.Fprintf(&transcript, "> %s(%s)\n", fc.Name, inputSummary(fc.Args))
+			fmt.Fprintf(transcriptOut, "> %s(%s)\n", fc.Name, inputSummary(fc.Args))
 			if isError {
-				fmt.Fprintf(&transcript, "! %s\n\n", toolText)
+				fmt.Fprintf(transcriptOut, "! %s\n\n", toolText)
 			} else {
-				fmt.Fprintf(&transcript, "%s\n\n", toolText)
+				fmt.Fprintf(transcriptOut, "%s\n\n", toolText)
 			}
 			responseParts = append(responseParts, genai.NewPartFromFunctionResponse(fc.Name, map[string]any{
 				"result": toolText, "isError": isError,

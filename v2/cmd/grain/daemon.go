@@ -66,7 +66,6 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/claude"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
@@ -391,17 +390,18 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer stopProxy(context.Background())
 
-	// transcriptDir is where a run's own agent.Framework (currently only
-	// pkg/agent/claude does anything with it) may mirror its
+	// transcriptDir is where a run's own agent.Framework may mirror its
 	// transcript-in-progress live, and where the UI server below reads one
 	// back from for a still-running attempt -- the two sides of
-	// bwsalmon/agents#467's live tailing, agreeing on this directory (and,
-	// within it, the run-ID-named file orchestrator.RunDispatch and
-	// claude.LiveTranscriptDir each independently compute) is what lets
-	// them talk to each other without either package importing the other.
-	// It must exist before any run can write into it -- orchestrator's own
-	// HostSandboxes.RootFor makes the same "must already exist" assumption
-	// about its own baseDir.
+	// bwsalmon/agents#467's live tailing (agent/gemini's own share of it
+	// added by bwsalmon/agents#513, since gemini.New below, not
+	// claude.New, is what production actually runs), agreeing on this
+	// directory (and, within it, the run-ID-named file
+	// orchestrator.RunDispatch and gemini.LiveTranscriptDir each
+	// independently compute) is what lets them talk to each other without
+	// either package importing the other. It must exist before any run
+	// can write into it -- orchestrator's own HostSandboxes.RootFor makes
+	// the same "must already exist" assumption about its own baseDir.
 	transcriptDir := filepath.Join(cfg.dataDir, "state", "transcripts")
 	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		return fmt.Errorf("creating transcript directory: %w", err)
@@ -776,14 +776,15 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string) (stop f
 			"daemon":          systemlog.Journalctl{Unit: "grain-daemon.service"},
 			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
 		},
-		// LiveTranscriptDir reads back whatever claude.Framework.Run has
+		// gemini.LiveTranscriptDir reads back whatever gemini.Framework.Run
+		// (the framework agentFramework below actually wires in) has
 		// mirrored so far into transcriptDir/<runID> for a still-running
-		// attempt (run's own doc comment on the shared directory
-		// convention). agent/gemini, the framework actually wired in
-		// below, never writes there at all yet -- AttemptTranscript falls
-		// back to the store either way, so this costs nothing today and is
-		// already correct for whenever agent/claude is wired in instead.
-		LiveTranscripts: claude.LiveTranscriptDir{Dir: transcriptDir},
+		// attempt (transcriptDir's own doc comment on the shared directory
+		// convention). If a deployment ever wires claude.New in instead,
+		// this must change alongside it -- claude.LiveTranscriptDir reads a
+		// different file format (its own doc comment), and the two are not
+		// interchangeable.
+		LiveTranscripts: gemini.LiveTranscriptDir{Dir: transcriptDir},
 		// orchestrator.ChecksUnavailable reads process-lifetime state
 		// RunCycle's own reconcile loop sets the first time GitHub 403s a
 		// check-runs read against this deployment's credential -- see its
