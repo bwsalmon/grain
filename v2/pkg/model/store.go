@@ -567,6 +567,116 @@ func (s *Store) Comments(ctx context.Context, taskID string) ([]Comment, error) 
 	return out, rows.Err()
 }
 
+// AttachmentMeta is one attachment's wire-worthy metadata, without its
+// content -- what a task or a comment listing needs (bwsalmon/agents#522),
+// kept separate from Attachment so reading every attachment on a busy
+// task never pulls every one's full bytes along with it just to report a
+// filename and a size.
+type AttachmentMeta struct {
+	ID          int64
+	TaskID      string
+	CommentID   *int64
+	Filename    string
+	ContentType string
+	Size        int64
+	CreatedAt   time.Time
+}
+
+// AddAttachment stores one file against a.TaskID -- a.CommentID nil for a
+// file carried by the task's own body, or naming the Comment.ID it was
+// posted alongside otherwise -- and returns the id the store assigned it.
+func (s *Store) AddAttachment(ctx context.Context, a Attachment) (id int64, err error) {
+	err = s.write(ctx, "add attachment to task "+a.TaskID, func(tx *sql.Tx) error {
+		id, err = addAttachment(ctx, tx, a)
+		return err
+	})
+	return id, err
+}
+
+func addAttachment(ctx context.Context, tx *sql.Tx, a Attachment) (int64, error) {
+	res, err := tx.ExecContext(ctx, "INSERT INTO `task_attachment` ("+
+		"`task_id`, `comment_id`, `filename`, `content_type`, `size`, `content`, `created_at`"+
+		") VALUES (?,?,?,?,?,?,?)",
+		a.TaskID, int64Of(a.CommentID), a.Filename, a.ContentType, a.Size, a.Content, a.CreatedAt.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("adding attachment %q to task %s: %w", a.Filename, a.TaskID, err)
+	}
+	return res.LastInsertId()
+}
+
+// AttachmentMetas returns every attachment on taskID, oldest first, with
+// no content -- what GetTask's own projection needs to list a task's own
+// and every comment's attachments. Attachments and GetAttachment are the
+// two calls that read content back.
+func (s *Store) AttachmentMetas(ctx context.Context, taskID string) ([]AttachmentMeta, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+
+		"`id`, `comment_id`, `filename`, `content_type`, `size`, `created_at` "+
+		"FROM `task_attachment` WHERE `task_id` = ? ORDER BY `id`", taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading attachments on task %s: %w", taskID, err)
+	}
+	defer rows.Close()
+
+	var out []AttachmentMeta
+	for rows.Next() {
+		m := AttachmentMeta{TaskID: taskID}
+		var commentID sql.NullInt64
+		if err := rows.Scan(&m.ID, &commentID, &m.Filename, &m.ContentType, &m.Size, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.CommentID = int64Ptr(commentID)
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// Attachments returns every attachment on taskID, oldest first, content
+// included -- what a dispatched run needs to materialize them into its
+// sandbox (orchestrator.placeAttachments).
+func (s *Store) Attachments(ctx context.Context, taskID string) ([]Attachment, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+
+		"`id`, `comment_id`, `filename`, `content_type`, `size`, `content`, `created_at` "+
+		"FROM `task_attachment` WHERE `task_id` = ? ORDER BY `id`", taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading attachments on task %s: %w", taskID, err)
+	}
+	defer rows.Close()
+
+	var out []Attachment
+	for rows.Next() {
+		a := Attachment{TaskID: taskID}
+		var commentID sql.NullInt64
+		if err := rows.Scan(&a.ID, &commentID, &a.Filename, &a.ContentType, &a.Size, &a.Content, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		a.CommentID = int64Ptr(commentID)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GetAttachment returns one attachment on taskID, content included, or
+// nil if there is none with that id (including one that exists but
+// belongs to a different task) -- the read behind a download endpoint,
+// scoped to taskID the same way Comments already scopes by task so one
+// task's attachment id can never be used to read another's file.
+func (s *Store) GetAttachment(ctx context.Context, taskID string, id int64) (*Attachment, error) {
+	a := Attachment{TaskID: taskID}
+	var commentID sql.NullInt64
+	err := s.db.QueryRowContext(ctx, "SELECT "+
+		"`id`, `comment_id`, `filename`, `content_type`, `size`, `content`, `created_at` "+
+		"FROM `task_attachment` WHERE `task_id` = ? AND `id` = ?", taskID, id).
+		Scan(&a.ID, &commentID, &a.Filename, &a.ContentType, &a.Size, &a.Content, &a.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading attachment %d on task %s: %w", id, taskID, err)
+	}
+	a.CommentID = int64Ptr(commentID)
+	return &a, nil
+}
+
 // GetTask returns a task, or nil if there is none with that ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	return getTask(ctx, s.db, id)

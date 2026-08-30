@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -101,6 +102,86 @@ func (e *NotFoundError) Error() string {
 		return e.message
 	}
 	return "no task " + e.ID
+}
+
+// AttachmentUpload is one file carried by a CreateTaskRequest or an
+// AddComment call (bwsalmon/agents#522) -- Content is base64, matching
+// how the frontend already reads a chosen File (FileReader.
+// readAsDataURL, with the leading "data:...;base64," stripped) rather
+// than widening this JSON API to multipart/form-data for just this one
+// field.
+type AttachmentUpload struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+	Content     string `json:"content"`
+}
+
+const (
+	// MaxAttachmentSize bounds one file's decoded size. Generous enough
+	// for a screenshot or a small repro zip, small enough that one
+	// request's worth of attachments never turns a single sqlite write
+	// into one carrying tens of megabytes -- the size a real limit would
+	// need to be to matter is a product decision nobody has made yet; this
+	// one exists so a request has *some* bound rather than none.
+	MaxAttachmentSize = 10 * 1024 * 1024
+	// MaxAttachmentsPerRequest bounds how many files one task or one
+	// comment can carry -- plenty for "a screenshot and a repro zip",
+	// while keeping one request from turning into an unbounded number of
+	// store writes.
+	MaxAttachmentsPerRequest = 10
+)
+
+// decodeAttachments validates and base64-decodes uploads into the
+// model.Attachment shape Store.AddAttachment writes -- TaskID and
+// CommentID are left for the caller to fill in once it knows them
+// (CreateTask has no task id yet when it validates; AddComment has no
+// comment id), so this only ever fails on the upload itself, before
+// either write happens.
+func decodeAttachments(uploads []AttachmentUpload, now time.Time) ([]model.Attachment, error) {
+	if len(uploads) > MaxAttachmentsPerRequest {
+		return nil, validationErrorf("at most %d attachments per request, got %d", MaxAttachmentsPerRequest, len(uploads))
+	}
+	out := make([]model.Attachment, 0, len(uploads))
+	for _, u := range uploads {
+		name := sanitizeAttachmentFilename(u.Filename)
+		content, err := base64.StdEncoding.DecodeString(u.Content)
+		if err != nil {
+			return nil, validationErrorf("attachment %q is not valid base64: %v", u.Filename, err)
+		}
+		if len(content) > MaxAttachmentSize {
+			return nil, validationErrorf("attachment %q is %d bytes, over the %d byte limit", u.Filename, len(content), MaxAttachmentSize)
+		}
+		contentType := strings.TrimSpace(u.ContentType)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		out = append(out, model.Attachment{
+			Filename: name, ContentType: contentType,
+			Size: int64(len(content)), Content: content, CreatedAt: now,
+		})
+	}
+	return out, nil
+}
+
+// sanitizeAttachmentFilename strips any directory component a client
+// sent -- orchestrator.placeAttachments joins this straight onto a
+// sandbox path, and a filename is display text a human (or a browser's
+// file picker) chose, never something entitled to say where it lands.
+// Both separators are stripped regardless of host OS, since a name here
+// came from a browser or a CLI flag, not a filesystem walk.
+func sanitizeAttachmentFilename(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.ReplaceAll(name, "\\", "/")
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if name == "" || name == "." || name == ".." {
+		return "attachment"
+	}
+	if len(name) > 200 {
+		name = name[len(name)-200:]
+	}
+	return name
 }
 
 func (c *Client) capabilityByID(id string) (Capability, bool) {
@@ -254,6 +335,22 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if err != nil {
 		return TaskDetail{}, err
 	}
+	attachments, err := c.Store.AttachmentMetas(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
+	}
+	// byComment groups attachments under the comment they were posted
+	// alongside; the rest (CommentID nil) belong to the task's own body
+	// and land on TaskDetail.Attachments directly below.
+	byComment := map[int64][]Attachment{}
+	var taskAttachments []Attachment
+	for _, a := range attachments {
+		if a.CommentID == nil {
+			taskAttachments = append(taskAttachments, attachmentFrom(a))
+			continue
+		}
+		byComment[*a.CommentID] = append(byComment[*a.CommentID], attachmentFrom(a))
+	}
 	obs, err := c.Store.GetObservation(ctx, id)
 	if err != nil {
 		return TaskDetail{}, err
@@ -262,9 +359,13 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if obs != nil {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
-	detail := TaskDetail{Task: taskFrom(*t, state, closed, blockedAt), Comments: make([]Comment, 0, len(comments))}
+	detail := TaskDetail{
+		Task:        taskFrom(*t, state, closed, blockedAt),
+		Comments:    make([]Comment, 0, len(comments)),
+		Attachments: taskAttachments,
+	}
 	for _, cm := range comments {
-		detail.Comments = append(detail.Comments, commentFrom(cm))
+		detail.Comments = append(detail.Comments, commentFrom(cm, byComment[cm.ID]))
 	}
 	streak, err := c.Store.FailureStreak(ctx, id)
 	if err != nil {
@@ -371,6 +472,21 @@ func (c *Client) AttemptTranscript(ctx context.Context, taskID string, number in
 	return transcript, nil
 }
 
+// Attachment returns one attachment's full content, scoped to taskID so
+// one task's attachment id can never be used to read another's file --
+// the read behind GET /api/tasks/{id}/attachments/{attachmentId}
+// (bwsalmon/agents#522).
+func (c *Client) Attachment(ctx context.Context, taskID string, id int64) (model.Attachment, error) {
+	a, err := c.Store.GetAttachment(ctx, taskID, id)
+	if err != nil {
+		return model.Attachment{}, err
+	}
+	if a == nil {
+		return model.Attachment{}, &NotFoundError{message: fmt.Sprintf("no attachment %d on task %s", id, taskID)}
+	}
+	return *a, nil
+}
+
 // askedAt is the currently pending question's own CreatedAt, or nil once
 // there is none -- model.Transitions' own askedAt parameter, resolved
 // against the same comment list GetTask already fetched rather than a
@@ -414,6 +530,13 @@ type CreateTaskRequest struct {
 	// Approved files the task already approved, so it is dispatchable at
 	// once. False files it proposed, waiting for Approve.
 	Approved bool `json:"approved"`
+	// Attachments is files to carry alongside the task's own body --
+	// bwsalmon/agents#522: a screenshot, a repro zip, anything the agent
+	// needs that isn't already code in a repo it can clone. Stored under
+	// the new task's own id with no CommentID, and materialized into
+	// every dispatched run's sandbox the same way a comment's own
+	// attachments are (orchestrator.placeAttachments).
+	Attachments []AttachmentUpload `json:"attachments"`
 }
 
 // CreateTask files a task straight into the store.
@@ -453,6 +576,14 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
+	now := c.now()
+	// Decoded before NewTaskID allocates anything: a bad attachment should
+	// fail this call with nothing written at all, not leave a task behind
+	// with none of the files it was supposed to carry.
+	attachments, err := decodeAttachments(req.Attachments, now)
+	if err != nil {
+		return Task{}, err
+	}
 
 	id, err := c.Store.NewTaskID(ctx)
 	if err != nil {
@@ -471,7 +602,6 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
-	now := c.now()
 	task := model.Task{
 		ID:     id,
 		Intent: model.IntentImplement,
@@ -497,6 +627,12 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	}
 	if err := c.Store.PutTask(ctx, task); err != nil {
 		return Task{}, err
+	}
+	for i := range attachments {
+		attachments[i].TaskID = id
+		if _, err := c.Store.AddAttachment(ctx, attachments[i]); err != nil {
+			return Task{}, err
+		}
 	}
 	if !targetAllowed(c.targetRepos(), *target) {
 		if err := c.parkOffAllowlist(ctx, id, *target, now); err != nil {
@@ -887,7 +1023,10 @@ func (c *Client) Submit(ctx context.Context, id string) error {
 	})
 }
 
-// AddComment appends to a task's conversation.
+// AddComment appends to a task's conversation, optionally carrying files
+// alongside it (bwsalmon/agents#522's "attachable to follow-on comments
+// in addition to the main task content") -- a comment needs a body, at
+// least one attachment, or both; one with neither says nothing at all.
 //
 // This is also how a human answers a question a run parked on: an
 // awaiting_reply task has Observation.PendingQuestionCommentID set, and
@@ -895,9 +1034,17 @@ func (c *Client) Submit(ctx context.Context, id string) error {
 // re-applying the trigger label to the issue so the next poll would
 // notice -- the reply and the re-trigger were two separate acts, and
 // forgetting the second left the task parked forever.
-func (c *Client) AddComment(ctx context.Context, id, body string) error {
-	if strings.TrimSpace(body) == "" {
-		return validationErrorf("body is required")
+func (c *Client) AddComment(ctx context.Context, id, body string, uploads []AttachmentUpload) error {
+	if strings.TrimSpace(body) == "" && len(uploads) == 0 {
+		return validationErrorf("a comment needs a body, an attachment, or both")
+	}
+	now := c.now()
+	// Decoded before the comment itself is written, for the same "fail
+	// with nothing written" reason CreateTask decodes its own attachments
+	// before NewTaskID allocates anything.
+	attachments, err := decodeAttachments(uploads, now)
+	if err != nil {
+		return err
 	}
 	task, err := c.Store.GetTask(ctx, id)
 	if err != nil {
@@ -907,14 +1054,21 @@ func (c *Client) AddComment(ctx context.Context, id, body string) error {
 		return &NotFoundError{ID: id}
 	}
 
-	now := c.now()
-	if _, err := c.Store.AddComment(ctx, model.Comment{
+	commentID, err := c.Store.AddComment(ctx, model.Comment{
 		TaskID:    id,
 		Author:    model.Attribution{Actor: c.Config.Actor},
 		Body:      body,
 		CreatedAt: now,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
+	}
+	for i := range attachments {
+		attachments[i].TaskID = id
+		attachments[i].CommentID = &commentID
+		if _, err := c.Store.AddAttachment(ctx, attachments[i]); err != nil {
+			return err
+		}
 	}
 
 	obs, err := c.Store.GetObservation(ctx, id)

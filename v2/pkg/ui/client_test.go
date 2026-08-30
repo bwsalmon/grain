@@ -8,6 +8,7 @@ package ui_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"reflect"
 	"sort"
@@ -157,7 +158,7 @@ func TestCreateTaskOffTargetRepoListParksAwaitingReply(t *testing.T) {
 
 	// Replying is how an operator un-parks it, the same as any other
 	// awaiting_reply task -- AddComment's own doc comment.
-	if err := c.AddComment(ctx, task.ID, "widened targetRepos, this can run now"); err != nil {
+	if err := c.AddComment(ctx, task.ID, "widened targetRepos, this can run now", nil); err != nil {
 		t.Fatal(err)
 	}
 	requeued, err := c.Task(ctx, task.ID)
@@ -661,7 +662,7 @@ func TestAddCommentAppendsToTheConversation(t *testing.T) {
 	c, _, ctx := testClient(t)
 	task := create(t, c, ctx)
 
-	if err := c.AddComment(ctx, task.ID, "any progress?"); err != nil {
+	if err := c.AddComment(ctx, task.ID, "any progress?", nil); err != nil {
 		t.Fatal(err)
 	}
 	detail, err := c.GetTask(ctx, task.ID)
@@ -674,8 +675,101 @@ func TestAddCommentAppendsToTheConversation(t *testing.T) {
 	if detail.Comments[0].Author != "alice" {
 		t.Fatalf("comment author = %q, want the configured actor", detail.Comments[0].Author)
 	}
-	if err := c.AddComment(ctx, task.ID, "   "); err == nil {
+	if err := c.AddComment(ctx, task.ID, "   ", nil); err == nil {
 		t.Fatal("an empty comment was accepted")
+	}
+}
+
+// TestAddCommentAcceptsAttachmentsWithNoBody covers bwsalmon/agents#522's
+// "attachable to follow-on comments" for the one case a bare body check
+// alone would get wrong: a comment that carries only a file is not the
+// same as one with nothing to say at all, so it must not be rejected the
+// way an all-whitespace body with no attachment is just above.
+func TestAddCommentAcceptsAttachmentsWithNoBody(t *testing.T) {
+	c, _, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	upload := ui.AttachmentUpload{
+		Filename: "screenshot.png", ContentType: "image/png",
+		Content: base64.StdEncoding.EncodeToString([]byte("fake png bytes")),
+	}
+	if err := c.AddComment(ctx, task.ID, "", []ui.AttachmentUpload{upload}); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Comments) != 1 {
+		t.Fatalf("comments = %+v, want exactly one", detail.Comments)
+	}
+	got := detail.Comments[0].Attachments
+	if len(got) != 1 || got[0].Filename != "screenshot.png" || got[0].ContentType != "image/png" {
+		t.Fatalf("comment attachments = %+v, want one screenshot.png (image/png)", got)
+	}
+	if got[0].Size != int64(len("fake png bytes")) {
+		t.Fatalf("attachment size = %d, want %d", got[0].Size, len("fake png bytes"))
+	}
+
+	content, err := c.Attachment(ctx, task.ID, got[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content.Content) != "fake png bytes" {
+		t.Fatalf("attachment content = %q, want %q", content.Content, "fake png bytes")
+	}
+}
+
+// TestCreateTaskStoresAttachments covers the other half of bwsalmon/
+// agents#522: a file carried by the task's own body (CommentID nil),
+// landing on TaskDetail.Attachments rather than any comment's.
+func TestCreateTaskStoresAttachments(t *testing.T) {
+	c, _, ctx := testClient(t)
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "Fix the thing", Repo: "acme/widgets", Approved: true,
+		Attachments: []ui.AttachmentUpload{
+			{Filename: "repro.zip", ContentType: "application/zip", Content: base64.StdEncoding.EncodeToString([]byte("PK\x03\x04fake"))},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Attachments) != 1 || detail.Attachments[0].Filename != "repro.zip" {
+		t.Fatalf("task attachments = %+v, want one repro.zip", detail.Attachments)
+	}
+	if len(detail.Comments) != 0 {
+		t.Fatalf("a task-body attachment leaked into the conversation: %+v", detail.Comments)
+	}
+}
+
+// TestCreateTaskRejectsAnOversizedAttachment proves the size limit is
+// actually enforced, and that nothing is left behind when it rejects a
+// request -- the task must not exist at all, not exist with some
+// attachments missing.
+func TestCreateTaskRejectsAnOversizedAttachment(t *testing.T) {
+	c, _, ctx := testClient(t)
+	oversized := base64.StdEncoding.EncodeToString(make([]byte, ui.MaxAttachmentSize+1))
+	_, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "Fix the thing", Repo: "acme/widgets",
+		Attachments: []ui.AttachmentUpload{{Filename: "huge.bin", Content: oversized}},
+	})
+	if err == nil {
+		t.Fatal("an oversized attachment was accepted")
+	}
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v (%T), want a *ui.ValidationError", err, err)
+	}
+	tasks, err := c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("a task was left behind despite the rejected attachment: %+v", tasks)
 	}
 }
 
@@ -1057,7 +1151,7 @@ func TestReplyingToAParkedTaskResumesIt(t *testing.T) {
 		t.Fatalf("state before the reply = %q, want awaiting_reply", got.State)
 	}
 
-	if err := c.AddComment(ctx, task.ID, "the second one"); err != nil {
+	if err := c.AddComment(ctx, task.ID, "the second one", nil); err != nil {
 		t.Fatal(err)
 	}
 

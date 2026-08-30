@@ -486,6 +486,30 @@ type Comment struct {
 	CreatedAt time.Time
 }
 
+// Attachment is one file carried alongside a task -- bwsalmon/agents#522's
+// "attach files (images, zip files, etc) to a task" and "attachable to
+// follow-on comments in addition to the main task content." Content lives
+// here, in the store, for the same reason Comment's own doc comment gives
+// for the conversation itself: a task is a row, and so is everything
+// carried with it, rather than a pointer to somewhere else that has to
+// stay reachable to read it back.
+//
+// CommentID is nil for a file carried by the task's own body, and names a
+// Comment.ID for one posted alongside a later comment -- one table for
+// both rather than two, since a dispatched run materializing them into
+// its sandbox (orchestrator's AttachmentsDir) treats every attachment
+// exactly alike regardless of which one it came from.
+type Attachment struct {
+	ID          int64
+	TaskID      string
+	CommentID   *int64
+	Filename    string
+	ContentType string
+	Size        int64
+	Content     []byte
+	CreatedAt   time.Time
+}
+
 // BranchName is the branch a task's work goes on — derived, never stored
 // and never self-reported, so any two callers compute the same name.
 func BranchName(taskID string) string { return "grain/task-" + taskID }

@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -90,6 +91,26 @@ type Comment struct {
 	OnBehalfOf string    `json:"onBehalfOf,omitempty"`
 	Body       string    `json:"body"`
 	CreatedAt  time.Time `json:"createdAt"`
+	// Attachments is every file posted alongside this comment
+	// (bwsalmon/agents#522) -- metadata only, GET
+	// /api/tasks/{id}/attachments/{attachmentId} is what serves one's
+	// actual content.
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment is one file's metadata on the wire -- never its content,
+// which GET /api/tasks/{id}/attachments/{attachmentId} serves separately
+// so listing a task or its conversation never pays to carry every byte of
+// every file attached to it (bwsalmon/agents#522).
+type Attachment struct {
+	ID          int64  `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+}
+
+func attachmentFrom(a model.AttachmentMeta) Attachment {
+	return Attachment{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType, Size: a.Size}
 }
 
 // TaskDetail is one task plus its conversation -- what GET
@@ -131,6 +152,10 @@ type TaskDetail struct {
 	// timeline"). Empty for a task with no pull request yet, or with one
 	// orchestrator.SyncPullRequests has not synced even once.
 	PullRequestEvents []PullRequestEvent `json:"pullRequestEvents,omitempty"`
+	// Attachments is every file carried by the task's own body (never one
+	// posted alongside a comment -- see Comment.Attachments for those),
+	// bwsalmon/agents#522.
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // PullRequestEvent is one moment in a task's own tracked pull request's
@@ -217,13 +242,18 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 	return out
 }
 
-func commentFrom(c model.Comment) Comment {
+// commentFrom projects a model.Comment to its JSON shape. attachments is
+// this one comment's own files, already narrowed by the caller (GetTask
+// groups a task's AttachmentMetas by CommentID before calling this) --
+// commentFrom stays free of the store the same way taskFrom does.
+func commentFrom(c model.Comment, attachments []Attachment) Comment {
 	out := Comment{
-		ID:         c.ID,
-		Author:     c.Author.Actor.ID,
-		AuthorKind: string(c.Author.Actor.Kind),
-		Body:       c.Body,
-		CreatedAt:  c.CreatedAt,
+		ID:          c.ID,
+		Author:      c.Author.Actor.ID,
+		AuthorKind:  string(c.Author.Actor.Kind),
+		Body:        c.Body,
+		CreatedAt:   c.CreatedAt,
+		Attachments: attachments,
 	}
 	if b := c.Author.OnBehalfOf; b != nil {
 		out.OnBehalfOf = b.ID
@@ -455,7 +485,8 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 type addCommentRequest struct {
-	Body string `json:"body"`
+	Body        string             `json:"body"`
+	Attachments []AttachmentUpload `json:"attachments"`
 }
 
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
@@ -464,11 +495,38 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.tasks.AddComment(r.Context(), id, req.Body); err != nil {
+	if err := s.tasks.AddComment(r.Context(), id, req.Body, req.Attachments); err != nil {
 		writeClientError(w, err)
 		return
 	}
 	s.respondWithTask(w, r, id)
+}
+
+// handleGetAttachment serves one attachment's raw content -- the only
+// place an attachment's bytes leave the store, since every other
+// attachment-carrying response (TaskDetail, its comments) is metadata
+// only (Attachment's own doc comment). Content-Disposition is "inline"
+// rather than "attachment": an image is worth previewing directly, and
+// nothing here can tell an image apart from a zip to treat them
+// differently -- a browser that cannot render the content type falls back
+// to downloading it either way.
+func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	attachmentID, err := strconv.ParseInt(r.PathValue("attachmentId"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("attachment id must be an integer"))
+		return
+	}
+	a, err := s.tasks.Attachment(r.Context(), id, attachmentID)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", a.ContentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", a.Filename))
+	w.Header().Set("Content-Length", strconv.FormatInt(a.Size, 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(a.Content)
 }
 
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {

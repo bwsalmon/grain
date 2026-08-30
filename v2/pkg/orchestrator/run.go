@@ -274,6 +274,10 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: reading %s's conversation: %w", task.ID, err)
 	}
+	attachments, err := store.Attachments(ctx, task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: reading %s's attachments: %w", task.ID, err)
+	}
 
 	// Before capabilities, and before the agent's first turn: a run whose
 	// sandbox never got its repo has nothing to do, and there is no point
@@ -298,7 +302,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
-		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, comments, checkoutDir)
+		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, tools, comments, attachments, checkoutDir)
 	}
 
 	var result *agent.Result
@@ -443,27 +447,34 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability
-// grants against reg and assembles the prompt they, the task itself, and
-// comments (its conversation so far -- see commentThreadSection) all
-// contribute, applying every SideSandbox placement under sandboxRoot on
-// the way. A nil registry, or a task with no Grants, skips capability
-// resolution and returns BuildPrompt's own prompt plus the comment thread
-// unchanged -- a deployment or test that grants no capabilities needs to
-// configure none of this. A non-nil error means preparation itself failed
-// (or a grant was refused) and the caller must not run the agent at all
-// -- the same "a half-materialized capability is never described to the
-// agent as present" rule model.MaterializeGrants's own doc comment holds
-// to, one level up: an agent whose capability request was refused must
-// not run at all, since the task it would work almost always depends on
-// it. Ported from pkg/orchestrate's own prepare (bwsalmon/agents#254).
+// grants against reg and assembles the prompt they, the task itself,
+// comments (its conversation so far -- see commentThreadSection) and
+// attachments (every file the task or its conversation carries -- see
+// placeAttachments) all contribute, applying every SideSandbox placement
+// under sandboxRoot and every attachment under AttachmentsDir on the way.
+// A nil registry, or a task with no Grants, skips capability resolution
+// and returns the rest of the prompt unchanged -- a deployment or test
+// that grants no capabilities needs to configure none of this. A non-nil
+// error means preparation itself failed (or a grant was refused) and the
+// caller must not run the agent at all -- the same "a half-materialized
+// capability is never described to the agent as present" rule
+// model.MaterializeGrants's own doc comment holds to, one level up: an
+// agent whose capability request was refused must not run at all, since
+// the task it would work almost always depends on it. Ported from
+// pkg/orchestrate's own prepare (bwsalmon/agents#254).
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
-	cc model.CapabilityContext, sandboxRoot string, comments []model.Comment,
-	checkoutDir string) (materialized []model.Materialized, prompt string, err error) {
+	cc model.CapabilityContext, sandboxRoot string, tools []mcp.Tool, comments []model.Comment,
+	attachments []model.Attachment, checkoutDir string) (materialized []model.Materialized, prompt string, err error) {
 
 	prompt = BuildPrompt(cc.Task, checkoutDir)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
 	}
+	attachmentsSection, err := placeAttachments(ctx, tools, attachments)
+	if err != nil {
+		return nil, "", err
+	}
+	prompt += attachmentsSection
 	if reg == nil || len(cc.Task.Grants) == 0 {
 		return nil, prompt, nil
 	}

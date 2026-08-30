@@ -421,7 +421,7 @@ func doLoadWriterAction(ctx context.Context, store *model.Store, rng *rand.Rand,
 	case roll < 0.65:
 		if id, ok := loadPickState(states, model.StateAwaitingReply, rng); ok {
 			start := time.Now()
-			err := client.AddComment(ctx, id, "here is some direction")
+			err := client.AddComment(ctx, id, "here is some direction", nil)
 			metrics.recordWrite(time.Since(start), benignOrErr(err))
 			if err == nil {
 				metrics.taskBecameReady(id, time.Now())

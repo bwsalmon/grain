@@ -197,6 +197,35 @@ var Tables = []string{
 
 	`CREATE INDEX IF NOT EXISTS ` + "`task_comment_task`" + ` ON ` + "`task_comment`" + ` (` + "`task_id`" + `)`,
 
+	// One row per file (bwsalmon/agents#522), content included -- the same
+	// "the store is durable; nothing needs to stay reachable to read it
+	// back" reasoning task_comment's own doc comment gives for the
+	// conversation itself, rather than a path on disk or in a bucket that
+	// this row would have to keep pointing at correctly forever.
+	// comment_id is NULL for a file carried by the task's own body, and a
+	// task_comment.id for one carried by a later comment -- both share
+	// this table rather than two, since a dispatched run materializing
+	// them into a sandbox (orchestrator's AttachmentsDir) treats every
+	// attachment exactly alike regardless of which one it came from.
+	// content_type and size are carried alongside content rather than
+	// derived from it on every read: content_type is what a browser's
+	// file picker already told the upload (and is not always reliably
+	// re-derivable from bytes alone), and size is what a listing needs
+	// without paying to read every attachment's full content back out of
+	// the database just to report how big it is.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_attachment`" + ` (
+  ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`task_id`" + `      TEXT     NOT NULL,
+  ` + "`comment_id`" + `   INTEGER  NULL,
+  ` + "`filename`" + `     TEXT     NOT NULL,
+  ` + "`content_type`" + ` TEXT     NOT NULL,
+  ` + "`size`" + `         INTEGER  NOT NULL,
+  ` + "`content`" + `      BLOB     NOT NULL,
+  ` + "`created_at`" + `   DATETIME NOT NULL
+)`,
+
+	`CREATE INDEX IF NOT EXISTS ` + "`task_attachment_task`" + ` ON ` + "`task_attachment`" + ` (` + "`task_id`" + `)`,
+
 	// Task identity, allocated here rather than borrowed from a GitHub
 	// issue number. A task used to be identified by the issue it was filed
 	// from ("owner/name/7"), which meant nothing could file a task without

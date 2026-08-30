@@ -60,12 +60,16 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"mime"
+	"net/http"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -316,13 +320,20 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	var reads stringList
 	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable)")
 	approve := fs.Bool("approve", false, "queue the task immediately instead of filing it as a proposal awaiting approval")
+	var attach stringList
+	fs.Var(&attach, "attach", "path to a local file to attach to the task (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	attachments, err := loadAttachments(attach)
+	if err != nil {
+		return err
+	}
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, Base: *base,
 		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
+		Attachments: attachments,
 	}
 
 	task, err := c.CreateTask(ctx, req)
@@ -428,21 +439,58 @@ func cmdCapability(ctx context.Context, c *ui.HTTPClient, out *printer, args []s
 
 func cmdComment(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain comment", flag.ContinueOnError)
+	var attach stringList
+	fs.Var(&attach, "attach", "path to a local file to attach to the comment (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() < 2 {
-		return errors.New("usage: grain comment <id> <body...>")
+	if fs.NArg() < 1 {
+		return errors.New("usage: grain comment [-attach path]... <id> [body...]")
 	}
 	id, err := taskID(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	body := strings.Join(fs.Args()[1:], " ")
-	if err := c.AddComment(ctx, id, body); err != nil {
+	attachments, err := loadAttachments(attach)
+	if err != nil {
+		return err
+	}
+	if body == "" && len(attachments) == 0 {
+		return errors.New("usage: grain comment [-attach path]... <id> [body...] -- a body, an attachment, or both is required")
+	}
+	if err := c.AddComment(ctx, id, body, attachments); err != nil {
 		return err
 	}
 	return respond(ctx, c, out, id)
+}
+
+// loadAttachments reads each path in paths off local disk and returns it
+// as the base64 upload CreateTaskRequest/addCommentRequest send over the
+// wire -- grain create/comment's own -attach flag's encoding step, so a
+// human filing a task from the CLI can hand the agent a screenshot or a
+// repro zip the same way the web UI's file picker does.
+func loadAttachments(paths []string) ([]ui.AttachmentUpload, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	out := make([]ui.AttachmentUpload, 0, len(paths))
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("reading attachment %s: %w", p, err)
+		}
+		contentType := mime.TypeByExtension(filepath.Ext(p))
+		if contentType == "" {
+			contentType = http.DetectContentType(data)
+		}
+		out = append(out, ui.AttachmentUpload{
+			Filename:    filepath.Base(p),
+			ContentType: contentType,
+			Content:     base64.StdEncoding.EncodeToString(data),
+		})
+	}
+	return out, nil
 }
 
 func cmdClose(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {

@@ -3,8 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import NewTaskOverlay from "./NewTaskOverlay.jsx";
 import api from "../api.js";
+import fileToAttachment from "../attachments.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn().mockResolvedValue(null) }));
+// fileToAttachment reads a real File with FileReader -- mocked the same
+// way api.js is, so a test that attaches a file exercises the component's
+// own wiring without depending on jsdom's own FileReader behaviour.
+vi.mock("../attachments.js", () => ({ default: vi.fn() }));
 
 describe("NewTaskOverlay", () => {
   afterEach(() => {
@@ -32,10 +37,29 @@ describe("NewTaskOverlay", () => {
         dependsOn: [],
         reads: [],
         approved: false,
+        attachments: [],
       }),
     });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads and includes a picked file as an attachment", async () => {
+    const upload = { filename: "screenshot.png", contentType: "image/png", content: "ZmFrZQ==" };
+    fileToAttachment.mockResolvedValueOnce(upload);
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    const file = new File(["fake"], "screenshot.png", { type: "image/png" });
+    await user.upload(screen.getByLabelText("Attach files"), file);
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(fileToAttachment).toHaveBeenCalledWith(file);
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.attachments).toEqual([upload]);
   });
 
   it("adds depends-on tasks via the picker and parses read-only repos, and includes checked capabilities", async () => {

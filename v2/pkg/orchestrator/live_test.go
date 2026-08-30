@@ -223,7 +223,7 @@ func TestRunCycleParksOnAQuestionThenResumesAfterAReply(t *testing.T) {
 	// the task. It used to take two acts -- comment, then re-apply the
 	// trigger label so the next poll would notice -- and forgetting the
 	// second left the task parked forever.
-	if err := tasks.AddComment(ctx, task.ID, "put it in NOTES.md"); err != nil {
+	if err := tasks.AddComment(ctx, task.ID, "put it in NOTES.md", nil); err != nil {
 		t.Fatal(err)
 	}
 

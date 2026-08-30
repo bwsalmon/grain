@@ -96,7 +96,7 @@ func TestHTTPClientUpdateSetCapabilityCommentCloseReopen(t *testing.T) {
 		t.Fatalf("SetCapability(detach): %v", err)
 	}
 
-	if err := c.AddComment(ctx, created.ID, "hello"); err != nil {
+	if err := c.AddComment(ctx, created.ID, "hello", nil); err != nil {
 		t.Fatalf("AddComment: %v", err)
 	}
 	detail, err := c.GetTask(ctx, created.ID)

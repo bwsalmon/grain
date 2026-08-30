@@ -3,8 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DetailOverlay from "./DetailOverlay.jsx";
 import api from "../api.js";
+import fileToAttachment from "../attachments.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn().mockResolvedValue(null) }));
+vi.mock("../attachments.js", () => ({ default: vi.fn() }));
 
 const baseTask = {
   id: "12",
@@ -581,7 +583,7 @@ describe("DetailOverlay", () => {
     act.mock.calls[0][0]();
     expect(api).toHaveBeenCalledWith("/api/tasks/12/comments", {
       method: "POST",
-      body: JSON.stringify({ body: "sounds good" }),
+      body: JSON.stringify({ body: "sounds good", attachments: [] }),
     });
     expect(textarea).toHaveValue("");
   });
@@ -638,7 +640,7 @@ describe("DetailOverlay", () => {
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
-  it("does not post an empty or whitespace-only comment", async () => {
+  it("does not post an empty or whitespace-only comment with no attachment either", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
@@ -647,6 +649,63 @@ describe("DetailOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Comment" }));
 
     expect(act).not.toHaveBeenCalled();
+  });
+
+  // bwsalmon/agents#522: a reply that carries only a file, no text, is
+  // still worth sending -- the empty-comment guard above must not treat
+  // it the same as one with nothing at all.
+  it("posts a comment carrying only an attachment, with no body", async () => {
+    const upload = { filename: "screenshot.png", contentType: "image/png", content: "ZmFrZQ==" };
+    fileToAttachment.mockResolvedValueOnce(upload);
+    const act = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+
+    const file = new File(["fake"], "screenshot.png", { type: "image/png" });
+    await user.upload(screen.getByLabelText("Attach files"), file);
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+
+    expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/comments", {
+      method: "POST",
+      body: JSON.stringify({ body: "", attachments: [upload] }),
+    });
+  });
+
+  it("shows a comment's own attachments as links to the download endpoint", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          comments: [{ author: "alice", authorKind: "human", body: "", attachments: [{ id: 5, filename: "repro.zip", contentType: "application/zip", size: 9 }] }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const link = screen.getByRole("link", { name: "repro.zip" });
+    expect(link).toHaveAttribute("href", "/api/tasks/12/attachments/5");
+  });
+
+  it("shows the task's own attachments as links to the download endpoint", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, attachments: [{ id: 3, filename: "notes.txt", contentType: "text/plain", size: 4 }] }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const link = screen.getByRole("link", { name: "notes.txt" });
+    expect(link).toHaveAttribute("href", "/api/tasks/12/attachments/3");
   });
 
   // bwsalmon/agents#446: typing on a task attempt opens a window over its
