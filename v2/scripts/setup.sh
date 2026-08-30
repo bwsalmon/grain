@@ -98,7 +98,7 @@ GRAIN_DATA_DIR="${GRAIN_DATA_DIR:-/var/lib/grain}"
 GRAIN_USER="${GRAIN_USER:-grain}"
 
 GRAIN_UI_ADDR="${GRAIN_UI_ADDR:-127.0.0.1:80}"
-GRAIN_SLOTS="${GRAIN_SLOTS:-local}"
+GRAIN_MAX_CONCURRENT="${GRAIN_MAX_CONCURRENT:-1}"
 GRAIN_POLL_INTERVAL="${GRAIN_POLL_INTERVAL:-30s}"
 
 GRAIN_GITHUB_HOST="${GRAIN_GITHUB_HOST:-github.com}"
@@ -149,7 +149,7 @@ Recognized variables:
   GRAIN_UI_ADDR             UI/API bind address (default: 127.0.0.1:80 -- loopback
                              only; reach it with `ssh -L 8080:localhost:80 host`,
                              or put it behind Tailscale/IAP instead)
-  GRAIN_SLOTS               comma-separated concurrency slots (default: local)
+  GRAIN_MAX_CONCURRENT      maximum number of tasks dispatched at once (default: 1)
   GRAIN_POLL_INTERVAL       daemon reconcile-cycle interval (default: 30s)
 
   GRAIN_GITHUB_HOST         GitHub API host (default: github.com)
@@ -598,7 +598,7 @@ write_systemd_units() {
   local daemon_args=(
     daemon
     -data-dir "$GRAIN_DATA_DIR"
-    -slots "$GRAIN_SLOTS"
+    -max-concurrent "$GRAIN_MAX_CONCURRENT"
     -poll-interval "$GRAIN_POLL_INTERVAL"
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -github-host "$GRAIN_GITHUB_HOST"
@@ -711,7 +711,7 @@ report_readiness() {
   echo "    GCP minter key:    $minter"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: every task parks>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
-  echo "    slots:             ${GRAIN_SLOTS:-<default>}"
+  echo "    max concurrent:    ${GRAIN_MAX_CONCURRENT:-<default>}"
 
   if [ "$github" = "MISSING" ]; then
     ready=0
