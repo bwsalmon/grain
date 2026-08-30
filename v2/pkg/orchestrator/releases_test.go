@@ -131,6 +131,56 @@ func TestSyncReleasesRecordsAnErrorWhenTheProdBranchIsMissing(t *testing.T) {
 	}
 }
 
+// A candidate stuck with a recorded error is not stuck forever: once
+// whatever configuration mistake caused it is fixed, the next cycle
+// picks the same candidate back up (PendingCandidates' own level-triggered
+// discipline) and finishes the step it could not complete before.
+func TestSyncReleasesRecoversOnceTheProdBranchIsFixed(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	cfg := releaseConfig(repo)
+	cfg.ProdBranch = "does-not-exist"
+	if err := store.PutReleaseConfig(ctx, cfg); err != nil {
+		t.Fatalf("put release config: %v", err)
+	}
+	candidate, err := store.CutCandidate(ctx, repo, baseTime)
+	if err != nil {
+		t.Fatalf("cut candidate: %v", err)
+	}
+	if err := orchestrator.SyncReleases(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncReleases with a bad prod branch: %v", err)
+	}
+	current, err := store.CurrentCandidate(ctx, repo)
+	if err != nil || current == nil || current.LastError == "" {
+		t.Fatalf("current candidate: %+v %v, want a recorded error", current, err)
+	}
+
+	// Fix the configuration and let the next cycle retry the same step.
+	fixed := releaseConfig(repo)
+	if err := store.PutReleaseConfig(ctx, fixed); err != nil {
+		t.Fatalf("put fixed release config: %v", err)
+	}
+	if err := orchestrator.SyncReleases(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncReleases after fixing the prod branch: %v", err)
+	}
+
+	current, err = store.CurrentCandidate(ctx, repo)
+	if err != nil || current == nil {
+		t.Fatalf("current candidate: %+v %v", current, err)
+	}
+	if current.ID != candidate.ID {
+		t.Fatalf("got a different candidate id %d, want %d", current.ID, candidate.ID)
+	}
+	if current.Status != model.CandidateActive {
+		t.Fatalf("got status %q after fixing the prod branch, want active", current.Status)
+	}
+	if current.LastError != "" {
+		t.Fatalf("got error %q after recovering, want it cleared", current.LastError)
+	}
+}
+
 func TestSyncReleasesPromotesTheCandidateAndCutsAReleaseBranch(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")

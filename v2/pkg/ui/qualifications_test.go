@@ -174,3 +174,66 @@ func TestApproveQualificationRunOnAnUnknownCandidateIs404(t *testing.T) {
 		t.Fatal("want an error approving a candidate with no qualification run")
 	}
 }
+
+// A candidate id is only meaningful within its own repo: asking for one
+// repo's candidate through a different repo's path must behave exactly
+// like the candidate does not exist, never leak the other repo's run.
+func TestGetCandidateQualificationIsScopedToItsOwnRepo(t *testing.T) {
+	client, store, ctx := testClient(t)
+	putTestTemplate(t, store, ctx, "template-1", widgets)
+	if err := store.PutQualificationPlan(ctx, model.QualificationPlan{
+		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-1", Repeat: 1}},
+	}); err != nil {
+		t.Fatalf("put plan: %v", err)
+	}
+	if err := store.PutReleaseConfig(ctx, model.ReleaseConfig{
+		Repo: widgets, ProdBranch: "main", RCBranch: "rc", ReleaseBranchPrefix: "release/",
+	}); err != nil {
+		t.Fatalf("put release config: %v", err)
+	}
+	candidate, err := store.CutCandidate(ctx, widgets, baseTime)
+	if err != nil {
+		t.Fatalf("cut: %v", err)
+	}
+	plan, err := store.GetQualificationPlan(ctx, widgets)
+	if err != nil || plan == nil {
+		t.Fatalf("get plan: (%+v, %v)", plan, err)
+	}
+	if _, err := store.CreateQualificationRun(ctx, candidate, *plan, baseTime); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	otherRepo := model.RepoRef{Owner: "acme", Name: "other"}
+	run, err := client.GetCandidateQualification(ctx, otherRepo, candidate.ID)
+	if err != nil || run != nil {
+		t.Fatalf("got (%+v, %v) asking through a different repo, want (nil, nil)", run, err)
+	}
+	if _, err := client.ApproveQualificationRun(ctx, otherRepo, candidate.ID); err == nil {
+		t.Fatal("want an error approving a candidate's run through a different repo")
+	}
+
+	// The same candidate, asked through its own repo, works fine.
+	run, err = client.GetCandidateQualification(ctx, widgets, candidate.ID)
+	if err != nil || run == nil {
+		t.Fatalf("got (%+v, %v) through its own repo, want the run", run, err)
+	}
+}
+
+// PutQualificationPlan defaults a non-positive repeat count to 1 rather
+// than rejecting it -- documenting that behavior here, since it means a
+// request with Repeat 0 (the zero value an easy client mistake to send
+// for "unset") never actually reaches model.QualificationPlan.Validate's
+// own "repeat must be at least 1" check.
+func TestPutQualificationPlanDefaultsANonPositiveRepeatToOne(t *testing.T) {
+	client, store, ctx := testClient(t)
+	putTestTemplate(t, store, ctx, "template-1", widgets)
+	saved, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
+		Items: []ui.QualificationItem{{TemplateID: "template-1", Repeat: 0}},
+	})
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if len(saved.Items) != 1 || saved.Items[0].Repeat != 1 {
+		t.Fatalf("got items %+v, want repeat defaulted to 1", saved.Items)
+	}
+}

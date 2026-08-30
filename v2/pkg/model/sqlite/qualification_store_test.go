@@ -7,6 +7,7 @@ package sqlite_test
 import (
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -180,6 +181,131 @@ func TestCreateQualificationRunInstantiatesEveryItemWithDependencyLinks(t *testi
 	// A second run for the same candidate is refused outright.
 	if _, err := store.CreateQualificationRun(ctx, candidate, plan, now); err == nil {
 		t.Fatal("want an error creating a second run for the same candidate")
+	}
+}
+
+// An item with Repeat > 1 depending on another item with Repeat > 1 waits
+// on the full cross product: every one of its own instances links to
+// every instance the dependency produced, not just one of them -- the
+// commit's own "an item with Repeat 3 depending on one with Repeat 2
+// waits on both of the latter's instances before any of its own three
+// start," exercised directly rather than trusted from a doc comment.
+func TestCreateQualificationRunLinksEveryDependentInstanceToEveryDependencyInstance(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
+		t.Fatalf("put build template: %v", err)
+	}
+	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
+		t.Fatalf("put unit template: %v", err)
+	}
+	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
+		t.Fatalf("put release config: %v", err)
+	}
+	candidate, err := store.CutCandidate(ctx, widgets, now)
+	if err != nil {
+		t.Fatalf("cut: %v", err)
+	}
+
+	plan := model.QualificationPlan{
+		Repo: widgets, Configured: true,
+		Items: []model.QualificationItem{
+			{TemplateID: "template-build", Repeat: 2},
+			{TemplateID: "template-unit", Repeat: 3, DependsOn: []string{"template-build"}},
+		},
+	}
+	run, err := store.CreateQualificationRun(ctx, candidate, plan, now)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if len(run.Tasks) != 5 {
+		t.Fatalf("got %d task instances, want 5 (2 build + 3 unit)", len(run.Tasks))
+	}
+
+	var buildIDs []string
+	var unitIDs []string
+	for _, ts := range run.Tasks {
+		switch ts.TemplateID {
+		case "template-build":
+			buildIDs = append(buildIDs, ts.TaskID)
+		case "template-unit":
+			unitIDs = append(unitIDs, ts.TaskID)
+		}
+	}
+	if len(buildIDs) != 2 || len(unitIDs) != 3 {
+		t.Fatalf("got %d build instances and %d unit instances, want 2 and 3", len(buildIDs), len(unitIDs))
+	}
+
+	for _, id := range unitIDs {
+		task, err := store.GetTask(ctx, id)
+		if err != nil || task == nil {
+			t.Fatalf("get task %s: (%+v, %v)", id, task, err)
+		}
+		var deps []string
+		for _, l := range task.Links {
+			if l.Kind == model.LinkDependsOn {
+				deps = append(deps, l.Target)
+			}
+		}
+		sort.Strings(deps)
+		want := append([]string(nil), buildIDs...)
+		sort.Strings(want)
+		if !reflect.DeepEqual(deps, want) {
+			t.Fatalf("unit task %s: got deps %v, want every build instance %v", id, deps, want)
+		}
+	}
+}
+
+// CreateQualificationRun's own doc comment promises the unique index on
+// candidate_id is "the backstop against creating two runs for the same
+// candidate" when "a concurrent daemon racing the same candidate" beats
+// the caller's own nil check -- exercised here with real goroutines
+// rather than trusted from the two sequential calls
+// TestCreateQualificationRunInstantiatesEveryItemWithDependencyLinks
+// already makes.
+func TestCreateQualificationRunUnderConcurrentRaceCreatesExactlyOneRun(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
+		t.Fatalf("put build template: %v", err)
+	}
+	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
+		t.Fatalf("put release config: %v", err)
+	}
+	candidate, err := store.CutCandidate(ctx, widgets, now)
+	if err != nil {
+		t.Fatalf("cut: %v", err)
+	}
+	plan := model.QualificationPlan{
+		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-build", Repeat: 1}},
+	}
+
+	const attempts = 8
+	errs := make([]error, attempts)
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = store.CreateQualificationRun(ctx, candidate, plan, now)
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("got %d successful concurrent creations, want exactly 1 (errs: %v)", successes, errs)
+	}
+
+	run, err := store.CandidateQualificationRun(ctx, candidate.ID)
+	if err != nil || run == nil {
+		t.Fatalf("candidate qualification run: (%+v, %v)", run, err)
+	}
+	if len(run.Tasks) != 1 {
+		t.Fatalf("got %d task instances, want exactly 1 (no duplication)", len(run.Tasks))
 	}
 }
 
