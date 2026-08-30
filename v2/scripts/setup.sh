@@ -109,6 +109,9 @@ GRAIN_GITHUB_HOST="${GRAIN_GITHUB_HOST:-github.com}"
 GRAIN_GITHUB_INSECURE_HTTP="${GRAIN_GITHUB_INSECURE_HTTP:-0}"
 GRAIN_GITHUB_TOKEN="${GRAIN_GITHUB_TOKEN:-}"
 GRAIN_GITHUB_CREDENTIAL_NAME="${GRAIN_GITHUB_CREDENTIAL_NAME:-bot}"
+GRAIN_GITHUB_APP_ID="${GRAIN_GITHUB_APP_ID:-}"
+GRAIN_GITHUB_APP_INSTALLATION_ID="${GRAIN_GITHUB_APP_INSTALLATION_ID:-}"
+GRAIN_GITHUB_APP_PRIVATE_KEY="${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 
 GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
@@ -161,6 +164,18 @@ Recognized variables:
   GRAIN_GITHUB_TOKEN        a token to seed the credential ladder with, once
                              (only written if no credential is configured yet)
   GRAIN_GITHUB_CREDENTIAL_NAME  name to store that token under (default: bot)
+  GRAIN_GITHUB_APP_ID       a GitHub App's own ID, together with
+  GRAIN_GITHUB_APP_INSTALLATION_ID  its installation ID on test_repos, and
+  GRAIN_GITHUB_APP_PRIVATE_KEY  its downloaded PEM private key -- seed all
+                             three, once, to store an App credential under
+                             GRAIN_GITHUB_CREDENTIAL_NAME instead of a bare
+                             token: pkg/gitproxy.CredentialSet mints and
+                             refreshes an installation token from it, which
+                             (unlike a fine-grained PAT) can read the Checks
+                             API -- see terraform/gcp-v2/README.md, "There is
+                             no Checks permission to grant". Ignored if
+                             GRAIN_GITHUB_CREDENTIAL_NAME already has a
+                             credential of either kind on disk
 
   GRAIN_GEMINI_API_KEY      Gemini API key to seed, once. Required for
                              grain-daemon.service to actually start, but
@@ -463,6 +478,51 @@ seed_secret() {
   chown "$GRAIN_USER:$GRAIN_USER" "$path"
 }
 
+# json_escape backslash-escapes $1 for embedding in a double-quoted JSON
+# string -- just enough for seed_github_app_credential below, whose three
+# inputs are a numeric App ID, a numeric installation ID, and a PEM
+# private key (printable ASCII with embedded newlines, no literal quotes
+# or backslashes of its own), so backslash, double-quote and newline are
+# the only characters that ever need it.
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\r'/}"
+  s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
+# seed_github_app_credential writes ${GRAIN_GITHUB_CREDENTIAL_NAME}.app.json
+# from GRAIN_GITHUB_APP_ID/INSTALLATION_ID/PRIVATE_KEY, the same
+# never-overwrite contract seed_secret gives every plain-token credential
+# above: an App credential already on disk, placed by hand or by an
+# earlier run, is left alone. pkg/gitproxy.CredentialSet.loadAppCredential
+# reads this file's app_id/installation_id/private_key fields and mints a
+# refreshing installation token from them -- both the git proxy's own
+# push/fetch auth and the daemon's REST client (checks, merges,
+# cmd/grain/daemon.go's credentialTokenSource) read through that same
+# ladder, so no separate wiring is needed for either to pick it up.
+seed_github_app_credential() {
+  local path="$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.app.json"
+  if [ -s "$path" ]; then
+    return
+  fi
+  if [ -z "$GRAIN_GITHUB_APP_ID" ] && [ -z "$GRAIN_GITHUB_APP_INSTALLATION_ID" ] && [ -z "$GRAIN_GITHUB_APP_PRIVATE_KEY" ]; then
+    return
+  fi
+  if [ -z "$GRAIN_GITHUB_APP_ID" ] || [ -z "$GRAIN_GITHUB_APP_INSTALLATION_ID" ] || [ -z "$GRAIN_GITHUB_APP_PRIVATE_KEY" ]; then
+    log "  GRAIN_GITHUB_APP_ID/INSTALLATION_ID/PRIVATE_KEY: only some are set -- need all three to seed an App credential; ignoring"
+    return
+  fi
+  ( umask 077
+    printf '{"app_id":"%s","installation_id":"%s","private_key":"%s"}\n' \
+      "$(json_escape "$GRAIN_GITHUB_APP_ID")" \
+      "$(json_escape "$GRAIN_GITHUB_APP_INSTALLATION_ID")" \
+      "$(json_escape "$GRAIN_GITHUB_APP_PRIVATE_KEY")" > "$path" )
+  chown "$GRAIN_USER:$GRAIN_USER" "$path"
+}
+
 setup_data_dir() {
   log "Laying out $GRAIN_DATA_DIR"
   install -d -m0750 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR"
@@ -483,15 +543,19 @@ setup_data_dir() {
   # first time the daemon starts.
 
   # GitHub credential ladder (v2/pkg/gitproxy/credentials.go): a pattern
-  # file plus one <name>.token per credential. "*" is the catch-all every
-  # repo falls back to absent a narrower entry -- an operator wanting a
-  # per-repo credential edits credentials.json and adds another
-  # <name>.token by hand; this script only ever seeds the one default.
-  if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] && [ -n "$GRAIN_GITHUB_TOKEN" ]; then
+  # file plus one <name>.token or <name>.app.json per credential. "*" is
+  # the catch-all every repo falls back to absent a narrower entry -- an
+  # operator wanting a per-repo credential edits credentials.json and
+  # adds another <name>.token/.app.json by hand; this script only ever
+  # seeds the one default, as either kind (never both for the same name:
+  # CredentialSet.load prefers .app.json when present).
+  if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
+     && { [ -n "$GRAIN_GITHUB_TOKEN" ] || [ -n "$GRAIN_GITHUB_APP_ID" ]; }; then
     printf '{"*":"%s"}\n' "$GRAIN_GITHUB_CREDENTIAL_NAME" > "$GRAIN_DATA_DIR/secrets/github/credentials.json"
     chown "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github/credentials.json"
   fi
   seed_secret "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" "$GRAIN_GITHUB_TOKEN"
+  seed_github_app_credential
 
   # Order matters below: the minter key has to be in the secrets
   # database before mint_gemini_operating_key can authenticate with it.
@@ -502,8 +566,9 @@ setup_data_dir() {
   mint_gemini_operating_key
 
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ]; then
-    log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN and re-run, or place"
-    log "  $GRAIN_DATA_DIR/secrets/github/credentials.json and a matching .token file by hand"
+    log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN, or all three of"
+    log "  GRAIN_GITHUB_APP_ID/INSTALLATION_ID/PRIVATE_KEY, and re-run, or place"
+    log "  $GRAIN_DATA_DIR/secrets/github/credentials.json and a matching .token/.app.json by hand"
   fi
 }
 

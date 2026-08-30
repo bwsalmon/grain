@@ -23,6 +23,21 @@
 #   PROJECT, INSTANCE, ZONE            terraform output project_id/instance_name/zone
 # Optional env (empty leaves the host's existing copy untouched):
 #   GRAIN_GITHUB_TOKEN                 the scoped PAT for this deployment's test_repos
+#   GRAIN_GITHUB_APP_ID                 a GitHub App's own ID, together with
+#   GRAIN_GITHUB_APP_INSTALLATION_ID    its installation ID on test_repos, and
+#   GRAIN_GITHUB_APP_PRIVATE_KEY        its downloaded PEM private key -- an
+#                                      alternative to GRAIN_GITHUB_TOKEN, stored under the
+#                                      same credential_name, that pkg/gitproxy.CredentialSet
+#                                      mints a refreshing installation token from instead of
+#                                      reading as a bare PAT -- unlike a fine-grained PAT, it
+#                                      can read the Checks API, which is what auto-merge
+#                                      needs from a non-Actions CI provider. See this
+#                                      directory's README, "There is no Checks permission to
+#                                      grant". Registering the App itself is still a manual,
+#                                      browser-based step on GitHub's own side; only pushing
+#                                      the resulting three values here is automated. Set all
+#                                      three together, or none -- v2/scripts/setup.sh ignores
+#                                      a partial set
 #   GRAIN_GEMINI_API_KEY               the daemon's own operating key (pkg/agent/gemini) --
 #                                      distinct from the gemini-key *capability*, which
 #                                      mints its own short-lived keys per task once this
@@ -57,6 +72,9 @@ push_secret() {
 }
 
 push_secret "grain-github-token" "${GRAIN_GITHUB_TOKEN:-}"
+push_secret "grain-github-app-id" "${GRAIN_GITHUB_APP_ID:-}"
+push_secret "grain-github-app-installation-id" "${GRAIN_GITHUB_APP_INSTALLATION_ID:-}"
+push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
 
 # The credential pkg/capability/gcpkey authenticates as to mint (and
