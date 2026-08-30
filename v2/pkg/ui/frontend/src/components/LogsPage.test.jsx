@@ -54,7 +54,8 @@ describe("LogsPage", () => {
 
     expect(await screen.findByText(/daemon line/)).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByLabelText(/Source/), "git-proxy-audit");
+    await user.click(screen.getByLabelText(/Source/));
+    await user.click(await screen.findByRole("option", { name: "git-proxy-audit" }));
 
     expect(await screen.findByText(/audit line/)).toBeInTheDocument();
     expect(api).toHaveBeenLastCalledWith("/api/logs/git-proxy-audit?lines=500");

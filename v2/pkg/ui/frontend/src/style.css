@@ -399,8 +399,7 @@ fieldset legend {
 }
 .upgrade-status dt { color: var(--text-tertiary); font-weight: 500; }
 
-.logs-toolbar { display: flex; align-items: flex-end; gap: 0.75rem; margin-bottom: 0.75rem; }
-.logs-toolbar label { margin-bottom: 0; }
+.logs-toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 1.75rem 0.75rem; }
 .logs-view {
   margin: 0;
   max-height: 60vh;
@@ -415,6 +414,13 @@ fieldset legend {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* .logs-page fills the whole main column (bwsalmon/agents#486) instead
+   of leaving the log box capped at a fraction of the viewport with
+   empty space below it -- the toolbar keeps its own size and .logs-view
+   grows to take up whatever room is left, scrolling internally. */
+.logs-page { display: flex; flex-direction: column; padding-bottom: 0; }
+.logs-page .logs-view { flex: 1; min-height: 0; max-height: none; margin: 0 1.75rem 1.5rem; }
 .upgrade-status dd { margin: 0; word-break: break-word; }
 .upgrade-phase-running { color: var(--accent); }
 .upgrade-phase-ok { color: var(--state-completed); }
