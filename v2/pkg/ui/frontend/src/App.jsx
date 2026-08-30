@@ -11,9 +11,9 @@ import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import SecretsOverlay from "./components/SecretsOverlay.jsx";
-import ReleasesOverlay from "./components/ReleasesOverlay.jsx";
+import RepoReleases from "./components/RepoReleases.jsx";
 import UpgradeOverlay from "./components/UpgradeOverlay.jsx";
-import LogsOverlay from "./components/LogsOverlay.jsx";
+import LogsPage from "./components/LogsPage.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -36,15 +36,17 @@ export default function App() {
   // about the same task list.
   const [view, setView] = useState("tasks");
   const [repoFilter, setRepoFilter] = useState(null);
+  // releasesRepo is which repo's release pane is open within the repos
+  // view (null shows the repo list instead) -- see RepoList's own
+  // "Releases" button.
+  const [releasesRepo, setReleasesRepo] = useState(null);
   const [error, setError] = useState(null);
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [showNewTask, setShowNewTask] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSecrets, setShowSecrets] = useState(false);
-  const [showReleases, setShowReleases] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
-  const [showLogs, setShowLogs] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -114,7 +116,16 @@ export default function App() {
   // anywhere else would.
   const openRepo = useCallback((repo) => {
     setRepoFilter(repo);
+    setReleasesRepo(null);
     setView("tasks");
+  }, []);
+
+  // setViewAndCloseReleases is Sidebar's onSetView: any nav click leaves
+  // the repos view's release pane behind, so returning to "repos" later
+  // should land back on the repo list rather than a stale release pane.
+  const setViewAndCloseReleases = useCallback((v) => {
+    setReleasesRepo(null);
+    setView(v);
   }, []);
 
   // act runs a mutation, then re-fetches the task (and the list behind
@@ -204,22 +215,24 @@ export default function App() {
       <Sidebar
         config={config}
         view={view}
-        onSetView={setView}
+        onSetView={setViewAndCloseReleases}
         tasks={tasks}
         schedules={schedules}
         stateFilter={stateFilter}
         onSetFilter={setStateFilter}
         onOpenSecrets={() => setShowSecrets(true)}
         onOpenSettings={() => setShowSettings(true)}
-        onOpenReleases={() => setShowReleases(true)}
         onOpenUpgrade={() => setShowUpgrade(true)}
-        onOpenLogs={() => setShowLogs(true)}
         onOpenNewTask={() => setShowNewTask(true)}
       />
-      {view === "repos" ? (
-        <RepoList tasks={tasks} onOpenRepo={openRepo} />
+      {view === "repos" && releasesRepo !== null ? (
+        <RepoReleases repo={releasesRepo} onBack={() => setReleasesRepo(null)} showError={showError} />
+      ) : view === "repos" ? (
+        <RepoList tasks={tasks} onOpenRepo={openRepo} onOpenReleases={setReleasesRepo} />
       ) : view === "schedules" ? (
         <SchedulesList schedules={schedules} config={config} tasks={tasks} onRefresh={refreshSchedules} showError={showError} />
+      ) : view === "logs" ? (
+        <LogsPage showError={showError} />
       ) : (
         <div className="main-column">
           {repoFilter !== null && (
@@ -252,9 +265,7 @@ export default function App() {
       )}
       {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
       {showSecrets && <SecretsOverlay onClose={() => setShowSecrets(false)} showError={showError} />}
-      {showReleases && <ReleasesOverlay config={config} onClose={() => setShowReleases(false)} showError={showError} />}
       {showUpgrade && <UpgradeOverlay onClose={() => setShowUpgrade(false)} showError={showError} />}
-      {showLogs && <LogsOverlay onClose={() => setShowLogs(false)} showError={showError} />}
     </div>
   );
 }
