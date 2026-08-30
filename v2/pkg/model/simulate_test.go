@@ -90,7 +90,7 @@ func TestUserFilingLandsAccordingToActor(t *testing.T) {
 	// A human's approval -- even relayed by automation -- is what moves it
 	// to queued; the reason it was proposed is never consulted.
 	if err := store.Approve(ctx, "automation-filed",
-		model.Attribution{Actor: bot, OnBehalfOf: &human}); err != nil {
+		model.Attribution{Actor: bot, OnBehalfOf: &human}, now); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := store.State(ctx, "automation-filed"); st != model.StateQueued {
@@ -347,7 +347,7 @@ func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 
 		// User update: a human approves something still proposed.
 		if rng.Float64() < 0.5 {
-			approveARandomProposedTask(t, store, ctx, rng, order)
+			approveARandomProposedTask(t, store, ctx, rng, order, clock)
 		}
 
 		// Dispatcher / sandbox: hand every ready task a free slot.
@@ -418,7 +418,7 @@ func fileTask(t *testing.T, store *model.Store, ctx context.Context, rng *rand.R
 	*order = append(*order, id)
 }
 
-func approveARandomProposedTask(t *testing.T, store *model.Store, ctx context.Context, rng *rand.Rand, order []string) {
+func approveARandomProposedTask(t *testing.T, store *model.Store, ctx context.Context, rng *rand.Rand, order []string, clock time.Time) {
 	t.Helper()
 	var candidates []string
 	for _, id := range order {
@@ -438,7 +438,7 @@ func approveARandomProposedTask(t *testing.T, store *model.Store, ctx context.Co
 	if rng.Float64() < 0.5 {
 		a = model.Attribution{Actor: bot, OnBehalfOf: &human}
 	}
-	if err := store.Approve(ctx, id, a); err != nil {
+	if err := store.Approve(ctx, id, a, clock); err != nil {
 		t.Fatalf("Approve(%s): %v", id, err)
 	}
 }

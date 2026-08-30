@@ -58,6 +58,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigTargetReposColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -95,6 +98,20 @@ func (s *Store) ensureConfigTargetReposColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `target_repos` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureTaskApprovedAtColumn adds task.approved_at (schema.go's own DDL
+// comment on the table has the reasoning) to a database created before
+// this column existed, the same probe-then-ALTER approach
+// ensureConfigTargetReposColumn already uses for the same reason: CREATE
+// TABLE IF NOT EXISTS never alters a table that is already there.
+func (s *Store) ensureTaskApprovedAtColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `approved_at` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task` ADD COLUMN `approved_at` DATETIME NULL")
 	return err
 }
 
@@ -221,13 +238,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
 	if _, err := tx.ExecContext(ctx, `REPLACE INTO `+"`task`"+` (
   `+"`id`, `intent`, `title`, `body`"+`,
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
-  `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`"+`,
+  `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
   `+"`auto_merge`, `created_at`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?)`,
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
-		aActorKind, aActorID, aBehalfKind, aBehalfID,
+		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
 		t.AutoMerge, timeOf(t.CreatedAt),
 	); err != nil {
@@ -392,7 +409,7 @@ func getTask(ctx context.Context, q querier, id string) (*Task, error) {
 // distance, if it fails at all.
 const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
-	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`," +
+	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
 	"`auto_merge`,`created_at`"
 
@@ -405,10 +422,10 @@ func scanTask(scan func(...any) error) (Task, error) {
 	var oaKind, oaID, oReason string
 	var obKind, obID, aaKind, aaID, abKind, abID sql.NullString
 	var tOwner, tName, base, folder sql.NullString
-	var createdAt sql.NullTime
+	var createdAt, approvedAt sql.NullTime
 	if err := scan(&t.ID, &intent, &t.Title, &t.Body,
 		&oaKind, &oaID, &obKind, &obID, &oReason,
-		&aaKind, &aaID, &abKind, &abID,
+		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
 		&t.AutoMerge, &createdAt); err != nil {
 		return Task{}, err
@@ -428,6 +445,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 			OnBehalfOf: principalFrom(abKind, abID),
 		}
 	}
+	t.ApprovedAt = timePtr(approvedAt)
 	if tOwner.Valid {
 		t.Target = &RepoRef{Owner: tOwner.String, Name: tName.String}
 	}
@@ -606,15 +624,20 @@ func (s *Store) ObserveField(ctx context.Context, taskID string, now time.Time,
 	})
 }
 
-func (s *Store) Approve(ctx context.Context, taskID string, a Attribution) error {
-	return s.write(ctx, "approve task "+taskID, func(tx *sql.Tx) error { return approve(ctx, tx, taskID, a) })
+// Approve takes approvedAt from the caller rather than reading the clock
+// itself, the same discipline ObserveField and FinishRun already hold to
+// -- ui.Client.now() is the one clock this store's writes ever run
+// against, so a test gets a deterministic timestamp and a real deployment
+// gets one instant shared with everything else that call recorded.
+func (s *Store) Approve(ctx context.Context, taskID string, a Attribution, approvedAt time.Time) error {
+	return s.write(ctx, "approve task "+taskID, func(tx *sql.Tx) error { return approve(ctx, tx, taskID, a, approvedAt) })
 }
 
-func approve(ctx context.Context, tx *sql.Tx, taskID string, a Attribution) error {
+func approve(ctx context.Context, tx *sql.Tx, taskID string, a Attribution, approvedAt time.Time) error {
 	_, err := tx.ExecContext(ctx,
 		"UPDATE `task` SET `approval_actor_kind` = ?, `approval_actor_id` = ?, "+
-			"`approval_behalf_kind` = ?, `approval_behalf_id` = ? WHERE `id` = ?",
-		string(a.Actor.Kind), a.Actor.ID, kindOf(a.OnBehalfOf), idOf(a.OnBehalfOf), taskID)
+			"`approval_behalf_kind` = ?, `approval_behalf_id` = ?, `approved_at` = ? WHERE `id` = ?",
+		string(a.Actor.Kind), a.Actor.ID, kindOf(a.OnBehalfOf), idOf(a.OnBehalfOf), approvedAt.UTC(), taskID)
 	return err
 }
 

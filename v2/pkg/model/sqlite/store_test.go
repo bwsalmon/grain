@@ -183,7 +183,7 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	assertState(model.StateProposed)
 
 	// Approval is the whole difference between proposed and queued.
-	if err := store.Approve(ctx, "a1b2", model.Attribution{Actor: bot, OnBehalfOf: &human}); err != nil {
+	if err := store.Approve(ctx, "a1b2", model.Attribution{Actor: bot, OnBehalfOf: &human}, now); err != nil {
 		t.Fatal(err)
 	}
 	assertState(model.StateQueued)
