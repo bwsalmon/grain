@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DetailOverlay from "./DetailOverlay.jsx";
@@ -223,6 +223,37 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("build error")).toBeInTheDocument();
     expect(screen.getByText("#2")).toBeInTheDocument();
     expect(screen.getByText("Running")).toBeInTheDocument();
+  });
+
+  it("shows nothing under History when there are no transitions", () => {
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("History")).not.toBeInTheDocument();
+  });
+
+  it("lists every transition in order, with its state and time", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          transitions: [
+            { state: "proposed", at: "2026-08-28T12:00:00Z" },
+            { state: "queued", at: "2026-08-28T12:01:00Z" },
+            { state: "running", at: "2026-08-28T12:02:00Z" },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const history = screen.getByText("History").closest("fieldset");
+    const labels = ["Proposed", "Queued", "Running"];
+    for (const label of labels) {
+      expect(within(history).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("shows a hint when there are no dependencies", () => {

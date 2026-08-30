@@ -51,6 +51,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
           </div>
 
           <Actions t={t} act={act} />
+          <Timeline t={t} />
           <Attempts t={t} />
           <Declared t={t} />
           <CapabilityToggles t={t} config={config} act={act} />
@@ -155,6 +156,34 @@ const OUTCOME_BADGES = { "": "running", succeeded: "completed", failed: "failed"
 function outcomeLabel(outcome) {
   outcome = outcome || "";
   return OUTCOME_LABELS[outcome] || (outcome.charAt(0).toUpperCase() + outcome.slice(1));
+}
+
+// Timeline is every point the record lets a task's state be pinned to a
+// time, oldest first (bwsalmon/agents#452 -- "make it clear what state
+// the task is in", as a history rather than only the badge above it).
+//
+// t.transitions omits a state the record has no timestamp for -- most
+// notably a past awaiting_reply period once its question has been
+// answered (see model.Transitions' own doc comment on why that one is
+// unrecoverable) -- so this can show fewer entries than State's full
+// vocabulary, which is expected rather than a bug to chase.
+function Timeline({ t }) {
+  const transitions = t.transitions || [];
+  if (transitions.length === 0) return null;
+  return (
+    <fieldset>
+      <legend>History</legend>
+      <ul className="transitions">
+        {transitions.map((tr, i) => (
+          <li className="transition" key={i}>
+            <span className="transition-arrow">→</span>
+            <span className={`badge badge-${tr.state}`}>{STATE_LABELS[tr.state] || tr.state}</span>
+            <span className="transition-at">{new Date(tr.at).toLocaleString()}</span>
+          </li>
+        ))}
+      </ul>
+    </fieldset>
+  );
 }
 
 // Attempts is every run this task has had, oldest first, each with its

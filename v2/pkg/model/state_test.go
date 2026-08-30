@@ -170,6 +170,108 @@ func TestLandingStateIsDecidedByTheActorNotTheReason(t *testing.T) {
 	}
 }
 
+func TestTransitionsCoversProposedThroughCompleted(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	approved := created.Add(time.Minute)
+	started := approved.Add(time.Minute)
+	finished := started.Add(10 * time.Minute)
+
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &approved
+	obs := &Observation{CompletedAt: &finished}
+	runs := []Run{{StartedAt: started, FinishedAt: &finished}}
+
+	got := Transitions(tk, obs, runs, nil, nil)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, approved},
+		{StateRunning, started},
+		{StateCompleted, finished},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+}
+
+func TestTransitionsRequeuesBetweenAttemptsButNotAfterTheLastOne(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	firstStart := created.Add(time.Minute)
+	firstEnd := firstStart.Add(time.Minute)
+	secondStart := firstEnd.Add(time.Minute)
+	secondEnd := secondStart.Add(time.Minute)
+
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &firstStart
+	obs := &Observation{CompletedAt: &secondEnd}
+	runs := []Run{
+		{StartedAt: firstStart, FinishedAt: &firstEnd},
+		{StartedAt: secondStart, FinishedAt: &secondEnd},
+	}
+
+	got := Transitions(tk, obs, runs, nil, nil)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, firstStart},
+		{StateRunning, firstStart},
+		// The requeue between the two attempts, but nothing after the
+		// second's own finish -- that instant is StateCompleted instead.
+		{StateQueued, firstEnd},
+		{StateRunning, secondStart},
+		{StateCompleted, secondEnd},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+}
+
+func TestTransitionsShowsFailedOnceTheStreakCapsOut(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &created
+	lastFinished := created.Add(time.Hour)
+	streak := &FailureStreak{Count: MaxConsecutiveFailures, LastFinishedAt: lastFinished, LastOutcome: "failed"}
+
+	got := Transitions(tk, nil, nil, streak, nil)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, created},
+		{StateFailed, lastFinished},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+}
+
+func TestTransitionsShowsAPendingQuestionOnlyWhileOutstanding(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	asked := created.Add(time.Hour)
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &created
+	obs := &Observation{PendingQuestionCommentID: new(int64)}
+	runs := []Run{{StartedAt: created.Add(time.Minute), FinishedAt: &asked}}
+
+	got := Transitions(tk, obs, runs, nil, &asked)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, created},
+		{StateRunning, created.Add(time.Minute)},
+		{StateAwaitingReply, asked},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+
+	// Once answered, the caller passes no askedAt at all -- the period is
+	// gone from the record, not merely unlabelled.
+	obs.PendingQuestionCommentID = nil
+	got = Transitions(tk, obs, runs, nil, nil)
+	for _, tr := range got {
+		if tr.State == StateAwaitingReply {
+			t.Fatalf("an answered question should leave no awaiting_reply transition: %+v", got)
+		}
+	}
+}
+
 func TestIsBlockedIgnoresNonBlockingLinks(t *testing.T) {
 	tk := task(true)
 	tk.Links = []Link{

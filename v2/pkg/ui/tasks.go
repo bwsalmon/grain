@@ -109,6 +109,21 @@ type TaskDetail struct {
 	// agents#445: "show attempts and their status, in order, in the task
 	// view").
 	Attempts []Attempt `json:"attempts,omitempty"`
+	// Transitions is model.Transitions' own projection: every point the
+	// record lets this task's state be pinned to a time, oldest first
+	// (bwsalmon/agents#452 -- "show the state transitions for the task").
+	Transitions []Transition `json:"transitions,omitempty"`
+}
+
+// Transition is one entry in a task's timeline, projected from
+// model.Transition.
+type Transition struct {
+	State model.State `json:"state"`
+	At    time.Time   `json:"at"`
+}
+
+func transitionFrom(t model.Transition) Transition {
+	return Transition{State: t.State, At: t.At}
 }
 
 // Attempt is one of a task's runs, projected from model.Run.
