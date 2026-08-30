@@ -130,6 +130,25 @@ func TestHTTPClientUpdateSetCapabilityCommentCloseReopen(t *testing.T) {
 	}
 }
 
+// TestHTTPClientRetry rounds out HTTPClient's own tests with Retry, the
+// one mutating method nothing here exercised through a real HTTP round
+// trip before now -- server_test.go and client_test.go each already
+// prove the route and the underlying Client method.
+func TestHTTPClientRetry(t *testing.T) {
+	c, ctx := testHTTPClient(t)
+	created, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "fix it", Approved: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// Retry on a task that has never failed is documented as a harmless
+	// no-op (Client.Retry); this just proves the round trip itself
+	// succeeds rather than erroring.
+	if err := c.Retry(ctx, created.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+}
+
 func TestHTTPClientApproveOnAProposal(t *testing.T) {
 	c, ctx := testHTTPClient(t)
 	created, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "needs a look"})

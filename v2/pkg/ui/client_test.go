@@ -11,6 +11,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -694,6 +695,100 @@ func TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted(t *testing.T) {
 	if detail.FailedAttempts != 0 || detail.LastFailureAt != nil || detail.LastFailureReason != "" {
 		t.Fatalf("FailedAttempts = %d, LastFailureAt = %v, LastFailureReason = %q, want all zero on a completed task",
 			detail.FailedAttempts, detail.LastFailureAt, detail.LastFailureReason)
+	}
+}
+
+// TestRetryClearsAFailedTasksStreak covers bwsalmon/agents#403's own
+// "Retry" button (Client.Retry, the UI's handleRetry): once a task has
+// failed model.MaxConsecutiveFailures times in a row it reads StateFailed
+// forever -- nothing else ever resets task_streak's own count -- until a
+// human retries it. Retry itself only stamps Observation.RetryRequestedAt
+// (Client.Retry's own doc comment); this proves that stamp actually
+// carries all the way through Store.FailureStreak to State and back to a
+// dispatchable task, the same round trip TestGetTaskHidesFailedAttempts
+// OnceTheTaskHasCompleted proves for completion instead.
+func TestRetryClearsAFailedTasksStreak(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	for i := 0; i < model.MaxConsecutiveFailures; i++ {
+		id := "r" + strconv.Itoa(i+1)
+		started := baseTime.Add(time.Duration(i) * time.Hour)
+		if err := store.StartRun(ctx, model.Run{
+			ID: id, TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+			Attempt: i + 1, StartedAt: started,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.FinishRun(ctx, id, started.Add(time.Minute), "failed", "boom"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != model.StateFailed {
+		t.Fatalf("state = %s, want failed after %d consecutive failures", detail.State, model.MaxConsecutiveFailures)
+	}
+	if detail.FailedAttempts != model.MaxConsecutiveFailures {
+		t.Fatalf("FailedAttempts = %d, want %d", detail.FailedAttempts, model.MaxConsecutiveFailures)
+	}
+
+	retryAt := baseTime.Add(model.MaxConsecutiveFailures * time.Hour)
+	c.Now = func() time.Time { return retryAt }
+	if err := c.Retry(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err = c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != model.StateQueued {
+		t.Fatalf("state = %s, want queued once retried: an approved task with no failures left is dispatchable", detail.State)
+	}
+	if detail.FailedAttempts != 0 || detail.LastFailureAt != nil || detail.LastFailureReason != "" {
+		t.Fatalf("FailedAttempts = %d, LastFailureAt = %v, LastFailureReason = %q, want all zero once retried",
+			detail.FailedAttempts, detail.LastFailureAt, detail.LastFailureReason)
+	}
+
+	// The failed attempts themselves are still on record -- retrying
+	// forgives the streak, it does not rewrite history.
+	if len(detail.Attempts) != model.MaxConsecutiveFailures {
+		t.Fatalf("attempts = %d, want retrying to leave every past attempt on record", len(detail.Attempts))
+	}
+}
+
+// TestRetryOnATaskWithNoFailureIsAHarmlessNoOp covers Client.Retry's own
+// doc comment: calling it on a task that is not currently failed must not
+// error or otherwise disturb its state.
+func TestRetryOnATaskWithNoFailureIsAHarmlessNoOp(t *testing.T) {
+	c, _, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := c.Retry(ctx, task.ID); err != nil {
+		t.Fatalf("Retry on a never-run task: %v", err)
+	}
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != model.StateQueued {
+		t.Fatalf("state = %s, want queued: retrying a task with nothing to retry must be a no-op", detail.State)
+	}
+}
+
+// TestRetryOnAnUnknownTaskIsNotFound matches the same NotFoundError every
+// other single-task Client method returns for an id nothing is behind
+// (Close, Reopen, AddComment).
+func TestRetryOnAnUnknownTaskIsNotFound(t *testing.T) {
+	c, _, ctx := testClient(t)
+	err := c.Retry(ctx, "nope")
+	var nf *ui.NotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("err = %v, want a NotFoundError", err)
 	}
 }
 

@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/secrets"
@@ -191,6 +193,58 @@ func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
 	}
 	if task := decode[ui.Task](t, rec); task.State != model.StateQueued {
 		t.Fatalf("state after reopen = %q, want queued", task.State)
+	}
+}
+
+// TestRetryRouteClearsAFailedTasksStreak is handleRetry's own route test
+// (bwsalmon/agents#403's "Retry" button) -- client_test.go's
+// TestRetryClearsAFailedTasksStreak already proves Client.Retry itself
+// works; this proves the route wires a POST through to it and answers
+// with the task in its now-unfailed state, the same "respond with the
+// task" contract TestMutatingRoutesRespondWithTheTask checks for every
+// other mutating route.
+func TestRetryRouteClearsAFailedTasksStreak(t *testing.T) {
+	srv, client := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it","approved":true}`)
+	id := decode[ui.Task](t, rec).ID
+
+	for i := 0; i < model.MaxConsecutiveFailures; i++ {
+		runID := id + "-r" + strconv.Itoa(i+1)
+		started := baseTime.Add(time.Duration(i) * time.Hour)
+		if err := client.Store.StartRun(context.Background(), model.Run{
+			ID: runID, TaskID: id, Slot: "s1", Sandbox: "s1", Attempt: i + 1, StartedAt: started,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Store.FinishRun(context.Background(), runID, started.Add(time.Minute), "failed", "boom"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/tasks/"+id, "")
+	if got := decode[ui.TaskDetail](t, rec).State; got != model.StateFailed {
+		t.Fatalf("state before retrying = %q, want failed", got)
+	}
+
+	rec = do(t, srv, http.MethodPost, "/api/tasks/"+id+"/retry", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	task := decode[ui.Task](t, rec)
+	if task.ID != id {
+		t.Fatalf("responded with task %q, want %q", task.ID, id)
+	}
+	if task.State != model.StateQueued {
+		t.Fatalf("state after retrying = %q, want queued", task.State)
+	}
+}
+
+func TestRetryRouteOnAnUnknownTaskIs404(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPost, "/api/tasks/nope/retry", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }
 
