@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
 func TestHealthFromClosedStateReadsClosedRegardlessOfChecks(t *testing.T) {
@@ -69,6 +71,86 @@ func TestHealthFromMergeableWithNoFailingChecksIsClean(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// --- closing a PR whose head branch is already gone --------------------
+
+// A merged PR's head branch is routinely deleted by the time this runs
+// (GitHub's own "automatically delete head branches" setting, or a human
+// tidying up after closing without merging), which leaves ListCheckRuns
+// unable to resolve it. syncEntry must still close the task out: it does
+// not need checks to know a closed PR is done, so it must never even ask
+// for them once detail.State already says "closed" -- see the comment in
+// syncEntry itself for why asking anyway used to leave the task never
+// closing, cycle after cycle.
+func TestSyncEntryClosesAPullRequestEvenWhenItsHeadBranchIsGone(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	human := model.Principal{Kind: model.PrincipalHuman, ID: "alice"}
+	completedAt := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	task := model.Task{
+		ID: "t1", Intent: model.IntentImplement, Title: "fix the thing", Body: "please",
+		Origin:   model.Origin{Attribution: model.Attribution{Actor: human}, Reason: model.ReasonDirect},
+		Approval: &model.Attribution{Actor: human},
+		Target:   &repo,
+		Binding:  model.BindingDirective,
+	}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("filing task: %v", err)
+	}
+	obs := model.Observation{TaskID: task.ID, CompletedAt: &completedAt}
+	if err := store.Observe(ctx, obs); err != nil {
+		t.Fatalf("recording completion: %v", err)
+	}
+
+	entry := queueEntry{
+		task: task, obs: &obs,
+		ref: model.PullRequestRef{Repo: repo, Number: 7},
+	}
+	client := &deletedBranchClient{}
+
+	if err := syncEntry(ctx, store, client, entry, map[string]string{}, completedAt); err != nil {
+		t.Fatalf("syncEntry: %v", err)
+	}
+	if client.checkRunsCalled {
+		t.Error("syncEntry read check runs for a PR already known to be closed")
+	}
+
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed", st)
+	}
+}
+
+// deletedBranchClient stands in for a real GitHub credential once a PR's
+// head branch is gone: GetPullRequest still answers fine (a closed PR
+// still exists), but any ref-scoped read like ListCheckRuns 404s because
+// there is no longer a branch or commit that name resolves to.
+type deletedBranchClient struct {
+	github.Client
+	checkRunsCalled bool
+}
+
+func (c *deletedBranchClient) GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error) {
+	return github.PullRequestDetail{State: "closed", HeadRef: "grain/t1", BaseRef: "main"}, nil
+}
+
+func (c *deletedBranchClient) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
+	c.checkRunsCalled = true
+	return nil, &github.Error{Status: 404, Body: []byte("Not Found")}
+}
 
 // --- checks the credential cannot read ----------------------------------
 

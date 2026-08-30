@@ -262,9 +262,24 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	if err != nil {
 		return fmt.Errorf("orchestrator: reading %s: %w", ref, err)
 	}
-	checks, checksKnown, err := checkRunsFor(client, ref, detail.HeadRef)
-	if err != nil {
-		return err
+
+	// A closed PR's head branch is routinely gone by the time this runs --
+	// GitHub deletes it on merge when a repo has that setting on, and
+	// nothing stops a human deleting it after closing without merging
+	// either. healthFrom's first line already answers PrClosed off
+	// detail.State alone with no need for checks, so skip checkRunsFor
+	// entirely here rather than have a 404 on a ref that no longer
+	// resolves turn a task that is plainly done into one syncEntry can
+	// never close: this same task_id keeps recurring in
+	// OpenPullRequestLinks every cycle, so an error here would repeat
+	// forever, not just once.
+	var checks []github.CheckRun
+	checksKnown := true
+	if detail.State != "closed" {
+		checks, checksKnown, err = checkRunsFor(client, ref, detail.HeadRef)
+		if err != nil {
+			return err
+		}
 	}
 	health := healthFrom(detail, checks, checksKnown)
 
