@@ -199,11 +199,21 @@ function outcomeLabel(outcome) {
 function timelineEvents(t) {
   const events = [];
   const transitions = t.transitions || [];
-  const lastTransitionIndex = transitions.length - 1;
+  const attempts = t.attempts || [];
+  // Every "running" period already gets its own, more detailed node from
+  // t.attempts below (start/finish time, outcome, a transcript to click
+  // into) -- so once attempts exist, the plain state transition into
+  // "running" is a second node for the same moment (bwsalmon/agents#503:
+  // "a running node ... followed by a running attempt #1 ... we only
+  // need a single node"). Older tasks or edge cases with transitions but
+  // no recorded attempts still show the bare transition, since it's the
+  // only record of that running period they have.
+  const shownTransitions = attempts.length > 0 ? transitions.filter((tr) => tr.state !== "running") : transitions;
+  const lastTransitionIndex = shownTransitions.length - 1;
 
-  transitions.forEach((tr, i) => {
+  shownTransitions.forEach((tr, i) => {
     events.push({
-      key: `transition-${i}`,
+      key: `transition-${tr.state}-${i}`,
       at: new Date(tr.at),
       badge: tr.state,
       // Only the most recent transition can still be "now" -- a running
@@ -211,11 +221,19 @@ function timelineEvents(t) {
       // read as static rather than keep spinning as if the task were
       // still running that far in the past.
       current: i === lastTransitionIndex,
+      // "closed" is where a task's own timeline ends -- flagged here so
+      // it can be pinned last below even if a synced pull request event
+      // lands with a later timestamp (bwsalmon/agents#503).
+      closedTransition: tr.state === "closed",
       render: () => <div className="timeline-title">{STATE_LABELS[tr.state] || tr.state}</div>,
     });
   });
 
-  (t.attempts || []).forEach((a) => {
+  attempts.forEach((a) => {
+    // The very first attempt *is* the task's one "running" node -- calling
+    // it out as "Attempt #1" only makes sense once there's a second one to
+    // tell it apart from (bwsalmon/agents#503).
+    const title = a.number === 1 ? outcomeLabel(a.outcome) : `Attempt #${a.number} · ${outcomeLabel(a.outcome)}`;
     events.push({
       key: `attempt-${a.number}`,
       at: new Date(a.startedAt),
@@ -230,7 +248,7 @@ function timelineEvents(t) {
       current: !a.finishedAt,
       render: () => (
         <>
-          <div className="timeline-title">Attempt #{a.number} · {outcomeLabel(a.outcome)}</div>
+          <div className="timeline-title">{title}</div>
           <div className="timeline-meta">
             started {new Date(a.startedAt).toLocaleString()}
             {a.finishedAt && <> · finished {new Date(a.finishedAt).toLocaleString()}</>}
@@ -241,10 +259,22 @@ function timelineEvents(t) {
     });
   });
 
+  // A pull request grain re-linked (say, a task reopened against a PR that
+  // had already been open for a while) keeps that PR's real, original
+  // open time -- which can predate this lifecycle's own first transition,
+  // sorting "PR opened" ahead of "Proposed"/"Queued" and everything else
+  // rather than where it actually belongs (bwsalmon/agents#503: "PR
+  // opened comes out of order at the beginning of the timeline"). Clamping
+  // it to this lifecycle's own start keeps it from floating above events
+  // that actually happened first.
+  const earliestAt = shownTransitions.length > 0 ? new Date(shownTransitions[0].at) : null;
+
   (t.pullRequestEvents || []).forEach((e, i) => {
+    let at = e.at ? new Date(e.at) : null;
+    if (e.kind === "opened" && at && earliestAt && at < earliestAt) at = earliestAt;
     events.push({
       key: `pr-event-${i}`,
-      at: e.at ? new Date(e.at) : null,
+      at,
       badge: `pr_${e.kind}`,
       render: () => (
         <>
@@ -278,6 +308,18 @@ function timelineEvents(t) {
   });
 
   events.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));
+
+  // Closing can outrun the sync that notices its pull request followed
+  // suit -- a "merged"/"closed" pull request event synced in afterward
+  // would otherwise land after "Closed" by timestamp but read strangely
+  // once "Closed" is already the story's end (bwsalmon/agents#503: "PR
+  // closing is coming after the closed state, let's make closed the last
+  // thing in the timeline").
+  const closedIndex = events.findIndex((e) => e.closedTransition);
+  if (closedIndex !== -1 && closedIndex !== events.length - 1) {
+    events.push(events.splice(closedIndex, 1)[0]);
+  }
+
   return events;
 }
 

@@ -274,7 +274,10 @@ describe("DetailOverlay", () => {
     expect(container.querySelectorAll(".timeline-item")).toHaveLength(0);
   });
 
-  it("lists every attempt on the timeline in order, with its number, status and timing", () => {
+  // bwsalmon/agents#503: the first attempt is the task's one "running"
+  // node -- it only reads as "Attempt #1" once a second one exists to
+  // tell it apart from.
+  it("lists every attempt on the timeline in order, numbering only the second and later ones", () => {
     render(
       <DetailOverlay
         task={{
@@ -292,9 +295,37 @@ describe("DetailOverlay", () => {
       />
     );
 
-    expect(screen.getByText("Attempt #1 · Failed")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.queryByText("Attempt #1 · Failed")).not.toBeInTheDocument();
     expect(screen.getByText("build error")).toBeInTheDocument();
     expect(screen.getByText("Attempt #2 · Running")).toBeInTheDocument();
+  });
+
+  // bwsalmon/agents#503: a "running" transition and the attempt it started
+  // both landing on the timeline read as two nodes for the same moment.
+  it("shows a single node for a running transition and its first attempt, not two", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "running",
+          transitions: [
+            { state: "queued", at: "2026-08-28T12:00:00Z" },
+            { state: "running", at: "2026-08-28T12:01:00Z" },
+          ],
+          attempts: [{ number: 1, startedAt: "2026-08-28T12:01:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    expect(within(list).getAllByText("Running")).toHaveLength(1);
+    expect(list.querySelectorAll(".timeline-item")).toHaveLength(2);
   });
 
   it("lists every transition on the timeline in order, with its label and time", () => {
@@ -362,6 +393,57 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("PR closed without merging")).toBeInTheDocument();
   });
 
+  // bwsalmon/agents#503: a synced "PR closed"/"merged" event can land with
+  // a later timestamp than the local "closed" transition that preceded
+  // it -- "closed" should still read as the end of the timeline.
+  it("keeps the closed transition last even when a pull request event syncs in with a later timestamp", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          transitions: [
+            { state: "proposed", at: "2026-08-28T09:00:00Z" },
+            { state: "closed", at: "2026-08-28T10:00:00Z" },
+          ],
+          pullRequestEvents: [{ kind: "merged", at: "2026-08-28T11:00:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const items = [...list.querySelectorAll(".timeline-item")];
+    expect(items[items.length - 1].textContent).toContain("Closed");
+  });
+
+  // bwsalmon/agents#503: a pull request re-linked to a reopened task keeps
+  // its own original open time, which can predate this lifecycle's first
+  // transition -- it should not sort ahead of everything else.
+  it("does not let a pull request opened before this lifecycle's first transition sort ahead of it", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          transitions: [{ state: "proposed", at: "2026-08-28T12:00:00Z" }],
+          pullRequestEvents: [{ kind: "opened", at: "2026-08-01T00:00:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const items = [...list.querySelectorAll(".timeline-item")];
+    expect(items[0].textContent).toContain("Proposed");
+  });
+
   it("interleaves transitions, attempts and comments by their own timestamps", () => {
     render(
       <DetailOverlay
@@ -383,8 +465,8 @@ describe("DetailOverlay", () => {
       />
     );
 
-    const titles = screen.getAllByText(/^Proposed$|^Attempt #1 · Succeeded$|^looks good$|^PR merged$|^Closed$/).map((el) => el.textContent);
-    expect(titles).toEqual(["Proposed", "Attempt #1 · Succeeded", "looks good", "PR merged", "Closed"]);
+    const titles = screen.getAllByText(/^Proposed$|^Succeeded$|^looks good$|^PR merged$|^Closed$/).map((el) => el.textContent);
+    expect(titles).toEqual(["Proposed", "Succeeded", "looks good", "PR merged", "Closed"]);
   });
 
   it("only animates the running badge for the current transition, not a past one", () => {
@@ -532,7 +614,7 @@ describe("DetailOverlay", () => {
       />
     );
 
-    await user.click(screen.getByText("Attempt #1 · Succeeded"));
+    await user.click(screen.getByText("Succeeded"));
 
     expect(await screen.findByText("Attempt #1 transcript")).toBeInTheDocument();
     expect(await screen.findByText("found it")).toBeInTheDocument();
@@ -554,7 +636,7 @@ describe("DetailOverlay", () => {
       />
     );
 
-    screen.getByText("Attempt #1 · Running").closest(".timeline-item-attempt").focus();
+    screen.getByText("Running").closest(".timeline-item-attempt").focus();
     await user.keyboard("{Enter}");
 
     expect(await screen.findByText("Attempt #1 transcript")).toBeInTheDocument();
