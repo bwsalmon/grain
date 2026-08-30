@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Config is a deployment's tunable, non-secret configuration -- the
 // knobs bwsalmon/agents#320 asked to move off the daemon's own flags and
@@ -24,9 +27,14 @@ import "time"
 type Config struct {
 	// PollInterval is how often pkg/orchestrator's RunCycle runs.
 	PollInterval time.Duration
-	// Slots is the concurrency pool dispatch.Cycle fills -- the same
-	// comma-separated list -slots parses.
-	Slots []string
+	// MaxConcurrent is the size of the concurrency pool dispatch.Cycle
+	// fills -- the same count -max-concurrent parses. bwsalmon/agents#461
+	// replaced named slots (an operator-chosen list, each entry its own
+	// sandbox directory or kontur VM name) with this plain count: SlotNames
+	// turns it into the []string dispatch.Cycle and orchestrator.Deps
+	// still take, since nothing below that layer needs to know a slot's
+	// name was ever chosen rather than generated.
+	MaxConcurrent int
 	// GeminiModel is the Gemini model the agent framework calls.
 	GeminiModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
@@ -54,4 +62,20 @@ type Config struct {
 	// line for it to be parsed from (see orchestrator.ParseDirectives'
 	// own doc comment).
 	TargetRepos []string
+}
+
+// SlotNames returns the n dispatch.Cycle slot identifiers a deployment
+// configured for MaxConcurrent == n fills -- "1" through strconv.Itoa(n).
+// A slot's name is otherwise meaningless (dispatch.Cycle only cares that
+// each one is distinct), but orchestrator.HostSandboxes and
+// orchestrator.KonturSandboxes turn it into a directory or VM name apiece,
+// so callers wiring either one need a stable, generated set rather than
+// picking their own the way -slots let an operator do before bwsalmon/
+// agents#461.
+func SlotNames(n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = strconv.Itoa(i + 1)
+	}
+	return names
 }

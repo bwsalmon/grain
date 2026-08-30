@@ -903,9 +903,9 @@ func TestGetSettingsIsUnconfiguredOnAFreshStore(t *testing.T) {
 }
 
 func firstSettings() ui.UpdateSettingsRequest {
-	pollInterval, slots, geminiModel, host := "30s", []string{"local"}, "gemini-2.5-pro", "github.com"
+	pollInterval, maxConcurrent, geminiModel, host := "30s", 1, "gemini-2.5-pro", "github.com"
 	return ui.UpdateSettingsRequest{
-		PollInterval: &pollInterval, Slots: &slots, GeminiModel: &geminiModel, GitHubHost: &host,
+		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent, GeminiModel: &geminiModel, GitHubHost: &host,
 	}
 }
 
@@ -918,8 +918,8 @@ func TestUpdateSettingsFirstTimeRequiresTheCoreFields(t *testing.T) {
 	}
 
 	c2, _, ctx2 := testClient(t)
-	slots := []string{"local"}
-	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{Slots: &slots})
+	maxConcurrent := 1
+	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{MaxConcurrent: &maxConcurrent})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("saving settings for the first time with pollInterval missing: error = %v, want a ValidationError", err)
@@ -980,9 +980,9 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
-// Unlike Slots, an empty TargetRepos is meaningful (unrestricted) rather
-// than rejected -- v1's target_repos "leave empty for a single-repo
-// deployment."
+// Unlike MaxConcurrent, an empty TargetRepos is meaningful (unrestricted)
+// rather than rejected -- v1's target_repos "leave empty for a
+// single-repo deployment."
 func TestUpdateSettingsTargetReposRoundTripsIncludingEmpty(t *testing.T) {
 	c, _, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
@@ -1017,11 +1017,11 @@ func TestUpdateSettingsValidates(t *testing.T) {
 	bad := "not-a-duration"
 	empty := ""
 	negative := -1
-	noSlots := []string{}
+	zeroConcurrent := 0
 	badRepo := []string{"not-owner-slash-name"}
 	cases := map[string]ui.UpdateSettingsRequest{
 		"unparseable poll interval": {PollInterval: &bad},
-		"zero-length slots":         {Slots: &noSlots},
+		"zero max concurrent":       {MaxConcurrent: &zeroConcurrent},
 		"blank gemini model":        {GeminiModel: &empty},
 		"blank github host":         {GitHubHost: &empty},
 		"negative max agent turns":  {MaxAgentTurns: &negative},

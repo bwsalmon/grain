@@ -124,7 +124,8 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	}
 
 	const owner, repoName = "acme", "gizmos"
-	const slot = "vm-0"
+	// One slot, maxConcurrent 1: model.SlotNames(1) is "1".
+	const slot = "1"
 
 	// A real bare repo standing in for the GitHub-hosted one, seeded
 	// with one commit on main -- githubsim.Sim.BranchExists shells out
@@ -183,7 +184,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, config{
-			dataDir: dataDir, slots: []string{slot}, pollInterval: 5 * time.Second,
+			dataDir: dataDir, maxConcurrent: 1, pollInterval: 5 * time.Second,
 			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: gemini.DefaultModel, maxAgentTurns: 15,
 			githubHost: githubHost, githubInsecureHTTP: true,
 
