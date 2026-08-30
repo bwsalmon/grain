@@ -208,14 +208,40 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	return detail, nil
 }
 
-// AttemptTranscript returns one attempt's own recorded agent transcript
-// -- the full narrative record GetTask's own Attempts list never carries
+// AttemptTranscript returns one attempt's own agent transcript -- the
+// full narrative record GetTask's own Attempts list never carries
 // (attemptFrom's own doc comment: TaskDetail stays cheap to fetch), for a
 // caller that wants to read one attempt's whole story rather than just
-// its outcome (bwsalmon/agents#446). "", nil means the attempt exists but
-// has nothing recorded yet -- still running, or run by a framework that
-// never populates one (agent.Result.Transcript's own doc comment).
+// its outcome (bwsalmon/agents#446). For an attempt still running,
+// Config.LiveTranscripts (when set) is tried first -- a still-running
+// attempt's own transcript-in-progress, straight from whatever file its
+// framework has been mirroring it into (bwsalmon/agents#467) -- falling
+// back to Store.RunTranscript, which "" (with no error) until the
+// attempt finishes, or forever for a framework that never populates one
+// (agent.Result.Transcript's own doc comment) or a deployment with no
+// LiveTranscripts configured at all.
 func (c *Client) AttemptTranscript(ctx context.Context, taskID string, number int) (string, error) {
+	runs, err := c.Store.Runs(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	var run *model.Run
+	for i := range runs {
+		if runs[i].Attempt == number {
+			run = &runs[i]
+			break
+		}
+	}
+	if run == nil {
+		return "", &NotFoundError{message: fmt.Sprintf("no attempt %d for task %s", number, taskID)}
+	}
+
+	if run.FinishedAt == nil && c.Config.LiveTranscripts != nil {
+		if text, ok, err := c.Config.LiveTranscripts.Tail(run.ID); err == nil && ok {
+			return text, nil
+		}
+	}
+
 	transcript, ok, err := c.Store.RunTranscript(ctx, taskID, number)
 	if err != nil {
 		return "", err

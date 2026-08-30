@@ -128,6 +128,29 @@ type Config struct {
 	// unavailable contract Secrets, Reboot and Upgrader above already
 	// give their own panes.
 	Logs map[string]LogSource
+	// LiveTranscripts is where Client.AttemptTranscript looks for a
+	// still-running attempt's own transcript-in-progress, before falling
+	// back to whatever Store.RunTranscript has recorded (nothing, until
+	// the attempt finishes) -- the seam a deployment with filesystem
+	// access to a live run's own transcript file plugs in
+	// (pkg/agent/claude.LiveTranscriptDir implements it), mirroring Logs'
+	// own nil-means-unavailable contract: nil here just means every
+	// attempt is read the way bwsalmon/agents#446 originally left it,
+	// nothing to show until it finishes (bwsalmon/agents#467).
+	LiveTranscripts LiveTranscript
+}
+
+// LiveTranscript is implemented by whatever can read back a still-running
+// run's own transcript-in-progress by run ID -- pkg/agent/claude's own
+// LiveTranscriptDir, structurally, the same decoupling LogSource already
+// gives pkg/systemlog: this package names the seam, a framework package
+// fills it, and neither imports the other.
+type LiveTranscript interface {
+	// Tail returns runID's transcript-in-progress. ok is false if
+	// nothing has been recorded for that run yet (or ever) -- a caller
+	// should fall back to the store the same way it would if
+	// LiveTranscripts were nil.
+	Tail(runID string) (text string, ok bool, err error)
 }
 
 // Upgrader is the subset of *upgrade.Upgrader the UI needs -- an
