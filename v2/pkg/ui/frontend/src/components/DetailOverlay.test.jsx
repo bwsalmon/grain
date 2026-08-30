@@ -295,6 +295,45 @@ describe("DetailOverlay", () => {
     }
   });
 
+  it("lists pull request events on the timeline with their own label and, when a pull request is linked, a link to it", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          pullRequest: "acme/widgets#42",
+          pullRequestEvents: [
+            { kind: "opened", at: "2026-08-28T12:00:00Z" },
+            { kind: "merged", at: "2026-08-28T13:00:00Z" },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    expect(within(list).getByText("PR opened")).toBeInTheDocument();
+    expect(within(list).getByText("PR merged")).toBeInTheDocument();
+    expect(within(list).getAllByRole("link", { name: "acme/widgets#42" })).toHaveLength(2);
+  });
+
+  it("labels a pull request closed without merging distinctly from a merged one", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequestEvents: [{ kind: "closed", at: "2026-08-28T12:00:00Z" }] }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("PR closed without merging")).toBeInTheDocument();
+  });
+
   it("interleaves transitions, attempts and comments by their own timestamps", () => {
     render(
       <DetailOverlay
@@ -306,6 +345,7 @@ describe("DetailOverlay", () => {
           ],
           attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "succeeded" }],
           comments: [{ author: "alice", authorKind: "human", body: "looks good", createdAt: "2026-08-28T13:00:00Z" }],
+          pullRequestEvents: [{ kind: "merged", at: "2026-08-28T14:00:00Z" }],
         }}
         tasks={[]}
         config={config}
@@ -315,8 +355,8 @@ describe("DetailOverlay", () => {
       />
     );
 
-    const titles = screen.getAllByText(/^Proposed$|^Attempt #1 · Succeeded$|^looks good$|^Closed$/).map((el) => el.textContent);
-    expect(titles).toEqual(["Proposed", "Attempt #1 · Succeeded", "looks good", "Closed"]);
+    const titles = screen.getAllByText(/^Proposed$|^Attempt #1 · Succeeded$|^looks good$|^PR merged$|^Closed$/).map((el) => el.textContent);
+    expect(titles).toEqual(["Proposed", "Attempt #1 · Succeeded", "looks good", "PR merged", "Closed"]);
   });
 
   it("only animates the running badge for the current transition, not a past one", () => {

@@ -15,11 +15,11 @@ import (
 
 // healthFrom computes a model.PrHealth from a fresh GitHub read, the pure
 // half of SyncPullRequests split out so it needs no store or client to
-// test. See model.PrHealth's own doc comment for why PrMerged never comes
-// back from here: detail.State folds a merged PR and a closed-without-
-// merging one into the same "closed" string, which github.
-// RESTClient.GetPullRequest's own doc comment already treats as one
-// outcome rather than two.
+// test. A closed PR reads PrMerged or PrClosed off detail.Merged --
+// GitHub's own field for the one distinction detail.State alone collapses
+// (github.PullRequestDetail.State's own doc comment) -- which is what
+// lets recordPullRequestEvents tell a task's timeline "PR merged" from
+// "PR closed unmerged" (bwsalmon/agents#493).
 //
 // Only a "failure" conclusion reads as PrFailing. GitHub's Checks API also
 // reports "cancelled", "timed_out", "action_required" and others
@@ -29,6 +29,9 @@ import (
 // this package has no business blocking.
 func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, checksKnown bool) model.PrHealth {
 	if detail.State == "closed" {
+		if detail.Merged {
+			return model.PrMerged
+		}
 		return model.PrClosed
 	}
 	if detail.Mergeable != nil && !*detail.Mergeable {
@@ -319,15 +322,64 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		}
 	}
 
-	if health != model.PrClosed && health != model.PrMerged {
-		return nil
-	}
-
 	// Closing out is one write now. It used to be two -- close the task's
 	// GitHub issue, then record the closure -- with the issue closed first
 	// and the store told second, so a crash in between left a closed issue
-	// that grain still believed was open.
-	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.ClosedAt = &now })
+	// that grain still believed was open. recordPullRequestEvents widens
+	// that one write rather than adding a second: PrOpenedAt can also need
+	// recording on a cycle that closes nothing (an open PR seen for the
+	// first time), and PrMergedAt/PrClosedAt only ever get set alongside
+	// ClosedAt, so there is never a cycle needing both writes at once.
+	return recordPullRequestEvents(ctx, store, task.ID, e.obs, detail, health, now)
+}
+
+// recordPullRequestEvents stamps whichever of a task's own pull-request
+// timeline moments (bwsalmon/agents#493: "PR opened", "PR merged", "PR
+// closed unmerged") this cycle can newly answer, and closes the task out
+// once the pull request itself is done.
+//
+// PrOpenedAt, off detail's own CreatedAt, is written the first cycle this
+// runs for a given task -- the moment a human (or EnsurePullRequest)
+// actually opened the PR, which can predate this task completing by
+// however long a found (rather than freshly opened) PR had already been
+// open before grain started tracking it. Written once: unlike Health, an
+// opening moment never changes, so re-observing it every cycle a PR
+// happens to stay open would be a write with nothing new to say.
+//
+// PrMergedAt or PrClosedAt -- mutually exclusive, per Observation's own
+// doc comment -- are set the one cycle health first reads PrMerged or
+// PrClosed, alongside ClosedAt: once written, this task drops out of
+// OpenPullRequestLinks (task_state stops reading 'completed' once
+// closed_at is set) and syncEntry never runs for it again, so there is no
+// second cycle for either field to be overwritten on.
+func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID string,
+	obs *model.Observation, detail github.PullRequestDetail, health model.PrHealth, now time.Time) error {
+
+	needsOpenedAt := (obs == nil || obs.PrOpenedAt == nil) && !detail.CreatedAt.IsZero()
+	closing := health == model.PrClosed || health == model.PrMerged
+	if !needsOpenedAt && !closing {
+		return nil
+	}
+
+	return observeField(ctx, store, taskID, now, func(o *model.Observation) {
+		if needsOpenedAt {
+			openedAt := detail.CreatedAt
+			o.PrOpenedAt = &openedAt
+		}
+		if !closing {
+			return
+		}
+		o.ClosedAt = &now
+		if health != model.PrMerged {
+			o.PrClosedAt = &now
+			return
+		}
+		mergedAt := now
+		if detail.MergedAt != nil {
+			mergedAt = *detail.MergedAt
+		}
+		o.PrMergedAt = &mergedAt
+	})
 }
 
 // advanceMergeQueueHead is what makes task -- the head of its repo's

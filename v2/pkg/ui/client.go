@@ -267,7 +267,29 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	for _, tr := range transitions {
 		detail.Transitions = append(detail.Transitions, transitionFrom(tr))
 	}
+	detail.PullRequestEvents = pullRequestEventsFrom(obs)
 	return detail, nil
+}
+
+// pullRequestEventsFrom projects Observation's own PrOpenedAt/PrMergedAt/
+// PrClosedAt into TaskDetail's wire shape, oldest first. obs is nil for a
+// task orchestrator.SyncPullRequests has never observed anything about,
+// same as every other obs field this package reads.
+func pullRequestEventsFrom(obs *model.Observation) []PullRequestEvent {
+	if obs == nil {
+		return nil
+	}
+	var out []PullRequestEvent
+	if obs.PrOpenedAt != nil {
+		out = append(out, PullRequestEvent{Kind: "opened", At: *obs.PrOpenedAt})
+	}
+	if obs.PrMergedAt != nil {
+		out = append(out, PullRequestEvent{Kind: "merged", At: *obs.PrMergedAt})
+	}
+	if obs.PrClosedAt != nil {
+		out = append(out, PullRequestEvent{Kind: "closed", At: *obs.PrClosedAt})
+	}
+	return out
 }
 
 // AttemptTranscript returns one attempt's own agent transcript -- the

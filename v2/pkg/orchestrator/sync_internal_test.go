@@ -24,6 +24,13 @@ func TestHealthFromClosedStateReadsClosedRegardlessOfChecks(t *testing.T) {
 	}
 }
 
+func TestHealthFromClosedAndMergedReadsMerged(t *testing.T) {
+	got := healthFrom(github.PullRequestDetail{State: "closed", Merged: true}, nil, true)
+	if got != model.PrMerged {
+		t.Fatalf("got %q, want merged", got)
+	}
+}
+
 func TestHealthFromUnknownMergeabilityWithNoFailingChecksIsUnknown(t *testing.T) {
 	got := healthFrom(github.PullRequestDetail{State: "open"}, nil, true)
 	if got != model.PrUnknown {
