@@ -161,6 +161,31 @@ describe("App", () => {
     expect(screen.queryByText(/Repo: acme\/other/)).not.toBeInTheDocument();
   });
 
+  it("folds a repo's tasks open from the repo view and files a new task against it", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+    await screen.findByText("acme/other");
+
+    await user.click(screen.getByRole("button", { name: "Show tasks for acme/other" }));
+    expect(await screen.findByText("Add feature")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Hide tasks for acme/other" }));
+    expect(screen.queryByText("Add feature")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "New task under acme/other" }));
+    expect(screen.getByLabelText(/Target repo/)).toHaveValue("acme/other");
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    await user.click(screen.getByRole("button", { name: "Show tasks for acme/other" }));
+    expect(await screen.findByText("Ship it")).toBeInTheDocument();
+  });
+
   it("opens a repo's release pane from the repo view and back out of it", async () => {
     setupApi();
     const user = userEvent.setup();

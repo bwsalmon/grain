@@ -213,6 +213,17 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var result *agent.Result
 	var runErr error
 	outcome, detail := "failed", ""
+	// transcriptPath names a file cfg.TranscriptDir's own doc comment says
+	// a Framework may mirror this run's transcript-in-progress into live;
+	// "" (cfg.TranscriptDir unset) leaves agent.RunConfig.TranscriptPath
+	// empty, which every Framework already treats as "no caller wants
+	// this". Computed before the switch below because the cleanup after
+	// it (once the store already has this run's own final story) needs it
+	// too, whether or not framework.Run ever actually ran.
+	var transcriptPath string
+	if cfg.TranscriptDir != "" {
+		transcriptPath = filepath.Join(cfg.TranscriptDir, d.RunID)
+	}
 	switch {
 	case prepErr != nil:
 		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, prepErr)
@@ -233,7 +244,9 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
 		}()
 
-		result, runErr = framework.Run(runCtx, agent.RunConfig{Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns})
+		result, runErr = framework.Run(runCtx, agent.RunConfig{
+			Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
+		})
 		cancelRun(nil)
 		<-watcherDone
 
@@ -264,6 +277,29 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	}
 
 	finishErr := store.FinishRun(ctx, d.RunID, at, outcome, detail)
+	if finishErr == nil && result != nil && result.Transcript != "" {
+		// A separate write, after FinishRun's own -- see
+		// Store.SetRunTranscript's own doc comment on why (bwsalmon/
+		// agents#446). Skipped once finishErr is already non-nil: a run
+		// whose own outcome failed to record is not worth a second write
+		// attempt on top of it.
+		finishErr = store.SetRunTranscript(ctx, d.RunID, result.Transcript)
+	}
+	// Only now, with the store already carrying whatever final story this
+	// run has to tell (FinishRun and SetRunTranscript, just above), does
+	// the live file cfg.TranscriptDir named stop mattering: a caller
+	// still polling AttemptTranscript sees FinishedAt set and reads the
+	// store from here on, never this file again, so removing it earlier
+	// (before either write above landed) would have opened a window where
+	// a still-"running" attempt suddenly read back as empty. Best-effort:
+	// a Framework never given a TranscriptPath (or one that errored before
+	// opening it) leaves nothing here to remove, and os.Remove's own
+	// error for that is ignored the same way any other remove failure
+	// would be -- there is nothing left to do differently about a stray
+	// file at this point beyond leaving it for an operator to notice.
+	if transcriptPath != "" {
+		os.Remove(transcriptPath)
+	}
 	revokeAll(ctx, store, cc, materialized)
 	if finishErr != nil {
 		return nil, fmt.Errorf("orchestrator: finishing run %s: %w", d.RunID, finishErr)

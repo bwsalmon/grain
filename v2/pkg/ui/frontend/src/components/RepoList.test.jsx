@@ -7,12 +7,28 @@ import api from "../api.js";
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
 const tasks = [
-  { id: "1", repo: "acme/widgets", state: "queued", blocked: false },
-  { id: "2", repo: "acme/widgets", state: "running", blocked: false },
-  { id: "3", repo: "acme/widgets", state: "queued", blocked: true },
-  { id: "4", repo: "acme/gadgets", state: "completed", blocked: false },
-  { id: "5", repo: "", state: "proposed", blocked: false },
+  { id: "1", title: "Fix the widget", repo: "acme/widgets", state: "queued", blocked: false, capabilities: [] },
+  { id: "2", title: "Ship the widget", repo: "acme/widgets", state: "running", blocked: false, capabilities: [] },
+  { id: "3", title: "Recall the widget", repo: "acme/widgets", state: "queued", blocked: true, blockedBy: ["1"], capabilities: [] },
+  { id: "4", title: "Ship the gadget", repo: "acme/gadgets", state: "completed", blocked: false, capabilities: [] },
+  { id: "5", title: "Untargeted proposal", repo: "", state: "proposed", blocked: false, capabilities: [] },
 ];
+
+function renderList(overrides = {}) {
+  const props = {
+    tasks,
+    config: null,
+    onOpenRepo: vi.fn(),
+    onOpenReleases: vi.fn(),
+    onOpenTask: vi.fn(),
+    onNewTask: vi.fn(),
+    onRefreshConfig: vi.fn(),
+    showError: vi.fn(),
+    ...overrides,
+  };
+  render(<RepoList {...props} />);
+  return props;
+}
 
 describe("RepoList", () => {
   afterEach(() => {
@@ -20,7 +36,7 @@ describe("RepoList", () => {
   });
 
   it("lists one row per repo with per-state counts and a total", () => {
-    render(<RepoList tasks={tasks} config={null} onOpenRepo={() => {}} onOpenReleases={() => {}} />);
+    renderList();
 
     expect(screen.getByText("acme/widgets")).toBeInTheDocument();
     expect(screen.getByText("acme/gadgets")).toBeInTheDocument();
@@ -32,13 +48,13 @@ describe("RepoList", () => {
   });
 
   it("omits tasks with no target repo", () => {
-    render(<RepoList tasks={tasks} config={null} onOpenRepo={() => {}} onOpenReleases={() => {}} />);
+    renderList();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
   });
 
   it("also lists a targetRepos entry that has no tasks yet", () => {
     const config = { targetRepos: ["acme/widgets", "acme/newrepo"] };
-    render(<RepoList tasks={tasks} config={config} onOpenRepo={() => {}} onOpenReleases={() => {}} />);
+    renderList({ config });
 
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(screen.getByText("acme/newrepo")).toBeInTheDocument();
@@ -48,7 +64,7 @@ describe("RepoList", () => {
   it("calls onOpenRepo when a row is clicked", async () => {
     const onOpenRepo = vi.fn();
     const user = userEvent.setup();
-    render(<RepoList tasks={tasks} config={null} onOpenRepo={onOpenRepo} onOpenReleases={() => {}} />);
+    renderList({ onOpenRepo });
 
     await user.click(screen.getByText("acme/gadgets"));
 
@@ -59,7 +75,7 @@ describe("RepoList", () => {
     const onOpenRepo = vi.fn();
     const onOpenReleases = vi.fn();
     const user = userEvent.setup();
-    render(<RepoList tasks={tasks} config={null} onOpenRepo={onOpenRepo} onOpenReleases={onOpenReleases} />);
+    renderList({ onOpenRepo, onOpenReleases });
 
     const row = screen.getByText("acme/gadgets").closest("li");
     await user.click(within(row).getByRole("button", { name: "Releases" }));
@@ -69,7 +85,7 @@ describe("RepoList", () => {
   });
 
   it("shows an empty message when there are no known repos", () => {
-    render(<RepoList tasks={[]} config={null} onOpenRepo={() => {}} onOpenReleases={() => {}} />);
+    renderList({ tasks: [] });
     expect(screen.getByText("No repos yet -- add one above, or file a task with a target repo.")).toBeInTheDocument();
   });
 
@@ -77,7 +93,7 @@ describe("RepoList", () => {
     api.mockResolvedValueOnce({});
     const onRefreshConfig = vi.fn();
     const user = userEvent.setup();
-    render(<RepoList tasks={[]} config={null} onOpenRepo={() => {}} onOpenReleases={() => {}} onRefreshConfig={onRefreshConfig} showError={() => {}} />);
+    renderList({ tasks: [], onRefreshConfig });
 
     await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add repo" }));
@@ -91,7 +107,7 @@ describe("RepoList", () => {
     const onRefreshConfig = vi.fn();
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<RepoList tasks={[]} config={null} onOpenRepo={() => {}} onOpenReleases={() => {}} onRefreshConfig={onRefreshConfig} showError={showError} />);
+    renderList({ tasks: [], onRefreshConfig, showError });
 
     await user.type(screen.getByPlaceholderText("owner/name"), "not-a-repo");
     await user.click(screen.getByRole("button", { name: "Add repo" }));
@@ -102,7 +118,7 @@ describe("RepoList", () => {
 
   it("only offers Remove on a row that is in config.targetRepos", () => {
     const config = { targetRepos: ["acme/widgets"] };
-    render(<RepoList tasks={tasks} config={config} onOpenRepo={() => {}} onOpenReleases={() => {}} />);
+    renderList({ config });
 
     const widgetsRow = screen.getByText("acme/widgets").closest("li");
     const gadgetsRow = screen.getByText("acme/gadgets").closest("li");
@@ -117,7 +133,7 @@ describe("RepoList", () => {
     const onRefreshConfig = vi.fn();
     const user = userEvent.setup();
     const config = { targetRepos: ["acme/widgets"] };
-    render(<RepoList tasks={tasks} config={config} onOpenRepo={onOpenRepo} onOpenReleases={() => {}} onRefreshConfig={onRefreshConfig} showError={() => {}} />);
+    renderList({ config, onOpenRepo, onRefreshConfig });
 
     const row = screen.getByText("acme/widgets").closest("li");
     await user.click(within(row).getByRole("button", { name: "Remove" }));
@@ -133,7 +149,7 @@ describe("RepoList", () => {
     const onRefreshConfig = vi.fn();
     const user = userEvent.setup();
     const config = { targetRepos: ["acme/widgets"] };
-    render(<RepoList tasks={tasks} config={config} onOpenRepo={() => {}} onOpenReleases={() => {}} onRefreshConfig={onRefreshConfig} showError={() => {}} />);
+    renderList({ config, onRefreshConfig });
 
     const row = screen.getByText("acme/widgets").closest("li");
     await user.click(within(row).getByRole("button", { name: "Remove" }));
@@ -141,5 +157,56 @@ describe("RepoList", () => {
     expect(api).not.toHaveBeenCalled();
     expect(onRefreshConfig).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it("folds a repo's tasks out of view until the chevron is clicked, without opening the repo", async () => {
+    const onOpenRepo = vi.fn();
+    const user = userEvent.setup();
+    renderList({ onOpenRepo });
+
+    expect(screen.queryByText("Fix the widget")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show tasks for acme/widgets" }));
+
+    expect(screen.getByText("Fix the widget")).toBeInTheDocument();
+    expect(screen.getByText("Ship the widget")).toBeInTheDocument();
+    expect(screen.getByText("Recall the widget")).toBeInTheDocument();
+    expect(screen.queryByText("Ship the gadget")).not.toBeInTheDocument();
+    expect(onOpenRepo).not.toHaveBeenCalled();
+  });
+
+  it("hides a repo's tasks again when its chevron is toggled a second time", async () => {
+    const user = userEvent.setup();
+    renderList();
+
+    const toggle = () => screen.getByRole("button", { name: /tasks for acme\/widgets/ });
+    await user.click(toggle());
+    expect(screen.getByText("Fix the widget")).toBeInTheDocument();
+
+    await user.click(toggle());
+    expect(screen.queryByText("Fix the widget")).not.toBeInTheDocument();
+  });
+
+  it("opens a task from a folded-out sublist", async () => {
+    const onOpenTask = vi.fn();
+    const user = userEvent.setup();
+    renderList({ onOpenTask });
+
+    await user.click(screen.getByRole("button", { name: "Show tasks for acme/widgets" }));
+    await user.click(screen.getByText("Fix the widget"));
+
+    expect(onOpenTask).toHaveBeenCalledWith("1");
+  });
+
+  it("calls onNewTask with the repo, not onOpenRepo, when a row's + button is clicked", async () => {
+    const onOpenRepo = vi.fn();
+    const onNewTask = vi.fn();
+    const user = userEvent.setup();
+    renderList({ onOpenRepo, onNewTask });
+
+    await user.click(screen.getByRole("button", { name: "New task under acme/gadgets" }));
+
+    expect(onNewTask).toHaveBeenCalledWith("acme/gadgets");
+    expect(onOpenRepo).not.toHaveBeenCalled();
   });
 });

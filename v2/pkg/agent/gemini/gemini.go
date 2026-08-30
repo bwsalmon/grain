@@ -12,6 +12,7 @@ package gemini
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -121,6 +122,13 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 
 	history := []*genai.Content{genai.NewContentFromText(cfg.Prompt, genai.RoleUser)}
 	result := &agent.Result{}
+	var transcript strings.Builder
+	// Result.Transcript is finalized from whatever accumulated no matter
+	// which of Run's several return points is taken -- an error partway
+	// through must not throw away the narrative of what already happened,
+	// the same reasoning this func's own doc comment gives for returning
+	// a non-nil result alongside an error at all.
+	defer func() { result.Transcript = strings.TrimSpace(transcript.String()) }()
 
 	for turn := 0; turn < maxTurns; turn++ {
 		resp, err := f.generator.GenerateContent(ctx, f.model, history, &genai.GenerateContentConfig{Tools: tools})
@@ -139,9 +147,20 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 			if part.FunctionCall != nil {
 				funcCalls = append(funcCalls, part.FunctionCall)
 			}
-			if part.Text != "" {
-				text.WriteString(part.Text)
+			if part.Text == "" {
+				continue
 			}
+			// A thought part explains what the model is about to do
+			// rather than answering the prompt -- it belongs in the
+			// transcript alongside the tool calls it precedes, not in
+			// FinalText, the same split claude/transcript.go draws
+			// between a "thinking" block and a "text" one.
+			if part.Thought {
+				fmt.Fprintf(&transcript, "%s\n\n", part.Text)
+				continue
+			}
+			text.WriteString(part.Text)
+			fmt.Fprintf(&transcript, "%s\n\n", part.Text)
 		}
 		if len(funcCalls) == 0 {
 			result.FinalText = text.String()
@@ -161,6 +180,12 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 			result.ToolCalls = append(result.ToolCalls, agent.ToolCall{
 				Name: fc.Name, Arguments: fc.Args, Text: toolText, IsError: isError,
 			})
+			fmt.Fprintf(&transcript, "> %s(%s)\n", fc.Name, inputSummary(fc.Args))
+			if isError {
+				fmt.Fprintf(&transcript, "! %s\n\n", toolText)
+			} else {
+				fmt.Fprintf(&transcript, "%s\n\n", toolText)
+			}
 			responseParts = append(responseParts, genai.NewPartFromFunctionResponse(fc.Name, map[string]any{
 				"result": toolText, "isError": isError,
 			}))
@@ -169,4 +194,16 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	}
 
 	return result, fmt.Errorf("gemini: exceeded max turns (%d) without a final answer", maxTurns)
+}
+
+// inputSummary renders a function call's own args as compact JSON for a
+// transcript line -- best-effort, matching claude/transcript.go's own
+// helper of the same name and purpose: a malformed value here should cost
+// the transcript one unreadable line, never the whole run.
+func inputSummary(args map[string]any) string {
+	data, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Sprintf("%v", args)
+	}
+	return string(data)
 }

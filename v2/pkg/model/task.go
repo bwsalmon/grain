@@ -418,6 +418,13 @@ type Run struct {
 	// task) can see why a run failed from `grain get` without reading
 	// graind's own stdout, which per README's security design is not
 	// necessarily somewhere they can reach at all.
+	//
+	// Its own transcript -- the agent framework's full narrative record of
+	// the run, agent.Result.Transcript -- is not a field here: unlike
+	// Detail, nothing needs it alongside a whole Run, only on its own
+	// (bwsalmon/agents#446's "show attempt agent logs" pane), so
+	// Store.SetRunTranscript/RunTranscript read and write it directly by
+	// task ID and attempt number instead.
 	Detail string
 	Leases []Lease
 }

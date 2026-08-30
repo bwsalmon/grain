@@ -26,8 +26,14 @@ type rawMessage struct {
 }
 
 type rawBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
+	Type string `json:"type"`
+	Text string `json:"text"`
+	// Thinking carries a "thinking"-type block's own text -- Claude's
+	// extended-thinking output, present only when that feature is on, and
+	// otherwise the one part of a real transcript neither FinalText nor
+	// ToolCalls ever captured before bwsalmon/agents#446 gave it
+	// somewhere to go (agent.Result.Transcript).
+	Thinking  string          `json:"thinking"`
 	Name      string          `json:"name"`
 	Input     map[string]any  `json:"input"`
 	ID        string          `json:"id"`
@@ -47,10 +53,51 @@ type rawBlock struct {
 // Code's event shape grows new fields and subtypes across versions, and
 // this parser seeing one it doesn't know about should not make a whole run
 // unreadable.
+//
+// The same pass also builds Result.Transcript: every "thinking" and
+// "text" block's own text, and a line for each tool call and what it got
+// back, in the order they appeared -- the human-readable narrative
+// FinalText and ToolCalls alone do not give a reader (bwsalmon/agents#446).
 func parseTranscript(stdout string) (*agent.Result, error) {
-	result := &agent.Result{}
-	pending := map[string]int{}
-	sawResult := false
+	p := parseEvents(stdout)
+	if p.resultErr != nil {
+		return nil, p.resultErr
+	}
+	if !p.sawResult {
+		return nil, fmt.Errorf("claude: no result event found in output")
+	}
+	p.result.Transcript = strings.TrimSpace(p.transcript.String())
+	return &p.result, nil
+}
+
+// PartialTranscript renders whatever of a still-in-progress
+// --output-format stream-json capture is on disk so far into the same
+// human-readable narrative parseTranscript builds once a run finishes --
+// what LiveTranscriptDir reads back for a run with no FinishedAt yet
+// (bwsalmon/agents#467). Unlike parseTranscript it never errors: a
+// missing (or not-yet-written) terminal "result" event just means the run
+// is still going, not that anything is wrong, and a truncated final line
+// -- reading a file the whole time claude is still appending to it can
+// always catch mid-write -- is handled the same way parseTranscript
+// already tolerates any other malformed line, by skipping it.
+func PartialTranscript(stdout string) string {
+	return strings.TrimSpace(parseEvents(stdout).transcript.String())
+}
+
+// parsedEvents is one line-by-line pass over a stream-json capture,
+// shared by parseTranscript (the whole thing, once a run has finished)
+// and PartialTranscript (however much exists so far) so the two can never
+// build the transcript text itself two different ways.
+type parsedEvents struct {
+	result     agent.Result
+	pending    map[string]int
+	sawResult  bool
+	resultErr  error
+	transcript strings.Builder
+}
+
+func parseEvents(stdout string) *parsedEvents {
+	p := &parsedEvents{pending: map[string]int{}}
 
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -69,29 +116,54 @@ func parseTranscript(stdout string) (*agent.Result, error) {
 			}
 			for _, b := range parseBlocks(ev.Message.Content) {
 				switch b.Type {
+				case "thinking":
+					if b.Thinking != "" {
+						fmt.Fprintf(&p.transcript, "%s\n\n", b.Thinking)
+					}
+				case "text":
+					if b.Text != "" {
+						fmt.Fprintf(&p.transcript, "%s\n\n", b.Text)
+					}
 				case "tool_use":
-					result.ToolCalls = append(result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
-					pending[b.ID] = len(result.ToolCalls) - 1
+					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
+					p.pending[b.ID] = len(p.result.ToolCalls) - 1
+					fmt.Fprintf(&p.transcript, "> %s(%s)\n", b.Name, inputSummary(b.Input))
 				case "tool_result":
-					if idx, ok := pending[b.ToolUseID]; ok {
-						result.ToolCalls[idx].Text = toolResultText(b.Content)
-						result.ToolCalls[idx].IsError = b.IsError
+					if idx, ok := p.pending[b.ToolUseID]; ok {
+						text := toolResultText(b.Content)
+						p.result.ToolCalls[idx].Text = text
+						p.result.ToolCalls[idx].IsError = b.IsError
+						if b.IsError {
+							fmt.Fprintf(&p.transcript, "! %s\n\n", text)
+						} else {
+							fmt.Fprintf(&p.transcript, "%s\n\n", text)
+						}
 					}
 				}
 			}
 		case "result":
-			sawResult = true
+			p.sawResult = true
 			if ev.IsError {
-				return nil, fmt.Errorf("claude: run ended in error (subtype=%s): %s", ev.Subtype, ev.Result)
+				p.resultErr = fmt.Errorf("claude: run ended in error (subtype=%s): %s", ev.Subtype, ev.Result)
+				continue
 			}
-			result.FinalText = ev.Result
+			p.result.FinalText = ev.Result
 		}
 	}
+	return p
+}
 
-	if !sawResult {
-		return nil, fmt.Errorf("claude: no result event found in output")
+// inputSummary renders a tool_use block's own input as compact JSON for a
+// transcript line -- best-effort, since a malformed value here should
+// cost the transcript one unreadable line, never the whole parse (see
+// parseTranscript's own doc comment on the same tolerance for the stream
+// itself).
+func inputSummary(input map[string]any) string {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Sprintf("%v", input)
 	}
-	return result, nil
+	return string(data)
 }
 
 // parseBlocks reads a message's content field, which is either a plain

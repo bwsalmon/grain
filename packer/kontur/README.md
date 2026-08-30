@@ -44,7 +44,7 @@ service a NoCloud datasource would ride on):
   the build's own temporary access used (see "How the build reaches the VM
   at all" below). This is the literal thing `pkg/kontur`'s doc comment and
   `v2/README.md` both say a kontur guest image already has to satisfy on
-  its own -- there is nothing downstream of `kontur vm create` positioned
+  its own -- there is nothing downstream of `konturctl vm create` positioned
   to inject it the way `LibvirtAdapter.create()` injects a sandbox's
   authorized key today.
 - **cloud-init is disabled** (`systemctl disable cloud-init ...` plus
@@ -71,6 +71,38 @@ Claude Code itself stays off the guest, for the same reason
 VM's SSH-exposed sandbox tools from the controller/orchestrator side, not
 on the guest, so there is nothing here worth a credential leak protecting
 in the first place.
+
+## Running a custom setup script
+
+To customize the image beyond `provision.sh`'s own fixed package list --
+installing extra packages, dropping in config files, enabling services,
+etc -- without forking this directory, set `SANDBOX_SETUP_SCRIPT` to a
+script's contents (not a path) before running `build.sh`:
+
+```sh
+export SANDBOX_SETUP_SCRIPT="$(cat my-setup.sh)"
+./build.sh
+```
+
+`provision.sh` runs it, as root, once the built-in provisioning above has
+finished but before the operator-key/cloud-init finalization below --
+see that script's own comment on the section for exactly where and why.
+This is bwsalmon/kontur's own `GUEST_SETUP_SCRIPT` build arg's idiom
+(`third_party/kontur/deploy/guest-image/README.md`, "Running a custom
+setup script"), applied to this directory's own build instead: same
+"an env var holds the script's contents, not a path" shape, so it needs
+no extra `packer build`/`docker build` context-wrangling either way. The
+mechanics differ where the two builds do -- that one's `chroot`s into an
+as-yet-unbooted rootfs (no `/proc`, `/sys`, or running service manager);
+this one runs over SSH against a live booted VM, the same as every other
+step `provision.sh` already takes, so none of that chroot's caveats apply
+here. Leave `SANDBOX_SETUP_SCRIPT` unset (the default) to build exactly
+what `provision.sh` already bakes in on its own.
+
+Like everything else in this image, the rule from "What's in the image,
+and why" above still applies: no secret belongs in a script baked in at
+build time, since it ends up in the shipped qcow2 for anyone with that
+image to read back out.
 
 ## How the image gets built and published
 
@@ -120,32 +152,41 @@ secret (it's a public key), but is still left to the environment rather
 than a repo file, so it's the deployment's own operator key and not one
 hand-picked here.
 
-**What isn't settled here**: the exact flag `kontur vm create` takes to
-point at a built image. `orchestrator.KonturConfig.CreateArgs`
-(bwsalmon/agents#262) exists as the passthrough a deployment would use, and
-`grain daemon` now constructs a real `KonturSandboxes`/`KonturConfig` from it
-(bwsalmon/agents#274) via `-kontur-vm-name-prefix` and a repeatable
-`-kontur-create-arg` flag -- e.g.
-`-kontur-create-arg=-image -kontur-create-arg=gs://.../kontur-guest-....qcow2`
--- rather than this repo guessing at and hard-coding a flag name. That
-name and shape are still owned entirely by bwsalmon/kontur's own CLI, a
-repo this one has no build or vendor relationship with in the Go-module
-sense (`pkg/kontur`'s own doc comment: "pulling in kontur's module graph
-... would be a strange trade") -- though as of bwsalmon/agents#351 its
-source is readable locally, at `../../third_party/kontur/`
-(`internal/cli/vm.go` for `create`'s actual flags), rather than only
-reachable from a sandbox that happens to hold proxy access to the private
-repo the way bwsalmon/agents#267 found it didn't. That vendored copy is a
-point-in-time snapshot with no automation keeping it current (see its own
-`VENDORED.md`), so a deployment wiring `-kontur-create-arg` for the first
-time should still treat bwsalmon/kontur's own `kontur vm create -h` as
-authoritative if the two ever disagree, and pass whichever of this
-directory's two outputs that flag expects -- a
-`gs://` URL if kontur fetches the image itself, or a path on the kontur
-host's own disk (this repo's `build.sh` always leaves the built qcow2 at
-`output/<image-name>-<version>/<image-name>.qcow2` locally, in addition to
-publishing it, for exactly that case) -- since nothing here can tell which
-of the two without seeing that flag's own documented semantics.
+**The flag `konturctl vm create` takes to point at a built image**, now
+resolved by reading bwsalmon/kontur's own source directly (as of
+bwsalmon/agents#351 it is readable locally at `../../third_party/kontur/`,
+rather than only reachable from a sandbox that happens to hold proxy
+access to the private repo the way bwsalmon/agents#267 found it didn't):
+per `internal/cli/vm.go`'s `registerVMFlags` and
+`internal/dockervm/docker.go`'s `Create`, `konturctl` never fetches an
+image itself -- `-disk` (`internal/cli/vm.go`: "path to the VM's disk
+image, as seen inside the kontur container, e.g. `/images/disk.img`") is
+a path inside a host directory `-images-hostpath` (default
+`/var/lib/vm-images`, `internal/staticpod/spec.go`'s own default) mounts
+read-only at `/images` in the VM's container. So a deployment publishing
+this directory's `build.sh` output has to land the built qcow2 on the
+kontur host's own local disk under that directory (`gsutil cp`/`gcloud
+storage cp` from wherever `KONTUR_IMAGE_BUCKET` published it, e.g. via a
+startup script or provisioning step, since nothing downstream of
+`konturctl vm create` fetches it there on its own) and then pass:
+
+```sh
+konturctl vm create <name> -backend docker \
+  -images-hostpath /var/lib/vm-images \
+  -disk /images/<same qcow2 filename as under -images-hostpath>
+```
+
+`orchestrator.KonturConfig.CreateArgs` (bwsalmon/agents#262) is the
+passthrough a deployment sets this through -- `grain daemon` constructs a
+real `KonturSandboxes`/`KonturConfig` from it (bwsalmon/agents#274) via
+`-kontur-vm-name-prefix` and a repeatable `-kontur-create-arg` flag, e.g.
+`-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images
+-kontur-create-arg=-disk -kontur-create-arg=/images/kontur-guest-....qcow2`.
+That vendored copy is a point-in-time snapshot with no automation keeping
+it current (see its own `VENDORED.md`), so a deployment wiring
+`-kontur-create-arg` for the first time should still treat bwsalmon/
+kontur's own `konturctl vm create -h` as authoritative if the two ever
+disagree.
 
 ## One image, uniform
 

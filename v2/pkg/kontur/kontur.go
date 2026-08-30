@@ -1,8 +1,8 @@
 // Package kontur resolves how to reach a sandbox VM that bwsalmon/kontur
 // is running under a static kubelet (see that repo's top-level README and
 // deploy/static-kubelet/README.md) -- the two pieces of information
-// mcp.SSHRunner needs that neither `kontur vm list` nor `kontur vm create`
-// prints on its own:
+// mcp.SSHRunner needs that neither `konturctl vm list` nor `konturctl vm
+// create` prints on its own:
 //
 //   - The external port netshim forwards to the VM's guest, which kontur
 //     itself persists per VM. Port reads it straight out of kontur's own
@@ -22,12 +22,18 @@
 //     equivalent for inspecting pods/containers").
 //
 // Create and Delete, unlike Port and PodIP, do not read kontur's own state
-// -- they just run the `kontur` binary itself ("kontur vm create"/"kontur
-// vm delete"), the same command an operator would type by hand. That is a
-// different, much shallower kind of dependency than importing
-// bwsalmon/kontur as a Go module would be (see above): this package still
-// never needs to agree with kontur's own code on any Go type, only on the
-// two subcommand names and the state file Port and PodIP already read.
+// -- they just run the `konturctl` binary itself ("konturctl vm create"/
+// "konturctl vm delete"), the same command an operator would type by
+// hand -- never the `kontur` binary itself, which is a different program
+// with a different job: the container-facing entrypoint that boots a
+// single VM or sets up netshim networking (bwsalmon/kontur's own
+// cmd/kontur/main.go doc comment: "distinct from cmd/konturctl, which is
+// the operator-facing CLI"), not the one an operator's own PATH ever runs
+// "vm create"/"vm delete" against. That is a different, much shallower
+// kind of dependency than importing bwsalmon/kontur as a Go module would
+// be (see above): this package still never needs to agree with kontur's
+// own code on any Go type, only on the two subcommand names and the state
+// file Port and PodIP already read.
 package kontur
 
 import (
@@ -42,8 +48,8 @@ import (
 )
 
 // DefaultStateDir matches bwsalmon/kontur's own default: internal/cli's
-// defaultStateDir, which every "kontur vm" subcommand's "-state-dir" flag
-// defaults to.
+// defaultStateDir, which every "konturctl vm" subcommand's "-state-dir"
+// flag defaults to.
 const DefaultStateDir = "/var/lib/kontur/vms"
 
 // DefaultRuntimeEndpoint matches the containerd CRI socket
@@ -52,7 +58,7 @@ const DefaultStateDir = "/var/lib/kontur/vms"
 // BackendStaticPod (below); the docker backend has no CRI to ask.
 const DefaultRuntimeEndpoint = "unix:///run/containerd/containerd.sock"
 
-// BackendDocker is the value `kontur vm create -backend` takes to run a VM
+// BackendDocker is the value `konturctl vm create -backend` takes to run a VM
 // directly against a local docker daemon instead of writing a static pod
 // manifest for a standalone kubelet to pick up -- bwsalmon/kontur's own
 // internal/staticpod.BackendDocker, duplicated here for the same "read the
@@ -79,7 +85,7 @@ type vmState struct {
 	Port int `json:"port"`
 }
 
-// Port reads the external port kontur assigned VM name at "kontur vm
+// Port reads the external port kontur assigned VM name at "konturctl vm
 // create"/"update" time, out of stateDir (see DefaultStateDir). This is
 // the port SSHRunner should connect to -- guestPort (also in the state
 // file) is only meaningful inside the VM's own network namespace.
@@ -178,8 +184,19 @@ func dockerNetnsContainerName(vmName string) string {
 // network) and falls back to the first network under
 // NetworkSettings.Networks (where IPAddress is always empty instead) --
 // covering a container attached to a named network, e.g. via `docker run
-// --network`.
-const dockerIPFormat = `{{if .NetworkSettings.IPAddress}}{{.NetworkSettings.IPAddress}}{{else}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{end}}`
+// --network`. The top-level lookup goes through "index" rather than a
+// plain ".IPAddress", confirmed necessary by hand against a real docker
+// daemon (29.7.2): docker inspect's own template execution runs against
+// the JSON response decoded as a bare map[string]interface{}, not a fixed
+// Go struct, and that version omits the "IPAddress" key from
+// NetworkSettings entirely (not just empty-strings it) once a container
+// has no legacy single-network attachment -- and unlike a struct field, a
+// plain ".Field" access on a map with no such key is a template execution
+// error ("map has no entry for key \"IPAddress\""), not a zero value.
+// "index" sidesteps that: indexing a map for an absent key yields the
+// untyped nil <no value> instead of erroring, which the "if" below
+// already treats as falsy.
+const dockerIPFormat = `{{$ip := index .NetworkSettings "IPAddress"}}{{if $ip}}{{$ip}}{{else}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{end}}`
 
 // dockerInspect runs `docker inspect -f format name` and returns its
 // trimmed stdout, folding stderr into the returned error the same way
@@ -196,7 +213,7 @@ func dockerInspect(ctx context.Context, format, name string) (string, error) {
 }
 
 // DockerPodIP resolves the address netshim's DNAT rules listen on for a VM
-// created with `kontur vm create -backend docker` (BackendDocker): the
+// created with `konturctl vm create -backend docker` (BackendDocker): the
 // docker-assigned address of that VM's network-namespace-holder container
 // (dockerNetnsContainerName) -- what internal/netshim/setup.go's
 // ensurePortForward calls "the pod IP" when there is no real Kubernetes
@@ -216,14 +233,14 @@ func DockerPodIP(ctx context.Context, vmName string) (string, error) {
 	return ip, nil
 }
 
-// vm runs `kontur vm <subcommand> name -state-dir stateDir <extraArgs...>`,
-// the shape every `kontur vm` subcommand shares (DefaultStateDir's own doc
-// comment). It returns kontur's combined stdout+stderr on failure, folded
-// into the error, the same "let the caller see why" reasoning crictl above
-// already uses.
+// vm runs `konturctl vm <subcommand> name -state-dir stateDir
+// <extraArgs...>`, the shape every `konturctl vm` subcommand shares
+// (DefaultStateDir's own doc comment). It returns konturctl's combined
+// stdout+stderr on failure, folded into the error, the same "let the
+// caller see why" reasoning crictl above already uses.
 func vm(ctx context.Context, subcommand, stateDir, name string, extraArgs ...string) error {
 	args := append([]string{"vm", subcommand, name, "-state-dir", stateDir}, extraArgs...)
-	cmd := exec.CommandContext(ctx, "kontur", args...)
+	cmd := exec.CommandContext(ctx, "konturctl", args...)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -233,7 +250,7 @@ func vm(ctx context.Context, subcommand, stateDir, name string, extraArgs ...str
 	return nil
 }
 
-// Create runs "kontur vm create", bringing name up. extraArgs carries
+// Create runs "konturctl vm create", bringing name up. extraArgs carries
 // whatever else create needs beyond a name and -state-dir -- guest image,
 // guest SSH port, resource sizing, and so on -- since this package has no
 // way to know those without importing bwsalmon/kontur itself (see the
@@ -246,7 +263,7 @@ func Create(ctx context.Context, stateDir, name string, extraArgs ...string) err
 	return vm(ctx, "create", stateDir, name, extraArgs...)
 }
 
-// Delete runs "kontur vm delete", tearing name down.
+// Delete runs "konturctl vm delete", tearing name down.
 func Delete(ctx context.Context, stateDir, name string) error {
 	return vm(ctx, "delete", stateDir, name)
 }
