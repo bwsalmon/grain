@@ -90,12 +90,21 @@ fi
 # -- see terraform/gcp-v2/variables.tf's ui_port for why that is safe
 # here specifically (the firewall only admits Google's own load-balancer
 # ranges on this port).
+#
+# GRAIN_ENABLE_UI_UPGRADE=0: this deployment shape already has its own
+# rollout mechanism -- this very script, re-run by config-sync.sh
+# whenever Terraform changes grain-deploy-generation -- so the UI's own
+# Upgrade button (bwsalmon/agents#396) stays disabled here. Leaving both
+# live at once would let an operator's UI click race, or silently drift
+# out of sync with, a `terraform apply` that changes grain_ref
+# (bwsalmon/agents#405).
 
 env \
   GRAIN_REPO_URL="$GRAIN_REPO_URL" \
   GRAIN_REF="$GRAIN_REF" \
   GRAIN_SRC_DIR="$SRC_DIR" \
   GRAIN_UI_ADDR="0.0.0.0:${UI_PORT}" \
+  GRAIN_ENABLE_UI_UPGRADE=0 \
   GRAIN_SLOTS="$SLOTS" \
   GRAIN_POLL_INTERVAL="$POLL_INTERVAL" \
   GRAIN_GITHUB_HOST="$GITHUB_HOST" \

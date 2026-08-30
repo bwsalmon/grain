@@ -28,13 +28,14 @@
 #   3. installs it to $GRAIN_DATA_DIR/bin/grain, with a stable
 #      /usr/local/bin/grain symlink to that path for an operator's own
 #      shell
-#   4. creates an unprivileged system user to run it as, gives it
-#      ownership of $GRAIN_SRC_DIR and membership in the docker group,
-#      and grants it two narrow NOPASSWD sudo rules -- exactly enough,
-#      and no more, for the UI's own reboot host button
-#      (bwsalmon/agents#395) to reboot the machine, and for its Upgrade
-#      button (bwsalmon/agents#396, v2/pkg/upgrade) to check out a
-#      different branch, rebuild, install, and restart
+#   4. creates an unprivileged system user to run it as, and grants it a
+#      narrow NOPASSWD sudo rule for the UI's own reboot host button
+#      (bwsalmon/agents#395) to reboot the machine. If
+#      GRAIN_ENABLE_UI_UPGRADE=1 (the default -- see that variable's own
+#      doc below), also gives it ownership of $GRAIN_SRC_DIR, membership
+#      in the docker group, and one more narrow NOPASSWD sudo rule, for
+#      its Upgrade button (bwsalmon/agents#396, v2/pkg/upgrade) to check
+#      out a different branch, rebuild, install, and restart
 #      grain-daemon.service later, with no further privilege of its own
 #   5. lays out the rest of $GRAIN_DATA_DIR (secrets, the sandbox root,
 #      the embedded SQLite store) and seeds secrets from environment
@@ -116,6 +117,17 @@ GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
+# On by default -- the common case is a single, directly-managed host
+# with no rollout mechanism of its own, where the UI's Upgrade button
+# (bwsalmon/agents#396) is the only way to ship a new build. Set to 0 by
+# terraform/gcp-v2/files/deploy.sh's own invocation of this script: that
+# deployment shape already has a separate, Terraform-driven rollout
+# (config-sync.sh watching the grain-deploy-generation instance-metadata
+# attribute), and leaving both live at once let an operator's UI click
+# race, or silently drift out of sync with, a `terraform apply`
+# (bwsalmon/agents#405).
+GRAIN_ENABLE_UI_UPGRADE="${GRAIN_ENABLE_UI_UPGRADE:-1}"
+
 usage() {
   cat <<'EOF'
 Usage: sudo ./setup.sh
@@ -162,6 +174,13 @@ Recognized variables:
                              daemon's own -target-repos, the allowlist a task
                              naming anything else is parked with a comment
                              rather than dispatched against
+
+  GRAIN_ENABLE_UI_UPGRADE   1 (default) to wire up the UI's own Upgrade
+                             button (bwsalmon/agents#396); set to 0 on a
+                             deployment shape that already has its own
+                             rollout mechanism (e.g. terraform/gcp-v2's
+                             config-sync.sh/deploy.sh), so the two cannot
+                             race or drift out of sync with each other
 EOF
 }
 
@@ -273,12 +292,21 @@ SUDOERS
 # else; rebooting the host outright is grant_reboot_sudo's separate,
 # narrower grant above.
 #
+# Skipped entirely when GRAIN_ENABLE_UI_UPGRADE=0: none of this grant is
+# needed if write_systemd_units below never wires up the flags that let
+# the daemon touch its own checkout or restart itself in the first place
+# (bwsalmon/agents#405).
+#
 # Run after ensure_user (the account has to exist) and again on every
 # re-run: chown -R is cheap against an already-correctly-owned tree, and
 # a previous run's build_and_install (root, via sudo) would otherwise
 # leave $GRAIN_SRC_DIR's freshly fetched/built files root-owned again on
 # every single upgrade.
 ensure_self_upgrade() {
+  if [ "$GRAIN_ENABLE_UI_UPGRADE" != "1" ]; then
+    log "GRAIN_ENABLE_UI_UPGRADE=$GRAIN_ENABLE_UI_UPGRADE -- skipping the UI Upgrade button's self-upgrade grant"
+    return
+  fi
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_SRC_DIR"
   if getent group docker >/dev/null 2>&1; then
     usermod -aG docker "$GRAIN_USER"
@@ -479,15 +507,24 @@ write_systemd_units() {
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -github-host "$GRAIN_GITHUB_HOST"
     -ui-addr "$GRAIN_UI_ADDR"
-    # bwsalmon/agents#396: the UI's own Upgrade button. Safe to wire up
-    # unconditionally -- ensure_self_upgrade (above) is what actually
-    # gives $GRAIN_USER the ownership and the one sudoers line this
-    # needs, run every time this script is, so the feature works the
-    # same whether this is a first install or the hundredth re-run.
-    -upgrade-src-dir "$GRAIN_SRC_DIR"
-    -upgrade-install-path "$REAL_BIN"
-    -upgrade-restart-cmd sudo -upgrade-restart-cmd systemctl -upgrade-restart-cmd restart -upgrade-restart-cmd grain-daemon.service
   )
+  # bwsalmon/agents#396: the UI's own Upgrade button. Wired up whenever
+  # GRAIN_ENABLE_UI_UPGRADE=1 (the default) -- ensure_self_upgrade
+  # (above) is what actually gives $GRAIN_USER the ownership and the one
+  # sudoers line this needs, run every time this script is, so the
+  # feature works the same whether this is a first install or the
+  # hundredth re-run. Left unset when GRAIN_ENABLE_UI_UPGRADE=0
+  # (terraform/gcp-v2's own deploy.sh sets exactly that): the daemon
+  # flags themselves default to empty/disabled (cmd/grain/daemon.go), so
+  # simply not passing them is enough -- see this script's own header on
+  # GRAIN_ENABLE_UI_UPGRADE (bwsalmon/agents#405).
+  if [ "$GRAIN_ENABLE_UI_UPGRADE" = "1" ]; then
+    daemon_args+=(
+      -upgrade-src-dir "$GRAIN_SRC_DIR"
+      -upgrade-install-path "$REAL_BIN"
+      -upgrade-restart-cmd sudo -upgrade-restart-cmd systemctl -upgrade-restart-cmd restart -upgrade-restart-cmd grain-daemon.service
+    )
+  fi
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
