@@ -1,0 +1,11 @@
+[Unit]
+Description=Signal host-side kontur listener when this guest is under memory pressure
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kontur-mem-agent
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

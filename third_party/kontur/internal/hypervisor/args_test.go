@@ -1,6 +1,8 @@
 package hypervisor
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +70,45 @@ func TestBuildArgs_FirmwareBoot(t *testing.T) {
 	}
 	if got := argValue(t, args, "--console"); got != "off" {
 		t.Errorf("--console = %q, want off", got)
+	}
+}
+
+func TestBuildArgs_MemoryHotplugAddsVirtioMemDevice(t *testing.T) {
+	cfg := baseConfig()
+	cfg.MemoryMB = 256
+	cfg.MemoryMaxMB = 2048
+	cfg.MemoryHotplug = true
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--memory"); got != "size=256M,shared=on,hotplug_method=virtio-mem,hotplug_size=1792M" {
+		t.Errorf("--memory = %q, want size=256M,shared=on,hotplug_method=virtio-mem,hotplug_size=1792M", got)
+	}
+}
+
+func TestBuildArgs_MemoryHotplugDisabledOmitsDevice(t *testing.T) {
+	cfg := baseConfig()
+	cfg.MemoryMB = 256
+	cfg.MemoryMaxMB = 2048
+	cfg.MemoryHotplug = false
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--memory"); got != "size=256M,shared=on" {
+		t.Errorf("--memory = %q, want size=256M,shared=on", got)
+	}
+}
+
+func TestBuildArgs_MemoryHotplugWithNoGrowthRoomOmitsDevice(t *testing.T) {
+	cfg := baseConfig()
+	cfg.MemoryMB = 2048
+	cfg.MemoryMaxMB = 2048
+	cfg.MemoryHotplug = true
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--memory"); got != "size=2048M,shared=on" {
+		t.Errorf("--memory = %q, want size=2048M,shared=on (no hotplug device when there's no room to grow into)", got)
 	}
 }
 
@@ -156,6 +197,68 @@ func TestBuildArgs_ExtraArgsAppended(t *testing.T) {
 	tail := args[len(args)-len(cfg.ExtraArgs):]
 	if strings.Join(tail, " ") != strings.Join(cfg.ExtraArgs, " ") {
 		t.Errorf("extra args not appended verbatim at the end: got %v", args)
+	}
+}
+
+func TestBuildArgs_RestoresFromExistingSnapshot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SnapshotPath = filepath.Join(t.TempDir(), "snapshot")
+	if err := os.Mkdir(cfg.SnapshotPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--api-socket"); got != "path="+cfg.APISocket {
+		t.Errorf("--api-socket = %q, want path=%s", got, cfg.APISocket)
+	}
+	want := "source_url=file://" + cfg.SnapshotPath + ",resume=true"
+	if got := argValue(t, args, "--restore"); got != want {
+		t.Errorf("--restore = %q, want %q", got, want)
+	}
+	for _, flag := range []string{"--cpus", "--memory", "--disk", "--firmware", "--kernel", "--serial", "--console"} {
+		for _, a := range args {
+			if a == flag {
+				t.Errorf("did not expect %s when restoring from a snapshot", flag)
+			}
+		}
+	}
+}
+
+func TestBuildArgs_BootsFreshWhenSnapshotPathUnsetOrMissing(t *testing.T) {
+	cfg := baseConfig()
+	args := BuildArgs(cfg)
+	for _, a := range args {
+		if a == "--restore" {
+			t.Fatalf("did not expect --restore with no SnapshotPath: %v", args)
+		}
+	}
+
+	cfg.SnapshotPath = filepath.Join(t.TempDir(), "does-not-exist")
+	args = BuildArgs(cfg)
+	for _, a := range args {
+		if a == "--restore" {
+			t.Fatalf("did not expect --restore when SnapshotPath does not exist yet: %v", args)
+		}
+	}
+}
+
+func TestSnapshotExists(t *testing.T) {
+	if SnapshotExists("") {
+		t.Error("SnapshotExists(\"\") = true, want false")
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	if SnapshotExists(missing) {
+		t.Error("SnapshotExists(missing) = true, want false")
+	}
+
+	present := filepath.Join(t.TempDir(), "present")
+	if err := os.Mkdir(present, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !SnapshotExists(present) {
+		t.Error("SnapshotExists(present) = false, want true")
 	}
 }
 

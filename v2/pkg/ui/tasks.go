@@ -36,12 +36,21 @@ type Task struct {
 	// Reads is every repo this task's run may read but never push to --
 	// model.Task.Reads, rendered as owner/name strings the same way Repo
 	// renders its single Target.
-	Reads         []string `json:"reads,omitempty"`
-	Base          string   `json:"base,omitempty"`
-	AutoMerge     bool     `json:"autoMerge"`
-	Capabilities  []string `json:"capabilities"`
-	PullRequest   string   `json:"pullRequest,omitempty"`
-	GeneratedFrom string   `json:"generatedFrom,omitempty"`
+	Reads     []string `json:"reads,omitempty"`
+	Base      string   `json:"base,omitempty"`
+	AutoMerge bool     `json:"autoMerge"`
+	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override the
+	// deployment's default sandbox shape for this task's own dispatch
+	// alone -- model.Task's own fields of the same name. Zero (the
+	// default for both) means "use the deployment default", omitted from
+	// the JSON response the same way Base's own empty string is, since
+	// "no override" is the common case and worth not cluttering every
+	// task response with.
+	SandboxCPUs     int      `json:"sandboxCpus,omitempty"`
+	SandboxMemoryMB int      `json:"sandboxMemoryMb,omitempty"`
+	Capabilities    []string `json:"capabilities"`
+	PullRequest     string   `json:"pullRequest,omitempty"`
+	GeneratedFrom   string   `json:"generatedFrom,omitempty"`
 	// Stacked is true for a task the merge queue filed automatically to
 	// repair another task's own pull request (model.ReasonFix) -- built
 	// on that task's own branch and merged straight back into it once
@@ -209,6 +218,8 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		State:               state,
 		Base:                t.Base,
 		AutoMerge:           t.AutoMerge,
+		SandboxCPUs:         t.SandboxCPUs,
+		SandboxMemoryMB:     t.SandboxMemoryMB,
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix,
 		Scheduled:           t.Origin.Reason == model.ReasonSchedule,

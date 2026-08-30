@@ -33,6 +33,8 @@ describe("NewTaskOverlay", () => {
         repo: "",
         base: "",
         autoMerge: false,
+        sandboxCpus: 0,
+        sandboxMemoryMb: 0,
         capabilities: [],
         dependsOn: [],
         reads: [],
@@ -42,6 +44,21 @@ describe("NewTaskOverlay", () => {
     });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onCreated).toHaveBeenCalledTimes(1);
+  });
+
+  // bwsalmon/agents#534: a per-task sandbox shape override.
+  it("includes a sandbox shape override when given", async () => {
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.type(screen.getByLabelText(/vCPUs/), "4");
+    await user.type(screen.getByLabelText(/Memory \(MiB\)/), "8192");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(api).toHaveBeenCalledWith("/api/tasks", expect.objectContaining({
+      body: expect.stringContaining('"sandboxCpus":4,"sandboxMemoryMb":8192'),
+    }));
   });
 
   it("reads and includes a picked file as an attachment", async () => {

@@ -1,0 +1,91 @@
+# Minimal, self-contained example of running kontur on GKE: apply this to
+# a cluster that has nested virtualization enabled (see
+# deploy/k8s/gke.md) and it boots one VM with no other setup -- no
+# node-local image cache to pre-populate, no device plugin to install.
+#
+# It gets away with that by using the two things kontur *doesn't* need
+# any extra config for:
+#   - the guest disk image: left unset (CHV_DISK_IMAGE), so this boots the
+#     reference Debian guest already baked into the kontur image itself.
+#   - KVM access: securityContext.privileged: true plus a /dev/kvm
+#     hostPath, the simpler of the two options deploy/k8s/pod-example.yaml
+#     documents (the other being a device plugin such as
+#     kubevirt/kubernetes-device-plugins, which needs its own DaemonSet
+#     installed on the cluster first -- worth it to drop pod privileges,
+#     not needed just to get something running).
+#
+# The one thing kontur *does* always need from outside is a kernel or
+# firmware (CHV_KERNEL/CHV_FIRMWARE): it never fetches one itself (see the
+# main README's "Fast startup"), and none is baked into the image the way
+# the guest disk is. The initContainer below fetches cloud-hypervisor's
+# own published PVH-entry kernel straight from its GitHub release into an
+# emptyDir the "web" container then points CHV_KERNEL at, so the whole
+# pod is a single self-contained manifest instead of requiring a
+# node-local cache to be provisioned out of band first. That trades a
+# few seconds and a network dependency at every pod start for not having
+# to provision anything on the node ahead of time -- fine for trying
+# kontur out; a real deployment should go back to a real node-local image
+# cache (see the main README's "Fast startup" and
+# deploy/k8s/pod-example.yaml) so pod start doesn't depend on GitHub being
+# reachable.
+#
+# Substitute IMAGE_PLACEHOLDER with your own pushed kontur image
+# (see deploy/k8s/gke.md) before applying.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kontur-gke-example
+  labels:
+    app: kontur-gke-example
+spec:
+  restartPolicy: Never
+  # Must comfortably exceed CHV_SHUTDOWN_TIMEOUT below so kontur's own
+  # graceful-shutdown sequence can run to completion before the kubelet
+  # SIGKILLs the container itself.
+  terminationGracePeriodSeconds: 40
+  initContainers:
+    - name: fetch-kernel
+      image: alpine:3.20
+      command:
+        - sh
+        - -c
+        - wget -O /images/vmlinux https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.16.9-20260508/vmlinux-x86_64
+      volumeMounts:
+        - name: images
+          mountPath: /images
+  containers:
+    - name: web
+      image: IMAGE_PLACEHOLDER
+      args: ["run"]
+      env:
+        - name: CHV_KERNEL
+          value: /images/vmlinux
+        - name: CHV_CMDLINE
+          value: "console=ttyS0 root=/dev/vda rw"
+        - name: CHV_CPUS
+          value: "2"
+        - name: CHV_MEMORY_MB
+          value: "2048"
+        - name: CHV_SHUTDOWN_TIMEOUT
+          value: "20s"
+      resources:
+        requests:
+          cpu: "2"
+          memory: 3Gi
+        limits:
+          cpu: "2"
+          memory: 3Gi
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: images
+          mountPath: /images
+          readOnly: true
+        - name: dev-kvm
+          mountPath: /dev/kvm
+  volumes:
+    - name: images
+      emptyDir: {}
+    - name: dev-kvm
+      hostPath:
+        path: /dev/kvm

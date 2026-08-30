@@ -1,7 +1,9 @@
 package hypervisor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +48,44 @@ func (c *APIClient) ShutdownVMM(ctx context.Context) error {
 	return c.put(ctx, "/api/v1/vmm.shutdown")
 }
 
+// Pause suspends every vCPU. cloud-hypervisor requires this before
+// Snapshot, and it's also the "suspend" half of Runner.Suspend.
+func (c *APIClient) Pause(ctx context.Context) error {
+	return c.put(ctx, "/api/v1/vm.pause")
+}
+
+// Resume unpauses a VM previously paused by Pause, or restored (with
+// resume left off) from a snapshot via BuildArgs's "--restore".
+func (c *APIClient) Resume(ctx context.Context) error {
+	return c.put(ctx, "/api/v1/vm.resume")
+}
+
+// Snapshot writes a full snapshot of the VM's state -- enough to restore
+// an identical VM later via "--restore", see BuildArgs -- to destDir.
+// The VM must already be paused (see Pause), and cloud-hypervisor
+// requires destDir to already exist.
+func (c *APIClient) Snapshot(ctx context.Context, destDir string) error {
+	return c.putJSON(ctx, "/api/v1/vm.snapshot", struct {
+		DestinationURL string `json:"destination_url"`
+	}{DestinationURL: "file://" + destDir})
+}
+
+// Resize asks cloud-hypervisor to live-resize the guest's RAM to
+// desiredRAMBytes, via the memory hotplug device configured at boot (see
+// internal/config's CHV_MEMORY_HOTPLUG/CHV_MEMORY_MAX_MB and
+// hypervisor.BuildArgs). desiredRAMBytes must fall between the VM's
+// starting size (CHV_MEMORY_MB) and its ceiling (CHV_MEMORY_MAX_MB);
+// cloud-hypervisor rejects the request otherwise, or if hotplug wasn't
+// enabled at boot at all. The resize itself is asynchronous from the
+// guest's point of view -- a virtio-mem-aware kernel picks up the change
+// on its own, with no guarantee of exactly when. See the README's
+// "Memory hotplug" section for how this interacts with Snapshot/suspend.
+func (c *APIClient) Resize(ctx context.Context, desiredRAMBytes uint64) error {
+	return c.putJSON(ctx, "/api/v1/vm.resize", struct {
+		DesiredRAM uint64 `json:"desired_ram"`
+	}{DesiredRAM: desiredRAMBytes})
+}
+
 // WaitReady polls the API socket until it accepts connections or ctx is
 // done. cloud-hypervisor creates the socket very early in startup, but the
 // runtime may race it right after Start returns.
@@ -65,17 +105,28 @@ func (c *APIClient) WaitReady(ctx context.Context) error {
 }
 
 func (c *APIClient) put(ctx context.Context, path string) error {
-	return c.do(ctx, http.MethodPut, path)
+	return c.do(ctx, http.MethodPut, path, nil)
+}
+
+func (c *APIClient) putJSON(ctx context.Context, path string, body any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding request body for %s %s: %w", http.MethodPut, path, err)
+	}
+	return c.do(ctx, http.MethodPut, path, bytes.NewReader(b))
 }
 
 func (c *APIClient) get(ctx context.Context, path string) error {
-	return c.do(ctx, http.MethodGet, path)
+	return c.do(ctx, http.MethodGet, path, nil)
 }
 
-func (c *APIClient) do(ctx context.Context, method, path string) error {
-	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, nil)
+func (c *APIClient) do(ctx context.Context, method, path string, body io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, body)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

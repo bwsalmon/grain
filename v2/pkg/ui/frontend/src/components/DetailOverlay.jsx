@@ -136,6 +136,12 @@ function Declared({ t }) {
   if (t.base) rows.push(["Base", t.base]);
   if (t.reads && t.reads.length > 0) rows.push(["Reads", t.reads.join(", ")]);
   rows.push(["Auto-merge", String(t.autoMerge)]);
+  // bwsalmon/agents#534: a per-task sandbox shape override, shown only
+  // when set -- most tasks use the deployment default and have neither
+  // field, the same "0 means unset" convention that keeps them out of
+  // the JSON response at all (Task's own omitempty).
+  if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
+  if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
   return (
     <div className="declared">
       {rows.map(([key, value]) => (

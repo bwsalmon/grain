@@ -1355,7 +1355,9 @@ func testConfig() model.Config {
 		GeminiModel: "gemini-2.5-pro", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
-		TargetRepos: []string{"acme/widgets", "acme/gadgets"},
+		TargetRepos:     []string{"acme/widgets", "acme/gadgets"},
+		SandboxCPUs:     4,
+		SandboxMemoryMB: 8192,
 	}
 }
 
@@ -1900,5 +1902,127 @@ func TestInitMigratesAnExistingDatabaseMissingNewestFirst(t *testing.T) {
 		// false is what keeps an upgraded deployment's backlog order
 		// unchanged -- the whole point of this migration's default.
 		t.Fatalf("NewestFirst after migrating = true, want false")
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingSandboxShape is
+// TestInitMigratesAnExistingDatabaseMissingNewestFirst's own pattern,
+// applied to grain_config.sandbox_cpus/sandbox_memory_mb (bwsalmon/
+// agents#534): a database from before this setting existed gets both
+// columns added by ensureConfigSandboxShapeColumns, defaulted to 0 --
+// Config.SandboxCPUs/SandboxMemoryMB's own "use bwsalmon/kontur's own
+// default" zero value, so an upgraded deployment's sandbox shape is
+// unchanged by this migration.
+func TestInitMigratesAnExistingDatabaseMissingSandboxShape(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#534 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-#534 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.sandbox_cpus/sandbox_memory_mb: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape is the same
+// migration, applied to task.sandbox_cpus/sandbox_memory_mb.
+func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task`"+` (
+  `+"`id`"+`                    TEXT    NOT NULL,
+  `+"`intent`"+`                TEXT    NOT NULL,
+  `+"`title`"+`                 TEXT    NOT NULL,
+  `+"`body`"+`                  TEXT    NOT NULL,
+  `+"`origin_actor_kind`"+`     TEXT    NOT NULL,
+  `+"`origin_actor_id`"+`       TEXT    NOT NULL,
+  `+"`origin_behalf_kind`"+`    TEXT    NULL,
+  `+"`origin_behalf_id`"+`      TEXT    NULL,
+  `+"`origin_reason`"+`         TEXT    NOT NULL,
+  `+"`approval_actor_kind`"+`   TEXT    NULL,
+  `+"`approval_actor_id`"+`     TEXT    NULL,
+  `+"`approval_behalf_kind`"+`  TEXT    NULL,
+  `+"`approval_behalf_id`"+`    TEXT    NULL,
+  `+"`approved_at`"+`           DATETIME NULL,
+  `+"`target_owner`"+`          TEXT    NULL,
+  `+"`target_name`"+`           TEXT    NULL,
+  `+"`binding`"+`               TEXT    NOT NULL,
+  `+"`base`"+`                  TEXT    NULL,
+  `+"`folder`"+`                TEXT    NULL,
+  `+"`auto_merge`"+`            INTEGER  NOT NULL,
+  `+"`created_at`"+`            DATETIME NULL,
+  `+"`order_key`"+`             REAL     NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#534 task table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task` (`id`,`intent`,`title`,`body`,`origin_actor_kind`,`origin_actor_id`,`origin_reason`,"+
+			"`binding`,`auto_merge`) VALUES ('t1','implement','a title','a body','automation','grain','direct','default',0)"); err != nil {
+		t.Fatalf("seeding a pre-#534 task row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_grant` (`task_id` TEXT, `capability` TEXT, `via` TEXT, `folder` TEXT)"); err != nil {
+		t.Fatalf("creating task_grant: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_read` (`task_id` TEXT, `owner` TEXT, `name` TEXT)"); err != nil {
+		t.Fatalf("creating task_read: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_link` (`task_id` TEXT, `kind` TEXT, `target` TEXT, `blocks` INTEGER)"); err != nil {
+		t.Fatalf("creating task_link: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_tag` (`task_id` TEXT, `tag` TEXT)"); err != nil {
+		t.Fatalf("creating task_tag: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task.sandbox_cpus/sandbox_memory_mb: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, "t1")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
 	}
 }

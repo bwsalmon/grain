@@ -23,10 +23,6 @@ ARG GUEST_ALPINE_VERSION=3.20
 # deploy/guest-image/README.md), not a secret, so baking it into the image
 # history via a plain ARG is fine.
 ARG GUEST_SSH_AUTHORIZED_KEY=""
-# GUEST_SETUP_SCRIPT, if set, is the text of a script run (via chroot) against
-# the guest rootfs before it's packed into disk.img -- see
-# deploy/guest-image/README.md for what it can and can't do there.
-ARG GUEST_SETUP_SCRIPT=""
 
 # Generates a dedicated ed25519 keypair "kontur exec" (internal/guestexec)
 # uses to authenticate against the guest's sshd, independent of
@@ -52,6 +48,25 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kontur ./cmd/kontur
+# kontur-mem-agent is the guest-side half of automatic memory hotplug
+# (see internal/memagent and cmd/kontur-mem-agent's own doc comment):
+# unlike kontur itself, this one ships *inside* the guest disk image
+# (both guest-rootfs-debian and guest-rootfs-alpine below install it),
+# not the outer scratch image, so it's built as its own small static
+# binary rather than folded into kontur's mode dispatch.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kontur-mem-agent ./cmd/kontur-mem-agent
+# Symlinks (not copies, so the final stage's own /usr/local/bin/kontur is
+# the only copy of the binary that ships) standing in for /bin/sh,
+# /bin/bash and their /usr/bin equivalents -- see cmd/kontur's own doc
+# comment and internal/guestexec's ShellCommandLine for why: kontur
+# itself tells these two apart from its four real modes by argv[0], so
+# all that's needed image-side is for the names a shell would normally
+# live at to resolve to it.
+RUN mkdir -p /out/shims/bin /out/shims/usr/bin \
+    && for shim in /out/shims/bin/sh /out/shims/bin/bash /out/shims/usr/bin/sh /out/shims/usr/bin/bash; do \
+         ln -s /usr/local/bin/kontur "${shim}"; \
+       done
 
 # cloud-hypervisor publishes fully static release binaries but no
 # published checksum file, so the expected sha256 for each architecture
@@ -82,7 +97,6 @@ RUN set -eux; \
 FROM debian:bookworm-slim AS guest-rootfs-debian
 ARG GUEST_SUITE
 ARG GUEST_SSH_AUTHORIZED_KEY
-ARG GUEST_SETUP_SCRIPT
 RUN apt-get update && apt-get install -y --no-install-recommends \
       debootstrap ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -93,6 +107,7 @@ RUN debootstrap --variant=minbase \
 COPY deploy/guest-image/overlay-common/ /rootfs/
 COPY deploy/guest-image/overlay-debian/ /rootfs/
 COPY --from=exec-keypair /exec_id_ed25519.pub /rootfs/root/.ssh/kontur-exec.pub
+COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontur-mem-agent
 
 # - The console wrapper and ACPI power-button handler need their
 #   executable bit set (COPY doesn't preserve it from build context
@@ -119,6 +134,8 @@ RUN set -eux; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     ln -sf /etc/systemd/system/kontur-ssh-host-keys.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-ssh-host-keys.service; \
+    ln -sf /etc/systemd/system/kontur-mem-agent.service \
+      /rootfs/etc/systemd/system/multi-user.target.wants/kontur-mem-agent.service; \
     rm -f /rootfs/etc/ssh/ssh_host_*; \
     install -d -m0700 /rootfs/root/.ssh; \
     cat /rootfs/root/.ssh/kontur-exec.pub > /rootfs/root/.ssh/authorized_keys; \
@@ -127,21 +144,6 @@ RUN set -eux; \
       printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" >> /rootfs/root/.ssh/authorized_keys; \
     fi; \
     chmod 0600 /rootfs/root/.ssh/authorized_keys
-
-# Runs GUEST_SETUP_SCRIPT, if given, against the rootfs via chroot -- the
-# same mechanism debootstrap itself already used above to configure
-# packages, so this needs no privileges beyond what this stage already
-# has, and network access works fine (chroot doesn't touch the network
-# namespace). See deploy/guest-image/README.md for what it can't do
-# (no /proc, /sys, or running service manager).
-RUN set -eux; \
-    if [ -n "${GUEST_SETUP_SCRIPT}" ]; then \
-      script=/rootfs/tmp/kontur-setup-script; \
-      printf '%s\n' "${GUEST_SETUP_SCRIPT}" > "${script}"; \
-      chmod 0755 "${script}"; \
-      chroot /rootfs /tmp/kontur-setup-script; \
-      rm -f "${script}"; \
-    fi
 
 # Builds the Alpine variant of the guest rootfs, via `apk --root` instead
 # of `debootstrap` -- the same technique Alpine's own official base image
@@ -157,7 +159,6 @@ RUN set -eux; \
 FROM alpine:${GUEST_ALPINE_VERSION} AS guest-rootfs-alpine
 ARG GUEST_ALPINE_VERSION
 ARG GUEST_SSH_AUTHORIZED_KEY
-ARG GUEST_SETUP_SCRIPT
 # --root only changes where packages are installed; apk still reads its
 # own trusted keys and repository list from this stage's own /etc/apk
 # (i.e. this Alpine image's), not /rootfs's, unless told otherwise -- so
@@ -173,6 +174,7 @@ RUN printf 'http://dl-cdn.alpinelinux.org/alpine/v%s/main\nhttp://dl-cdn.alpinel
 COPY deploy/guest-image/overlay-common/ /rootfs/
 COPY deploy/guest-image/overlay-alpine/ /rootfs/
 COPY --from=exec-keypair /exec_id_ed25519.pub /rootfs/root/.ssh/kontur-exec.pub
+COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontur-mem-agent
 
 # Nothing enables OpenRC services on install the way Debian's
 # deb-systemd-helper does (see the Debian stage above), so every service
@@ -187,13 +189,14 @@ COPY --from=exec-keypair /exec_id_ed25519.pub /rootfs/root/.ssh/kontur-exec.pub
 RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
+    chmod 0755 /rootfs/etc/init.d/kontur-mem-agent; \
     for svc in devfs dmesg mdev hwdrivers; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/sysinit/"${svc}"; \
     done; \
     for svc in hwclock modules sysctl hostname bootmisc syslog; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/boot/"${svc}"; \
     done; \
-    for svc in local sshd acpid; do \
+    for svc in local sshd acpid kontur-mem-agent; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/default/"${svc}"; \
     done; \
     install -d -m0700 /rootfs/root/.ssh; \
@@ -203,17 +206,6 @@ RUN set -eux; \
       printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" >> /rootfs/root/.ssh/authorized_keys; \
     fi; \
     chmod 0600 /rootfs/root/.ssh/authorized_keys
-
-# See the Debian stage above -- same mechanism, run from within this
-# stage's own matching Alpine/musl environment instead.
-RUN set -eux; \
-    if [ -n "${GUEST_SETUP_SCRIPT}" ]; then \
-      script=/rootfs/tmp/kontur-setup-script; \
-      printf '%s\n' "${GUEST_SETUP_SCRIPT}" > "${script}"; \
-      chmod 0755 "${script}"; \
-      chroot /rootfs /tmp/kontur-setup-script; \
-      rm -f "${script}"; \
-    fi
 
 # Selects between the two guest-rootfs-* stages above -- an indirection
 # forced by BuildKit not resolving ARGs in COPY --from, only FROM.
@@ -251,6 +243,11 @@ RUN set -eux; \
 FROM scratch AS final
 COPY --from=fetch-chv /out/cloud-hypervisor /usr/local/bin/cloud-hypervisor
 COPY --from=build /out/kontur /usr/local/bin/kontur
+# See the "build" stage above -- these are symlinks back to the same
+# /usr/local/bin/kontur binary just copied in, not real shells: this
+# image is still "scratch" underneath (no coreutils, no package manager),
+# it just also answers to "sh"/"bash" the way one would.
+COPY --from=build /out/shims/ /
 COPY --from=guest-image /disk.img /var/lib/kontur/guest/disk.img
 # internal/guestexec's default KONTUR_EXEC_KEY -- see the exec-keypair
 # stage above for why this is generated at build time rather than passed

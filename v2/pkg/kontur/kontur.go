@@ -286,3 +286,14 @@ func Create(ctx context.Context, stateDir, name string, extraArgs ...string) err
 func Delete(ctx context.Context, stateDir, name string) error {
 	return vm(ctx, "delete", stateDir, name)
 }
+
+// Update runs "konturctl vm update" against an already-created name,
+// changing only whatever flags extraArgs passes -- bwsalmon/kontur's own
+// registerVMFlags doc comment: "makes 'konturctl vm update' a partial
+// update instead of requiring every flag to be repeated." Used by
+// orchestrator.KonturSandboxes.Reshape (bwsalmon/agents#534) to resize an
+// existing VM's -cpus/-memory-mb for one task's own run without touching
+// its disk, network, or anything else update was not asked to change.
+func Update(ctx context.Context, stateDir, name string, extraArgs ...string) error {
+	return vm(ctx, "update", stateDir, name, extraArgs...)
+}

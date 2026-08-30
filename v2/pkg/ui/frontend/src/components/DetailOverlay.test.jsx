@@ -46,6 +46,24 @@ describe("DetailOverlay", () => {
     expect(link).toHaveAttribute("href", "https://github.com/acme/widgets/pull/42");
   });
 
+  // bwsalmon/agents#534: a per-task sandbox shape override.
+  it("shows a sandbox shape override when set, and hides it when not", () => {
+    const { rerender } = render(
+      <DetailOverlay
+        task={{ ...baseTask, sandboxCpus: 4, sandboxMemoryMb: 8192 }}
+        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Sandbox vCPUs")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("Sandbox memory (MiB)")).toBeInTheDocument();
+    expect(screen.getByText("8192")).toBeInTheDocument();
+
+    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("Sandbox vCPUs")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sandbox memory (MiB)")).not.toBeInTheDocument();
+  });
+
   it("shows the merge-blocked chip over awaiting-submit once the merge queue has given up", () => {
     render(
       <DetailOverlay

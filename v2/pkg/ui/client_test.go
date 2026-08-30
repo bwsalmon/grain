@@ -300,11 +300,13 @@ func TestCreateTaskValidates(t *testing.T) {
 	c, _, ctx := testClient(t)
 
 	for name, req := range map[string]ui.CreateTaskRequest{
-		"empty title":        {Title: "  "},
-		"unknown capability": {Title: "t", Capabilities: []string{"nope"}},
-		"unparseable repo":   {Title: "t", Repo: "not-a-repo"},
-		"unknown dependency": {Title: "t", DependsOn: []string{"404"}},
-		"unparseable read":   {Title: "t", Reads: []string{"not-a-repo"}},
+		"empty title":              {Title: "  "},
+		"unknown capability":       {Title: "t", Capabilities: []string{"nope"}},
+		"unparseable repo":         {Title: "t", Repo: "not-a-repo"},
+		"unknown dependency":       {Title: "t", DependsOn: []string{"404"}},
+		"unparseable read":         {Title: "t", Reads: []string{"not-a-repo"}},
+		"negative sandbox cpus":    {Title: "t", SandboxCPUs: -1},
+		"sandbox memory below 128": {Title: "t", SandboxMemoryMB: 64},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.CreateTask(ctx, req)
@@ -367,6 +369,44 @@ func TestUpdateTaskEditsEveryField(t *testing.T) {
 	}
 }
 
+// bwsalmon/agents#534: a task's own SandboxCPUs/SandboxMemoryMB override
+// round-trips through CreateTask and UpdateTask the same as every other
+// task field, and setting either back to 0 through UpdateTask clears the
+// override (distinct from leaving the request field nil, which leaves it
+// alone -- UpdateTaskRequest's own doc comment).
+func TestTaskSandboxShapeOverrideRoundTrips(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	created, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "t", Repo: "acme/widgets", Approved: true,
+		SandboxCPUs: 4, SandboxMemoryMB: 8192,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SandboxCPUs != 4 || created.SandboxMemoryMB != 8192 {
+		t.Fatalf("created task sandbox shape = %d/%d, want 4/8192", created.SandboxCPUs, created.SandboxMemoryMB)
+	}
+
+	cpus, memoryMB := 2, 4096
+	updated, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.SandboxCPUs != 2 || updated.SandboxMemoryMB != 4096 {
+		t.Fatalf("updated task sandbox shape = %d/%d, want 2/4096", updated.SandboxCPUs, updated.SandboxMemoryMB)
+	}
+
+	zero := 0
+	cleared, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{SandboxCPUs: &zero, SandboxMemoryMB: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.SandboxCPUs != 0 || cleared.SandboxMemoryMB != 0 {
+		t.Fatalf("cleared task sandbox shape = %d/%d, want 0/0", cleared.SandboxCPUs, cleared.SandboxMemoryMB)
+	}
+}
+
 // Reads has no attach/detach endpoint of its own (unlike Capabilities and
 // DependsOn): a given Reads always replaces the whole set rather than
 // adding to it.
@@ -403,14 +443,17 @@ func TestUpdateTaskValidates(t *testing.T) {
 	task := create(t, c, ctx)
 
 	blank, bad := "  ", "not-a-repo"
+	negativeCPUs, lowMemory := -1, 64
 	for name, req := range map[string]ui.UpdateTaskRequest{
 		"empty title": {Title: &blank},
 		// Clearing the target is rejected rather than allowed: a task with
 		// no target cannot be dispatched, and it is a real column now
 		// rather than an optional directive line that could just be absent.
-		"empty repo":       {Repo: &blank},
-		"unparseable repo": {Repo: &bad},
-		"unparseable read": {Reads: &[]string{"not-a-repo"}},
+		"empty repo":               {Repo: &blank},
+		"unparseable repo":         {Repo: &bad},
+		"unparseable read":         {Reads: &[]string{"not-a-repo"}},
+		"negative sandbox cpus":    {SandboxCPUs: &negativeCPUs},
+		"sandbox memory below 128": {SandboxMemoryMB: &lowMemory},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.UpdateTask(ctx, task.ID, req)
@@ -1583,6 +1626,44 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
+// bwsalmon/agents#534: SandboxCPUs/SandboxMemoryMB (the deployment-wide
+// default sandbox shape) round-trip through UpdateSettings/GetSettings
+// the same as every other store-backed field, and 0 -- the "unset, use
+// bwsalmon/kontur's own default" zero value -- is valid, unlike
+// MaxConcurrent's own "must be at least 1".
+func TestUpdateSettingsSandboxShapeRoundTrips(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	cpus, memoryMB := 4, 8192
+	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB})
+	if err != nil {
+		t.Fatalf("setting sandbox shape: %v", err)
+	}
+	if got.SandboxCPUs != 4 || got.SandboxMemoryMB != 8192 {
+		t.Fatalf("sandboxCpus/sandboxMemoryMb = %d/%d, want 4/8192", got.SandboxCPUs, got.SandboxMemoryMB)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.SandboxCPUs != 4 || read.SandboxMemoryMB != 8192 {
+		t.Fatalf("GetSettings sandboxCpus/sandboxMemoryMb = %d/%d, want 4/8192", read.SandboxCPUs, read.SandboxMemoryMB)
+	}
+
+	zero := 0
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &zero, SandboxMemoryMB: &zero})
+	if err != nil {
+		t.Fatalf("clearing sandbox shape: %v", err)
+	}
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
+		t.Fatalf("sandboxCpus/sandboxMemoryMb after clearing = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	}
+}
+
 // Unlike MaxConcurrent, an empty TargetRepos is meaningful (unrestricted)
 // rather than rejected -- v1's target_repos "leave empty for a
 // single-repo deployment."
@@ -1622,6 +1703,8 @@ func TestUpdateSettingsValidates(t *testing.T) {
 	negative := -1
 	zeroConcurrent := 0
 	badRepo := []string{"not-owner-slash-name"}
+	negativeCPUs := -1
+	lowMemory := 64
 	cases := map[string]ui.UpdateSettingsRequest{
 		"unparseable poll interval": {PollInterval: &bad},
 		"zero max concurrent":       {MaxConcurrent: &zeroConcurrent},
@@ -1629,6 +1712,8 @@ func TestUpdateSettingsValidates(t *testing.T) {
 		"blank github host":         {GitHubHost: &empty},
 		"negative max agent turns":  {MaxAgentTurns: &negative},
 		"malformed target repo":     {TargetRepos: &badRepo},
+		"negative sandbox cpus":     {SandboxCPUs: &negativeCPUs},
+		"sandbox memory below 128":  {SandboxMemoryMB: &lowMemory},
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {

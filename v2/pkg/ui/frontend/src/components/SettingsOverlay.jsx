@@ -74,6 +74,18 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const newestFirst = form.elements.newestFirst.checked;
     if (newestFirst !== !!settings.newestFirst) payload.newestFirst = newestFirst;
 
+    const sandboxCpusRaw = form.elements.sandboxCpus.value.trim();
+    if (sandboxCpusRaw !== "") {
+      const sandboxCpus = parseInt(sandboxCpusRaw, 10);
+      if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
+    }
+
+    const sandboxMemoryMbRaw = form.elements.sandboxMemoryMb.value.trim();
+    if (sandboxMemoryMbRaw !== "") {
+      const sandboxMemoryMb = parseInt(sandboxMemoryMbRaw, 10);
+      if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
+    }
+
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
       onClose();
@@ -153,6 +165,26 @@ export default function SettingsOverlay({ config, onClose, showError }) {
                 </>
               )}
               sx={{ display: "flex", mt: 1 }}
+            />
+            <TextField
+              name="sandboxCpus"
+              label="Sandbox vCPUs"
+              helperText="default vCPU count for a kontur-managed sandbox VM; 0 or blank leaves kontur's own default in place. Overridable per task."
+              type="number"
+              inputProps={{ min: 0, step: 1 }}
+              defaultValue={String(settings.sandboxCpus || 0)}
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              name="sandboxMemoryMb"
+              label="Sandbox memory (MiB)"
+              helperText="default guest memory, in MiB, for a kontur-managed sandbox VM; 0 or blank leaves kontur's own default in place. Overridable per task."
+              type="number"
+              inputProps={{ min: 0, step: 1 }}
+              defaultValue={String(settings.sandboxMemoryMb || 0)}
+              fullWidth
+              margin="normal"
             />
 
             <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>

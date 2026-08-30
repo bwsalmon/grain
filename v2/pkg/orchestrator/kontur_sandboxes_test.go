@@ -576,6 +576,153 @@ func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
 	}
 }
 
+// TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB confirms
+// KonturConfig.DefaultCPUs/DefaultMemoryMB (bwsalmon/agents#534) reach
+// "konturctl vm create" as -cpus/-memory-mb, after CreateArgs -- so an
+// operator's own -kontur-create-arg=-cpus (if not set here too) is never
+// silently overridden by leaving DefaultCPUs at its zero "unset" value,
+// but the deployment-wide setting wins when both are configured, the
+// same "last one wins" precedent BaseIP/BasePort already set for this
+// same argument list.
+func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
+	listenTCP(t, 30080)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/key",
+		Workspace:         "/workspace",
+		CreateArgs:        []string{"-disk", "/images/current/disk.img"},
+		DefaultCPUs:       4,
+		DefaultMemoryMB:   8192,
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "vm create grain-test-slot-0 -state-dir " + stateDir + " -disk /images/current/disk.img -cpus 4 -memory-mb 8192"
+	got := splitNonEmptyLines(string(data))
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("kontur invocations = %v, want [%q]", got, want)
+	}
+}
+
+// TestKonturSandboxesReshapeUpdatesAnExistingVM confirms Reshape
+// (bwsalmon/agents#534) runs "konturctl vm update" with -cpus/-memory-mb
+// against a slot's already-created VM, leaving whatever flags Reshape
+// was not asked to change (disk, network, ...) untouched -- vm update's
+// own partial-update contract, exercised here only by checking that
+// Reshape's own invocation carries exactly the two flags it was given,
+// nothing else.
+func TestKonturSandboxesReshapeUpdatesAnExistingVM(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix: "grain-test-",
+		StateDir:   stateDir,
+		SSHUser:    "debian",
+		SSHKey:     "/key",
+		Workspace:  "/workspace",
+	})
+
+	if err := k.Reshape(context.Background(), "slot-0", 4, 8192); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "vm update grain-test-slot-0 -state-dir " + stateDir + " -cpus 4 -memory-mb 8192"
+	got := splitNonEmptyLines(string(data))
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("kontur invocations = %v, want [%q]", got, want)
+	}
+}
+
+// TestKonturSandboxesReshapeOmitsUnsetDimension confirms Reshape passes
+// only the one flag whose value is non-zero -- a task overriding just
+// SandboxCPUs, say, must not also force -memory-mb 0 onto a VM that
+// staticpod.VMSpec.Validate would refuse outright ("memory-mb must be at
+// least 128").
+func TestKonturSandboxesReshapeOmitsUnsetDimension(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix: "grain-test-",
+		StateDir:   stateDir,
+		SSHUser:    "debian",
+		SSHKey:     "/key",
+		Workspace:  "/workspace",
+	})
+
+	if err := k.Reshape(context.Background(), "slot-0", 4, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "vm update grain-test-slot-0 -state-dir " + stateDir + " -cpus 4"
+	got := splitNonEmptyLines(string(data))
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("kontur invocations = %v, want [%q]", got, want)
+	}
+}
+
+// TestKonturSandboxesReshapeNoOpWhenNeitherDimensionSet confirms Reshape
+// never invokes konturctl at all when both cpus and memoryMB are zero --
+// runOne only calls Reshape when a task set at least one of
+// SandboxCPUs/SandboxMemoryMB, but Reshape itself stays a safe no-op
+// either way rather than running a pointless "vm update" with no flags.
+func TestKonturSandboxesReshapeNoOpWhenNeitherDimensionSet(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix: "grain-test-",
+		StateDir:   stateDir,
+		SSHUser:    "debian",
+		SSHKey:     "/key",
+		Workspace:  "/workspace",
+	})
+
+	if err := k.Reshape(context.Background(), "slot-0", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err == nil && len(data) != 0 {
+		t.Errorf("kontur was invoked by a no-op Reshape: %q", data)
+	}
+}
+
 func TestKonturSandboxesRejectsNonNumericSlotWithBaseIPSet(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)

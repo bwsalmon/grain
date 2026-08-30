@@ -88,6 +88,16 @@ type KonturConfig struct {
 	// same derivation and for the same reason BaseIP is: every other
 	// slot's is BasePort plus its own number minus one.
 	BasePort int
+	// DefaultCPUs and DefaultMemoryMB (bwsalmon/agents#534), if set, are
+	// appended to createArgs' own result as "-cpus"/"-memory-mb" -- the
+	// deployment-wide default VM shape (model.Config.SandboxCPUs/
+	// SandboxMemoryMB), applied last so it wins out over anything
+	// CreateArgs also happens to set, the same reasoning BaseIP/BasePort's
+	// own doc comment gives for appending those last too. Zero, the
+	// default for both, omits the corresponding flag entirely and leaves
+	// bwsalmon/kontur's own `konturctl vm create` default in place.
+	DefaultCPUs     int
+	DefaultMemoryMB int
 }
 
 func (c KonturConfig) stateDir() string {
@@ -121,16 +131,23 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // createArgs returns the full argument list ensure passes to kontur.Create
 // for slot's VM beyond a name and -state-dir: -backend cfg.Backend first,
 // when set, so a caller's own CreateArgs never needs to repeat it, then
-// cfg.CreateArgs verbatim, then a "-ip"/"-port" pair derived from
-// BaseIP/BasePort and slot's own number last -- last so they win out over
-// anything CreateArgs also happens to set, on the theory that a
-// deployment using BaseIP/BasePort at all wants every slot's address
-// derived consistently, not overridden per slot by a CreateArgs list that
+// cfg.CreateArgs verbatim, then DefaultCPUs/DefaultMemoryMB (if set) as
+// "-cpus"/"-memory-mb", then a "-ip"/"-port" pair derived from
+// BaseIP/BasePort and slot's own number last -- each later group winning
+// out over anything CreateArgs also happens to set, on the theory that a
+// deployment configuring one of these more specific knobs at all wants it
+// applied consistently, not overridden per slot by a CreateArgs list that
 // is otherwise identical across every slot's call.
 func (c KonturConfig) createArgs(slot string) ([]string, error) {
 	args := c.CreateArgs
 	if c.Backend != "" {
 		args = append([]string{"-backend", c.Backend}, args...)
+	}
+	if c.DefaultCPUs != 0 {
+		args = append(args, "-cpus", strconv.Itoa(c.DefaultCPUs))
+	}
+	if c.DefaultMemoryMB != 0 {
+		args = append(args, "-memory-mb", strconv.Itoa(c.DefaultMemoryMB))
 	}
 	if c.BaseIP == "" && c.BasePort == 0 {
 		return args, nil
@@ -247,6 +264,59 @@ func (k *KonturSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool
 
 	runner := &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}
 	return mcp.NewSSHSandboxTools(runner, k.cfg.Workspace), nil
+}
+
+// Reshape resizes slot's VM to cpus vCPUs and/or memoryMB MiB of memory
+// via "konturctl vm update" -- the per-task shape override
+// bwsalmon/agents#534 asked for, called by orchestrator.runOne ahead of a
+// task whose own model.Task.SandboxCPUs/SandboxMemoryMB differ from the
+// deployment default cfg.DefaultCPUs/DefaultMemoryMB already baked into
+// this slot's VM at create time. A zero cpus or memoryMB leaves that
+// dimension alone, the same "unset means keep whatever konturctl vm
+// update was last told" partial-update contract bwsalmon/kontur's own
+// registerVMFlags gives every flag it does not receive -- so a task
+// overriding only one of the two never has to know or repeat the other's
+// current value.
+//
+// Unlike ensure/Recreate's own "always leaves a fresh VM behind," a
+// Reshape is not undone until the next Recreate rebuilds the VM from
+// cfg.createArgs (the deployment default) -- exactly once, right after
+// this task's own run, the same boundary every other task's isolation
+// already goes through. A task that never sets either field never calls
+// this at all (see runOne), so a deployment using no per-task overrides
+// sees no behavior change here whatsoever.
+//
+// Reshape creates slot's VM first (via ensure) if it does not exist yet,
+// the same "first ToolsFor call for a slot creates its VM" contract every
+// other exported method on this type already gives, and takes the same
+// per-name lock ensure's own kontur.Create call does, for the same
+// reason: konturctl vm update execs a real, potentially slow subprocess,
+// and guarding it with anything wider than a per-name lock would
+// serialize unrelated slots' VM operations against each other.
+func (k *KonturSandboxes) Reshape(ctx context.Context, slot string, cpus, memoryMB int) error {
+	name := k.VMNameFor(slot)
+	if err := k.ensure(ctx, name, slot); err != nil {
+		return err
+	}
+	var args []string
+	if cpus != 0 {
+		args = append(args, "-cpus", strconv.Itoa(cpus))
+	}
+	if memoryMB != 0 {
+		args = append(args, "-memory-mb", strconv.Itoa(memoryMB))
+	}
+	if len(args) == 0 {
+		return nil
+	}
+
+	lock := k.lockFor(name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if err := kontur.Update(ctx, k.cfg.stateDir(), name, args...); err != nil {
+		return fmt.Errorf("orchestrator: reshaping kontur VM %q: %w", name, err)
+	}
+	return nil
 }
 
 // ensure creates name's VM if this KonturSandboxes has not already created

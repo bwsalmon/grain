@@ -22,14 +22,16 @@ and manage the VM pods `kontur` runs. See "Operating a node" below.
 
 The image contains three things:
 
-- `kontur` (this repo, Go): a single binary with four modes, selected by
+- `kontur` (this repo, Go): a single binary with five modes, selected by
   the first argument (`run`, the default if none is given; `netshim`;
-  `exec`; or `sleep`):
+  `exec`; `resize`; or `sleep`):
   - **`run`** reads configuration from the environment, execs
     `cloud-hypervisor` with the resulting arguments, streams the guest's
     serial console to the container's stdout/stderr so it shows up under
-    `kubectl logs`, and turns `SIGTERM`/`SIGINT` into a graceful VM
-    shutdown.
+    `kubectl logs`, turns `SIGTERM`/`SIGINT` into a graceful VM shutdown,
+    and, if configured, runs a one-time setup script and suspends the VM
+    once it completes so a later run can resume it instead of booting
+    fresh; see "Suspend and resume" below.
   - **`netshim`** sets up the pod-local networking (bridge, taps, NAT)
     that lets several VM containers in the same pod share the pod's IP;
     see "Pod-local networking" below. It's meant to run once, to
@@ -38,6 +40,10 @@ The image contains three things:
     already-running `sshd`, rather than in this otherwise-empty
     container -- meant to be `kubectl exec`'s own command, so that ends
     up in the guest too; see "Execing into a VM" below.
+  - **`resize`** live-resizes an already-running VM's memory via
+    cloud-hypervisor's own API, within the range `run` configured at boot
+    -- also meant to be `kubectl exec`'s own command (it needs to reach
+    the API socket inside this container); see "Memory hotplug" below.
   - **`sleep`** just blocks until killed. It exists purely so
     `-backend docker` (see "Operating a node" below) can hold a network
     namespace open with the `kontur` image itself, without needing a
@@ -45,7 +51,7 @@ The image contains three things:
 
   `netshim` talks to the kernel directly via netlink/nftables (see
   "Pod-local networking" below) rather than shelling out to `ip`/
-  `iptables`, so none of the four modes needs anything beyond the two
+  `iptables`, so none of the five modes needs anything beyond the two
   statically linked binaries themselves -- the image's base is `scratch`
   (see "Building" below).
 - `cloud-hypervisor`: the actual VMM, fetched from the upstream static
@@ -98,6 +104,37 @@ shutdown"), but a custom `CHV_DISK_IMAGE` needs to bring its own
 `acpid`/`systemd-logind` or equivalent, or every shutdown will pay the
 full `CHV_SHUTDOWN_TIMEOUT` before falling through to step 3.
 
+### Suspend and resume
+
+`CHV_SETUP_SCRIPT`, if set, is run once inside the guest over SSH (the
+same machinery `kontur exec` uses, see "Execing into a VM" below) right
+after a fresh boot finishes. There's a single script for this regardless
+of whether you want its result snapshotted: `kontur` always boots the VM
+to run it, and `CHV_SNAPSHOT_PATH` is what makes suspending afterward
+optional rather than a separate mechanism.
+
+- With `CHV_SNAPSHOT_PATH` set, once the script exits zero, `kontur run`
+  pauses the VM, snapshots its full state (memory included) to
+  `CHV_SNAPSHOT_PATH` via the cloud-hypervisor API's
+  `vm.pause`/`vm.snapshot`, and resumes it -- so this run carries on as
+  if nothing happened. The next `kontur run` that finds a complete
+  snapshot already at `CHV_SNAPSHOT_PATH` boots by restoring it
+  (`--restore source_url=file://...,resume=true`) instead of booting
+  fresh, which skips both the normal boot path and the setup script
+  entirely -- the restored guest already reflects whatever the script
+  did. `CHV_SNAPSHOT_PATH` must be an absolute path whose parent
+  directory already exists, and, to actually be picked up on a later
+  run, needs to live somewhere that survives the current container going
+  away (a hostPath or PVC, the same as a persistent `CHV_DISK_IMAGE`).
+- Without `CHV_SNAPSHOT_PATH`, the script just runs again on every fresh
+  boot instead -- useful for a script that's cheap and idempotent, or
+  for guest customization where there's no persistent path available to
+  snapshot to.
+
+A snapshot is only ever published by renaming a completed staging
+directory into its final path, so a reader never observes a partial one
+even if the process is killed mid-snapshot.
+
 ## Configuration
 
 `kontur run`'s configuration is entirely via environment variables:
@@ -112,18 +149,124 @@ full `CHV_SHUTDOWN_TIMEOUT` before falling through to step 3.
 | `CHV_CMDLINE`          | no       | `console=ttyS0 root=/dev/vda rw` | Kernel command line, used with `CHV_KERNEL`. |
 | `CHV_FIRMWARE`         | one of `CHV_KERNEL`/`CHV_FIRMWARE` | — | Path to firmware (e.g. `CLOUDHV.fd`) for firmware boot. |
 | `CHV_CPUS`             | no       | `2`                               | Boot vCPU count. |
-| `CHV_MEMORY_MB`        | no       | `2048`                            | Guest memory, in MiB. |
-| `CHV_MEMORY_SHARED`    | no       | `true`                            | Shared guest memory (required for some device backends). |
+| `CHV_MEMORY_MB`        | no       | `256`                             | Guest memory at boot, in MiB. See "Memory hotplug" below. |
+| `CHV_MEMORY_MAX_MB`    | no       | `2048`, or `CHV_MEMORY_MB` if larger | Ceiling `CHV_MEMORY_MB` can grow to via hotplug. See "Memory hotplug" below. |
+| `CHV_MEMORY_HOTPLUG`   | no       | `true`                            | Attach a memory hotplug device sized for growth up to `CHV_MEMORY_MAX_MB`. See "Memory hotplug" below. |
+| `CHV_MEMORY_SHARED`    | no       | `true`                            | Shared guest memory (required for some device backends, and for `CHV_MEMORY_HOTPLUG`). |
 | `CHV_NET`              | no       | —                                 | Passed through verbatim as `--net`, e.g. `tap=eth0,mac=...`. |
 | `CHV_API_SOCKET`       | no       | `/run/cloud-hypervisor/api.sock` | Path to the cloud-hypervisor API socket. |
 | `CHV_BINARY_PATH`      | no       | `/usr/local/bin/cloud-hypervisor` | Path to the cloud-hypervisor binary. |
 | `CHV_EXTRA_ARGS`       | no       | —                                 | Extra CLI args appended verbatim, space-separated (e.g. `--watchdog`). |
 | `CHV_SHUTDOWN_TIMEOUT` | no       | `20s` (Go duration syntax)        | How long to wait for a graceful guest shutdown before forcing it. |
+| `CHV_SETUP_SCRIPT`     | no       | —                                 | Shell script run once inside the guest over SSH after a fresh boot. If `CHV_SNAPSHOT_PATH` is also set, suspended to it on success; otherwise reruns on every fresh boot. See "Suspend and resume". |
+| `CHV_SNAPSHOT_PATH`    | no       | —                                 | Absolute path to suspend the VM's state to on success of `CHV_SETUP_SCRIPT`, and to restore it from if a complete snapshot is already there at startup. See "Suspend and resume". |
+| `CHV_MEM_AGENT`        | no       | `false`                           | Let the guest-side memory-pressure agent baked into the disk image trigger hotplug growth on its own. Requires `CHV_MEMORY_HOTPLUG=true`. See "Memory hotplug". |
+| `CHV_MEM_AGENT_ADDR`   | no       | `169.254.100.1:30090`            | Address the guest's pressure signals are received on; must be reachable from the guest and match what it was built to signal. See "Memory hotplug". |
+| `CHV_MEM_AGENT_STEP_MB`| no       | `256`                             | How much a single pressure signal grows the guest by, capped at `CHV_MEMORY_MAX_MB`. See "Memory hotplug". |
+| `CHV_MEM_AGENT_COOLDOWN` | no     | `30s` (Go duration syntax)        | Minimum time between two guest-triggered resizes. See "Memory hotplug". |
 
 Every configured path -- `CHV_DISK_IMAGE` (including its default) and, if
 set, `CHV_KERNEL`/`CHV_INITRAMFS`/`CHV_FIRMWARE` -- must already exist on
 disk: `kontur run` checks this at startup and fails fast with a clear
 error rather than letting cloud-hypervisor fail deeper into boot.
+
+## Memory hotplug
+
+`CHV_MEMORY_HOTPLUG` is on by default, and `CHV_MEMORY_MB` (the guest's
+size at boot) defaults to a deliberately small `256`: the VMM doesn't pay
+for a large memory footprint from the very first boot the way a fixed,
+large `CHV_MEMORY_MB` always did, and the guest can still grow up to
+`CHV_MEMORY_MAX_MB` (`2048` by default) later, on demand. This uses
+cloud-hypervisor's virtio-mem-based hotplug device (`--memory
+hotplug_method=virtio-mem`) rather than its ACPI-based DIMM hotplug --
+virtio-mem needs no udev rule in the guest to online newly added memory
+and, unlike ACPI hotplug, also supports shrinking back down again, at the
+cost of requiring a guest kernel built with `CONFIG_VIRTIO_MEM` (Linux
+5.8+) to actually make use of it. A guest without that support still
+boots fine at `CHV_MEMORY_MB`; it just never grows past it.
+
+Growth can be triggered two ways: manually, from outside the guest, or
+automatically, from inside it.
+
+`kontur resize` (`kubectl exec <pod> -c <container> -- kontur resize
+-memory-mb=1024`) is the manual trigger: it asks cloud-hypervisor's API
+to resize the guest directly to a size between `CHV_MEMORY_MB` and
+`CHV_MEMORY_MAX_MB`. The guest's own virtio-mem driver then onlines (or
+offlines, if resizing down) whatever changed on its own, automatically --
+no udev rule or other guest-side action needed, unlike ACPI-based
+hotplug. Unlike the two boot-time sizes, this only takes effect after the
+VM is already running -- there's no way to reach a container's API socket
+before that.
+
+`CHV_MEM_AGENT=true` turns on the automatic trigger: `kontur run` starts
+a small listener (`internal/memagent`) alongside the VM, and the guest
+disk image baked by this repo's Dockerfile (both the Debian and Alpine
+variants, see `deploy/guest-image/README.md`) already ships a matching
+guest-side daemon, `kontur-mem-agent`, installed and enabled by default
+(as a `systemd`/OpenRC service) regardless of `CHV_MEM_AGENT`'s own
+setting -- it's a no-op if nothing is listening on the other end. That
+daemon polls `/proc/pressure/memory` every `KONTUR_MEM_AGENT_INTERVAL`
+(`10s` default) and, once "some avg10" reaches `KONTUR_MEM_AGENT_THRESHOLD`
+(`10.00` default), opens a plain TCP connection to its own default
+route's gateway -- the same address `CHV_CMDLINE`'s `ip=` boot parameter
+already configured, i.e. this VM's own `kontur run` container, reachable
+directly since they share netshim's bridge network (see "Pod-local
+networking" below) -- on `KONTUR_MEM_AGENT_PORT` (`30090` default,
+matching `CHV_MEM_AGENT_ADDR`'s own default port) and writes a single
+`PRESSURE <value>` line. `internal/memagent` grows the guest by
+`CHV_MEM_AGENT_STEP_MB` on each signal it receives (capped at
+`CHV_MEMORY_MAX_MB`, rate-limited to once per `CHV_MEM_AGENT_COOLDOWN` so
+a guest still catching up on an in-flight grow doesn't trigger another
+one immediately) and calls the same `vm.resize` API `kontur resize` does.
+
+This is deliberately a first pass at "pressure": a single fixed PSI
+threshold and a single fixed growth step, with no guest-side backoff
+beyond the host's own cooldown, no shrinking back down when pressure
+subsides, and no authentication on the listener beyond it only being
+reachable from whatever already shares the pod's network namespace (the
+guest itself, and anything else in the same pod). Bounded blast radius --
+the worst a misbehaving or compromised guest can do is grow itself up to
+a ceiling the operator already chose (`CHV_MEMORY_MAX_MB`) -- but not a
+sophisticated policy. The guest agent's target address and port are also
+fixed at image build time (baked into `kontur-mem-agent`'s defaults,
+since the guest has no way to learn a nonstandard one at boot beyond
+`CHV_CMDLINE`'s own kernel `ip=` parameter), so overriding
+`CHV_MEM_AGENT_ADDR`'s *port* away from `30090`, or `NETSHIM_BRIDGE_CIDR`
+away from its own default gateway, needs a matching guest-side override
+of `KONTUR_MEM_AGENT_PORT` (e.g. via `CHV_SETUP_SCRIPT` dropping in an
+env override and restarting the service) to keep working -- there is
+currently no plumbing to pass that through automatically. Multiple
+VMs sharing one pod (see "Pod-local networking" below) also all share one
+network namespace, so only one of their `kontur run` containers can
+actually bind `CHV_MEM_AGENT_ADDR` at a time; this has not been extended
+to disambiguate which VM a signal came from, so treat automatic growth as
+a single-VM-per-pod feature for now.
+
+`CHV_MEMORY_MAX_MB` itself, unlike the live size, can only be set at boot
+(`kontur run`'s own `CHV_MEMORY_MAX_MB`/`CHV_MEMORY_MB`): cloud-hypervisor
+sizes the hotplug device's address space once, from `hotplug_size` at
+`--memory`, and has no way to grow that window later without a restart.
+Size `CHV_MEMORY_MAX_MB` for whatever this VM might legitimately need at
+its busiest, not just its typical case -- and size the *container's* own
+memory request/limit (e.g. a Kubernetes pod's `resources.requests.memory`)
+to `CHV_MEMORY_MAX_MB` too, not `CHV_MEMORY_MB`: cloud-hypervisor's own
+process memory grows along with the guest's as it's hotplugged, so a
+container limit sized only for the small starting footprint will get the
+VM OOM-killed by the node the first time it actually grows.
+
+Set `CHV_MEMORY_HOTPLUG=false` to disable all of this and get the old,
+fixed-size behavior back -- `CHV_MEMORY_MB` is then simply the VM's whole
+memory, unchangeable for its lifetime, same as before this existed.
+
+Combining this with "Suspend and resume" above works -- a snapshot
+captures whatever the guest's memory looks like at pause time, hotplugged
+or not, and a restored VM keeps whatever size that was, still adjustable
+afterwards the same way via `kontur resize` -- but is untested beyond
+what unit tests cover, since cloud-hypervisor's own snapshot/restore
+support is known to have rough edges in general (see its own docs) and
+neither feature here was built with the other specifically in mind. If
+you rely on both together, verify that combination yourself rather than
+assuming it works exactly like either one alone.
 
 ## Execing into a VM
 
@@ -141,9 +284,11 @@ kubectl exec -it <pod> -c <container> -- kontur exec -- <command> [args...]
 
 Leaving off `-- <command>` (i.e. just `kontur exec`) opens an interactive
 login shell instead, the same as an ordinary `ssh <host>` with no command.
-Since the container ships no shell of its own (see "Building" below),
-`kontur exec` -- not e.g. `/bin/sh` -- is always the command
-`kubectl exec`/`docker exec` itself needs to run.
+Explicitly running `kontur exec` this way handles any command; see
+"Shimming sh and bash" below for a way to reach the same guest session
+via plain `sh`/`bash`, without needing to know `kontur exec` exists at
+all, for the common case of an interactive shell or a single `-c
+<command>`.
 
 | Variable                      | Required | Default                          | Description |
 |--------------------------------|:--------:|-----------------------------------|--------------|
@@ -156,6 +301,41 @@ This depends on `CHV_NET` actually giving the guest a reachable address
 (e.g. via `netshim`, as `konturctl vm` sets up automatically) -- a guest
 booted with no network device at all has no path in for `kontur exec`
 either.
+
+## Shimming sh and bash
+
+`docker exec`/`kubectl exec` resolve the command they're given by name
+inside the container's own filesystem and run that directly -- never
+through the container's entrypoint -- so without `kontur exec` above, an
+end user (or a tool built on top of `docker`/`kubectl` that isn't aware
+of kontur specifically) reaching for the shell that's normally just
+*there*, e.g.:
+
+```sh
+kubectl exec -it <pod> -c <container> -- sh
+docker exec -it <container> bash -c 'tail -n100 /var/log/app.log'
+```
+
+would just get "executable file not found in $PATH": the container ships
+no shell of its own (see "Building" below). `/bin/sh`, `/bin/bash`, and
+their `/usr/bin` equivalents are symlinks to the same `kontur` binary
+instead (see the Dockerfile's `final` stage), which tells them apart
+from its four real modes by `argv[0]` (see `cmd/kontur`) and forwards
+into the guest the same way `kontur exec` does.
+
+This can't support arbitrary `sh`/`bash` invocations the way a real
+shell binary would -- there's no way to plumb an arbitrary local argv
+through the guest's SSH `ForceCommand` wrapper, which only ever receives
+a single command string (see `internal/guestexec`'s `ShellCommandLine`).
+Only two shapes are recognized: no arguments at all (an interactive login
+shell, the same as bare `kontur exec`), and `-c <command>` (optionally
+with other short flags fused in front of the `c`, e.g. `-ec`), which
+covers what `docker exec`/`kubectl exec`-based tooling actually generates
+in practice. Anything else -- a script file argument, positional
+arguments after `-c`'s command, `--login` on its own, and so on -- is
+reported as an error naming `kontur exec` as the alternative that does
+support it, rather than silently behaving unlike a real `sh`/`bash`
+would.
 
 ## Building
 
@@ -191,8 +371,7 @@ less commonly-run-as-a-guest distro. See
 [`deploy/guest-image/README.md`](deploy/guest-image/README.md) for the
 guest disk image build (`guest-image`/`guest-rootfs-*` stages), how the
 two variants differ beyond package manager, and their own build args
-(`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`,
-`GUEST_SETUP_SCRIPT`).
+(`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`).
 
 ## Running locally
 
@@ -247,6 +426,12 @@ worked example. Two things any deployment needs to account for:
 - **Graceful termination**: set `terminationGracePeriodSeconds` comfortably
   above `CHV_SHUTDOWN_TIMEOUT` so Kubernetes doesn't `SIGKILL` the container
   before `kontur run` finishes its own shutdown sequence.
+
+See [`deploy/k8s/gke.md`](deploy/k8s/gke.md) for a GKE-specific,
+tested walkthrough (enabling nested virtualization on the node pool,
+pushing the image, and a self-contained
+[`gke-pod-example.yaml`](deploy/k8s/gke-pod-example.yaml) that needs no
+other cluster setup).
 
 ## Local testing with a static kubelet
 
@@ -448,9 +633,13 @@ go vet ./...
 go test ./...
 ```
 
-`internal/hypervisor`'s tests exercise the process/shutdown state machine
-against a fake `cloud-hypervisor` stand-in (`testdata/fakechv`) that speaks
-the same API, so they run without KVM. `internal/netshim`'s integration
+`internal/hypervisor`'s tests exercise the process/shutdown/suspend state
+machine against a fake `cloud-hypervisor` stand-in (`testdata/fakechv`)
+that speaks the same API, so they run without KVM; this covers that
+`kontur run` drives the pause/snapshot/resume and restore-argument-
+building sides of suspend/resume correctly, but not whether a real
+`cloud-hypervisor` actually restores a snapshot the way fakechv's own
+unconditional acks imply. `internal/netshim`'s integration
 test creates a real bridge/tap/nftables setup via the same netlink/nftables
 Go libraries `netshim` itself uses (no `ip`/`iptables` binaries needed) and
 is skipped unless run as root (`sudo go test ./internal/netshim/...`).
@@ -485,6 +674,21 @@ fails to apply `kernel.pid_max=4194304` at the default `CHV_MEMORY_MB`
 ACPI power-button shutdown isn't handled without `logind`/`dbus` in the
 guest, so `kontur run`'s SIGTERM path falls back to its forced-shutdown
 step every time -- still exiting cleanly, just not via the graceful path.
+Memory hotplug (`internal/config`'s `CHV_MEMORY_HOTPLUG`/
+`CHV_MEMORY_MAX_MB` and `hypervisor.BuildArgs`'s resulting `--memory`
+argument) has been smoke-tested directly against the real
+`cloud-hypervisor` v53.0 binary under KVM: booted with
+`size=256M,shared=on,hotplug_method=virtio-mem,hotplug_size=1792M` (i.e.
+`CHV_MEMORY_MB=256`, `CHV_MEMORY_MAX_MB=2048`), `vm.info` confirmed
+cloud-hypervisor accepted that configuration as given, and a `vm.resize`
+call with `desired_ram` for 1024 MiB (what `kontur resize
+-memory-mb=1024` sends, see `hypervisor.APIClient.Resize`) returned `204`
+and `vm.info` afterwards showed `hotplugged_size` grown to account for
+the difference. This confirms the VMM-side wiring end to end; it does not
+confirm a guest actually consuming the hotplugged memory, since that
+needs a `CONFIG_VIRTIO_MEM` guest kernel and neither of this repo's own
+kernels (the benchmark suite's marker kernel, or the purpose-built one
+used for the guest disk image smoke test above) currently is one.
 `internal/setup` (which `konturctl setup` drives) is tested
 against a fake `install.sh` stand-in (`fstest.MapFS`) that only records
 what it was invoked with, so the wiring -- asset extraction, environment
@@ -668,3 +872,32 @@ config `install.sh` wrote when prompted) so `containerd.io`'s newer
 binary ends up serving both Docker and the CRI socket kubelet uses, under
 one config. See `deploy/static-kubelet/README.md` for the same note
 closer to where it matters.
+
+### Validated on GKE
+
+Everything above ran on a real, generic nested-virt VM or a container
+standing in for a Kubernetes node, never on Kubernetes' most common
+managed form. This pass built the image and ran it on an actual GKE
+Standard cluster instead, to check for platform-specific gotchas in
+either direction (a managed node image behaving differently from a
+hand-rolled nested-virt VM, or GKE's own restrictions blocking something
+that worked elsewhere). See [`deploy/k8s/gke.md`](deploy/k8s/gke.md) for
+the full walkthrough and exact findings; in short: no kontur code changes
+were needed. `--enable-nested-virtualization` is a real, documented GKE
+node pool flag that Just Works, `netshim` needed the same
+`privileged: true` already documented for a standalone kubelet (GKE's
+containerd masks `/proc/sys/net` read-only the same way), and the VM
+container itself also needs `privileged: true` when using a `/dev/kvm`
+hostPath rather than a device plugin -- confirmed by first getting this
+wrong (a `/dev/kvm` bind mount with capabilities dropped and no
+`privileged` opens the device node fine but fails `KVM_CREATE_VM` with
+`Operation not permitted`, since the non-privileged pod's device cgroup
+doesn't allow it through regardless of the file's own permissions).
+`deploy/k8s/gke.md` also adds a fully self-contained example
+(`gke-pod-example.yaml`) that fetches its own kernel into an `emptyDir`
+via an init container rather than assuming a pre-populated node-local
+cache, so a single `kubectl apply` is enough to see a VM boot on a fresh
+cluster with no other setup -- both that and the existing
+`netshim`-networked `pod-example.yaml` shape were confirmed working,
+including a real `kontur exec` SSH session reaching the guest and a
+clean sub-3-second shutdown on pod deletion.

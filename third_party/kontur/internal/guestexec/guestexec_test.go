@@ -94,6 +94,42 @@ func TestShellJoin(t *testing.T) {
 	}
 }
 
+func TestShellCommandLine(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		want    string
+		wantErr bool
+	}{
+		{name: "no args requests interactive shell", args: nil, want: ""},
+		{name: "plain -c", args: []string{"-c", "echo hi"}, want: "echo hi"},
+		{name: "fused flags ending in c", args: []string{"-ec", "echo hi"}, want: "echo hi"},
+		{name: "command containing shell metacharacters passed through verbatim", args: []string{"-c", "ls -la $HOME | wc -l"}, want: "ls -la $HOME | wc -l"},
+		{name: "-c with no command is an error", args: []string{"-c"}, wantErr: true},
+		{name: "positional args after -c's command are unsupported", args: []string{"-c", "echo hi", "extra"}, wantErr: true},
+		{name: "a script file argument is unsupported", args: []string{"script.sh"}, wantErr: true},
+		{name: "--login is unsupported", args: []string{"--login"}, wantErr: true},
+		{name: "bare -", args: []string{"-"}, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ShellCommandLine(c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("ShellCommandLine(%q) error = nil, want an error", c.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ShellCommandLine(%q) error = %v", c.args, err)
+			}
+			if got != c.want {
+				t.Errorf("ShellCommandLine(%q) = %q, want %q", c.args, got, c.want)
+			}
+		})
+	}
+}
+
 func TestExitCode(t *testing.T) {
 	if got := exitCode(nil); got != 0 {
 		t.Errorf("exitCode(nil) = %d, want 0", got)
@@ -266,6 +302,58 @@ func TestRun_ExecutesGivenCommandAndReportsExitCode(t *testing.T) {
 	}
 	if got := stdout.String(); got != "hello from guest\n" {
 		t.Errorf("stdout = %q, want %q", got, "hello from guest\n")
+	}
+}
+
+func TestRunLine_SendsLineVerbatim(t *testing.T) {
+	keyPath, pub := writeClientKey(t)
+
+	var gotCmd string
+	addr := fakeGuestSSHD(t, pub,
+		func(cmd string, ch ssh.Channel) {
+			gotCmd = cmd
+			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 0}))
+		},
+		func(ch ssh.Channel) {
+			t.Error("handleShell called, want handleExec for a non-empty line")
+		},
+	)
+
+	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
+	// A line like this, round-tripped through Run's own shellJoin (which
+	// quotes it as a single literal argument), would reach the guest as
+	// a single-quoted string instead of a command the guest's own shell
+	// expands and word-splits -- see RunLine's doc comment for why it
+	// needs to skip that quoting instead.
+	line := "ls -la $HOME | wc -l"
+	if _, err := RunLine(context.Background(), cfg, line, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatalf("RunLine() error = %v", err)
+	}
+	if gotCmd != line {
+		t.Errorf("guest received command %q, want %q", gotCmd, line)
+	}
+}
+
+func TestRunLine_EmptyLineRequestsShell(t *testing.T) {
+	keyPath, pub := writeClientKey(t)
+
+	shellCalled := false
+	addr := fakeGuestSSHD(t, pub,
+		func(cmd string, ch ssh.Channel) {
+			t.Error("handleExec called, want handleShell for an empty line")
+		},
+		func(ch ssh.Channel) {
+			shellCalled = true
+			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 0}))
+		},
+	)
+
+	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
+	if _, err := RunLine(context.Background(), cfg, "", strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatalf("RunLine() error = %v", err)
+	}
+	if !shellCalled {
+		t.Error("guest never received a shell request")
 	}
 }
 

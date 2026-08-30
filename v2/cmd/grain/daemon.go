@@ -193,6 +193,14 @@ func daemon(args []string) {
 	konturBasePort := fs.Int("kontur-base-port", 0,
 		"the -port slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own "+
 			"number minus one, the same derivation -kontur-base-ip uses. Only used with -kontur-vm-name-prefix.")
+	sandboxCPUs := fs.Int("sandbox-cpus", 0,
+		"deployment-wide default vCPU count for a kontur-managed sandbox VM, passed as `konturctl vm create`'s "+
+			"own -cpus (only used with -kontur-vm-name-prefix); 0 leaves bwsalmon/kontur's own default in place. "+
+			"Overridable per task from the UI/API (model.Task.SandboxCPUs)"+seedOnly)
+	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
+		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM, passed as `konturctl vm "+
+			"create`'s own -memory-mb (only used with -kontur-vm-name-prefix); 0 leaves bwsalmon/kontur's own "+
+			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -245,6 +253,7 @@ func daemon(args []string) {
 		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
 		konturCreateArgs: konturCreateArgs, konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
+		sandboxCPUs: *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
@@ -301,6 +310,13 @@ type config struct {
 	konturCreateArgs   []string
 	konturBaseIP       string
 	konturBasePort     int
+	// sandboxCPUs and sandboxMemoryMB are store-backed
+	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
+	// like poll-interval and the rest of the seedOnly flags above --
+	// only consulted with -kontur-vm-name-prefix, the same as every
+	// other kontur* field here.
+	sandboxCPUs     int
+	sandboxMemoryMB int
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -348,6 +364,8 @@ func run(ctx context.Context, cfg config) error {
 			Workspace:       cfg.konturWorkspace,
 			BaseIP:          cfg.konturBaseIP,
 			BasePort:        cfg.konturBasePort,
+			DefaultCPUs:     cfg.sandboxCPUs,
+			DefaultMemoryMB: cfg.sandboxMemoryMB,
 		})
 		sandboxes = konturSandboxes
 	} else {
@@ -616,6 +634,7 @@ func (c config) toModelConfig() model.Config {
 		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
 		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
 		TargetRepos: c.targetRepos,
+		SandboxCPUs: c.sandboxCPUs, SandboxMemoryMB: c.sandboxMemoryMB,
 	}
 }
 
@@ -632,6 +651,8 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.gcpProject = mc.GCPProject
 	c.gcpServiceAccountEmail = mc.GCPServiceAccountEmail
 	c.targetRepos = mc.TargetRepos
+	c.sandboxCPUs = mc.SandboxCPUs
+	c.sandboxMemoryMB = mc.SandboxMemoryMB
 	return c
 }
 

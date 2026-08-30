@@ -510,12 +510,19 @@ func askedAt(obs *model.Observation, comments []model.Comment) *time.Time {
 // docs/data-model.md's "a form knows all of that before the task exists"
 // asked for in the first place.
 type CreateTaskRequest struct {
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
-	Repo         string   `json:"repo"`
-	Base         string   `json:"base"`
-	AutoMerge    bool     `json:"autoMerge"`
-	Capabilities []string `json:"capabilities"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Repo        string `json:"repo"`
+	Base        string `json:"base"`
+	AutoMerge   bool   `json:"autoMerge"`
+	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) set model.Task's
+	// own fields of the same name -- a per-task override of the
+	// deployment's default sandbox shape. 0 (the default for both) means
+	// no override: the task dispatches at whatever shape the deployment
+	// otherwise configures.
+	SandboxCPUs     int      `json:"sandboxCpus"`
+	SandboxMemoryMB int      `json:"sandboxMemoryMb"`
+	Capabilities    []string `json:"capabilities"`
 	// DependsOn is a set of task IDs this task cannot dispatch ahead of --
 	// model.LinkDependsOn links, filed at creation the same way
 	// Capabilities is. SetDependency is the picker's attach/detach
@@ -564,6 +571,9 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			"no repo given, and this deployment has no default target repo configured")
 	}
 
+	if err := validateSandboxShape(req.SandboxCPUs, req.SandboxMemoryMB); err != nil {
+		return Task{}, err
+	}
 	grants, err := c.grantsFor(req.Capabilities)
 	if err != nil {
 		return Task{}, err
@@ -611,15 +621,17 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			Attribution: model.Attribution{Actor: c.Config.Actor},
 			Reason:      model.ReasonDirect,
 		},
-		Target:    target,
-		Binding:   model.BindingDirective,
-		Base:      req.Base,
-		AutoMerge: req.AutoMerge,
-		Grants:    grants,
-		Links:     links,
-		Reads:     reads,
-		CreatedAt: &now,
-		OrderKey:  orderKey,
+		Target:          target,
+		Binding:         model.BindingDirective,
+		Base:            req.Base,
+		AutoMerge:       req.AutoMerge,
+		SandboxCPUs:     req.SandboxCPUs,
+		SandboxMemoryMB: req.SandboxMemoryMB,
+		Grants:          grants,
+		Links:           links,
+		Reads:           reads,
+		CreatedAt:       &now,
+		OrderKey:        orderKey,
 	}
 	if req.Approved {
 		task.Approval = &model.Attribution{Actor: c.Config.Actor}
@@ -640,6 +652,23 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		}
 	}
 	return c.Task(ctx, id)
+}
+
+// validateSandboxShape checks a task's own SandboxCPUs/SandboxMemoryMB
+// override, mirroring bwsalmon/kontur's own staticpod.VMSpec.Validate
+// bounds ("cpus must be at least 1", "memory-mb must be at least 128")
+// the same way UpdateSettings' identical check does for the
+// deployment-wide default -- 0 is the one value each rejects that
+// Validate would not, since 0 means "no override" here rather than a
+// literal request for a zero-vCPU or zero-memory VM.
+func validateSandboxShape(cpus, memoryMB int) error {
+	if cpus != 0 && cpus < 1 {
+		return validationErrorf("sandboxCpus must be 0 (no override) or at least 1")
+	}
+	if memoryMB != 0 && memoryMB < 128 {
+		return validationErrorf("sandboxMemoryMb must be 0 (no override) or at least 128")
+	}
+	return nil
 }
 
 // targetAllowed reports whether target may be dispatched into: always,
@@ -773,6 +802,14 @@ type UpdateTaskRequest struct {
 	Repo        *string `json:"repo,omitempty"`
 	Base        *string `json:"base,omitempty"`
 	AutoMerge   *bool   `json:"autoMerge,omitempty"`
+	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) edit the same
+	// per-task override CreateTaskRequest's own fields set. Unlike most
+	// pointer fields here, *req.SandboxCPUs == 0 is a meaningful, valid
+	// edit (clearing a previously-set override back to "use the
+	// deployment default"), not rejected the way Repo's own empty string
+	// is -- only the request field itself being nil means "leave alone".
+	SandboxCPUs     *int `json:"sandboxCpus,omitempty"`
+	SandboxMemoryMB *int `json:"sandboxMemoryMb,omitempty"`
 	// Reads, given, replaces the whole set of read-only repos rather than
 	// adding to it -- there is no per-entry attach/detach endpoint for
 	// Reads the way SetCapability and SetDependency give Grants and
@@ -803,6 +840,18 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 	}
 	if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
 		return Task{}, validationErrorf("title cannot be empty")
+	}
+	if req.SandboxCPUs != nil || req.SandboxMemoryMB != nil {
+		var cpus, memoryMB int
+		if req.SandboxCPUs != nil {
+			cpus = *req.SandboxCPUs
+		}
+		if req.SandboxMemoryMB != nil {
+			memoryMB = *req.SandboxMemoryMB
+		}
+		if err := validateSandboxShape(cpus, memoryMB); err != nil {
+			return Task{}, err
+		}
 	}
 	var reads []model.RepoRef
 	if req.Reads != nil {
@@ -836,6 +885,12 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 		if req.AutoMerge != nil {
 			task.AutoMerge = *req.AutoMerge
+		}
+		if req.SandboxCPUs != nil {
+			task.SandboxCPUs = *req.SandboxCPUs
+		}
+		if req.SandboxMemoryMB != nil {
+			task.SandboxMemoryMB = *req.SandboxMemoryMB
 		}
 		if req.Reads != nil {
 			task.Reads = reads
