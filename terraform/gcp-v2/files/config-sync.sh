@@ -97,11 +97,16 @@ run_deploy() {
   # Login, or debugging from CI, does not have. The tail goes into a
   # guest attribute, which is readable with
   # `gcloud compute instances get-guest-attributes` and no shell at all.
+  # The status is taken in the `||` branch, not from a PIPESTATUS read on
+  # the next line. `pipeline || true` runs `true`, and `true` is itself a
+  # pipeline, so it resets PIPESTATUS -- a later ${PIPESTATUS[0]} then
+  # reads 0 no matter how the deploy exited. That mistake reported every
+  # failed rollout as converged, which is worse than the missing detail
+  # this tee was added to provide.
   local out rc=0
   out="$(mktemp)"
   timeout --signal=TERM --kill-after=60 "$DEPLOY_TIMEOUT_SECS" "$DEPLOY" 2>&1 \
-    | tee /dev/stderr > "$out" || true
-  rc="${PIPESTATUS[0]}"
+    | tee /dev/stderr > "$out" || rc="${PIPESTATUS[0]}"
 
   if [ "$rc" -eq 0 ]; then
     log "generation $generation deployed"
