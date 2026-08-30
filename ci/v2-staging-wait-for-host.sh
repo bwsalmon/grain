@@ -51,6 +51,12 @@ while [ "$SECONDS" -lt "$deadline" ]; do
         ;;
       failed)
         echo "::error::the host failed to converge on $deploy_generation: $(attr deploy-detail)"
+        tail="$(attr deploy-tail)"
+        if [ -n "$tail" ]; then
+          echo "--- the last of the host's own deploy output ---"
+          echo "$tail"
+          echo "--- end ---"
+        fi
         log_hint
         exit 1
         ;;
