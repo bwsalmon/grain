@@ -351,6 +351,18 @@ func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
 // cmd/mcpserver's own, always-preexisting-VM wiring makes do with) would
 // almost always lose the race with, so ToolsFor waits it out here instead
 // of surfacing that as a caller-visible error on every freshly created VM.
+//
+// Note this only waits for the container/pod to get an IP, not for the
+// cloud-hypervisor guest inside it to finish booting to sshd -- those are
+// different points in time (confirmed by hand against a real guest,
+// bwsalmon/agents#478): a docker-backed VM's container is reachable by IP
+// the moment "docker run" starts it, well before the nested guest has
+// actually booted. A caller's first SSH-backed tool call against a
+// just-created VM can still race that gap --
+// TestKonturSandboxesToolsForAgainstARealDockerBackedVM's own retry loop
+// around its first run_command call works around it for that test, but
+// nothing in this package or mcp.SSHRunner retries it for a real
+// deployment yet.
 func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (host string, port int, err error) {
 	port, err = kontur.Port(k.cfg.stateDir(), name)
 	if err != nil {

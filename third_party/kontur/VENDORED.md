@@ -30,3 +30,25 @@ dependency -- it can go stale (there is no automation re-pulling it), so
 anything safety- or correctness-critical should still be confirmed against
 a live `kontur vm create -h` (or a fresh vendor) rather than assumed
 current.
+
+## One local patch: `image_type=raw` on every disk (bwsalmon/agents#478)
+
+Unlike every other file in this snapshot, `internal/hypervisor/args.go` no
+longer matches upstream verbatim: its `BuildArgs` now appends
+`,image_type=raw` to every `--disk` argument it builds. Confirmed by hand
+against a real `cloud-hypervisor` v53.0 binary under real KVM: without it,
+`cloud-hypervisor`'s own disk-format auto-detection refuses the first
+write to sector 0 ("Attempting to write to sector 0 on a disk without
+specifying image_type"), which fails the guest's root-filesystem mount
+before it ever gets to userspace -- confirmed against the exact same disk
+image booting cleanly once the flag is added. Every disk this runtime is
+ever pointed at is a plain raw image (`config.go`'s own
+`defaultDiskImage`, and every guest `packer/kontur/build.sh` produces), so
+there is no real tradeoff to gate this behind a new flag over -- see the
+patched file's own comment for the full reasoning.
+
+A deployment building `kontur`/`konturctl` from a *fresh*, unpatched
+checkout of bwsalmon/kontur (rather than this vendored copy) needs the
+same one-line change to `internal/hypervisor/args.go` until it lands
+upstream, or any `-disk` pointed at a raw image will fail to boot the same
+way.

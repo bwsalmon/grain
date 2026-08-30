@@ -19,7 +19,7 @@ BUILDVCS ?= auto
 #
 # `make container-build` runs this same `make build`, out of this same
 # Makefile, inside Dockerfile.build's pinned Debian 12 toolchain -- the
-# release packer/kontur/image.pkr.hcl and terraform/gcp/variables.tf
+# release packer/kontur/build.sh and terraform/gcp/variables.tf
 # both deploy to -- so neither depends on the machine that drove it. It
 # is not the default: it wants a container engine, and a first run pays
 # for an image pull and a cold module cache, which is a poor trade on a

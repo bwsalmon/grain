@@ -22,7 +22,17 @@ func BuildArgs(cfg config.Config) []string {
 	args = append(args, "--memory", fmt.Sprintf("size=%dM,shared=%s", cfg.MemoryMB, onOff(cfg.MemoryShared)))
 
 	for _, d := range cfg.Disks {
-		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=%s", d.Path, onOff(d.ReadOnly)))
+		// image_type=raw is a local addition (bwsalmon/agents#478, see
+		// this repo's own VENDORED.md) -- every disk this runtime is
+		// ever pointed at is a plain raw image (config.go's own
+		// defaultDiskImage, and every guest packer/kontur/build.sh
+		// produces), and without it cloud-hypervisor's own format
+		// auto-detection refuses writes to sector 0 ("Attempting to
+		// write to sector 0 on a disk without specifying image_type"),
+		// which fails the guest's root-filesystem mount outright.
+		// Confirmed by hand against a real cloud-hypervisor v53.0
+		// binary: the exact same disk boots cleanly once this is added.
+		args = append(args, "--disk", fmt.Sprintf("path=%s,readonly=%s,image_type=raw", d.Path, onOff(d.ReadOnly)))
 	}
 
 	if cfg.Kernel != "" {

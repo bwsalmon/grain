@@ -1,30 +1,70 @@
-#!/bin/bash
-# Baked into packer/kontur/image.pkr.hcl's output qcow2 by Packer's shell
-# provisioner, which runs this once, as root, against a fresh boot of the
-# stock Debian base image -- see README.md in this directory for the whole
-# pipeline this script is one piece of.
+#!/bin/sh
+# Populates a Debian rootfs with everything a kontur guest needs, run by
+# build.sh via chroot against a fresh debootstrap tree -- see README.md in
+# this directory for the whole pipeline this script is one piece of, and
+# for why chroot (not a booted VM, unlike this directory's previous
+# Packer-based build) is enough to do all of it.
 #
 # This is the kontur-guest counterpart to provision/sandbox.sh, which does
 # the equivalent job for v1's libvirt-managed sandboxes: same package list,
-# same reasoning (bwsalmon/agents#267's own text: "whatever v1's own sandbox
-# image already carries"), same "no secret is ever baked into an image"
-# rule provision/controller.sh's header states for the controller. The
-# difference is delivery, not content -- v1 hands this script to cloud-init
-# fresh on every VM's first boot, against a shared base image; a kontur VM
-# has no equivalent per-VM provisioning hook (pkg/kontur's own doc comment:
-# kontur has no apiserver, and nothing here found an analogous NoCloud-style
-# seed kontur itself feeds a guest), so this script instead runs once, here,
-# at image-build time, and every VM kontur creates from the resulting image
-# boots with everything below already in place.
+# same reasoning (bwsalmon/agents#267's own text: "whatever v1's own
+# sandbox image already carries"), same "no secret is ever baked into an
+# image" rule provision/controller.sh's header states for the controller.
 set -eux
 
 KIND_VERSION="v0.32.0"
-KIND_NODE_IMAGE="kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+
+export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
+# linux-image-amd64 is the guest kernel: cloud-hypervisor direct-kernel-
+# boots it (CHV_KERNEL/CHV_INITRAMFS) rather than going through a
+# bootloader/firmware -- see README.md, "Why no custom kernel" for why
+# Debian's own stock kernel already has everything that needs (PVH entry,
+# virtio-pci/virtio-blk/virtio-net) with nothing built from source.
 apt-get install -y --no-install-recommends \
-  openssh-server git curl jq ripgrep fd-find build-essential python3 python3-venv \
+  linux-image-amd64 openssh-server systemd-sysv iproute2 acpid sudo \
+  libnss-myhostname \
+  git curl jq ripgrep fd-find build-essential python3 python3-venv \
   pipx tmux unzip ca-certificates bubblewrap gnupg
+
+# Chroot shares this build host's own UTS namespace, so anything run
+# above that queries "the current hostname" (some package's postinst,
+# confirmed by hand: /etc/hostname ended up holding this build host's own
+# name, not anything meaningful to a booted guest) sees this build host's
+# name, not the guest's own. Every guest getting the exact same fixed
+# name is not a real problem here -- nothing in this image needs a unique
+# hostname, and konturctl's own addressing (see the "ip=" handling below)
+# never relies on it -- but inheriting an arbitrary build host's name
+# would be actively misleading. libnss-myhostname above (whatever the
+# name ends up being) is what actually keeps a local lookup -- notably
+# sudo's, which otherwise blocks for a long timeout trying to resolve a
+# name no DNS server has ever heard of -- from ever needing a DNS
+# round-trip in the first place.
+echo kontur-guest > /etc/hostname
+
+# libnss-myhostname's postinst does not itself edit this conffile (an
+# existing /etc/nsswitch.conf, from base-files, predates it in every
+# debootstrap run), so the "myhostname" module it just installed has to
+# be wired into the hosts line by hand to actually apply -- confirmed by
+# hand: without this, sudo (which resolves the local hostname as part of
+# its own logging) blocks for a long DNS timeout against a guest with no
+# real nameserver, since nothing here otherwise resolves it locally.
+sed -i 's/^hosts:.*/hosts:          files myhostname dns/' /etc/nsswitch.conf
+
+# The "debian" account itself: on v1's own sandbox base (a stock Debian
+# cloud image), this is cloud-init's default_user, created before
+# provision/sandbox.sh ever runs against it (that script's own comment:
+# "The default cloud-init user"). This image has no cloud-init and no
+# cloud image underneath it, so the account has to be created here
+# instead -- same name, for every assumption downstream of it (the
+# operator's authorized_keys below, grain/adapter/libvirt.py's v1
+# convention, this script's own docker group grant) to keep holding.
+# Passwordless sudo matches what cloud-init's own default_user grants on
+# every cloud image v1 and this image's predecessor both used.
+useradd -m -s /bin/bash debian
+echo 'debian ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-debian
+chmod 0440 /etc/sudoers.d/90-debian
 
 # Docker, from the official repo -- identical to provision/sandbox.sh's own
 # block, same reasoning (the documented path on Debian, no kernel-config
@@ -45,7 +85,11 @@ apt-get install -y --no-install-recommends \
 # needs to run docker without sudo.
 usermod -aG docker debian
 
-# kind itself.
+# kind itself. Unlike this directory's previous Packer-based build, the
+# node image is not pre-pulled here: that needs a running docker daemon,
+# which a chroot -- deliberately not a booted VM, see README.md -- cannot
+# provide. A first `kind create cluster` inside a dispatched task now pays
+# that pull once itself instead of paying it here on every image build.
 curl -fsSL -o /usr/local/bin/kind \
   "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
 chmod +x /usr/local/bin/kind
@@ -56,15 +100,6 @@ cat > /etc/sysctl.d/99-grain-kind.conf <<'SYSCTL'
 fs.inotify.max_user_watches   = 524288
 fs.inotify.max_user_instances = 8192
 SYSCTL
-sysctl --system
-
-# Pre-load the kind node image into the base: it is on the order of a
-# gigabyte, and there is no per-task rebuild step here to reload it into
-# (unlike v1's recreate, a kontur VM's own lifecycle is between this repo
-# and bwsalmon/kontur, not grain -- see README.md).
-systemctl start docker
-docker pull "${KIND_NODE_IMAGE}"
-systemctl stop docker
 
 # gcloud and terraform -- identical reasoning to provision/sandbox.sh's own
 # block (bwsalmon/agents#117): a task whose deployment mints a per-task GCP
@@ -82,24 +117,76 @@ echo \
 apt-get update
 apt-get install -y --no-install-recommends google-cloud-cli terraform
 
+# --- Static "eth0" naming, and static addressing from the kernel's own
+# "ip=" boot parameter -- see README.md, "Networking", for why both of
+# these are needed at all (systemd's predictable-naming policy renames the
+# guest's one NIC away from "eth0" otherwise, and Debian's stock kernel
+# does not enable CONFIG_IP_PNP, so nothing acts on "ip=" without this).
+# konturctl derives that "ip=" value itself (kontur's own
+# internal/staticpod/spec.go) hard-coding "eth0" as the device name, so
+# the guest has to guarantee that name rather than the other way around.
+cat > /etc/systemd/network/00-eth0.link <<'EOF'
+[Match]
+Type=ether
+
+[Link]
+NamePolicy=
+Name=eth0
+EOF
+
+cat > /usr/local/sbin/kontur-configure-net <<'EOF'
+#!/bin/sh
+# Configures the guest's network interface from the kernel's own "ip="
+# boot parameter. klibc's ipconfig(8) (from klibc-utils, pulled in by
+# initramfs-tools) implements the same static-addressing syntax the
+# kernel's own in-kernel IP-config code would if CONFIG_IP_PNP were
+# enabled, but (unlike that in-kernel code) does not read /proc/cmdline
+# itself -- it only accepts the spec as an explicit argument.
+set -e
+ipparam=$(sed -n 's/.*\bip=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$ipparam" ] || exit 0
+exec /usr/lib/klibc/bin/ipconfig "$ipparam"
+EOF
+chmod 0755 /usr/local/sbin/kontur-configure-net
+
+cat > /etc/systemd/system/kontur-net-cmdline.service <<'EOF'
+[Unit]
+Description=Configure networking from the ip= kernel command line (kontur static addressing)
+DefaultDependencies=no
+After=systemd-udevd.service systemd-udev-trigger.service
+Before=network-pre.target sshd.service ssh.service
+Wants=systemd-udev-trigger.service network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/sbin/modprobe -v virtio_net
+ExecStartPre=/bin/udevadm settle --timeout=10
+ExecStart=/usr/local/sbin/kontur-configure-net
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+EOF
+mkdir -p /etc/systemd/system/sysinit.target.wants
+ln -sf /etc/systemd/system/kontur-net-cmdline.service \
+  /etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service
+
 # --- Optional operator-supplied customization, run once the built-in
 # provisioning above has finished but before the security-critical
-# finalization below (operator key, cloud-init disable) -- so a custom
-# script can rely on everything above already being in place, and can't
-# itself interfere with either finalization step by, say, leaving its own
-# stray authorized_keys entry or re-enabling cloud-init. SANDBOX_SETUP_
-# SCRIPT arrives as a build-time-only environment variable the same way
-# OPERATOR_SSH_PUBLIC_KEY does below (Packer's shell provisioner,
-# image.pkr.hcl's environment_vars) -- holding the script's own contents
-# rather than a path, the same idiom bwsalmon/kontur's own GUEST_SETUP_
-# SCRIPT build arg uses for its Dockerfile-based guest image build
-# (third_party/kontur/deploy/guest-image/README.md, "Running a custom
-# setup script"). Unlike that one, this runs against a live booted VM
-# over SSH -- this whole script's own delivery mechanism -- rather than a
-# chroot, so it has a running service manager, /proc, /sys, and network
-# access all as themselves, no different from provision.sh's own
-# apt-get/curl calls above; there is nothing analogous to that feature's
-# "no /proc, /sys, or running service manager" caveat here.
+# finalization below (operator key) -- so a custom script can rely on
+# everything above already being in place, and can't itself interfere
+# with that finalization by, say, leaving its own stray authorized_keys
+# entry. SANDBOX_SETUP_SCRIPT arrives as an environment variable (set by
+# build.sh from its own caller's environment) holding the script's own
+# contents rather than a path -- the same idiom bwsalmon/kontur's own
+# GUEST_SETUP_SCRIPT build arg uses for its Dockerfile-based guest image
+# build (third_party/kontur/deploy/guest-image/README.md, "Running a
+# custom setup script"). This runs in the same chroot -- with a real
+# /proc, /sys and /dev bind-mounted by build.sh, and network access, since
+# chroot does not create a new mount or network namespace -- as every
+# other step in this script, so none of that Dockerfile build's "no
+# /proc/sys, no running service manager" caveats apply here: enabling a
+# unit the normal way (systemctl enable) works, apt-get works, and so on.
 if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
   script="$(mktemp)"
   printf '%s\n' "${SANDBOX_SETUP_SCRIPT}" > "${script}"
@@ -108,21 +195,18 @@ if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
   rm -f "${script}"
 fi
 
-# --- sshd: enabled and running, matching the assumption pkg/kontur's own
-# package doc comment and v2/README.md both state a kontur guest image
-# has to satisfy on its own, since nothing analogous to
-# LibvirtAdapter.render_domain_xml wires SSH access up per-VM the way v1
-# does. -----------------------------------------------------------------
+# --- sshd: enabled, matching the assumption pkg/kontur's own package doc
+# comment and v2/README.md both state a kontur guest image has to satisfy
+# on its own, since nothing analogous to LibvirtAdapter.render_domain_xml
+# wires SSH access up per-VM the way v1 does. --------------------------
 systemctl enable ssh
 
-# --- The operator's SSH key, baked in rather than injected. OPERATOR_SSH_
-# PUBLIC_KEY arrives as a build-time-only environment variable (Packer's
-# shell provisioner, image.pkr.hcl's environment_vars) -- never written to
-# this repo, never a secret (it is the public half; see the private half's
-# own handling, e.g. provision/controller.sh's controller-ssh key, for what
-# actually gates access). This overwrites, not appends: whatever
-# provisioner-only key the build's own NoCloud seed (build.sh) used to reach
-# this VM in the first place must not survive into the shipped image.
+# --- The operator's SSH key, baked in rather than injected.
+# OPERATOR_SSH_PUBLIC_KEY arrives as an environment variable (set by
+# build.sh) -- never written to this repo, never a secret (it is the
+# public half; see the private half's own handling, e.g.
+# provision/controller.sh's controller-ssh key, for what actually gates
+# access).
 [ -n "${OPERATOR_SSH_PUBLIC_KEY:-}" ] || {
   echo "provision.sh: OPERATOR_SSH_PUBLIC_KEY is empty -- refusing to ship an image no one can reach" >&2
   exit 1
@@ -132,22 +216,15 @@ printf '%s\n' "${OPERATOR_SSH_PUBLIC_KEY}" > /home/debian/.ssh/authorized_keys
 chmod 0600 /home/debian/.ssh/authorized_keys
 chown debian:debian /home/debian/.ssh/authorized_keys
 
-# --- cloud-init: disabled, not left running. It did its one job -- getting
-# the build-time seed's temporary key onto this VM so Packer could reach it
-# at all (build.sh) -- and has no further job once the image ships: kontur
-# manages a VM's lifecycle itself (static pod manifests under a standalone
-# kubelet, per pkg/kontur's doc comment), not via a cloud provider's
-# metadata service, and nothing found in this repo or in bwsalmon/kontur's
-# own referenced docs (deploy/static-kubelet/README.md) describes a NoCloud
-# datasource a kontur guest would see. Left enabled, cloud-init would at
-# best no-op against a datasource that never appears and at worst try to
-# reconfigure networking a kontur/CNI guest doesn't own the way a NoCloud
-# guest normally would. `clean` also removes the build's own seed's cached
-# instance-id, so if a datasource ever does appear in some future
-# deployment shape, cloud-init treats it as a first boot rather than as a
-# rerun of this one.
-systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null || true
-cloud-init clean --logs --seed
+# initramfs-tools' own hooks bake a snapshot of /etc/udev's rules and
+# /etc/modules-load.d into the initramfs at the time update-initramfs
+# runs -- everything above (the kernel package's own postinst included)
+# already triggered at least one such run, from before the eth0/ip=
+# units above existed, so it has to be regenerated now that they do:
+# confirmed by hand while writing this script, the guest's NIC still got
+# renamed away from "eth0" by the initramfs' own stale udev snapshot
+# until this final regeneration was added.
+update-initramfs -u -k all
 
 mkdir -p /etc/kontur-guest
 cat > /etc/kontur-guest/README <<'DOC'
@@ -155,13 +232,16 @@ This is a kontur guest image, built by packer/kontur/ in bwsalmon/grain.
 See that directory's README.md for the full pipeline.
 
 Baked in at image-build time (packer/kontur/provision.sh):
-- openssh-server, enabled -- the operator's public key is the only
-  authorized_keys entry for the debian user, and there is no password
-  login
+- linux-image-amd64 (direct-kernel-booted by cloud-hypervisor; see
+  README.md, "Why no custom kernel"), openssh-server (enabled), the
+  operator's public key as the only authorized_keys entry for the debian
+  user (no password login), and a systemd unit that statically addresses
+  eth0 from the kernel's own "ip=" boot parameter (see README.md,
+  "Networking")
 - git curl jq ripgrep fd-find build-essential python3 python3-venv pipx
   tmux unzip ca-certificates bubblewrap gnupg
-- docker-ce (debian in the docker group) plus kind, with kindest/node's
-  image pre-pulled
+- docker-ce (debian in the docker group) plus kind (its node image is not
+  pre-pulled -- see provision.sh's own comment on that)
 - google-cloud-cli and terraform, for a task whose deployment mints a
   per-task GCP key at dispatch time (nothing here bakes the key itself)
 

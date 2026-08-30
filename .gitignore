@@ -3,6 +3,10 @@ __pycache__/
 .pytest_cache/
 .claude/settings.local.json
 v2/bin/
+# packer/kontur/build.sh's own output -- a built kernel/initramfs/disk
+# triple, multiple GB once docker/gcloud/terraform are provisioned in, not
+# something to ever commit.
+packer/kontur/output/
 # Module and build caches the Makefile bind-mounts into the
 # container-build toolchain (v2/Dockerfile.build), owned by whoever ran make.
 v2/.container-cache/

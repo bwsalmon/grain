@@ -236,8 +236,9 @@ about testing this module ships anywhere.
 
 `make container-build` still runs that same `make build`, out of this
 same Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain --
-the release `packer/kontur/image.pkr.hcl` and `terraform/gcp/variables.tf`
-both deploy to -- but the image now exists purely to pin the Go compiler
+the release `packer/kontur/build.sh` (bookworm, via `debootstrap`) and
+`terraform/gcp/variables.tf` both deploy to -- but the image now exists
+purely to pin the Go compiler
 version, with no C toolchain or system library left for it to carry. The
 Go version is read back out of `go.mod` rather than written down twice,
 and `GOTOOLCHAIN=local` in the image turns a stale image into an error
@@ -681,6 +682,24 @@ inside the guest over SSH -- see the test's own doc comment for why:
 packer/kontur's own guest image, the one built to actually carry
 `git`/build tooling and a working SSH login, is not yet published
 anywhere a test could fetch it from).
+
+bwsalmon/agents#478 closed that gap by deciding, and validating by hand
+under real KVM, the two things #466 left open: `packer/kontur/` no longer
+uses Packer/QEMU at all (a plain `debootstrap`+`chroot` pipeline now
+builds the guest directly, needing no VM boot and no cloud image to build
+against — see that directory's README.md, "Why no VM boot to build
+this"), and the guest's kernel is just Debian's own stock
+`linux-image-amd64` direct-kernel-booted by cloud-hypervisor, not a
+from-source PVH build — it already has `CONFIG_PVH` and working
+virtio-pci/virtio-blk/virtio-net, confirmed by hand once the actual
+blocker (`internal/hypervisor/args.go` needing `image_type=raw` on every
+disk, a one-line vendored patch — `third_party/kontur/VENDORED.md`) and
+two guest-side gaps (systemd renaming the NIC away from `eth0`, and no
+`CONFIG_IP_PNP` to act on `konturctl`'s own `ip=` cmdline — both closed in
+`provision.sh`) were found and fixed. `TestKonturSandboxesToolsForAgainstARealDockerBackedVM`
+now builds that real guest image as part of the test itself and asserts a
+`run_command` tool call actually executes inside it over SSH, closing the
+gap this paragraph used to describe.
 
 The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
 `propose_task`, `add_review_comment`) `agent/gemini.Framework.Run` wires
