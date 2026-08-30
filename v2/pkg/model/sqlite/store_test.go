@@ -1055,6 +1055,58 @@ func TestAFailedWriteLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+// TestStartRunRejectsASecondOpenRunOnTheSameSlot pins the bwsalmon/
+// agents#434 guard: dispatch.Cycle reads OccupiedSlots and Ready outside
+// of any one transaction, so nothing stops two overlapping callers from
+// both deciding a slot is free and both calling StartRun onto it. Before
+// task_run_open_slot existed, the second StartRun would silently
+// overwrite the first's row (REPLACE INTO has no conflict signal); now it
+// must fail outright, and the first dispatch's row must survive intact.
+func TestStartRunRejectsASecondOpenRunOnTheSameSlot(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutTask(ctx, task("c3d4", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	first := model.Run{ID: "a1b2-r1", TaskID: "a1b2", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now}
+	if err := store.StartRun(ctx, first); err != nil {
+		t.Fatalf("first StartRun onto a free slot: %v", err)
+	}
+
+	second := model.Run{ID: "c3d4-r1", TaskID: "c3d4", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now}
+	if err := store.StartRun(ctx, second); err == nil {
+		t.Fatal("a second open run on an already-occupied slot should have failed, not landed")
+	}
+
+	occupied, err := store.OccupiedSlots(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(occupied) != 1 || occupied[0] != "sandbox-1" {
+		t.Fatalf("occupied slots = %v, want exactly [sandbox-1] -- the rejected second run must not have landed", occupied)
+	}
+	streak, err := store.FailureStreak(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streak != nil {
+		t.Fatalf("first dispatch's own run row was overwritten: FailureStreak(a1b2) = %+v, want nil (never finished)", streak)
+	}
+
+	// Once the slot is actually free again, a fresh dispatch onto it
+	// succeeds -- the index guards against an overlap, not against reuse.
+	if err := store.FinishRun(ctx, "a1b2-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	third := model.Run{ID: "c3d4-r1", TaskID: "c3d4", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour)}
+	if err := store.StartRun(ctx, third); err != nil {
+		t.Fatalf("StartRun onto a slot freed by FinishRun: %v", err)
+	}
+}
+
 func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
 	store, _, ctx := openStore(t)
 	got, err := store.GetConfig(ctx)
