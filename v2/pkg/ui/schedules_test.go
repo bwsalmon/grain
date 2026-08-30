@@ -311,3 +311,142 @@ func TestDeleteScheduleOnAnUnknownIDIsNotFound(t *testing.T) {
 		t.Fatal("want an error")
 	}
 }
+
+// TestCreateScheduleFromATemplateCopiesItsContent is bwsalmon/agents#516's
+// whole point: a schedule created with TemplateID needs no Title or Repo
+// of its own, and reads them off the template instead.
+func TestCreateScheduleFromATemplateCopiesItsContent(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "Dependency bump", Title: "Bump dependencies", Description: "Bump every dependency.",
+		Repo: "acme/widgets", Base: "main", AutoMerge: true,
+		Capabilities: []string{"gemini-key"}, Reads: []string{"acme/shared-lib"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: tmpl.ID, Recurrence: everyDay})
+	if err != nil {
+		t.Fatalf("creating a template-backed schedule: %v", err)
+	}
+	if sched.TemplateID != tmpl.ID {
+		t.Errorf("templateId = %q, want %q", sched.TemplateID, tmpl.ID)
+	}
+	if sched.TemplateName != "Dependency bump" {
+		t.Errorf("templateName = %q, want %q", sched.TemplateName, "Dependency bump")
+	}
+	if sched.Title != "Bump dependencies" || sched.Description != "Bump every dependency." {
+		t.Errorf("title/description = %q/%q, want the template's own", sched.Title, sched.Description)
+	}
+	if sched.Repo != "acme/widgets" || sched.Base != "main" || !sched.AutoMerge {
+		t.Errorf("repo/base/autoMerge = %q/%q/%v, want the template's own", sched.Repo, sched.Base, sched.AutoMerge)
+	}
+	if len(sched.Capabilities) != 1 || sched.Capabilities[0] != "gemini-key" {
+		t.Errorf("capabilities = %v, want [gemini-key]", sched.Capabilities)
+	}
+	if len(sched.Reads) != 1 || sched.Reads[0] != "acme/shared-lib" {
+		t.Errorf("reads = %v, want [acme/shared-lib]", sched.Reads)
+	}
+}
+
+func TestCreateScheduleRejectsAnUnknownTemplate(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: "nope", Recurrence: everyDay})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+// TestUpdateScheduleAttachToATemplateOverridesInlineContent checks
+// UpdateScheduleRequest.TemplateID's non-empty case: attaching an
+// ordinary, inline schedule to a template overwrites its content from
+// that template outright, ignoring any other content field on the same
+// request (CreateScheduleRequest's own doc comment explains why -- a
+// template and per-field overrides is a combination this API does not
+// support).
+func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
+	c, _, ctx := testClient(t)
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "old title", Repo: "acme/widgets", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "Dependency bump", Title: "Bump dependencies", Repo: "acme/other-widgets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignoredTitle := "this should be ignored"
+	updated, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{
+		TemplateID: &tmpl.ID, Title: &ignoredTitle,
+	})
+	if err != nil {
+		t.Fatalf("attaching: %v", err)
+	}
+	if updated.TemplateID != tmpl.ID {
+		t.Errorf("templateId = %q, want %q", updated.TemplateID, tmpl.ID)
+	}
+	if updated.Title != "Bump dependencies" {
+		t.Errorf("title = %q, want the template's own, not %q", updated.Title, ignoredTitle)
+	}
+	if updated.Repo != "acme/other-widgets" {
+		t.Errorf("repo = %q, want the template's own", updated.Repo)
+	}
+}
+
+// TestUpdateScheduleDetachFromATemplateKeepsCurrentContent checks
+// UpdateScheduleRequest.TemplateID's empty-string case: it clears
+// TemplateID but leaves whatever content the schedule currently has
+// (most recently synced from the template) in place as an independent
+// copy, rather than blanking it out.
+func TestUpdateScheduleDetachFromATemplateKeepsCurrentContent(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "Dependency bump", Title: "Bump dependencies", Repo: "acme/widgets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: tmpl.ID, Recurrence: everyDay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := ""
+	updated, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &empty})
+	if err != nil {
+		t.Fatalf("detaching: %v", err)
+	}
+	if updated.TemplateID != "" {
+		t.Errorf("templateId = %q, want empty after detaching", updated.TemplateID)
+	}
+	if updated.Title != "Bump dependencies" || updated.Repo != "acme/widgets" {
+		t.Errorf("title/repo = %q/%q, want the content already on the row kept", updated.Title, updated.Repo)
+	}
+
+	// Now independent: editing it directly works the ordinary way.
+	newTitle := "renamed"
+	edited, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{Title: &newTitle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Title != "renamed" {
+		t.Errorf("title = %q, want %q", edited.Title, "renamed")
+	}
+}
+
+func TestUpdateScheduleRejectsAnUnknownTemplate(t *testing.T) {
+	c, _, ctx := testClient(t)
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{Title: "x", Repo: "acme/widgets", Recurrence: everyDay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nope := "nope"
+	_, err = c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &nope})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}

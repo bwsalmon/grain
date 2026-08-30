@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SchedulesList from "./SchedulesList.jsx";
@@ -72,6 +72,8 @@ describe("SchedulesList", () => {
     expect(api).toHaveBeenCalledWith("/api/schedules", {
       method: "POST",
       body: JSON.stringify({
+        templateId: "",
+        recurrence: { kind: "everyNHours", everyNHours: 24 },
         title: "Nightly dependency bump",
         description: "",
         repo: "acme/widgets",
@@ -79,7 +81,6 @@ describe("SchedulesList", () => {
         autoMerge: false,
         reads: [],
         capabilities: [],
-        recurrence: { kind: "everyNHours", everyNHours: 24 },
       }),
     });
     expect(onRefresh).toHaveBeenCalled();
@@ -207,6 +208,8 @@ describe("SchedulesList", () => {
     expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", {
       method: "PATCH",
       body: JSON.stringify({
+        templateId: "",
+        recurrence: { kind: "everyNHours", everyNHours: 24 },
         title: "Weekly dependency bump",
         description: "",
         repo: "acme/widgets",
@@ -214,7 +217,6 @@ describe("SchedulesList", () => {
         autoMerge: false,
         reads: [],
         capabilities: [],
-        recurrence: { kind: "everyNHours", everyNHours: 24 },
       }),
     });
     expect(onRefresh).toHaveBeenCalled();
@@ -247,6 +249,55 @@ describe("SchedulesList", () => {
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
     expect(payload.repo).toBe("acme/other");
+  });
+
+  it("hides the content fields and submits templateId when a template is chosen", async () => {
+    api.mockResolvedValueOnce({});
+    const templates = [{ id: "template-1", name: "Dependency bump" }];
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByLabelText("Template"));
+    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+
+    expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload).toEqual({
+      templateId: "template-1",
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+    });
+  });
+
+  it("pre-fills the template select when editing a template-backed schedule, and can detach from it", async () => {
+    api.mockResolvedValueOnce({});
+    const templates = [{ id: "template-1", name: "Dependency bump" }];
+    const templateBacked = { ...schedule, templateId: "template-1", templateName: "Dependency bump" };
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[templateBacked]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    // Two "Template" selects (and, once detached, two "Title" fields) are
+    // on screen at once: this row's own edit form, and the always-present
+    // "New schedule" form below it -- scoped to the edit form's own
+    // <form> so this only ever asserts about the one just opened.
+    const editForm = within(screen.getByRole("button", { name: "Save" }).closest("form"));
+    const templateSelect = editForm.getByLabelText("Template");
+    expect(templateSelect).toHaveTextContent("Dependency bump");
+    expect(editForm.queryByLabelText(/^Title/)).not.toBeInTheDocument();
+
+    await user.click(templateSelect);
+    await user.click(await screen.findByRole("option", { name: "None -- fill in the fields below" }));
+    expect(editForm.getByLabelText(/^Title/)).toHaveValue("Nightly dependency bump");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.templateId).toBe("");
+    expect(payload.title).toBe("Nightly dependency bump");
   });
 
   it("reports the error and leaves the form open when creation fails", async () => {

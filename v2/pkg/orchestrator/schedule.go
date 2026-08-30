@@ -56,6 +56,17 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // human's standing approval, written once and editable like any other
 // declaration, so a firing needs no approval flag of its own the way
 // fileFixTask's own automatic fix needs none either.
+//
+// sched.TemplateID (bwsalmon/agents#516), if set, is resolved here --
+// fresh, against the store, not against whatever sched.Title/Body/Target/
+// Base/AutoMerge/Reads/Grants already say -- so a template edited since
+// this schedule last fired is what actually gets filed, not a stale copy.
+// A template deleted out from under a schedule (ui.Client.DeleteTemplate
+// tries to prevent this, but nothing stops a row from disappearing some
+// other way) fails this one firing with a plain error, retried next
+// cycle exactly like any other store error reconcileSchedule's own doc
+// comment already tolerates -- not treated as reason to disable the
+// schedule outright.
 func fireScheduledTask(ctx context.Context, store *model.Store, sched model.ScheduledTask, now time.Time) error {
 	tag := firingTag(sched.ID)
 	open, err := store.HasOpenTaskWithTag(ctx, tag)
@@ -66,16 +77,29 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		return nil
 	}
 
+	content := sched
+	if sched.TemplateID != nil {
+		tmpl, err := store.GetTaskTemplate(ctx, *sched.TemplateID)
+		if err != nil {
+			return fmt.Errorf("resolving template %s: %w", *sched.TemplateID, err)
+		}
+		if tmpl == nil {
+			return fmt.Errorf("template %s no longer exists", *sched.TemplateID)
+		}
+		content.Title, content.Body, content.Target, content.Base, content.AutoMerge, content.Reads, content.Grants =
+			tmpl.Title, tmpl.Body, tmpl.Target, tmpl.Base, tmpl.AutoMerge, tmpl.Reads, tmpl.Grants
+	}
+
 	id, err := store.NewTaskID(ctx)
 	if err != nil {
-		return fmt.Errorf("allocating an id for %q: %w", sched.Title, err)
+		return fmt.Errorf("allocating an id for %q: %w", content.Title, err)
 	}
-	target := sched.Target
+	target := content.Target
 	task := model.Task{
 		ID:     id,
 		Intent: model.IntentImplement,
-		Title:  sched.Title,
-		Body:   sched.Body,
+		Title:  content.Title,
+		Body:   content.Body,
 		Origin: model.Origin{
 			Attribution: model.Attribution{Actor: scheduler},
 			Reason:      model.ReasonSchedule,
@@ -83,10 +107,10 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		Approval:  &model.Attribution{Actor: scheduler},
 		Target:    &target,
 		Binding:   model.BindingDirective,
-		Base:      sched.Base,
-		Reads:     sched.Reads,
-		Grants:    sched.Grants,
-		AutoMerge: sched.AutoMerge,
+		Base:      content.Base,
+		Reads:     content.Reads,
+		Grants:    content.Grants,
+		AutoMerge: content.AutoMerge,
 		Tags:      []string{tag},
 		CreatedAt: &now,
 	}
@@ -107,6 +131,15 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
 		s.LastRunAt = &now
 		s.NextRunAt = next
+		// Keeps the schedule's own display cache in sync with the
+		// template it fired from (ScheduledTask.TemplateID's own doc
+		// comment) -- a no-op assignment when TemplateID is nil, since
+		// content is just sched unchanged in that case.
+		if sched.TemplateID != nil {
+			s.Title, s.Body, s.Target, s.Base, s.AutoMerge, s.Reads, s.Grants =
+				content.Title, content.Body, content.Target, content.Base, content.AutoMerge,
+				content.Reads, content.Grants
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("advancing next run time: %w", err)
