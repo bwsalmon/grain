@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -10,42 +11,48 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
-// ReleaseConfig is a repo's release settings' JSON shape -- the prod/rc
-// branch names, release branch prefix and hand-edited major version
-// bwsalmon/agents#398 asked for. Configured is false when nothing has
-// saved one yet, the same "tell unconfigured apart from every field
-// happening to be zero" convention Settings already uses.
-type ReleaseConfig struct {
-	Configured          bool   `json:"configured"`
-	Repo                string `json:"repo"`
-	ProdBranch          string `json:"prodBranch"`
-	RCBranch            string `json:"rcBranch"`
-	ReleaseBranchPrefix string `json:"releaseBranchPrefix"`
-	MajorVersion        int    `json:"majorVersion"`
+// Release is one named release branch set's JSON shape --
+// bwsalmon/agents#571's own latest/rc/prod branches, derived from Name
+// rather than configured separately: LatestBranch and ProdBranch are
+// always Name+".latest" and Name itself.
+type Release struct {
+	Repo           string     `json:"repo"`
+	Name           string     `json:"name"`
+	LatestBranch   string     `json:"latestBranch"`
+	ProdBranch     string     `json:"prodBranch"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	MergedAt       *time.Time `json:"mergedAt,omitempty"`
+	PullRequestURL string     `json:"pullRequestUrl,omitempty"`
+	// Error is the releases reconciler's own account of why Status hasn't
+	// advanced yet, if anything has gone wrong.
+	Error string `json:"error,omitempty"`
 }
 
-func releaseConfigFrom(cfg model.ReleaseConfig) ReleaseConfig {
-	return ReleaseConfig{
-		Configured: true, Repo: cfg.Repo.String(),
-		ProdBranch: cfg.ProdBranch, RCBranch: cfg.RCBranch,
-		ReleaseBranchPrefix: cfg.ReleaseBranchPrefix, MajorVersion: cfg.MajorVersion,
+func releaseFrom(r model.Release) Release {
+	return Release{
+		Repo: r.Repo.String(), Name: r.Name,
+		LatestBranch: r.LatestBranch(), ProdBranch: r.ProdBranch(),
+		Status: string(r.Status), CreatedAt: r.CreatedAt, MergedAt: r.MergedAt,
+		PullRequestURL: r.PullRequestURL, Error: r.LastError,
 	}
 }
 
-// Candidate is one release candidate's JSON shape -- what the "cut" and
-// "promote" buttons in a repo's own release panel act on and render.
+func releasesFrom(rs []model.Release) []Release {
+	out := make([]Release, len(rs))
+	for i, r := range rs {
+		out[i] = releaseFrom(r)
+	}
+	return out
+}
+
+// Candidate is one rc cut for a release, over the wire.
 type Candidate struct {
-	ID           int64  `json:"id"`
-	Repo         string `json:"repo"`
-	MajorVersion int    `json:"majorVersion"`
-	Number       int    `json:"number"`
-	Version      int    `json:"version"`
-	// Label is the issue's own naming scheme rendered -- "3.7-rc1" --
-	// what a human reads rather than reconstructing from the three
-	// numbers above.
-	Label         string `json:"label"`
-	Branch        string `json:"branch"`
-	ReleaseBranch string `json:"releaseBranch,omitempty"`
+	ID      int64  `json:"id"`
+	Repo    string `json:"repo"`
+	Release string `json:"release"`
+	Number  int    `json:"number"`
+	Branch  string `json:"branch"`
 	// Status is one of "cutting", "active", "promoting", "promoted" --
 	// model.CandidateStatus's own vocabulary, unchanged, since it is
 	// already the plain English a UI wants to show.
@@ -58,24 +65,22 @@ type Candidate struct {
 	Error string `json:"error,omitempty"`
 }
 
-func candidateFrom(c model.Candidate) Candidate {
+// candidateFrom renders c over the wire against releaseName -- the name
+// of the release c.ReleaseID names, which every caller here already has
+// in hand from the request path, so model.Candidate itself carries no
+// redundant copy of it.
+func candidateFrom(c model.Candidate, releaseName string) Candidate {
 	return Candidate{
-		ID: c.ID, Repo: c.Repo.String(), MajorVersion: c.MajorVersion,
-		Number: c.Number, Version: c.Version,
-		Label:         model.CandidateLabel(c.MajorVersion, c.Number, c.Version),
-		Branch:        c.Branch,
-		ReleaseBranch: c.ReleaseBranch,
-		Status:        string(c.Status),
-		CreatedAt:     c.CreatedAt,
-		PromotedAt:    c.PromotedAt,
-		Error:         c.LastError,
+		ID: c.ID, Repo: c.Repo.String(), Release: releaseName,
+		Number: c.Number, Branch: c.Branch, Status: string(c.Status),
+		CreatedAt: c.CreatedAt, PromotedAt: c.PromotedAt, Error: c.LastError,
 	}
 }
 
-func candidatesFrom(cs []model.Candidate) []Candidate {
+func candidatesFrom(cs []model.Candidate, releaseName string) []Candidate {
 	out := make([]Candidate, len(cs))
 	for i, c := range cs {
-		out[i] = candidateFrom(c)
+		out[i] = candidateFrom(c, releaseName)
 	}
 	return out
 }
@@ -88,162 +93,211 @@ func parseRepoPath(r *http.Request) (model.RepoRef, error) {
 	return model.RepoRef{Owner: owner, Name: name}, nil
 }
 
-// GetReleaseConfig reads repo's release settings. A zero ReleaseConfig
-// with Configured false, and no error, means nothing has saved one yet.
-func (c *Client) GetReleaseConfig(ctx context.Context, repo model.RepoRef) (ReleaseConfig, error) {
-	cfg, err := c.Store.GetReleaseConfig(ctx, repo)
-	if err != nil {
-		return ReleaseConfig{}, err
+func parseReleaseName(r *http.Request) (string, error) {
+	name := r.PathValue("release")
+	if name == "" {
+		return "", validationErrorf("release name is required")
 	}
-	if cfg == nil {
-		return ReleaseConfig{Repo: repo.String()}, nil
-	}
-	return releaseConfigFrom(*cfg), nil
+	return name, nil
 }
 
-// ListReleaseConfigs returns every repo with release settings configured
-// -- what a release panel with no repo already in hand lists to let a
-// human pick one.
-func (c *Client) ListReleaseConfigs(ctx context.Context) ([]ReleaseConfig, error) {
-	cfgs, err := c.Store.ListReleaseConfigs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ReleaseConfig, len(cfgs))
-	for i, cfg := range cfgs {
-		out[i] = releaseConfigFrom(cfg)
-	}
-	return out, nil
+// releaseNotFoundError marks a repo and release name with no release
+// behind it -- writeClientError maps it to a 404, scheduleNotFoundError's
+// own reasoning for why this is its own type rather than NotFoundError
+// itself.
+type releaseNotFoundError struct {
+	Repo model.RepoRef
+	Name string
 }
 
-// UpdateReleaseConfigRequest is a repo's release settings, all required:
-// unlike UpdateSettings' partial-update shape, there is no existing row
-// to leave a field alone against the first time a repo is configured, and
-// every field here is meaningful at its zero value (an empty branch name,
-// or major version 0) in a way that would silently misconfigure a repo
-// rather than plainly reject the request.
-type UpdateReleaseConfigRequest struct {
-	ProdBranch          string `json:"prodBranch"`
-	RCBranch            string `json:"rcBranch"`
-	ReleaseBranchPrefix string `json:"releaseBranchPrefix"`
-	MajorVersion        int    `json:"majorVersion"`
-}
-
-// PutReleaseConfig saves repo's release settings wholesale.
-func (c *Client) PutReleaseConfig(ctx context.Context, repo model.RepoRef, req UpdateReleaseConfigRequest) (ReleaseConfig, error) {
-	if strings.TrimSpace(req.ProdBranch) == "" {
-		return ReleaseConfig{}, validationErrorf("prodBranch cannot be empty")
-	}
-	if strings.TrimSpace(req.RCBranch) == "" {
-		return ReleaseConfig{}, validationErrorf("rcBranch cannot be empty")
-	}
-	if req.MajorVersion < 0 {
-		return ReleaseConfig{}, validationErrorf("majorVersion cannot be negative")
-	}
-	cfg := model.ReleaseConfig{
-		Repo: repo, ProdBranch: req.ProdBranch, RCBranch: req.RCBranch,
-		ReleaseBranchPrefix: req.ReleaseBranchPrefix, MajorVersion: req.MajorVersion,
-	}
-	if err := c.Store.PutReleaseConfig(ctx, cfg); err != nil {
-		return ReleaseConfig{}, err
-	}
-	return releaseConfigFrom(cfg), nil
-}
-
-// ListCandidates returns repo's release history, newest first.
-func (c *Client) ListCandidates(ctx context.Context, repo model.RepoRef) ([]Candidate, error) {
-	cs, err := c.Store.ListCandidates(ctx, repo)
-	if err != nil {
-		return nil, err
-	}
-	return candidatesFrom(cs), nil
+func (e *releaseNotFoundError) Error() string {
+	return fmt.Sprintf("%s has no release %q", e.Repo, e.Name)
 }
 
 // releaseErrorf maps one of model's own release sentinel errors to the
 // ValidationError Server maps to a 400 -- every one of them is a caller
-// mistake (repo not configured, wrong sequencing), never a store fault.
+// mistake (unknown or inactive release, wrong sequencing), never a store
+// fault.
 func releaseErrorf(err error) error {
 	switch {
-	case errors.Is(err, model.ErrNoReleaseConfig):
-		return validationErrorf("this repo has no release configuration yet")
+	case errors.Is(err, model.ErrInvalidReleaseName):
+		return validationErrorf("invalid release name")
+	case errors.Is(err, model.ErrReleaseNameInUse):
+		return validationErrorf("this repo already has an unmerged release with this name")
+	case errors.Is(err, model.ErrNoRelease):
+		return validationErrorf("no such release")
+	case errors.Is(err, model.ErrReleaseNotActive):
+		return validationErrorf("this release is not active yet, or its merge back has already been requested")
+	case errors.Is(err, model.ErrReleaseAlreadyMergeRequested):
+		return validationErrorf("this release's merge back to the default branch was already requested")
 	case errors.Is(err, model.ErrCandidateActive):
-		return validationErrorf("this repo already has an unpromoted release candidate")
+		return validationErrorf("this release already has an unpromoted candidate")
 	case errors.Is(err, model.ErrNoCandidate):
-		return validationErrorf("this repo has no release candidate yet")
+		return validationErrorf("this release has no candidate yet")
 	case errors.Is(err, model.ErrCandidateNotReady):
-		return validationErrorf("the current release candidate has not finished cutting yet")
+		return validationErrorf("the current candidate has not finished cutting yet")
 	case errors.Is(err, model.ErrAlreadyPromoted):
-		return validationErrorf("the current release candidate was already promoted")
+		return validationErrorf("the current candidate was already promoted")
 	default:
 		return err
 	}
 }
 
+// CreateReleaseRequest is a new release's user-given name -- the issue's
+// own "the branch should have a user given name."
+type CreateReleaseRequest struct {
+	Name string `json:"name"`
+}
+
+// CreateRelease is the issue's own "create a new release branch": it
+// records a fresh model.Release declaring the intent, and returns
+// immediately -- the releases reconciler (pkg/orchestrator.SyncReleases)
+// is what actually creates LatestBranch on GitHub.
+func (c *Client) CreateRelease(ctx context.Context, repo model.RepoRef, req CreateReleaseRequest) (Release, error) {
+	name := strings.TrimSpace(req.Name)
+	r, err := c.Store.CreateRelease(ctx, repo, name, c.now())
+	if err != nil {
+		return Release{}, releaseErrorf(err)
+	}
+	return releaseFrom(r), nil
+}
+
+// ListReleases returns every release ever created for repo, newest
+// first.
+func (c *Client) ListReleases(ctx context.Context, repo model.RepoRef) ([]Release, error) {
+	rs, err := c.Store.ListReleases(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	return releasesFrom(rs), nil
+}
+
+// GetRelease returns repo's current release named name.
+func (c *Client) GetRelease(ctx context.Context, repo model.RepoRef, name string) (Release, error) {
+	r, err := c.Store.GetRelease(ctx, repo, name)
+	if err != nil {
+		return Release{}, err
+	}
+	if r == nil {
+		return Release{}, &releaseNotFoundError{Repo: repo, Name: name}
+	}
+	return releaseFrom(*r), nil
+}
+
+// RequestReleaseMerge is the issue's own "the prod branch can be merged
+// back into the default branch when ready": it records the request
+// against repo's release named name and returns immediately, the same
+// declarative handoff CutCandidate and PromoteCandidate already make.
+func (c *Client) RequestReleaseMerge(ctx context.Context, repo model.RepoRef, name string) (Release, error) {
+	r, err := c.Store.RequestReleaseMerge(ctx, repo, name)
+	if err != nil {
+		return Release{}, releaseErrorf(err)
+	}
+	return releaseFrom(r), nil
+}
+
+// ListCandidates returns repo's release named releaseName's own rc
+// history, newest first.
+func (c *Client) ListCandidates(ctx context.Context, repo model.RepoRef, releaseName string) ([]Candidate, error) {
+	cs, err := c.Store.ListCandidates(ctx, repo, releaseName)
+	if err != nil {
+		return nil, err
+	}
+	return candidatesFrom(cs, releaseName), nil
+}
+
 // CutCandidate is the issue's own "create a new rc": it records a fresh
 // model.Candidate declaring the cut, and returns immediately -- the
-// releases reconciler (pkg/orchestrator.SyncReleases) is what actually
-// creates the branch on GitHub, per this package's own doc comment ("
-// nothing here talks to GitHub at all").
-func (c *Client) CutCandidate(ctx context.Context, repo model.RepoRef) (Candidate, error) {
-	candidate, err := c.Store.CutCandidate(ctx, repo, c.now())
+// releases reconciler is what actually creates the branch on GitHub.
+func (c *Client) CutCandidate(ctx context.Context, repo model.RepoRef, releaseName string) (Candidate, error) {
+	candidate, err := c.Store.CutCandidate(ctx, repo, releaseName, c.now())
 	if err != nil {
 		return Candidate{}, releaseErrorf(err)
 	}
-	return candidateFrom(candidate), nil
+	return candidateFrom(candidate, releaseName), nil
 }
 
 // PromoteCandidate is the issue's own "promote the current rc": it
-// records the promotion against repo's current candidate and returns
-// immediately, the same declarative handoff CutCandidate makes.
-func (c *Client) PromoteCandidate(ctx context.Context, repo model.RepoRef) (Candidate, error) {
-	candidate, err := c.Store.PromoteCandidate(ctx, repo)
+// records the promotion against releaseName's current candidate and
+// returns immediately, the same declarative handoff CutCandidate makes.
+func (c *Client) PromoteCandidate(ctx context.Context, repo model.RepoRef, releaseName string) (Candidate, error) {
+	candidate, err := c.Store.PromoteCandidate(ctx, repo, releaseName)
 	if err != nil {
 		return Candidate{}, releaseErrorf(err)
 	}
-	return candidateFrom(candidate), nil
+	return candidateFrom(candidate, releaseName), nil
 }
 
 // --- handlers ------------------------------------------------------------
 
-func (s *Server) handleGetReleaseConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListReleases(w http.ResponseWriter, r *http.Request) {
 	repo, err := parseRepoPath(r)
 	if err != nil {
 		writeClientError(w, err)
 		return
 	}
-	cfg, err := s.tasks.GetReleaseConfig(r.Context(), repo)
+	releases, err := s.tasks.ListReleases(r.Context(), repo)
 	if err != nil {
 		writeClientError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, releases)
 }
 
-func (s *Server) handleListReleaseConfigs(w http.ResponseWriter, r *http.Request) {
-	cfgs, err := s.tasks.ListReleaseConfigs(r.Context())
-	if err != nil {
-		writeClientError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, cfgs)
-}
-
-func (s *Server) handlePutReleaseConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleCreateRelease(w http.ResponseWriter, r *http.Request) {
 	repo, err := parseRepoPath(r)
 	if err != nil {
 		writeClientError(w, err)
 		return
 	}
-	var req UpdateReleaseConfigRequest
+	var req CreateReleaseRequest
 	if !readJSON(w, r, &req) {
 		return
 	}
-	cfg, err := s.tasks.PutReleaseConfig(r.Context(), repo, req)
+	release, err := s.tasks.CreateRelease(r.Context(), repo, req)
 	if err != nil {
 		writeClientError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusCreated, release)
+}
+
+func (s *Server) handleGetRelease(w http.ResponseWriter, r *http.Request) {
+	repo, err := parseRepoPath(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	name, err := parseReleaseName(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	release, err := s.tasks.GetRelease(r.Context(), repo, name)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, release)
+}
+
+func (s *Server) handleRequestReleaseMerge(w http.ResponseWriter, r *http.Request) {
+	repo, err := parseRepoPath(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	name, err := parseReleaseName(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	release, err := s.tasks.RequestReleaseMerge(r.Context(), repo, name)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, release)
 }
 
 func (s *Server) handleListCandidates(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +306,12 @@ func (s *Server) handleListCandidates(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
-	candidates, err := s.tasks.ListCandidates(r.Context(), repo)
+	name, err := parseReleaseName(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	candidates, err := s.tasks.ListCandidates(r.Context(), repo, name)
 	if err != nil {
 		writeClientError(w, err)
 		return
@@ -266,7 +325,12 @@ func (s *Server) handleCutCandidate(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
-	candidate, err := s.tasks.CutCandidate(r.Context(), repo)
+	name, err := parseReleaseName(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	candidate, err := s.tasks.CutCandidate(r.Context(), repo, name)
 	if err != nil {
 		writeClientError(w, err)
 		return
@@ -280,7 +344,12 @@ func (s *Server) handlePromoteCandidate(w http.ResponseWriter, r *http.Request) 
 		writeClientError(w, err)
 		return
 	}
-	candidate, err := s.tasks.PromoteCandidate(r.Context(), repo)
+	name, err := parseReleaseName(r)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	candidate, err := s.tasks.PromoteCandidate(r.Context(), repo, name)
 	if err != nil {
 		writeClientError(w, err)
 		return

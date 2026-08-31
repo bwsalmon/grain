@@ -8,16 +8,53 @@ package orchestrator_test
 // from GitHub than a promotion request is.
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
-func qualifyingReleaseConfig(repo model.RepoRef) model.ReleaseConfig {
-	return model.ReleaseConfig{
-		Repo: repo, ProdBranch: "main", RCBranch: "rc", ReleaseBranchPrefix: "release/", MajorVersion: 1,
+// cutFirstCandidate creates a fresh release named "myfeat" for repo and
+// returns its own first candidate -- CreateRelease's own "also cuts its
+// first candidate" (bwsalmon/agents#571), which is all every test below
+// needs a candidate for.
+func cutFirstCandidate(t *testing.T, ctx context.Context, store *model.Store, repo model.RepoRef) model.Candidate {
+	t.Helper()
+	release, err := store.CreateRelease(ctx, repo, "myfeat", baseTime)
+	if err != nil {
+		t.Fatalf("create release: %v", err)
 	}
+	// Store-level tests exercise SyncQualifications alone, never
+	// SyncReleases (this package's own doc comment on why: qualification
+	// scheduling and auto-promotion are pure store operations) -- so
+	// nothing else here ever advances the release out of provisioning the
+	// way the real releases reconciler would.
+	if err := store.MarkReleaseProvisioned(ctx, release.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	c, err := store.CurrentCandidateForRelease(ctx, release.ID)
+	if err != nil || c == nil {
+		t.Fatalf("current candidate: (%+v, %v)", c, err)
+	}
+	return *c
+}
+
+// currentCandidate returns repo's release named "myfeat"'s own current
+// candidate -- store.CurrentCandidate's own repo-scoped convenience,
+// applied here since every test in this file only ever has the one
+// release in play.
+func currentCandidate(t *testing.T, ctx context.Context, store *model.Store, repo model.RepoRef) model.Candidate {
+	t.Helper()
+	release, err := store.GetRelease(ctx, repo, "myfeat")
+	if err != nil || release == nil {
+		t.Fatalf("release: (%+v, %v)", release, err)
+	}
+	c, err := store.CurrentCandidateForRelease(ctx, release.ID)
+	if err != nil || c == nil {
+		t.Fatalf("current candidate: (%+v, %v)", c, err)
+	}
+	return *c
 }
 
 func smokeTestTemplate(repo model.RepoRef) model.TaskTemplate {
@@ -41,13 +78,7 @@ func TestSyncQualificationsCreatesARunForAFreshlyActiveCandidate(t *testing.T) {
 	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, qualifyingReleaseConfig(repo)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, repo, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutFirstCandidate(t, ctx, store, repo)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
@@ -87,13 +118,7 @@ func TestSyncQualificationsAutoPromotesOnceEveryTaskCompletes(t *testing.T) {
 	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, qualifyingReleaseConfig(repo)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, repo, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutFirstCandidate(t, ctx, store, repo)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
@@ -114,10 +139,7 @@ func TestSyncQualificationsAutoPromotesOnceEveryTaskCompletes(t *testing.T) {
 	if err := orchestrator.SyncQualifications(ctx, store, baseTime); err != nil {
 		t.Fatalf("SyncQualifications before completion: %v", err)
 	}
-	current, err := store.CurrentCandidate(ctx, repo)
-	if err != nil || current == nil {
-		t.Fatalf("current: (%+v, %v)", current, err)
-	}
+	current := currentCandidate(t, ctx, store, repo)
 	if current.Status != model.CandidateActive {
 		t.Fatalf("got status %q before completion, want still active", current.Status)
 	}
@@ -130,10 +152,7 @@ func TestSyncQualificationsAutoPromotesOnceEveryTaskCompletes(t *testing.T) {
 	if err := orchestrator.SyncQualifications(ctx, store, baseTime); err != nil {
 		t.Fatalf("SyncQualifications after completion: %v", err)
 	}
-	current, err = store.CurrentCandidate(ctx, repo)
-	if err != nil || current == nil {
-		t.Fatalf("current: (%+v, %v)", current, err)
-	}
+	current = currentCandidate(t, ctx, store, repo)
 	if current.Status != model.CandidatePromoting {
 		t.Fatalf("got status %q after every task completed, want promoting", current.Status)
 	}
@@ -148,13 +167,7 @@ func TestSyncQualificationsRetriesRunCreationAfterAMissingTemplateIsAdded(t *tes
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	if err := store.PutReleaseConfig(ctx, qualifyingReleaseConfig(repo)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, repo, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutFirstCandidate(t, ctx, store, repo)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
@@ -199,13 +212,7 @@ func TestSyncQualificationsNeverAutoPromotesARunWithAClosedTask(t *testing.T) {
 	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, qualifyingReleaseConfig(repo)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, repo, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutFirstCandidate(t, ctx, store, repo)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
@@ -230,10 +237,7 @@ func TestSyncQualificationsNeverAutoPromotesARunWithAClosedTask(t *testing.T) {
 	if err := orchestrator.SyncQualifications(ctx, store, baseTime); err != nil {
 		t.Fatalf("SyncQualifications after the task closed: %v", err)
 	}
-	current, err := store.CurrentCandidate(ctx, repo)
-	if err != nil || current == nil {
-		t.Fatalf("current: (%+v, %v)", current, err)
-	}
+	current := currentCandidate(t, ctx, store, repo)
 	if current.Status != model.CandidateActive {
 		t.Fatalf("got status %q for a run with a closed task, want still active (never auto-promoted)", current.Status)
 	}
@@ -259,19 +263,13 @@ func TestSyncQualificationsHandlesASecondCandidateAfterTheFirstIsPromoted(t *tes
 	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, qualifyingReleaseConfig(repo)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
 	plan := onePassingItem()
 	plan.Repo = repo
 	if err := store.PutQualificationPlan(ctx, plan); err != nil {
 		t.Fatalf("put plan: %v", err)
 	}
 
-	first, err := store.CutCandidate(ctx, repo, baseTime)
-	if err != nil {
-		t.Fatalf("cut first candidate: %v", err)
-	}
+	first := cutFirstCandidate(t, ctx, store, repo)
 	if err := store.MarkCandidateCut(ctx, first.ID); err != nil {
 		t.Fatalf("mark first cut: %v", err)
 	}
@@ -293,7 +291,7 @@ func TestSyncQualificationsHandlesASecondCandidateAfterTheFirstIsPromoted(t *tes
 		t.Fatalf("mark first promoted: %v", err)
 	}
 
-	second, err := store.CutCandidate(ctx, repo, baseTime)
+	second, err := store.CutCandidate(ctx, repo, "myfeat", baseTime)
 	if err != nil {
 		t.Fatalf("cut second candidate: %v", err)
 	}
@@ -326,13 +324,7 @@ func TestSyncQualificationsDoesNotAutoPromoteWhenThePlanDoesNotAskForIt(t *testi
 	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, qualifyingReleaseConfig(repo)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, repo, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutFirstCandidate(t, ctx, store, repo)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
@@ -357,10 +349,7 @@ func TestSyncQualificationsDoesNotAutoPromoteWhenThePlanDoesNotAskForIt(t *testi
 	if err := orchestrator.SyncQualifications(ctx, store, baseTime); err != nil {
 		t.Fatalf("SyncQualifications: %v", err)
 	}
-	current, err := store.CurrentCandidate(ctx, repo)
-	if err != nil || current == nil {
-		t.Fatalf("current: (%+v, %v)", current, err)
-	}
+	current := currentCandidate(t, ctx, store, repo)
 	if current.Status != model.CandidateActive {
 		t.Fatalf("got status %q with AutoPromote disabled, want still active", current.Status)
 	}

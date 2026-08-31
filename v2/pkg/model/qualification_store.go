@@ -9,8 +9,7 @@ import (
 )
 
 // GetQualificationPlan reads repo's qualification plan, or nil (with no
-// error) if nothing has configured one yet -- ReleaseConfig's own
-// "Configured" convention.
+// error) if nothing has configured one yet.
 func (s *Store) GetQualificationPlan(ctx context.Context, repo RepoRef) (*QualificationPlan, error) {
 	return getQualificationPlan(ctx, s.db, repo)
 }
@@ -82,9 +81,9 @@ func qualificationItemDependsOnOf(ctx context.Context, q querier, repo RepoRef, 
 }
 
 // PutQualificationPlan replaces repo's qualification plan wholesale --
-// PutReleaseConfig's own "one row a caller changing one field reads
-// first" shape, and PutTask's own "child rows are deleted and
-// re-inserted rather than diffed" for the items themselves. Callers are
+// one row per repo, replaced rather than diffed, and PutTask's own
+// "child rows are deleted and re-inserted rather than diffed" for the
+// items themselves. Callers are
 // expected to have already run plan.Validate and confirmed every
 // TemplateID still names a real template (ui.Client.PutQualificationPlan
 // does both) -- this trusts the plan it is given rather than checking it
@@ -218,7 +217,7 @@ func (s *Store) QualifiableActiveCandidates(ctx context.Context) ([]Candidate, e
 	err := each(ctx, s.db,
 		"SELECT "+candidateColumns+" FROM `release_candidate` WHERE `status` = ? AND ("+
 			"EXISTS (SELECT 1 FROM `qualification_item` WHERE `qualification_item`.`owner` = `release_candidate`.`owner` "+
-			"AND `qualification_item`.`name` = `release_candidate`.`name`) "+
+			"AND `qualification_item`.`name` = `release_candidate`.`repo`) "+
 			"OR EXISTS (SELECT 1 FROM `qualification_run` WHERE `qualification_run`.`candidate_id` = `release_candidate`.`id`)"+
 			") ORDER BY `id`",
 		[]any{string(CandidateActive)},

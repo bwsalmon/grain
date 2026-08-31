@@ -28,8 +28,8 @@ func qualificationItemFrom(it model.QualificationItem, name string) Qualificatio
 }
 
 // QualificationPlan is a repo's whole qualification setup, over the wire
-// -- ReleaseConfig's own "Configured" convention: false, with Items
-// empty, means nothing has ever been saved for this repo.
+// -- Configured false, with Items empty, means nothing has ever been
+// saved for this repo.
 type QualificationPlan struct {
 	Configured      bool                `json:"configured"`
 	Repo            string              `json:"repo"`
@@ -72,14 +72,13 @@ func (c *Client) GetQualificationPlan(ctx context.Context, repo model.RepoRef) (
 }
 
 // PutQualificationPlanRequest is a repo's whole qualification plan, all
-// required -- UpdateReleaseConfigRequest's own "no existing row to leave
-// a field alone against" reasoning: PutQualificationPlan always replaces
-// the whole plan wholesale, so a partial-update shape would only invite a
-// caller to believe a field it omitted was left alone when it was in
-// fact cleared. TemplateName is accepted but ignored -- the response
-// shape's own field, echoed back by a form that round-trips what it read
-// -- since what a template is actually called always comes fresh from
-// the store, never from a caller.
+// required rather than a partial update: PutQualificationPlan always
+// replaces the whole plan wholesale, so a partial-update shape would only
+// invite a caller to believe a field it omitted was left alone when it
+// was in fact cleared. TemplateName is accepted but ignored -- the
+// response shape's own field, echoed back by a form that round-trips
+// what it read -- since what a template is actually called always comes
+// fresh from the store, never from a caller.
 type PutQualificationPlanRequest struct {
 	RequireApproval bool                `json:"requireApproval"`
 	AutoPromote     bool                `json:"autoPromote"`

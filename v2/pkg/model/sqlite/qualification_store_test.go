@@ -5,6 +5,7 @@ package sqlite_test
 // why this matters applies again here.
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"sync"
@@ -38,6 +39,23 @@ func testQualificationPlan() model.QualificationPlan {
 	}
 }
 
+// cutTestCandidate creates a fresh release for widgets and returns its
+// own first candidate -- CreateRelease's own "also cuts its first
+// candidate" (bwsalmon/agents#571), which is all every qualification test
+// below needs a candidate for.
+func cutTestCandidate(t *testing.T, ctx context.Context, store *model.Store) model.Candidate {
+	t.Helper()
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create release: %v", err)
+	}
+	c, err := store.CurrentCandidateForRelease(ctx, r.ID)
+	if err != nil || c == nil {
+		t.Fatalf("current candidate: (%+v, %v)", c, err)
+	}
+	return *c
+}
+
 func TestGetQualificationPlanReturnsNilOnAFreshDatabase(t *testing.T) {
 	store, _, ctx := openStore(t)
 	got, err := store.GetQualificationPlan(ctx, widgets)
@@ -62,8 +80,8 @@ func TestQualificationPlanRoundTrips(t *testing.T) {
 }
 
 // PutQualificationPlan replaces a repo's items wholesale rather than
-// accumulating them, the same discipline PutReleaseConfig already holds
-// its own single row to.
+// accumulating them, the same discipline every other one-row-per-repo
+// config in this package already holds its own single row to.
 func TestPutQualificationPlanReplacesRatherThanAccumulating(t *testing.T) {
 	store, _, ctx := openStore(t)
 	if err := store.PutQualificationPlan(ctx, testQualificationPlan()); err != nil {
@@ -93,13 +111,7 @@ func TestCreateQualificationRunInstantiatesEveryItemWithDependencyLinks(t *testi
 	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
 		t.Fatalf("put unit template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
@@ -198,13 +210,7 @@ func TestCreateQualificationRunLinksEveryDependentInstanceToEveryDependencyInsta
 	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
 		t.Fatalf("put unit template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 
 	plan := model.QualificationPlan{
 		Repo: widgets, Configured: true,
@@ -267,13 +273,7 @@ func TestCreateQualificationRunUnderConcurrentRaceCreatesExactlyOneRun(t *testin
 	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
 		t.Fatalf("put build template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 	plan := model.QualificationPlan{
 		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-build", Repeat: 1}},
 	}
@@ -311,13 +311,7 @@ func TestCreateQualificationRunUnderConcurrentRaceCreatesExactlyOneRun(t *testin
 
 func TestCreateQualificationRunFailsWhenATemplateIsMissing(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 	plan := model.QualificationPlan{
 		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "does-not-exist", Repeat: 1}},
 	}
@@ -333,13 +327,7 @@ func TestCreateQualificationRunFailsWhenATemplateTargetsADifferentRepo(t *testin
 	if err := store.PutTaskTemplate(ctx, mismatched); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 	plan := model.QualificationPlan{
 		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-build", Repeat: 1}},
 	}
@@ -356,13 +344,7 @@ func TestCreateQualificationRunLeavesTasksUnapprovedWhenPlanRequiresApproval(t *
 	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
 		t.Fatalf("put unit template: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 
 	plan := testQualificationPlan()
 	plan.RequireApproval = true
@@ -398,13 +380,7 @@ func TestCreateQualificationRunLeavesTasksUnapprovedWhenPlanRequiresApproval(t *
 
 func TestQualifiableActiveCandidatesFindsAnActiveCandidateWithAnItemButNoRunYet(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store)
 	if err := store.MarkCandidateCut(ctx, candidate.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
