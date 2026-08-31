@@ -35,6 +35,11 @@
 # already does it: install openssh-server/systemd-sysv/iproute2/acpid,
 # wire up the ACPI power button for graceful shutdown, arrange for fresh
 # SSH host keys per VM, or authorize kontur's own `kontur exec` keypair.
+#
+# One thing it deliberately UNDOES: kontur's ForceCommand console wrapper.
+# See "Stop forcing kontur's console wrapper" below -- it is the one place
+# where building on kontur's guest actively breaks grain's tools rather
+# than merely not helping them.
 set -eux
 
 KIND_VERSION="v0.32.0"
@@ -46,8 +51,16 @@ apt-get update
 # carries" (bwsalmon/agents#267), matching provision/sandbox.sh's list.
 # sudo and libnss-myhostname are not toolchain: see the "debian" account
 # and hostname blocks below for what needs each.
+# klibc-utils is named explicitly rather than left to arrive as a
+# transitive dependency: /usr/lib/klibc/bin/ipconfig is what the
+# networking unit below actually execs, and it reaches this image only via
+# linux-image-amd64 -> initramfs-tools -> klibc-utils. kontur's guest is
+# debootstrap --variant=minbase, which has none of that chain, so anything
+# that changes how the kernel gets in (a copied-in kernel rather than the
+# Debian package, say) would silently take ipconfig with it and leave
+# every guest without an address.
 apt-get install -y --no-install-recommends \
-  sudo libnss-myhostname \
+  sudo libnss-myhostname klibc-utils \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
   pipx tmux unzip ca-certificates bubblewrap gnupg
 
@@ -191,6 +204,47 @@ EOF
 mkdir -p /etc/systemd/system/sysinit.target.wants
 ln -sf /etc/systemd/system/kontur-net-cmdline.service \
   /etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service
+
+# --- Stop forcing kontur's console wrapper on every SSH session.
+#
+# kontur's own guest overlay ships
+# /etc/ssh/sshd_config.d/10-console.conf with an unconditional
+# `ForceCommand /usr/local/libexec/kontur-ssh-console-wrap`, and that
+# wrapper runs the session's real command under `script`, mirroring its
+# output to the serial console so SSH activity shows up in the container's
+# own logs. That is a good property for kontur's reference guest. It is
+# incompatible with grain's sandbox tools, because `script` runs the
+# command under a *pty*, and a pty is not a transparent pipe.
+#
+# Measured against the real wrapper rather than reasoned about:
+#
+#   - Every "\n" on output becomes "\r\n" (the pty's ONLCR). read_file
+#     (`cat -- path`) would hand back every file with CRLF line endings it
+#     does not have on disk, and a write_file/read_file round trip would
+#     no longer agree with itself.
+#   - stdout and stderr are merged onto the one pty. run_command reports
+#     the two separately, and sshReadRemote/sshWriteRemote report a failed
+#     `cat`/`dd` by its stderr -- which would arrive empty, giving errors
+#     with no message.
+#
+# (Exit status and stdin both survive intact: `script --return` propagates
+# the command's status, and input passes through byte-for-byte. Only the
+# two above break.)
+#
+# So the drop-in is replaced rather than removed: its two hardening lines
+# are worth keeping, and only the ForceCommand has to go. The wrapper
+# script itself is left in place, unreferenced, for anyone who wants to
+# invoke it deliberately.
+cat > /etc/ssh/sshd_config.d/10-console.conf <<'EOF'
+# grain (packer/kontur/guest-setup.sh) replaced kontur's own version of
+# this file. The hardening below is kept verbatim; the ForceCommand that
+# mirrored every session to the serial console is deliberately not, since
+# it runs each command under a pty -- which merges stdout with stderr and
+# rewrites every newline as CRLF, both of which grain's sandbox tools
+# depend on not happening. See guest-setup.sh for the measurements.
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+EOF
 
 # --- Optional operator-supplied customization, run once everything above
 # has finished but before the operator key below -- so a custom script can

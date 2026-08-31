@@ -28,6 +28,78 @@ PVH/virtio-pci kernel from source looked, going in, like the only way
 past that. It turned out not to be needed at all -- see "Why no custom
 kernel" below.
 
+## Converging on kontur's own guest build
+
+This directory's pipeline (`build.sh` driving `provision.sh` through
+debootstrap and chroot, as root) duplicates work `third_party/kontur`'s
+own Dockerfile already does: it debootstraps a `--variant=minbase` rootfs,
+applies its overlays, and packs the result with `mke2fs -d` -- *"no extra
+privileges beyond an ordinary docker build"*. The plan is to stop building
+a guest rootfs here at all and instead hand kontur's build-time guest
+setup hook a script saying only what grain adds. `guest-setup.sh` is that
+script; it is written and not yet wired up.
+
+What that buys: one build instead of two, no root/debootstrap requirement
+for a guest image build, and -- because kontur generates its `kontur exec`
+keypair inside the same `docker build` that produces the guest rootfs it
+authorizes it on -- the keypair becomes self-contained again, which would
+retire `-kontur-exec-key` and the key-staging step `v2/scripts/setup.sh`
+does for it.
+
+### What still has to come from somewhere
+
+**A kernel.** kontur ships none -- `deploy/k8s/gke.md` says a kernel comes
+*"from somewhere outside the image (it never fetches one itself)"* -- and
+its guest rootfs installs no `linux-image-*`. "Why no custom kernel" above
+is still the operative finding: Debian's stock `linux-image-amd64` already
+has PVH entry and virtio-pci, with nothing built from source.
+
+### Two things measured while porting, both load-bearing
+
+Neither is a matter of taste; each produces a guest that boots cleanly and
+then fails in a way that says nothing about its cause.
+
+**kontur's guest has no `ip=` handling, and grain's kernel needs some.**
+kontur's `deploy/guest-image/README.md` states its guest needs no
+guest-side networking setup because *"it relies on the kernel's built-in
+`ip=` boot-time autoconfiguration"*. That holds only for a kernel with
+`CONFIG_IP_PNP`, which kontur ships none to have. Debian's stock kernel
+does **not** enable it, so nothing acts on `ip=` without the klibc
+`ipconfig` unit `guest-setup.sh` keeps -- and `konturctl` hard-codes
+`eth0` in the `ip=` it derives, which systemd's predictable-naming policy
+renames away from without the link file beside it. Neither has any
+equivalent in kontur's overlays.
+
+**kontur's ForceCommand console wrapper breaks grain's sandbox tools.**
+`overlay-common/etc/ssh/sshd_config.d/10-console.conf` forces every SSH
+session on the guest through `kontur-ssh-console-wrap`, which runs the
+session's command under `script` so its output is mirrored to the serial
+console. `script` runs the command under a **pty**, and a pty is not a
+transparent pipe. Measured against the real wrapper:
+
+| | through the wrapper |
+|---|---|
+| `cat` of a file with `\n` endings | comes back `\r\n` -- `read_file` corrupts every file it reads |
+| stdout vs stderr | merged onto the one pty -- `run_command` loses the split, and a failed `cat`/`dd` reports an empty error |
+| exit status | survives (`script --return`) |
+| stdin | survives byte-for-byte |
+
+So `guest-setup.sh` replaces that drop-in, keeping its two hardening lines
+and dropping the `ForceCommand`. This is the one place where building on
+kontur's guest actively breaks something rather than merely not helping.
+
+### Wiring, once the hook lands
+
+`build-oci-image.sh` grows the arguments that hand kontur the setup script
+and the operator's public key; `v2/scripts/setup.sh`'s
+`ensure_kontur_images_build` takes `disk.img`/`vmlinuz`/`initrd.img` from
+that build instead of running `build.sh`; and `build.sh`/`provision.sh` go
+away. The exact argument names wait on the vendored code -- `guest-setup.sh`'s
+header states the contract it assumes (root inside the guest rootfs,
+network available, and the kernel package already installed, since its
+final `update-initramfs` has nothing to regenerate otherwise).
+
+
 ## Why no custom kernel
 
 Debian's own `linux-image-amd64` package -- the same kernel package any
