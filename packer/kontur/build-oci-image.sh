@@ -45,7 +45,10 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 echo "building ${KONTUR_OCI_IMAGE} from $(pwd)"
-docker build -t "$KONTUR_OCI_IMAGE" .
+# The Dockerfile uses `RUN --mount=type=cache`, which only the BuildKit
+# builder understands -- the classic builder fails outright on it ("the
+# --mount option requires BuildKit").
+DOCKER_BUILDKIT=1 docker build -t "$KONTUR_OCI_IMAGE" .
 
 # KONTUR_OCI_SKIP_PUSH=1 stops here, leaving the image built but only in
 # this host's own local docker image store -- exactly what a deployment
