@@ -35,10 +35,22 @@ import { TaskRow } from "./TaskList.jsx";
 // targets it, so the two facts (targeted, configured) stay visibly
 // independent rather than the button pretending removal always clears
 // the row.
+//
+// The header/toolbar/row shape below mirrors TaskList's own
+// (bwsalmon/agents#561): a .content-header with title, count, and this
+// page's own primary action (the add-repo form, in place of TaskList's
+// filter title or TemplatesList/SchedulesList's "+ New X" button) above
+// a .task-list-toolbar search box, then flat divider rows instead of
+// this list's old card-per-repo look -- so the four list pages read as
+// one design instead of four.
 export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, onOpenTask, onNewTask, onRefreshConfig, showError }) {
   const [newRepo, setNewRepo] = useState("");
+  const [search, setSearch] = useState("");
   const repos = repoRows(config, tasks);
   const [expanded, setExpanded] = useState(() => new Set());
+
+  const q = search.trim().toLowerCase();
+  const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
 
   const toggleExpanded = (repo) => {
     setExpanded((prev) => {
@@ -75,18 +87,33 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
 
   return (
     <main>
-      <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ px: "1.75rem", pt: "1.2rem" }}>
-        <TextField
-          value={newRepo}
-          onChange={(evt) => setNewRepo(evt.target.value)}
-          placeholder="owner/name"
-          size="small"
-          autoComplete="off"
-        />
-        <Button type="submit" variant="outlined">Add repo</Button>
-      </Stack>
+      <div className="content-header" style={{ alignItems: "center" }}>
+        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Repos</Typography>
+        <span className="count">{visible.length}</span>
+        <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ ml: "auto" }}>
+          <TextField
+            value={newRepo}
+            onChange={(evt) => setNewRepo(evt.target.value)}
+            placeholder="owner/name"
+            size="small"
+            autoComplete="off"
+          />
+          <Button type="submit" variant="outlined" size="small">Add repo</Button>
+        </Stack>
+      </div>
+      {repos.length > 0 && (
+        <div className="task-list-toolbar">
+          <TextField
+            size="small"
+            placeholder="Search repos…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            sx={{ flex: 1, maxWidth: 320 }}
+          />
+        </div>
+      )}
       <ul className="repo-list">
-        {repos.map((r) => {
+        {visible.map((r) => {
           const isOpen = expanded.has(r.repo);
           return (
             <li key={r.repo}>
@@ -144,6 +171,9 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
       </ul>
       {repos.length === 0 && (
         <p className="empty">No repos yet -- add one above, or file a task with a target repo.</p>
+      )}
+      {repos.length > 0 && visible.length === 0 && (
+        <p className="empty">No repos match your search.</p>
       )}
     </main>
   );

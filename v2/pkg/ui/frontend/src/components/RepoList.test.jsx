@@ -61,6 +61,25 @@ describe("RepoList", () => {
     expect(screen.getByText("0 tasks")).toBeInTheDocument();
   });
 
+  it("filters the list by repo name", async () => {
+    const user = userEvent.setup();
+    renderList();
+
+    await user.type(screen.getByPlaceholderText("Search repos…"), "gadgets");
+
+    expect(screen.getByText("acme/gadgets")).toBeInTheDocument();
+    expect(screen.queryByText("acme/widgets")).not.toBeInTheDocument();
+  });
+
+  it("shows a message when a search matches no repos", async () => {
+    const user = userEvent.setup();
+    renderList();
+
+    await user.type(screen.getByPlaceholderText("Search repos…"), "nope");
+
+    expect(screen.getByText("No repos match your search.")).toBeInTheDocument();
+  });
+
   it("calls onOpenRepo when a row is clicked", async () => {
     const onOpenRepo = vi.fn();
     const user = userEvent.setup();

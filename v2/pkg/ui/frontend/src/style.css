@@ -326,28 +326,24 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   .badge-running::before { animation: none; }
 }
 
-.repo-list { list-style: none; margin: 0; padding: 1rem 1.75rem 0; }
-.repo-list li {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  margin-bottom: 0.85rem;
-  overflow: hidden;
-  transition: box-shadow 120ms ease, border-color 120ms ease;
-}
-.repo-list li:hover { box-shadow: var(--shadow-panel); border-color: transparent; }
+/* RepoList (bwsalmon/agents#561) uses TaskList's own flat, full-width
+   divider-row treatment instead of its old card-per-repo look, so all
+   four list pages share one row shape. */
+.repo-list { list-style: none; margin: 0; padding: 0; }
 .repo-list-row {
-  padding: 0.9rem 1.1rem;
+  padding: 0.6rem 1.75rem;
+  border-bottom: 1px solid var(--border);
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 0.85rem;
 }
+.repo-list-row:hover { background: var(--surface-hover); }
 /* Without min-width: 0, a flex:1 item's minimum width defaults to its
    content's min-content size, not 0 -- so a long repo/org name refuses
-   to shrink, stretches the row past the card's edge, and the state
-   chips after it (which don't shrink either, see .chips) get clipped
-   by .repo-list li's own overflow: hidden instead of fitting beside it. */
+   to shrink, stretches the row past its container's edge, and the
+   state chips after it (which don't shrink either, see .chips) get
+   clipped instead of fitting beside it. */
 .repo-list-name {
   flex: 1;
   min-width: 0;
@@ -357,13 +353,11 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Tasks folded out under a repo row (bwsalmon/agents#474) sit inside
-   that repo's own card rather than TaskList's page-level sublist, so
-   they get the card's left inset instead of TaskList's deeper one
-   (reserved there for a stacked task nested under its parent). */
+/* Tasks folded out under a repo row (bwsalmon/agents#474) get the same
+   nested indent as a stacked task under its parent in TaskList itself
+   (the shared .task-sublist .task-row rule above), set off from the
+   repo row by a divider of its own. */
 .repo-list .task-sublist { border-top: 1px solid var(--border); }
-.repo-list .task-sublist .task-row { padding-left: 1.1rem; }
-.repo-list .task-sublist li:last-child .task-row { border-bottom: none; }
 
 .repo-scope-bar { padding: 1rem 1.75rem 0; }
 
