@@ -644,10 +644,14 @@ loopback. Setting it makes `startGitProxy` bind every interface instead of
 just loopback, and advertise that host to every slot's sandbox in
 loopback's place. `v2/scripts/setup.sh`'s `ensure_kontur_git_proxy_host`
 defaults `GRAIN_KONTUR_GIT_PROXY_HOST` to that gateway address
-automatically (via `docker network inspect bridge`) when an operator
-hasn't set one, the same "detect it, or disable kontur sandboxing for this
-run rather than install a daemon that would fail every task" shape
-`ensure_kontur_kvm_access` already uses for `/dev/kvm`.
+automatically when an operator hasn't set one, preferring `docker network
+inspect bridge`'s own `.IPAM.Config` but falling back to the bridge
+device's own address (some docker builds, e.g. Debian's `docker.io`
+package, never populate that field for the default bridge's
+auto-allocated pool — bwsalmon/agents#572), the same "detect it, or
+disable kontur sandboxing for this run rather than install a daemon that
+would fail every task" shape `ensure_kontur_kvm_access` already uses for
+`/dev/kvm`.
 
 bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
 `KonturConfig.Backend` selects the value `konturctl vm create -backend`
