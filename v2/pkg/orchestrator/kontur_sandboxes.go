@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,8 +60,46 @@ type KonturConfig struct {
 	// as.
 	SSHUser string
 	// SSHKey is the path to the private key KonturSandboxes authenticates
-	// to each VM with.
+	// to each VM with. Under DockerExec (below) this is still the key
+	// that gets used, but it is DockerExecKeyPath -- the same key, named
+	// by where the VM's own container can read it -- that names it.
 	SSHKey string
+	// DockerExec routes every sandbox tool call through
+	// `docker exec <vm container> kontur exec` (mcp.DockerExecRunner)
+	// instead of an SSH connection to netshim's externally forwarded
+	// port (mcp.SSHRunner). Only meaningful under
+	// Backend/kontur.BackendDocker, which is the only backend whose VM
+	// containers `docker exec` can reach at all.
+	//
+	// The two transports reach the same guest sshd, as the same account,
+	// with the same key; what changes is where the connection originates.
+	// SSHRunner needs a path *into* the VM's network namespace from
+	// outside it, and so needs everything that builds and describes one:
+	// netshim's inbound DNAT rules, the external port kontur assigned the
+	// VM (kontur.Port), and the container address that port answers on
+	// (kontur.DockerPodIP). DockerExecRunner starts inside that namespace
+	// already, so it needs none of them -- see that type's own doc
+	// comment.
+	//
+	// Left off by default: the SSH path is what every deployment runs
+	// today, and leaving both wired lets a deployment turn this on and
+	// compare rather than having to switch outright.
+	DockerExec bool
+	// DockerExecKeyPath is the private key `kontur exec` authenticates to
+	// the guest with, as a path *inside the VM's own container* rather
+	// than on the host -- which is why it is a separate field from
+	// SSHKey (the host path ssh -i takes) even when both name the same
+	// deployment keypair. Required when DockerExec is set: leaving it
+	// empty falls back to kontur's own baked-in key
+	// (/etc/kontur/exec_id_ed25519), which only a guest image built by
+	// kontur's own Dockerfile authorizes -- and a deployment pointing
+	// -disk at packer/kontur/build.sh's output, as every grain
+	// deployment does, is not using such an image.
+	//
+	// The images directory internal/dockervm already mounts read-only at
+	// /images is the natural place to put it, since it needs no change to
+	// kontur to be readable there.
+	DockerExecKeyPath string
 	// Workspace is the working directory run_command/read_file/edit_file/
 	// write_file operate in on each VM.
 	Workspace string
@@ -257,12 +296,10 @@ func (k *KonturSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool
 		return nil, err
 	}
 
-	host, port, err := k.resolveEndpoint(ctx, name)
+	runner, err := k.runnerFor(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-
-	runner := &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}
 	return mcp.NewSSHSandboxTools(runner, k.cfg.Workspace), nil
 }
 
@@ -417,11 +454,10 @@ func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, rem
 	if err := k.ensure(ctx, name, slot); err != nil {
 		return err
 	}
-	host, port, err := k.resolveEndpoint(ctx, name)
+	runner, err := k.runnerFor(ctx, name)
 	if err != nil {
 		return err
 	}
-	runner := &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}
 	if err := mcp.ConfigureGitCredentialsOverSSH(runner, remoteURL, token); err != nil {
 		return fmt.Errorf("orchestrator: configuring git credentials on kontur VM %q: %w", name, err)
 	}
@@ -461,7 +497,7 @@ func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
 	if err := k.ensure(ctx, name, slot); err != nil {
 		return fmt.Errorf("orchestrator: recreating kontur VM %q: %w", name, err)
 	}
-	if _, _, err := k.resolveEndpoint(ctx, name); err != nil {
+	if _, err := k.runnerFor(ctx, name); err != nil {
 		return fmt.Errorf("orchestrator: waiting for recreated kontur VM %q to become ready: %w", name, err)
 	}
 
@@ -474,6 +510,112 @@ func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
 		}
 	}
 	return nil
+}
+
+// sandboxRunner is the transport a slot's four sandbox tools run over:
+// the method set mcp.NewSSHSandboxTools and mcp.ConfigureGitCredentialsOverSSH
+// both take, satisfied by mcp.SSHRunner and mcp.DockerExecRunner alike.
+// Declared here rather than imported because mcp's own equivalent
+// (remoteRunner) is unexported -- deliberately, so that package's tests
+// can double it -- and runnerFor needs a name for what it returns.
+type sandboxRunner interface {
+	Run(ctx context.Context, argv []string, stdin string) (stdout, stderr string, exitCode int)
+}
+
+// runnerFor returns the transport reaching name's guest, once that guest
+// is actually reachable over it -- so a caller that gets a runner back
+// has already waited out the VM's boot, the same guarantee resolveEndpoint
+// gave every caller before cfg.DockerExec existed.
+//
+// The wait is per-transport because what "reachable" can even be observed
+// through differs: the SSH path can watch for a TCP port to start
+// answering before anything authenticates (waitForSSHPort), while the
+// docker-exec path's first observable success is a whole command running
+// in the guest (waitForGuestExec) -- there is no port to dial from out
+// here, which is the entire point of it.
+func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRunner, error) {
+	if !k.cfg.DockerExec {
+		host, port, err := k.resolveEndpoint(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		return &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}, nil
+	}
+
+	if k.cfg.Backend != kontur.BackendDocker {
+		return nil, fmt.Errorf("orchestrator: DockerExec needs Backend %q, not %q: there is no docker container to exec into under any other backend", kontur.BackendDocker, k.cfg.Backend)
+	}
+	runner := k.dockerExecRunner(name)
+	if err := k.waitForGuestExec(ctx, name, time.Now().Add(k.cfg.readyTimeout())); err != nil {
+		return nil, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest to become reachable over docker exec: %w", name, err)
+	}
+	return runner, nil
+}
+
+// dockerExecRunner builds the docker-exec transport for name's VM. Its
+// ConnectTimeout is left at guestexec's own default rather than tied to
+// cfg.readyTimeout: by the time a caller has a runner back, runnerFor has
+// already waited out the boot this config's timeouts describe, and what
+// is left for this to ride out is only the ordinary case of a guest that
+// blinks mid-task -- the same thing SSHRunner covers with its own fixed
+// ConnectTimeout=10 rather than anything derived from cfg.
+func (k *KonturSandboxes) dockerExecRunner(name string) *mcp.DockerExecRunner {
+	return &mcp.DockerExecRunner{
+		Container: kontur.PodName(name),
+		User:      k.cfg.SSHUser,
+		KeyPath:   k.cfg.DockerExecKeyPath,
+	}
+}
+
+// waitForGuestExec polls a trivial command through the docker-exec
+// transport until it succeeds or deadline passes -- the docker-exec
+// counterpart to waitForSSHPort, and for the same reason: a VM whose
+// container is up is not yet a VM whose guest has finished booting, and
+// everything short of that looks like a failure to reach it.
+//
+// It probes with a runner of its own whose ConnectTimeout is one poll
+// interval, so a probe against a guest that is not up yet gives up and
+// lets this loop decide whether to keep waiting, rather than each probe
+// sitting on guestexec's own 30s default and overshooting the deadline
+// this is measuring against. That mirrors what waitForSSHPort gets from
+// giving its dialer a readyPollInterval timeout.
+//
+// Like waitForSSHPort, it fails immediately on a VM container that has
+// already exited rather than waiting out the rest of deadline exec'ing
+// into something that will never answer.
+func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, deadline time.Time) error {
+	probe := k.dockerExecRunner(name)
+	probe.ConnectTimeout = k.cfg.readyPollInterval()
+	var lastErr error
+	for {
+		_, stderr, exitCode := probe.Run(ctx, []string{"true"}, "")
+		if exitCode == 0 {
+			return nil
+		}
+		lastErr = guestExecProbeError(probe.Container, stderr, exitCode)
+		if status, dead := dockerExitedEarly(ctx, k.cfg.Backend, name); dead {
+			return fmt.Errorf("VM container %q exited (status %q) before its guest ever ran a command -- check `docker logs %s`: %w", probe.Container, status, probe.Container, lastErr)
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(k.cfg.readyPollInterval()):
+		}
+	}
+}
+
+// guestExecProbeError renders one failed waitForGuestExec probe as the
+// error a caller sees if the deadline runs out on it, naming the command
+// an operator can run by hand to see the same thing.
+func guestExecProbeError(container, stderr string, exitCode int) error {
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		detail = fmt.Sprintf("exited %d with no output", exitCode)
+	}
+	return fmt.Errorf("`docker exec %s kontur exec -- true`: %s", container, detail)
 }
 
 // resolveEndpoint reads name's assigned port and polls PodIP until it
