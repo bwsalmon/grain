@@ -36,8 +36,9 @@ own Dockerfile already does: it debootstraps a `--variant=minbase` rootfs,
 applies its overlays, and packs the result with `mke2fs -d` -- *"no extra
 privileges beyond an ordinary docker build"*. The plan is to stop building
 a guest rootfs here at all and instead hand kontur's build-time guest
-setup hook a script saying only what grain adds. `guest-setup.sh` is that
-script; it is written and not yet wired up.
+setup hook (`GUEST_SETUP_SCRIPT`, which now exists -- see "Status" below)
+a script saying only what grain adds. `guest-setup.sh` is that script; it
+is written and not yet wired up.
 
 What that buys: one build instead of two, no root/debootstrap requirement
 for a guest image build, and -- because kontur generates its `kontur exec`
@@ -46,7 +47,7 @@ authorizes it on -- the keypair becomes self-contained again, which would
 retire `-kontur-exec-key` and the key-staging step `v2/scripts/setup.sh`
 does for it.
 
-### Status: the kernel landed, the hook did not
+### Status: both the kernel and the hook have landed upstream
 
 The `third_party/kontur` resync (upstream `dd6e306`) bakes a guest kernel
 into the kontur OCI image -- a new `fetch-kernel` stage pulling
@@ -60,17 +61,19 @@ this guest runs docker and `kind`, which need a far richer kernel config
 for cloud-hypervisor's own CI is likely to carry, and "Why no custom
 kernel" below records Debian's stock `linux-image-amd64` being verified by
 hand under real KVM for exactly this guest. So `guest-setup.sh` installs
-`linux-image-amd64` itself, and the patch below publishes the resulting
-`vmlinuz`/`initrd.img` beside `disk.img`.
+`linux-image-amd64` itself, and the hook's `guest-artifacts` target
+publishes the resulting `vmlinuz`/`initrd.img` beside `disk.img`.
 
-The build-time setup hook did **not** land -- the resync brought CPU
-hotplug and the kernel, and kontur's build args remain `GO_VERSION`,
+The build-time setup hook has now landed too, in upstream `c21bace`
+(kontur's `claude/kontur-vendoring-grain-sync-k7ha3e` branch, pending
+merge to its `main`), and is in this repo's `third_party/kontur`
+snapshot. kontur's build args are now `GO_VERSION`,
 `CLOUD_HYPERVISOR_VERSION`, `KONTUR_KERNEL_VERSION`, `GUEST_DISTRO`,
-`GUEST_SUITE`, `GUEST_ALPINE_VERSION` and `GUEST_SSH_AUTHORIZED_KEY`.
-`upstream-guest-setup-hook.patch` in this directory is the change to land
-in bwsalmon/kontur for it; it applies to that repo's `Dockerfile`.
+`GUEST_SUITE`, `GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY` and
+`GUEST_SETUP_SCRIPT` -- the last being the one this directory was waiting
+on. It holds the script's own *text*, not a path.
 
-### What the patch does, and the one problem it exists to solve
+### What the hook does, and the one problem it exists to solve
 
 Customizing kontur's guest rootfs is not simply "run a script in it",
 because the rootfs is a *directory* in a build stage. Running anything in
@@ -82,23 +85,27 @@ This is precisely why `build.sh` needs root today, and it would have
 undone the "no extra privileges beyond an ordinary docker build" property
 kontur's own `guest-image` stage calls out for `mke2fs -d`.
 
-The patch sidesteps it rather than paying it: a new `guest-customized`
-stage promotes the rootfs to an image of its own
+It sidesteps that rather than paying it: a `guest-customized` stage
+promotes the rootfs to an image of its own
 (`FROM scratch` + `COPY --from=guest-rootfs /rootfs/ /`), so
 `GUEST_SETUP_SCRIPT` runs as an ordinary `RUN` -- real `/proc`, real
 `/dev`, working network, rootfs as `/` -- with no chroot and no
 privileges. `guest-image` then packs that stage instead of the raw
-rootfs. It also adds a `guest-artifacts` target so
+rootfs. There is also a `guest-artifacts` target, so
 `docker build --target guest-artifacts --output type=local,dest=<dir>`
 yields `disk.img` plus the guest's own kernel and initramfs when it has
 them, without bloating the runtime image with any of it. `final` stays
-last, so the default build target is unchanged.
+last, so the default build target is unchanged. See
+`third_party/kontur/deploy/guest-image/README.md`'s "Running a custom
+setup script" and "Exporting the built guest".
 
 ### Not yet verified
 
-This environment has no docker daemon (`/var/run/docker.sock` absent) and
-no `/dev/kvm`, so the patch has been reviewed but never built. What needs
-checking on a machine that can:
+The hook was written and reviewed, and landed upstream, without ever
+being built: no image registry is reachable from where it was written
+(the egress policy denies Docker's blob CDN, so `docker build` cannot
+resolve a single base image), and there is no `/dev/kvm` to boot the
+result under. What needs checking on a machine that can:
 
 1. **Device nodes survive the copy.** `COPY --from=guest-rootfs /rootfs/ /`
    has to carry debootstrap's `/dev` entries through BuildKit. If it
@@ -148,16 +155,32 @@ So `guest-setup.sh` replaces that drop-in, keeping its two hardening lines
 and dropping the `ForceCommand`. This is the one place where building on
 kontur's guest actively breaks something rather than merely not helping.
 
-### Wiring, once the hook lands
+### Wiring, still to do
 
-`build-oci-image.sh` grows the arguments that hand kontur the setup script
-and the operator's public key; `v2/scripts/setup.sh`'s
-`ensure_kontur_images_build` takes `disk.img`/`vmlinuz`/`initrd.img` from
-that build instead of running `build.sh`; and `build.sh`/`provision.sh` go
-away. The exact argument names wait on the vendored code -- `guest-setup.sh`'s
-header states the contract it assumes (root inside the guest rootfs,
-network available, and the kernel package already installed, since its
-final `update-initramfs` has nothing to regenerate otherwise).
+The hook exists now, so the argument names no longer wait on anything:
+
+```sh
+docker build \
+  --build-arg GUEST_SETUP_SCRIPT="$(cat packer/kontur/guest-setup.sh)" \
+  --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat <operator key>.pub)" \
+  --target guest-artifacts --output type=local,dest=<dir> \
+  third_party/kontur
+```
+
+-- which yields `disk.img`, `vmlinuz` and `initrd.img` in `<dir>`, the
+same three files `build.sh` produces today. What is left:
+`build-oci-image.sh` grows those arguments; `v2/scripts/setup.sh`'s
+`ensure_kontur_images_build` takes the three artifacts from that build
+instead of running `build.sh`; and `build.sh`/`provision.sh` go away.
+Because kontur generates its `kontur exec` keypair inside the same build,
+that also retires `-kontur-exec-key` and the key-staging step
+`v2/scripts/setup.sh` does for it.
+
+None of that is worth wiring up before the four checks above pass on a
+machine that can actually run the build -- `guest-setup.sh` assumes root
+inside the guest rootfs, network available, and the kernel package
+already installed (its final `update-initramfs` has nothing to regenerate
+otherwise), and only a real build proves it gets all three.
 
 
 ## Why no custom kernel
@@ -441,13 +464,15 @@ the single largest time sink in validating this whole pipeline, since a
 refused connection looks identical whether the guest hasn't finished
 booting yet or is listening on a port nothing is forwarded to.
 
-**Local patches to the vendored `third_party/kontur` copy are required
-for the `-disk` path above to actually boot** -- see
-`third_party/kontur/VENDORED.md`'s "Local patches" section for what they
-are and why (`internal/hypervisor/args.go`'s `image_type=raw` on every
-raw disk device, chiefly); a deployment building its own
-`kontur`/`konturctl` from a *fresh*, unpatched checkout of bwsalmon/kontur
-needs the same changes until they land upstream.
+**A `kontur`/`konturctl` built from bwsalmon/kontur's `main` will not
+boot the `-disk` path above yet.** The fixes it needs (chiefly
+`internal/hypervisor/args.go` passing `image_type` on every `--disk`)
+were local patches to the vendored `third_party/kontur` copy and are now
+upstream commits -- `84f683d`, `1c7ac13`, `694b3d1` on kontur's
+`claude/kontur-vendoring-grain-sync-k7ha3e` branch, pending merge to its
+`main`; see `third_party/kontur/VENDORED.md` for what each does. Until
+that merges, build from that branch (or from the vendored snapshot here,
+which is byte-identical to it).
 
 `orchestrator.KonturConfig.CreateArgs` (bwsalmon/agents#262) is the
 passthrough a deployment sets this through -- `grain daemon` constructs a

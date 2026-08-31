@@ -188,12 +188,13 @@ func TestBuildArgs_MultipleDisksAndNet(t *testing.T) {
 	}
 }
 
-// A writable disk overlay (internal/staticpod's PrepareWritableDisk,
-// upstream) is qcow2, not raw -- the local image_type=raw patch (this
-// repo's own VENDORED.md) must not force it too, or cloud-hypervisor
-// refuses to open it at all ("Maximum disk nesting depth exceeded",
-// confirmed by hand against a real cloud-hypervisor v53.0 binary).
-func TestBuildArgs_Qcow2DiskHasNoImageTypeRaw(t *testing.T) {
+// A writable disk overlay (staticpod.PrepareWritableDisk) is qcow2, not
+// raw, and must not get the raw image_type every other disk here gets --
+// cloud-hypervisor refuses to open it at all if it does ("Maximum disk
+// nesting depth exceeded", confirmed by hand against a real
+// cloud-hypervisor v53.0 binary), and needs backing_files=on before it
+// will follow the overlay's backing-file chain.
+func TestBuildArgs_Qcow2DiskGetsQcow2ImageTypeAndBackingFiles(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Disks = []config.Disk{{Path: "/disk/disk.qcow2"}}
 

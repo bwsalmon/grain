@@ -694,7 +694,8 @@ this"), and the guest's kernel is just Debian's own stock
 from-source PVH build — it already has `CONFIG_PVH` and working
 virtio-pci/virtio-blk/virtio-net, confirmed by hand once the actual
 blocker (`internal/hypervisor/args.go` needing `image_type=raw` on every
-disk, a one-line vendored patch — `third_party/kontur/VENDORED.md`) and
+disk, for a while a one-line vendored patch, now upstream — see
+`third_party/kontur/VENDORED.md`) and
 two guest-side gaps (systemd renaming the NIC away from `eth0`, and no
 `CONFIG_IP_PNP` to act on `konturctl`'s own `ip=` cmdline — both closed in
 `provision.sh`) were found and fixed. `TestKonturSandboxesToolsForAgainstARealDockerBackedVM`
