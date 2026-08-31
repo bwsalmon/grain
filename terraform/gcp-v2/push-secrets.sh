@@ -48,7 +48,8 @@
 #                                      Gemini key". Set it only to use a key of your own.
 #   GRAIN_KONTUR_SSH_KEY                the private half of the SSH keypair
 #                                      orchestrator.KonturSandboxes authenticates to each
-#                                      kontur VM with (-kontur-ssh-key). Optional: with
+#                                      kontur VM's guest with (staged into the images
+#                                      directory and named by -kontur-exec-key). Optional: with
 #                                      enable_kontur_sandboxes on and this unset,
 #                                      v2/scripts/setup.sh's own ensure_kontur_ssh_key
 #                                      generates a keypair itself and bakes its public half

@@ -24,14 +24,15 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 escape-hatch tools (ask_question, comment_on_issue,
                 propose_task, add_review_comment). NewSandboxTools runs
                 those four locally, confined to a directory; NewSSHSandboxTools
-                (SSHRunner) runs the same four tools over SSH against a
-                real remote host instead, the transport a kontur-managed
-                sandbox VM needs
-pkg/kontur/     resolves a bwsalmon/kontur-managed VM's SSH endpoint: the
-                external port kontur itself persisted at "konturctl vm
-                create" time, plus the pod IP that port answers on, asked
-                of containerd directly via crictl since kontur has no
-                apiserver to have recorded it anywhere itself
+                (DockerExecRunner) runs the same four tools inside a
+                kontur-managed sandbox VM's guest instead, by exec'ing
+                into that VM's own container -- see "Reaching a sandbox
+                guest without a route into it" below
+pkg/kontur/     drives the `konturctl` binary: create/update/delete for a
+                slot's VM, the container names kontur derives from a VM
+                name, and the one `docker inspect` that tells a VM whose
+                container died from one still on its way up. It resolves
+                no address for a VM, because nothing needs one
 pkg/agent/      the Framework interface an agent driver implements
 pkg/agent/gemini/  Framework via the Gemini API, talking to its own
                 in-process pkg/mcp/ server
@@ -582,13 +583,13 @@ The daemon still defaults to the same "no host adapter" stand-in every
 other package here does: one local directory per slot doing sandbox duty
 (`orchestrator.HostSandboxes`). `orchestrator.KonturSandboxes`
 (bwsalmon/agents#262) is the real alternative `Deps.Sandboxes` also
-accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached over
-SSH via `mcp.NewSSHSandboxTools` instead of a local directory, created
+accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached via
+`mcp.NewSSHSandboxTools` instead of a local directory, created
 via `kontur.Create` on first use and reused across cycles the same way
 `HostSandboxes` reuses its directories — and the daemon can now be
 pointed at it for real: `-kontur-vm-name-prefix` opts a deployment in,
-with `-kontur-ssh-user`/`-kontur-ssh-key`/`-kontur-workspace` for the SSH
-side and repeatable `-kontur-create-arg` flags building
+with `-kontur-ssh-user`/`-kontur-exec-key`/`-kontur-workspace` for
+reaching the guest and repeatable `-kontur-create-arg` flags building
 `KonturConfig.CreateArgs` (bwsalmon/agents#274) — a deployment's own
 `konturctl vm create -h` decides what those are, most importantly whichever
 flag points at a built guest image (`../packer/kontur/`, below), since
@@ -998,61 +999,77 @@ capability in practice, same as the rest of `Config.GrantTools`.
 
 ## Reaching a sandbox guest without a route into it
 
-`KonturSandboxes` reaches a slot's VM over SSH to the external port
-netshim forwards on the VM's container address — which is why
-`pkg/kontur` exists at all: neither half of that address is something
-kontur prints, so `Port` reads the port out of kontur's own state file
-and `DockerPodIP`/`PodIP` ask docker (or containerd, under the static-pod
-backend) for the address it answers on.
+A slot's VM guest is reached by exec'ing into that VM's own container:
+`docker exec <vm container> kontur exec` (`mcp.DockerExecRunner`).
+bwsalmon/kontur ships the guest-side half -- `kontur exec` SSHes to the
+guest's own tap-attached address, which the docker backend records as
+`KONTUR_EXEC_ADDR` when it starts the VM container. That address needs no
+address translation to reach, because the container shares the network
+namespace netshim set the tap up in: `internal/guestexec`'s own words,
+"reachable directly from this container's own network namespace ...
+without going through NETSHIM_GUEST_PORT's external DNAT at all."
 
-`-kontur-docker-exec` (with `-kontur-docker-exec-key`) routes the same
-four tools through `docker exec <vm container> kontur exec` instead
-(`mcp.DockerExecRunner`). bwsalmon/kontur already ships the guest-side
-half: `kontur exec` SSHes to the guest's own tap-attached address, which
-the docker backend records as `KONTUR_EXEC_ADDR` when it starts the VM
-container. That address needs no address translation to reach, because
-the container shares the network namespace netshim set the tap up in —
-`internal/guestexec`'s own words, "reachable directly from this
-container's own network namespace ... without going through
-NETSHIM_GUEST_PORT's external DNAT at all."
+This replaced an SSH connection from the daemon to the external port
+netshim forwards on the VM's container address, and the reason to prefer
+it is how much only existed to describe that route in from outside:
 
-Nothing about authentication changes: the same guest sshd, the same
-account, and the same keypair `v2/scripts/setup.sh`'s
-`ensure_kontur_ssh_key` already generates and
-`packer/kontur/provision.sh` already installs as the guest's only
-`authorized_keys` entry. What changes is that the connection starts
-inside the VM's own container, so nothing outside it has to be able to
-reach the guest — and so none of the machinery that makes such a
-connection possible has to be consulted: not netshim's inbound DNAT
-rules, not the per-VM external port, not the container-address lookup.
+- `pkg/kontur` no longer reads kontur's state files or resolves an
+  address at all. `Port` (the external port, out of kontur's own JSON),
+  `PodIP` (crictl) and `DockerPodIP` (`docker inspect`, with its
+  `index`/`Networks` template) are all gone; `Exists` is what remains of
+  the state file, and only to answer "has this VM been created".
+- `KonturSandboxes` lost `resolveEndpoint` and `waitForSSHPort`, and with
+  them the `Backend`, `RuntimeEndpoint` and `SSHKey` config.
+- `mcp.SSHRunner` is gone; only its shell-quoting helpers survive
+  (`shellquote.go`), which the tools still need to build one command
+  string for the guest to parse.
+- Only the docker backend is supported, since it is the only one whose
+  VMs run as containers to exec into. `createArgs` passes
+  `-backend docker` itself rather than taking it as config.
+
 `TestKonturSandboxesDockerExecReachesTheGuestWithoutResolvingAnAddress`
-is what holds that: its fake docker cannot answer an address lookup and
+holds the claim: its fake docker cannot answer an address lookup and
 nothing is listening on any port, so getting tools back at all is the
-proof none of it was consulted.
+proof none of that is consulted.
 
-Two details are worth knowing before turning it on:
+Two details are worth knowing:
 
-- **`-kontur-docker-exec-key` is a path inside the VM's container**, not
-  on the host — the same deployment keypair `-kontur-ssh-key` names, just
-  named by where the container can read it. The images directory
+- **`-kontur-exec-key` is a path inside the VM's container**, not on the
+  host -- the same deployment keypair `ensure_kontur_ssh_key` generates
+  and `packer/kontur/provision.sh` bakes into the guest's
+  `authorized_keys`, just named by where the container can read it.
+  `setup.sh` stages it into the images directory
   `konturctl vm create -images-hostpath` already mounts read-only at
-  `/images` needs no change to kontur to serve as that place. Left unset,
-  `kontur exec` falls back to the dedicated key kontur's own `Dockerfile`
-  bakes in — which only a guest image built by that same Dockerfile
-  authorizes, and a deployment pointing `-disk` at
-  `packer/kontur/build.sh`'s output is not using one. That is why the
-  flag is required rather than defaulted.
+  `/images`, so no new mount is involved. Left unset, `kontur exec` falls
+  back to the dedicated key kontur's own `Dockerfile` bakes in -- which
+  only a guest image built by that same Dockerfile authorizes, and a
+  deployment pointing `-disk` at `packer/kontur/build.sh`'s output is not
+  using one. That is why the flag is required rather than defaulted.
 - **`docker exec` cannot distinguish a failure to reach the guest from a
   guest command that exited 1**, the way `ssh` can with its own reserved
   status: it reports the exit status of whatever it started, and
   `kontur exec` exits with the guest command's own. `DockerExecRunner`
-  tells the two apart by the first line of stderr instead (see
-  `execFailedBeforeGuest`), erring toward "it never ran" — the same
-  `exitCode == -1` `SSHRunner` reports for an unreachable sandbox.
+  tells the two apart by the first line of stderr (see
+  `execFailedBeforeGuest`), erring toward "it never ran" -- the same
+  `exitCode == -1` the SSH transport reported for an unreachable sandbox.
 
-Both transports stay wired, so a deployment can turn this on and compare
-rather than switch outright. The SSH path remains the default.
+Readiness changed shape with the transport. `resolveEndpoint` could only
+wait for a TCP port to start answering, which happens before the guest
+has booted to a usable sshd; `waitForGuestExec` probes by running a whole
+command *in the guest*, so a caller holding a runner already knows one
+ran. Both fast-fail on a VM container that has already exited.
 
+What a fake cannot settle is whether `kontur exec` authenticates against
+*this* guest image at all -- that rests on kontur's own `KONTUR_EXEC_KEY`
+handling and on `packer/kontur/provision.sh`'s `authorized_keys`, neither
+of which this repo's fakes own -- nor whether `KONTUR_EXEC_ADDR` is
+really set to somewhere the guest answers, nor whether exit statuses and
+stdin survive both hops. `TestKonturSandboxesAgainstARealDockerBackedVM`
+(`kontur_docker_real_test.go`) covers all four against a real
+konturctl/docker/cloud-hypervisor VM under real KVM, and skips wherever
+docker, `/dev/kvm` or the guest-image build prerequisites are missing --
+so it never runs on a hosted runner, and does run wherever kontur's
+prerequisites genuinely exist.
 
 ## The UI
 
@@ -1226,7 +1243,7 @@ first" call every store-backed field elsewhere in this project already
 makes. What stays flags-only either has to be reachable before there is
 a store to read from at all (`-data-dir`, the `-store-*` family) or
 names secret material rather than being configuration itself
-(`-gemini-api-key-file`, `-kontur-ssh-key`) — bwsalmon/agents#320's own
+(`-gemini-api-key-file`, `-kontur-exec-key`) — bwsalmon/agents#320's own
 "but not the secrets."
 
 `pkg/ui.Settings`/`UpdateSettingsRequest` (`pkg/ui/settings.go`) and

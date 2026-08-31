@@ -1,0 +1,103 @@
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -37,6 +37,26 @@
+ # history via a plain ARG is fine.
+ ARG GUEST_SSH_AUTHORIZED_KEY=""
+ 
++# GUEST_SETUP_SCRIPT, if set, is a shell script run inside the guest rootfs
++# at build time -- the build-time counterpart to CHV_SETUP_SCRIPT, for
++# customization that belongs in the image rather than in every boot of it.
++# It holds the script's own text, not a path, the same way
++# GUEST_SSH_AUTHORIZED_KEY holds a key rather than a filename.
++#
++# deploy/guest-image/README.md's "Running a custom setup script" points at
++# CHV_SETUP_SCRIPT instead, on the grounds that a build-time chroot has no
++# running kernel or service manager to work with. That reasoning does not
++# apply here: see the "guest-customized" stage below, which runs this as an
++# ordinary container rather than under chroot. What CHV_SETUP_SCRIPT is
++# still the right answer for is anything that has to observe the guest
++# actually running; what this is for is installing packages and dropping in
++# files, paid once at build time by everyone who pulls the image rather
++# than once per host at first boot.
++#
++# Anything it writes lands in the guest disk image, so do not use it to
++# place secrets -- it is as public as the image is.
++ARG GUEST_SETUP_SCRIPT=""
++
+ # Generates a dedicated ed25519 keypair "kontur exec" (internal/guestexec)
+ # uses to authenticate against the guest's sshd, independent of
+ # GUEST_SSH_AUTHORIZED_KEY above -- that one is an operator's own,
+@@ -255,6 +275,37 @@
+ # forced by BuildKit not resolving ARGs in COPY --from, only FROM.
+ FROM guest-rootfs-${GUEST_DISTRO} AS guest-rootfs
+ 
++# Applies GUEST_SETUP_SCRIPT, if one was given, inside the guest rootfs.
++#
++# The rootfs is promoted to an image stage of its own first, so the script
++# runs as an ordinary RUN -- with a real /proc and /dev, working network,
++# and the rootfs as / exactly as it will look booted -- rather than under
++# `chroot`. That distinction is what preserves the "no extra privileges
++# beyond an ordinary docker build" property the guest-image stage below
++# already relies on for `mke2fs -d`: bind-mounting /proc and /dev into a
++# chroot needs CAP_SYS_ADMIN, which a docker build does not have, and
++# without them apt postinsts, `systemctl enable` and `update-initramfs`
++# variously misbehave or fail outright.
++#
++# Both rootfs variants provide the /bin/sh this RUN needs (debootstrap
++# --variant=minbase on Debian, busybox via alpine-base on Alpine), so this
++# works the same way for either GUEST_DISTRO. With no script given the RUN
++# is a no-op, and the stage is just a copy of the rootfs.
++FROM scratch AS guest-customized
++COPY --from=guest-rootfs /rootfs/ /
++# A scratch-derived stage inherits no PATH, and while the runtime supplies
++# a default when an image config sets none, this stage is the one place
++# where the whole point is running a caller's own script -- so it is set
++# explicitly rather than left to that fallback.
++ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ARG GUEST_SETUP_SCRIPT
++RUN if [ -n "${GUEST_SETUP_SCRIPT}" ]; then \
++      printf '%s\n' "${GUEST_SETUP_SCRIPT}" > /tmp/kontur-guest-setup.sh; \
++      chmod 0755 /tmp/kontur-guest-setup.sh; \
++      /tmp/kontur-guest-setup.sh; \
++      rm -f /tmp/kontur-guest-setup.sh; \
++    fi
++
+ # Packs guest-rootfs (whichever of the two stages above GUEST_DISTRO
+ # selected) into disk.img. `mke2fs -d` populates the filesystem straight
+ # from a directory tree, so this needs no loop-mount (and so no extra
+@@ -265,13 +316,34 @@
+ FROM debian:bookworm-slim AS guest-image
+ RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs \
+     && rm -rf /var/lib/apt/lists/*
+-COPY --from=guest-rootfs /rootfs /rootfs
++COPY --from=guest-customized / /rootfs
+ RUN set -eux; \
+     size_kb=$(du -sk /rootfs | cut -f1); \
+     img_kb=$(( (size_kb * 12 / 10) + 65536 )); \
+     truncate -s "${img_kb}K" /disk.img; \
+     mke2fs -F -t ext4 -L kontur-root -d /rootfs /disk.img
+ 
++# A customized guest may bring its own kernel -- a distro kernel package
++# installed by GUEST_SETUP_SCRIPT, for a guest whose workload needs more
++# than the fetch-kernel stage's own build provides. Publish it beside
++# disk.img when there is one, so a caller booting that guest has all of
++# what it needs from this one build. Nothing is produced when there is
++# not, and CHV_KERNEL's default (fetch-kernel's vmlinux, baked into the
++# final image) still applies to the bundled guest either way.
++RUN set -eux; \
++    mkdir -p /out; \
++    for pattern in vmlinuz initrd.img; do \
++      newest="$(ls -1 /rootfs/boot/${pattern}-* 2>/dev/null | sort -V | tail -1 || true)"; \
++      if [ -n "${newest}" ]; then cp "${newest}" "/out/${pattern}"; fi; \
++    done
++
++# Everything a caller needs to boot this guest elsewhere, and nothing
++# else, so `docker build --target guest-artifacts --output type=local,dest=<dir>`
++# yields exactly those files rather than a whole builder filesystem.
++FROM scratch AS guest-artifacts
++COPY --from=guest-image /disk.img /disk.img
++COPY --from=guest-image /out/ /
++
+ # netshim mode still needs CAP_NET_ADMIN/CAP_NET_RAW at runtime (creating
+ # the bridge/taps and nftables NAT rules), but as of `internal/netshim`
+ # talking to the kernel directly via netlink/nftables Go libraries instead

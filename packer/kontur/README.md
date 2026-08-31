@@ -28,6 +28,138 @@ PVH/virtio-pci kernel from source looked, going in, like the only way
 past that. It turned out not to be needed at all -- see "Why no custom
 kernel" below.
 
+## Converging on kontur's own guest build
+
+This directory's pipeline (`build.sh` driving `provision.sh` through
+debootstrap and chroot, as root) duplicates work `third_party/kontur`'s
+own Dockerfile already does: it debootstraps a `--variant=minbase` rootfs,
+applies its overlays, and packs the result with `mke2fs -d` -- *"no extra
+privileges beyond an ordinary docker build"*. The plan is to stop building
+a guest rootfs here at all and instead hand kontur's build-time guest
+setup hook a script saying only what grain adds. `guest-setup.sh` is that
+script; it is written and not yet wired up.
+
+What that buys: one build instead of two, no root/debootstrap requirement
+for a guest image build, and -- because kontur generates its `kontur exec`
+keypair inside the same `docker build` that produces the guest rootfs it
+authorizes it on -- the keypair becomes self-contained again, which would
+retire `-kontur-exec-key` and the key-staging step `v2/scripts/setup.sh`
+does for it.
+
+### Status: the kernel landed, the hook did not
+
+The `third_party/kontur` resync (upstream `dd6e306`) bakes a guest kernel
+into the kontur OCI image -- a new `fetch-kernel` stage pulling
+cloud-hypervisor's own published PVH `vmlinux`, plus a `CHV_KERNEL`
+default pointing at it. That closes kontur's "a kernel comes from
+somewhere outside the image" gap **for kontur's own bundled guest**.
+
+It does not close it for grain's, and grain should not adopt that kernel:
+this guest runs docker and `kind`, which need a far richer kernel config
+(overlayfs, cgroup v2, bridge netfilter, veth) than a release kernel built
+for cloud-hypervisor's own CI is likely to carry, and "Why no custom
+kernel" below records Debian's stock `linux-image-amd64` being verified by
+hand under real KVM for exactly this guest. So `guest-setup.sh` installs
+`linux-image-amd64` itself, and the patch below publishes the resulting
+`vmlinuz`/`initrd.img` beside `disk.img`.
+
+The build-time setup hook did **not** land -- the resync brought CPU
+hotplug and the kernel, and kontur's build args remain `GO_VERSION`,
+`CLOUD_HYPERVISOR_VERSION`, `KONTUR_KERNEL_VERSION`, `GUEST_DISTRO`,
+`GUEST_SUITE`, `GUEST_ALPINE_VERSION` and `GUEST_SSH_AUTHORIZED_KEY`.
+`upstream-guest-setup-hook.patch` in this directory is the change to land
+in bwsalmon/kontur for it; it applies to that repo's `Dockerfile`.
+
+### What the patch does, and the one problem it exists to solve
+
+Customizing kontur's guest rootfs is not simply "run a script in it",
+because the rootfs is a *directory* in a build stage. Running anything in
+it means `chroot`, and a useful chroot needs `/proc` and `/dev`
+bind-mounted -- which needs `CAP_SYS_ADMIN`, which an ordinary
+`docker build` does not have. Without them, apt postinsts,
+`systemctl enable` and `update-initramfs` variously misbehave or fail.
+This is precisely why `build.sh` needs root today, and it would have
+undone the "no extra privileges beyond an ordinary docker build" property
+kontur's own `guest-image` stage calls out for `mke2fs -d`.
+
+The patch sidesteps it rather than paying it: a new `guest-customized`
+stage promotes the rootfs to an image of its own
+(`FROM scratch` + `COPY --from=guest-rootfs /rootfs/ /`), so
+`GUEST_SETUP_SCRIPT` runs as an ordinary `RUN` -- real `/proc`, real
+`/dev`, working network, rootfs as `/` -- with no chroot and no
+privileges. `guest-image` then packs that stage instead of the raw
+rootfs. It also adds a `guest-artifacts` target so
+`docker build --target guest-artifacts --output type=local,dest=<dir>`
+yields `disk.img` plus the guest's own kernel and initramfs when it has
+them, without bloating the runtime image with any of it. `final` stays
+last, so the default build target is unchanged.
+
+### Not yet verified
+
+This environment has no docker daemon (`/var/run/docker.sock` absent) and
+no `/dev/kvm`, so the patch has been reviewed but never built. What needs
+checking on a machine that can:
+
+1. **Device nodes survive the copy.** `COPY --from=guest-rootfs /rootfs/ /`
+   has to carry debootstrap's `/dev` entries through BuildKit. If it
+   chokes, empty `/dev` in the rootfs stages first -- both variants'
+   kernels mount devtmpfs over it during early boot anyway.
+2. **`RUN` works on the scratch-derived stage.** It needs the `/bin/sh`
+   the rootfs provides; the patch sets `PATH` explicitly rather than
+   relying on the runtime's default for an image config that sets none.
+3. **The Alpine variant still builds.** The hook is written to be
+   distro-agnostic (busybox `sh` satisfies it), but only the Debian path
+   is what grain exercises.
+4. **`update-initramfs` inside the RUN** produces an initramfs the guest
+   actually boots from -- the step `guest-setup.sh` depends on for its
+   `eth0`/`ip=` units to stick.
+
+### Two things measured while porting, both load-bearing
+
+Neither is a matter of taste; each produces a guest that boots cleanly and
+then fails in a way that says nothing about its cause.
+
+**kontur's guest has no `ip=` handling, and grain's kernel needs some.**
+kontur's `deploy/guest-image/README.md` states its guest needs no
+guest-side networking setup because *"it relies on the kernel's built-in
+`ip=` boot-time autoconfiguration"*. That holds only for a kernel with
+`CONFIG_IP_PNP`, which kontur ships none to have. Debian's stock kernel
+does **not** enable it, so nothing acts on `ip=` without the klibc
+`ipconfig` unit `guest-setup.sh` keeps -- and `konturctl` hard-codes
+`eth0` in the `ip=` it derives, which systemd's predictable-naming policy
+renames away from without the link file beside it. Neither has any
+equivalent in kontur's overlays.
+
+**kontur's ForceCommand console wrapper breaks grain's sandbox tools.**
+`overlay-common/etc/ssh/sshd_config.d/10-console.conf` forces every SSH
+session on the guest through `kontur-ssh-console-wrap`, which runs the
+session's command under `script` so its output is mirrored to the serial
+console. `script` runs the command under a **pty**, and a pty is not a
+transparent pipe. Measured against the real wrapper:
+
+| | through the wrapper |
+|---|---|
+| `cat` of a file with `\n` endings | comes back `\r\n` -- `read_file` corrupts every file it reads |
+| stdout vs stderr | merged onto the one pty -- `run_command` loses the split, and a failed `cat`/`dd` reports an empty error |
+| exit status | survives (`script --return`) |
+| stdin | survives byte-for-byte |
+
+So `guest-setup.sh` replaces that drop-in, keeping its two hardening lines
+and dropping the `ForceCommand`. This is the one place where building on
+kontur's guest actively breaks something rather than merely not helping.
+
+### Wiring, once the hook lands
+
+`build-oci-image.sh` grows the arguments that hand kontur the setup script
+and the operator's public key; `v2/scripts/setup.sh`'s
+`ensure_kontur_images_build` takes `disk.img`/`vmlinuz`/`initrd.img` from
+that build instead of running `build.sh`; and `build.sh`/`provision.sh` go
+away. The exact argument names wait on the vendored code -- `guest-setup.sh`'s
+header states the contract it assumes (root inside the guest rootfs,
+network available, and the kernel package already installed, since its
+final `update-initramfs` has nothing to regenerate otherwise).
+
+
 ## Why no custom kernel
 
 Debian's own `linux-image-amd64` package -- the same kernel package any

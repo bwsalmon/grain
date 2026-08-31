@@ -18,7 +18,7 @@ package main
 // writeKeyFile and daemon_kontur_wiring_test.go's fake kontur/crictl
 // binaries verbatim (same package, same techniques) rather than
 // reinventing either. The one new piece of infrastructure is
-// installFakeSSHBinaryWithHome, below: writeFakeSSHBinary's fake ssh
+// installFakeDockerBinaryWithHome, below: writeFakeDockerBinary's fake
 // stands in for a real sshd well enough for ConfigureGitCredentials'
 // relative-path writes (the only thing daemon_kontur_wiring_test.go and
 // kontur_sandboxes_test.go ever run over it), but this test's dispatched
@@ -73,23 +73,36 @@ func (s *syncedSim) firstPullRequestNumber() int {
 	return s.sim.PullRequests[0].Number
 }
 
-// installFakeSSHBinaryWithHome installs a fake `ssh` on PATH, the same
-// shape writeFakeSSHBinary (daemon_kontur_wiring_test.go) uses -- run its
-// trailing shell-quoted command against homeDir, standing in for a real
-// sshd's own "start a fresh login session in $HOME" -- but also pins
-// HOME to homeDir for that command, which writeFakeSSHBinary does not:
+// installFakeDockerBinaryWithHome installs a fake `docker` on PATH, the
+// same shape writeFakeDockerBinary (daemon_kontur_wiring_test.go) uses --
+// run the argv after "kontur exec --" against homeDir, standing in for a
+// real sshd's own "start a fresh login session in $HOME" -- but also pins
+// HOME to homeDir for that command, which writeFakeDockerBinary does not:
 // see this file's own doc comment for why this test needs that and the
 // other kontur tests do not.
-func installFakeSSHBinaryWithHome(t *testing.T, homeDir string) {
+func installFakeDockerBinaryWithHome(t *testing.T, homeDir string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fake ssh script is POSIX shell only")
+		t.Skip("fake docker script is POSIX shell only")
 	}
 	dir := t.TempDir()
-	script := fmt.Sprintf(`#!/bin/bash
-cd %q && HOME=%q exec bash -c "${@: -1}"
-`, homeDir, homeDir)
-	install(t, dir, "ssh", script)
+	install(t, dir, "docker", fmt.Sprintf(`#!/bin/sh
+case "$1" in
+exec)
+  shift
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+  shift
+  cd %[1]q && HOME=%[1]q exec "$@"
+  ;;
+inspect)
+  echo running
+  ;;
+*)
+  echo "fake docker: unexpected subcommand: $*" >&2
+  exit 1
+  ;;
+esac
+`, homeDir))
 }
 
 // freeTCPAddr returns a loopback address nothing is listening on yet, for
@@ -174,9 +187,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFakeKonturBinary(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictlBinary(t, "127.0.0.1")
-	listenTCP(t, 30080)
-	installFakeSSHBinaryWithHome(t, vmHome)
+	installFakeDockerBinaryWithHome(t, vmHome)
 
 	uiAddr := freeTCPAddr(t)
 
@@ -193,9 +204,8 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 
 			konturVMNamePrefix: "grain-true-e2e-7e64d1b4-",
 			konturStateDir:     konturStateDir,
-			criRuntimeEndpoint: "unix:///run/containerd/containerd.sock",
 			konturSSHUser:      "debian",
-			konturSSHKey:       "/key",
+			konturExecKey:      "/images/key",
 			konturWorkspace:    workspace,
 		})
 	}()
