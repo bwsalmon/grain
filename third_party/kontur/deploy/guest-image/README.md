@@ -2,11 +2,12 @@
 
 The `guest-image` stage in the top-level `Dockerfile` (packing) plus one
 of the two `guest-rootfs-debian`/`guest-rootfs-alpine` stages (building
-the rootfs `guest-image` packs) build the disk image baked into the
-final `kontur` image at `/var/lib/kontur/guest/disk.img`, used
-automatically when a VM container doesn't set `CHV_DISK_IMAGE` (see
-`internal/config`). `GUEST_DISTRO` (default `debian`) picks which of the
-two rootfs stages runs:
+the rootfs `guest-image` packs, via the `guest-customized` stage in
+between -- see "Running a custom setup script" below) build the disk
+image baked into the final `kontur` image at
+`/var/lib/kontur/guest/disk.img`, used automatically when a VM container
+doesn't set `CHV_DISK_IMAGE` (see `internal/config`). `GUEST_DISTRO`
+(default `debian`) picks which of the two rootfs stages runs:
 
 - `debian` (default): a minimal Debian rootfs (`debootstrap
   --variant=minbase`) with `openssh-server`, `systemd-sysv` (for
@@ -114,15 +115,74 @@ This works the same way on both `GUEST_DISTRO` variants.
 ## Running a custom setup script
 
 To customize the guest beyond what the overlays above do -- installing
-extra packages, dropping in config files, enabling services, etc -- use
-`CHV_SETUP_SCRIPT` (see the top-level README's "Suspend and resume")
-instead of a build-time mechanism: it boots the actual guest and runs
-your script over SSH once, which -- unlike a build-time `chroot` -- gets
-a running kernel, service manager, and network stack to work with, so
-there's nothing it can't do that an interactively-administered guest
-could. Pair it with `CHV_SNAPSHOT_PATH` to pay that cost only once: the
-suspended snapshot after the first run stands in for what would
-otherwise be a customized `disk.img` baked at build time.
+extra packages, dropping in config files, enabling services, etc --
+there are two mechanisms, and which one to reach for is a question of
+*when* the customization should happen rather than what it can do.
+
+`GUEST_SETUP_SCRIPT` is a build arg holding the script's own text (not a
+path, the same way `GUEST_SSH_AUTHORIZED_KEY` holds a key rather than a
+filename), run inside the guest rootfs while the image is being built:
+
+```sh
+docker build --build-arg GUEST_SETUP_SCRIPT="$(cat my-setup.sh)" -t kontur .
+```
+
+The result is baked into `disk.img`, so it is paid once by whoever
+builds the image rather than once per host at first boot, and every VM
+booted from that image already has it. Anything the script writes is as
+public as the image is, so don't use it to place secrets.
+
+It runs in the `guest-customized` stage, which promotes the rootfs to an
+image of its own (`FROM scratch` + `COPY --from=guest-rootfs /rootfs/ /`)
+and runs the script as an ordinary `RUN`. That is deliberate, and it is
+what makes this mechanism usable at all: running something *in a
+directory tree* means `chroot`, and a useful chroot needs `/proc` and
+`/dev` bind-mounted into it -- `CAP_SYS_ADMIN`, which an ordinary
+`docker build` does not have, and without which apt postinsts,
+`systemctl enable` and `update-initramfs` variously misbehave or fail
+outright. Running it as a container instead gives the script a real
+`/proc`, a real `/dev`, working network and the rootfs as `/`, with no
+extra privileges -- the same property the `guest-image` stage's
+`mke2fs -d` already relies on. What it still doesn't get is a *running*
+guest: no booted kernel, no service manager actually running, so
+`systemctl enable` works but `systemctl start` does not.
+
+`CHV_SETUP_SCRIPT` (see the top-level README's "Suspend and resume") is
+the boot-time counterpart: it boots the actual guest and runs your script
+over SSH once, so it gets a running kernel, service manager and network
+stack, and there's nothing it can't do that an interactively-administered
+guest could. Pair it with `CHV_SNAPSHOT_PATH` to pay that cost only once:
+the suspended snapshot after the first run stands in for what would
+otherwise be a customized `disk.img`.
+
+So: `GUEST_SETUP_SCRIPT` for installing packages and dropping in files,
+`CHV_SETUP_SCRIPT` for anything that has to observe the guest actually
+running. They compose -- a build-time script can install what a boot-time
+one then configures against the live system.
+
+## Exporting the built guest
+
+The `guest-artifacts` target publishes the built guest for booting
+somewhere other than inside this image:
+
+```sh
+docker build --target guest-artifacts --output type=local,dest=./out .
+```
+
+That yields `disk.img`, plus `vmlinuz` and `initrd.img` when the guest
+has its own -- i.e. when `GUEST_SETUP_SCRIPT` installed a distro kernel
+package, which a guest whose workload needs a richer kernel config than
+the `fetch-kernel` stage's `cloud-hypervisor/linux` release build carries
+(overlayfs, cgroup v2, bridge netfilter, veth, ...) will want to do. The
+newest `/boot/vmlinuz-*` and `/boot/initrd.img-*` in the rootfs are what
+get published; a guest with no kernel package installed produces neither,
+and `CHV_KERNEL`'s default (the `fetch-kernel` build, baked into the
+final image) is what boots the bundled guest either way.
+
+The target is `FROM scratch` and contains nothing else, so the exported
+directory holds exactly those files rather than a whole builder
+filesystem. None of it bloats the `kontur` runtime image: `final` is
+still the Dockerfile's last stage and so still the default build target.
 
 ## Graceful shutdown
 

@@ -440,7 +440,25 @@ less commonly-run-as-a-guest distro. See
 [`deploy/guest-image/README.md`](deploy/guest-image/README.md) for the
 guest disk image build (`guest-image`/`guest-rootfs-*` stages), how the
 two variants differ beyond package manager, and their own build args
-(`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`).
+(`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`,
+`GUEST_SETUP_SCRIPT`).
+
+`GUEST_SETUP_SCRIPT` is worth calling out here, since it's what makes
+that guest more than a reference one: it holds a shell script's own text,
+run inside the guest rootfs at build time (in the `guest-customized`
+stage, as an ordinary `RUN` rather than under `chroot` -- see that README
+for why the distinction matters), so packages and config files can be
+baked into `disk.img` without maintaining a separate guest image build.
+Paired with the `guest-artifacts` target --
+
+```sh
+docker build --target guest-artifacts --output type=local,dest=./out .
+```
+
+-- which exports `disk.img` plus the guest's own `vmlinuz`/`initrd.img`
+when a setup script installed a kernel package, one `docker build`
+produces everything needed to boot a customized guest elsewhere. `final`
+is still the last stage, so the default build target is unaffected.
 
 ## Running locally
 
