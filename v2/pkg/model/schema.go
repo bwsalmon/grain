@@ -408,54 +408,69 @@ var Tables = []string{
 )`,
 
 	// A repo's release settings -- bwsalmon/agents#398's prod/rc branch
-	// names, the prefix a cut or promoted branch is named under, and the
-	// hand-edited major version an RC's own label starts from. One row per
-	// repo, keyed the way task_read and every other repo-scoped table
-	// already is (owner, name), rather than a single deployment-wide row
-	// the way grain_config is: a deployment can run release management for
-	// more than one repo at once.
-	`CREATE TABLE IF NOT EXISTS ` + "`release_config`" + ` (
-  ` + "`owner`" + `                 TEXT    NOT NULL,
-  ` + "`name`" + `                  TEXT    NOT NULL,
-  ` + "`prod_branch`" + `           TEXT    NOT NULL,
-  ` + "`rc_branch`" + `             TEXT    NOT NULL,
-  ` + "`release_branch_prefix`" + ` TEXT    NOT NULL,
-  ` + "`major_version`" + `         INTEGER NOT NULL,
-  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
+	// One named release branch set (bwsalmon/agents#571) -- a repo may
+	// have any number of these at once, each with its own name and its own
+	// independent candidate sequence, unlike bwsalmon/agents#398's own
+	// release_config, which this table replaces and which held exactly one
+	// singleton row per repo. INTEGER PRIMARY KEY AUTOINCREMENT for the
+	// same reason release_candidate's own id is: starting a fresh release
+	// under a name that already merged has to stay correct with more than
+	// one writer. `repo` is the target repo's own name, kept apart from
+	// `name` -- the release's own user-given name -- since a release is no
+	// longer 1:1 with a repo the way release_config's row was. status is
+	// TEXT rather than a constrained type for the reason schema.go's own
+	// doc comment gives for every other enum column here: the vocabulary
+	// lives in release.go, not the schema. last_error is the reconciler's
+	// own report of why provisioning or a requested merge has not landed
+	// yet -- cleared the moment the attempt that follows succeeds.
+	`CREATE TABLE IF NOT EXISTS ` + "`release`" + ` (
+  ` + "`id`" + `                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`owner`" + `             TEXT     NOT NULL,
+  ` + "`repo`" + `              TEXT     NOT NULL,
+  ` + "`name`" + `              TEXT     NOT NULL,
+  ` + "`status`" + `            TEXT     NOT NULL,
+  ` + "`created_at`" + `        DATETIME NOT NULL,
+  ` + "`merged_at`" + `         DATETIME NULL,
+  ` + "`pull_request_url`" + `  TEXT     NULL,
+  ` + "`last_error`" + `        TEXT     NULL
 )`,
+
+	// What GetRelease and ListReleases both need: every release for one
+	// repo, or by one repo and name, newest first.
+	`CREATE INDEX IF NOT EXISTS ` + "`release_repo`" + ` ON ` + "`release`" + ` (` + "`owner`" + `, ` + "`repo`" + `, ` + "`name`" + `, ` + "`id`" + `)`,
 
 	// One cut release candidate. INTEGER PRIMARY KEY AUTOINCREMENT for the
 	// same reason task_sequence uses it: cutting a new candidate has to
 	// stay correct with more than one writer, and letting SQLite assign
 	// the rowid is atomic where a read-then-increment column would race.
 	//
-	// major_version, number and version together are the candidate's own
-	// label (CandidateLabel) -- captured here at cut time rather than
-	// re-read from release_config, so a later hand-edit to major_version
-	// never renames a candidate already cut under the old one. status is
-	// TEXT rather than a constrained type for the reason schema.go's own
-	// doc comment gives for every other enum column here: the vocabulary
-	// lives in release.go, not the schema. last_error is the reconciler's
-	// own report of why a cut or promotion it attempted did not land yet
-	// -- cleared the moment the attempt that follows succeeds.
+	// release_id names the release (above) this candidate belongs to;
+	// number is scoped to that release alone, starting back at 1 for every
+	// fresh release, unlike bwsalmon/agents#398's own candidate number,
+	// which never reset for the life of a repo's single release_config.
+	// `owner`/`repo` duplicate the release's own target repo, the same
+	// "every repo, oldest first" shape PendingCandidates and
+	// QualifiableActiveCandidates both need without a join back to
+	// `release` for it. There is no release_branch column the way
+	// bwsalmon/agents#398's own release_candidate had: promoting moves the
+	// release's own prod branch (release.name, unadorned) forward, and
+	// that is the only permanent branch a promotion touches now.
 	`CREATE TABLE IF NOT EXISTS ` + "`release_candidate`" + ` (
   ` + "`id`" + `             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`release_id`" + `     INTEGER  NOT NULL,
   ` + "`owner`" + `          TEXT     NOT NULL,
-  ` + "`name`" + `           TEXT     NOT NULL,
-  ` + "`major_version`" + `  INTEGER  NOT NULL,
+  ` + "`repo`" + `           TEXT     NOT NULL,
   ` + "`number`" + `         INTEGER  NOT NULL,
-  ` + "`version`" + `        INTEGER  NOT NULL,
   ` + "`branch`" + `         TEXT     NOT NULL,
-  ` + "`release_branch`" + ` TEXT     NULL,
   ` + "`status`" + `         TEXT     NOT NULL,
   ` + "`created_at`" + `     DATETIME NOT NULL,
   ` + "`promoted_at`" + `    DATETIME NULL,
   ` + "`last_error`" + `     TEXT     NULL
 )`,
 
-	// What CurrentCandidate and the releases reconciler both need: every
-	// candidate for one repo, newest first.
-	`CREATE INDEX IF NOT EXISTS ` + "`release_candidate_repo`" + ` ON ` + "`release_candidate`" + ` (` + "`owner`" + `, ` + "`name`" + `, ` + "`id`" + `)`,
+	// What CurrentCandidateForRelease and the releases reconciler both
+	// need: every candidate for one release, newest first.
+	`CREATE INDEX IF NOT EXISTS ` + "`release_candidate_release`" + ` ON ` + "`release_candidate`" + ` (` + "`release_id`" + `, ` + "`id`" + `)`,
 
 	// A repo's qualification setup -- bwsalmon/agents#518's two switches:
 	// require_approval gates every task a run instantiates behind a
@@ -463,8 +478,8 @@ var Tables = []string{
 	// than landing pre-approved the way a schedule's own firing does, and
 	// auto_promote is what lets the qualifications reconciler promote a
 	// candidate itself the moment its run succeeds instead of leaving
-	// that to a human. One row per repo, the same key release_config
-	// already uses.
+	// that to a human. One row per repo, the same (owner, name) key every
+	// other repo-scoped, one-row-per-repo table here already uses.
 	`CREATE TABLE IF NOT EXISTS ` + "`qualification_config`" + ` (
   ` + "`owner`" + `            TEXT    NOT NULL,
   ` + "`name`" + `             TEXT    NOT NULL,

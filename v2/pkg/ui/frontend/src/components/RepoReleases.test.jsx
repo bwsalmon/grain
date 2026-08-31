@@ -6,16 +6,6 @@ import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-const releaseConfig = {
-  configured: true,
-  prodBranch: "main",
-  rcBranch: "rc",
-  releaseBranchPrefix: "release/",
-  majorVersion: 1,
-};
-
-const unconfiguredReleaseConfig = { configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 };
-
 const unconfiguredQualificationPlan = {
   configured: false, repo: "acme/widgets", requireApproval: false, autoPromote: false, items: [],
 };
@@ -23,12 +13,16 @@ const unconfiguredQualificationPlan = {
 const smokeTemplate = { id: "template-1", name: "Smoke test", title: "Smoke test", repo: "acme/widgets", autoMerge: false, capabilities: [] };
 const otherRepoTemplate = { id: "template-2", name: "Unrelated", title: "Unrelated", repo: "acme/other", autoMerge: false, capabilities: [] };
 
-// Distinct labels for the active vs. promoted candidate below -- a real
-// cut always produces a fresh label, and giving the two fixtures the
+const activeRelease = {
+  repo: "acme/widgets", name: "myfeat", latestBranch: "myfeat.latest", prodBranch: "myfeat", status: "active",
+};
+
+// Distinct branches for the active vs. promoted candidate below -- a real
+// cut always produces a fresh branch, and giving the two fixtures the
 // same one only makes "current candidate" vs. "history" harder to tell
 // apart in a rendered tree that shows the current one in both places.
-const activeCandidate = { id: 2, label: "v1.1.0-rc1", status: "active", branch: "rc", releaseBranch: "" };
-const promotedCandidate = { id: 1, label: "v1.0.0-rc1", status: "promoted", branch: "rc", releaseBranch: "release/v1" };
+const activeCandidate = { id: 2, release: "myfeat", branch: "myfeat.rc.2", status: "active" };
+const promotedCandidate = { id: 1, release: "myfeat", branch: "myfeat.rc.1", status: "promoted" };
 
 // setupApi wires a routing fake covering every endpoint RepoReleases
 // touches, backed by mutable state, the same way App.test.jsx's own
@@ -37,13 +31,13 @@ const promotedCandidate = { id: 1, label: "v1.0.0-rc1", status: "promoted", bran
 // component's own poll (bwsalmon/agents#530) re-fetches in the
 // background while a test is still running.
 function setupApi({
-  releaseConfig: releaseConfigInit = unconfiguredReleaseConfig,
+  releases: releasesInit = [],
   candidates = [],
   qualificationPlan = unconfiguredQualificationPlan,
   qualificationRuns = {},
   nextCut = null,
 } = {}) {
-  let releaseConfigState = { ...releaseConfigInit };
+  let releasesState = [...releasesInit];
   let candidatesState = [...candidates];
   let qualificationPlanState = { ...qualificationPlan };
   let runsState = { ...qualificationRuns };
@@ -51,22 +45,29 @@ function setupApi({
   api.mockImplementation((path, opts) => {
     const method = opts?.method || "GET";
 
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/release-config$/.test(path)) {
-      if (method === "PUT") {
-        releaseConfigState = { ...JSON.parse(opts.body), configured: true };
-      }
-      return Promise.resolve(releaseConfigState);
+    if (path === "/api/repos/acme/widgets/releases" && method === "POST") {
+      const created = { repo: "acme/widgets", latestBranch: `${JSON.parse(opts.body).name}.latest`,
+        prodBranch: JSON.parse(opts.body).name, status: "provisioning", name: JSON.parse(opts.body).name };
+      releasesState = [...releasesState, created];
+      return Promise.resolve(created);
     }
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/promote$/.test(path) && method === "POST") {
+    if (path === "/api/repos/acme/widgets/releases" && method === "GET") {
+      return Promise.resolve(releasesState);
+    }
+    if (/^\/api\/repos\/acme\/widgets\/releases\/[^/]+\/candidates\/promote$/.test(path) && method === "POST") {
       candidatesState = candidatesState.map((c, i) => (i === 0 ? { ...c, status: "promoted" } : c));
       return Promise.resolve(candidatesState[0]);
     }
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates$/.test(path)) {
+    if (/^\/api\/repos\/acme\/widgets\/releases\/[^/]+\/candidates$/.test(path)) {
       if (method === "POST") {
         if (nextCut) candidatesState = [nextCut, ...candidatesState];
         return Promise.resolve(candidatesState[0]);
       }
       return Promise.resolve(candidatesState);
+    }
+    if (/^\/api\/repos\/acme\/widgets\/releases\/[^/]+\/merge$/.test(path) && method === "POST") {
+      releasesState = releasesState.map((r) => ({ ...r, status: "merged", pullRequestUrl: "https://example/pull/1" }));
+      return Promise.resolve(releasesState[0]);
     }
     const approveMatch = path.match(/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/([^/]+)\/qualification\/approve$/);
     if (approveMatch && method === "POST") {
@@ -106,22 +107,22 @@ describe("RepoReleases", () => {
     api.mockReset();
   });
 
-  it("loads the given repo's config and shows its current candidate", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+  it("loads the given repo's releases and shows the current candidate", async () => {
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     expect(screen.getByRole("heading", { name: "acme/widgets releases" })).toBeInTheDocument();
-    expect(current().getByText("v1.1.0-rc1")).toBeInTheDocument();
+    expect(current().getByText("myfeat.rc.2")).toBeInTheDocument();
     expect(current().getByText(/active/)).toBeInTheDocument();
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/release-config");
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates");
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/releases");
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/releases/myfeat/candidates");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/qualification-plan");
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates/2/qualification");
   });
 
   it("enables Promote but not Cut when the current candidate is still active", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
@@ -129,58 +130,67 @@ describe("RepoReleases", () => {
     expect(screen.getByRole("button", { name: "Promote current RC" })).toBeEnabled();
   });
 
-  it("shows a note and no candidate history when the repo has no release config yet", async () => {
-    setupApi({ releaseConfig: unconfiguredReleaseConfig, candidates: [] });
+  it("shows a note and no release picker when the repo has no releases yet", async () => {
+    setupApi({ releases: [], candidates: [] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
-    expect(await screen.findByText(/has no release configuration yet/)).toBeInTheDocument();
-    expect(screen.getByText("No release candidate cut yet.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cut new RC" })).toBeDisabled();
+    expect(await screen.findByText(/has no releases yet/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Release")).not.toBeInTheDocument();
   });
 
-  it("saves the release config form and reloads it", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+  it("creates a new release from the form", async () => {
+    setupApi({ releases: [] });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
-    await screen.findByLabelText(/Prod branch/);
+    await screen.findByLabelText(/New release name/);
 
-    const prodInput = screen.getByLabelText(/Prod branch/);
-    await user.clear(prodInput);
-    await user.type(prodInput, "production");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.type(screen.getByLabelText(/New release name/), "myfeat");
+    await user.click(screen.getByRole("button", { name: "Create release" }));
 
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/release-config", {
-      method: "PUT",
-      body: JSON.stringify({ prodBranch: "production", rcBranch: "rc", releaseBranchPrefix: "release/", majorVersion: 1 }),
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/releases", {
+      method: "POST", body: JSON.stringify({ name: "myfeat" }),
     });
+    await screen.findByLabelText("Release");
   });
 
   it("cuts a new RC when eligible", async () => {
-    setupApi({ releaseConfig, candidates: [promotedCandidate], nextCut: activeCandidate });
+    setupApi({ releases: [activeRelease], candidates: [promotedCandidate], nextCut: activeCandidate });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     await user.click(screen.getByRole("button", { name: "Cut new RC" }));
 
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates", { method: "POST" });
-    expect(await current().findByText("v1.1.0-rc1")).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/releases/myfeat/candidates", { method: "POST" });
+    expect(await current().findByText("myfeat.rc.2")).toBeInTheDocument();
   });
 
   it("promotes the current RC when eligible", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
     await user.click(screen.getByRole("button", { name: "Promote current RC" }));
 
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/candidates/promote", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/releases/myfeat/candidates/promote", { method: "POST" });
     expect(await current().findByText(/promoted/)).toBeInTheDocument();
   });
 
+  it("requests a merge back to the default branch", async () => {
+    setupApi({ releases: [activeRelease], candidates: [promotedCandidate] });
+    const user = userEvent.setup();
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
+    await screen.findByRole("button", { name: "Merge myfeat into the default branch" });
+
+    await user.click(screen.getByRole("button", { name: "Merge myfeat into the default branch" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/releases/myfeat/merge", { method: "POST" });
+    expect(await screen.findByText(/Merge requested/)).toBeInTheDocument();
+  });
+
   it("calls onBack when the back button is clicked", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     const onBack = vi.fn();
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={onBack} showError={() => {}} />);
@@ -196,7 +206,7 @@ describe("RepoReleases", () => {
       id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "pending_approval",
       tasks: [{ taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 1, approved: false, state: "proposed" }],
     };
-    setupApi({ releaseConfig, candidates: [activeCandidate], qualificationRuns: { 2: run } });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate], qualificationRuns: { 2: run } });
     const user = userEvent.setup();
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByText("Smoke test");
@@ -213,7 +223,7 @@ describe("RepoReleases", () => {
       id: 5, candidateId: 2, createdAt: "2026-08-27T12:00:00Z", status: "succeeded",
       tasks: [{ taskId: "10", templateId: "template-1", templateName: "Smoke test", instanceIndex: 1, repeat: 1, approved: true, state: "completed" }],
     };
-    setupApi({ releaseConfig, candidates: [activeCandidate], qualificationRuns: { 2: run } });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate], qualificationRuns: { 2: run } });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/ready to promote/)).toBeInTheDocument();
@@ -227,7 +237,7 @@ describe("RepoReleases", () => {
         { taskId: "11", templateId: "template-1", templateName: "Smoke test", instanceIndex: 2, repeat: 2, approved: true, state: "completed" },
       ],
     };
-    setupApi({ releaseConfig, candidates: [activeCandidate], qualificationRuns: { 2: run } });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate], qualificationRuns: { 2: run } });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/Qualification failed/)).toBeInTheDocument();
@@ -238,7 +248,7 @@ describe("RepoReleases", () => {
   });
 
   it("only offers templates that target this repo, and saves a new qualification item", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     const user = userEvent.setup();
     render(
       <RepoReleases repo="acme/widgets" templates={[smokeTemplate, otherRepoTemplate]} onBack={() => {}} showError={() => {}} />
@@ -263,14 +273,14 @@ describe("RepoReleases", () => {
   });
 
   it("polls the candidate and qualification state on an interval", async () => {
-    setupApi({ releaseConfig, candidates: [activeCandidate] });
+    setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
-    const callsBefore = api.mock.calls.filter((c) => c[0] === "/api/repos/acme/widgets/candidates").length;
+    const callsBefore = api.mock.calls.filter((c) => c[0] === "/api/repos/acme/widgets/releases/myfeat/candidates").length;
 
     await waitFor(() => {
-      const callsAfter = api.mock.calls.filter((c) => c[0] === "/api/repos/acme/widgets/candidates").length;
+      const callsAfter = api.mock.calls.filter((c) => c[0] === "/api/repos/acme/widgets/releases/myfeat/candidates").length;
       expect(callsAfter).toBeGreaterThan(callsBefore);
     }, { timeout: 4000 });
   }, 6000);

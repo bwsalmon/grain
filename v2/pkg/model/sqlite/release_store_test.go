@@ -1,6 +1,6 @@
 package sqlite_test
 
-// Release management's own store tests (bwsalmon/agents#398), against a
+// Release management's own store tests (bwsalmon/agents#571), against a
 // real embedded SQLite database -- the same discipline store_test.go
 // holds every other Store method to, for the same reason its own doc
 // comment gives: this proves SQLite accepts the DDL and the queries
@@ -20,128 +20,208 @@ var (
 	gadgets = model.RepoRef{Owner: "acme", Name: "gadgets"}
 )
 
-func testReleaseConfig(repo model.RepoRef) model.ReleaseConfig {
-	return model.ReleaseConfig{
-		Repo: repo, ProdBranch: "main", RCBranch: "rc", ReleaseBranchPrefix: "release/", MajorVersion: 3,
+func TestCreateReleaseRejectsAnInvalidName(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if _, err := store.CreateRelease(ctx, widgets, "", now); !errors.Is(err, model.ErrInvalidReleaseName) {
+		t.Fatalf("got %v, want ErrInvalidReleaseName for an empty name", err)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat.latest", now); !errors.Is(err, model.ErrInvalidReleaseName) {
+		t.Fatalf("got %v, want ErrInvalidReleaseName for a name colliding with the latest suffix", err)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat.rc.3", now); !errors.Is(err, model.ErrInvalidReleaseName) {
+		t.Fatalf("got %v, want ErrInvalidReleaseName for a name colliding with the rc suffix", err)
 	}
 }
 
-func TestGetReleaseConfigReturnsNilOnAFreshDatabase(t *testing.T) {
+func TestCreateReleaseAlsoCutsItsOwnFirstCandidate(t *testing.T) {
 	store, _, ctx := openStore(t)
-	got, err := store.GetReleaseConfig(ctx, widgets)
-	if err != nil || got != nil {
-		t.Fatalf("want (nil, nil) before anything has configured %s, got (%+v, %v)", widgets, got, err)
-	}
-}
-
-func TestReleaseConfigRoundTrips(t *testing.T) {
-	store, _, ctx := openStore(t)
-	want := testReleaseConfig(widgets)
-	if err := store.PutReleaseConfig(ctx, want); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-	got, err := store.GetReleaseConfig(ctx, widgets)
-	if err != nil || got == nil {
-		t.Fatalf("get: (%+v, %v)", got, err)
-	}
-	if !reflect.DeepEqual(*got, want) {
-		t.Fatalf("got %+v, want %+v", *got, want)
-	}
-}
-
-// PutReleaseConfig replaces a repo's single row wholesale rather than
-// accumulating a second one -- the same discipline
-// TestPutConfigReplacesRatherThanAccumulating pins for the deployment-wide
-// grain_config row.
-func TestPutReleaseConfigReplacesRatherThanAccumulating(t *testing.T) {
-	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("first put: %v", err)
-	}
-	updated := testReleaseConfig(widgets)
-	updated.MajorVersion = 4
-	updated.RCBranch = "release-candidate"
-	if err := store.PutReleaseConfig(ctx, updated); err != nil {
-		t.Fatalf("second put: %v", err)
-	}
-	got, err := store.GetReleaseConfig(ctx, widgets)
-	if err != nil || got == nil {
-		t.Fatalf("get: (%+v, %v)", got, err)
-	}
-	if !reflect.DeepEqual(*got, updated) {
-		t.Fatalf("got %+v, want %+v", *got, updated)
-	}
-	configs, err := store.ListReleaseConfigs(ctx)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("create: %v", err)
 	}
-	if len(configs) != 1 {
-		t.Fatalf("want exactly one configured repo, got %d: %+v", len(configs), configs)
+	if r.Repo != widgets || r.Name != "myfeat" || r.Status != model.ReleaseProvisioning {
+		t.Fatalf("got %+v", r)
 	}
-}
+	if r.LatestBranch() != "myfeat.latest" || r.ProdBranch() != "myfeat" {
+		t.Fatalf("got latest %q prod %q, want myfeat.latest / myfeat", r.LatestBranch(), r.ProdBranch())
+	}
 
-func TestListReleaseConfigsOrdersByRepo(t *testing.T) {
-	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(gadgets)); err != nil {
-		t.Fatalf("put gadgets: %v", err)
-	}
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put widgets: %v", err)
-	}
-	got, err := store.ListReleaseConfigs(ctx)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(got) != 2 || got[0].Repo != gadgets || got[1].Repo != widgets {
-		t.Fatalf("got %+v, want [gadgets, widgets] in that order", got)
-	}
-}
-
-func TestCutCandidateRequiresReleaseConfig(t *testing.T) {
-	store, _, ctx := openStore(t)
-	_, err := store.CutCandidate(ctx, widgets, now)
-	if !errors.Is(err, model.ErrNoReleaseConfig) {
-		t.Fatalf("got %v, want ErrNoReleaseConfig", err)
-	}
-}
-
-func TestCutCandidateAllocatesTheFirstCandidateAsNumberOne(t *testing.T) {
-	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
-	}
-	c, err := store.CutCandidate(ctx, widgets, now)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
+	first, err := store.CurrentCandidateForRelease(ctx, r.ID)
+	if err != nil || first == nil {
+		t.Fatalf("first candidate: (%+v, %v)", first, err)
 	}
 	want := model.Candidate{
-		ID: c.ID, Repo: widgets, MajorVersion: 3, Number: 1, Version: 1,
-		Branch: "release/3.1-rc1", Status: model.CandidateCutting, CreatedAt: now,
+		ID: first.ID, Repo: widgets, ReleaseID: r.ID, Number: 1,
+		Branch: "myfeat.rc.1", Status: model.CandidateCutting, CreatedAt: now,
 	}
-	if !reflect.DeepEqual(c, want) {
-		t.Fatalf("got %+v, want %+v", c, want)
+	if !reflect.DeepEqual(*first, want) {
+		t.Fatalf("got %+v, want %+v", *first, want)
+	}
+}
+
+func TestCreateReleaseRefusesAnUnmergedNameCollision(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat", now); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat", now); !errors.Is(err, model.ErrReleaseNameInUse) {
+		t.Fatalf("got %v, want ErrReleaseNameInUse", err)
+	}
+	// A different repo, or a different name on the same repo, is fine.
+	if _, err := store.CreateRelease(ctx, gadgets, "myfeat", now); err != nil {
+		t.Fatalf("same name, different repo: %v", err)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "otherfeat", now); err != nil {
+		t.Fatalf("different name, same repo: %v", err)
+	}
+}
+
+func TestCreateReleaseAllowsReusingANameOnceItHasMerged(t *testing.T) {
+	store, _, ctx := openStore(t)
+	first, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if err := store.MarkReleaseProvisioned(ctx, first.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	if _, err := store.RequestReleaseMerge(ctx, widgets, "myfeat"); err != nil {
+		t.Fatalf("request merge: %v", err)
+	}
+	if err := store.MarkReleaseMerged(ctx, first.ID, "https://example/pr/1", now.Add(time.Hour)); err != nil {
+		t.Fatalf("mark merged: %v", err)
 	}
 
-	current, err := store.CurrentCandidate(ctx, widgets)
+	second, err := store.CreateRelease(ctx, widgets, "myfeat", now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatal("want a fresh release row, not the merged one reused")
+	}
+
+	current, err := store.GetRelease(ctx, widgets, "myfeat")
 	if err != nil || current == nil {
 		t.Fatalf("current: (%+v, %v)", current, err)
 	}
-	if !reflect.DeepEqual(*current, want) {
-		t.Fatalf("current: got %+v, want %+v", *current, want)
+	if current.ID != second.ID {
+		t.Fatalf("got %+v, want the second (unmerged) release as current", *current)
+	}
+
+	// The second release's own first candidate starts back at number 1,
+	// not continuing the first release's own sequence.
+	secondFirst, err := store.CurrentCandidateForRelease(ctx, second.ID)
+	if err != nil || secondFirst == nil {
+		t.Fatalf("second release's first candidate: (%+v, %v)", secondFirst, err)
+	}
+	if secondFirst.Number != 1 || secondFirst.Branch != "myfeat.rc.1" {
+		t.Fatalf("got %+v, want number 1, branch myfeat.rc.1", *secondFirst)
 	}
 }
 
-// CutCandidate refuses a fresh cut while the repo's current candidate has
-// not been promoted yet -- the issue's own "the current rc" is singular.
+func TestListReleasesOrdersNewestFirst(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat", now); err != nil {
+		t.Fatalf("create myfeat: %v", err)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "2.1", now.Add(time.Hour)); err != nil {
+		t.Fatalf("create 2.1: %v", err)
+	}
+	got, err := store.ListReleases(ctx, widgets)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "2.1" || got[1].Name != "myfeat" {
+		t.Fatalf("got %+v, want [2.1, myfeat] in that order", got)
+	}
+}
+
+func TestPendingReleasesSpansEveryRepo(t *testing.T) {
+	store, _, ctx := openStore(t)
+	w, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create widgets release: %v", err)
+	}
+	g, err := store.CreateRelease(ctx, gadgets, "2.1", now)
+	if err != nil {
+		t.Fatalf("create gadgets release: %v", err)
+	}
+	if err := store.MarkReleaseProvisioned(ctx, g.ID); err != nil {
+		t.Fatalf("mark gadgets provisioned: %v", err)
+	}
+	if _, err := store.RequestReleaseMerge(ctx, gadgets, "2.1"); err != nil {
+		t.Fatalf("request gadgets merge: %v", err)
+	}
+
+	pending, err := store.PendingReleases(ctx)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("got %d pending, want 2: %+v", len(pending), pending)
+	}
+	if pending[0].ID != w.ID || pending[0].Status != model.ReleaseProvisioning {
+		t.Fatalf("got %+v, want widgets still provisioning first", pending[0])
+	}
+	if pending[1].ID != g.ID || pending[1].Status != model.ReleaseMergeRequested {
+		t.Fatalf("got %+v, want gadgets merge-requested second", pending[1])
+	}
+}
+
+func TestRequestReleaseMergeRequiresAnActiveRelease(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if _, err := store.RequestReleaseMerge(ctx, widgets, "myfeat"); !errors.Is(err, model.ErrNoRelease) {
+		t.Fatalf("got %v, want ErrNoRelease", err)
+	}
+
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := store.RequestReleaseMerge(ctx, widgets, "myfeat"); !errors.Is(err, model.ErrReleaseNotActive) {
+		t.Fatalf("got %v, want ErrReleaseNotActive while still provisioning", err)
+	}
+
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	if _, err := store.RequestReleaseMerge(ctx, widgets, "myfeat"); err != nil {
+		t.Fatalf("request merge: %v", err)
+	}
+	if _, err := store.RequestReleaseMerge(ctx, widgets, "myfeat"); !errors.Is(err, model.ErrReleaseAlreadyMergeRequested) {
+		t.Fatalf("got %v, want ErrReleaseAlreadyMergeRequested", err)
+	}
+}
+
+func TestCutCandidateRequiresAnActiveRelease(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if _, err := store.CutCandidate(ctx, widgets, "myfeat", now); !errors.Is(err, model.ErrNoRelease) {
+		t.Fatalf("got %v, want ErrNoRelease", err)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat", now); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Still provisioning: the first candidate already exists, so a second
+	// cut request is refused for the same reason a second cut against any
+	// already-active, unpromoted candidate is.
+	if _, err := store.CutCandidate(ctx, widgets, "myfeat", now); !errors.Is(err, model.ErrReleaseNotActive) {
+		t.Fatalf("got %v, want ErrReleaseNotActive while still provisioning", err)
+	}
+}
+
+// CutCandidate refuses a fresh cut while the release's current candidate
+// has not been promoted yet -- the issue's own "current rc" is singular.
 func TestCutCandidateRefusesASecondCandidateWhileOneIsUnpromoted(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	if _, err := store.CutCandidate(ctx, widgets, now); err != nil {
-		t.Fatalf("first cut: %v", err)
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
 	}
-	if _, err := store.CutCandidate(ctx, widgets, now); !errors.Is(err, model.ErrCandidateActive) {
+	// The first candidate (cut by CreateRelease) is still unpromoted.
+	if _, err := store.CutCandidate(ctx, widgets, "myfeat", now); !errors.Is(err, model.ErrCandidateActive) {
 		t.Fatalf("got %v, want ErrCandidateActive", err)
 	}
 }
@@ -150,42 +230,43 @@ func TestCutCandidateRefusesASecondCandidateWhileOneIsUnpromoted(t *testing.T) {
 // number rather than reusing or resetting it.
 func TestCutCandidateAfterPromotionAllocatesTheNextNumber(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
-	}
-	first, err := store.CutCandidate(ctx, widgets, now)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
 	if err != nil {
-		t.Fatalf("first cut: %v", err)
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	first, err := store.CurrentCandidateForRelease(ctx, r.ID)
+	if err != nil || first == nil {
+		t.Fatalf("first candidate: (%+v, %v)", first, err)
 	}
 	if err := store.MarkCandidateCut(ctx, first.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
-	if _, err := store.PromoteCandidate(ctx, widgets); err != nil {
+	if _, err := store.PromoteCandidate(ctx, widgets, "myfeat"); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	if err := store.MarkCandidatePromoted(ctx, first.ID, now.Add(time.Hour)); err != nil {
 		t.Fatalf("mark promoted: %v", err)
 	}
 
-	second, err := store.CutCandidate(ctx, widgets, now.Add(2*time.Hour))
+	second, err := store.CutCandidate(ctx, widgets, "myfeat", now.Add(2*time.Hour))
 	if err != nil {
 		t.Fatalf("second cut: %v", err)
 	}
 	if second.Number != 2 {
 		t.Fatalf("got number %d, want 2", second.Number)
 	}
-	if second.Branch != "release/3.2-rc1" {
-		t.Fatalf("got branch %q, want release/3.2-rc1", second.Branch)
+	if second.Branch != "myfeat.rc.2" {
+		t.Fatalf("got branch %q, want myfeat.rc.2", second.Branch)
 	}
 }
 
 func TestPromoteCandidateRequiresACandidate(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
-	}
-	if _, err := store.PromoteCandidate(ctx, widgets); !errors.Is(err, model.ErrNoCandidate) {
-		t.Fatalf("got %v, want ErrNoCandidate", err)
+	if _, err := store.PromoteCandidate(ctx, widgets, "myfeat"); !errors.Is(err, model.ErrNoRelease) {
+		t.Fatalf("got %v, want ErrNoRelease", err)
 	}
 }
 
@@ -194,66 +275,78 @@ func TestPromoteCandidateRequiresACandidate(t *testing.T) {
 // step.
 func TestPromoteCandidateRequiresItToHaveFinishedCutting(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	if _, err := store.CutCandidate(ctx, widgets, now); err != nil {
-		t.Fatalf("cut: %v", err)
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
 	}
-	if _, err := store.PromoteCandidate(ctx, widgets); !errors.Is(err, model.ErrCandidateNotReady) {
+	if _, err := store.PromoteCandidate(ctx, widgets, "myfeat"); !errors.Is(err, model.ErrCandidateNotReady) {
 		t.Fatalf("got %v, want ErrCandidateNotReady", err)
 	}
 }
 
-// The issue's own "it cannot be promoted twice."
+// "It cannot be promoted twice."
 func TestPromoteCandidateRefusesASecondPromotion(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
-	}
-	c, err := store.CutCandidate(ctx, widgets, now)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
 	if err != nil {
-		t.Fatalf("cut: %v", err)
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	c, err := store.CurrentCandidateForRelease(ctx, r.ID)
+	if err != nil || c == nil {
+		t.Fatalf("candidate: (%+v, %v)", c, err)
 	}
 	if err := store.MarkCandidateCut(ctx, c.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
-	promoted, err := store.PromoteCandidate(ctx, widgets)
+	promoted, err := store.PromoteCandidate(ctx, widgets, "myfeat")
 	if err != nil {
 		t.Fatalf("first promote: %v", err)
 	}
-	if promoted.ReleaseBranch != "release/3.1" {
-		t.Fatalf("got release branch %q, want release/3.1", promoted.ReleaseBranch)
+	if promoted.Status != model.CandidatePromoting {
+		t.Fatalf("got status %q, want promoting", promoted.Status)
 	}
 	if err := store.MarkCandidatePromoted(ctx, c.ID, now.Add(time.Hour)); err != nil {
 		t.Fatalf("mark promoted: %v", err)
 	}
 
-	if _, err := store.PromoteCandidate(ctx, widgets); !errors.Is(err, model.ErrAlreadyPromoted) {
+	if _, err := store.PromoteCandidate(ctx, widgets, "myfeat"); !errors.Is(err, model.ErrAlreadyPromoted) {
 		t.Fatalf("got %v, want ErrAlreadyPromoted", err)
 	}
 }
 
 func TestPendingCandidatesSpansEveryRepo(t *testing.T) {
 	store, _, ctx := openStore(t)
-	for _, repo := range []model.RepoRef{widgets, gadgets} {
-		if err := store.PutReleaseConfig(ctx, testReleaseConfig(repo)); err != nil {
-			t.Fatalf("put config for %s: %v", repo, err)
-		}
-	}
-	w, err := store.CutCandidate(ctx, widgets, now)
+	w, err := store.CreateRelease(ctx, widgets, "myfeat", now)
 	if err != nil {
-		t.Fatalf("cut widgets: %v", err)
+		t.Fatalf("create widgets release: %v", err)
 	}
-	g, err := store.CutCandidate(ctx, gadgets, now)
+	g, err := store.CreateRelease(ctx, gadgets, "2.1", now)
 	if err != nil {
-		t.Fatalf("cut gadgets: %v", err)
+		t.Fatalf("create gadgets release: %v", err)
 	}
-	if err := store.MarkCandidateCut(ctx, g.ID); err != nil {
-		t.Fatalf("mark gadgets cut: %v", err)
+	if err := store.MarkReleaseProvisioned(ctx, g.ID); err != nil {
+		t.Fatalf("mark gadgets provisioned: %v", err)
 	}
-	if _, err := store.PromoteCandidate(ctx, gadgets); err != nil {
+	gc, err := store.CurrentCandidateForRelease(ctx, g.ID)
+	if err != nil || gc == nil {
+		t.Fatalf("gadgets candidate: (%+v, %v)", gc, err)
+	}
+	if err := store.MarkCandidateCut(ctx, gc.ID); err != nil {
+		t.Fatalf("mark gadgets candidate cut: %v", err)
+	}
+	if _, err := store.PromoteCandidate(ctx, gadgets, "2.1"); err != nil {
 		t.Fatalf("promote gadgets: %v", err)
+	}
+
+	wc, err := store.CurrentCandidateForRelease(ctx, w.ID)
+	if err != nil || wc == nil {
+		t.Fatalf("widgets candidate: (%+v, %v)", wc, err)
 	}
 
 	pending, err := store.PendingCandidates(ctx)
@@ -263,42 +356,43 @@ func TestPendingCandidatesSpansEveryRepo(t *testing.T) {
 	if len(pending) != 2 {
 		t.Fatalf("got %d pending, want 2: %+v", len(pending), pending)
 	}
-	if pending[0].ID != w.ID || pending[0].Status != model.CandidateCutting {
+	if pending[0].ID != wc.ID || pending[0].Status != model.CandidateCutting {
 		t.Fatalf("got %+v, want widgets still cutting first", pending[0])
 	}
-	if pending[1].ID != g.ID || pending[1].Status != model.CandidatePromoting {
+	if pending[1].ID != gc.ID || pending[1].Status != model.CandidatePromoting {
 		t.Fatalf("got %+v, want gadgets promoting second", pending[1])
 	}
 }
 
 func TestMarkCandidateErrorRecordsTheMessageWithoutChangingStatus(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
-	}
-	c, err := store.CutCandidate(ctx, widgets, now)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
 	if err != nil {
-		t.Fatalf("cut: %v", err)
+		t.Fatalf("create: %v", err)
 	}
-	if err := store.MarkCandidateError(ctx, c.ID, "prod branch not found"); err != nil {
+	c, err := store.CurrentCandidateForRelease(ctx, r.ID)
+	if err != nil || c == nil {
+		t.Fatalf("candidate: (%+v, %v)", c, err)
+	}
+	if err := store.MarkCandidateError(ctx, c.ID, "latest branch not found"); err != nil {
 		t.Fatalf("mark error: %v", err)
 	}
-	got, err := store.CurrentCandidate(ctx, widgets)
+	got, err := store.CurrentCandidateForRelease(ctx, r.ID)
 	if err != nil || got == nil {
 		t.Fatalf("current: (%+v, %v)", got, err)
 	}
 	if got.Status != model.CandidateCutting {
 		t.Fatalf("got status %q, want still cutting", got.Status)
 	}
-	if got.LastError != "prod branch not found" {
-		t.Fatalf("got error %q, want %q", got.LastError, "prod branch not found")
+	if got.LastError != "latest branch not found" {
+		t.Fatalf("got error %q, want %q", got.LastError, "latest branch not found")
 	}
 
 	// A later success clears it.
 	if err := store.MarkCandidateCut(ctx, c.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
-	got, err = store.CurrentCandidate(ctx, widgets)
+	got, err = store.CurrentCandidateForRelease(ctx, r.ID)
 	if err != nil || got == nil {
 		t.Fatalf("current: (%+v, %v)", got, err)
 	}
@@ -307,34 +401,78 @@ func TestMarkCandidateErrorRecordsTheMessageWithoutChangingStatus(t *testing.T) 
 	}
 }
 
+func TestMarkReleaseErrorRecordsTheMessageWithoutChangingStatus(t *testing.T) {
+	store, _, ctx := openStore(t)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.MarkReleaseError(ctx, r.ID, "default branch not found"); err != nil {
+		t.Fatalf("mark error: %v", err)
+	}
+	got, err := store.GetRelease(ctx, widgets, "myfeat")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Status != model.ReleaseProvisioning {
+		t.Fatalf("got status %q, want still provisioning", got.Status)
+	}
+	if got.LastError != "default branch not found" {
+		t.Fatalf("got error %q, want %q", got.LastError, "default branch not found")
+	}
+
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	got, err = store.GetRelease(ctx, widgets, "myfeat")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.LastError != "" {
+		t.Fatalf("got error %q, want cleared", got.LastError)
+	}
+}
+
 func TestListCandidatesReturnsNewestFirst(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutReleaseConfig(ctx, testReleaseConfig(widgets)); err != nil {
-		t.Fatalf("put config: %v", err)
-	}
-	first, err := store.CutCandidate(ctx, widgets, now)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
 	if err != nil {
-		t.Fatalf("first cut: %v", err)
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	first, err := store.CurrentCandidateForRelease(ctx, r.ID)
+	if err != nil || first == nil {
+		t.Fatalf("first candidate: (%+v, %v)", first, err)
 	}
 	if err := store.MarkCandidateCut(ctx, first.ID); err != nil {
 		t.Fatalf("mark cut: %v", err)
 	}
-	if _, err := store.PromoteCandidate(ctx, widgets); err != nil {
+	if _, err := store.PromoteCandidate(ctx, widgets, "myfeat"); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	if err := store.MarkCandidatePromoted(ctx, first.ID, now.Add(time.Hour)); err != nil {
 		t.Fatalf("mark promoted: %v", err)
 	}
-	second, err := store.CutCandidate(ctx, widgets, now.Add(2*time.Hour))
+	second, err := store.CutCandidate(ctx, widgets, "myfeat", now.Add(2*time.Hour))
 	if err != nil {
 		t.Fatalf("second cut: %v", err)
 	}
 
-	list, err := store.ListCandidates(ctx, widgets)
+	list, err := store.ListCandidates(ctx, widgets, "myfeat")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(list) != 2 || list[0].ID != second.ID || list[1].ID != first.ID {
 		t.Fatalf("got %+v, want [second, first]", list)
+	}
+}
+
+func TestListCandidatesReturnsNilForAnUnknownRelease(t *testing.T) {
+	store, _, ctx := openStore(t)
+	list, err := store.ListCandidates(ctx, widgets, "myfeat")
+	if err != nil || list != nil {
+		t.Fatalf("got (%+v, %v), want (nil, nil)", list, err)
 	}
 }

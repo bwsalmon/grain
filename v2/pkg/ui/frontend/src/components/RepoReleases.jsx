@@ -7,49 +7,68 @@ import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
 
 // POLL_INTERVAL_MS mirrors App.jsx's own poll: a candidate can move
-// through "cutting"/"promoting", and a qualification run's tasks
+// through "cutting"/"promoting", a release through
+// "provisioning"/"merge_requested", and a qualification run's tasks
 // through queued/running/completed, entirely server-side (graind
 // dispatch, a run finishing), so without a poll this pane only ever
 // moves when a human takes some action that happens to re-render it.
 const POLL_INTERVAL_MS = 3000;
 
-// RepoReleases is a single repo's release pane (bwsalmon/agents#459):
-// configure its prod/rc branches, release branch prefix and major
-// version, then cut and promote release candidates against them. It
-// replaces the old ReleasesOverlay modal (bwsalmon/agents#398), which
-// asked the caller to type an owner/name even though releases are a
-// property of a repo -- this only ever renders from the repo pane
-// (RepoList's own "Releases" button), already knowing which repo it means.
+const RELEASE_STATUS_LABELS = {
+  provisioning: "Provisioning",
+  active: "Active",
+  merge_requested: "Merge requested",
+  merged: "Merged",
+};
+
+// RepoReleases is a single repo's release pane (bwsalmon/agents#571): pick
+// or create a named release, then cut and promote its own rc candidates
+// against the latest/rc/prod branches that name derives -- "myfeat" gives
+// "myfeat.latest", "myfeat.rc.N" and "myfeat"; "2.1" gives "2.1.latest",
+// "2.1.rc.N" and "2.1". This replaces bwsalmon/agents#398's own single
+// prod/rc/prefix/major-version form, since a repo may now have any number
+// of releases going at once, each independent.
 //
-// bwsalmon/agents#518 adds the qualification plan editor and, for the
-// current candidate, its qualification run's own summary -- see
-// QualificationPlanEditor and QualificationSummary below. A qualification
-// item always names a task_template (bwsalmon/agents#516) rather than
-// carrying its own content, which is why this component needs the same
-// `templates` list App.jsx already fetches for SchedulesList's own
-// picker.
+// bwsalmon/agents#518's qualification plan editor and, for the current
+// candidate, its qualification run's own summary are unchanged from
+// before -- see QualificationPlanEditor and QualificationSummary below --
+// since a plan is still one repo-wide policy, not a per-release one.
 export default function RepoReleases({ repo, templates = [], onBack, showError }) {
   const [owner, name] = repo.split("/");
-  const [releaseConfig, setReleaseConfig] = useState(null);
+  const [releases, setReleases] = useState(null);
+  const [selected, setSelected] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [qualificationPlan, setQualificationPlan] = useState(null);
   const [qualificationRun, setQualificationRun] = useState(null);
   const polling = useRef(false);
+  const selectedRef = useRef(null);
+  selectedRef.current = selected;
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, list, plan] = await Promise.all([
-        api(`/api/repos/${owner}/${name}/release-config`),
-        api(`/api/repos/${owner}/${name}/candidates`),
+      const [list, plan] = await Promise.all([
+        api(`/api/repos/${owner}/${name}/releases`),
         api(`/api/repos/${owner}/${name}/qualification-plan`),
       ]);
-      setReleaseConfig(cfg);
-      setCandidates(list);
+      setReleases(list);
       setQualificationPlan(plan);
-      const current = list.length > 0 ? list[0] : null;
-      setQualificationRun(
-        current ? await api(`/api/repos/${owner}/${name}/candidates/${current.id}/qualification`) : null
-      );
+
+      const current = selectedRef.current && list.some((r) => r.name === selectedRef.current)
+        ? selectedRef.current
+        : (list.length > 0 ? list[0].name : null);
+      setSelected(current);
+
+      if (current) {
+        const cs = await api(`/api/repos/${owner}/${name}/releases/${current}/candidates`);
+        setCandidates(cs);
+        const currentCandidate = cs.length > 0 ? cs[0] : null;
+        setQualificationRun(
+          currentCandidate ? await api(`/api/repos/${owner}/${name}/candidates/${currentCandidate.id}/qualification`) : null
+        );
+      } else {
+        setCandidates([]);
+        setQualificationRun(null);
+      }
     } catch (err) {
       showError(err);
     }
@@ -57,11 +76,11 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Poll for the same reason App.jsx does: cutting/promoting a
-  // candidate and running its qualification tasks both happen
-  // server-side, with no other event to tell this pane it should
-  // re-fetch. visibilitychange catches up immediately on tab-back
-  // rather than waiting out a stale interval.
+  // Poll for the same reason App.jsx does: a release's or a candidate's
+  // status, and a qualification run's tasks, all move server-side, with
+  // no other event to tell this pane it should re-fetch. visibilitychange
+  // catches up immediately on tab-back rather than waiting out a stale
+  // interval.
   useEffect(() => {
     async function poll() {
       if (polling.current || document.visibilityState === "hidden") return;
@@ -83,17 +102,16 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
     };
   }, [refresh]);
 
-  const submitConfig = async (evt) => {
+  const createRelease = async (evt) => {
     evt.preventDefault();
     const form = evt.target;
-    const payload = {
-      prodBranch: form.elements.prodBranch.value.trim(),
-      rcBranch: form.elements.rcBranch.value.trim(),
-      releaseBranchPrefix: form.elements.releaseBranchPrefix.value.trim(),
-      majorVersion: parseInt(form.elements.majorVersion.value, 10) || 0,
-    };
+    const releaseName = form.elements.releaseName.value.trim();
     try {
-      await api(`/api/repos/${owner}/${name}/release-config`, { method: "PUT", body: JSON.stringify(payload) });
+      const created = await api(`/api/repos/${owner}/${name}/releases`, {
+        method: "POST", body: JSON.stringify({ name: releaseName }),
+      });
+      form.reset();
+      setSelected(created.name);
       await refresh();
     } catch (err) {
       showError(err);
@@ -102,7 +120,7 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
 
   const cut = async () => {
     try {
-      await api(`/api/repos/${owner}/${name}/candidates`, { method: "POST" });
+      await api(`/api/repos/${owner}/${name}/releases/${selected}/candidates`, { method: "POST" });
       await refresh();
     } catch (err) {
       showError(err);
@@ -111,7 +129,16 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
 
   const promote = async () => {
     try {
-      await api(`/api/repos/${owner}/${name}/candidates/promote`, { method: "POST" });
+      await api(`/api/repos/${owner}/${name}/releases/${selected}/candidates/promote`, { method: "POST" });
+      await refresh();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const requestMerge = async () => {
+    try {
+      await api(`/api/repos/${owner}/${name}/releases/${selected}/merge`, { method: "POST" });
       await refresh();
     } catch (err) {
       showError(err);
@@ -136,11 +163,13 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
     }
   };
 
-  if (releaseConfig === null || qualificationPlan === null) return null;
+  if (releases === null || qualificationPlan === null) return null;
 
-  const current = candidates.length > 0 ? candidates[0] : null;
-  const canCut = releaseConfig.configured && (!current || current.status === "promoted");
-  const canPromote = current && current.status === "active";
+  const current = releases.find((r) => r.name === selected) || null;
+  const currentCandidate = candidates.length > 0 ? candidates[0] : null;
+  const canCut = current && current.status === "active" && (!currentCandidate || currentCandidate.status === "promoted");
+  const canPromote = current && current.status === "active" && currentCandidate && currentCandidate.status === "active";
+  const canRequestMerge = current && current.status === "active";
   const ownTemplates = templates.filter((tmpl) => tmpl.repo === repo);
 
   return (
@@ -149,57 +178,94 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
         <Button onClick={onBack} sx={{ mb: 1, ml: -0.9 }}>&larr; Repos</Button>
         <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{repo} releases</Typography>
 
-        {!releaseConfig.configured && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            {repo} has no release configuration yet -- set its prod branch, rc branch and
-            release branch prefix below before cutting a release candidate.
-          </Alert>
-        )}
-        <form onSubmit={submitConfig}>
-          <TextField name="prodBranch" label="Prod branch" defaultValue={releaseConfig.prodBranch || ""} autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
-          <TextField name="rcBranch" label="RC branch" helperText="the moving pointer a fresh cut repoints" defaultValue={releaseConfig.rcBranch || ""} autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
-          <TextField name="releaseBranchPrefix" label="Release branch prefix" defaultValue={releaseConfig.releaseBranchPrefix || ""} autoComplete="off" placeholder="release/" fullWidth margin="normal" />
-          <TextField name="majorVersion" label="Major version" helperText="hand-edited; grain never changes this" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(releaseConfig.majorVersion || 0)} fullWidth margin="normal" />
-          <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-            <Button type="submit" variant="contained">Save</Button>
+        <form onSubmit={createRelease}>
+          <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ mt: 1 }}>
+            <TextField
+              name="releaseName" label="New release name" placeholder="myfeat, or 2.1"
+              helperText="Gives myfeat.latest, myfeat.rc.N and myfeat" autoComplete="off" required
+              InputLabelProps={{ required: false }} size="small"
+            />
+            <Button type="submit" variant="contained" size="small">Create release</Button>
           </Stack>
         </form>
 
-        <Typography variant="subtitle1" sx={{ mt: 2 }}>Current candidate</Typography>
-        {current ? (
-          <div className="candidate-current">
-            <p>
-              <strong>{current.label}</strong> -- {current.status}
-              {current.error && <span className="candidate-error"> ({current.error})</span>}
-            </p>
-            <p className="hint">branch: {current.branch}{current.releaseBranch ? `, release branch: ${current.releaseBranch}` : ""}</p>
-          </div>
-        ) : (
-          <p className="empty">No release candidate cut yet.</p>
+        {releases.length === 0 && (
+          <Alert severity="info" sx={{ mt: 2 }}>
+            {repo} has no releases yet -- create one above to get a latest, rc and prod branch.
+          </Alert>
         )}
-        <Stack direction="row" spacing={1} sx={{ mt: 1, mb: 2 }}>
-          <Button variant="contained" disabled={!canCut} onClick={cut}>Cut new RC</Button>
-          <Button variant="outlined" disabled={!canPromote} onClick={promote}>Promote current RC</Button>
-        </Stack>
+
+        {releases.length > 0 && (
+          <FormControl size="small" sx={{ mt: 2, minWidth: 240 }}>
+            <InputLabel id="release-picker-label">Release</InputLabel>
+            <Select
+              labelId="release-picker-label" label="Release" value={selected || ""}
+              onChange={(e) => setSelected(e.target.value)}
+            >
+              {releases.map((r) => (
+                <MenuItem key={r.name} value={r.name}>
+                  {r.name} -- {RELEASE_STATUS_LABELS[r.status] || r.status}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        )}
 
         {current && (
-          <QualificationSummary
-            run={qualificationRun}
-            onApprove={() => approveQualification(current.id)}
-          />
-        )}
+          <Box sx={{ mt: 2 }}>
+            <p className="hint">
+              latest: {current.latestBranch}, prod: {current.prodBranch}
+              {current.error && <span className="candidate-error"> ({current.error})</span>}
+            </p>
 
-        <Typography variant="subtitle1" sx={{ mt: 2 }}>History</Typography>
-        {candidates.length === 0 && <p className="empty">No candidates yet.</p>}
-        {candidates.length > 0 && (
-          <ul className="candidate-history">
-            {candidates.map((c) => (
-              <li key={c.id}>
-                <strong>{c.label}</strong> -- {c.status}
-                {c.releaseBranch ? ` -> ${c.releaseBranch}` : ""}
-              </li>
-            ))}
-          </ul>
+            <Typography variant="subtitle1" sx={{ mt: 1 }}>Current candidate</Typography>
+            {currentCandidate ? (
+              <div className="candidate-current">
+                <p>
+                  <strong>{currentCandidate.branch}</strong> -- {currentCandidate.status}
+                  {currentCandidate.error && <span className="candidate-error"> ({currentCandidate.error})</span>}
+                </p>
+              </div>
+            ) : (
+              <p className="empty">No release candidate cut yet.</p>
+            )}
+            <Stack direction="row" spacing={1} sx={{ mt: 1, mb: 2 }}>
+              <Button variant="contained" disabled={!canCut} onClick={cut}>Cut new RC</Button>
+              <Button variant="outlined" disabled={!canPromote} onClick={promote}>Promote current RC</Button>
+            </Stack>
+
+            {currentCandidate && (
+              <QualificationSummary
+                run={qualificationRun}
+                onApprove={() => approveQualification(currentCandidate.id)}
+              />
+            )}
+
+            <Typography variant="subtitle1" sx={{ mt: 2 }}>History</Typography>
+            {candidates.length === 0 && <p className="empty">No candidates yet.</p>}
+            {candidates.length > 0 && (
+              <ul className="candidate-history">
+                {candidates.map((c) => (
+                  <li key={c.id}>
+                    <strong>{c.branch}</strong> -- {c.status}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <Typography variant="subtitle1" sx={{ mt: 2 }}>Merge back to default</Typography>
+            {current.status === "merged" ? (
+              <p className="hint">
+                Merge requested{current.pullRequestUrl ? <> -- <a href={current.pullRequestUrl} target="_blank" rel="noreferrer">pull request</a></> : "."}
+              </p>
+            ) : (
+              <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
+                <Button variant="outlined" disabled={!canRequestMerge} onClick={requestMerge}>
+                  Merge {current.prodBranch} into the default branch
+                </Button>
+              </Stack>
+            )}
+          </Box>
         )}
 
         <Typography variant="subtitle1" sx={{ mt: 3 }}>Qualification plan</Typography>

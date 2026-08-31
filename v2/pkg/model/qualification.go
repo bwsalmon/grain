@@ -43,8 +43,7 @@ type QualificationItem struct {
 // bwsalmon/agents#518 asks for -- requiring a human's approval before any
 // of a run's tasks may dispatch, and promoting a candidate automatically
 // once its run succeeds. Configured is false, with Items empty, when
-// nothing has ever been saved for a repo -- ReleaseConfig's own
-// "Configured" convention.
+// nothing has ever been saved for a repo.
 type QualificationPlan struct {
 	Repo            RepoRef
 	Configured      bool
@@ -151,8 +150,7 @@ func qualificationTopoOrder(items []QualificationItem) ([]QualificationItem, err
 // TemplateName is a snapshot of the resolved template's own Name at the
 // moment this instance was created, so a run's own history reads the
 // same after a human later edits or deletes the template that produced
-// it, the same reasoning Candidate's own MajorVersion/Number snapshot
-// ReleaseConfig at cut time.
+// it.
 type QualificationTaskStatus struct {
 	TaskID       string
 	TemplateID   string

@@ -47,10 +47,8 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
     if (/^\/api\/tasks\/\w+\/(approve|submit|retry|close|reopen)$/.test(path)) return Promise.resolve({});
     if (path === "/api/secrets") return Promise.resolve({ enabled: false });
     if (path === "/api/settings") return Promise.resolve({ configured: false });
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/release-config$/.test(path)) {
-      return Promise.resolve({ configured: false, prodBranch: "", rcBranch: "", releaseBranchPrefix: "", majorVersion: 0 });
-    }
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/releases$/.test(path)) return Promise.resolve([]);
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/releases\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
     if (/^\/api\/repos\/[^/]+\/[^/]+\/qualification-plan$/.test(path)) {
       return Promise.resolve({ configured: false, repo: "", requireApproval: false, autoPromote: false, items: [] });
     }

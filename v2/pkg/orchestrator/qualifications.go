@@ -52,6 +52,13 @@ func syncQualification(ctx context.Context, store *model.Store, c model.Candidat
 	if err != nil {
 		return fmt.Errorf("reading qualification plan: %w", err)
 	}
+	release, err := store.GetReleaseByID(ctx, c.ReleaseID)
+	if err != nil {
+		return fmt.Errorf("reading release %d: %w", c.ReleaseID, err)
+	}
+	if release == nil {
+		return nil
+	}
 
 	if run == nil {
 		if plan == nil || len(plan.Items) == 0 {
@@ -70,20 +77,21 @@ func syncQualification(ctx context.Context, store *model.Store, c model.Candidat
 		return nil
 	}
 
-	// PromoteCandidate re-reads the repo's current candidate itself, so
-	// this always acts on c even though it is only ever named by repo --
-	// c is Active (QualifiableActiveCandidates' own WHERE clause) and a
-	// repo can only ever have one unpromoted candidate at a time
+	// PromoteCandidate re-reads the release's current candidate itself, so
+	// this always acts on c even though it is only ever named by release
+	// -- c is Active (QualifiableActiveCandidates' own WHERE clause) and a
+	// release can only ever have one unpromoted candidate at a time
 	// (Store.CutCandidate's own ErrCandidateActive), so c is necessarily
-	// that repo's current one.
-	if _, err := store.PromoteCandidate(ctx, c.Repo); err != nil {
-		// ErrCandidateActive/ErrCandidateNotReady/ErrAlreadyPromoted all
-		// mean a human (or an earlier cycle) already acted on this same
-		// candidate between the read above and this write -- benign, and
-		// left for the next cycle to see the outcome of rather than
-		// reported as a failure of this one.
+	// that release's current one.
+	if _, err := store.PromoteCandidate(ctx, c.Repo, release.Name); err != nil {
+		// ErrCandidateActive/ErrCandidateNotReady/ErrAlreadyPromoted/
+		// ErrReleaseNotActive all mean a human (or an earlier cycle)
+		// already acted on this same candidate or release between the read
+		// above and this write -- benign, and left for the next cycle to
+		// see the outcome of rather than reported as a failure of this one.
 		if errors.Is(err, model.ErrCandidateActive) || errors.Is(err, model.ErrCandidateNotReady) ||
-			errors.Is(err, model.ErrAlreadyPromoted) || errors.Is(err, model.ErrNoReleaseConfig) {
+			errors.Is(err, model.ErrAlreadyPromoted) || errors.Is(err, model.ErrReleaseNotActive) ||
+			errors.Is(err, model.ErrNoRelease) {
 			return nil
 		}
 		return fmt.Errorf("auto-promoting candidate %d: %w", c.ID, err)

@@ -96,15 +96,7 @@ func TestPutThenGetQualificationPlanRoundTripsWithTemplateNameFilledIn(t *testin
 
 func TestGetCandidateQualificationReturnsNilBeforeARunExists(t *testing.T) {
 	client, store, ctx := testClient(t)
-	if err := store.PutReleaseConfig(ctx, model.ReleaseConfig{
-		Repo: widgets, ProdBranch: "main", RCBranch: "rc", ReleaseBranchPrefix: "release/",
-	}); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store, widgets)
 	run, err := client.GetCandidateQualification(ctx, widgets, candidate.ID)
 	if err != nil || run != nil {
 		t.Fatalf("got (%+v, %v), want (nil, nil)", run, err)
@@ -120,15 +112,7 @@ func TestApproveQualificationRunApprovesEveryTaskAndOrdersFailuresFirst(t *testi
 	}); err != nil {
 		t.Fatalf("put plan: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, model.ReleaseConfig{
-		Repo: widgets, ProdBranch: "main", RCBranch: "rc", ReleaseBranchPrefix: "release/",
-	}); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store, widgets)
 	plan, err := store.GetQualificationPlan(ctx, widgets)
 	if err != nil || plan == nil {
 		t.Fatalf("get plan: (%+v, %v)", plan, err)
@@ -186,15 +170,7 @@ func TestGetCandidateQualificationIsScopedToItsOwnRepo(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put plan: %v", err)
 	}
-	if err := store.PutReleaseConfig(ctx, model.ReleaseConfig{
-		Repo: widgets, ProdBranch: "main", RCBranch: "rc", ReleaseBranchPrefix: "release/",
-	}); err != nil {
-		t.Fatalf("put release config: %v", err)
-	}
-	candidate, err := store.CutCandidate(ctx, widgets, baseTime)
-	if err != nil {
-		t.Fatalf("cut: %v", err)
-	}
+	candidate := cutTestCandidate(t, ctx, store, widgets)
 	plan, err := store.GetQualificationPlan(ctx, widgets)
 	if err != nil || plan == nil {
 		t.Fatalf("get plan: (%+v, %v)", plan, err)

@@ -8,110 +8,296 @@ import (
 	"time"
 )
 
-// GetReleaseConfig reads repo's release settings, or nil (with no error)
-// if nothing has configured them yet -- the same "nil means unconfigured"
-// convention GetConfig holds to for the deployment-wide row.
-func (s *Store) GetReleaseConfig(ctx context.Context, repo RepoRef) (*ReleaseConfig, error) {
-	return getReleaseConfig(ctx, s.db, repo)
+// releaseColumns' `repo` is the target repo's own name, kept apart from
+// `name` -- the release's own user-given name ("myfeat", "2.1") -- since,
+// unlike bwsalmon/agents#398's singleton ReleaseConfig, a release row is
+// no longer 1:1 with a repo: `owner`+`repo` identifies the repo, `name`
+// identifies which of that repo's releases this is.
+const releaseColumns = "`id`,`owner`,`repo`,`name`,`status`,`created_at`,`merged_at`,`pull_request_url`,`last_error`"
+
+func scanRelease(scan func(...any) error) (Release, error) {
+	var r Release
+	var status string
+	var mergedAt sql.NullTime
+	var prURL, lastError sql.NullString
+	if err := scan(&r.ID, &r.Repo.Owner, &r.Repo.Name, &r.Name, &status, &r.CreatedAt, &mergedAt, &prURL, &lastError); err != nil {
+		return Release{}, err
+	}
+	r.Status = ReleaseStatus(status)
+	r.MergedAt = timePtr(mergedAt)
+	r.PullRequestURL = prURL.String
+	r.LastError = lastError.String
+	return r, nil
 }
 
-const releaseConfigColumns = "`prod_branch`,`rc_branch`,`release_branch_prefix`,`major_version`"
+// GetRelease returns repo's current release by name -- the newest row
+// ever created under that name, which is the live one unless every
+// release by that name has already merged, in which case it is the most
+// recently merged one -- or nil if repo has never had a release by that
+// name at all. At most one row for a given (repo, name) can be anything
+// but ReleaseMerged at once (CreateRelease's own ErrReleaseNameInUse), so
+// "newest" and "the live one, or else the last merged one" agree.
+func (s *Store) GetRelease(ctx context.Context, repo RepoRef, name string) (*Release, error) {
+	return getRelease(ctx, s.db, repo, name)
+}
 
-func getReleaseConfig(ctx context.Context, q querier, repo RepoRef) (*ReleaseConfig, error) {
-	row := q.QueryRowContext(ctx,
-		"SELECT "+releaseConfigColumns+" FROM `release_config` WHERE `owner` = ? AND `name` = ?",
-		repo.Owner, repo.Name)
-	cfg := ReleaseConfig{Repo: repo}
-	if err := row.Scan(&cfg.ProdBranch, &cfg.RCBranch, &cfg.ReleaseBranchPrefix, &cfg.MajorVersion); err != nil {
+func getRelease(ctx context.Context, q querier, repo RepoRef, name string) (*Release, error) {
+	r, err := scanRelease(q.QueryRowContext(ctx,
+		"SELECT "+releaseColumns+" FROM `release` WHERE `owner` = ? AND `repo` = ? AND `name` = ? "+
+			"ORDER BY `id` DESC LIMIT 1",
+		repo.Owner, repo.Name, name).Scan)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("reading release config for %s: %w", repo, err)
+		return nil, fmt.Errorf("reading release %q for %s: %w", name, repo, err)
 	}
-	return &cfg, nil
+	return &r, nil
 }
 
-// ListReleaseConfigs returns every repo with release settings configured,
-// ordered by repo -- what a UI with no repo already in hand lists to let
-// a human pick one.
-func (s *Store) ListReleaseConfigs(ctx context.Context) ([]ReleaseConfig, error) {
-	var out []ReleaseConfig
+// GetReleaseByID returns a release by its own id, or nil if none exists
+// -- what the releases reconciler resolves a pending Candidate's own
+// ReleaseID against, since it only ever has that id in hand, not the name
+// a human last called it by.
+func (s *Store) GetReleaseByID(ctx context.Context, id int64) (*Release, error) {
+	r, err := scanRelease(s.db.QueryRowContext(ctx,
+		"SELECT "+releaseColumns+" FROM `release` WHERE `id` = ?", id).Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading release %d: %w", id, err)
+	}
+	return &r, nil
+}
+
+// ListReleases returns every release ever created for repo, of any name,
+// newest first -- what a repo's own release pane lists to let a human
+// pick which one to act on next.
+func (s *Store) ListReleases(ctx context.Context, repo RepoRef) ([]Release, error) {
+	var out []Release
 	err := each(ctx, s.db,
-		"SELECT `owner`,`name`,"+releaseConfigColumns+" FROM `release_config` ORDER BY `owner`,`name`", nil,
+		"SELECT "+releaseColumns+" FROM `release` WHERE `owner` = ? AND `repo` = ? ORDER BY `id` DESC",
+		[]any{repo.Owner, repo.Name},
 		func(rows *sql.Rows) error {
-			var cfg ReleaseConfig
-			if err := rows.Scan(&cfg.Repo.Owner, &cfg.Repo.Name,
-				&cfg.ProdBranch, &cfg.RCBranch, &cfg.ReleaseBranchPrefix, &cfg.MajorVersion); err != nil {
+			r, err := scanRelease(rows.Scan)
+			if err != nil {
 				return err
 			}
-			out = append(out, cfg)
+			out = append(out, r)
 			return nil
 		})
 	return out, err
 }
 
-// PutReleaseConfig replaces repo's release settings wholesale -- there is
-// one row per repo, so a caller changing one field reads the current
-// ReleaseConfig first the same way UpdateSettings does for the
-// deployment-wide one.
-func (s *Store) PutReleaseConfig(ctx context.Context, cfg ReleaseConfig) error {
-	return s.write(ctx, "put release config for "+cfg.Repo.String(), func(tx *sql.Tx) error {
+// CreateRelease records a fresh release branch set for repo, named name
+// -- the issue's own "create a new release branch." It also cuts that
+// release's own first candidate (Number 1, Status CandidateCutting) in
+// the same transaction, so a release is never left with LatestBranch
+// provisioned but nothing yet cut from it: the releases reconciler's own
+// ordering (releases before candidates, every cycle) then creates
+// LatestBranch and this first candidate's own branch in the same cycle.
+//
+// name must satisfy ValidReleaseName (ErrInvalidReleaseName), and must
+// not already name a release for repo that has not yet merged
+// (ErrReleaseNameInUse) -- Release's own doc comment on why a name is
+// exclusive until it merges.
+func (s *Store) CreateRelease(ctx context.Context, repo RepoRef, name string, now time.Time) (Release, error) {
+	if !ValidReleaseName(name) {
+		return Release{}, ErrInvalidReleaseName
+	}
+	var out Release
+	err := s.write(ctx, "create release "+name+" for "+repo.String(), func(tx *sql.Tx) error {
+		existing, err := getRelease(ctx, tx, repo, name)
+		if err != nil {
+			return err
+		}
+		if existing != nil && existing.Status != ReleaseMerged {
+			return ErrReleaseNameInUse
+		}
+		r := Release{Repo: repo, Name: name, Status: ReleaseProvisioning, CreatedAt: now}
+		id, err := insertRelease(ctx, tx, r)
+		if err != nil {
+			return err
+		}
+		r.ID = id
+		first := Candidate{
+			Repo: repo, ReleaseID: id, Number: 1,
+			Branch: RCBranch(name, 1), Status: CandidateCutting, CreatedAt: now,
+		}
+		if _, err := insertCandidate(ctx, tx, first); err != nil {
+			return err
+		}
+		out = r
+		return nil
+	})
+	return out, err
+}
+
+func insertRelease(ctx context.Context, tx *sql.Tx, r Release) (int64, error) {
+	res, err := tx.ExecContext(ctx,
+		"INSERT INTO `release` (`owner`,`repo`,`name`,`status`,`created_at`,`merged_at`,`pull_request_url`,`last_error`) "+
+			"VALUES (?,?,?,?,?,?,?,?)",
+		r.Repo.Owner, r.Repo.Name, r.Name, string(r.Status), r.CreatedAt.UTC(), timeOf(r.MergedAt),
+		nullable(r.PullRequestURL), nullable(r.LastError))
+	if err != nil {
+		return 0, fmt.Errorf("creating release %q for %s: %w", r.Name, r.Repo, err)
+	}
+	return res.LastInsertId()
+}
+
+func updateRelease(ctx context.Context, tx *sql.Tx, r Release) error {
+	_, err := tx.ExecContext(ctx,
+		"UPDATE `release` SET `status` = ?, `merged_at` = ?, `pull_request_url` = ?, `last_error` = ? WHERE `id` = ?",
+		string(r.Status), timeOf(r.MergedAt), nullable(r.PullRequestURL), nullable(r.LastError), r.ID)
+	if err != nil {
+		return fmt.Errorf("updating release %d: %w", r.ID, err)
+	}
+	return nil
+}
+
+// PendingReleases returns every release, across every repo, whose status
+// names a GitHub-side effect the releases reconciler still owes it --
+// ReleaseProvisioning or ReleaseMergeRequested -- oldest first.
+func (s *Store) PendingReleases(ctx context.Context) ([]Release, error) {
+	var out []Release
+	err := each(ctx, s.db,
+		"SELECT "+releaseColumns+" FROM `release` WHERE `status` IN (?,?) ORDER BY `id`",
+		[]any{string(ReleaseProvisioning), string(ReleaseMergeRequested)},
+		func(rows *sql.Rows) error {
+			r, err := scanRelease(rows.Scan)
+			if err != nil {
+				return err
+			}
+			out = append(out, r)
+			return nil
+		})
+	return out, err
+}
+
+// MarkReleaseProvisioned advances a ReleaseProvisioning row to
+// ReleaseActive, clearing LastError -- the releases reconciler's report
+// that LatestBranch is live on GitHub.
+func (s *Store) MarkReleaseProvisioned(ctx context.Context, id int64) error {
+	return s.write(ctx, "mark release provisioned", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `release_config` (`owner`,`name`,"+releaseConfigColumns+") VALUES (?,?,?,?,?,?)",
-			cfg.Repo.Owner, cfg.Repo.Name, cfg.ProdBranch, cfg.RCBranch, cfg.ReleaseBranchPrefix, cfg.MajorVersion)
+			"UPDATE `release` SET `status` = ?, `last_error` = NULL WHERE `id` = ?",
+			string(ReleaseActive), id)
 		return err
 	})
 }
 
-const candidateColumns = "`id`,`owner`,`name`,`major_version`,`number`,`version`," +
-	"`branch`,`release_branch`,`status`,`created_at`,`promoted_at`,`last_error`"
+// MarkReleaseMerged advances a ReleaseMergeRequested row to ReleaseMerged,
+// recording the merge-back pull request's own URL and clearing LastError
+// -- the releases reconciler's report that the pull request is open. Its
+// Name becomes free again for CreateRelease the moment this lands.
+func (s *Store) MarkReleaseMerged(ctx context.Context, id int64, pullRequestURL string, now time.Time) error {
+	return s.write(ctx, "mark release merged", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `release` SET `status` = ?, `merged_at` = ?, `pull_request_url` = ?, `last_error` = NULL WHERE `id` = ?",
+			string(ReleaseMerged), now.UTC(), pullRequestURL, id)
+		return err
+	})
+}
+
+// MarkReleaseError records why the releases reconciler's current step for
+// a release has not landed yet, leaving Status unchanged -- the next
+// cycle retries the same step.
+func (s *Store) MarkReleaseError(ctx context.Context, id int64, message string) error {
+	return s.write(ctx, "record release error", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE `release` SET `last_error` = ? WHERE `id` = ?", message, id)
+		return err
+	})
+}
+
+// RequestReleaseMerge requests that repo's release named name have its
+// ProdBranch merged back into the repo's own default branch -- the
+// issue's own "The prod branch can be merged back into the default
+// branch when ready." release must be ReleaseActive (ErrReleaseNotActive
+// for one still provisioning, ErrReleaseAlreadyMergeRequested for one
+// already requested or already merged); this only records the request,
+// the same declarative handoff CutCandidate and PromoteCandidate already
+// make to the releases reconciler, which is what actually opens the pull
+// request.
+func (s *Store) RequestReleaseMerge(ctx context.Context, repo RepoRef, name string) (Release, error) {
+	var out Release
+	err := s.write(ctx, "request merge for release "+name+" of "+repo.String(), func(tx *sql.Tx) error {
+		r, err := getRelease(ctx, tx, repo, name)
+		if err != nil {
+			return err
+		}
+		if r == nil {
+			return ErrNoRelease
+		}
+		switch r.Status {
+		case ReleaseActive:
+		case ReleaseProvisioning:
+			return ErrReleaseNotActive
+		default:
+			return ErrReleaseAlreadyMergeRequested
+		}
+		r.Status = ReleaseMergeRequested
+		if err := updateRelease(ctx, tx, *r); err != nil {
+			return err
+		}
+		out = *r
+		return nil
+	})
+	return out, err
+}
+
+const candidateColumns = "`id`,`release_id`,`owner`,`repo`,`number`,`branch`,`status`,`created_at`,`promoted_at`,`last_error`"
 
 func scanCandidate(scan func(...any) error) (Candidate, error) {
 	var c Candidate
 	var status string
-	var releaseBranch, lastError sql.NullString
+	var lastError sql.NullString
 	var promotedAt sql.NullTime
-	if err := scan(&c.ID, &c.Repo.Owner, &c.Repo.Name, &c.MajorVersion, &c.Number, &c.Version,
-		&c.Branch, &releaseBranch, &status, &c.CreatedAt, &promotedAt, &lastError); err != nil {
+	if err := scan(&c.ID, &c.ReleaseID, &c.Repo.Owner, &c.Repo.Name, &c.Number,
+		&c.Branch, &status, &c.CreatedAt, &promotedAt, &lastError); err != nil {
 		return Candidate{}, err
 	}
 	c.Status = CandidateStatus(status)
-	c.ReleaseBranch = releaseBranch.String
 	c.LastError = lastError.String
 	c.PromotedAt = timePtr(promotedAt)
 	return c, nil
 }
 
-// CurrentCandidate returns repo's most recently cut candidate, whatever
-// its status, or nil if none has ever been cut -- what a UI reads to
-// render "the current rc" (still cutting, active, promoting, or already
-// promoted) alongside the button to act on it.
-func (s *Store) CurrentCandidate(ctx context.Context, repo RepoRef) (*Candidate, error) {
-	return currentCandidate(ctx, s.db, repo)
+// CurrentCandidateForRelease returns releaseID's own most recently cut
+// candidate, whatever its status, or nil if none has ever been cut for
+// it -- what a UI reads to render "the current rc" for one release.
+func (s *Store) CurrentCandidateForRelease(ctx context.Context, releaseID int64) (*Candidate, error) {
+	return currentCandidateForRelease(ctx, s.db, releaseID)
 }
 
-func currentCandidate(ctx context.Context, q querier, repo RepoRef) (*Candidate, error) {
+func currentCandidateForRelease(ctx context.Context, q querier, releaseID int64) (*Candidate, error) {
 	c, err := scanCandidate(q.QueryRowContext(ctx,
 		"SELECT "+candidateColumns+" FROM `release_candidate` "+
-			"WHERE `owner` = ? AND `name` = ? ORDER BY `id` DESC LIMIT 1",
-		repo.Owner, repo.Name).Scan)
+			"WHERE `release_id` = ? ORDER BY `id` DESC LIMIT 1", releaseID).Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("reading current candidate for %s: %w", repo, err)
+		return nil, fmt.Errorf("reading current candidate for release %d: %w", releaseID, err)
 	}
 	return &c, nil
 }
 
-// ListCandidates returns every candidate ever cut for repo, newest first
-// -- a release history, not just the current one.
-func (s *Store) ListCandidates(ctx context.Context, repo RepoRef) ([]Candidate, error) {
+// ListCandidates returns every candidate ever cut for repo's release
+// named releaseName, newest first -- or nil if repo has no release by
+// that name.
+func (s *Store) ListCandidates(ctx context.Context, repo RepoRef, releaseName string) ([]Candidate, error) {
+	release, err := s.GetRelease(ctx, repo, releaseName)
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		return nil, nil
+	}
 	var out []Candidate
-	err := each(ctx, s.db,
-		"SELECT "+candidateColumns+" FROM `release_candidate` "+
-			"WHERE `owner` = ? AND `name` = ? ORDER BY `id` DESC",
-		[]any{repo.Owner, repo.Name},
+	err = each(ctx, s.db,
+		"SELECT "+candidateColumns+" FROM `release_candidate` WHERE `release_id` = ? ORDER BY `id` DESC",
+		[]any{release.ID},
 		func(rows *sql.Rows) error {
 			c, err := scanCandidate(rows.Scan)
 			if err != nil {
@@ -123,28 +309,32 @@ func (s *Store) ListCandidates(ctx context.Context, repo RepoRef) ([]Candidate, 
 	return out, err
 }
 
-// CutCandidate allocates and records a fresh release candidate for repo:
-// the issue's own "create a new rc". MajorVersion comes from repo's
-// current ReleaseConfig; Number is one past the highest ever allocated
-// for repo (so it never repeats, even across a MajorVersion edit);
-// Version is always 1, for now. Status starts at CandidateCutting -- the
-// releases reconciler is what actually creates Branch on GitHub and
-// advances it to CandidateActive.
+// CutCandidate allocates and records a fresh release candidate for
+// repo's release named releaseName -- the issue's own "create a new rc",
+// cut from that release's own LatestBranch. Number is one past the
+// highest ever allocated within this release (never reused, never reset
+// except by starting a whole new Release under the same name). Status
+// starts at CandidateCutting -- the releases reconciler is what actually
+// creates Branch on GitHub and advances it to CandidateActive.
 //
-// It is an error to cut a fresh candidate while repo already has one that
-// has not been promoted (ErrCandidateActive): the issue's own "the
-// current rc" is singular, and promoting is what retires one.
-func (s *Store) CutCandidate(ctx context.Context, repo RepoRef, now time.Time) (Candidate, error) {
+// ErrNoRelease: repo has no release by that name. ErrReleaseNotActive:
+// the release has not finished provisioning yet, or its merge back has
+// already been requested. ErrCandidateActive: the release's own "current
+// rc" is singular, and promoting is what retires one.
+func (s *Store) CutCandidate(ctx context.Context, repo RepoRef, releaseName string, now time.Time) (Candidate, error) {
 	var out Candidate
-	err := s.write(ctx, "cut release candidate for "+repo.String(), func(tx *sql.Tx) error {
-		cfg, err := getReleaseConfig(ctx, tx, repo)
+	err := s.write(ctx, "cut release candidate for "+repo.String()+" "+releaseName, func(tx *sql.Tx) error {
+		release, err := getRelease(ctx, tx, repo, releaseName)
 		if err != nil {
 			return err
 		}
-		if cfg == nil {
-			return ErrNoReleaseConfig
+		if release == nil {
+			return ErrNoRelease
 		}
-		current, err := currentCandidate(ctx, tx, repo)
+		if release.Status != ReleaseActive {
+			return ErrReleaseNotActive
+		}
+		current, err := currentCandidateForRelease(ctx, tx, release.ID)
 		if err != nil {
 			return err
 		}
@@ -156,10 +346,9 @@ func (s *Store) CutCandidate(ctx context.Context, repo RepoRef, now time.Time) (
 			number = current.Number + 1
 		}
 		c := Candidate{
-			Repo: repo, MajorVersion: cfg.MajorVersion, Number: number, Version: 1,
-			Status: CandidateCutting, CreatedAt: now,
+			Repo: repo, ReleaseID: release.ID, Number: number,
+			Branch: RCBranch(releaseName, number), Status: CandidateCutting, CreatedAt: now,
 		}
-		c.Branch = cfg.ReleaseBranchPrefix + CandidateLabel(c.MajorVersion, c.Number, c.Version)
 		id, err := insertCandidate(ctx, tx, c)
 		if err != nil {
 			return err
@@ -174,40 +363,42 @@ func (s *Store) CutCandidate(ctx context.Context, repo RepoRef, now time.Time) (
 func insertCandidate(ctx context.Context, tx *sql.Tx, c Candidate) (int64, error) {
 	res, err := tx.ExecContext(ctx,
 		"INSERT INTO `release_candidate` "+
-			"(`owner`,`name`,`major_version`,`number`,`version`,`branch`,`release_branch`,`status`,`created_at`,`promoted_at`,`last_error`) "+
-			"VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-		c.Repo.Owner, c.Repo.Name, c.MajorVersion, c.Number, c.Version,
-		c.Branch, nullable(c.ReleaseBranch), string(c.Status), c.CreatedAt.UTC(), timeOf(c.PromotedAt), nullable(c.LastError))
+			"(`release_id`,`owner`,`repo`,`number`,`branch`,`status`,`created_at`,`promoted_at`,`last_error`) "+
+			"VALUES (?,?,?,?,?,?,?,?,?)",
+		c.ReleaseID, c.Repo.Owner, c.Repo.Name, c.Number,
+		c.Branch, string(c.Status), c.CreatedAt.UTC(), timeOf(c.PromotedAt), nullable(c.LastError))
 	if err != nil {
 		return 0, fmt.Errorf("cutting a release candidate for %s: %w", c.Repo, err)
 	}
 	return res.LastInsertId()
 }
 
-// PromoteCandidate requests promotion of repo's current candidate to its
-// ReleaseConfig's ProdBranch -- the issue's own "promote the current rc".
-// The candidate must already be CandidateActive (its own branch cut and
-// live on GitHub); PromoteCandidate only records ReleaseBranch (named
-// from ReleaseConfig's own prefix) and advances Status to
-// CandidatePromoting, the same declarative-intent handoff CutCandidate
-// makes to the releases reconciler -- which is what actually moves
-// ProdBranch and creates ReleaseBranch on GitHub, then advances Status to
-// CandidatePromoted.
+// PromoteCandidate requests promotion of releaseName's current candidate
+// to its release's own ProdBranch -- the issue's own "promote the current
+// rc". The candidate must already be CandidateActive; this only advances
+// Status to CandidatePromoting, the same declarative-intent handoff
+// CutCandidate makes to the releases reconciler, which is what actually
+// moves ProdBranch on GitHub, then advances Status to CandidatePromoted.
 //
-// ErrNoCandidate: repo has never had one cut. ErrCandidateNotReady: the
-// current one is still cutting, or already mid-promotion. ErrAlreadyPromoted:
-// the issue's own "it cannot be promoted twice."
-func (s *Store) PromoteCandidate(ctx context.Context, repo RepoRef) (Candidate, error) {
+// ErrNoRelease: repo has no release by that name. ErrReleaseNotActive:
+// the release has not finished provisioning yet, or its merge back has
+// already been requested. ErrNoCandidate: the release has never had one
+// cut. ErrCandidateNotReady: the current one is still cutting, or already
+// mid-promotion. ErrAlreadyPromoted: "it cannot be promoted twice."
+func (s *Store) PromoteCandidate(ctx context.Context, repo RepoRef, releaseName string) (Candidate, error) {
 	var out Candidate
-	err := s.write(ctx, "promote release candidate for "+repo.String(), func(tx *sql.Tx) error {
-		cfg, err := getReleaseConfig(ctx, tx, repo)
+	err := s.write(ctx, "promote release candidate for "+repo.String()+" "+releaseName, func(tx *sql.Tx) error {
+		release, err := getRelease(ctx, tx, repo, releaseName)
 		if err != nil {
 			return err
 		}
-		if cfg == nil {
-			return ErrNoReleaseConfig
+		if release == nil {
+			return ErrNoRelease
 		}
-		current, err := currentCandidate(ctx, tx, repo)
+		if release.Status != ReleaseActive {
+			return ErrReleaseNotActive
+		}
+		current, err := currentCandidateForRelease(ctx, tx, release.ID)
 		if err != nil {
 			return err
 		}
@@ -220,7 +411,6 @@ func (s *Store) PromoteCandidate(ctx context.Context, repo RepoRef) (Candidate, 
 		case CandidateCutting, CandidatePromoting:
 			return ErrCandidateNotReady
 		}
-		current.ReleaseBranch = cfg.ReleaseBranchPrefix + ReleaseLabel(current.MajorVersion, current.Number)
 		current.Status = CandidatePromoting
 		if err := updateCandidate(ctx, tx, *current); err != nil {
 			return err
@@ -233,20 +423,18 @@ func (s *Store) PromoteCandidate(ctx context.Context, repo RepoRef) (Candidate, 
 
 func updateCandidate(ctx context.Context, tx *sql.Tx, c Candidate) error {
 	_, err := tx.ExecContext(ctx,
-		"UPDATE `release_candidate` SET `release_branch` = ?, `status` = ?, `promoted_at` = ?, `last_error` = ? "+
-			"WHERE `id` = ?",
-		nullable(c.ReleaseBranch), string(c.Status), timeOf(c.PromotedAt), nullable(c.LastError), c.ID)
+		"UPDATE `release_candidate` SET `status` = ?, `promoted_at` = ?, `last_error` = ? WHERE `id` = ?",
+		string(c.Status), timeOf(c.PromotedAt), nullable(c.LastError), c.ID)
 	if err != nil {
 		return fmt.Errorf("updating release candidate %d: %w", c.ID, err)
 	}
 	return nil
 }
 
-// PendingCandidates returns every candidate, across every repo, whose
-// status names a GitHub-side effect the releases reconciler still owes
-// it -- CandidateCutting or CandidatePromoting -- oldest first, so a
-// reconciler working through a backlog clears the longest-waiting one
-// first.
+// PendingCandidates returns every candidate, across every repo and
+// release, whose status names a GitHub-side effect the releases
+// reconciler still owes it -- CandidateCutting or CandidatePromoting --
+// oldest first.
 func (s *Store) PendingCandidates(ctx context.Context) ([]Candidate, error) {
 	var out []Candidate
 	err := each(ctx, s.db,
@@ -265,8 +453,7 @@ func (s *Store) PendingCandidates(ctx context.Context) ([]Candidate, error) {
 
 // MarkCandidateCut advances a CandidateCutting row to CandidateActive,
 // clearing LastError -- the releases reconciler's report that the
-// candidate's own branch (and the repo's moving rc branch) are live on
-// GitHub.
+// candidate's own branch is live on GitHub.
 func (s *Store) MarkCandidateCut(ctx context.Context, id int64) error {
 	return s.write(ctx, "mark release candidate cut", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
@@ -278,11 +465,10 @@ func (s *Store) MarkCandidateCut(ctx context.Context, id int64) error {
 
 // MarkCandidatePromoted advances a CandidatePromoting row to
 // CandidatePromoted, stamping PromotedAt and clearing LastError -- the
-// releases reconciler's report that ProdBranch and ReleaseBranch both
-// landed on GitHub. This is the retirement the issue's own "it cannot be
-// promoted twice" depends on: PromoteCandidate refuses every status but
-// CandidateActive, so a candidate that reaches this can never be promoted
-// again.
+// releases reconciler's report that ProdBranch landed on GitHub. This is
+// the retirement "it cannot be promoted twice" depends on: PromoteCandidate
+// refuses every status but CandidateActive, so a candidate that reaches
+// this can never be promoted again.
 func (s *Store) MarkCandidatePromoted(ctx context.Context, id int64, now time.Time) error {
 	return s.write(ctx, "mark release candidate promoted", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
@@ -294,8 +480,7 @@ func (s *Store) MarkCandidatePromoted(ctx context.Context, id int64, now time.Ti
 
 // MarkCandidateError records why the releases reconciler's current step
 // for a candidate has not landed yet, leaving Status unchanged -- the
-// next cycle retries the same step, the same level-triggered discipline
-// every other reconciler in pkg/orchestrator holds to.
+// next cycle retries the same step.
 func (s *Store) MarkCandidateError(ctx context.Context, id int64, message string) error {
 	return s.write(ctx, "record release candidate error", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
