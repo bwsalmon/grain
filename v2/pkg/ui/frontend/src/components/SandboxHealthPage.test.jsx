@@ -11,6 +11,19 @@ describe("SandboxHealthPage", () => {
     api.mockReset();
   });
 
+  it("shows the header and a spinner while the initial fetch is in flight", async () => {
+    let resolve;
+    api.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    render(<SandboxHealthPage showError={() => {}} />);
+
+    expect(screen.getByText("Sandbox health")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
+
+    resolve({ enabled: true, sandboxes: [], host: null });
+    expect(await screen.findByText("No sandboxes tracked yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
   it("shows a note instead of a table when nothing is configured", async () => {
     api.mockResolvedValueOnce({ enabled: false });
     render(<SandboxHealthPage showError={() => {}} />);
