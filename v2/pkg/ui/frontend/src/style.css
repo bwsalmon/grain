@@ -271,6 +271,17 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
 
+/* RepoList (bwsalmon/agents#546) is the one place .badge sits on an MUI
+   Chip rather than a plain span, to get its filled pill background. The
+   Chip root has zero left padding of its own -- only its .MuiChip-label
+   child carries an inset (8px, small size), which keeps chip text clear
+   of the pill's rounded right corner. Nothing plays that role on the
+   left, so the ::before dot -- the chip root's first flex child -- sits
+   flush against x:0, exactly where the pill's own border-radius rounds
+   the corner away, and reads as spilling outside the bubble instead of
+   sitting inside it. */
+.MuiChip-root.badge { padding-left: 0.45rem; }
+
 /* .badge-static is for a "running" badge that records a past moment
    (e.g. a Timeline entry once superseded by a later transition) rather
    than the task's live status -- it should read as the same solid dot
