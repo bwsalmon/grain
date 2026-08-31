@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Chip, Table, TableBody, TableCell, TableHead, TableRow, Typography } from "@mui/material";
+import { Alert, Button, Chip, CircularProgress, Table, TableBody, TableCell, TableHead, TableRow, Typography } from "@mui/material";
 import api from "../api.js";
 
 // REFRESH_MS matches LogsPage's own polling cadence -- the debug section
@@ -40,20 +40,23 @@ export default function SandboxHealthPage({ showError }) {
     return () => clearInterval(interval);
   }, [refresh]);
 
-  if (data === null) return null;
-
   return (
     <main className="logs-page">
       <div className="content-header">
         <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Sandbox health</Typography>
-        {data.enabled && <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>}
+        {data?.enabled && <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>}
       </div>
-      {!data.enabled && (
+      {data === null && (
+        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <CircularProgress size={28} aria-label="Loading sandbox health" />
+        </div>
+      )}
+      {data !== null && !data.enabled && (
         <Alert severity="info" sx={{ mx: "1.75rem", mt: "1rem" }}>
           Not available: this deployment has no sandbox pool or host stats configured.
         </Alert>
       )}
-      {data.enabled && (
+      {data !== null && data.enabled && (
         <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0 1.75rem 1.75rem" }}>
           <Typography variant="subtitle2" sx={{ mt: "1rem", mb: "0.5rem" }}>Host</Typography>
           {data.hostError && (
