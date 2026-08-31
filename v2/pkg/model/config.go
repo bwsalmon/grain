@@ -88,6 +88,15 @@ type Config struct {
 	SandboxCPUs int
 	// SandboxMemoryMB is SandboxCPUs' memory counterpart, in MiB.
 	SandboxMemoryMB int
+	// ShowClosedByDefault is the deployment-wide default for whether a
+	// task list starts out showing closed tasks (bwsalmon/agents#537):
+	// false, the default, matches "hide closed tasks by default" --
+	// TaskList.jsx's own "Show closed tasks" toggle starts unchecked, and
+	// a viewer flips it on to see them. true starts that toggle checked
+	// instead. Either way it is only ever the list's *starting* state --
+	// like NewestFirst, nothing here forces it to stay that way, and
+	// nothing in the daemon's own dispatch loop reads it.
+	ShowClosedByDefault bool
 }
 
 // SlotNames returns the n dispatch.Cycle slot identifiers a deployment

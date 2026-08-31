@@ -65,6 +65,13 @@ type Settings struct {
 	// stored either way, the same as every other kontur* setting here.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`
+	// ShowClosedByDefault is model.Config's own field of the same name
+	// (bwsalmon/agents#537): the deployment-wide default for whether a
+	// task list's own "Show closed tasks" toggle starts checked. Also
+	// mirrored onto GET /api/config (handleConfig, tasks.go) so a list
+	// has it to seed that toggle with before Settings has ever been
+	// opened this session.
+	ShowClosedByDefault bool `json:"showClosedByDefault"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -83,6 +90,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		NewestFirst:                   cfg.NewestFirst,
 		SandboxCPUs:                   cfg.SandboxCPUs,
 		SandboxMemoryMB:               cfg.SandboxMemoryMB,
+		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 	}
 }
 
@@ -145,6 +153,7 @@ type UpdateSettingsRequest struct {
 	NewestFirst            *bool     `json:"newestFirst"`
 	SandboxCPUs            *int      `json:"sandboxCpus"`
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
+	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -244,6 +253,9 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			return Settings{}, validationErrorf("sandboxMemoryMb must be 0 (unset) or at least 128")
 		}
 		cfg.SandboxMemoryMB = *req.SandboxMemoryMB
+	}
+	if req.ShowClosedByDefault != nil {
+		cfg.ShowClosedByDefault = *req.ShowClosedByDefault
 	}
 
 	if firstTime {

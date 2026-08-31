@@ -146,6 +146,37 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // bwsalmon/agents#537: the global "hide closed tasks by default" switch.
+  it("toggles showClosedByDefault and includes it in the payload only when changed", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    const checkbox = screen.getByRole("checkbox", { name: /Show closed tasks by default/ });
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ showClosedByDefault: true }),
+    });
+  });
+
+  it("leaves showClosedByDefault out of the payload when already on and left alone", async () => {
+    api.mockResolvedValueOnce({ ...settings, showClosedByDefault: true }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByRole("checkbox", { name: /Show closed tasks by default/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+  });
+
   it("reports the error and does not close on a failed save", async () => {
     api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("pollInterval must be positive"));
     const showError = vi.fn();

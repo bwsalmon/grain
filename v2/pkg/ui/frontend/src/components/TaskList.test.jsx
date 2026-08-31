@@ -66,6 +66,48 @@ describe("TaskList", () => {
     expect(screen.getByText("No tasks in this state.")).toBeInTheDocument();
   });
 
+  // bwsalmon/agents#537: closed tasks are hidden by default, with a
+  // per-list toggle to bring them back and a deployment-wide setting
+  // (config.showClosedByDefault) for what "by default" starts out as.
+  describe("hiding closed tasks", () => {
+    const withClosed = [
+      ...tasks,
+      { id: 3, title: "Long done", state: "closed", capabilities: [], blocked: false },
+    ];
+
+    it("hides closed tasks by default", () => {
+      renderList({ tasks: withClosed });
+      expect(screen.queryByText("Long done")).not.toBeInTheDocument();
+      expect(document.querySelector(".content-header .count")).toHaveTextContent("2");
+    });
+
+    it("shows closed tasks once the toggle is checked", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: withClosed });
+
+      await user.click(screen.getByRole("checkbox", { name: "Show closed tasks" }));
+
+      expect(screen.getByText("Long done")).toBeInTheDocument();
+    });
+
+    it("starts showing closed tasks when config.showClosedByDefault is set", () => {
+      renderList({ tasks: withClosed, config: { showClosedByDefault: true } });
+      expect(screen.getByText("Long done")).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Show closed tasks" })).toBeChecked();
+    });
+
+    it("does not offer the toggle when there are no closed tasks", () => {
+      renderList();
+      expect(screen.queryByRole("checkbox", { name: "Show closed tasks" })).not.toBeInTheDocument();
+    });
+
+    it("does not hide closed tasks while the Closed filter itself is selected", () => {
+      renderList({ tasks: withClosed, stateFilter: "closed" });
+      expect(screen.getByText("Long done")).toBeInTheDocument();
+      expect(screen.queryByRole("checkbox", { name: "Show closed tasks" })).not.toBeInTheDocument();
+    });
+  });
+
   it("opens a task when its row is clicked", async () => {
     const onOpenTask = vi.fn();
     const user = userEvent.setup();

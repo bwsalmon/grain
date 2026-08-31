@@ -324,15 +324,32 @@ type configResponse struct {
 	// instead of a task looking stuck for no visible reason
 	// (bwsalmon/agents#483).
 	AutoMergeDegraded bool `json:"autoMergeDegraded,omitempty"`
+	// ShowClosedByDefault mirrors model.Config.ShowClosedByDefault
+	// (bwsalmon/agents#537), read straight from the store the same way
+	// Settings itself does rather than cached on Client.Config -- unlike
+	// TargetRepos, nothing else in this process needs it kept in sync
+	// mid-run, so there is no setTargetRepos-style write-through to keep
+	// current. TaskList.jsx seeds its own "Show closed tasks" toggle from
+	// this the moment a list first renders, before Settings has ever been
+	// opened this session.
+	ShowClosedByDefault bool `json:"showClosedByDefault"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.tasks.Store.GetConfig(r.Context())
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
 	resp := configResponse{
 		Actor:         s.tasks.Config.Actor.ID,
 		ActorKind:     string(s.tasks.Config.Actor.Kind),
 		Capabilities:  s.tasks.Config.Capabilities,
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.targetRepos(),
+	}
+	if cfg != nil {
+		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()
