@@ -790,13 +790,20 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// runs as grain-daemon.service -- scripts/setup.sh's own unit --
 		// under a real deployment); "git-proxy-audit" reads the audit log
 		// startGitProxy's own gitproxy.BuildProxy just wrote alongside it,
-		// in the same DataDir. Both are colocated with this process by
-		// construction -- unlike Secrets/Credentials above, there is no
-		// case here where this deployment has one but not the other
-		// (bwsalmon/agents#444).
+		// in the same DataDir; "config-sync" reads the rollout loop that
+		// deployed this process in the first place -- terraform/gcp-v2/
+		// files/config-sync.sh, installed as grain-v2-config-sync.service
+		// by that same terraform's startup.sh. All three are colocated
+		// with this process by construction under a real deployment (v2
+		// runs the daemon directly on the host that config-sync watches,
+		// unlike v1's nested guest -- deploy.sh's own ensure_ops_agent
+		// comment) -- unlike Secrets/Credentials above, there is no case
+		// here where this deployment has one but not the others
+		// (bwsalmon/agents#444, bwsalmon/agents#542).
 		Logs: map[string]ui.LogSource{
 			"daemon":          systemlog.Journalctl{Unit: "grain-daemon.service"},
 			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
+			"config-sync":     systemlog.Journalctl{Unit: "grain-v2-config-sync.service"},
 		},
 		// gemini.LiveTranscriptDir reads back whatever gemini.Framework.Run
 		// (the framework agentFramework below actually wires in) has
