@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -281,6 +282,65 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	// leave it exactly as the flags set it, on both branches.
 	if got.dataDir != flagCfg.dataDir {
 		t.Fatalf("loadConfig changed dataDir to %q, want it left alone", got.dataDir)
+	}
+}
+
+// TestLoadConfigLogsEveryOverriddenFlag is bwsalmon/agents#574: the
+// store-wins behavior TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists
+// covers used to be silent, which cost real debugging time chasing a flag
+// that looked like it had no effect. Every seedOnly field the flags and
+// the store disagree on must get its own log line; fields that agree must
+// not.
+func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
+	store, db, err := openStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	stored := model.Config{
+		MaxConcurrent: 1, PollInterval: 5 * time.Second,
+		GeminiModel: "gemini-2.5-flash", MaxAgentTurns: 99,
+		GitHubHost: "github.com", GitHubInsecureHTTP: false,
+		GCPProject: "stored-proj", GCPServiceAccountEmail: "stored@stored-proj.iam.gserviceaccount.com",
+		TargetRepos: []string{"owner/repo"},
+	}
+	if err := store.PutConfig(ctx, stored); err != nil {
+		t.Fatalf("PutConfig: %v", err)
+	}
+
+	// Agrees with the store on everything except -github-host and
+	// -max-concurrent, so only those two should be logged.
+	flagCfg := config{
+		maxConcurrent: 4, pollInterval: stored.PollInterval,
+		geminiModel: stored.GeminiModel, maxAgentTurns: stored.MaxAgentTurns,
+		githubHost: "ignored.example.com", githubInsecureHTTP: stored.GitHubInsecureHTTP,
+		gcpProject: stored.GCPProject, gcpServiceAccountEmail: stored.GCPServiceAccountEmail,
+		targetRepos: stored.TargetRepos,
+	}
+
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+
+	if _, err := loadConfig(ctx, store, flagCfg); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	got := logs.String()
+	for _, want := range []string{
+		"ignoring -max-concurrent=4, stored config already has 1",
+		"ignoring -github-host=ignored.example.com, stored config already has github.com",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("loadConfig log output = %q, want it to contain %q", got, want)
+		}
+	}
+	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-max-agent-turns", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("loadConfig log output = %q, should not mention %q since the flag and the store agree", got, unwanted)
+		}
 	}
 }
 
