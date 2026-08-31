@@ -13,6 +13,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +24,11 @@ import (
 )
 
 func TestRunKeepsTheUIServerUpWhenTheRestOfTheDaemonFails(t *testing.T) {
+	// reconcilerDown is process-global state (its own doc comment,
+	// daemon.go), so a run in this same test binary that sets it true
+	// must not leak into any other test's expectations.
+	t.Cleanup(func() { reconcilerDown.Store(false) })
+
 	dataDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dataDir, "secrets", "github"), 0o755); err != nil {
 		t.Fatal(err)
@@ -77,6 +84,31 @@ func TestRunKeepsTheUIServerUpWhenTheRestOfTheDaemonFails(t *testing.T) {
 	case err := <-runErr:
 		t.Fatalf("run() returned (%v) before ctx was cancelled -- the UI/API server would have been torn down with it", err)
 	default:
+	}
+
+	// bwsalmon/agents#576: the same runDaemon failure that leaves the UI
+	// up must also be visible *through* that UI, not just in this
+	// process's own log -- GET /api/config's reconcilerDown is what an
+	// operator (or external monitoring polling that same endpoint) sees
+	// instead of having to notice and interpret a log line.
+	//
+	// ui.HTTPClient.Config (unlike ui.Config itself) has no field for
+	// this -- Config's own RebootEnabled/AutoMergeDegraded/ReconcilerDown
+	// are all polling funcs server-side, not booleans an HTTP round trip
+	// can reconstitute -- so this reads the raw JSON body directly, the
+	// same wire shape pkg/ui/server_test.go's own decode[map[string]any]
+	// helper reads in-process.
+	resp, err := http.Get("http://" + uiAddr + "/api/config")
+	if err != nil {
+		t.Fatalf("GET /api/config: %v", err)
+	}
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding GET /api/config: %v", err)
+	}
+	if got["reconcilerDown"] != true {
+		t.Fatalf("config.reconcilerDown = %v, want true once runDaemon has failed", got["reconcilerDown"])
 	}
 
 	// The UI must still be reachable well after runDaemon's own failure

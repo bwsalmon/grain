@@ -16,6 +16,7 @@ import RepoReleases from "./components/RepoReleases.jsx";
 import LogsPage from "./components/LogsPage.jsx";
 import SandboxHealthPage from "./components/SandboxHealthPage.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
+import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -234,7 +235,12 @@ export default function App() {
       if (polling.current || document.visibilityState === "hidden") return;
       polling.current = true;
       try {
-        await refreshList();
+        // refreshConfig here (not just at mount) is what keeps
+        // config.reconcilerDown -- and the banner it drives, below --
+        // current: it is the one /api/config field that can flip from
+        // false to true mid-session, on a process this same UI is still
+        // otherwise happily serving (bwsalmon/agents#576).
+        await Promise.all([refreshList(), refreshConfig()]);
         if (openTaskId !== null) {
           setDetail(await api(`/api/tasks/${openTaskId}`));
         }
@@ -263,7 +269,7 @@ export default function App() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [openTaskId, refreshList, refreshSchedules, refreshTemplates, view]);
+  }, [openTaskId, refreshConfig, refreshList, refreshSchedules, refreshTemplates, view]);
 
   // Opens whatever task /tasks/:id in the URL the page loaded with names
   // -- the view/showSettings equivalent of this runs synchronously in
@@ -393,6 +399,7 @@ export default function App() {
           )}
         </>
       )}
+      {config?.reconcilerDown && <ReconcilerDownBanner />}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
         <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />

@@ -177,6 +177,20 @@ type Config struct {
 	// their own panes above -- except here false is the "nothing to
 	// warn about" answer rather than "the feature is off."
 	AutoMergeDegraded func() bool
+	// ReconcilerDown, when set, is polled by GET /api/config to report
+	// whether this deployment's own reconcile loop has died -- true once
+	// cmd/grain/daemon.go's runDaemon has returned an error (or panicked)
+	// and given up entirely, as opposed to a one-time setup step still
+	// being retried. Before this existed, that fact lived only in a
+	// single server log line: the UI/API server stays up on its own
+	// (bwsalmon/agents#550, "make sure ui with logs stays up even if the
+	// daemon has failed"), so nothing dispatching or reconciling tasks
+	// was otherwise visible from outside the process at all
+	// (bwsalmon/agents#576). nil (`grain demo`'s throwaway UI, or any
+	// deployment not wired to cmd/grain's own package-level state) means
+	// ReconcilerDown always reports false, the same nil-means-
+	// unavailable-feature default AutoMergeDegraded above gives.
+	ReconcilerDown func() bool
 }
 
 // LiveTranscript is implemented by whatever can read back a still-running

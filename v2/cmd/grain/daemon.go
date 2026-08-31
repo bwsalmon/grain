@@ -63,6 +63,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -442,6 +443,14 @@ func run(ctx context.Context, cfg config) error {
 		go func() {
 			defer close(done)
 			if err := runDaemon(ctx, cfg, store, slots, sandboxes, hostSandboxes, konturSandboxes, transcriptDir); err != nil {
+				// reconcilerDown is what turns this log line into
+				// something GET /api/config (and, through it, the UI
+				// itself) can also see -- bwsalmon/agents#576: before
+				// this, a runDaemon failure here was visible only to
+				// whoever happened to be reading this process's log,
+				// while the UI it left running kept looking perfectly
+				// healthy.
+				reconcilerDown.Store(true)
 				log.Printf("grain daemon: %v -- the UI/API server above is still up, but nothing is "+
 					"dispatching or reconciling tasks until this is fixed and the process is restarted", err)
 			}
@@ -529,14 +538,32 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []stri
 		// first call would have -- doing it here instead means a slot's
 		// VM is up, and reachable, before RunCycle ever tries to dispatch
 		// onto it.
+		//
+		// configureSlotGitCredentials retries this with backoff rather
+		// than this loop returning (and runDaemon along with it) on the
+		// first failure -- bwsalmon/agents#576: this step used to be
+		// fatal-but-non-crashing by design (bwsalmon/agents#550, so a bad
+		// one-time setup step never crash-loops systemd), which also
+		// meant one transient failure -- a flaky first-boot VM create, the
+		// proxy not accepting connections yet -- permanently wedged
+		// reconciliation for the rest of the process's life, recoverable
+		// only by a human noticing the log line and restarting the
+		// process by hand. Retrying keeps #550's own tradeoff (never exit
+		// on this) while actually giving a transient failure a chance to
+		// clear on its own.
 		remoteURL := proxyURL + "/placeholder/placeholder.git"
 		if hostSandboxes != nil {
-			if err := mcp.ConfigureGitCredentials(roots[slot], remoteURL, slotTokens[slot]); err != nil {
+			root := roots[slot]
+			if err := configureSlotGitCredentials(ctx, slot, func() error {
+				return mcp.ConfigureGitCredentials(root, remoteURL, slotTokens[slot])
+			}); err != nil {
 				return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
 			}
 			continue
 		}
-		if err := konturSandboxes.ConfigureGitCredentials(ctx, slot, remoteURL, slotTokens[slot]); err != nil {
+		if err := configureSlotGitCredentials(ctx, slot, func() error {
+			return konturSandboxes.ConfigureGitCredentials(ctx, slot, remoteURL, slotTokens[slot])
+		}); err != nil {
 			return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
 		}
 	}
@@ -589,6 +616,86 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []stri
 	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
 }
+
+// slotProvisionRetryBaseDelay and slotProvisionRetryMaxDelay bound
+// configureSlotGitCredentials' own backoff between attempts: the first
+// retry waits slotProvisionRetryBaseDelay, doubling on every subsequent
+// failure up to slotProvisionRetryMaxDelay, at which point it keeps
+// retrying at that same interval for as long as ctx stays alive. Neither
+// is exposed as a flag -- like reapInterval below, nothing about a
+// deployment's own -poll-interval or -max-concurrent bears on how often
+// a stuck provisioning step should be re-tried -- but both are vars
+// rather than consts so daemon_reconciler_recovery_test.go can shrink
+// them for the length of a single test rather than that test spending
+// real minutes waiting out a production backoff.
+var (
+	slotProvisionRetryBaseDelay = 5 * time.Second
+	slotProvisionRetryMaxDelay  = 5 * time.Minute
+)
+
+// configureSlotGitCredentials runs fn -- either a hostSandboxes slot's
+// mcp.ConfigureGitCredentials call or a konturSandboxes one (which also
+// creates that slot's VM) -- until it succeeds or ctx is cancelled,
+// retrying with capped exponential backoff on every failure instead of
+// the single attempt runDaemon used to make (bwsalmon/agents#576). A
+// transient failure -- the proxy not yet accepting connections, a flaky
+// first-boot VM create -- now clears on its own instead of wedging
+// reconciliation for the rest of the process's life; a permanent one (a
+// bad -kontur-create-args, say) retries forever rather than exiting,
+// which is the same "never crash-loop systemd over a bad one-time setup
+// step" tradeoff bwsalmon/agents#550 already made for this exact call
+// site, just applied per slot instead of failing runDaemon's caller
+// outright. The only way this returns a non-nil error is ctx itself
+// ending mid-retry, which only happens as part of the process already
+// shutting down.
+func configureSlotGitCredentials(ctx context.Context, slot string, fn func() error) error {
+	return retryWithBackoff(ctx, slotProvisionRetryBaseDelay, slotProvisionRetryMaxDelay, func(attempt int, err error) {
+		log.Printf("grain daemon: configuring git credentials for %s (attempt %d): %v -- retrying", slot, attempt, err)
+	}, fn)
+}
+
+// retryWithBackoff calls fn until it returns nil or ctx is cancelled,
+// waiting baseDelay after the first failure and doubling that wait after
+// every failure thereafter, capped at maxDelay, so a caller retrying
+// forever (configureSlotGitCredentials above) settles into a steady
+// interval rather than hammering whatever fn talks to. onFailure runs
+// between an attempt and the wait that follows it, purely to report the
+// failure -- daemon_reconciler_retry_test.go's own coverage of this
+// passes baseDelay/maxDelay small enough to run fast rather than mocking
+// time itself.
+func retryWithBackoff(ctx context.Context, baseDelay, maxDelay time.Duration, onFailure func(attempt int, err error), fn func() error) error {
+	delay := baseDelay
+	for attempt := 1; ; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		onFailure(attempt, err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay *= 2; delay > maxDelay {
+			delay = maxDelay
+		}
+	}
+}
+
+// reconcilerDown reports whether runDaemon has given up entirely --
+// returned a non-nil error, including from a recovered panic -- rather
+// than a transient step it is still retrying (configureSlotGitCredentials's
+// own retry loop above no longer counts as "given up" on its own, so a slot
+// stuck retrying VM creation does not flip this true). Set once, from
+// run()'s own goroutine, alongside the log line that already reports the
+// same failure; never cleared, since -- like orchestrator.
+// ChecksUnavailable -- this is a standing fact about *this process*, not
+// an event, and only a restart (a fresh process, with a fresh zero
+// value) can turn it back to false. GET /api/config surfaces it as
+// reconcilerDown so a UI, or an external monitor polling that same
+// endpoint, can see reconciliation is dead without an operator having to
+// notice and interpret a single log line (bwsalmon/agents#576).
+var reconcilerDown atomic.Bool
 
 // reapInterval is how often reconcile calls reapCapabilities -- not
 // configurable, since nothing about it needs to race a deployment's own
@@ -984,6 +1091,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
 		// separate reading from Sandboxes above.
 		HostStats: hostStats,
+		// ReconcilerDown mirrors this same process's own package-level
+		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
+		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
+		ReconcilerDown: func() bool { return reconcilerDown.Load() },
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

@@ -128,6 +128,25 @@ describe("App", () => {
     expect(api).toHaveBeenCalledWith("/api/tasks");
   });
 
+  it("shows no reconciler-down banner by default", async () => {
+    setupApi();
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    expect(screen.queryByText(/reconcile loop has stopped/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a banner when the deployment's reconciler has died (bwsalmon/agents#576)", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      (path === "/api/config" ? Promise.resolve({ ...config, reconcilerDown: true }) : realImpl(path, opts)));
+
+    render(<App />);
+
+    expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
+  });
+
   it("shows a loading screen with the large mark until config loads (bwsalmon/agents#555)", async () => {
     setupApi();
     let resolveConfig;

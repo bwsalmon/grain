@@ -333,6 +333,13 @@ type configResponse struct {
 	// this the moment a list first renders, before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// ReconcilerDown mirrors Config.ReconcilerDown's own doc comment:
+	// true means this deployment's reconcile loop has died and nothing is
+	// dispatching or reconciling tasks, even though this same API is
+	// still answering. The frontend uses this to show a standing banner
+	// rather than an operator having to notice tasks have stopped moving
+	// and go searching logs to learn why (bwsalmon/agents#576).
+	ReconcilerDown bool `json:"reconcilerDown,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -353,6 +360,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()
+	}
+	if s.tasks.Config.ReconcilerDown != nil {
+		resp.ReconcilerDown = s.tasks.Config.ReconcilerDown()
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()
