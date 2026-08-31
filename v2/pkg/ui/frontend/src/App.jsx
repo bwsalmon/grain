@@ -15,6 +15,7 @@ import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LogsPage from "./components/LogsPage.jsx";
 import SandboxHealthPage from "./components/SandboxHealthPage.jsx";
+import LoadingScreen from "./components/LoadingScreen.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -322,69 +323,75 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar
-        config={config}
-        view={view}
-        onSetView={setViewAndCloseReleases}
-        tasks={tasks}
-        schedules={schedules}
-        templates={templates}
-        stateFilter={stateFilter}
-        onSetFilter={setStateFilter}
-        onOpenSettings={() => setShowSettings(true)}
-        onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
-      />
-      {view === "repos" && releasesRepo !== null ? (
-        <RepoReleases repo={releasesRepo} templates={templates} onBack={() => setReleasesRepo(null)} showError={showError} />
-      ) : view === "repos" ? (
-        <RepoList
-          tasks={tasks}
-          config={config}
-          onOpenRepo={openRepo}
-          onOpenReleases={setReleasesRepo}
-          onRefreshConfig={refreshConfig}
-          showError={showError}
-          onOpenTask={openTask}
-          onNewTask={openNewTaskForRepo}
-        />
-      ) : view === "schedules" ? (
-        <SchedulesList
-          schedules={schedules}
-          templates={templates}
-          config={config}
-          tasks={tasks}
-          onRefresh={refreshSchedules}
-          showError={showError}
-        />
-      ) : view === "templates" ? (
-        <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
-      ) : view === "logs" ? (
-        <LogsPage showError={showError} />
-      ) : view === "sandboxes" ? (
-        <SandboxHealthPage showError={showError} />
+      {config === null ? (
+        <LoadingScreen />
       ) : (
-        <div className="main-column">
-          {repoFilter !== null && (
-            <div className="repo-scope-bar">
-              <Chip
-                label={`Repo: ${repoFilter}`}
-                onDelete={() => setRepoFilter(null)}
-                deleteIcon={<span title="Clear repo filter">×</span>}
+        <>
+          <Sidebar
+            config={config}
+            view={view}
+            onSetView={setViewAndCloseReleases}
+            tasks={tasks}
+            schedules={schedules}
+            templates={templates}
+            stateFilter={stateFilter}
+            onSetFilter={setStateFilter}
+            onOpenSettings={() => setShowSettings(true)}
+            onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
+          />
+          {view === "repos" && releasesRepo !== null ? (
+            <RepoReleases repo={releasesRepo} templates={templates} onBack={() => setReleasesRepo(null)} showError={showError} />
+          ) : view === "repos" ? (
+            <RepoList
+              tasks={tasks}
+              config={config}
+              onOpenRepo={openRepo}
+              onOpenReleases={setReleasesRepo}
+              onRefreshConfig={refreshConfig}
+              showError={showError}
+              onOpenTask={openTask}
+              onNewTask={openNewTaskForRepo}
+            />
+          ) : view === "schedules" ? (
+            <SchedulesList
+              schedules={schedules}
+              templates={templates}
+              config={config}
+              tasks={tasks}
+              onRefresh={refreshSchedules}
+              showError={showError}
+            />
+          ) : view === "templates" ? (
+            <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
+          ) : view === "logs" ? (
+            <LogsPage showError={showError} />
+          ) : view === "sandboxes" ? (
+            <SandboxHealthPage showError={showError} />
+          ) : (
+            <div className="main-column">
+              {repoFilter !== null && (
+                <div className="repo-scope-bar">
+                  <Chip
+                    label={`Repo: ${repoFilter}`}
+                    onDelete={() => setRepoFilter(null)}
+                    deleteIcon={<span title="Clear repo filter">×</span>}
+                  />
+                </div>
+              )}
+              <TaskList
+                tasks={scopedTasks}
+                stateFilter={stateFilter}
+                config={config}
+                onOpenTask={openTask}
+                selected={selected}
+                onToggleSelect={toggleSelect}
+                onSelectAll={setSelection}
+                onReorder={reorderTasks}
               />
+              <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
             </div>
           )}
-          <TaskList
-            tasks={scopedTasks}
-            stateFilter={stateFilter}
-            config={config}
-            onOpenTask={openTask}
-            selected={selected}
-            onToggleSelect={toggleSelect}
-            onSelectAll={setSelection}
-            onReorder={reorderTasks}
-          />
-          <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
-        </div>
+        </>
       )}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
