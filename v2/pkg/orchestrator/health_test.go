@@ -103,10 +103,11 @@ func TestKonturSandboxesHealthReportsErrorWhenThePodNeverBecomesReady(t *testing
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30083)
 	// readyAfter is far beyond the single call Health itself makes, so
-	// the fake crictl always answers "no pod yet" -- unlike ToolsFor,
-	// Health never retries (see its own doc comment on why), so this
-	// exercises the "not ready right now" branch deterministically rather
-	// than racing a real timeout.
+	// the fake crictl always answers "no pod yet" -- kontur.PodIP itself
+	// never succeeds here, so this never even reaches slotHealth's own
+	// port-dial retry (waitForPortHealthy), exercising the "not ready
+	// right now" branch deterministically rather than racing a real
+	// timeout.
 	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 1000, "127.0.0.1")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
