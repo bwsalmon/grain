@@ -8,10 +8,10 @@ to reach it. Nothing in this repo built that image -- v1 has an equivalent
 job for its own libvirt-managed sandboxes (`provision/sandbox.sh`, run as
 cloud-init user-data against a shared base image on every VM's first boot);
 v2 had no successor, kontur-backed or otherwise. This directory is that
-successor: a plain shell pipeline (`build.sh`/`provision.sh`) that
-produces a kernel, an initramfs and a disk image cloud-hypervisor
-direct-kernel-boots, with no bootloader, firmware, or partition table
-anywhere in the picture.
+successor: `build-guest.sh` drives `third_party/kontur`'s own guest build
+with `guest-setup.sh` as its `GUEST_SETUP_SCRIPT`, producing a kernel, an
+initramfs and a disk image cloud-hypervisor direct-kernel-boots, with no
+bootloader, firmware, or partition table anywhere in the picture.
 
 bwsalmon/agents#267 first answered "decide, don't just wire" for what the
 image needs beyond sshd+key, how it gets built and published, and whether
@@ -28,17 +28,24 @@ PVH/virtio-pci kernel from source looked, going in, like the only way
 past that. It turned out not to be needed at all -- see "Why no custom
 kernel" below.
 
-## Converging on kontur's own guest build
+## Converged on kontur's own guest build
 
-This directory's pipeline (`build.sh` driving `provision.sh` through
-debootstrap and chroot, as root) duplicates work `third_party/kontur`'s
-own Dockerfile already does: it debootstraps a `--variant=minbase` rootfs,
-applies its overlays, and packs the result with `mke2fs -d` -- *"no extra
-privileges beyond an ordinary docker build"*. The plan is to stop building
-a guest rootfs here at all and instead hand kontur's build-time guest
-setup hook (`GUEST_SETUP_SCRIPT`, which now exists -- see "Status" below)
-a script saying only what grain adds. `guest-setup.sh` is that script; it
-is written and not yet wired up.
+This directory used to run its own pipeline -- `build.sh` driving
+`provision.sh` through debootstrap and chroot, as root -- which duplicated
+work `third_party/kontur`'s own Dockerfile already does: it debootstraps a
+`--variant=minbase` rootfs, applies its overlays, and packs the result
+with `mke2fs -d` -- *"no extra privileges beyond an ordinary docker
+build"*. That pipeline is gone. Nothing here builds a guest rootfs any
+more: `build-guest.sh` hands kontur's build-time guest setup hook
+(`GUEST_SETUP_SCRIPT`) a script saying only what grain adds, and
+`guest-setup.sh` is that script.
+
+Beyond the one-build-instead-of-two win below, building *on* kontur's
+rootfs rather than beside it means the guest carries kontur's own guest
+overlays. That is what makes kontur's flat networking mode usable here:
+its control link is configured guest-side by `kontur-control-net`, one of
+those overlays, which a rootfs built from scratch in this directory never
+had.
 
 What that buys: one build instead of two, no root/debootstrap requirement
 for a guest image build, and -- because kontur generates its `kontur exec`
@@ -154,9 +161,9 @@ So `guest-setup.sh` replaces that drop-in, keeping its two hardening lines
 and dropping the `ForceCommand`. This is the one place where building on
 kontur's guest actively breaks something rather than merely not helping.
 
-### Wiring, still to do
+### Wiring: done
 
-The hook exists now, so the argument names no longer wait on anything:
+`build-guest.sh` runs exactly this:
 
 ```sh
 docker build \
@@ -167,19 +174,29 @@ docker build \
 ```
 
 -- which yields `disk.img`, `vmlinuz` and `initrd.img` in `<dir>`, the
-same three files `build.sh` produces today. What is left:
-`build-oci-image.sh` grows those arguments; `v2/scripts/setup.sh`'s
-`ensure_kontur_images_build` takes the three artifacts from that build
-instead of running `build.sh`; and `build.sh`/`provision.sh` go away.
-Because kontur generates its `kontur exec` keypair inside the same build,
-that also retires `-kontur-exec-key` and the key-staging step
-`v2/scripts/setup.sh` does for it.
+same three files, with the same names, the old `build.sh` produced.
+`v2/scripts/setup.sh`'s `ensure_kontur_images_build` calls
+`build-guest.sh` in its place, and no longer installs debootstrap or
+e2fsprogs, since the build needs neither (nor root).
 
-None of that is worth wiring up before the four checks above pass on a
-machine that can actually run the build -- `guest-setup.sh` assumes root
-inside the guest rootfs, network available, and the kernel package
-already installed (its final `update-initramfs` has nothing to regenerate
-otherwise), and only a real build proves it gets all three.
+`guest-setup.sh` reads two variables (`OPERATOR_SSH_PUBLIC_KEY`, and
+`SANDBOX_SETUP_SCRIPT` if set). kontur's hook execs the script with only
+its own build stage's environment, so `build-guest.sh` inserts both as
+assignments immediately after the script's shebang -- which has to stay
+on line 1 for the exec to work -- rather than passing them as build args
+of their own.
+
+Still open, and deliberately not done here: kontur generates its `kontur
+exec` keypair inside this same build and authorizes it for **root**,
+while this guest's sandbox account is `debian` (what `-kontur-ssh-user`
+names, and what `guest-setup.sh` installs the operator key for). So
+`-kontur-exec-key` and the key-staging `v2/scripts/setup.sh` does for it
+do *not* fall out of this change for free, the way this section
+previously assumed -- retiring them needs the exec key authorized for
+`debian` too, or the sandbox account moved to root.
+
+The four checks below still have not been run: the build has never been
+executed anywhere, here or upstream.
 
 
 ## Why no custom kernel

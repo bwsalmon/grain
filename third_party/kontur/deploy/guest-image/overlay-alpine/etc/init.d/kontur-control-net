@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+
+description="Configure the kontur flat-mode control link"
+
+depend() {
+	before kontur-mem-agent
+}
+
+start() {
+	ebegin "Configuring the kontur control link"
+	/usr/local/libexec/kontur-control-net
+	eend $?
+}

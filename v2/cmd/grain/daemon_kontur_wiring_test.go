@@ -170,7 +170,7 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kontur was never invoked: %v", err)
 	}
-	want := "vm create " + cfg.konturVMNamePrefix + slot + " -state-dir " + cfg.konturStateDir + " -backend docker -image gs://bucket/kontur-guest-deadbeef.qcow2\n"
+	want := "vm create " + cfg.konturVMNamePrefix + slot + " -state-dir " + cfg.konturStateDir + " -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2\n"
 	if string(data) != want {
 		t.Errorf("kontur invoked as %q, want %q", data, want)
 	}

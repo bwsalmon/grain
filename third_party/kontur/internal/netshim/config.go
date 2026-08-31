@@ -15,12 +15,28 @@ import (
 )
 
 const (
+	envMode          = "NETSHIM_MODE"
+	envVM            = "NETSHIM_VM"
+	envControlCIDR   = "NETSHIM_CONTROL_CIDR"
 	envBridge        = "NETSHIM_BRIDGE"
 	envBridgeCIDR    = "NETSHIM_BRIDGE_CIDR"
 	envExternalIface = "NETSHIM_EXTERNAL_IFACE"
 	envGuestPort     = "NETSHIM_GUEST_PORT"
 	envVMs           = "NETSHIM_VMS"
 
+	// ModeNAT is the original mode: a private subnet inside the
+	// namespace, with DNAT/masquerade rules sharing the namespace's
+	// single IP between one or more VMs. ModeFlat instead splices one
+	// guest directly onto the namespace's own segment, where it takes
+	// over the address and MAC the container runtime assigned -- see
+	// SetupFlat. NAT remains the default: flat mode is one VM per
+	// namespace by construction, and needs the segment to tolerate the
+	// guest speaking for the endpoint.
+	ModeNAT  = "nat"
+	ModeFlat = "flat"
+
+	defaultMode          = ModeNAT
+	defaultControlCIDR   = "169.254.100.1/24"
 	defaultBridge        = "kontur0"
 	defaultBridgeCIDR    = "169.254.100.1/24"
 	defaultExternalIface = "eth0"
@@ -29,7 +45,13 @@ const (
 	// tapPrefix is prepended to each VM's name to derive its tap device
 	// name. Linux interface names are capped at 15 bytes, which bounds
 	// how long a VM name may be.
-	tapPrefix    = "tap-"
+	tapPrefix = "tap-"
+
+	// controlTapPrefix names the flat-mode control link's tap. It is the
+	// same length as tapPrefix so both derived names fit the same VM
+	// name budget.
+	controlTapPrefix = "ctl-"
+
 	maxIfaceName = 15
 )
 
@@ -58,8 +80,29 @@ func (vm VM) TapName() string {
 	return tapPrefix + vm.Name
 }
 
+// ControlTapName is the name of the tap netshim creates for this VM's
+// flat-mode control link -- the private path between the namespace and
+// the guest that survives the guest taking over the namespace's own
+// address. Unused in NAT mode.
+func (vm VM) ControlTapName() string {
+	return controlTapPrefix + vm.Name
+}
+
 // Config holds everything netshim needs to wire up one pod's network.
 type Config struct {
+	// Mode is ModeNAT or ModeFlat. It selects which of Setup/SetupFlat
+	// applies, and therefore which of the fields below are meaningful:
+	// flat mode uses Bridge, ExternalIface, the Control* fields and a
+	// single entry in VMs, and ignores the rest.
+	Mode string
+
+	// ControlAddr and ControlNet are the address netshim holds on the
+	// flat-mode control link, and its subnet. Both nil when the control
+	// link is disabled (NETSHIM_CONTROL_CIDR set to the empty string),
+	// which leaves the guest reachable only from the container network.
+	ControlAddr net.IP
+	ControlNet  *net.IPNet
+
 	// Bridge is the name of the Linux bridge netshim creates. Every VM's
 	// tap device is attached to it.
 	Bridge string
@@ -81,9 +124,77 @@ type Config struct {
 	VMs []VM
 }
 
-// FromEnv builds a Config from the process environment and validates it.
+// FromEnv builds a Config from the process environment and validates it,
+// dispatching on NETSHIM_MODE to whichever of the two modes' own settings
+// apply.
 func FromEnv() (Config, error) {
+	switch mode := getEnvDefault(envMode, defaultMode); mode {
+	case ModeNAT:
+		return natFromEnv()
+	case ModeFlat:
+		return flatFromEnv()
+	default:
+		return Config{}, fmt.Errorf("%s: unknown mode %q, want %q or %q",
+			envMode, mode, ModeNAT, ModeFlat)
+	}
+}
+
+// flatFromEnv builds a flat-mode Config. Flat mode is one VM per network
+// namespace by construction -- there is exactly one identity to take over
+// -- so it takes a single VM name rather than NETSHIM_VMS' list, and
+// needs neither an address nor a port for it: docker (or the CNI) already
+// chose the address, and ports are published on the sandbox the ordinary
+// way rather than forwarded by rules of netshim's own.
+func flatFromEnv() (Config, error) {
 	cfg := Config{
+		Mode:          ModeFlat,
+		Bridge:        getEnvDefault(envBridge, defaultBridge),
+		ExternalIface: getEnvDefault(envExternalIface, defaultExternalIface),
+	}
+
+	name := strings.TrimSpace(os.Getenv(envVM))
+	if name == "" {
+		return Config{}, fmt.Errorf("%s is required in %s mode", envVM, ModeFlat)
+	}
+	vm := VM{Name: name}
+	if len(vm.TapName()) > maxIfaceName {
+		return Config{}, fmt.Errorf("%s: VM %q name too long: tap device name %q exceeds %d characters",
+			envVM, name, vm.TapName(), maxIfaceName)
+	}
+	cfg.VMs = []VM{vm}
+
+	// An explicitly empty NETSHIM_CONTROL_CIDR disables the control link
+	// altogether, for a guest that only ever needs to be reached from
+	// the container network. That costs "kontur exec" and the memory
+	// agent, both of which run inside this namespace and so have no
+	// other way to the guest once it holds the namespace's own address.
+	raw, ok := os.LookupEnv(envControlCIDR)
+	if ok && raw == "" {
+		return cfg, nil
+	}
+	addr, ipnet, err := net.ParseCIDR(getEnvDefault(envControlCIDR, defaultControlCIDR))
+	if err != nil {
+		return Config{}, fmt.Errorf("%s: %w", envControlCIDR, err)
+	}
+	if addr.To4() == nil {
+		return Config{}, fmt.Errorf("%s: %s is not an IPv4 address", envControlCIDR, addr)
+	}
+	if len(vm.ControlTapName()) > maxIfaceName {
+		return Config{}, fmt.Errorf("%s: VM %q name too long: control tap device name %q exceeds %d characters",
+			envVM, name, vm.ControlTapName(), maxIfaceName)
+	}
+	cfg.ControlAddr = addr.To4()
+	cfg.ControlNet = ipnet
+
+	return cfg, nil
+}
+
+// natFromEnv builds a NAT-mode Config: the private bridge subnet, one tap
+// per VM, and the port each VM is reached on through the namespace's
+// shared IP.
+func natFromEnv() (Config, error) {
+	cfg := Config{
+		Mode:          ModeNAT,
 		Bridge:        getEnvDefault(envBridge, defaultBridge),
 		ExternalIface: getEnvDefault(envExternalIface, defaultExternalIface),
 	}

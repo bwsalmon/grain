@@ -187,6 +187,13 @@ func daemon(args []string) {
 			"and set -kontur-base-ip/-kontur-base-port instead once -max-concurrent is more than 1 -- konturctl has "+
 			"no default for either and no way to vary a value shared verbatim across every slot's create call, so "+
 			"without one of those two, every slot's VM would otherwise be created with the exact same address.")
+	konturNet := fs.String("kontur-net", kontur.NetModeFlat,
+		"how a kontur VM reaches the network: \"flat\" (the default -- the guest is spliced onto the sandbox "+
+			"container's own segment and takes over the address docker assigned it, so -kontur-base-ip/"+
+			"-kontur-base-port are unnecessary and ignored) or \"nat\" (kontur's original mode: a private "+
+			"subnet per namespace, with an -ip and a forwarded -port assigned per VM). Flat mode needs a guest "+
+			"image built from kontur's own guest overlays, for the control link \"kontur exec\" arrives on -- "+
+			"packer/kontur/build-guest.sh produces one.")
 	konturBaseIP := fs.String("kontur-base-ip", "",
 		"the -ip slot \"1\"'s kontur VM gets on netshim's bridge; every later slot's is the next IPv4 address after "+
 			"it. Leave unset for a single-slot (-max-concurrent 1) deployment content to put a literal -ip in "+
@@ -270,7 +277,8 @@ func daemon(args []string) {
 		konturStateDir:     *konturStateDir,
 		konturSSHUser:      *konturSSHUser, konturWorkspace: *konturWorkspace,
 		konturExecKey:    *konturExecKey,
-		konturCreateArgs: konturCreateArgs, konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
+		konturCreateArgs: konturCreateArgs, konturNet: *konturNet,
+		konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 		konturGitProxyHost: *konturGitProxyHost,
 		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
 	}); err != nil {
@@ -325,6 +333,7 @@ type config struct {
 	konturExecKey      string
 	konturWorkspace    string
 	konturCreateArgs   []string
+	konturNet          string
 	konturBaseIP       string
 	konturBasePort     int
 	// konturGitProxyHost is the address startGitProxy advertises to a
@@ -385,6 +394,7 @@ func run(ctx context.Context, cfg config) error {
 			NamePrefix:      cfg.konturVMNamePrefix,
 			StateDir:        cfg.konturStateDir,
 			CreateArgs:      cfg.konturCreateArgs,
+			NetMode:         cfg.konturNet,
 			SSHUser:         cfg.konturSSHUser,
 			ExecKeyPath:     cfg.konturExecKey,
 			Workspace:       cfg.konturWorkspace,

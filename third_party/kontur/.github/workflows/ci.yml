@@ -1,0 +1,109 @@
+name: CI
+
+# push and pull_request cover different things and must not overlap:
+# pull_request tests the *proposed merge* (GitHub builds head into base
+# and runs against that), catching a change that only breaks once combined
+# with what has landed since; push on main tests what actually landed,
+# since two PRs that each pass alone can still conflict once both are in.
+# Firing push on every branch instead would run this whole workflow twice
+# for every push to a branch with a PR open -- image builds included.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A branch pushed several times in a minute otherwise leaves earlier runs
+# burning runners on commits nobody is waiting for.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      # internal/netshim's integration tests create real interfaces, tc
+      # filters and nftables rules, so they need CAP_NET_ADMIN and
+      # /dev/net/tun (the netlink library opens that device to create a
+      # tap). The netlink tap path needs the module present; it is
+      # normally already loaded, and if it genuinely is not, the run
+      # below fails naming the device rather than failing obscurely
+      # inside link creation.
+      - name: load tun module
+        run: sudo modprobe tun || true
+
+      # Those tests skip when they cannot reach the kernel, and a package
+      # whose every such test skipped still reports "ok" -- so the "test"
+      # step above proves nothing about them. Re-run them as root with
+      # KONTUR_NETNS_TESTS=required, which turns that silence into a
+      # failure, so a runner that cannot exercise the kernel says so
+      # instead of passing quietly.
+      #
+      # -count=1 is load-bearing: without it the unprivileged run's
+      # cached "ok" for this package would be reused and nothing would
+      # actually execute. sudo resets PATH, hence passing the runner's
+      # own through so setup-go's toolchain is still found.
+      - name: test (kernel networking, as root)
+        run: sudo env "PATH=$PATH" KONTUR_NETNS_TESTS=required go test -count=1 ./internal/netshim/...
+
+  # The image build is a separate job so it fails independently of the
+  # Go tests and runs alongside them. It needs no privileges beyond an
+  # ordinary `docker build`: the Dockerfile deliberately avoids `chroot`
+  # (which would want CAP_SYS_ADMIN) by promoting the guest rootfs to an
+  # image stage and using `mke2fs -d`, so there is nothing special to
+  # arrange here.
+  #
+  # Both guest variants are built, not just the default: the Debian and
+  # Alpine rootfs stages carry separate overlays and separate
+  # service-enabling logic (see deploy/guest-image/README.md), so
+  # building only one leaves the other's changes uncompiled.
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        guest_distro: [debian, alpine]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The build fetches a pinned cloud-hypervisor release and kernel
+      # and runs debootstrap/apk against distro mirrors, so it is slow
+      # from cold. The layer cache is scoped per guest variant, since the
+      # two share every stage up to the rootfs and nothing after it.
+      - name: docker build (GUEST_DISTRO=${{ matrix.guest_distro }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: GUEST_DISTRO=${{ matrix.guest_distro }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.guest_distro }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.guest_distro }}

@@ -3,6 +3,8 @@ package staticpod
 import (
 	"strings"
 	"testing"
+
+	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
 // envValue returns the "value:" line following a "- name: <key>" entry in
@@ -144,5 +146,58 @@ func TestManifestFileNameAndPodName(t *testing.T) {
 	}
 	if got, want := PodName("web"), "kontur-vm-web"; got != want {
 		t.Errorf("PodName() = %q, want %q", got, want)
+	}
+}
+
+func TestRender_FlatMode(t *testing.T) {
+	s := Defaults()
+	s.Name = "web"
+	s.DiskImage = "/images/disk.img"
+	s.NetMode = netshim.ModeFlat
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	if got, want := envValue(t, out, "NETSHIM_MODE"), netshim.ModeFlat; got != want {
+		t.Errorf("NETSHIM_MODE = %q, want %q", got, want)
+	}
+	if got, want := envValue(t, out, "NETSHIM_VM"), "web"; got != want {
+		t.Errorf("NETSHIM_VM = %q, want %q", got, want)
+	}
+	// NAT-only settings must not leak into a flat-mode manifest, where
+	// they describe a subnet and forwarding rules that do not exist.
+	for _, unwanted := range []string{"NETSHIM_VMS", "NETSHIM_GUEST_PORT", "NETSHIM_BRIDGE_CIDR", "CHV_NET"} {
+		if strings.Contains(out, "- name: "+unwanted) {
+			t.Errorf("manifest sets %s in flat mode:\n%s", unwanted, out)
+		}
+	}
+	// exec goes via the control link, since the guest now answers to the
+	// namespace's own address.
+	if got, want := envValue(t, out, "KONTUR_EXEC_ADDR"), "169.254.100.2:22"; got != want {
+		t.Errorf("KONTUR_EXEC_ADDR = %q, want %q", got, want)
+	}
+}
+
+func TestRender_FlatModeWithoutControlLinkOmitsExecAddr(t *testing.T) {
+	s := Defaults()
+	s.Name = "web"
+	s.DiskImage = "/images/disk.img"
+	s.NetMode = netshim.ModeFlat
+	s.ControlCIDR = ""
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if strings.Contains(out, "KONTUR_EXEC_ADDR") {
+		t.Errorf("manifest sets KONTUR_EXEC_ADDR with no control link, which has no address to dial:\n%s", out)
 	}
 }

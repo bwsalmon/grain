@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func writeFixture(t *testing.T, content string) string {
@@ -119,5 +123,49 @@ func TestHexLEToIPv4_InvalidInput(t *testing.T) {
 	}
 	if _, err := hexLEToIPv4("AABB"); err == nil {
 		t.Fatal("expected error for too-short input, got nil")
+	}
+}
+
+// TestSignalPressure_ExplicitHost covers the flat-mode path: given a host
+// address, the agent signals it directly rather than falling back to this
+// guest's default route (which in flat mode leads out to the container
+// network, not to the host side of this VM).
+func TestSignalPressure_ExplicitHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	host, portStr, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+
+	got := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			got <- ""
+			return
+		}
+		defer conn.Close()
+		line, _ := bufio.NewReader(conn).ReadString('\n')
+		got <- line
+	}()
+
+	signalPressure(host, port, 42.5)
+
+	select {
+	case line := <-got:
+		if want := "PRESSURE 42.50\n"; line != want {
+			t.Errorf("received %q, want %q", line, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Errorf("nothing arrived on the listener")
 	}
 }

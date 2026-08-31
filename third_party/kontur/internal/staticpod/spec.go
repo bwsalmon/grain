@@ -21,6 +21,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
 const (
@@ -86,6 +88,32 @@ type VMSpec struct {
 	BridgeCIDR    string `json:"bridgeCIDR"`
 	ExternalIface string `json:"externalIface"`
 
+	// NetMode selects how the guest reaches the network: netshim.ModeNAT
+	// (the default) puts it behind a private subnet on Bridge, sharing
+	// the namespace's IP through Port. netshim.ModeFlat instead splices
+	// it straight onto the namespace's own segment, where it takes over
+	// the address and MAC the container runtime assigned -- so IP, Port,
+	// GuestPort and BridgeCIDR are all unused, and ports are published
+	// on the sandbox itself (see DockerRunOpts) like any other
+	// container's.
+	NetMode string `json:"netMode,omitempty"`
+
+	// ControlCIDR is the address netshim holds on the flat-mode control
+	// link, the private second NIC that keeps "kontur exec" and the
+	// memory agent able to reach a guest that now answers to the
+	// namespace's own address. Set to the empty string to omit the
+	// control link entirely. Unused in NAT mode.
+	ControlCIDR string `json:"controlCIDR,omitempty"`
+
+	// DockerRunOpts are extra options passed verbatim to the "docker
+	// run" that creates the network namespace holder (-backend docker
+	// only). Port publishing, network membership and DNS all have to be
+	// set on the container that owns the namespace, and cannot be added
+	// afterwards by the containers that join it, so this is the only
+	// place they can go -- e.g. []string{"-p", "8080:80", "--network",
+	// "mynet"}.
+	DockerRunOpts []string `json:"dockerRunOpts,omitempty"`
+
 	ImagesHostPath string `json:"imagesHostPath"`
 
 	// DiskHostPath is the host directory a VM's own private writable
@@ -147,6 +175,8 @@ func Defaults() VMSpec {
 		MemoryMB:                      2048,
 		ShutdownTimeout:               "20s",
 		GuestPort:                     80,
+		NetMode:                       netshim.ModeNAT,
+		ControlCIDR:                   "169.254.100.1/24",
 		Bridge:                        "kontur0",
 		BridgeCIDR:                    "169.254.100.1/24",
 		ExternalIface:                 "eth0",
@@ -201,18 +231,40 @@ func (s *VMSpec) Validate() error {
 			return fmt.Errorf("disk-hostpath is required when disk-readonly is false")
 		}
 	}
-	if s.IP == "" {
-		return fmt.Errorf("ip is required")
-	}
-	ip := net.ParseIP(s.IP)
-	if ip == nil || ip.To4() == nil {
-		return fmt.Errorf("invalid IPv4 address %q", s.IP)
-	}
-	if s.Port < 1 || s.Port > 65535 {
-		return fmt.Errorf("port %d out of range 1-65535", s.Port)
-	}
-	if s.GuestPort < 1 || s.GuestPort > 65535 {
-		return fmt.Errorf("guest port %d out of range 1-65535", s.GuestPort)
+	s.NetMode = s.NetModeOrDefault()
+	switch s.NetMode {
+	case netshim.ModeNAT:
+		if s.IP == "" {
+			return fmt.Errorf("ip is required")
+		}
+		ip := net.ParseIP(s.IP)
+		if ip == nil || ip.To4() == nil {
+			return fmt.Errorf("invalid IPv4 address %q", s.IP)
+		}
+		if s.Port < 1 || s.Port > 65535 {
+			return fmt.Errorf("port %d out of range 1-65535", s.Port)
+		}
+		if s.GuestPort < 1 || s.GuestPort > 65535 {
+			return fmt.Errorf("guest port %d out of range 1-65535", s.GuestPort)
+		}
+	case netshim.ModeFlat:
+		// Flat mode takes its address from the container runtime rather
+		// than from -ip, so passing one is a sign the caller expects
+		// netshim to assign it. Reject it rather than silently ignoring
+		// it and handing them a guest on a different address entirely.
+		if s.IP != "" {
+			return fmt.Errorf("ip must not be set in %q net mode: the container runtime assigns the address the guest takes over (pass -ip \"\" when switching an existing VM over)", netshim.ModeFlat)
+		}
+		if ctlTap := "ctl-" + s.Name; len(ctlTap) > 15 {
+			return fmt.Errorf("name %q too long: control tap device name %q would exceed 15 characters", s.Name, ctlTap)
+		}
+		if s.ControlCIDR != "" {
+			if _, _, err := net.ParseCIDR(s.ControlCIDR); err != nil {
+				return fmt.Errorf("invalid control CIDR %q: %w", s.ControlCIDR, err)
+			}
+		}
+	default:
+		return fmt.Errorf("net mode must be %q or %q, got %q", netshim.ModeNAT, netshim.ModeFlat, s.NetMode)
 	}
 	if s.CPUs < 1 {
 		return fmt.Errorf("cpus must be at least 1, got %d", s.CPUs)
@@ -226,9 +278,13 @@ func (s *VMSpec) Validate() error {
 	if _, err := time.ParseDuration(s.ShutdownTimeout); err != nil {
 		return fmt.Errorf("invalid shutdown timeout %q: %w", s.ShutdownTimeout, err)
 	}
-	gateway, netmask, err := gatewayAndNetmask(s.BridgeCIDR)
-	if err != nil {
-		return fmt.Errorf("invalid bridge CIDR %q: %w", s.BridgeCIDR, err)
+	var gateway, netmask string
+	if s.NetMode == netshim.ModeNAT {
+		var err error
+		gateway, netmask, err = gatewayAndNetmask(s.BridgeCIDR)
+		if err != nil {
+			return fmt.Errorf("invalid bridge CIDR %q: %w", s.BridgeCIDR, err)
+		}
 	}
 	s.Backend = s.BackendOrDefault()
 	if s.Backend != BackendStaticPod && s.Backend != BackendDocker {
@@ -240,10 +296,54 @@ func (s *VMSpec) Validate() error {
 		if s.DiskReadOnly {
 			root = "ro"
 		}
-		s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s ip=%s::%s:%s::eth0:off", root, s.IP, gateway, netmask)
+		// Flat mode leaves the ip= parameter off: the address is only
+		// knowable once the sandbox exists, so the VM container appends
+		// it at boot from what it reads off the namespace itself (see
+		// cmd/kontur's applyFlatNet).
+		if s.NetMode == netshim.ModeFlat {
+			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s", root)
+		} else {
+			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s ip=%s::%s:%s::eth0:off", root, s.IP, gateway, netmask)
+		}
 		s.CmdlineAuto = true
 	}
 	return nil
+}
+
+// NetModeOrDefault returns s.NetMode, treating an empty value (a spec
+// saved before this field existed) as netshim.ModeNAT.
+func (s VMSpec) NetModeOrDefault() string {
+	if s.NetMode == "" {
+		return netshim.ModeNAT
+	}
+	return s.NetMode
+}
+
+// IsFlat reports whether this VM is attached in flat mode.
+func (s VMSpec) IsFlat() bool {
+	return s.NetModeOrDefault() == netshim.ModeFlat
+}
+
+// ExecAddr is the address "kontur exec" dials to reach this VM's guest
+// sshd, as seen from inside the shared network namespace.
+//
+// In NAT mode that is the guest's own address on the private bridge. In
+// flat mode the guest holds the *namespace's* address, so dialing it from
+// in here would reach the local stack instead -- the control link's
+// address is the only way back in, and without a control link there is
+// no path at all.
+func (s VMSpec) ExecAddr() string {
+	if s.NetModeOrDefault() == netshim.ModeNAT {
+		return net.JoinHostPort(s.IP, "22")
+	}
+	if s.ControlCIDR == "" {
+		return ""
+	}
+	addr, _, err := net.ParseCIDR(s.ControlCIDR)
+	if err != nil {
+		return ""
+	}
+	return net.JoinHostPort(netshim.ControlGuestIP(addr).String(), "22")
 }
 
 // WritableDiskDir is the host directory holding this VM's own private,

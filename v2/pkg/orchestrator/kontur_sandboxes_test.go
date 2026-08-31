@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/kontur"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
@@ -130,9 +131,9 @@ func TestKonturSandboxesRecreateDeletesAndRecreatesTheVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker",
+		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat",
 		"vm delete grain-test-slot-0 -state-dir " + stateDir,
-		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker",
+		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {
@@ -222,7 +223,7 @@ func TestKonturSandboxesCreatesVMOnFirstUseAndReusesAfter(t *testing.T) {
 	}
 	createCalls := 0
 	for _, line := range splitNonEmptyLines(string(data)) {
-		if line == "vm create grain-test-slot-0 -state-dir "+stateDir+" -backend docker" {
+		if line == "vm create grain-test-slot-0 -state-dir "+stateDir+" -backend docker -net flat" {
 			createCalls++
 		}
 	}
@@ -365,6 +366,7 @@ func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
+		NetMode:           kontur.NetModeNAT,
 		BaseIP:            "169.254.100.2",
 		BasePort:          30080,
 		ReadyPollInterval: time.Millisecond,
@@ -387,8 +389,8 @@ func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create grain1 -state-dir " + stateDir + " -backend docker -ip 169.254.100.2 -port 30080",
-		"vm create grain2 -state-dir " + stateDir + " -backend docker -ip 169.254.100.3 -port 30081",
+		"vm create grain1 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.2 -port 30080",
+		"vm create grain2 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.3 -port 30081",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {
@@ -435,7 +437,7 @@ func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -disk /images/current/disk.img -cpus 4 -memory-mb 8192"
+	want := "vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192"
 	got := splitNonEmptyLines(string(data))
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("kontur invocations = %v, want [%q]", got, want)
@@ -800,5 +802,83 @@ func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testi
 	}
 	if !strings.Contains(err.Error(), "kontur-vm-grain-test-slot-0") {
 		t.Errorf("error = %q, want it to name the container", err)
+	}
+}
+
+// TestKonturSandboxesFlatModeOmitsAddressing covers the default mode:
+// docker assigns the guest's address, so no -ip is derived or passed --
+// konturctl rejects one outright under flat mode -- and no -port either,
+// since nothing forwards one. BaseIP/BasePort are set here anyway, as a
+// deployment's own systemd unit may still carry them from before the
+// switch, to confirm they are ignored rather than fatal.
+func TestKonturSandboxesFlatModeOmitsAddressing(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		BaseIP:            "169.254.100.2",
+		BasePort:          30080,
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	for _, slot := range []string{"1", "2"} {
+		if _, err := k.ToolsFor(context.Background(), slot); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"vm create grain1 -state-dir " + stateDir + " -backend docker -net flat",
+		"vm create grain2 -state-dir " + stateDir + " -backend docker -net flat",
+	}
+	got := splitNonEmptyLines(string(data))
+	if len(got) != len(want) {
+		t.Fatalf("kontur invocations = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestKonturSandboxesFlatModeIsTheDefault pins the default down on its
+// own: an unset NetMode has to mean flat, since that is what every
+// deployment gets without saying anything.
+func TestKonturSandboxesFlatModeIsTheDefault(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+	})
+	if _, err := k.ToolsFor(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "-net " + kontur.NetModeFlat; !strings.Contains(string(data), want) {
+		t.Errorf("kontur invocation = %q, want it to carry %q", string(data), want)
 	}
 }

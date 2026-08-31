@@ -49,6 +49,33 @@ const DefaultStateDir = "/var/lib/kontur/vms"
 // sandboxes to run under it rather than the default static-pod backend.
 const BackendDocker = "docker"
 
+// NetModeFlat and NetModeNAT are the values `konturctl vm create -net`
+// takes -- bwsalmon/kontur's own netshim.ModeFlat/ModeNAT, duplicated
+// here for the same "read the shape, don't import the writer" reason
+// BackendDocker and PodName are.
+//
+// NAT mode puts every guest on a private subnet inside its network
+// namespace and shares that namespace's single IP between them with DNAT
+// and masquerade rules, so each VM needs an address and an external port
+// assigned to it. Flat mode splices one guest straight onto the segment
+// the container runtime already put the namespace on, where it takes over
+// the address and MAC assigned to it -- so nothing has to assign either,
+// and the guest reaches the network as an ordinary container does.
+//
+// Flat mode also gives the guest a second NIC: it now answers to the
+// namespace's own address, so anything inside that namespace dialing it
+// would reach the local stack instead, and "kontur exec" (which is how
+// this repo reaches a guest at all -- mcp.DockerExecRunner) goes over a
+// private control link instead. The guest has to configure its end of
+// that link, which kontur's own guest overlay does in its
+// kontur-control-net service; a guest image not built from that overlay
+// has no route in at all under this mode. packer/kontur/build-guest.sh
+// builds on it for exactly this reason.
+const (
+	NetModeFlat = "flat"
+	NetModeNAT  = "nat"
+)
+
 // PodName returns the static pod name kontur gives a VM's manifest --
 // bwsalmon/kontur's internal/staticpod.PodName, duplicated here rather
 // than imported for the reason the package doc gives: this is a name

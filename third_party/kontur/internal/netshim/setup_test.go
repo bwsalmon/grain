@@ -10,13 +10,50 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// requireRoot skips tests that need to create real network interfaces and
-// nftables rules, which requires CAP_NET_ADMIN (in practice, root).
+// requireNetnsTestsEnv names the environment variable that turns
+// requireRoot's skips into failures. Set it to "required" in any
+// automated run that is *supposed* to exercise the kernel, so a
+// misconfigured environment reports itself instead of quietly passing.
+const requireNetnsTestsEnv = "KONTUR_NETNS_TESTS"
+
+// requireRoot skips tests that need to create real network interfaces,
+// nftables rules and tc filters, which requires CAP_NET_ADMIN (in
+// practice, root) and access to /dev/net/tun -- the netlink library
+// creates a tap by opening that device rather than over rtnetlink, so a
+// root run without it fails deep inside link creation rather than here.
+//
+// Skipping is the right default: these tests cannot run on a developer's
+// machine without sudo. It is also a trap, because `go test ./...`
+// reports a package whose every kernel-touching test skipped as "ok",
+// and skips are invisible without -v -- so a green run says nothing
+// about whether the splice actually carries a packet. Setting
+// KONTUR_NETNS_TESTS=required turns that silence into a failure.
 func requireRoot(t *testing.T) {
 	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("requires root/CAP_NET_ADMIN to manipulate network interfaces")
+
+	var reason string
+	switch {
+	case os.Geteuid() != 0:
+		reason = fmt.Sprintf("requires root/CAP_NET_ADMIN to manipulate network interfaces (euid %d)", os.Geteuid())
+	case !tunDeviceAvailable():
+		reason = "requires /dev/net/tun, which the netlink library opens to create a tap"
+	default:
+		return
 	}
+
+	if os.Getenv(requireNetnsTestsEnv) == "required" {
+		t.Fatalf("%s=required, but this test cannot run here: %s", requireNetnsTestsEnv, reason)
+	}
+	t.Skip(reason)
+}
+
+func tunDeviceAvailable() bool {
+	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
 }
 
 // TestSetup_Idempotent exercises Setup against the real network stack,

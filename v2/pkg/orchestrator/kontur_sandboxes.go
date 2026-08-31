@@ -69,6 +69,28 @@ type KonturConfig struct {
 	// ReadyPollInterval is how often ToolsFor retries PodIP while waiting
 	// out ReadyTimeout (2 seconds if zero).
 	ReadyPollInterval time.Duration
+	// NetMode selects how a VM reaches the network: kontur.NetModeFlat
+	// (the default, and what an empty value means) or kontur.NetModeNAT.
+	//
+	// Flat mode is the default because it is the one that matches what
+	// this package actually needs. NAT mode's whole apparatus -- a
+	// private subnet, an address per VM, an external port per VM, and
+	// the BaseIP/BasePort derivation below that exists solely to assign
+	// them -- serves callers reaching a guest from *outside* its network
+	// namespace, which this package deliberately does not do: its
+	// transport execs into the VM's own container (mcp.DockerExecRunner)
+	// and the SSH-to-a-forwarded-port transport that needed any of it was
+	// removed. Under flat mode docker assigns the address and BaseIP/
+	// BasePort are ignored entirely.
+	//
+	// Flat mode needs a guest image built from kontur's own guest
+	// overlays, for the control link "kontur exec" arrives on -- see
+	// kontur.NetModeFlat's own doc comment. packer/kontur/build-guest.sh
+	// produces one; a deployment pulling a *prebuilt* guest image from
+	// GRAIN_KONTUR_IMAGE_BUCKET has to republish it from that build
+	// before switching, or every sandbox becomes unreachable.
+	NetMode string
+
 	// BaseIP, if set, is the "-ip" ensure passes `konturctl vm create` for
 	// slot "1" (model.SlotNames' own 1-based, all-numeric contract); every
 	// other slot gets the next IPv4 address after it, offset by its own
@@ -97,6 +119,15 @@ type KonturConfig struct {
 	DefaultMemoryMB int
 }
 
+// netMode returns c.NetMode, treating an empty value as the default,
+// kontur.NetModeFlat.
+func (c KonturConfig) netMode() string {
+	if c.NetMode == "" {
+		return kontur.NetModeFlat
+	}
+	return c.NetMode
+}
+
 func (c KonturConfig) stateDir() string {
 	if c.StateDir != "" {
 		return c.StateDir
@@ -122,7 +153,10 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // for slot's VM beyond a name and -state-dir: -backend docker first, the
 // only backend this package supports (its transport reaches a guest by
 // exec'ing into that VM's docker container, which no other backend gives
-// it), so a caller's own CreateArgs never needs to repeat it, then
+// it), so a caller's own CreateArgs never needs to repeat it, then "-net"
+// (see NetMode; under the default, flat, the -ip/-port pair below is
+// skipped entirely because the container runtime assigns the address),
+// then
 // cfg.CreateArgs verbatim, then DefaultCPUs/DefaultMemoryMB (if set) as
 // "-cpus"/"-memory-mb", then a "-ip"/"-port" pair derived from
 // BaseIP/BasePort and slot's own number last -- each later group winning
@@ -131,12 +165,21 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // applied consistently, not overridden per slot by a CreateArgs list that
 // is otherwise identical across every slot's call.
 func (c KonturConfig) createArgs(slot string) ([]string, error) {
-	args := append([]string{"-backend", kontur.BackendDocker}, c.CreateArgs...)
+	args := append([]string{"-backend", kontur.BackendDocker, "-net", c.netMode()}, c.CreateArgs...)
 	if c.DefaultCPUs != 0 {
 		args = append(args, "-cpus", strconv.Itoa(c.DefaultCPUs))
 	}
 	if c.DefaultMemoryMB != 0 {
 		args = append(args, "-memory-mb", strconv.Itoa(c.DefaultMemoryMB))
+	}
+	// Flat mode takes its address from the container runtime, and
+	// konturctl rejects "-ip" outright under it rather than ignoring it.
+	// BaseIP/BasePort are dropped here rather than treated as a
+	// misconfiguration because a deployment's own systemd unit may still
+	// carry them from before the switch, and failing every create over a
+	// pair of now-meaningless flags would be worse than ignoring them.
+	if c.netMode() == kontur.NetModeFlat {
+		return args, nil
 	}
 	if c.BaseIP == "" && c.BasePort == 0 {
 		return args, nil

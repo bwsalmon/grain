@@ -120,6 +120,12 @@ func runVM() error {
 		return err
 	}
 
+	if netshim.FlatEnabled() {
+		if err := applyFlatNet(&cfg); err != nil {
+			return err
+		}
+	}
+
 	runner := hypervisor.New(cfg)
 	if err := runner.Start(os.Stdout, os.Stderr); err != nil {
 		return err
@@ -348,10 +354,54 @@ func runNetshim() error {
 		return err
 	}
 
+	if cfg.Mode == netshim.ModeFlat {
+		if err := netshim.SetupFlat(cfg); err != nil {
+			return err
+		}
+		log.Printf("network shim ready: %s spliced onto %s", cfg.VMs[0].TapName(), cfg.ExternalIface)
+		return nil
+	}
+
 	if err := netshim.Setup(cfg); err != nil {
 		return err
 	}
 
 	log.Printf("network shim ready: bridge %s (%s), %d VM(s)", cfg.Bridge, cfg.BridgeNet, len(cfg.VMs))
+	return nil
+}
+
+// applyFlatNet fills in the guest configuration a flat-mode VM cannot be
+// told in advance: the address, MAC and MTU the container runtime chose
+// for this network namespace, which are only knowable once the sandbox
+// exists.
+//
+// It is deliberately done here, from inside the namespace, rather than
+// computed by whoever created the sandbox and passed down as environment.
+// Reading them back off the external interface works identically whether
+// the sandbox came from "docker run", a kubelet, or something else, so
+// the same image behaves the same way under all of them -- and there is
+// no second copy of the identity to drift out of date.
+//
+// This relies on netshim having left that interface addressed, which
+// SetupFlat documents it does.
+func applyFlatNet(cfg *config.Config) error {
+	ncfg, err := netshim.FromEnv()
+	if err != nil {
+		return err
+	}
+	id, err := netshim.DiscoverIdentity(ncfg.ExternalIface)
+	if err != nil {
+		return err
+	}
+
+	guest := netshim.FlatGuestConfig(ncfg, id)
+	cfg.Nets = guest.Nets
+	cfg.Cmdline = netshim.WithIPParam(cfg.Cmdline, guest.IPParam)
+
+	log.Printf("flat mode: guest takes over %s as %s (mac %s, mtu %d)",
+		id.Iface, id.IP, id.MAC, id.MTU)
+	if guest.ControlIP != "" {
+		log.Printf("flat mode: control link expects the guest at %s on its second NIC", guest.ControlIP)
+	}
 	return nil
 }
