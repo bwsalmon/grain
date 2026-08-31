@@ -11,3 +11,12 @@ import { cleanup } from "@testing-library/react";
 // explicit everywhere else here), each render would otherwise pile up
 // in the same jsdom document instead of unmounting between tests.
 afterEach(cleanup);
+
+// App.jsx (bwsalmon/agents#548) reads and writes window.location as
+// part of keeping the address bar in sync with the current sub-page.
+// jsdom's window -- and so its location -- outlives any one test within
+// a file, so without resetting this too, one test's navigation would
+// otherwise leak into the next test's initial render.
+afterEach(() => {
+  window.history.replaceState(null, "", "/");
+});
