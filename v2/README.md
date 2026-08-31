@@ -966,6 +966,36 @@ with the same `store.Observe` calls a real GitHub-sync component would
 make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
 
+`self-debug` and `self-repair` (bwsalmon/agents#540, "configuration
+mode") went from `ui.DefaultCapabilities` names with nothing behind them
+to real `model.CapabilityProvider`s -- `pkg/capability/selfdebug` and
+`pkg/capability/selfrepair` -- but what each one grants is not material
+in a sandbox or text in a prompt, `model.CapabilityProvider`'s only two
+channels; it is tools. `orchestrator.Config.GrantTools` is the new,
+narrow seam that adds: a capability name to a function building extra
+`mcp.Tool`s, consulted by `runOne` only for an `Interactive` task, and
+kept as a caller-supplied map rather than a fifth `CapabilityProvider`
+method on purpose, so `model/capability.go`'s own "a provider is handed
+no Runner" stays true of the package itself even though a deployment can
+now wire one in from outside it. `selfdebug.SourceTools` is read-only --
+`read_grain_source`/`list_grain_source`, confined to whatever directory
+a deployment's `-upgrade-src-dir` already names, needing no confirmation
+of any kind, since nothing it exposes can change anything.
+`selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
+runs a shell command directly against the same host `grain daemon`
+itself runs on -- no sandbox, no adapter, the real machine -- so every
+call posts the command into the task's own chat and blocks
+(`selfrepair.Confirm`, polling `Store.Comments`) until a human replies
+there with approve or deny, or a timeout refuses it for them. That block
+is a real synchronous wait inside one tool call, unlike every other
+human-in-the-loop primitive here (`ask_question` parks the whole run and
+picks a reply up on the next dispatch) -- it only works because
+`gemini.Framework.Run` registers a run's tools in-process and so already
+holds the same `*model.Store` connection the reply lands on;
+`claude.Framework.Run` ignores `RunConfig.Tools` entirely and isn't
+wired into any real deployment, so this is, for now, a gemini-only
+capability in practice, same as the rest of `Config.GrantTools`.
+
 ## The UI
 
 `pkg/ui`, served by `cmd/grain`'s "daemon" subcommand (bwsalmon/agents#237,

@@ -246,6 +246,20 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		return err
 	}
 
+	// Config.GrantTools' own doc comment explains why this is gated on
+	// Interactive and keyed by raw Grants rather than a resolved
+	// GrantResolution: every capability it is wired for today is a GRANT
+	// capability (model.ProvisionGrant) whose Resolve always honours, so
+	// there is no "granted but refused" case to miss by not waiting for
+	// prepareCapabilities below.
+	if deps.Config.GrantTools != nil && task.Interactive {
+		for _, g := range task.Grants {
+			if build, ok := deps.Config.GrantTools[g.Capability]; ok {
+				tools = append(tools, build(deps.Store, task.ID)...)
+			}
+		}
+	}
+
 	var sandboxRoot string
 	if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
 		rooted, ok := deps.Sandboxes.(rootedSandboxes)

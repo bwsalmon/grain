@@ -106,6 +106,33 @@ type Config struct {
 	// caller wants this, and RunDispatch leaves agent.RunConfig's own
 	// TranscriptPath empty (bwsalmon/agents#467).
 	TranscriptDir string
+	// GrantTools maps a capability name to a function building the extra
+	// MCP tools a task holding that grant gets added to its own
+	// dispatched run -- runOne's own hook for a capability whose effect
+	// is which tools a run has, rather than only what Materialize's own
+	// Placements put in the sandbox or what PromptSection adds to the
+	// prompt (model.CapabilityProvider's four-moment contract has no
+	// room for either). selfdebug's read-only source tools and
+	// selfrepair's confirmation-gated host command tool
+	// (bwsalmon/agents#540) are the two capabilities that need this
+	// today.
+	//
+	// Kept as a caller-supplied map rather than a fifth method on
+	// CapabilityProvider deliberately: model/capability.go's own doc
+	// comment already explains why a provider is handed no Runner, and a
+	// method returning live mcp.Tools would be exactly the kind of
+	// convention that comment says a structural contract should avoid.
+	// A deployment that wants a grant to add tools wires it here
+	// instead, entirely outside that package.
+	//
+	// runOne only ever consults this for an Interactive task
+	// (model.Task.Interactive) -- every capability it is meant for today
+	// assumes a human is actually watching the task's own chat closely
+	// enough to answer a tool's own confirmation prompt (selfrepair.
+	// Confirm) within its timeout, which is not a safe assumption for an
+	// unattended dispatch. nil, or a capability with no entry, adds no
+	// tools.
+	GrantTools map[string]func(store *model.Store, taskID string) []mcp.Tool
 }
 
 func (c Config) cancelPollInterval() time.Duration {

@@ -118,19 +118,19 @@ func TestCapabilityProviders(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "no gcp project configured still registers github-sandbox",
+			name: "no gcp project configured still registers github-sandbox, self-debug and self-repair",
 			cfg:  config{},
-			want: []string{"github-sandbox"},
+			want: []string{"github-sandbox", "self-debug", "self-repair"},
 		},
 		{
-			name: "a gcp project with no agent service account only mints gemini-key, plus github-sandbox",
+			name: "a gcp project with no agent service account only mints gemini-key, plus github-sandbox, self-debug and self-repair",
 			cfg:  config{gcpProject: "proj"},
-			want: []string{"gemini-key", "github-sandbox"},
+			want: []string{"gemini-key", "github-sandbox", "self-debug", "self-repair"},
 		},
 		{
-			name: "a gcp project with an agent service account mints both, plus github-sandbox",
+			name: "a gcp project with an agent service account mints both, plus github-sandbox, self-debug and self-repair",
 			cfg:  config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"},
-			want: []string{"gcp-key", "gemini-key", "github-sandbox"},
+			want: []string{"gcp-key", "gemini-key", "github-sandbox", "self-debug", "self-repair"},
 		},
 	}
 	for _, tc := range cases {
