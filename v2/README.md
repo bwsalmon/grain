@@ -1030,6 +1030,19 @@ is what holds that: its fake docker cannot answer an address lookup and
 nothing is listening on any port, so getting tools back at all is the
 proof none of it was consulted.
 
+What a fake cannot settle is whether `kontur exec` authenticates against
+*this* guest image at all — that rests on kontur's own `KONTUR_EXEC_KEY`
+handling and on `packer/kontur/provision.sh`'s `authorized_keys`, neither
+of which this repo's fakes own — nor whether `KONTUR_EXEC_ADDR` is really
+set to somewhere the guest answers, nor whether exit statuses and stdin
+survive both hops.
+`TestKonturSandboxesDockerExecAgainstARealDockerBackedVM`
+(`kontur_docker_real_test.go`) covers all four against a real
+konturctl/docker/cloud-hypervisor VM under real KVM, and skips under the
+same conditions the SSH test beside it does — so it never runs on a
+hosted runner, and does run wherever kontur's prerequisites genuinely
+exist.
+
 Two details are worth knowing before turning it on:
 
 - **`-kontur-docker-exec-key` is a path inside the VM's container**, not

@@ -514,3 +514,244 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// TestKonturSandboxesDockerExecAgainstARealDockerBackedVM is the
+// docker-exec transport's (KonturConfig.DockerExec) counterpart to
+// TestKonturSandboxesToolsForAgainstARealDockerBackedVM above: the same
+// real konturctl, real docker, real cloud-hypervisor guest under real
+// KVM, reached through `docker exec <vm container> kontur exec` instead
+// of SSH to netshim's externally forwarded port.
+//
+// The fake-docker tests in kontur_sandboxes_test.go can prove that
+// nothing looks a VM's address up under this transport, because a fake
+// can be made to fail that lookup. What they cannot prove is the half
+// this test exists for, all of which depends on code neither this repo
+// nor its fakes own:
+//
+//   - That `kontur exec` authenticates against *this* guest image at all.
+//     bwsalmon/kontur's own Dockerfile generates a dedicated keypair and
+//     authorizes it on the guest rootfs that same Dockerfile builds
+//     (its exec-keypair stage), but a grain deployment never boots that
+//     guest -- packer/kontur/build.sh's output, whose only
+//     authorized_keys entry is the operator key, is what -disk points at.
+//     So this transport only works here because KONTUR_EXEC_KEY can be
+//     pointed at a key the guest does authorize, which is a claim about
+//     kontur's env handling and this image's authorized_keys that only a
+//     real run can settle.
+//   - That KONTUR_EXEC_ADDR is really set, by the real internal/dockervm,
+//     to somewhere the guest really answers on. Everything else here
+//     rests on it, and nothing in this repo sets it.
+//   - That a guest command's exit status survives both hops (the guest's
+//     sshd to `kontur exec`, then `kontur exec`'s own os.Exit to
+//     `docker exec`), including the exit 1 that DockerExecRunner has to
+//     tell apart from its own failure to reach the guest at all.
+//   - That stdin survives both hops, which write_file depends on (it
+//     pipes content into `dd` rather than embedding it in a command
+//     line).
+//
+// It skips under exactly the same conditions the tests above do, and
+// shares their build helpers, so it costs a host without docker/KVM
+// nothing.
+func TestKonturSandboxesDockerExecAgainstARealDockerBackedVM(t *testing.T) {
+	konturDockerRealTestPrereqs(t)
+
+	konturctlDir := buildKonturctl(t)
+	image := buildKonturDockerImage(t)
+	imagesHostPath, sshKeyPath := buildKonturGuestImage(t)
+
+	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// buildKonturGuestImage generates its throwaway keypair *into*
+	// imagesHostPath, and internal/dockervm mounts that same directory
+	// read-only at /images in every VM container it starts -- so the
+	// private key DockerExecKeyPath names is already somewhere the
+	// container can read it, with nothing to copy and no mount to add.
+	// That is the same arrangement KonturConfig.DockerExecKeyPath's own
+	// doc comment recommends to a real deployment, exercised here rather
+	// than only described.
+	//
+	// Asserted rather than assumed: if that helper ever puts its keypair
+	// somewhere else, the failure this would otherwise produce is an
+	// authentication error deep inside a guest, which says nothing about
+	// why.
+	if got, want := filepath.Dir(sshKeyPath), imagesHostPath; got != want {
+		t.Fatalf("guest image helper put its SSH key in %s, want it inside the images directory %s that gets mounted at /images -- this test's DockerExecKeyPath depends on those being the same place", got, want)
+	}
+	dockerExecKey := "/images/" + filepath.Base(sshKeyPath)
+
+	stateDir := t.TempDir()
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		// "kde-" + a one-digit slot, staying under the 11-byte cap
+		// KonturConfig.NamePrefix's own doc comment explains, and
+		// distinct from the two tests above so all three can run back to
+		// back.
+		NamePrefix: "kde-",
+		Backend:    kontur.BackendDocker,
+		StateDir:   stateDir,
+		CreateArgs: []string{
+			"-kontur-image", image,
+			"-images-hostpath", imagesHostPath,
+			"-disk", "/images/disk.img",
+			"-kernel", "/images/vmlinuz",
+			"-initramfs", "/images/initrd.img",
+			// Still 22, and still not optional -- konturctl's own default
+			// is 80. This transport never goes through the DNAT rule that
+			// forwards to it, but konturctl validates and netshim
+			// installs the rule either way, so leaving it wrong would
+			// only mean building a VM whose forwarded port goes nowhere.
+			"-guest-port", "22",
+			// Distinct from both tests above (169.254.100.2:31080 and
+			// 169.254.100.20+:31090+) so none of the three fight over an
+			// address if run back to back without a clean teardown.
+			"-ip", "169.254.100.40",
+			"-port", "31110",
+		},
+		SSHUser: "debian",
+		// Still set, and still the host path: nothing on this transport
+		// reads it, but leaving it out would make this config differ from
+		// a real deployment's in a way this test has no reason to.
+		SSHKey:            sshKeyPath,
+		DockerExec:        true,
+		DockerExecKeyPath: dockerExecKey,
+		Workspace:         "/home/debian",
+		ReadyTimeout:      3 * time.Minute,
+		ReadyPollInterval: time.Second,
+	})
+
+	name := k.VMNameFor("1")
+	t.Cleanup(func() {
+		if err := kontur.Delete(context.Background(), stateDir, name); err != nil {
+			t.Logf("cleaning up real kontur VM %q: %v", name, err)
+		}
+	})
+
+	tools, err := k.ToolsFor(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("ToolsFor over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
+	}
+	byName := map[string]*mcp.Tool{}
+	for i := range tools {
+		byName[tools[i].Name] = &tools[i]
+	}
+	for _, want := range []string{"run_command", "read_file", "write_file", "edit_file"} {
+		if byName[want] == nil {
+			t.Fatalf("ToolsFor() returned no %s tool (got %d tools)", want, len(tools))
+		}
+	}
+
+	// Confirm the variable this whole transport rests on is really set on
+	// the real VM container, by the real internal/dockervm -- and points
+	// at the address this VM was created with. Nothing in this repo sets
+	// it, so nothing in this repo would notice it changing.
+	envOut, err := exec.Command("docker", "inspect", "-f",
+		`{{range .Config.Env}}{{println .}}{{end}}`, "kontur-vm-"+name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, envOut)
+	}
+	if want := "KONTUR_EXEC_ADDR=169.254.100.40:22"; !strings.Contains(string(envOut), want) {
+		t.Errorf("VM container env = %q, want it to carry %q -- `kontur exec` has no other way to know where the guest is", envOut, want)
+	}
+
+	// Unlike the SSH test above, this needs no retry loop around the
+	// first tool call. resolveEndpoint's readiness wait can only watch a
+	// TCP port start answering, which happens before the guest has
+	// finished booting to a usable sshd; waitForGuestExec's probe is a
+	// whole command *running in the guest*, so ToolsFor returning here
+	// already means the guest ran one. Asserting that directly, rather
+	// than retrying and hiding it, is what would catch that guarantee
+	// regressing.
+	result := byName["run_command"].Handler(context.Background(), map[string]any{
+		"command": "echo grain-kontur-dockerexec-marker; id -un; uname -s",
+	})
+	if result.IsError {
+		t.Fatalf("run_command over docker exec failed on the first attempt, though ToolsFor had already run a command in this guest to decide it was ready: %s", result.Text)
+	}
+	for _, want := range []string{"grain-kontur-dockerexec-marker", "debian", "Linux"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("run_command output = %q, want it to contain %q", result.Text, want)
+		}
+	}
+
+	// A guest command's own exit status has to survive the guest's sshd
+	// -> `kontur exec` -> `docker exec` chain intact. 42 proves the
+	// status is carried rather than collapsed to a success/failure bit;
+	// 1 is the one that matters most, since it is exactly what
+	// DockerExecRunner's own failure-to-reach-the-guest case also exits
+	// with (see execFailedBeforeGuest) -- a -1 here would mean this
+	// transport reports "the command never ran" for every command that
+	// merely failed.
+	for _, code := range []int{42, 1} {
+		result := byName["run_command"].Handler(context.Background(), map[string]any{
+			"command": fmt.Sprintf("exit %d", code),
+		})
+		if !result.IsError {
+			t.Errorf("run_command `exit %d` reported success, want an error result", code)
+		}
+		if want := fmt.Sprintf("exit=%d", code); !strings.Contains(result.Text, want) {
+			t.Errorf("run_command `exit %d` result = %q, want it to report %q", code, result.Text, want)
+		}
+	}
+
+	// write_file pipes its content over stdin (sshWriteRemote's `dd`), so
+	// a write/read round trip is what proves stdin survives both hops --
+	// the one direction `docker exec` needs -i for, and the one a
+	// command-line-only test would never exercise. The tab and the
+	// trailing newline are there to catch a round trip that "works" but
+	// mangles whitespace somewhere in the two shells between here and
+	// that `dd`.
+	//
+	// The path is absolute rather than relative to Workspace: these two
+	// tools pass file_path through to `cat`/`dd` verbatim (unlike
+	// run_command, which cds into Workspace first), so a relative path
+	// would resolve against whatever directory the guest's own login
+	// leaves the session in.
+	const content = "docker exec stdin round trip\nsecond line\twith a tab\n"
+	const remotePath = "/home/debian/dockerexec-stdin.txt"
+	if result := byName["write_file"].Handler(context.Background(), map[string]any{
+		"file_path": remotePath, "content": content,
+	}); result.IsError {
+		t.Fatalf("write_file over docker exec: %s", result.Text)
+	}
+
+	// Byte-for-byte, through run_command: what `cat` prints lands in
+	// run_command's own output unaltered, so this is the assertion that
+	// actually holds stdin fidelity. read_file below cannot serve that
+	// purpose -- it renders what it read as numbered lines
+	// (numberedRange), which no longer contains the original text.
+	catResult := byName["run_command"].Handler(context.Background(), map[string]any{
+		"command": "cat -- " + remotePath,
+	})
+	if catResult.IsError {
+		t.Fatalf("reading back what write_file piped over stdin: %s", catResult.Text)
+	}
+	if !strings.Contains(catResult.Text, content) {
+		t.Errorf("guest file contents = %q, want it to carry back exactly what write_file piped in over stdin (%q)", catResult.Text, content)
+	}
+
+	// And through read_file itself, so the tool a dispatched task
+	// actually calls is exercised over this transport too -- asserted per
+	// line, since its output is numbered rather than raw.
+	readBack := byName["read_file"].Handler(context.Background(), map[string]any{
+		"file_path": remotePath,
+	})
+	if readBack.IsError {
+		t.Fatalf("read_file over docker exec: %s", readBack.Text)
+	}
+	for _, want := range []string{"docker exec stdin round trip", "second line\twith a tab"} {
+		if !strings.Contains(readBack.Text, want) {
+			t.Errorf("read_file returned %q, want it to carry the line %q", readBack.Text, want)
+		}
+	}
+
+	// The VM container should still be running: the guest booted all the
+	// way to sshd and cloud-hypervisor supervises it rather than exiting
+	// once it has -- the same end state the SSH test asserts, reached
+	// without anything outside this container ever connecting to it.
+	statusOut, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "kontur-vm-"+name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, statusOut)
+	}
+	if status := string(bytes.TrimSpace(statusOut)); status != "running" {
+		t.Errorf("real VM container status = %q, want %q", status, "running")
+	}
+}
