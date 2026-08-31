@@ -21,6 +21,7 @@ const (
 	envFirmware         = "CHV_FIRMWARE"
 	envCmdline          = "CHV_CMDLINE"
 	envCPUs             = "CHV_CPUS"
+	envCPUsMax          = "CHV_CPUS_MAX"
 	envMemoryMB         = "CHV_MEMORY_MB"
 	envMemoryMaxMB      = "CHV_MEMORY_MAX_MB"
 	envMemoryHotplug    = "CHV_MEMORY_HOTPLUG"
@@ -78,6 +79,18 @@ const (
 	// separately-managed disk image. CHV_DISK_IMAGE overrides this for
 	// any other guest.
 	defaultDiskImage = "/var/lib/kontur/guest/disk.img"
+
+	// defaultKernel is the guest kernel baked into the kontur OCI image
+	// itself (see the Dockerfile's fetch-kernel stage): a
+	// cloud-hypervisor/linux release build with PVH entry plus
+	// virtio-pci/virtio-blk/virtio-net/virtio-mem support, matching what
+	// the bundled disk image (defaultDiskImage) itself needs to boot and
+	// what CONFIG_VIRTIO_MEM memory hotplug (see "Memory hotplug" in the
+	// README) needs to actually take effect. Used only when neither
+	// CHV_KERNEL nor CHV_FIRMWARE is set, so an operator supplying either
+	// (e.g. for a custom guest that needs its own kernel, or a
+	// firmware/bootloader-based guest) always overrides it as before.
+	defaultKernel = "/var/lib/kontur/guest/vmlinux"
 )
 
 // Disk describes one virtio-blk device to attach to the VM.
@@ -93,13 +106,24 @@ type Config struct {
 	Disks []Disk
 
 	// Direct kernel boot. Kernel is mutually exclusive with Firmware:
-	// exactly one of the two must be set.
+	// setting both is an error, but leaving both unset is not -- Kernel
+	// then defaults to defaultKernel, the kernel baked into the image
+	// (see FromEnv).
 	Kernel    string
 	Initramfs string
 	Firmware  string
 	Cmdline   string
 
+	// CPUs is the guest's vCPU count at boot. With CPUsMax greater than
+	// CPUs, it can grow later via cloud-hypervisor's ACPI CPU hotplug
+	// (see hypervisor.APIClient.ResizeCPUs and "kontur resize").
 	CPUs int
+
+	// CPUsMax is the ceiling CPUs can grow to via hotplug. Left at its
+	// default (CPUs itself, i.e. no headroom), no hotplug device is
+	// attached at all -- same fixed-vCPU behavior as before this
+	// existed. Must be at least CPUs.
+	CPUsMax int
 
 	// MemoryMB is the guest's memory size at boot. With MemoryHotplug on,
 	// it can grow up to MemoryMaxMB later, either from within the guest
@@ -182,11 +206,14 @@ type Config struct {
 }
 
 // FromEnv builds a Config from the process environment and validates it.
-// The disk image (and kernel/firmware, if set) are expected to already be
-// present on the local filesystem: this runtime never fetches images, so
-// startup only pays for booting the VM itself. CHV_DISK_IMAGE defaults to
-// the guest image baked into the kontur OCI image (defaultDiskImage); set
-// it explicitly to boot a different disk instead.
+// The disk image (and kernel/firmware, if given explicitly) are expected
+// to already be present on the local filesystem: this runtime never
+// fetches images, so startup only pays for booting the VM itself.
+// CHV_DISK_IMAGE defaults to the guest image baked into the kontur OCI
+// image (defaultDiskImage), and, unless CHV_FIRMWARE is given instead,
+// CHV_KERNEL defaults to the matching kernel baked in alongside it
+// (defaultKernel) -- set either explicitly to boot a different guest
+// instead.
 func FromEnv() (Config, error) {
 	cfg := Config{
 		Kernel:       os.Getenv(envKernel),
@@ -220,6 +247,18 @@ func FromEnv() (Config, error) {
 	}
 	if cfg.CPUs < 1 {
 		return Config{}, fmt.Errorf("%s must be at least 1, got %d", envCPUs, cfg.CPUs)
+	}
+
+	// CHV_CPUS_MAX defaults to CHV_CPUS itself: unlike memory, CPU
+	// hotplug headroom is opt-in rather than on by default, since
+	// (unlike virtio-mem) newly added vCPUs need the guest to online
+	// them itself -- see the README's "CPU hotplug" section.
+	cfg.CPUsMax, err = getEnvInt(envCPUsMax, cfg.CPUs)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.CPUsMax < cfg.CPUs {
+		return Config{}, fmt.Errorf("%s (%d) must be at least %s (%d)", envCPUsMax, cfg.CPUsMax, envCPUs, cfg.CPUs)
 	}
 
 	cfg.MemoryMB, err = getEnvInt(envMemoryMB, defaultMemoryMB)
@@ -298,11 +337,15 @@ func FromEnv() (Config, error) {
 		}
 	}
 
-	if cfg.Kernel == "" && cfg.Firmware == "" {
-		return Config{}, fmt.Errorf("one of %s or %s is required", envKernel, envFirmware)
-	}
 	if cfg.Kernel != "" && cfg.Firmware != "" {
 		return Config{}, fmt.Errorf("%s and %s are mutually exclusive", envKernel, envFirmware)
+	}
+	// Neither set: default to the kernel baked into the image itself
+	// (defaultKernel), matching the bundled guest disk image the same
+	// way -- rather than requiring one of the two to be supplied
+	// externally.
+	if cfg.Kernel == "" && cfg.Firmware == "" {
+		cfg.Kernel = defaultKernel
 	}
 
 	if err := cfg.checkPathsExist(); err != nil {

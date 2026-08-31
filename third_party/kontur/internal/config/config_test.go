@@ -14,7 +14,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		envDiskImage, envDiskReadonly, envExtraDisks, envKernel, envInitramfs,
-		envFirmware, envCmdline, envCPUs, envMemoryMB, envMemoryMaxMB,
+		envFirmware, envCmdline, envCPUs, envCPUsMax, envMemoryMB, envMemoryMaxMB,
 		envMemoryHotplug, envMemoryShared, envNet,
 		envAPISocket, envBinaryPath, envExtraArgs, envShutdownTimeout,
 		envSetupScript, envSnapshotPath,
@@ -54,6 +54,9 @@ func TestFromEnv_MinimalKernelBoot(t *testing.T) {
 	if cfg.CPUs != defaultCPUs {
 		t.Errorf("CPUs = %d, want default %d", cfg.CPUs, defaultCPUs)
 	}
+	if cfg.CPUsMax != defaultCPUs {
+		t.Errorf("CPUsMax = %d, want default %d (no hotplug headroom unless CHV_CPUS_MAX is set)", cfg.CPUsMax, defaultCPUs)
+	}
 	if cfg.MemoryMB != defaultMemoryMB {
 		t.Errorf("MemoryMB = %d, want default %d", cfg.MemoryMB, defaultMemoryMB)
 	}
@@ -84,12 +87,19 @@ func TestFromEnv_DiskImageDefaultsToBundledGuestImage(t *testing.T) {
 	}
 }
 
-func TestFromEnv_RequiresKernelOrFirmware(t *testing.T) {
+func TestFromEnv_KernelDefaultsToBundledKernel(t *testing.T) {
 	clearEnv(t)
 	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
 
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("expected error when neither kernel nor firmware is set, got nil")
+	// Neither CHV_KERNEL nor CHV_FIRMWARE is set: FromEnv should fall
+	// back to defaultKernel (which won't exist in a test environment)
+	// rather than reporting one of the two as required.
+	_, err := FromEnv()
+	if err == nil {
+		t.Fatal("expected error for nonexistent default kernel, got nil")
+	}
+	if !strings.Contains(err.Error(), defaultKernel) {
+		t.Errorf("error = %v, want it to mention the default kernel path %q", err, defaultKernel)
 	}
 }
 
@@ -260,6 +270,52 @@ func TestFromEnv_RejectsTooFewCPUs(t *testing.T) {
 
 	if _, err := FromEnv(); err == nil {
 		t.Fatal("expected error for 0 cpus, got nil")
+	}
+}
+
+func TestFromEnv_CPUsMaxDefaultsToCPUsWhenOverridden(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envCPUs, "4")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.CPUsMax != 4 {
+		t.Errorf("CPUsMax = %d, want 4 (tracking the overridden boot count, since CHV_CPUS_MAX was left unset)", cfg.CPUsMax)
+	}
+}
+
+func TestFromEnv_CPUsMaxExplicit(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envCPUs, "2")
+	t.Setenv(envCPUsMax, "8")
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.CPUs != 2 {
+		t.Errorf("CPUs = %d, want 2", cfg.CPUs)
+	}
+	if cfg.CPUsMax != 8 {
+		t.Errorf("CPUsMax = %d, want 8", cfg.CPUsMax)
+	}
+}
+
+func TestFromEnv_RejectsCPUsMaxBelowCPUs(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envCPUs, "4")
+	t.Setenv(envCPUsMax, "2")
+
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected error when CHV_CPUS_MAX is below CHV_CPUS, got nil")
 	}
 }
 

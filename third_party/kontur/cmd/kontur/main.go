@@ -5,10 +5,11 @@
 // a network namespace open in place of a pod sandbox -- see
 // internal/dockervm), runs a command inside the VM guest over SSH
 // ("exec", see internal/guestexec), or live-resizes an already-running
-// VM's memory via cloud-hypervisor's API ("resize", see
-// internal/hypervisor's APIClient.Resize) -- the latter two meant to be
-// invoked as `kubectl exec`'s own command, so they reach the guest/VMM of
-// the already-running container rather than this otherwise-empty one.
+// VM's memory and/or vCPU count via cloud-hypervisor's API ("resize",
+// see internal/hypervisor's APIClient.Resize/ResizeCPUs) -- the latter
+// two meant to be invoked as `kubectl exec`'s own command, so they
+// reach the guest/VMM of the already-running container rather than this
+// otherwise-empty one.
 // All five modes live in the same binary and the same OCI image -- which,
 // since internal/netshim talks to the kernel directly via netlink/nftables
 // rather than exec'ing external CLIs, ships from "scratch" with no shell
@@ -242,35 +243,51 @@ func runExec(args []string) error {
 	})
 }
 
-// runResize live-resizes this container's own already-running VM's guest
-// memory via the cloud-hypervisor API (see internal/hypervisor's
-// APIClient.Resize), within the range CHV_MEMORY_MB..CHV_MEMORY_MAX_MB
-// that was configured at boot (see internal/config) -- it does not, and
-// cannot, change that range itself. Meant to be invoked the same way
-// "exec" is, e.g. `kubectl exec <pod> -c <container> -- kontur resize
-// -memory-mb=1024`, since reaching this container's API socket from
-// outside it has no other path. Requires CHV_MEMORY_HOTPLUG to have been
-// left enabled (the default) at boot; cloud-hypervisor rejects the resize
-// otherwise.
+// runResize live-resizes this container's own already-running VM's
+// guest memory and/or vCPU count via the cloud-hypervisor API (see
+// internal/hypervisor's APIClient.Resize/ResizeCPUs), within the ranges
+// CHV_MEMORY_MB..CHV_MEMORY_MAX_MB and CHV_CPUS..CHV_CPUS_MAX that were
+// configured at boot (see internal/config) -- it does not, and cannot,
+// change those ranges itself. Meant to be invoked the same way "exec"
+// is, e.g. `kubectl exec <pod> -c <container> -- kontur resize
+// -memory-mb=1024` or `-cpus=4` (either or both may be given in one
+// call), since reaching this container's API socket from outside it has
+// no other path. Requires CHV_MEMORY_HOTPLUG (for -memory-mb) or a
+// CHV_CPUS_MAX above CHV_CPUS (for -cpus) to have been set at boot;
+// cloud-hypervisor rejects the corresponding resize otherwise. A -cpus
+// value below the current count asks cloud-hypervisor to remove vCPUs,
+// which only completes once the guest acknowledges the removal -- a
+// second -cpus call made before that finishes fails with a 429 from
+// cloud-hypervisor ("a cpu removal is still pending"); see
+// APIClient.ResizeCPUs and the README's "CPU hotplug" section.
 func runResize(args []string) error {
 	fs := flag.NewFlagSet("kontur resize", flag.ContinueOnError)
 	memoryMB := fs.Int("memory-mb", 0, "desired guest memory size, in MiB")
+	cpus := fs.Int("cpus", 0, "desired vCPU count")
 	timeout := fs.Duration("timeout", 10*time.Second, "how long to wait for cloud-hypervisor's API to respond")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *memoryMB <= 0 {
-		return fmt.Errorf("-memory-mb is required and must be positive")
+	if *memoryMB <= 0 && *cpus <= 0 {
+		return fmt.Errorf("at least one of -memory-mb or -cpus is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	api := hypervisor.NewAPIClient(config.APISocket())
-	if err := api.Resize(ctx, uint64(*memoryMB)*1024*1024); err != nil {
-		return err
+	if *memoryMB > 0 {
+		if err := api.Resize(ctx, uint64(*memoryMB)*1024*1024); err != nil {
+			return fmt.Errorf("resizing memory: %w", err)
+		}
+		log.Printf("requested resize to %d MiB", *memoryMB)
 	}
-	log.Printf("requested resize to %d MiB", *memoryMB)
+	if *cpus > 0 {
+		if err := api.ResizeCPUs(ctx, uint32(*cpus)); err != nil {
+			return fmt.Errorf("resizing cpus: %w", err)
+		}
+		log.Printf("requested resize to %d vCPU(s)", *cpus)
+	}
 	return nil
 }
 

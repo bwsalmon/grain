@@ -136,6 +136,43 @@ func TestAPIClient_Resize(t *testing.T) {
 	}
 }
 
+func TestAPIClient_ResizeCPUs(t *testing.T) {
+	var gotMethod, gotPath, gotContentType string
+	var gotBody []byte
+	socket := newFakeAPIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	c := NewAPIClient(socket)
+	if err := c.ResizeCPUs(context.Background(), 4); err != nil {
+		t.Fatalf("ResizeCPUs() error = %v", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/api/v1/vm.resize" {
+		t.Errorf("got %s %s, want PUT /api/v1/vm.resize", gotMethod, gotPath)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	wantBody := `{"desired_vcpus":4}`
+	if string(gotBody) != wantBody {
+		t.Errorf("body = %s, want %s", gotBody, wantBody)
+	}
+}
+
+func TestAPIClient_ResizeCPUsSurfacesPendingRemovalError(t *testing.T) {
+	socket := newFakeAPIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "a cpu removal is still pending", http.StatusTooManyRequests)
+	}))
+
+	c := NewAPIClient(socket)
+	if err := c.ResizeCPUs(context.Background(), 4); err == nil {
+		t.Fatal("expected error for 429 response, got nil")
+	}
+}
+
 func TestAPIClient_ErrorStatusReturnsError(t *testing.T) {
 	socket := newFakeAPIServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not booted", http.StatusMethodNotAllowed)

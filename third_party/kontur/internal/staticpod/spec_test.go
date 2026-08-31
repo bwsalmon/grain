@@ -110,8 +110,30 @@ func TestValidate_Minimal(t *testing.T) {
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
+	// Kernel is left unset, but so is Firmware: this still means direct
+	// kernel boot, via kontur run's own baked-in CHV_KERNEL default (see
+	// internal/config's defaultKernel) -- so Cmdline is still
+	// auto-derived here, the same as if Kernel had been given explicitly.
+	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
+	if s.Cmdline != want {
+		t.Errorf("Cmdline = %q, want %q", s.Cmdline, want)
+	}
+	if !s.CmdlineAuto {
+		t.Errorf("CmdlineAuto = false, want true")
+	}
+}
+
+func TestValidate_FirmwareSkipsAutoCmdline(t *testing.T) {
+	s := baseSpec()
+	s.Firmware = "/images/firmware.fd"
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
 	if s.Cmdline != "" {
-		t.Errorf("Cmdline = %q, want empty (no kernel set)", s.Cmdline)
+		t.Errorf("Cmdline = %q, want empty (firmware boot, not direct kernel boot)", s.Cmdline)
+	}
+	if s.CmdlineAuto {
+		t.Errorf("CmdlineAuto = true, want false for firmware boot")
 	}
 }
 

@@ -102,8 +102,9 @@ the only piece of "artifact repo" infrastructure this setup needs:
 node-local disk images/kernels for `kontur`'s "run" mode itself still work
 exactly as described in `../k8s/pod-example.yaml` (pre-populated under
 `/var/lib/vm-images`, nothing fetched at runtime) -- omitting
-`CHV_DISK_IMAGE` instead falls back to the reference guest image already
-baked into the `kontur` image, see `../guest-image/README.md`.
+`CHV_DISK_IMAGE`/`CHV_KERNEL` instead falls back to the reference guest
+disk image and kernel already baked into the `kontur` image itself, see
+the main README's "Guest disk image and kernel".
 
 For a fully offline node, skip the registry: `docker save` the built image
 and `ctr -n k8s.io images import` it directly into containerd's store

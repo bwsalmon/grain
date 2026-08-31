@@ -44,7 +44,7 @@ func BuildArgs(cfg config.Config) []string {
 		return args
 	}
 
-	args = append(args, "--cpus", fmt.Sprintf("boot=%d", cfg.CPUs))
+	args = append(args, "--cpus", cpusArg(cfg))
 	args = append(args, "--memory", memoryArg(cfg))
 
 	for _, d := range cfg.Disks {
@@ -131,6 +131,23 @@ func memoryArg(cfg config.Config) string {
 	arg := fmt.Sprintf("size=%dM,shared=%s", cfg.MemoryMB, onOff(cfg.MemoryShared))
 	if cfg.MemoryHotplug && cfg.MemoryMaxMB > cfg.MemoryMB {
 		arg += fmt.Sprintf(",hotplug_method=virtio-mem,hotplug_size=%dM", cfg.MemoryMaxMB-cfg.MemoryMB)
+	}
+	return arg
+}
+
+// cpusArg builds --cpus's value: a fixed boot count, plus (when CPUsMax
+// is greater than CPUs) a "max=" ceiling that turns on cloud-
+// hypervisor's ACPI-based CPU hotplug for growth up to CPUsMax. Unlike
+// memory hotplug, there is no separate hotplug_method or enable flag to
+// set -- cloud-hypervisor treats any max greater than boot as hotplug-
+// capable on its own. Live resizing (up to CPUsMax, down to 1) works via
+// the cloud-hypervisor API's vm.resize (see APIClient.ResizeCPUs /
+// "kontur resize"). See the README's "CPU hotplug" section for how this
+// interacts with Snapshot/suspend.
+func cpusArg(cfg config.Config) string {
+	arg := fmt.Sprintf("boot=%d", cfg.CPUs)
+	if cfg.CPUsMax > cfg.CPUs {
+		arg += fmt.Sprintf(",max=%d", cfg.CPUsMax)
 	}
 	return arg
 }

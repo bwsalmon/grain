@@ -22,10 +22,11 @@
 #    securityContext.privileged: true plus a hostPath volume for /dev/kvm.
 #  - the disk images and kernel are already present on the node under
 #    /var/lib/vm-images, e.g. pre-populated by a node-local image cache.
-#    Omitting CHV_DISK_IMAGE instead boots the reference guest image baked
-#    into the kontur image itself (see deploy/guest-image/README.md), but
-#    that image can't be shared read-only between VMs the way a hostPath
-#    image can, so this example still uses one.
+#    Omitting CHV_DISK_IMAGE/CHV_KERNEL instead boots the reference guest
+#    disk image and kernel baked into the kontur image itself (see the
+#    main README's "Guest disk image and kernel"), but that image can't
+#    be shared read-only between VMs the way a hostPath image can, so
+#    this example still uses its own node-local ones.
 #
 # KONTUR_EXEC_ADDR below (see the top-level README's "Execing into a VM")
 # lets `kubectl exec -it chv-vm-example -c web -- kontur exec -- <command>`
