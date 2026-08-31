@@ -130,6 +130,24 @@ describe("App", () => {
     expect(api).toHaveBeenCalledWith("/api/tasks");
   });
 
+  it("shows a loading screen with the large mark until config loads (bwsalmon/agents#555)", async () => {
+    setupApi();
+    let resolveConfig;
+    const configPromise = new Promise((resolve) => { resolveConfig = resolve; });
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) => (path === "/api/config" ? configPromise : realImpl(path, opts)));
+
+    render(<App />);
+
+    expect(screen.getByTitle("grain")).toHaveAttribute("width", "320");
+    expect(screen.queryByRole("button", { name: "+ New task" })).not.toBeInTheDocument();
+
+    resolveConfig(config);
+
+    await screen.findByText("Fix bug");
+    expect(screen.getByTitle("grain")).toHaveAttribute("width", "26");
+  });
+
   it("opens a task's detail overlay on click and closes it", async () => {
     setupApi();
     const user = userEvent.setup();

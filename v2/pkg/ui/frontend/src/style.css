@@ -152,6 +152,18 @@ body {
   overflow-y: auto;
 }
 
+/* LoadingScreen (bwsalmon/agents#555) stands in for the sidebar plus
+   main column both, for the one stretch before config has loaded and
+   neither has anything to render -- so it takes .app-shell's own
+   flex: 1/stretch sizing rather than the fixed sidebar width plus
+   scrolling main column split either of them use once config lands. */
+.loading-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .content-header {
   display: flex;
   align-items: baseline;
