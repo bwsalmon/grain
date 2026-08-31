@@ -116,6 +116,58 @@ func TestCreateTaskUnapprovedFilesAsAProposal(t *testing.T) {
 	}
 }
 
+// TestCreateTaskInteractiveDispatchesAtOnce is bwsalmon/agents#539's
+// whole point: an interactive task is dispatchable the moment it is
+// filed even though Approved was never set, because CreateTaskRequest.
+// Interactive's own doc comment says a chat nobody has opened yet has
+// nothing to show for itself.
+func TestCreateTaskInteractiveDispatchesAtOnce(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "chat about this", Interactive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !task.Interactive {
+		t.Fatal("task.Interactive = false, want true")
+	}
+	if task.State != model.StateQueued {
+		t.Fatalf("state = %q, want queued: an interactive task is approved at once", task.State)
+	}
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 1 || ready[0] != task.ID {
+		t.Fatalf("ready = %v, want just the new task", ready)
+	}
+}
+
+// TestCreateTaskInteractiveJumpsTheQueue mirrors
+// TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue: an interactive
+// task dispatches ahead of whatever is already queued, on top of
+// whatever model.Config.NewestFirst says, since starting it is the whole
+// reason it was filed.
+func TestCreateTaskInteractiveJumpsTheQueue(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	first := create(t, c, ctx)
+	second := create(t, c, ctx)
+	chat, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "chat about this", Interactive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{chat.ID, first.ID, second.ID}
+	if !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want the interactive task dispatched first %v", ready, want)
+	}
+}
+
 // A repo outside Config.TargetRepos is filed exactly as asked, but
 // parked awaiting reply -- v1's "a task naming anything else is parked
 // with a comment rather than dispatched" -- so it never reaches

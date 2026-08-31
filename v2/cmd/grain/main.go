@@ -320,6 +320,7 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	var reads stringList
 	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable)")
 	approve := fs.Bool("approve", false, "queue the task immediately instead of filing it as a proposal awaiting approval")
+	interactive := fs.Bool("interactive", false, "file this as a live chat rather than a change to run unattended (bwsalmon/agents#539); implies -approve and dispatches ahead of the backlog")
 	var attach stringList
 	fs.Var(&attach, "attach", "path to a local file to attach to the task (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -333,7 +334,7 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, Base: *base,
 		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
-		Attachments: attachments,
+		Interactive: *interactive, Attachments: attachments,
 	}
 
 	task, err := c.CreateTask(ctx, req)

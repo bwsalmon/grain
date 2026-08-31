@@ -64,6 +64,22 @@ describe("DetailOverlay", () => {
     expect(screen.queryByText("Sandbox memory (MiB)")).not.toBeInTheDocument();
   });
 
+  // bwsalmon/agents#539: an interactive task's Timeline reads as a chat.
+  it("labels an interactive task's mode and renders its Timeline as a Chat", () => {
+    render(<DetailOverlay task={{ ...baseTask, interactive: true }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.getByText("Mode")).toBeInTheDocument();
+    expect(screen.getByText("Interactive")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Chat" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Message...")).toBeInTheDocument();
+  });
+
+  it("labels an ordinary task's Timeline as Timeline, not Chat, and shows no Mode row", () => {
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("Mode")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Timeline" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Reply...")).toBeInTheDocument();
+  });
+
   it("shows the merge-blocked chip over awaiting-submit once the merge queue has given up", () => {
     render(
       <DetailOverlay

@@ -359,6 +359,18 @@ type Task struct {
 	Tags   []string
 
 	AutoMerge bool
+	// Interactive marks a task filed for a live back-and-forth with
+	// whoever created it, rather than a change handed off to run
+	// unattended (bwsalmon/agents#539). It changes nothing about how a
+	// dispatched run is driven -- a comment posted while one is live
+	// already reaches the agent through the same channel every task's
+	// conversation does (agent.RunConfig.Addenda, orchestrator.
+	// addendaPoller) -- only how the task is prioritised and presented:
+	// ui.Client.CreateTask files it ahead of the ordinary backlog, the
+	// same way Config.NewestFirst already can, and the frontend opens
+	// its chat view immediately after filing it instead of returning to
+	// the task list.
+	Interactive bool
 	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override
 	// Config.SandboxCPUs/SandboxMemoryMB for this task's own dispatch
 	// only -- the per-job escape hatch alongside the deployment-wide

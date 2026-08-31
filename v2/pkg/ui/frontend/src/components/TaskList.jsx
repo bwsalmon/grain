@@ -227,6 +227,7 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       <span className="task-title">{t.title}</span>
       <span className="chips">
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
+        {t.interactive && <Chip size="small" className="chip-interactive" title="a live chat, not a background task" label="interactive" />}
         {t.repo && <Chip size="small" label={t.repo} />}
         {(t.reads || []).map((repo) => (
           <Chip key={repo} size="small" variant="outlined" title="read-only" label={`${repo} (read)`} />

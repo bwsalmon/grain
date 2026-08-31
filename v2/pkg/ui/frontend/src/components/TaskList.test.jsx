@@ -194,6 +194,18 @@ describe("TaskList", () => {
     expect(screen.queryAllByTitle("filed automatically by a schedule")).toHaveLength(1);
   });
 
+  // bwsalmon/agents#539
+  it("badges an interactive task, and leaves an ordinary one unbadged", () => {
+    renderList({
+      tasks: [
+        { ...tasks[0], interactive: true },
+        tasks[1],
+      ],
+    });
+    expect(screen.getByTitle("a live chat, not a background task")).toHaveTextContent("interactive");
+    expect(screen.queryAllByTitle("a live chat, not a background task")).toHaveLength(1);
+  });
+
   describe("search (bwsalmon/agents#460)", () => {
     it("filters down to tasks whose title matches the search text", async () => {
       const user = userEvent.setup();

@@ -394,6 +394,15 @@ main { padding: 0 0 2.5rem; }
   color: var(--accent);
 }
 
+/* An interactive task (bwsalmon/agents#539) gets the same tinted-fill
+   treatment as a scheduled one -- both are grain telling you something
+   about how a task came to be or how it runs, not a repo/capability
+   chip describing what it targets. */
+.chip-interactive {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
 /* Form fields themselves are MUI's own TextField/Checkbox now; fieldset
    and legend remain plain HTML (MUI has no fieldset primitive) and keep
    their own look here. RepoField's <input>/<select> are plain HTML too
