@@ -636,21 +636,42 @@ ensure_kontur_ssh_key() {
     return
   fi
 
-  local existing=""
+  local existing="" existing_is_managed=0
   if [ -n "$GRAIN_KONTUR_SSH_KEY_FILE" ] && [ -s "$GRAIN_KONTUR_SSH_KEY_FILE" ]; then
     existing="$GRAIN_KONTUR_SSH_KEY_FILE"
   elif [ -s "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" ]; then
     existing="$GRAIN_DATA_DIR/secrets/kontur-ssh-key"
+    existing_is_managed=1
   fi
 
   if [ -n "$existing" ]; then
     KONTUR_SSH_PRIVATE_KEY="$(cat "$existing")"
     KONTUR_SSH_PUBLIC_KEY="$(ssh-keygen -y -f "$existing" 2>/dev/null || true)"
-    if [ -z "$KONTUR_SSH_PUBLIC_KEY" ]; then
+    if [ -n "$KONTUR_SSH_PUBLIC_KEY" ]; then
+      return
+    fi
+    KONTUR_SSH_PRIVATE_KEY=""
+    # $GRAIN_DATA_DIR/secrets/kontur-ssh-key is the slot this script
+    # alone ever writes (GRAIN_KONTUR_SSH_KEY_FILE, above, is always an
+    # operator's own explicit choice instead) -- so a corrupt file there
+    # can only be this script's own past mistake (bwsalmon/agents#543:
+    # seed_secret used to drop the trailing newline an OpenSSH private
+    # key needs). seed_secret's own never-overwrite contract means
+    # nothing would ever replace it on its own, wedging kontur off on
+    # every future run even after that bug is fixed -- so, but only when
+    # this run is about to build its own guest image right alongside it
+    # (no GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE pinning this
+    # host to a specific already-published keypair -- the same condition
+    # the generate-fresh path below already requires), move it aside and
+    # fall through to generate a fresh one instead of just giving up.
+    if [ "$existing_is_managed" = "1" ] && [ -z "$GRAIN_KONTUR_IMAGE_BUCKET" ] && [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
+      log "GRAIN_KONTUR_ENABLE=1 but $existing is not a valid SSH private key -- moving it aside and generating a fresh one"
+      mv -f "$existing" "$existing.invalid.$(date +%s)"
+    else
       log "GRAIN_KONTUR_ENABLE=1 but $existing is not a valid SSH private key -- leaving kontur sandboxing off this run"
       GRAIN_KONTUR_ENABLE=0
+      return
     fi
-    return
   fi
 
   # A guest image built and published elsewhere (GRAIN_KONTUR_IMAGE_BUCKET/
@@ -925,6 +946,21 @@ seed_secret() {
   # value was actually given -- never overwrites a credential a previous
   # run (or an operator by hand) already placed, and never writes an
   # empty file for a value nobody supplied this time.
+  #
+  # Trailing newline appended deliberately: $2 reaches every caller
+  # through at least one layer of "$(...)" command substitution (here,
+  # in ensure_kontur_ssh_key, in files/deploy.sh reading metadata --
+  # bash strips every trailing newline doing that), so without adding
+  # one back a multi-line PEM/OpenSSH-format value -- kontur-ssh-key
+  # chief among them -- is written one newline short of what it started
+  # as. ssh-keygen/ssh both refuse to parse an OpenSSH private key
+  # missing its final newline ("error in libcrypto", no clearer
+  # message), which is exactly what made ensure_kontur_ssh_key call its
+  # own freshly-generated, self-seeded key invalid on every later run
+  # (bwsalmon/agents#543). Harmless for every other seed_secret caller
+  # (github token, gemini-api-key): both are read with strings.TrimSpace
+  # (pkg/gitproxy/credentials.go, cmd/grain/daemon.go's own
+  # readTrimmedFile).
   local path="$1" value="$2"
   if [ -s "$path" ]; then
     return
@@ -932,7 +968,7 @@ seed_secret() {
   if [ -z "$value" ]; then
     return
   fi
-  ( umask 077; printf '%s' "$value" > "$path" )
+  ( umask 077; printf '%s\n' "$value" > "$path" )
   chown "$GRAIN_USER:$GRAIN_USER" "$path"
 }
 
