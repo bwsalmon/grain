@@ -1,8 +1,9 @@
 #!/bin/bash
 # Builds and pushes the bwsalmon/kontur OCI image (third_party/kontur's
 # own Dockerfile) -- the other half of what a kontur-backed deployment
-# needs published ahead of time, alongside this directory's own build.sh
-# (the guest image, built via debootstrap+chroot, no Docker involved).
+# needs published ahead of time, alongside this directory's own
+# build-guest.sh (the guest image, built from the same Dockerfile's
+# guest-artifacts target).
 # See terraform/gcp-v2/README.md, "Kontur sandboxing", for how the two
 # fit together and where v2/scripts/setup.sh fetches each from.
 #
@@ -17,19 +18,17 @@
 # as of bwsalmon/kontur#28) -- at the Dockerfile's own empty defaults,
 # because a real deployment never boots its bundled guest disk at all:
 # KonturConfig.CreateArgs always points -disk/-kernel/-initramfs at this
-# directory's own build.sh output instead (see README.md's own
+# directory's own build-guest.sh output instead (see README.md's own
 # -kontur-create-arg example). All this image contributes at runtime is
 # the `kontur` binary and the pinned cloud-hypervisor release inside it;
 # v2/scripts/setup.sh's own ensure_kontur_images retags whatever is
 # pulled here to konturctl's own default "localhost:5000/kontur:latest"
 # so no -kontur-image override is needed either.
 #
-# That split is what README.md's "Wiring, still to do" would collapse:
-# passing GUEST_SETUP_SCRIPT=guest-setup.sh here and building the
-# guest-artifacts target would make this one build produce the guest too,
-# retiring build.sh/provision.sh. It waits on that section's four
-# unverified checks, which need a machine that can actually run the
-# build.
+# The guest disk is built by build-guest.sh in this directory, which
+# drives the same Dockerfile's guest-artifacts target with
+# GUEST_SETUP_SCRIPT set. The two builds share every stage up to the guest
+# rootfs, so running them back to back costs little more than one.
 #
 # Needs: docker, authenticated to push to KONTUR_OCI_IMAGE's own registry
 # (e.g. `gcloud auth configure-docker <region>-docker.pkg.dev` for

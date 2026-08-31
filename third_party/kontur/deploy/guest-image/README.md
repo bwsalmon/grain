@@ -50,6 +50,8 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 | `overlay-debian/etc/systemd/system/kontur-ssh-host-keys.service` | Regenerates SSH host keys on first boot (`ssh-keygen -A`, `Before=ssh.service`), since the Dockerfile deletes whatever `openssh-server`'s postinst generated at build time -- otherwise every VM booted from this image would share the same host keys. |
 | `overlay-alpine/etc/acpi/powerbtn.sh` | Runs `poweroff` (busybox's applet, which signals `/sbin/init` rather than powering off directly -- see "Graceful shutdown"). |
 | `overlay-debian/etc/systemd/system/kontur-mem-agent.service`, `overlay-alpine/etc/init.d/kontur-mem-agent` | Run `kontur-mem-agent` (copied into both variants straight from the top-level Dockerfile's own `build` stage, not part of either overlay) as a restart-always service. See the top-level README's "Memory hotplug". |
+| `overlay-common/usr/local/libexec/kontur-control-net` | Configures the guest's end of a flat-mode control link: brings up the second NIC at `169.254.100.2/24` and writes `KONTUR_MEM_AGENT_HOST` to `/run/kontur-control-net.env` for `kontur-mem-agent` to pick up. A guest with no second NIC (NAT mode, or flat mode with the control link disabled) has nothing to do and exits successfully, so the same image boots unchanged either way. See the top-level README's "Flat mode". |
+| `overlay-debian/etc/systemd/system/kontur-control-net.service`, `overlay-alpine/etc/init.d/kontur-control-net` | Run that script once at boot, ordered before `kontur-mem-agent` so the address it writes is in place before the agent starts. |
 
 The Alpine variant has no equivalent of `kontur-ssh-host-keys.service`:
 unlike Debian's, Alpine's `openssh-server` package doesn't generate host
@@ -67,8 +69,9 @@ normal tooling (`systemctl enable`, `rc-update add`), since neither has
 a running service manager during the build to ask -- each is just a
 symlink, written directly:
 
-- Debian: `kontur-ssh-host-keys.service` and `kontur-mem-agent.service`
-  are both symlinked into `multi-user.target.wants/`. `acpid.socket`/
+- Debian: `kontur-ssh-host-keys.service`, `kontur-mem-agent.service` and
+  `kontur-control-net.service` are all symlinked into
+  `multi-user.target.wants/`. `acpid.socket`/
   `acpid.path` don't need the same treatment -- `acpid`'s own postinst
   already enables them via `deb-systemd-helper`, which (like `systemctl
   enable`) just writes symlinks and doesn't need a running systemd to do
@@ -80,7 +83,7 @@ symlink, written directly:
   reach a usable state at all (device nodes, `/proc`/`/sys`, hostname,
   clearing `/tmp`, syslog -- Debian's systemd does the equivalent
   internally, with nothing to enable by hand for it), and `default` for
-  `sshd`/`acpid`/`kontur-mem-agent` themselves. See the
+  `sshd`/`acpid`/`kontur-control-net`/`kontur-mem-agent` themselves. See the
   `guest-rootfs-alpine` stage in the top-level `Dockerfile` for the exact
   list.
 

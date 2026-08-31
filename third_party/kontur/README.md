@@ -37,8 +37,11 @@ The image contains three things:
     fresh; see "Suspend and resume" below.
   - **`netshim`** sets up the pod-local networking (bridge, taps, NAT)
     that lets several VM containers in the same pod share the pod's IP;
-    see "Pod-local networking" below. It's meant to run once, to
-    completion, as an init container.
+    see "Pod-local networking" below. With `NETSHIM_MODE=flat` it instead
+    splices a single guest straight onto the namespace's own segment, to
+    take over the address and MAC the container runtime assigned; see
+    "Flat mode" below. Either way it's meant to run once, to completion,
+    as an init container.
   - **`exec`** runs a command inside the VM guest itself, over SSH to its
     already-running `sshd`, rather than in this otherwise-empty
     container -- meant to be `kubectl exec`'s own command, so that ends
@@ -224,7 +227,13 @@ already configured, i.e. this VM's own `kontur run` container, reachable
 directly since they share netshim's bridge network (see "Pod-local
 networking" below) -- on `KONTUR_MEM_AGENT_PORT` (`30090` default,
 matching `CHV_MEM_AGENT_ADDR`'s own default port) and writes a single
-`PRESSURE <value>` line. `internal/memagent` grows the guest by
+`PRESSURE <value>` line. Setting `KONTUR_MEM_AGENT_HOST` in the guest overrides that default-route
+target with an explicit address, which is what flat mode needs: there the
+default route leads out to the container network rather than to this VM's
+own `kontur run` container. The reference guest image sets it from its
+control link automatically -- see "Flat mode" below.
+
+`internal/memagent` grows the guest by
 `CHV_MEM_AGENT_STEP_MB` on each signal it receives (capped at
 `CHV_MEMORY_MAX_MB`, rate-limited to once per `CHV_MEM_AGENT_COOLDOWN` so
 a guest still catching up on an in-flight grow doesn't trigger another
@@ -585,6 +594,123 @@ only sets up the host side.
 container, a second run leaves the same bridge/taps/rules in place rather
 than erroring on things that already exist.
 
+## Flat mode (`NETSHIM_MODE=flat`)
+
+The NAT mode above shares one namespace's IP between several VMs. Flat
+mode does the opposite: exactly one VM per network namespace, spliced
+directly onto whatever segment the container runtime already put that
+namespace on, where it takes over the address *and* MAC the runtime
+assigned. From outside there is still exactly one endpoint, so the VM
+behaves like an ordinary container -- `-p`, `--network`, compose
+membership, Kubernetes Services -- because all of those are properties of
+the sandbox rather than of anything `netshim` installs.
+
+What it builds:
+
+- One tap, `tap-<name>`, with its MTU copied from the external interface.
+- A **splice**: on each of the external interface and the tap, an ingress
+  qdisc plus a match-everything filter whose action is `mirred egress
+  redirect` at the other one. Redirect steals the frame rather than
+  cloning it, so nothing is copied and no frame leaves the kernel.
+- Optionally a control link -- a bridge holding `NETSHIM_CONTROL_CIDR`
+  plus a `ctl-<name>` tap -- see below.
+
+What it deliberately does *not* build: no `net.ipv4.ip_forward` write, no
+nftables table, no routing and no NAT. `netshim` is control plane only in
+both modes (it programs kernel state and exits; nothing of it is ever in
+the data path), but flat mode leaves the kernel far less to do per packet
+-- one tc action, instead of a conntrack lookup, a DNAT rewrite, a
+routing decision and a bridge FDB lookup.
+
+**Why a splice rather than a bridge.** A Linux bridge cannot have one MAC
+on two ports -- the FDB entry would flap -- so bridging the tap to the
+veth forces the guest onto a *different* MAC, and the segment then sees a
+second endpoint appear behind a port it already authorized. That is
+harmless on `docker0`, which learns whatever shows up, and dropped by the
+port security enforced on most cloud fabrics and managed CNIs. A splice
+has no forwarding database to confuse, so the guest can present the exact
+MAC the runtime assigned and nothing upstream can tell the difference.
+This is also why `kata-containers` defaults to its own `tcfilter`
+internetworking model rather than the `bridged` one it deprecated.
+
+The classifier is `u32` with no selectors (which matches everything)
+rather than the more direct `matchall`: `matchall` needs
+`CONFIG_NET_CLS_MATCHALL`, which plenty of minimal kernels leave out, and
+its absence surfaces as a bare `ENOENT` from the filter add with nothing
+to say the classifier was the missing piece.
+
+**The guest's configuration is discovered, not passed in.** The VM
+container shares the namespace, so it reads the address, MAC and MTU back
+off the external interface itself and synthesizes its own `--net` (with
+`mac=` and `mtu=`) and kernel `ip=` parameter at boot. That behaves
+identically whether the sandbox came from `docker run`, a kubelet or
+anything else, and leaves no second copy of the identity to drift out of
+date. It works because `netshim` leaves that interface addressed: the
+splice steals its ingress, so the namespace's own stack can never receive
+a reply over it anyway. An explicit `ip=` in `CHV_CMDLINE` still wins, for
+an operator overriding the derived identity on purpose.
+
+**The control link.** Because the guest now answers to the namespace's
+own address, anything *inside* the namespace dialing that address reaches
+its own stack instead. `kontur exec` and the memory agent therefore need a
+second, private NIC. `netshim` builds the host side (a bridge at
+`NETSHIM_CONTROL_CIDR`, plus a `ctl-<name>` tap), and the guest brings its
+own second interface up at the next address in that subnet
+(`169.254.100.2` by default).
+
+That last part cannot be derived from the boot command line the way the
+first NIC is -- the kernel's `ip=` parameter configures a single
+interface -- so it is fixed at image build time instead, the same way
+`kontur-mem-agent`'s own target is. The reference guest image does it in
+`kontur-control-net` (see `deploy/guest-image/`), a one-shot service that
+no-ops when there is no second NIC, so the same image still boots
+unchanged in NAT mode. A third-party guest image needs its own equivalent;
+without one, flat mode still works, but nothing inside the namespace can
+reach the guest.
+
+Setting `NETSHIM_CONTROL_CIDR=""` omits the control link entirely, which
+costs `kontur exec` and the memory agent and nothing else; `konturctl`
+then leaves `KONTUR_EXEC_ADDR` unset rather than emitting an address
+nothing answers on.
+
+The memory agent needs the same treatment for a different reason: it
+signals whichever host address it is given, defaulting to its own default
+route's gateway. That default is the `kontur run` container's bridge
+address in NAT mode and *wrong* in flat mode, where the default route
+leads out to the container network. `kontur-control-net` therefore also
+writes `KONTUR_MEM_AGENT_HOST` (see `cmd/kontur-mem-agent`) pointing at
+the control link, which both guests' service definitions pick up.
+
+| Variable                 | Required | Default        | Description |
+|---------------------------|:--------:|-----------------|--------------|
+| `NETSHIM_MODE`            | no       | `nat`           | `nat` for the shared-IP mode above, `flat` for this one. |
+| `NETSHIM_VM`              | yes      | —               | The single VM's name, in place of `NETSHIM_VMS`: flat mode needs no address or port for it. |
+| `NETSHIM_CONTROL_CIDR`    | no       | `169.254.100.1/24` | The control link's address and subnet. Empty disables the control link. |
+| `NETSHIM_BRIDGE`          | no       | `kontur0`       | Name of the control link's bridge. |
+| `NETSHIM_EXTERNAL_IFACE`  | no       | `eth0`          | The interface whose identity the guest takes over. |
+
+Under `-backend docker`, flat mode also drops `netshim`'s `--privileged`:
+with no `/proc/sys/net` write to make it needs only `--cap-add NET_ADMIN
+--cap-add NET_RAW --device /dev/net/tun`. The device grant is not
+optional -- the netlink library creates a tap by opening `/dev/net/tun`
+rather than over rtnetlink, and docker's device cgroup denies it
+otherwise. A pod has no per-device grant to give, so the static pod
+manifest stays privileged in both modes.
+
+Known gaps, none of which flat mode closes on its own:
+
+- **DNS.** Docker's embedded resolver listens on `127.0.0.11`, the
+  *namespace's loopback*, which is not on the wire -- so other containers
+  resolve the VM by name, but the guest cannot resolve them.
+- **IPv4 only**, as with the NAT path.
+- **Single queue.** The tap is created without `IFF_MULTI_QUEUE`, so
+  `num_queues` cannot be raised without also handing cloud-hypervisor
+  file descriptors instead of a tap name.
+- **No re-addressing.** Setup is one-shot, so if the runtime ever
+  re-addresses the container the guest's `ip=` goes stale and nothing
+  notices.
+
+
 ## Operating a node (`konturctl` CLI)
 
 `cmd/konturctl` builds a single static binary, meant to run on the node
@@ -605,7 +731,7 @@ management into a day-to-day workflow, against either of two backends:
   that directory documents, embedded into the `konturctl` binary so it
   can run from just that one binary, without a checkout of this repo on
   the node. Must run as root. Only needed for `-backend static-pod`.
-- `konturctl vm create <name> -disk ... -ip ... -port ... [-backend static-pod|docker] [flags]`:
+- `konturctl vm create <name> -disk ... -ip ... -port ... [-backend static-pod|docker] [-net nat|flat] [flags]`:
   starts one VM (a `netshim`-mode init container plus a single `run`-mode
   container, the same shape as
   [`manifests/kontur-static-pod.yaml`](deploy/static-kubelet/manifests/kontur-static-pod.yaml))
@@ -680,6 +806,28 @@ konturctl vm create web -backend docker \
   -ip 169.254.100.2 -port 30080
 ```
 
+With `-net flat` (see "Flat mode" above) the VM instead takes over the
+namespace's own identity, so there is no `-ip` or `-port` to give -- the
+address comes from docker, and ports are published on the sandbox itself
+the ordinary way:
+
+```sh
+konturctl vm create web -backend docker -net flat \
+  -disk /images/disk.img -kernel /images/vmlinux \
+  -docker-run-opt --network -docker-run-opt mynet \
+  -docker-run-opt -p -docker-run-opt 8080:80
+```
+
+`-docker-run-opt` is repeatable and passes each value through verbatim to
+the `docker run` that creates the namespace holder. It has to go there
+rather than on the VM container: port publishing, network membership and
+DNS all belong to the container that *creates* a network namespace, and a
+container joining an existing one with `--network container:` cannot add
+them afterwards. Passing the flag at all replaces whatever a previous
+`vm create`/`vm update` saved, so it behaves like every other flag. It
+applies in NAT mode too, which is what makes a NAT-mode VM's forwarded
+port reachable from outside the host at all.
+
 A Kubernetes pod's containers share a network namespace held open by the
 pod sandbox for as long as the pod exists, which is what lets the
 `netshim`-mode init container set up the tap/bridge/NAT that the VM
@@ -736,7 +884,21 @@ booted as a GKE pod, plus the scripts used to reproduce them.
 go build ./...
 go vet ./...
 go test ./...
+
+# The tests that actually touch the kernel (see below) skip without root.
+# sudo resets PATH, so the toolchain is passed through explicitly.
+sudo env "PATH=$PATH" KONTUR_NETNS_TESTS=required go test -count=1 ./internal/netshim/...
 ```
+
+`.github/workflows/ci.yml` runs exactly that sequence -- `gofmt`, build,
+vet, the unprivileged suite, then the kernel tests as root -- on every
+pull request and on pushes to `main`, plus a second job building the OCI
+image (see
+"Building" above) for *both* guest variants, since the Debian and Alpine
+rootfs stages carry separate overlays and building only one leaves the
+other's changes uncompiled. The image build needs no privileges beyond an
+ordinary `docker build`, which is a property the `Dockerfile` maintains
+deliberately (see its `guest-customized` stage).
 
 `internal/hypervisor`'s tests exercise the process/shutdown/suspend state
 machine against a fake `cloud-hypervisor` stand-in (`testdata/fakechv`)
@@ -744,10 +906,21 @@ that speaks the same API, so they run without KVM; this covers that
 `kontur run` drives the pause/snapshot/resume and restore-argument-
 building sides of suspend/resume correctly, but not whether a real
 `cloud-hypervisor` actually restores a snapshot the way fakechv's own
-unconditional acks imply. `internal/netshim`'s integration
-test creates a real bridge/tap/nftables setup via the same netlink/nftables
-Go libraries `netshim` itself uses (no `ip`/`iptables` binaries needed) and
-is skipped unless run as root (`sudo go test ./internal/netshim/...`).
+unconditional acks imply. `internal/netshim`'s integration tests go
+further and exercise the real kernel through the same netlink/nftables Go
+libraries `netshim` itself uses (no `ip`/`iptables` binaries needed): NAT
+mode's bridge/tap/nftables setup, and flat mode's splice -- including a
+genuine packet test that injects a frame on one end of a veth pair and
+reads it back off the tap, and the reverse.
+
+Those need `CAP_NET_ADMIN` and `/dev/net/tun`, and skip without them. That
+default is necessary (they cannot run unprivileged) and it is a trap: a
+package whose every kernel-touching test skipped still reports `ok`, and
+skips are invisible without `-v`, so a green `go test ./...` says nothing
+about whether the splice carries a packet. Setting
+`KONTUR_NETNS_TESTS=required` turns each such skip into a failure naming
+what was missing, which is how CI asserts they really ran rather than
+passing quietly on a runner that could not exercise the kernel.
 The Dockerfile and the resulting image have additionally been smoke-tested
 against the real `cloud-hypervisor` binary under KVM (kernel + initramfs
 boot, console streamed to stdout, and the SIGTERM → power-button →
@@ -1048,3 +1221,37 @@ pod start is baked in instead). Both that and the existing
 `netshim`-networked `pod-example.yaml` shape were confirmed working,
 including a real `kontur exec` SSH session reaching the guest and a
 clean sub-3-second shutdown on pod deletion.
+
+### Flat mode
+
+The splice at the heart of flat mode (see "Flat mode" above) was
+validated against the real kernel rather than only through the netlink
+calls being accepted. `TestSplice_MovesFramesBothWays` builds a veth pair
+standing in for a container's own interface, splices it to a tap, opens
+the tap the way cloud-hypervisor would, and confirms a frame injected on
+the network side arrives on the tap and a frame written to the tap
+arrives on the network side -- both directions, on real devices.
+`TestSetupFlat` covers the rest of the setup the same way: identity
+discovery off an addressed interface, the tap's MTU copied from it,
+exactly one ingress filter per device after two runs (the same
+convergence a retried init container needs), and the control link's
+bridge addressed with its tap enslaved to it.
+
+That found one real portability bug before it could ship. The filter
+started out using the `matchall` classifier, which expresses "match
+everything" directly and is what the code reads most clearly as; the
+development kernel rejected it with a bare `ENOENT`, because `matchall`
+needs `CONFIG_NET_CLS_MATCHALL` and plenty of minimal kernels leave it
+out. Nothing in that error names the classifier as the missing piece, and
+it would have surfaced as flat mode simply not working on some hosts. It
+now uses `u32` with no selectors, which is effectively always present and
+is what `kata-containers` uses for the same job.
+
+Not covered here, for want of the environment: no real docker daemon and
+no KVM-capable host were available, so the `-backend docker` sequencing
+in flat mode is exercised only against the `fakedocker` stand-in (as the
+NAT path already is), and no guest has actually been booted on a spliced
+tap. The pieces that would differ from the NAT path there are the
+container's own flags and the two `--net` values, both asserted in unit
+tests; the guest-side control link (`kontur-control-net`) has not been
+run in a booted guest at all.

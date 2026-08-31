@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/kontur/internal/netshim"
 	"github.com/bwsalmon/kontur/internal/staticpod"
 )
 
@@ -261,5 +262,102 @@ func TestDelete_IdempotentWhenContainersAlreadyGone(t *testing.T) {
 
 	if err := Delete(context.Background(), d, "web", 40, &strings.Builder{}); err != nil {
 		t.Errorf("Delete() of already-gone containers error = %v, want nil (idempotent)", err)
+	}
+}
+
+// flatSpec is testSpec in flat mode: no -ip (the container runtime picks
+// the address the guest takes over), and a couple of caller-supplied
+// docker options that only the namespace holder can carry.
+func flatSpec() staticpod.VMSpec {
+	s := testSpec()
+	s.NetMode = netshim.ModeFlat
+	s.IP = ""
+	s.Port = 0
+	s.DockerRunOpts = []string{"--network", "mynet", "-p", "8080:80"}
+	return s
+}
+
+func TestCreate_FlatMode(t *testing.T) {
+	d, calls := testDocker(t)
+	var stdout strings.Builder
+
+	if err := Create(context.Background(), d, flatSpec(), &stdout); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	got := calls()
+	if len(got) != 5 {
+		t.Fatalf("Create() issued %d docker calls, want 5:\n%v", len(got), got)
+	}
+	netnsCall, netshimCall, vmCall := got[2], got[3], got[4]
+
+	// Port publishing and network membership belong to the container
+	// that owns the namespace; nothing joining it later can add them.
+	for _, want := range []string{"--network", "mynet", "-p", "8080:80"} {
+		if !containsArg(netnsCall, want) {
+			t.Errorf("netns holder call = %v, missing pass-through option %q", netnsCall, want)
+		}
+	}
+	// They must land on the holder only -- repeating a -p on a container
+	// joining an existing namespace is an error, not a no-op.
+	if containsArg(vmCall, "8080:80") {
+		t.Errorf("VM call = %v, should not repeat the holder's published ports", vmCall)
+	}
+
+	if !containsArg(netshimCall, "NETSHIM_MODE=flat") || !containsArg(netshimCall, "NETSHIM_VM=web") {
+		t.Errorf("netshim call = %v, want flat-mode settings", netshimCall)
+	}
+	if !containsArg(netshimCall, "NETSHIM_CONTROL_CIDR=169.254.100.1/24") {
+		t.Errorf("netshim call = %v, missing expected NETSHIM_CONTROL_CIDR", netshimCall)
+	}
+
+	// Flat mode does no routing and installs no NAT rules, so it never
+	// writes the sysctl that forces the NAT path to run privileged.
+	if containsArg(netshimCall, "--privileged") {
+		t.Errorf("netshim call = %v, want capabilities rather than --privileged in flat mode", netshimCall)
+	}
+	for _, want := range []string{"NET_ADMIN", "/dev/net/tun"} {
+		if !containsArg(netshimCall, want) {
+			t.Errorf("netshim call = %v, missing %q", netshimCall, want)
+		}
+	}
+
+	// The VM container derives its own --net from the namespace, so it
+	// gets netshim's settings rather than a precomputed CHV_NET.
+	if !containsArg(vmCall, "NETSHIM_MODE=flat") {
+		t.Errorf("VM call = %v, want the flat-mode netshim settings", vmCall)
+	}
+	for _, unwanted := range []string{"CHV_NET=tap=tap-web", "CHV_NET="} {
+		if containsArg(vmCall, unwanted) {
+			t.Errorf("VM call = %v, should not set CHV_NET in flat mode", vmCall)
+		}
+	}
+
+	// exec has to go via the control link: the guest now answers to the
+	// namespace's own address, so dialing that from inside the namespace
+	// would reach the local stack.
+	if !containsArg(vmCall, "KONTUR_EXEC_ADDR=169.254.100.2:22") {
+		t.Errorf("VM call = %v, want KONTUR_EXEC_ADDR on the control link", vmCall)
+	}
+}
+
+// TestCreate_FlatModeNoControlLink confirms that disabling the control
+// link drops the exec address entirely rather than emitting an empty or
+// bogus one that would fail at dial time.
+func TestCreate_FlatModeNoControlLink(t *testing.T) {
+	d, calls := testDocker(t)
+	var stdout strings.Builder
+
+	spec := flatSpec()
+	spec.ControlCIDR = ""
+	if err := Create(context.Background(), d, spec, &stdout); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	vmCall := calls()[4]
+	for _, a := range vmCall {
+		if strings.HasPrefix(a, "KONTUR_EXEC_ADDR=") {
+			t.Errorf("VM call = %v, want no KONTUR_EXEC_ADDR without a control link", vmCall)
+		}
 	}
 }

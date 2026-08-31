@@ -1,8 +1,11 @@
 package staticpod
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
 func baseSpec() VMSpec {
@@ -214,7 +217,7 @@ func TestSaveLoadDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got != s {
+	if !reflect.DeepEqual(got, s) {
 		t.Errorf("Load() = %+v, want %+v", got, s)
 	}
 
@@ -259,5 +262,83 @@ func TestList(t *testing.T) {
 	}
 	if len(specs) != 2 || specs[0].Name != "web" || specs[1].Name != "worker" {
 		t.Errorf("List() = %+v, want [web, worker] sorted by name", specs)
+	}
+}
+
+// flatBaseSpec is baseSpec in flat mode: the container runtime assigns
+// the address the guest takes over, so there is no -ip to give.
+func flatBaseSpec() VMSpec {
+	s := baseSpec()
+	s.NetMode = netshim.ModeFlat
+	s.IP = ""
+	s.Port = 0
+	return s
+}
+
+func TestValidate_FlatRejectsIP(t *testing.T) {
+	s := flatBaseSpec()
+	s.IP = "169.254.100.2"
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() = nil, want an error: flat mode takes its address from the runtime, so -ip would be silently ignored")
+	}
+}
+
+func TestValidate_FlatNeedsNoAddressOrPort(t *testing.T) {
+	s := flatBaseSpec()
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	// The address is only knowable once the sandbox exists, so the
+	// derived cmdline must leave ip= out for the VM container to append.
+	if strings.Contains(s.Cmdline, "ip=") {
+		t.Errorf("Cmdline = %q, want no ip= parameter in flat mode", s.Cmdline)
+	}
+	if !s.CmdlineAuto {
+		t.Errorf("CmdlineAuto = false, want the derived cmdline to be marked automatic")
+	}
+}
+
+func TestValidate_RejectsUnknownNetMode(t *testing.T) {
+	s := baseSpec()
+	s.NetMode = "bridged"
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() = nil, want an error for an unknown net mode")
+	}
+}
+
+func TestValidate_FlatRejectsBadControlCIDR(t *testing.T) {
+	s := flatBaseSpec()
+	s.ControlCIDR = "nonsense"
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() = nil, want an error for an unparseable control CIDR")
+	}
+}
+
+func TestValidate_FlatRejectsNameTooLongForControlTap(t *testing.T) {
+	s := flatBaseSpec()
+	s.Name = "twelvechars1"
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() = nil, want an error: %q would exceed the 15-character interface name limit", "ctl-"+s.Name)
+	}
+}
+
+func TestExecAddr(t *testing.T) {
+	nat := baseSpec()
+	if got, want := nat.ExecAddr(), "169.254.100.2:22"; got != want {
+		t.Errorf("NAT ExecAddr() = %q, want %q", got, want)
+	}
+
+	// In flat mode the guest holds the namespace's own address, so
+	// dialing it from inside the namespace reaches the local stack; the
+	// control link is the only way back in.
+	flat := flatBaseSpec()
+	if got, want := flat.ExecAddr(), "169.254.100.2:22"; got != want {
+		t.Errorf("flat ExecAddr() = %q, want the control link address %q", got, want)
+	}
+
+	none := flatBaseSpec()
+	none.ControlCIDR = ""
+	if got := none.ExecAddr(); got != "" {
+		t.Errorf("ExecAddr() = %q, want empty with no control link: there is no path to the guest", got)
 	}
 }

@@ -164,7 +164,7 @@ func TestBuildArgs_KernelBoot(t *testing.T) {
 func TestBuildArgs_MultipleDisksAndNet(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Disks = append(cfg.Disks, config.Disk{Path: "/data/extra.img", ReadOnly: true})
-	cfg.Net = "tap=eth0,mac=02:00:00:00:00:01"
+	cfg.Nets = []string{"tap=eth0,mac=02:00:00:00:00:01"}
 
 	args := BuildArgs(cfg)
 
@@ -183,8 +183,8 @@ func TestBuildArgs_MultipleDisksAndNet(t *testing.T) {
 			t.Errorf("disk[%d] = %q, want %q", i, disks[i], want[i])
 		}
 	}
-	if got := argValue(t, args, "--net"); got != cfg.Net {
-		t.Errorf("--net = %q, want %q", got, cfg.Net)
+	if got := argValue(t, args, "--net"); got != cfg.Nets[0] {
+		t.Errorf("--net = %q, want %q", got, cfg.Nets[0])
 	}
 }
 
@@ -292,5 +292,30 @@ func TestString_QuotesArgsWithSpaces(t *testing.T) {
 	want := `cloud-hypervisor --cmdline "console=ttyS0 root=/dev/vda"`
 	if got != want {
 		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
+// TestBuildArgs_MultipleNets covers flat mode's two-NIC guest: the
+// spliced interface plus the control link, each of which needs its own
+// --net (see internal/netshim's FlatGuestConfig).
+func TestBuildArgs_MultipleNets(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Nets = []string{"tap=tap-web,mac=02:42:ac:11:00:02,mtu=1450", "tap=ctl-web"}
+
+	args := BuildArgs(cfg)
+
+	var nets []string
+	for i, a := range args {
+		if a == "--net" {
+			nets = append(nets, args[i+1])
+		}
+	}
+	if len(nets) != len(cfg.Nets) {
+		t.Fatalf("--net values = %v, want %v", nets, cfg.Nets)
+	}
+	for i := range cfg.Nets {
+		if nets[i] != cfg.Nets[i] {
+			t.Errorf("--net[%d] = %q, want %q", i, nets[i], cfg.Nets[i])
+		}
 	}
 }

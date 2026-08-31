@@ -16,6 +16,38 @@ import (
 
 const defaultStateDir = "/var/lib/kontur/vms"
 
+// stringList collects a flag that may be repeated, in order. Used for
+// -docker-run-opt, where each option and each of its values is passed
+// separately so no quoting or splitting convention has to be invented for
+// values that may themselves contain spaces or commas.
+//
+// The first Set clears whatever the list was seeded with, so that passing
+// the flag at all replaces the saved value wholesale rather than
+// appending to it. That keeps "konturctl vm update" behaving the same way
+// for this flag as for every other one -- give it and it replaces, omit
+// it and the saved value is kept -- instead of silently accumulating a
+// longer list on each update.
+type stringList struct {
+	values   []string
+	replaced bool
+}
+
+func (l *stringList) String() string {
+	if l == nil {
+		return ""
+	}
+	return strings.Join(l.values, " ")
+}
+
+func (l *stringList) Set(v string) error {
+	if !l.replaced {
+		l.values = nil
+		l.replaced = true
+	}
+	l.values = append(l.values, v)
+	return nil
+}
+
 func runVM(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("vm: expected a subcommand (create, update, delete, list)")
@@ -53,6 +85,9 @@ type vmFlags struct {
 	bridge                        *string
 	bridgeCIDR                    *string
 	externalIface                 *string
+	netMode                       *string
+	controlCIDR                   *string
+	dockerRunOpts                 stringList
 	imagesHostPath                *string
 	diskHostPath                  *string
 	konturImage                   *string
@@ -83,6 +118,10 @@ func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v.bridge = fs.String("bridge", d.Bridge, "name of the in-pod bridge netshim creates")
 	v.bridgeCIDR = fs.String("bridge-cidr", d.BridgeCIDR, "the bridge's own address and subnet; -ip must fall within it")
 	v.externalIface = fs.String("external-iface", d.ExternalIface, "the pod's primary interface")
+	v.netMode = fs.String("net", d.NetModeOrDefault(), "how the guest reaches the network: \"nat\" (private subnet behind netshim's DNAT/masquerade) or \"flat\" (spliced onto the sandbox's own segment, taking over its address and MAC)")
+	v.controlCIDR = fs.String("control-cidr", d.ControlCIDR, "address netshim holds on the flat-mode control link, the private second NIC that keeps \"kontur exec\" and the memory agent able to reach the guest; empty disables it")
+	v.dockerRunOpts.values = append([]string(nil), d.DockerRunOpts...)
+	fs.Var(&v.dockerRunOpts, "docker-run-opt", "extra option passed verbatim to the \"docker run\" creating the network namespace holder, repeatable (e.g. -docker-run-opt -p -docker-run-opt 8080:80); -backend docker only")
 	v.imagesHostPath = fs.String("images-hostpath", d.ImagesHostPath, "host directory mounted read-only at /images in the kontur container")
 	v.diskHostPath = fs.String("disk-hostpath", d.DiskHostPath, "host directory where each VM's own writable qcow2 overlay is stored, one subdirectory per VM name; only used when -disk-readonly=false")
 	v.konturImage = fs.String("kontur-image", d.KonturImage, "kontur image reference, used for both the netshim init container and the VM container")
@@ -109,6 +148,9 @@ func (v *vmFlags) toSpec(name string) staticpod.VMSpec {
 		Bridge:                        *v.bridge,
 		BridgeCIDR:                    *v.bridgeCIDR,
 		ExternalIface:                 *v.externalIface,
+		NetMode:                       *v.netMode,
+		ControlCIDR:                   *v.controlCIDR,
+		DockerRunOpts:                 v.dockerRunOpts.values,
 		ImagesHostPath:                *v.imagesHostPath,
 		DiskHostPath:                  *v.diskHostPath,
 		KonturImage:                   *v.konturImage,

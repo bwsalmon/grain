@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -323,5 +324,67 @@ func TestVMLifecycle_DockerBackend(t *testing.T) {
 	// from either way -- runVMDelete must fall back sanely).
 	if _, _, err := runVMArgs(t, "delete", "web", "--state-dir", stateDir); err != nil {
 		t.Errorf("second delete error = %v, want nil (idempotent)", err)
+	}
+}
+
+func TestVMLifecycle_FlatMode(t *testing.T) {
+	withFakeDocker(t)
+	stateDir := filepath.Join(t.TempDir(), "state")
+
+	_, stderr, err := runVMArgs(t, "create", "web",
+		"--backend", "docker",
+		"--net", "flat",
+		"--disk", "/images/disk.img",
+		"--kernel", "/images/vmlinux",
+		"--docker-run-opt", "--network",
+		"--docker-run-opt", "mynet",
+		"--docker-run-opt", "-p",
+		"--docker-run-opt", "8080:80",
+		"--state-dir", stateDir,
+	)
+	if err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+
+	saved, err := staticpod.Load(stateDir, "web")
+	if err != nil {
+		t.Fatalf("saved state not found: %v", err)
+	}
+	if !saved.IsFlat() {
+		t.Errorf("saved NetMode = %q, want flat", saved.NetMode)
+	}
+	want := []string{"--network", "mynet", "-p", "8080:80"}
+	if !reflect.DeepEqual(saved.DockerRunOpts, want) {
+		t.Errorf("saved DockerRunOpts = %v, want %v", saved.DockerRunOpts, want)
+	}
+
+	// -ip is a NAT-mode setting; in flat mode the runtime assigns the
+	// address, so passing one has to be rejected rather than ignored.
+	if _, _, err := runVMArgs(t, "create", "other", "--backend", "docker", "--net", "flat",
+		"--disk", "/images/disk.img", "--ip", "169.254.100.2", "--state-dir", stateDir); err == nil {
+		t.Errorf("create with -net flat and -ip = nil error, want it rejected")
+	}
+
+	// An update carries the mode forward, and repeating -docker-run-opt
+	// replaces the saved list rather than appending to it.
+	if _, stderr, err := runVMArgs(t, "update", "web",
+		"--docker-run-opt", "-p",
+		"--docker-run-opt", "9090:80",
+		"--state-dir", stateDir); err != nil {
+		t.Fatalf("update error = %v, stderr = %s", err, stderr)
+	}
+	saved, err = staticpod.Load(stateDir, "web")
+	if err != nil {
+		t.Fatalf("saved state not found after update: %v", err)
+	}
+	if !saved.IsFlat() {
+		t.Errorf("saved NetMode after update = %q, want flat", saved.NetMode)
+	}
+	if want := []string{"-p", "9090:80"}; !reflect.DeepEqual(saved.DockerRunOpts, want) {
+		t.Errorf("saved DockerRunOpts after update = %v, want %v (replaced, not appended)", saved.DockerRunOpts, want)
+	}
+
+	if _, stderr, err := runVMArgs(t, "delete", "web", "--state-dir", stateDir); err != nil {
+		t.Fatalf("delete error = %v, stderr = %s", err, stderr)
 	}
 }

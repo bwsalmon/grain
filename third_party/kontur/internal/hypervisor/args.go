@@ -101,8 +101,8 @@ func BuildArgs(cfg config.Config) []string {
 		args = append(args, "--firmware", cfg.Firmware)
 	}
 
-	if cfg.Net != "" {
-		args = append(args, "--net", cfg.Net)
+	for _, n := range cfg.Nets {
+		args = append(args, "--net", n)
 	}
 
 	// Route the guest's serial console to our own stdio (so it shows up

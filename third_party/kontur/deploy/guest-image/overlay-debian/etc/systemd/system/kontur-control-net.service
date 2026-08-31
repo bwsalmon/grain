@@ -1,0 +1,13 @@
+[Unit]
+Description=Configure the kontur flat-mode control link
+After=network-pre.target
+Wants=network-pre.target
+Before=kontur-mem-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/kontur-control-net
+
+[Install]
+WantedBy=multi-user.target

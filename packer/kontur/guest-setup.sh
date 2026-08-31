@@ -177,32 +177,41 @@ echo \
 apt-get update
 apt-get install -y --no-install-recommends google-cloud-cli terraform
 
-# --- Networking: static "eth0" naming, and static addressing from the
+# --- Networking: kernel interface naming, and static addressing from the
 # kernel's own "ip=" boot parameter.
 #
 # kontur's own guest image needs neither, and its deploy/guest-image
 # README says so explicitly ("it relies on the kernel's built-in ip=
 # boot-time autoconfiguration ... no extra guest-side networking setup was
-# needed"). That holds only for a kernel with CONFIG_IP_PNP, and kontur
-# ships no kernel of its own to have that property. Debian's stock
-# linux-image-amd64 -- the kernel this guest actually boots -- does NOT
-# enable CONFIG_IP_PNP, so nothing acts on "ip=" without the unit below,
-# and systemd's predictable-naming policy renames the guest's one NIC away
-# from "eth0" without the link file below. konturctl derives the "ip="
-# value itself with "eth0" hard-coded (internal/staticpod/spec.go), so the
-# guest has to guarantee that name rather than the other way around.
+# needed"). That holds only for a kernel with CONFIG_IP_PNP, and the
+# kernel this guest actually boots -- Debian's stock linux-image-amd64,
+# installed above rather than kontur's own (see README.md, "Why no custom
+# kernel") -- does NOT enable it, so nothing acts on "ip=" without the
+# unit below. konturctl derives that "ip=" value itself with "eth0"
+# hard-coded (internal/staticpod/spec.go), so the guest has to guarantee
+# that name rather than the other way around.
+#
+# Naming is done by turning systemd's predictable-naming policy off
+# wholesale rather than by pinning a name, because this guest can have
+# more than one NIC. kontur's flat networking mode gives it two: the
+# first is spliced onto the container's own network segment and carries
+# the identity "ip=" configures, the second is the private control link
+# "kontur exec" and the memory agent reach the guest on (kontur's
+# internal/netshim, "Flat mode"). A link file matching Type=ether and
+# forcing Name=eth0 -- which is what this did before -- matches *both* of
+# them and can only win once, leaving the other NIC under whatever name
+# systemd falls back to and the control link unconfigured. Masking the
+# default .link is the documented way to disable predictable naming, and
+# leaves the kernel's own names in place: eth0 and eth1, in the PCI probe
+# order cloud-hypervisor attaches them, which is the order kontur passes
+# --net (spliced NIC first, control link second -- netshim's
+# FlatGuestConfig). A single-NIC guest, i.e. kontur's original NAT mode,
+# still gets exactly eth0 out of this.
 #
 # Both were found by hand against a real booted guest. Their failure mode
 # is a VM that boots fine and has no address at all, which reaches the
 # daemon only as "the guest never became reachable".
-cat > /etc/systemd/network/00-eth0.link <<'EOF'
-[Match]
-Type=ether
-
-[Link]
-NamePolicy=
-Name=eth0
-EOF
+ln -sf /dev/null /etc/systemd/network/99-default.link
 
 cat > /usr/local/sbin/kontur-configure-net <<'EOF'
 #!/bin/sh
@@ -326,8 +335,11 @@ Added on top of kontur's own guest image:
   operator's public key as its only authorized_keys entry and no password
   login -- this is the account -kontur-ssh-user names
 - a systemd unit that statically addresses eth0 from the kernel's own
-  "ip=" boot parameter, and a link file pinning that NIC's name, neither
-  of which kontur's own guest needs (see guest-setup.sh's "Networking")
+  "ip=" boot parameter, and predictable interface naming disabled so the
+  kernel's own eth0/eth1 names survive, neither of which kontur's own
+  guest needs (see guest-setup.sh's "Networking"). kontur's flat-mode
+  control link (its own kontur-control-net service, from kontur's guest
+  overlay) configures eth1 on top of that
 - git curl jq ripgrep fd-find build-essential python3 python3-venv pipx
   tmux unzip ca-certificates bubblewrap gnupg
 - docker-ce plus kind (its node image is not pre-pulled -- see

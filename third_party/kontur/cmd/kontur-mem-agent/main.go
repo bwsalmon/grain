@@ -51,6 +51,7 @@ func main() {
 	interval := envDuration("KONTUR_MEM_AGENT_INTERVAL", defaultInterval)
 	threshold := envFloat("KONTUR_MEM_AGENT_THRESHOLD", defaultThreshold)
 	port := envInt("KONTUR_MEM_AGENT_PORT", defaultPort)
+	host := os.Getenv("KONTUR_MEM_AGENT_HOST")
 
 	log.Printf("polling %s every %s, signalling port %d when \"some avg10\" >= %.2f", pressurePath, interval, port, threshold)
 
@@ -60,7 +61,7 @@ func main() {
 		case err != nil:
 			log.Printf("reading %s: %v", pressurePath, err)
 		case avg10 >= threshold:
-			signalPressure(port, avg10)
+			signalPressure(host, port, avg10)
 		}
 		time.Sleep(interval)
 	}
@@ -104,19 +105,29 @@ func readPressure(path string) (float64, error) {
 }
 
 // signalPressure asks the host to grow this guest's memory, by dialing
-// its internal/memagent listener at the default route's gateway (see
-// defaultGateway) on port and writing a single "PRESSURE <value>\n"
-// line. Errors (including no listener there at all, e.g. because the
-// host has CHV_MEM_AGENT unset) are logged and otherwise ignored: this
-// is just the next poll's problem too.
-func signalPressure(port int, avg10 float64) {
-	gw, err := defaultGateway(routePath)
-	if err != nil {
-		log.Printf("finding default gateway: %v", err)
-		return
+// its internal/memagent listener on port and writing a single
+// "PRESSURE <value>\n" line. Errors (including no listener there at all,
+// e.g. because the host has CHV_MEM_AGENT unset) are logged and
+// otherwise ignored: this is just the next poll's problem too.
+//
+// An empty host falls back to this guest's default route's gateway (see
+// defaultGateway), which is the "kontur run" container's own bridge
+// address in NAT mode. That fallback is wrong in flat mode, where the
+// default route leads out to the container network rather than to the
+// host side of this VM, so the guest's control link is configured with
+// an explicit host instead -- see deploy/guest-image's
+// kontur-control-net.
+func signalPressure(host string, port int, avg10 float64) {
+	if host == "" {
+		gw, err := defaultGateway(routePath)
+		if err != nil {
+			log.Printf("finding default gateway: %v", err)
+			return
+		}
+		host = gw.String()
 	}
 
-	addr := net.JoinHostPort(gw.String(), strconv.Itoa(port))
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		log.Printf("signalling %s: %v", addr, err)

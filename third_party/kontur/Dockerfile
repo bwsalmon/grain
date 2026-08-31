@@ -195,11 +195,14 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 #   overlay-common/etc/ssh/sshd_config.d).
 RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     ln -sf /etc/systemd/system/kontur-ssh-host-keys.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-ssh-host-keys.service; \
     ln -sf /etc/systemd/system/kontur-mem-agent.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-mem-agent.service; \
+    ln -sf /etc/systemd/system/kontur-control-net.service \
+      /rootfs/etc/systemd/system/multi-user.target.wants/kontur-control-net.service; \
     rm -f /rootfs/etc/ssh/ssh_host_*; \
     install -d -m0700 /rootfs/root/.ssh; \
     cat /rootfs/root/.ssh/kontur-exec.pub > /rootfs/root/.ssh/authorized_keys; \
@@ -252,15 +255,17 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 # - default: sshd and acpid, this guest's actual raison d'etre.
 RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     chmod 0755 /rootfs/etc/init.d/kontur-mem-agent; \
+    chmod 0755 /rootfs/etc/init.d/kontur-control-net; \
     for svc in devfs dmesg mdev hwdrivers; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/sysinit/"${svc}"; \
     done; \
     for svc in hwclock modules sysctl hostname bootmisc syslog; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/boot/"${svc}"; \
     done; \
-    for svc in local sshd acpid kontur-mem-agent; do \
+    for svc in local sshd acpid kontur-control-net kontur-mem-agent; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/default/"${svc}"; \
     done; \
     install -d -m0700 /rootfs/root/.ssh; \

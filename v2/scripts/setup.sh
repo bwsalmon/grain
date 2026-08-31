@@ -293,7 +293,7 @@ Recognized variables:
                              failing the whole run.
   GRAIN_KONTUR_IMAGE_BUCKET  set together with GRAIN_KONTUR_OCI_IMAGE below to
                              fetch a guest/OCI image pair someone already built
-                             and published centrally (packer/kontur/build.sh's
+                             and published centrally (packer/kontur/build-guest.sh's
                              own KONTUR_IMAGE_BUCKET; this script fetches its
                              "latest" alias) instead of building one locally.
                              Leave both empty (the default) to build locally.
@@ -666,7 +666,7 @@ gcs_fetch() {
 
 # ensure_kontur_ssh_key finds or generates the SSH keypair a guest image
 # bakes in as the operator account's only authorized_keys entry
-# (packer/kontur/provision.sh's own OPERATOR_SSH_PUBLIC_KEY), before
+# (packer/kontur/guest-setup.sh's own OPERATOR_SSH_PUBLIC_KEY), before
 # ensure_kontur_images needs the public half to build one. Generating one
 # automatically -- rather than requiring an operator to run `ssh-keygen`
 # and push-secrets.sh by hand before a first deploy, the way
@@ -760,26 +760,9 @@ ensure_kontur_ssh_key() {
   rm -rf "$tmp"
 }
 
-# ensure_kontur_build_tools installs debootstrap/e2fsprogs, the only two
-# packages packer/kontur/build.sh needs beyond what setup.sh already
-# requires unconditionally (docker, which build-oci-image.sh also needs)
-# -- only ever called right before ensure_kontur_images_build actually
-# needs to build a guest image locally, the same "install it here, since
-# this is the only place that can" reasoning ensure_make already uses for
-# `make`.
-ensure_kontur_build_tools() {
-  command -v debootstrap >/dev/null 2>&1 && command -v mke2fs >/dev/null 2>&1 && return 0
-  if command -v apt-get >/dev/null 2>&1; then
-    log "  installing debootstrap/e2fsprogs (packer/kontur/build.sh needs both to build the guest image)"
-    apt-get update -qq || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends debootstrap e2fsprogs || true
-  fi
-  command -v debootstrap >/dev/null 2>&1 && command -v mke2fs >/dev/null 2>&1
-}
-
 # kontur_image_tag names the guest/OCI image pair ensure_kontur_images_build
 # builds and caches by hashing exactly what defines their contents:
-# packer/kontur's own git tree (provision.sh and build.sh -- the "startup
+# packer/kontur's own git tree (guest-setup.sh and build-guest.sh -- the "startup
 # script" a guest image is provisioned from) and third_party/kontur's own
 # vendored git tree (the kontur binary and cloud-hypervisor version the
 # OCI image actually bakes in -- the "kontur version"), plus the operator
@@ -832,7 +815,7 @@ kontur_image_tag() {
 # readable *there*, not on the host where the daemon runs.
 #
 # It is the same key ensure_kontur_ssh_key already generated and
-# packer/kontur/provision.sh already baked into the guest's own
+# packer/kontur/guest-setup.sh already baked into the guest's own
 # authorized_keys -- copied, not moved, since $GRAIN_DATA_DIR/secrets
 # remains where the deployment's own copy lives.
 ensure_kontur_exec_key() {
@@ -872,7 +855,7 @@ ensure_kontur_images() {
 # unchanged: always (re-)fetches the bucket's "latest" alias and pulls the
 # OCI image, on every run, rather than caching by kontur_image_tag -- an
 # operator choosing this path already owns when "latest" changes (their
-# own build.sh/build-oci-image.sh invocation, run separately), so there is
+# own build-guest.sh/build-oci-image.sh invocation, run separately), so there is
 # no local staleness for this script to detect on its own.
 ensure_kontur_images_fetch() {
   log "Fetching kontur guest image from gs://${GRAIN_KONTUR_IMAGE_BUCKET}/kontur-guest/latest"
@@ -918,8 +901,9 @@ ensure_kontur_images_fetch() {
 }
 
 # ensure_kontur_images_build is the default path (bwsalmon/agents#531):
-# builds the guest image (packer/kontur/build.sh -- debootstrap+chroot, no
-# VM boot needed) and the OCI image (build-oci-image.sh -- a plain `docker
+# builds the guest image (packer/kontur/build-guest.sh -- kontur's own
+# guest build, a plain `docker build` needing neither root nor a VM boot)
+# and the OCI image (build-oci-image.sh -- likewise a plain `docker
 # build`, KONTUR_OCI_SKIP_PUSH=1 so no registry is ever touched) itself,
 # right here, skipping either step entirely once kontur_image_tag shows
 # a matching one already exists on disk.
@@ -932,20 +916,15 @@ ensure_kontur_images_build() {
   if [ -s "$img_dir/vmlinuz" ] && [ -s "$img_dir/initrd.img" ] && [ -s "$img_dir/disk.img" ]; then
     log "kontur guest image ${tag} already built -- reusing it"
   else
-    if ! ensure_kontur_build_tools; then
-      log "GRAIN_KONTUR_ENABLE=1 but debootstrap/e2fsprogs could not be installed -- leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
-      return
-    fi
-    log "Building kontur guest image ${tag} (packer/kontur/build.sh -- debootstrap, no VM boot; this can take several minutes)"
+    log "Building kontur guest image ${tag} (packer/kontur/build-guest.sh -- one docker build, no VM boot; this can take several minutes)"
     local tmp_out
     tmp_out="$(mktemp -d)"
     if ! env \
         OPERATOR_SSH_PUBLIC_KEY="$KONTUR_SSH_PUBLIC_KEY" \
         SANDBOX_SETUP_SCRIPT="" \
         OUTPUT_DIR="$tmp_out" \
-        "$GRAIN_SRC_DIR/packer/kontur/build.sh"; then
-      log "  packer/kontur/build.sh failed -- leaving kontur sandboxing off this run"
+        "$GRAIN_SRC_DIR/packer/kontur/build-guest.sh"; then
+      log "  packer/kontur/build-guest.sh failed -- leaving kontur sandboxing off this run"
       rm -rf "$tmp_out"
       GRAIN_KONTUR_ENABLE=0
       return

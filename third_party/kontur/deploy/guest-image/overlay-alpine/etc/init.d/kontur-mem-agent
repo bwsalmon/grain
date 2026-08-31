@@ -4,3 +4,18 @@ description="Signal host-side kontur listener when this guest is under memory pr
 command="/usr/local/bin/kontur-mem-agent"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	after kontur-control-net
+}
+
+start_pre() {
+	# Written by kontur-control-net when this guest has a flat-mode
+	# control link, naming the host address to signal. Absent in NAT
+	# mode, where the agent's own default (this guest's default route's
+	# gateway) is correct.
+	if [ -f /run/kontur-control-net.env ]; then
+		. /run/kontur-control-net.env
+		export KONTUR_MEM_AGENT_HOST
+	fi
+}

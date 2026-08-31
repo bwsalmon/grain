@@ -1,8 +1,13 @@
 [Unit]
 Description=Signal host-side kontur listener when this guest is under memory pressure
+After=kontur-control-net.service
 
 [Service]
 Type=simple
+# Written by kontur-control-net when this guest has a flat-mode control
+# link, naming the host address to signal. Absent in NAT mode, where the
+# agent's own default (this guest's default route's gateway) is correct.
+EnvironmentFile=-/run/kontur-control-net.env
 ExecStart=/usr/local/bin/kontur-mem-agent
 Restart=always
 RestartSec=5

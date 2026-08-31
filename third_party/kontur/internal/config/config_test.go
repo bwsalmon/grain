@@ -169,8 +169,8 @@ func TestFromEnv_ExtraDisksAndOverrides(t *testing.T) {
 	if cfg.MemoryShared {
 		t.Errorf("MemoryShared = true, want false")
 	}
-	if cfg.Net != "tap=eth0" {
-		t.Errorf("Net = %q, want tap=eth0", cfg.Net)
+	if len(cfg.Nets) != 1 || cfg.Nets[0] != "tap=eth0" {
+		t.Errorf("Nets = %q, want [tap=eth0]", cfg.Nets)
 	}
 	if cfg.APISocket != "/tmp/custom.sock" {
 		t.Errorf("APISocket = %q, want /tmp/custom.sock", cfg.APISocket)

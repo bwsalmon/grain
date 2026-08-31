@@ -144,10 +144,13 @@ type Config struct {
 
 	MemoryShared bool
 
-	// Net is passed through verbatim as the value of --net, e.g.
-	// "tap=eth0,mac=02:00:00:00:00:01". Left empty, the VM boots with no
-	// network device.
-	Net string
+	// Nets holds one --net value per guest NIC, each passed through
+	// verbatim, e.g. "tap=eth0,mac=02:00:00:00:00:01". CHV_NET supplies
+	// a single entry; flat mode (see cmd/kontur) replaces the whole list
+	// with values it derives from the namespace's own identity, which is
+	// how a flat-mode guest gets both its spliced NIC and its control
+	// NIC. Left empty, the VM boots with no network device.
+	Nets []string
 
 	APISocket  string
 	BinaryPath string
@@ -220,7 +223,7 @@ func FromEnv() (Config, error) {
 		Initramfs:    os.Getenv(envInitramfs),
 		Firmware:     os.Getenv(envFirmware),
 		Cmdline:      getEnvDefault(envCmdline, defaultCmdline),
-		Net:          os.Getenv(envNet),
+		Nets:         netsFromEnv(),
 		APISocket:    getEnvDefault(envAPISocket, defaultAPISocket),
 		BinaryPath:   getEnvDefault(envBinaryPath, defaultBinaryPath),
 		MemoryShared: true,
@@ -460,4 +463,13 @@ func getEnvDuration(key string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: invalid duration %q", key, v)
 	}
 	return d, nil
+}
+
+// netsFromEnv turns CHV_NET into the one-element list BuildArgs expects,
+// or no list at all when it is unset (a VM with no network device).
+func netsFromEnv() []string {
+	if v := os.Getenv(envNet); v != "" {
+		return []string{v}
+	}
+	return nil
 }
