@@ -316,9 +316,10 @@ Recognized variables:
                              127.0.0.1, with no route to this host's
                              (bwsalmon/agents#567). Defaults to docker's own
                              "bridge" network gateway address, detected via
-                             `docker network inspect bridge`; set explicitly
-                             if this host's kontur VM containers join a
-                             different docker network.
+                             `docker network inspect bridge` or, failing
+                             that, the bridge device's own address; set
+                             explicitly if this host's kontur VM containers
+                             join a different docker network.
 EOF
 }
 
@@ -1089,6 +1090,20 @@ ensure_kontur_kvm_access() {
 # Like ensure_kontur_kvm_access, resets GRAIN_KONTUR_ENABLE to 0 (with a
 # log line explaining why) rather than installing a daemon whose every
 # dispatched task would fail its very first git clone.
+#
+# `docker network inspect bridge`'s own .IPAM.Config only carries a
+# "Gateway" key when something (a custom network, or an operator's own
+# `docker network create --gateway`) set one explicitly -- the Debian
+# `docker.io` package's bundled daemon (bwsalmon/agents#572: seen with
+# docker.io 20.10.24 on the grain-v2-staging-host image) never fills it
+# in for the default bridge network's own auto-allocated pool, even
+# after a container has actually attached to it, so `gw` here came back
+# empty on every real install and permanently disabled kontur sandboxing.
+# The address containers on that network actually get routed through is
+# simpler ground truth: whatever IPv4 address the bridge device itself
+# (by default docker0, but overridable via `docker network create -o
+# com.docker.network.bridge.name`, hence reading it from the network's
+# own Options rather than hardcoding it) carries on this host.
 ensure_kontur_git_proxy_host() {
   if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     return
@@ -1096,8 +1111,13 @@ ensure_kontur_git_proxy_host() {
   if [ -n "$GRAIN_KONTUR_GIT_PROXY_HOST" ]; then
     return
   fi
-  local gw
+  local gw iface
   gw="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)"
+  if [ -z "$gw" ]; then
+    iface="$(docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)"
+    iface="${iface:-docker0}"
+    gw="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+  fi
   if [ -z "$gw" ]; then
     log "GRAIN_KONTUR_ENABLE=1 but GRAIN_KONTUR_GIT_PROXY_HOST is unset and docker's own \"bridge\" network has no gateway address to default it to -- set GRAIN_KONTUR_GIT_PROXY_HOST explicitly (see this script's own -h); leaving kontur sandboxing off this run"
     GRAIN_KONTUR_ENABLE=0
