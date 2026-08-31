@@ -168,6 +168,7 @@ GRAIN_KONTUR_SSH_KEY_FILE="${GRAIN_KONTUR_SSH_KEY_FILE:-}"
 GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
 GRAIN_KONTUR_BASE_IP="${GRAIN_KONTUR_BASE_IP:-169.254.100.10}"
 GRAIN_KONTUR_BASE_PORT="${GRAIN_KONTUR_BASE_PORT:-12000}"
+GRAIN_KONTUR_GIT_PROXY_HOST="${GRAIN_KONTUR_GIT_PROXY_HOST:-}"
 
 # On by default -- the common case is a single, directly-managed host
 # with no rollout mechanism of its own, where the UI's Upgrade button
@@ -308,6 +309,16 @@ Recognized variables:
   GRAIN_KONTUR_BASE_PORT     "-port" slot 1's kontur VM forwards; every later
                              slot's is this plus its own number minus one
                              (default: 12000)
+  GRAIN_KONTUR_GIT_PROXY_HOST  host (no port) a kontur VM reaches this
+                             daemon's own git proxy through, in place of the
+                             loopback address it otherwise binds to -- a
+                             kontur VM's guest has its own unrelated
+                             127.0.0.1, with no route to this host's
+                             (bwsalmon/agents#567). Defaults to docker's own
+                             "bridge" network gateway address, detected via
+                             `docker network inspect bridge`; set explicitly
+                             if this host's kontur VM containers join a
+                             different docker network.
 EOF
 }
 
@@ -1063,6 +1074,39 @@ ensure_kontur_kvm_access() {
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" /var/lib/kontur/vms
 }
 
+# ensure_kontur_git_proxy_host resolves GRAIN_KONTUR_GIT_PROXY_HOST -- the
+# address startGitProxy (cmd/grain/daemon.go) advertises to a kontur VM in
+# place of the loopback address it binds to by default, since a kontur VM's
+# guest runs in its own network namespace with its own unrelated 127.0.0.1
+# that this host's daemon is never listening behind (bwsalmon/agents#567:
+# "Failed to connect to 127.0.0.1 ... Couldn't connect to server") -- to
+# docker's own "bridge" network gateway address when an operator hasn't
+# already set one explicitly. That address is what a kontur VM's outbound
+# NAT (third_party/kontur/internal/netshim's own masqueradeExprs, leaving
+# via the VM container's docker-assigned interface) routes through to reach
+# this host, the same way any other container on that network would.
+#
+# Like ensure_kontur_kvm_access, resets GRAIN_KONTUR_ENABLE to 0 (with a
+# log line explaining why) rather than installing a daemon whose every
+# dispatched task would fail its very first git clone.
+ensure_kontur_git_proxy_host() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+  if [ -n "$GRAIN_KONTUR_GIT_PROXY_HOST" ]; then
+    return
+  fi
+  local gw
+  gw="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)"
+  if [ -z "$gw" ]; then
+    log "GRAIN_KONTUR_ENABLE=1 but GRAIN_KONTUR_GIT_PROXY_HOST is unset and docker's own \"bridge\" network has no gateway address to default it to -- set GRAIN_KONTUR_GIT_PROXY_HOST explicitly (see this script's own -h); leaving kontur sandboxing off this run"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+  GRAIN_KONTUR_GIT_PROXY_HOST="$gw"
+  log "kontur git proxy host defaulted to docker bridge gateway $GRAIN_KONTUR_GIT_PROXY_HOST"
+}
+
 # seed_kontur_ssh_key writes KONTUR_SSH_PRIVATE_KEY -- found or generated
 # by ensure_kontur_ssh_key, above, well before $GRAIN_DATA_DIR/secrets
 # necessarily existed to write it into -- to
@@ -1441,6 +1485,7 @@ write_systemd_units() {
       -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
       -kontur-base-ip "$GRAIN_KONTUR_BASE_IP"
       -kontur-base-port "$GRAIN_KONTUR_BASE_PORT"
+      -kontur-git-proxy-host "$GRAIN_KONTUR_GIT_PROXY_HOST"
       -kontur-create-arg -images-hostpath -kontur-create-arg "$GRAIN_KONTUR_IMAGES_HOSTPATH"
       -kontur-create-arg -disk -kontur-create-arg /images/current/disk.img
       -kontur-create-arg -kernel -kontur-create-arg /images/current/vmlinuz
@@ -1593,6 +1638,7 @@ main() {
   ensure_kontur_images
   ensure_konturctl
   ensure_kontur_kvm_access
+  ensure_kontur_git_proxy_host
   setup_data_dir
   # After setup_data_dir: seed_kontur_ssh_key, which it calls, is what
   # actually writes $GRAIN_DATA_DIR/secrets/kontur-ssh-key -- the key this

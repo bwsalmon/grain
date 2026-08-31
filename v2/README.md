@@ -627,10 +627,27 @@ skips it and leaves the sandbox exactly as bare as it was before. What it
 does make load-bearing is an assumption `ConfigureGitCredentials` has
 always made quietly: that the sandbox can actually reach the proxy's
 address. The daemon binds it to `127.0.0.1:0`, which a local directory
-shares and a kontur VM does not — a slot that cannot reach it now fails
-its dispatch with a clone error naming the repo, where before it failed
-later and less legibly, on whatever the agent tried against a host its
-credential file matched but nothing could route to.
+shares and a kontur VM does not — a slot that cannot reach it fails its
+dispatch with a clone error naming the repo (`fatal: unable to access
+'http://127.0.0.1:<port>/...': ... Couldn't connect to server`,
+bwsalmon/agents#567), where before it failed later and less legibly, on
+whatever the agent tried against a host its credential file matched but
+nothing could route to.
+
+bwsalmon/agents#567 closed that gap: `-kontur-git-proxy-host` (required
+alongside `-kontur-ssh-user`/`-kontur-exec-key`/`-kontur-workspace`
+whenever `-kontur-vm-name-prefix` is set) names the address a kontur VM's
+guest can actually reach this daemon at — typically the docker bridge
+gateway its own outbound NAT (`third_party/kontur/internal/netshim`)
+routes through, since the guest's `127.0.0.1` is its own, unrelated
+loopback. Setting it makes `startGitProxy` bind every interface instead of
+just loopback, and advertise that host to every slot's sandbox in
+loopback's place. `v2/scripts/setup.sh`'s `ensure_kontur_git_proxy_host`
+defaults `GRAIN_KONTUR_GIT_PROXY_HOST` to that gateway address
+automatically (via `docker network inspect bridge`) when an operator
+hasn't set one, the same "detect it, or disable kontur sandboxing for this
+run rather than install a daemon that would fail every task" shape
+`ensure_kontur_kvm_access` already uses for `/dev/kvm`.
 
 bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
 `KonturConfig.Backend` selects the value `konturctl vm create -backend`

@@ -105,7 +105,7 @@ func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyURL, stop, err := startGitProxy(dataDir, store, githubHost, true)
+	proxyURL, stop, err := startGitProxy(dataDir, store, githubHost, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
