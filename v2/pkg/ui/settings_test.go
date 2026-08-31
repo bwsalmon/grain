@@ -96,6 +96,38 @@ func TestSettingsHasNoGapWhenTheLadderCoversEveryTargetRepo(t *testing.T) {
 	}
 }
 
+// TestUpdateSettingsRoundTripsShowClosedByDefault is bwsalmon/agents#537's
+// global default: unset it reads back false (hide closed tasks by
+// default), and setting it sticks through a GetSettings read the same
+// way NewestFirst already does (client_test.go's own
+// TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue).
+func TestUpdateSettingsRoundTripsShowClosedByDefault(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.ShowClosedByDefault {
+		t.Fatalf("ShowClosedByDefault = true with nothing set, want false")
+	}
+
+	show := true
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{ShowClosedByDefault: &show}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read.ShowClosedByDefault {
+		t.Fatalf("ShowClosedByDefault = false after UpdateSettings, want true")
+	}
+}
+
 func TestSettingsSkipsTheCredentialCheckWithNoCredentialsConfigured(t *testing.T) {
 	// The default testClient -- Config.Credentials left nil, as a UI not
 	// colocated with the proxy's secrets directory always leaves it.

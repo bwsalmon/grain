@@ -409,6 +409,40 @@ func TestConfigEndpointReportsTargetRepos(t *testing.T) {
 	}
 }
 
+// TestConfigEndpointReportsShowClosedByDefault is bwsalmon/agents#537's
+// global default reaching a list before Settings has ever been opened
+// this session: unconfigured (no UpdateSettings call yet) reports false,
+// matching "hide closed tasks by default", and an operator turning it on
+// through Settings is reflected immediately, the same store round trip
+// TestConfigEndpointReportsTargetRepos already covers for targetRepos.
+func TestConfigEndpointReportsShowClosedByDefault(t *testing.T) {
+	srv, client := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	cfg := decode[struct {
+		ShowClosedByDefault bool `json:"showClosedByDefault"`
+	}](t, rec)
+	if cfg.ShowClosedByDefault {
+		t.Fatalf("showClosedByDefault = true with nothing configured, want false")
+	}
+
+	if _, err := client.UpdateSettings(context.Background(), firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	show := true
+	if _, err := client.UpdateSettings(context.Background(), ui.UpdateSettingsRequest{ShowClosedByDefault: &show}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/config", "")
+	cfg = decode[struct {
+		ShowClosedByDefault bool `json:"showClosedByDefault"`
+	}](t, rec)
+	if !cfg.ShowClosedByDefault {
+		t.Fatalf("showClosedByDefault = false after UpdateSettings, want true")
+	}
+}
+
 func TestSubmitUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {

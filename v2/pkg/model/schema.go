@@ -403,6 +403,7 @@ var Tables = []string{
   ` + "`newest_first`" + `                INTEGER NOT NULL DEFAULT 0,
   ` + "`sandbox_cpus`" + `                INTEGER NOT NULL DEFAULT 0,
   ` + "`sandbox_memory_mb`" + `            INTEGER NOT NULL DEFAULT 0,
+  ` + "`show_closed_by_default`" + `       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

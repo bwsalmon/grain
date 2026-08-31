@@ -1958,6 +1958,58 @@ func TestInitMigratesAnExistingDatabaseMissingSandboxShape(t *testing.T) {
 	}
 }
 
+// TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault is the
+// same pattern, applied to grain_config.show_closed_by_default
+// (bwsalmon/agents#537).
+func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#537 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-#537 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.show_closed_by_default: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.ShowClosedByDefault {
+		// false is model.Config's own zero value -- the new "hide closed
+		// tasks by default" behaviour applies to an upgraded deployment
+		// exactly as it does to a fresh one, the same default
+		// ensureConfigShowClosedByDefaultColumn's own doc comment explains.
+		t.Fatalf("ShowClosedByDefault after migrating = true, want false")
+	}
+}
+
 // TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape is the same
 // migration, applied to task.sandbox_cpus/sandbox_memory_mb.
 func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {

@@ -58,11 +58,26 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("manual");
 
+  // showClosedOverride is null until this list's own "Show closed tasks"
+  // checkbox is touched -- until then, showClosed instead follows
+  // config.showClosedByDefault (bwsalmon/agents#537's deployment-wide
+  // default), even though config itself only arrives after this
+  // component's first render (App.jsx fetches it once, asynchronously).
+  // Once a viewer picks a value here it wins for the rest of this list's
+  // life, same "local refinement" treatment as search/sortBy above.
+  const [showClosedOverride, setShowClosedOverride] = useState(null);
+  const showClosed = showClosedOverride !== null ? showClosedOverride : !!config?.showClosedByDefault;
+
   const q = search.trim().toLowerCase();
   const matches = (t) => {
     if (stateFilter === "blocked" ? !t.blocked : stateFilter !== "all" && t.state !== stateFilter) return false;
+    // Closed tasks are hidden everywhere except the "Closed" filter
+    // itself, unless showClosed turns that back on -- viewing "Closed"
+    // is always a request to see them, so the toggle has no say there.
+    if (!showClosed && stateFilter !== "closed" && t.state === "closed") return false;
     return q === "" || t.title.toLowerCase().includes(q) || String(t.id).toLowerCase().includes(q);
   };
+  const closedCount = tasks.filter((t) => t.state === "closed").length;
 
   const reorderEnabled = !!onReorder && sortBy === "manual";
   const cmp = SORTS[sortBy].cmp;
@@ -134,6 +149,18 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
               {Object.entries(SORTS).map(([id, { label }]) => <MenuItem key={id} value={id}>{label}</MenuItem>)}
             </Select>
           </FormControl>
+          {closedCount > 0 && stateFilter !== "closed" && (
+            <FormControlLabel
+              control={(
+                <Checkbox
+                  size="small"
+                  checked={showClosed}
+                  onChange={(e) => setShowClosedOverride(e.target.checked)}
+                />
+              )}
+              label="Show closed tasks"
+            />
+          )}
         </div>
       )}
       {visibleIds.length > 0 && (
@@ -187,7 +214,13 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
         )}
       </ul>
       {topLevel.length === 0 && (
-        <p className="empty">{q ? "No tasks match your search." : "No tasks in this state."}</p>
+        <p className="empty">
+          {q
+            ? "No tasks match your search."
+            : !showClosed && closedCount > 0 && stateFilter !== "closed"
+              ? "No tasks in this state (closed tasks are hidden)."
+              : "No tasks in this state."}
+        </p>
       )}
     </main>
   );

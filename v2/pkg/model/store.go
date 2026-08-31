@@ -77,6 +77,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigNewestFirstColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigShowClosedByDefaultColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureScheduledTaskTemplateColumn(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
@@ -364,6 +367,25 @@ func (s *Store) ensureTaskInteractiveColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task` ADD COLUMN `interactive` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigShowClosedByDefaultColumn adds
+// grain_config.show_closed_by_default (model.Config.ShowClosedByDefault's
+// own doc comment has the reasoning) to a database created before
+// bwsalmon/agents#537, the same probe-then-ALTER approach
+// ensureConfigNewestFirstColumn already uses. Defaulting to 0 (false)
+// matches model.Config's own zero value, so an upgraded deployment gets
+// exactly the new "hide closed tasks by default" behaviour the issue
+// asked for, the same as a fresh one, until an operator opts back into
+// showing them through Settings.
+func (s *Store) ensureConfigShowClosedByDefaultColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `show_closed_by_default` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `show_closed_by_default` INTEGER NOT NULL DEFAULT 0")
 	return err
 }
 
@@ -1796,7 +1818,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`"
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -1804,7 +1826,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var targetRepos string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB); err != nil {
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -1819,10 +1841,10 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB)
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault)
 		return err
 	})
 }

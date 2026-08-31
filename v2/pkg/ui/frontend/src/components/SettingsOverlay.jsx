@@ -86,6 +86,9 @@ export default function SettingsOverlay({ config, onClose, showError }) {
       if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
     }
 
+    const showClosedByDefault = form.elements.showClosedByDefault.checked;
+    if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
+
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
       onClose();
@@ -185,6 +188,19 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               defaultValue={String(settings.sandboxMemoryMb || 0)}
               fullWidth
               margin="normal"
+            />
+            <FormControlLabel
+              control={<Checkbox name="showClosedByDefault" defaultChecked={!!settings.showClosedByDefault} />}
+              label={(
+                <>
+                  Show closed tasks by default
+                  <span className="hint">
+                    off (default): a task list's own "Show closed tasks" checkbox starts unchecked, hiding closed
+                    tasks until turned on. on: it starts checked instead, showing them from the start.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
             />
 
             <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
