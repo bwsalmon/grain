@@ -110,10 +110,18 @@ body {
 
 /* ---------- Shell: a fixed sidebar beside the task list, the same
    frame Plane builds every view inside of. ---------- */
+/* height (not min-height) plus overflow: hidden bounds .app-shell to
+   the viewport instead of growing to fit whatever a pane's content
+   needs -- without that, a tall pane (e.g. LogsPage's own log lines)
+   stretches .app-shell past the viewport and the whole document
+   scrolls, carrying the sidebar off screen with it (bwsalmon/agents
+   #544). Each pane is now the one that scrolls its own overflow
+   internally; see main / .main-column below. */
 .app-shell {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
   align-items: stretch;
+  overflow: hidden;
 }
 
 /* Sidebar's own layout (width, padding, nav rows) now comes from
@@ -133,6 +141,7 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .content-header {
@@ -164,7 +173,7 @@ body {
 .dot-closed { background: var(--state-closed); }
 .dot-blocked { background: var(--danger); }
 
-main { padding: 0 0 2.5rem; }
+main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 
 .task-list-toolbar {
   display: flex;
@@ -484,7 +493,7 @@ fieldset legend {
    of leaving the log box capped at a fraction of the viewport with
    empty space below it -- the toolbar keeps its own size and .logs-view
    grows to take up whatever room is left, scrolling internally. */
-.logs-page { display: flex; flex-direction: column; padding-bottom: 0; }
+.logs-page { display: flex; flex-direction: column; padding-bottom: 0; overflow-y: hidden; }
 .logs-page .logs-view { flex: 1; min-height: 0; max-height: none; margin: 0 1.75rem 1.5rem; }
 .upgrade-status dd { margin: 0; word-break: break-word; }
 .upgrade-phase-running { color: var(--accent); }
