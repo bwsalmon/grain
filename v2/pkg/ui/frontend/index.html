@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- The fixed mark, 1.4 (-), as scripts/export-brand-assets.mjs writes
+     it. The light file is what a browser gets before any script runs;
+     AppThemeProvider swaps this href for the dark one once it has
+     resolved which theme the app is actually in. -->
+<link id="favicon" rel="icon" type="image/png" href="/grain-mark-light.png">
 <title>grain</title>
 </head>
 <body>

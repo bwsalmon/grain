@@ -19,6 +19,18 @@ function ResolvedThemeProvider({ children }) {
     document.documentElement.dataset.theme = resolvedMode;
   }, [resolvedMode]);
 
+  // The mark is drawn in two colours -- bronze for a light ground, wheat
+  // for a dark one -- and the tab icon is the one place the ground is
+  // the browser's rather than the app's. Following the app's own
+  // resolved theme is the best guess available: a reader in dark mode
+  // has a dark browser chrome far more often than not, and the
+  // alternative (one file that has to work on both) is the washed-out
+  // middle the brand explicitly avoided.
+  useEffect(() => {
+    const link = document.getElementById("favicon");
+    if (link) link.href = `/grain-mark-${resolvedMode}.png`;
+  }, [resolvedMode]);
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />

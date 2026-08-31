@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "brand": "node scripts/export-brand-assets.mjs"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
