@@ -292,7 +292,7 @@ func TestStartGitProxyServesAndStops(t *testing.T) {
 	}
 	defer db.Close()
 
-	url, stop, err := startGitProxy(dataDir, store, "example.com", false)
+	url, stop, err := startGitProxy(dataDir, store, "example.com", false, "")
 	if err != nil {
 		t.Fatalf("startGitProxy: %v", err)
 	}
@@ -313,4 +313,35 @@ func TestStartGitProxyServesAndStops(t *testing.T) {
 	if _, err := http.Get(url); err == nil {
 		t.Fatal("expected the git proxy to stop accepting connections once stopped")
 	}
+}
+
+// TestStartGitProxyAdvertisesHostOverLoopback covers bwsalmon/agents#567:
+// a kontur VM's guest has its own loopback, unrelated to this process's, so
+// -kontur-git-proxy-host asks startGitProxy to bind every interface instead
+// of just loopback and hand back a URL naming that host (here, loopback
+// again, standing in for a real kontur deployment's docker bridge gateway
+// address) rather than whatever it actually bound to.
+func TestStartGitProxyAdvertisesHostOverLoopback(t *testing.T) {
+	dataDir := t.TempDir()
+	store, db, err := openStore(dataDir)
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer db.Close()
+
+	url, stop, err := startGitProxy(dataDir, store, "example.com", false, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("startGitProxy: %v", err)
+	}
+	defer stop(context.Background())
+	if !strings.HasPrefix(url, "http://127.0.0.1:") {
+		t.Fatalf("startGitProxy URL = %q, want an http://127.0.0.1:<port> URL naming advertiseHost", url)
+	}
+
+	resp, err := http.Get(url + "/owner/repo.git/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("the git proxy did not answer at the advertised host: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }

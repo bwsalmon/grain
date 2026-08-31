@@ -193,6 +193,18 @@ func daemon(args []string) {
 	konturBasePort := fs.Int("kontur-base-port", 0,
 		"the -port slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own "+
 			"number minus one, the same derivation -kontur-base-ip uses. Only used with -kontur-vm-name-prefix.")
+	konturGitProxyHost := fs.String("kontur-git-proxy-host", "",
+		"host (no port) this daemon's git proxy is reachable at from inside a kontur VM's own guest, in place "+
+			"of the loopback address the proxy binds to by default -- required with -kontur-vm-name-prefix. A "+
+			"kontur VM (KonturConfig.createArgs always builds one against -backend docker) runs its guest in its "+
+			"own network namespace behind netshim's NAT (third_party/kontur/internal/netshim), with its own "+
+			"127.0.0.1 that never reaches this process's -- so a clone against the default 127.0.0.1 proxy URL "+
+			"fails the moment it leaves the guest (bwsalmon/agents#567: \"Failed to connect to 127.0.0.1 ... "+
+			"Couldn't connect to server\"). Setting this makes startGitProxy bind on every interface instead of "+
+			"just loopback, and advertise this host to every slot's sandbox in loopback's place -- typically the "+
+			"docker bridge gateway address the guest's own outbound NAT routes through to reach this host (see "+
+			"netshim's masqueradeExprs); run `docker network inspect bridge` (or whichever network the kontur VM "+
+			"containers join) and read \"Gateway\" if unsure -- commonly 172.17.0.1.")
 	sandboxCPUs := fs.Int("sandbox-cpus", 0,
 		"deployment-wide default vCPU count for a kontur-managed sandbox VM, passed as `konturctl vm create`'s "+
 			"own -cpus (only used with -kontur-vm-name-prefix); 0 leaves bwsalmon/kontur's own default in place. "+
@@ -228,6 +240,10 @@ func daemon(args []string) {
 			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-workspace is required with -kontur-vm-name-prefix")
 			os.Exit(2)
 		}
+		if *konturGitProxyHost == "" {
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-git-proxy-host is required with -kontur-vm-name-prefix")
+			os.Exit(2)
+		}
 	}
 	if *maxConcurrent < 1 {
 		fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent must be at least 1")
@@ -254,7 +270,8 @@ func daemon(args []string) {
 		konturSSHUser:      *konturSSHUser, konturWorkspace: *konturWorkspace,
 		konturExecKey:    *konturExecKey,
 		konturCreateArgs: konturCreateArgs, konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
-		sandboxCPUs: *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
+		konturGitProxyHost: *konturGitProxyHost,
+		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
@@ -309,6 +326,12 @@ type config struct {
 	konturCreateArgs   []string
 	konturBaseIP       string
 	konturBasePort     int
+	// konturGitProxyHost is the address startGitProxy advertises to a
+	// kontur-managed sandbox in place of the loopback address it binds to
+	// by default -- see -kontur-git-proxy-host's own flag doc comment for
+	// why a kontur VM cannot reach that default (bwsalmon/agents#567).
+	// Required whenever konturVMNamePrefix is set; unused otherwise.
+	konturGitProxyHost string
 	// sandboxCPUs and sandboxMemoryMB are store-backed
 	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
 	// like poll-interval and the rest of the seedOnly flags above --
@@ -490,7 +513,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []stri
 		slotTokens[slot] = token
 	}
 
-	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP)
+	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP, cfg.konturGitProxyHost)
 	if err != nil {
 		return fmt.Errorf("starting git proxy: %w", err)
 	}
@@ -809,21 +832,38 @@ func openStore(dataDir string) (*model.Store, *sql.DB, error) {
 	return store, db, nil
 }
 
-// startGitProxy serves gitproxy.NewHandler on a local, random port, and
-// returns the URL to point every slot's git credential helper at plus a
-// shutdown func. Running it in-process rather than as a separate systemd
-// unit (v1's shape, docs/design.md) is exactly bwsalmon/agents#254's
-// "the MCP server just uses the local machine" simplification applied to
-// the proxy too: one process, one machine, no unit to keep in sync with
-// this one's own lifecycle.
-func startGitProxy(dataDir string, store *model.Store, githubHost string, insecureHTTP bool) (url string, stop func(context.Context) error, err error) {
+// startGitProxy serves gitproxy.NewHandler on a random port, and returns
+// the URL to point every slot's git credential helper at plus a shutdown
+// func. Running it in-process rather than as a separate systemd unit (v1's
+// shape, docs/design.md) is exactly bwsalmon/agents#254's "the MCP server
+// just uses the local machine" simplification applied to the proxy too:
+// one process, one machine, no unit to keep in sync with this one's own
+// lifecycle.
+//
+// advertiseHost is empty for every backend that shares this process's own
+// network namespace (HostSandboxes, and every existing deployment before
+// bwsalmon/agents#567): the proxy binds loopback only, and the URL it
+// hands back names that same loopback address, exactly as it always has.
+// A kontur VM's guest runs in its own network namespace behind netshim's
+// NAT (third_party/kontur/internal/netshim) with its own unrelated
+// 127.0.0.1, so a deployment naming one in -kontur-vm-name-prefix passes
+// -kontur-git-proxy-host as advertiseHost instead: the proxy then binds
+// every interface rather than just loopback, and hands back a URL naming
+// advertiseHost (typically the docker bridge gateway address the guest's
+// own outbound NAT routes through to reach this host) instead of the
+// address it actually bound.
+func startGitProxy(dataDir string, store *model.Store, githubHost string, insecureHTTP bool, advertiseHost string) (url string, stop func(context.Context) error, err error) {
 	proxy, err := gitproxy.BuildProxy(gitproxy.BuildConfig{
 		DataDir: dataDir, Store: store, ForwardHost: githubHost, ForwardTLS: !insecureHTTP,
 	})
 	if err != nil {
 		return "", nil, err
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	bindHost := "127.0.0.1"
+	if advertiseHost != "" {
+		bindHost = "0.0.0.0"
+	}
+	ln, err := net.Listen("tcp", bindHost+":0")
 	if err != nil {
 		return "", nil, err
 	}
@@ -833,7 +873,10 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 			log.Printf("grain daemon: git proxy: %v", err)
 		}
 	}()
-	return "http://" + ln.Addr().String(), srv.Shutdown, nil
+	if advertiseHost == "" {
+		return "http://" + ln.Addr().String(), srv.Shutdown, nil
+	}
+	return fmt.Sprintf("http://%s:%d", advertiseHost, ln.Addr().(*net.TCPAddr).Port), srv.Shutdown, nil
 }
 
 // startUIServer serves pkg/ui.Server -- the JSON API plus the static
