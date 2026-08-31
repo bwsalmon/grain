@@ -184,9 +184,12 @@ ln -sf /etc/systemd/system/kontur-net-cmdline.service \
 # custom setup script"). This runs in the same chroot -- with a real
 # /proc, /sys and /dev bind-mounted by build.sh, and network access, since
 # chroot does not create a new mount or network namespace -- as every
-# other step in this script, so none of that Dockerfile build's "no
-# /proc/sys, no running service manager" caveats apply here: enabling a
-# unit the normal way (systemctl enable) works, apt-get works, and so on.
+# other step in this script: enabling a unit the normal way (systemctl
+# enable) works, apt-get works, and so on. That is not a point of
+# difference from the Dockerfile build any more: kontur's guest-customized
+# stage runs its script as an ordinary RUN rather than under chroot, so it
+# has the same real /proc, /dev and network. Neither has a *running*
+# service manager, so systemctl start works in neither.
 if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
   script="$(mktemp)"
   printf '%s\n' "${SANDBOX_SETUP_SCRIPT}" > "${script}"

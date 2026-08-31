@@ -64,9 +64,8 @@ hand under real KVM for exactly this guest. So `guest-setup.sh` installs
 `linux-image-amd64` itself, and the hook's `guest-artifacts` target
 publishes the resulting `vmlinuz`/`initrd.img` beside `disk.img`.
 
-The build-time setup hook has now landed too, in upstream `c21bace`
-(kontur's `claude/kontur-vendoring-grain-sync-k7ha3e` branch, pending
-merge to its `main`), and is in this repo's `third_party/kontur`
+The build-time setup hook has now landed too, on kontur's `main`
+(bwsalmon/kontur#28), and is in this repo's `third_party/kontur`
 snapshot. kontur's build args are now `GO_VERSION`,
 `CLOUD_HYPERVISOR_VERSION`, `KONTUR_KERNEL_VERSION`, `GUEST_DISTRO`,
 `GUEST_SUITE`, `GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY` and
@@ -330,12 +329,15 @@ bwsalmon/kontur's own `GUEST_SETUP_SCRIPT` build arg's idiom
 (`third_party/kontur/deploy/guest-image/README.md`, "Running a custom
 setup script"), applied to this directory's own build instead: same
 "an env var holds the script's contents, not a path" shape, so it needs
-no extra context-wrangling either way. The mechanics are actually simpler
-here than that one's: this script's chroot has a real, bind-mounted
-`/proc`/`/sys`/`/dev` and network access (build.sh sets all of that up for
-`provision.sh` itself to use), so none of that Dockerfile build's "no
-/proc/sys, no running service manager" caveats apply -- `apt-get install`,
-`systemctl enable`, and the like all work normally. Leave
+no extra context-wrangling either way. The two mechanisms also turn out
+to offer the same environment, which is what makes the migration in
+"Wiring, still to do" above a straight swap rather than a rewrite: this
+script's chroot has a real, bind-mounted `/proc`/`/sys`/`/dev` and network
+access (build.sh sets that up for `provision.sh` itself to use), and
+kontur's `guest-customized` stage gets the same from running the script
+as an ordinary `RUN` rather than under chroot. `apt-get install`,
+`systemctl enable` and the like work normally either way; neither one has
+a *running* service manager, so neither can `systemctl start`. Leave
 `SANDBOX_SETUP_SCRIPT` unset (the default) to build exactly what
 `provision.sh` already bakes in on its own.
 
@@ -464,15 +466,14 @@ the single largest time sink in validating this whole pipeline, since a
 refused connection looks identical whether the guest hasn't finished
 booting yet or is listening on a port nothing is forwarded to.
 
-**A `kontur`/`konturctl` built from bwsalmon/kontur's `main` will not
-boot the `-disk` path above yet.** The fixes it needs (chiefly
-`internal/hypervisor/args.go` passing `image_type` on every `--disk`)
-were local patches to the vendored `third_party/kontur` copy and are now
-upstream commits -- `84f683d`, `1c7ac13`, `694b3d1` on kontur's
-`claude/kontur-vendoring-grain-sync-k7ha3e` branch, pending merge to its
-`main`; see `third_party/kontur/VENDORED.md` for what each does. Until
-that merges, build from that branch (or from the vendored snapshot here,
-which is byte-identical to it).
+**A `kontur`/`konturctl` built from bwsalmon/kontur's `main` boots the
+`-disk` path above with no patching**, as of bwsalmon/kontur#28. The
+fixes that makes true (chiefly `internal/hypervisor/args.go` passing
+`image_type` on every `--disk`) spent a while as local patches to the
+vendored `third_party/kontur` copy; they are now upstream commits
+`84f683d`, `1c7ac13` and `694b3d1`, and this repo carries no local
+patches to that copy at all -- see `third_party/kontur/VENDORED.md`.
+Anything earlier than that merge still needs them applied by hand.
 
 `orchestrator.KonturConfig.CreateArgs` (bwsalmon/agents#262) is the
 passthrough a deployment sets this through -- `grain daemon` constructs a
