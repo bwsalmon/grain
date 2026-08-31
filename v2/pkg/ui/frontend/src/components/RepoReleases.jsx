@@ -283,7 +283,7 @@ function emptyItem() {
 // Each item's own content -- title, body, reads, capabilities -- comes
 // entirely from the template it names (bwsalmon/agents#516); this form
 // only ever picks which template, how many times, and what it waits on,
-// the same "template takes over the content fields" split ScheduleForm's
+// the same "template takes over the content fields" split ScheduleOverlay's
 // own picker already draws.
 function QualificationPlanEditor({ plan, templates, onSave }) {
   const [requireApproval, setRequireApproval] = useState(plan.requireApproval);

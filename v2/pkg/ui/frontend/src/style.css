@@ -397,11 +397,17 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 .repo-chip-add { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
 .repo-chip-add input { flex: 1; margin-top: 0; }
 
-.schedules-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+/* The schedules page's own list (bwsalmon/agents#547): TaskList's own
+   .task-row/.template-row treatment -- the whole row is a click target
+   that opens ScheduleOverlay with everything else about that schedule,
+   rather than a row with its own inline form and button row. */
+.schedules-list { list-style: none; margin: 0; padding: 0; }
 .schedule-row {
-  padding: 0.6rem 0;
+  padding: 0.6rem 1.75rem;
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
 }
+.schedule-row:hover { background: var(--surface-hover); }
 .schedule-summary { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .schedule-title { font-weight: 500; }
 .schedule-meta { margin: 0.25rem 0 0.4rem; }

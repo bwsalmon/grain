@@ -293,10 +293,10 @@ describe("App", () => {
     await screen.findByText("Fix bug");
 
     await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
-    await screen.findByText("Nightly dependency bump");
+    await user.click(await screen.findByText("Nightly dependency bump"));
+    expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    const titleField = screen.getAllByLabelText(/Title/)[0];
+    const titleField = screen.getByLabelText(/Title/);
     await user.clear(titleField);
     await user.type(titleField, "Weekly dependency bump");
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -326,7 +326,8 @@ describe("App", () => {
     await screen.findByText("Fix bug");
 
     await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
-    await screen.findByText("New schedule");
+    await user.click(await screen.findByRole("button", { name: "+ New schedule" }));
+    await screen.findByRole("heading", { name: "New schedule" });
 
     await user.click(screen.getByLabelText("Template"));
     await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
