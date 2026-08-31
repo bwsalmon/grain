@@ -374,6 +374,28 @@ fi
 # --- 1. clone or update the checkout -----------------------------------
 
 sync_repo() {
+  # git 2.35.2+ refuses to operate on a repository it does not own
+  # ("detected dubious ownership in repository at ..."). ensure_self_
+  # upgrade (below, GRAIN_ENABLE_UI_UPGRADE=1 by default) chowns
+  # $GRAIN_SRC_DIR to $GRAIN_USER on every run, so every git command this
+  # script itself runs as root *after* that point in the same run --
+  # kontur_image_tag/konturctl_tag, both later in main() -- would
+  # otherwise fail closed with no visible error (both redirect git's
+  # stderr to /dev/null and fall back to the literal string "unknown"),
+  # silently breaking the content-hash caching those tags exist for: a
+  # packer/kontur edit or third_party/kontur vendor bump would stop
+  # changing the tag at all, so ensure_kontur_images_build/ensure_konturctl
+  # would keep reusing whatever they built the first time, forever. The
+  # same failure hits this function's own git calls below on the second
+  # and every later run, since by then $GRAIN_SRC_DIR is already
+  # $GRAIN_USER-owned from the previous run's chown. Exempting it here,
+  # before anything else touches the checkout, covers every git
+  # invocation for the rest of this run and every run after it -- a
+  # global config entry, so guarded against piling up duplicates across
+  # re-runs.
+  git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GRAIN_SRC_DIR" \
+    || git config --global --add safe.directory "$GRAIN_SRC_DIR"
+
   if [ -d "$GRAIN_SRC_DIR/.git" ]; then
     log "Updating checkout at $GRAIN_SRC_DIR ($GRAIN_REF)"
     if ! git -C "$GRAIN_SRC_DIR" diff --quiet || ! git -C "$GRAIN_SRC_DIR" diff --cached --quiet; then
@@ -999,6 +1021,16 @@ ensure_kontur_kvm_access() {
   fi
   grant_docker_group
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_KONTUR_DISK_HOSTPATH"
+  # konturctl's own defaultStateDir (third_party/kontur/internal/cli/
+  # vm.go) -- where it records each VM it creates, distinct from
+  # GRAIN_KONTUR_DISK_HOSTPATH above (each VM's own disk overlay). Never
+  # overridden by a -kontur-create-arg -state-dir below, so this is the
+  # exact path konturctl -- run unprivileged, as $GRAIN_USER -- actually
+  # tries to create on its first "vm create": without this, that mkdir
+  # fails closed with "permission denied" and grain-daemon.service dies
+  # on its very first dispatched task, the same way GRAIN_KONTUR_DISK_
+  # HOSTPATH would without the install -d right above it.
+  install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" /var/lib/kontur/vms
 }
 
 # seed_kontur_ssh_key writes KONTUR_SSH_PRIVATE_KEY -- found or generated
