@@ -70,6 +70,8 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/githubsandbox"
+	"github.com/bwsalmon/grain/v2/pkg/capability/selfdebug"
+	"github.com/bwsalmon/grain/v2/pkg/capability/selfrepair"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/kontur"
@@ -496,6 +498,7 @@ func run(ctx context.Context, cfg config) error {
 			// checkout is cloned from (orchestrator.prepareCheckout).
 			// Nothing else ever told a sandbox where its repo lives.
 			GitRemoteBase: proxyURL,
+			GrantTools:    grantTools(cfg.upgradeSrcDir),
 		},
 		Slots: slots,
 	}
@@ -683,7 +686,29 @@ func capabilityProviders(cfg config) []model.CapabilityProvider {
 	providers = append(providers, githubsandbox.NewProvider(githubsandbox.Config{
 		Host: cfg.githubHost, InsecureHTTP: cfg.githubInsecureHTTP,
 	}))
+	providers = append(providers, selfdebug.New(), selfrepair.New())
 	return providers
+}
+
+// grantTools wires selfdebug/selfrepair's own tool-building functions
+// into orchestrator.Config.GrantTools -- see that field's own doc
+// comment for why this indirection exists instead of a method on
+// model.CapabilityProvider. srcDir is cfg.upgradeSrcDir, reused rather
+// than asking for a second -source-dir flag: it already names a checkout
+// of grain's own source on every deployment v2/scripts/setup.sh builds,
+// and self-debug wants read access to exactly that tree.
+func grantTools(srcDir string) map[string]func(store *model.Store, taskID string) []mcp.Tool {
+	return map[string]func(store *model.Store, taskID string) []mcp.Tool{
+		selfdebug.CapabilityName: func(*model.Store, string) []mcp.Tool {
+			if srcDir == "" {
+				return nil
+			}
+			return selfdebug.SourceTools(srcDir)
+		},
+		selfrepair.CapabilityName: func(store *model.Store, taskID string) []mcp.Tool {
+			return selfrepair.HostCommandTools(store, taskID, 0, 0)
+		},
+	}
 }
 
 // credentialTokenSource adapts gitproxy's own owner/repo credential

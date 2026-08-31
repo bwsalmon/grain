@@ -52,9 +52,9 @@ func DefaultCapabilities() []Capability {
 		{ID: "gemini-key", Name: "Gemini key",
 			Description: "Mint a short-lived Gemini API key for this task"},
 		{ID: "self-debug", Name: "Self debug",
-			Description: "Let this task read grain's own controller logs"},
+			Description: "Let this task read grain's own source checkout, to help it debug or explain grain's own behavior"},
 		{ID: "self-repair", Name: "Self repair",
-			Description: "Let this task restart grain services or reboot/reformat its sandbox"},
+			Description: "Let this task run commands on grain's own host -- restart services, edit config, call the grain CLI -- each one needing a live reply in the task's chat before it runs"},
 		{ID: "scratch-repo", Name: "Scratch repo",
 			Description: "Dispatch this task into its sandbox's own scratch repo instead of /repo"},
 	}
