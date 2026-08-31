@@ -117,6 +117,34 @@ apt-get install -y --no-install-recommends \
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 usermod -aG docker debian
 
+# Docker's own default bridge subnet, 172.17.0.0/16, is not a guest-image
+# choice -- it is dockerd's hardcoded first entry in its default address
+# pool, so an operator host that also runs unconfigured Docker (the common
+# case: v2/scripts/setup.sh needs docker to build/run the OCI image and
+# to attach a kontur VM's own container to it) ends up with its docker0
+# gateway at that exact address too. GRAIN_KONTUR_GIT_PROXY_HOST
+# (v2/scripts/setup.sh's ensure_kontur_git_proxy_host) defaults a VM's
+# route to the host's git proxy to be that same host-side gateway
+# address. Confirmed live: the moment this guest's own dockerd creates
+# its identically-addressed local bridge, the guest's routing table gains
+# a directly-connected 172.17.0.0/16 route that is *more specific* than
+# its default route out through eth0 -- so a packet to the host's real
+# 172.17.0.1 never leaves the guest at all, and lands on the guest's own
+# unrelated docker0 instead, refused with nothing listening there. Giving
+# this guest's dockerd a different, deliberately unusual default bridge
+# subnet up front removes the collision at its actual source, without
+# touching the host-side networking or the address-selection logic at
+# all.
+install -d -m0755 /etc/docker
+cat > /etc/docker/daemon.json <<'DOCKERD'
+{
+  "bip": "172.30.255.1/24",
+  "default-address-pools": [
+    {"base": "172.31.0.0/16", "size": 24}
+  ]
+}
+DOCKERD
+
 # kind itself. The node image is not pre-pulled: that needs a running
 # docker daemon, which a chroot cannot provide. A first
 # `kind create cluster` inside a dispatched task pays that pull once
