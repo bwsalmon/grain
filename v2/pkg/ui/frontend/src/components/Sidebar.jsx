@@ -20,8 +20,6 @@ const SIDEBAR_WIDTH = 232;
 // so grouping them apart makes that distinction visible in the nav
 // itself rather than only in each pane's own content.
 export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenNewTask }) {
-  const repoName = config ? (config.defaultTarget ? config.defaultTarget : `as ${config.actor}`) : "";
-
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -82,11 +80,6 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           grain
         </Typography>
       </Box>
-      {repoName && (
-        <Typography variant="caption" color="text.secondary" noWrap title={repoName} sx={{ px: 0.5, mt: -1 }}>
-          {repoName}
-        </Typography>
-      )}
 
       <Button variant="contained" fullWidth onClick={onOpenNewTask}>+ New task</Button>
 
