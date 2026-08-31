@@ -707,7 +707,33 @@ func loadConfig(ctx context.Context, store *model.Store, flagCfg config) (config
 		}
 		return flagCfg, nil
 	}
+	flagCfg.logStoreOverrides(*stored)
 	return flagCfg.withModelConfig(*stored), nil
+}
+
+// logStoreOverrides logs one line for every seedOnly flag whose
+// command-line value doesn't match what's already stored -- withModelConfig
+// is about to silently prefer the stored value over it. Without this, an
+// operator re-running v2/scripts/setup.sh (or `grain daemon` by hand) with
+// a changed flag sees no effect and no explanation until they find `grain
+// settings`, the actual way to change a seeded value (bwsalmon/agents#574).
+func (c config) logStoreOverrides(mc model.Config) {
+	warn := func(flag string, flagVal, storedVal any) {
+		if fmt.Sprint(flagVal) != fmt.Sprint(storedVal) {
+			log.Printf("loadConfig: ignoring -%s=%v, stored config already has %v -- use 'grain settings' to change it", flag, flagVal, storedVal)
+		}
+	}
+	warn("poll-interval", c.pollInterval, mc.PollInterval)
+	warn("max-concurrent", c.maxConcurrent, mc.MaxConcurrent)
+	warn("gemini-model", c.geminiModel, mc.GeminiModel)
+	warn("max-agent-turns", c.maxAgentTurns, mc.MaxAgentTurns)
+	warn("github-host", c.githubHost, mc.GitHubHost)
+	warn("github-insecure-http", c.githubInsecureHTTP, mc.GitHubInsecureHTTP)
+	warn("gcp-project", c.gcpProject, mc.GCPProject)
+	warn("gcp-agent-service-account", c.gcpServiceAccountEmail, mc.GCPServiceAccountEmail)
+	warn("target-repos", c.targetRepos, mc.TargetRepos)
+	warn("sandbox-cpus", c.sandboxCPUs, mc.SandboxCPUs)
+	warn("sandbox-memory-mb", c.sandboxMemoryMB, mc.SandboxMemoryMB)
 }
 
 // toModelConfig is the flag-parsed subset of config that mirrors

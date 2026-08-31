@@ -60,7 +60,7 @@
 #      grain always branches off an existing ref, never creates one)
 #   8. writes and enables grain-daemon.service, so it comes back on
 #      reboot, and restarts it (not just "enable --now") so a second
-#      run's new binary and new config actually take effect -- see
+#      run's new binary actually takes effect -- see
 #      docs/next-session.md item 3's "Update" for why
 #      enable-without-restart was already a bug once in v1's own proxy
 #      service
@@ -69,6 +69,17 @@
 # case is `sudo GRAIN_GITHUB_TOKEN=... GRAIN_GEMINI_API_KEY=... ./setup.sh`
 # and a re-run to pick up a repo update is `sudo ./setup.sh` with no
 # arguments at all. Run with -h/--help for the full list.
+#
+# Most daemon settings below (everything except GRAIN_UI_ADDR,
+# GRAIN_TARGET_REPO/GRAIN_TARGET_BRANCH and GRAIN_ENABLE_UI_UPGRADE) are
+# only *seeded* from these variables, the first time a deployment's store
+# has none (cmd/grain/daemon.go's loadConfig, bwsalmon/agents#320) --
+# passing this script a new GRAIN_GITHUB_HOST or GRAIN_MAX_CONCURRENT on
+# a later re-run has no effect on a deployment that already has one, and
+# loadConfig now logs a line saying so on every start it happens. Change
+# an already-seeded value with `grain settings` (or the UI's Settings
+# pane) instead -- see each variable's own note below for which ones this
+# applies to (bwsalmon/agents#574).
 #
 # There used to be a second service (grain-ui.service) and, before
 # bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt
@@ -190,6 +201,12 @@ the binary, lays out /var/lib/grain (including its embedded SQLite task
 store), and installs grain-daemon.service, which runs the dispatch loop
 and serves the UI/API itself. Every setting is an environment variable;
 all have defaults, so a bare `sudo ./setup.sh` re-run is the update path.
+Anything marked "Seeded once" below only takes effect the first time this
+deployment's store gets a config row (typically this script's very first
+run); a later run passing a different value has no effect on an existing
+deployment -- grain-daemon.service logs a line saying so on every start it
+happens. Change an already-seeded value with `grain settings` (run as
+GRAIN_USER) or the UI's Settings pane instead.
 Recognized variables:
 
   GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
@@ -201,11 +218,13 @@ Recognized variables:
   GRAIN_UI_ADDR             UI/API bind address (default: 127.0.0.1:80 -- loopback
                              only; reach it with `ssh -L 8080:localhost:80 host`,
                              or put it behind Tailscale/IAP instead)
-  GRAIN_MAX_CONCURRENT      maximum number of tasks dispatched at once (default: 1)
-  GRAIN_POLL_INTERVAL       daemon reconcile-cycle interval (default: 30s)
+  GRAIN_MAX_CONCURRENT      maximum number of tasks dispatched at once (default: 1).
+                             Seeded once, like every setting below marked the same
+                             way -- see this file's own header comment
+  GRAIN_POLL_INTERVAL       daemon reconcile-cycle interval (default: 30s). Seeded once
 
-  GRAIN_GITHUB_HOST         GitHub API host (default: github.com)
-  GRAIN_GITHUB_INSECURE_HTTP  1 to speak plain HTTP to it (mock servers only)
+  GRAIN_GITHUB_HOST         GitHub API host (default: github.com). Seeded once
+  GRAIN_GITHUB_INSECURE_HTTP  1 to speak plain HTTP to it (mock servers only). Seeded once
   GRAIN_GITHUB_TOKEN        a token to seed the credential ladder with, once
                              (only written if no credential is configured yet)
   GRAIN_GITHUB_CREDENTIAL_NAME  name to store that token under (default: bot)
@@ -229,15 +248,18 @@ Recognized variables:
                              GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE below): the
                              minter then mints the daemon's own key here --
                              see mint_gemini_operating_key
-  GRAIN_GEMINI_MODEL        override the daemon's default Gemini model
+  GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
                              can exhaust: reading a few files, writing one, running
                              a test and then add/commit/push are each a turn, and
-                             the run fails outright rather than finishing short
+                             the run fails outright rather than finishing short.
+                             Seeded once
 
-  GRAIN_GCP_PROJECT                  enables the gcp-key/gemini-key capabilities
-  GRAIN_GCP_SERVICE_ACCOUNT_EMAIL    the narrow agent service account they mint for
+  GRAIN_GCP_PROJECT                  enables the gcp-key/gemini-key capabilities.
+                                      Seeded once
+  GRAIN_GCP_SERVICE_ACCOUNT_EMAIL    the narrow agent service account they mint
+                                      for. Seeded once
   GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE a minter key to seed under secrets/gcp-key-minter/
 
   GRAIN_TARGET_REPO         owner/name: the UI's default target for a task with
@@ -248,7 +270,7 @@ Recognized variables:
                              name (default: empty, meaning unrestricted) -- the
                              daemon's own -target-repos, the allowlist a task
                              naming anything else is parked with a comment
-                             rather than dispatched against
+                             rather than dispatched against. Seeded once
 
   GRAIN_ENABLE_UI_UPGRADE   1 (default) to wire up the UI's own Upgrade
                              button (bwsalmon/agents#396); set to 0 on a
