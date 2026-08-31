@@ -692,6 +692,40 @@ func TestAutoMergeDegradedReportsConfiguredFunc(t *testing.T) {
 	}
 }
 
+// --- reconciler down -------------------------------------------------
+//
+// bwsalmon/agents#576: runDaemon dying (a one-time setup step that
+// exhausted its own retries, or any other fatal-but-non-crashing error)
+// used to be visible only in a server log line -- the UI/API server
+// stays up regardless (bwsalmon/agents#550), so nothing said, anywhere
+// the UI could see, that reconciliation itself had actually stopped.
+// These mirror TestAutoMergeNotDegradedByDefault/
+// TestAutoMergeDegradedReportsConfiguredFunc immediately above: the same
+// "expose the func, don't hardcode true" shape, for Config.
+// ReconcilerDown instead of Config.AutoMergeDegraded.
+
+func TestReconcilerNotDownByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["reconcilerDown"] != nil && got["reconcilerDown"] != false {
+		t.Fatalf("reconcilerDown = %v, want false or omitted", got["reconcilerDown"])
+	}
+}
+
+func TestReconcilerDownReportsConfiguredFunc(t *testing.T) {
+	client, _, _ := testClient(t)
+	client.Config.ReconcilerDown = func() bool { return true }
+	srv := ui.NewServerWithClient(client)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["reconcilerDown"] != true {
+		t.Fatalf("reconcilerDown = %v, want true", got["reconcilerDown"])
+	}
+}
+
 func TestRebootSurfacesError(t *testing.T) {
 	client, _, _ := testClient(t)
 	client.Config.Reboot = func(ctx context.Context) error {
