@@ -54,7 +54,7 @@ export default function SandboxHealthPage({ showError }) {
         </Alert>
       )}
       {data.enabled && (
-        <div style={{ overflow: "auto", padding: "0 1.75rem 1.75rem" }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0 1.75rem 1.75rem" }}>
           <Typography variant="subtitle2" sx={{ mt: "1rem", mb: "0.5rem" }}>Host</Typography>
           {data.hostError && (
             <Alert severity="warning" sx={{ mb: "1rem" }}>Host stats unavailable: {data.hostError}</Alert>
