@@ -40,16 +40,16 @@ afterEach(() => {
 
 describe("GrainMark", () => {
   it("shows the fixed mark as an image when nothing is animating", () => {
-    render(<GrainMark size={26} title="grain" />);
+    render(<GrainMark size={24} title="grain" />);
 
     const img = screen.getByTitle("grain");
     expect(img.tagName).toBe("IMG");
-    expect(img).toHaveAttribute("src", "/grain-mark-light.png");
+    expect(img).toHaveAttribute("src", "/grain-mark-light.svg");
   });
 
   it("paints an animated canvas while agents are working", () => {
     const ctx = stubCanvas();
-    render(<GrainMark size={26} animated />);
+    render(<GrainMark size={24} animated />);
 
     const canvas = screen.getByRole("img", { name: "grain — agents working" });
     expect(canvas.tagName).toBe("CANVAS");
@@ -61,13 +61,13 @@ describe("GrainMark", () => {
   it("falls back to the fixed mark when the reader asked for less motion", () => {
     stubCanvas();
     stubMatchMedia(true);
-    render(<GrainMark size={26} animated title="grain" />);
+    render(<GrainMark size={24} animated title="grain" />);
 
     expect(screen.getByTitle("grain").tagName).toBe("IMG");
   });
 
   it("falls back to the fixed mark when there is no canvas to paint on", () => {
-    render(<GrainMark size={26} animated title="grain" />);
+    render(<GrainMark size={24} animated title="grain" />);
 
     expect(screen.getByTitle("grain").tagName).toBe("IMG");
   });

@@ -143,7 +143,8 @@ describe("App", () => {
     resolveConfig(config);
 
     await screen.findByText("Fix bug");
-    expect(screen.getByTitle("grain")).toHaveAttribute("width", "26");
+    // 24: the sidebar's mark, which is the pack's tiny-tier design size.
+    expect(screen.getByTitle("grain")).toHaveAttribute("width", "24");
   });
 
   it("opens a task's detail overlay on click and closes it", async () => {
