@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SchedulesList from "./SchedulesList.jsx";
@@ -18,6 +18,7 @@ const schedule = {
   recurrence: { kind: "everyNHours", everyNHours: 24 },
   enabled: true,
   nextRunAt: "2026-08-29T00:00:00Z",
+  createdAt: "2026-01-01T00:00:00Z",
 };
 
 const noop = () => {};
@@ -27,12 +28,15 @@ describe("SchedulesList", () => {
     api.mockReset();
   });
 
-  it("lists the schedules it is given", () => {
+  it("lists the schedules it is given, showing just their key details", () => {
     render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
     expect(screen.getByText("acme/widgets")).toBeInTheDocument();
     expect(screen.getByText("every 24h")).toBeInTheDocument();
+    // No form fields on the main list any more -- editing lives behind
+    // clicking a row instead.
+    expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
   });
 
   it("describes daily, weekly and monthly recurrences", () => {
@@ -46,24 +50,48 @@ describe("SchedulesList", () => {
     expect(screen.getByText("monthly on day 31 at 00:00")).toBeInTheDocument();
   });
 
+  it("shows a Paused chip for a disabled schedule", () => {
+    render(<SchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+  });
+
   it("shows an empty message when there are none", () => {
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("No scheduled tasks.")).toBeInTheDocument();
+    // Nothing to search or sort when the list is empty.
+    expect(screen.queryByPlaceholderText("Search schedules…")).not.toBeInTheDocument();
   });
 
-  it("shows Paused for a disabled schedule, and Resume as its action", () => {
-    render(<SchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+  it("filters the list by title or repo", async () => {
+    const other = { ...schedule, id: "sched-2", title: "Weekly digest", repo: "acme/other" };
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[schedule, other]} tasks={[]} onRefresh={noop} showError={noop} />);
 
-    expect(screen.getByText("Paused")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("Search schedules…"), "digest");
+
+    expect(screen.getByText("Weekly digest")).toBeInTheDocument();
+    expect(screen.queryByText("Nightly dependency bump")).not.toBeInTheDocument();
   });
 
-  it("submits a new schedule with the expected fields, defaulting to every 24 hours", async () => {
+  it("shows a message when a search matches nothing", async () => {
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.type(screen.getByPlaceholderText("Search schedules…"), "nope");
+
+    expect(screen.getByText("No schedules match your search.")).toBeInTheDocument();
+  });
+
+  it("opens a blank overlay from the + button and submits a new schedule, defaulting to every 24 hours", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+    expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText(/Title/), "Nightly dependency bump");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
@@ -84,6 +112,7 @@ describe("SchedulesList", () => {
       }),
     });
     expect(onRefresh).toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "New schedule" })).not.toBeInTheDocument();
   });
 
   it("submits a daily recurrence with the chosen time", async () => {
@@ -91,6 +120,7 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Morning report");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByLabelText("Repeat"));
@@ -109,6 +139,7 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Weekly digest");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByLabelText("Repeat"));
@@ -129,6 +160,7 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Monthly cleanup");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByLabelText("Repeat"));
@@ -148,6 +180,7 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.type(screen.getByLabelText(/Read-only repos/), "owner/shared-lib, owner/schema ");
@@ -161,44 +194,16 @@ describe("SchedulesList", () => {
     expect(payload.capabilities).toEqual(["gemini-key"]);
   });
 
-  it("toggles a schedule's enabled state via PATCH", async () => {
+  it("opens a row's overlay pre-filled and saves changes via PATCH", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
     render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "Pause" }));
+    await user.click(screen.getByText("Nightly dependency bump"));
+    expect(screen.getByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
 
-    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", {
-      method: "PATCH",
-      body: JSON.stringify({ enabled: false }),
-    });
-    expect(onRefresh).toHaveBeenCalled();
-  });
-
-  it("deletes a schedule after confirming", async () => {
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-    api.mockResolvedValueOnce({});
-    const onRefresh = vi.fn();
-    const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
-
-    await user.click(screen.getByRole("button", { name: "Delete" }));
-
-    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", { method: "DELETE" });
-    expect(onRefresh).toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
-
-  it("opens an edit form pre-filled with the schedule's fields and saves changes via PATCH", async () => {
-    api.mockResolvedValueOnce({});
-    const onRefresh = vi.fn();
-    const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
-
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-
-    const titleField = screen.getAllByLabelText(/Title/)[0];
+    const titleField = screen.getByLabelText(/Title/);
     expect(titleField).toHaveValue("Nightly dependency bump");
 
     await user.clear(titleField);
@@ -220,20 +225,61 @@ describe("SchedulesList", () => {
       }),
     });
     expect(onRefresh).toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
   });
 
   it("cancels an edit without saving", async () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByText("Nightly dependency bump"));
     expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
     expect(api).not.toHaveBeenCalled();
+  });
+
+  it("pauses a schedule from its overlay via PATCH", async () => {
+    api.mockResolvedValueOnce({});
+    const onRefresh = vi.fn();
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+
+    await user.click(screen.getByText("Nightly dependency bump"));
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+
+    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(onRefresh).toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+  });
+
+  it("shows Resume as the pause/resume action for a disabled schedule", async () => {
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Nightly dependency bump"));
+
+    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+  });
+
+  it("deletes a schedule from its overlay after confirming", async () => {
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+    api.mockResolvedValueOnce({});
+    const onRefresh = vi.fn();
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+
+    await user.click(screen.getByText("Nightly dependency bump"));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", { method: "DELETE" });
+    expect(onRefresh).toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("offers a repo dropdown when the deployment has known repos, instead of a bare text field", async () => {
@@ -243,6 +289,7 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} config={config} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Nightly dependency bump");
     await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
@@ -257,6 +304,7 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Template"));
     await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
 
@@ -279,19 +327,14 @@ describe("SchedulesList", () => {
     const user = userEvent.setup();
     render(<SchedulesList schedules={[templateBacked]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    // Two "Template" selects (and, once detached, two "Title" fields) are
-    // on screen at once: this row's own edit form, and the always-present
-    // "New schedule" form below it -- scoped to the edit form's own
-    // <form> so this only ever asserts about the one just opened.
-    const editForm = within(screen.getByRole("button", { name: "Save" }).closest("form"));
-    const templateSelect = editForm.getByLabelText("Template");
+    await user.click(screen.getByText("Nightly dependency bump"));
+    const templateSelect = screen.getByLabelText("Template");
     expect(templateSelect).toHaveTextContent("Dependency bump");
-    expect(editForm.queryByLabelText(/^Title/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
 
     await user.click(templateSelect);
     await user.click(await screen.findByRole("option", { name: "None -- fill in the fields below" }));
-    expect(editForm.getByLabelText(/^Title/)).toHaveValue("Nightly dependency bump");
+    expect(screen.getByLabelText(/^Title/)).toHaveValue("Nightly dependency bump");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -300,16 +343,18 @@ describe("SchedulesList", () => {
     expect(payload.title).toBe("Nightly dependency bump");
   });
 
-  it("reports the error and leaves the form open when creation fails", async () => {
+  it("reports the error and leaves the overlay open when creation fails", async () => {
     api.mockRejectedValueOnce(new Error("everyNHours must be positive"));
     const showError = vi.fn();
     const user = userEvent.setup();
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={showError} />);
 
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "x");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "everyNHours must be positive" }));
+    expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
   });
 });

@@ -356,3 +356,48 @@ no-match states) and, since `TemplateOverlay` has no store state of its
 own outside this pane, exercises create/edit/delete/cancel through it
 the same way `SchedulesList.test.jsx` already exercises `ScheduleForm`
 inline rather than as a separate suite.
+
+## Update: schedules page split into a list and a sub-page overlay (bwsalmon/agents#547)
+
+`SchedulesList.jsx`'s list-plus-form shape -- the very shape the two
+updates above already carried over to `TemplatesList.jsx`, then moved
+`TemplatesList.jsx` off of -- gets the same treatment here, so the
+schedules page ends up looking like the tasks page the way both of those
+pages already look like each other. Previously `SchedulesList.jsx` put a
+full edit form inline in whichever row was being edited (`ScheduleForm`,
+reused for both), a Pause/Resume and Delete button on every row, and a
+permanently open "New schedule" form pinned to the foot of the list --
+fine when there were only a couple of schedules, but with no search or
+sort it did not scale the way `TaskList.jsx`'s own toolbar lets the task
+list scale, and editing lived somewhere `TaskList.jsx`'s own rows never
+put it.
+
+`SchedulesList.jsx` is now a flat list of key details only -- title,
+target repo, cadence, template (if any), and a "Paused" chip when
+disabled -- with `TaskList.jsx`'s own search-and-sort toolbar (`SORTS`
+here has no `manual` entry, `TemplatesList.jsx`'s own reasoning: a
+schedule has no backlog order, so `title` is the default instead).
+Everything about one schedule -- description, base branch, read-only
+repos, capabilities, the recurrence picker, and now Pause/Resume and
+Delete too -- moved into a new `ScheduleOverlay.jsx`, opened either by
+the list's own "+ New schedule" button (blank) or by clicking a row
+(pre-filled), `TemplateOverlay.jsx`'s own split applied here. Pause/
+Resume and Delete sitting inside the overlay rather than on the row
+matches where a task's own Close/Reopen already live -- inside
+`DetailOverlay.jsx`, not on a `TaskList.jsx` row -- rather than being a
+schedule-specific pattern.
+
+No API or model changes: `Schedule`'s wire shape already carried
+everything the new overlay and sort options need, including `createdAt`
+for the Newest/Oldest sorts, and `PATCH /api/schedules/{id}` already
+accepted a bare `{"enabled": ...}` body for Pause/Resume, unchanged from
+how the old inline button used it.
+
+Tests: `SchedulesList.test.jsx` covers the list (search, sort, empty and
+no-match states, recurrence descriptions) and, since `ScheduleOverlay`
+has no store state of its own outside this pane, exercises create/edit/
+pause/resume/delete/cancel through it the same way
+`TemplatesList.test.jsx` already exercises `TemplateOverlay`.
+`App.test.jsx`'s own schedules-pane tests are updated to open the
+overlay (a row click, or "+ New schedule") rather than an inline "Edit"
+button.
