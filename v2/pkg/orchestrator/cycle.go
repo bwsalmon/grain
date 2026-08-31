@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -113,11 +114,30 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 			errs = append(errs, err)
 			break
 		}
-		if err := r.Reconcile(ctx, deps, now); err != nil {
+		if err := recoverReconcile(ctx, r, deps, now); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// recoverReconcile calls r.Reconcile and turns a panic into an error the
+// same way this func's own caller already treats any other error one
+// reconciler returns -- see RunCycle's own "one reconciler having a
+// problem shouldn't take the others down": a panic is such a problem too,
+// and cmd/grain's own reconcile loop, which calls RunCycle once per tick,
+// has nothing of its own left to recover it with by the time it has
+// already unwound past this call (bwsalmon/agents#550 -- an unrecovered
+// panic here would otherwise crash the whole grain daemon process,
+// including the UI/API server it now also serves alongside RunCycle,
+// bwsalmon/agents#363).
+func recoverReconcile(ctx context.Context, r Reconciler, deps Deps, now time.Time) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic: %v\n%s", rec, debug.Stack())
+		}
+	}()
+	return r.Reconcile(ctx, deps, now)
 }
 
 // reconcileSync refreshes every pull request grain is still watching.
@@ -181,7 +201,7 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 		wg.Add(1)
 		go func(d dispatch.Dispatch) {
 			defer wg.Done()
-			if err := runOne(ctx, deps, d, now); err != nil {
+			if err := recoverRunOne(ctx, deps, d, now); err != nil {
 				errsMu.Lock()
 				errs = append(errs, err)
 				errsMu.Unlock()
@@ -190,6 +210,26 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// recoverRunOne wraps runOne with the same panic-to-error conversion
+// recoverReconcile (cycle.go, above) gives every Reconciler, for the same
+// "one dispatch failing does not abandon the others" reason this func's
+// own caller already documents -- and for a reason unique to running in
+// its own goroutine, one per concurrent dispatch: recover only ever
+// catches a panic on the same goroutine it was deferred on, so
+// RunCycle's/recoverReconcile's own recover, one level up, could never
+// have caught a panic here anyway. Left unrecovered, it would crash the
+// whole grain daemon process -- UI/API server included
+// (bwsalmon/agents#550) -- over what should only ever cost this one
+// dispatch its run.
+func recoverRunOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic running dispatch %s (task %s): %v\n%s", d.RunID, d.TaskID, rec, debug.Stack())
+		}
+	}()
+	return runOne(ctx, deps, d, now)
 }
 
 // recreatingSandboxes is implemented by a Sandboxes backend that supports
