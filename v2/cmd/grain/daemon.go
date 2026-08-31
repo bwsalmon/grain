@@ -61,6 +61,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -323,7 +324,12 @@ type config struct {
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
 // under cfg.dataDir and starts the reconcile loop; it returns only once
-// ctx is cancelled (or setup itself fails).
+// ctx is cancelled. With -ui-addr set, a failure in the rest of the
+// daemon -- runDaemon, below -- no longer counts as "ctx cancelled" for
+// this purpose (bwsalmon/agents#550): only a failure to open the store,
+// load configuration, or start the UI server itself still returns an
+// error here early, since those leave nothing running worth keeping the
+// process up for. See runDaemon's own doc comment.
 func run(ctx context.Context, cfg config) error {
 
 	store, db, err := openStore(cfg.dataDir)
@@ -375,6 +381,91 @@ func run(ctx context.Context, cfg config) error {
 		sandboxes = hostSandboxes
 	}
 
+	// transcriptDir is where a run's own agent.Framework may mirror its
+	// transcript-in-progress live, and where the UI server below reads one
+	// back from for a still-running attempt -- the two sides of
+	// bwsalmon/agents#467's live tailing (agent/gemini's own share of it
+	// added by bwsalmon/agents#513, since gemini.New in runDaemon below,
+	// not claude.New, is what production actually runs), agreeing on this
+	// directory (and, within it, the run-ID-named file
+	// orchestrator.RunDispatch and gemini.LiveTranscriptDir each
+	// independently compute) is what lets them talk to each other without
+	// either package importing the other. It must exist before any run
+	// can write into it -- orchestrator's own HostSandboxes.RootFor makes
+	// the same "must already exist" assumption about its own baseDir.
+	transcriptDir := filepath.Join(cfg.dataDir, "state", "transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return fmt.Errorf("creating transcript directory: %w", err)
+	}
+
+	// The UI/API server starts here, as early as its own dependencies (the
+	// store, sandboxes, and transcriptDir above) allow -- deliberately
+	// before the git proxy, per-slot credentials, the Gemini agent
+	// framework, and RunCycle's own reconcile loop, none of which the UI
+	// needs a working copy of to serve the store's existing tasks, runs,
+	// and logs (bwsalmon/agents#550: "make sure ui with logs stays up even
+	// if the daemon has failed"). Everything from here down used to run
+	// inline in this same function, so a `return err` from any one of
+	// those steps -- a bad -gemini-api-key-file, a git proxy that failed
+	// to bind -- or an unrecovered panic anywhere beneath them (a single
+	// dispatch's own goroutine included -- see reconcileDispatch's doc
+	// comment in pkg/orchestrator/cycle.go) unwound run() itself, which
+	// tore this UI server down right along with it via the very defer
+	// below. It now runs in runDaemon, in its own goroutine, so that no
+	// longer happens: runDaemon's own failure is logged, not fatal, and
+	// run() itself only returns once ctx is actually cancelled.
+	if cfg.uiAddr != "" {
+		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes)
+		if err != nil {
+			return fmt.Errorf("starting the UI/API server: %w", err)
+		}
+		defer stopUI(context.Background())
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if err := runDaemon(ctx, cfg, store, slots, sandboxes, hostSandboxes, konturSandboxes, transcriptDir); err != nil {
+				log.Printf("grain daemon: %v -- the UI/API server above is still up, but nothing is "+
+					"dispatching or reconciling tasks until this is fixed and the process is restarted", err)
+			}
+		}()
+		select {
+		case <-ctx.Done():
+		case <-done:
+			// runDaemon gave up (or panicked) before ctx was ever
+			// cancelled -- already logged above. The UI stays up
+			// regardless: wait for a real shutdown signal instead of
+			// falling through to the deferred stopUI/db.Close below, which
+			// would tear it down right after bringing it up for exactly
+			// this reason.
+			<-ctx.Done()
+		}
+		<-done
+		return nil
+	}
+
+	return runDaemon(ctx, cfg, store, slots, sandboxes, hostSandboxes, konturSandboxes, transcriptDir)
+}
+
+// runDaemon is everything that makes cfg's deployment actually dispatch
+// and reconcile tasks: minting per-slot sandbox tokens, the git proxy,
+// per-slot git credentials, the Gemini agent framework, orphaned-run
+// recovery, and RunCycle's own reconcile loop. run() calls it exactly
+// once, either inline (-ui-addr disabled, so there is no UI server worth
+// keeping up on its own -- a setup failure here is still this process's
+// only job, so it is still fatal the way it always was) or in a goroutine
+// recovered from panics (-ui-addr set), so that nothing in here -- a
+// config problem this returns as an error, or a bug that panics -- can
+// take the UI server run() already started down with it
+// (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
+// reconcile itself does; a non-nil error means it never got that far.
+func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []string, sandboxes orchestrator.Sandboxes, hostSandboxes *orchestrator.HostSandboxes, konturSandboxes *orchestrator.KonturSandboxes, transcriptDir string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+
 	// Mint every slot's sandbox token, and only then start the git proxy
 	// -- BuildProxy's own doc comment on gitproxy.LoadSandboxTokens says
 	// the proxy "loads the map once at startup and only ever looks
@@ -410,31 +501,6 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("starting git proxy: %w", err)
 	}
 	defer stopProxy(context.Background())
-
-	// transcriptDir is where a run's own agent.Framework may mirror its
-	// transcript-in-progress live, and where the UI server below reads one
-	// back from for a still-running attempt -- the two sides of
-	// bwsalmon/agents#467's live tailing (agent/gemini's own share of it
-	// added by bwsalmon/agents#513, since gemini.New below, not
-	// claude.New, is what production actually runs), agreeing on this
-	// directory (and, within it, the run-ID-named file
-	// orchestrator.RunDispatch and gemini.LiveTranscriptDir each
-	// independently compute) is what lets them talk to each other without
-	// either package importing the other. It must exist before any run
-	// can write into it -- orchestrator's own HostSandboxes.RootFor makes
-	// the same "must already exist" assumption about its own baseDir.
-	transcriptDir := filepath.Join(cfg.dataDir, "state", "transcripts")
-	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
-		return fmt.Errorf("creating transcript directory: %w", err)
-	}
-
-	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes)
-		if err != nil {
-			return fmt.Errorf("starting the UI/API server: %w", err)
-		}
-		defer stopUI(context.Background())
-	}
 
 	for _, slot := range slots {
 		// Configuring git credentials is a one-time, per-slot setup step,
