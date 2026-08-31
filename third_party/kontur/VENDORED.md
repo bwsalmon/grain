@@ -1,8 +1,11 @@
 # Vendored from bwsalmon/kontur
 
-This directory is a source snapshot of [bwsalmon/kontur](https://github.com/bwsalmon/kontur),
-pulled through the grain git proxy at commit
-`c21bace01cd2a8da26a319211605b108d1eb8875` (2026-08-31). It was first
+This directory is a source snapshot of [bwsalmon/kontur](https://github.com/bwsalmon/kontur)'s
+`main` branch, pulled through the grain git proxy at commit
+`5ed4e0017f5337bc3fde3ab8c29ef42dd1dac848` (2026-08-31). Always vendor
+from `main`: grain is kontur's primary consumer, so a change grain needs
+belongs on kontur's `main` and reaches here by a resync, not by being
+applied to this copy (see "Local patches" below). It was first
 vendored at commit `a13a8cc` (2026-08-28, bwsalmon/agents#351), then
 partially re-synced to `3cf4f9286402753add8390302cfb7c1fa82e4f81`
 (2026-08-30, bwsalmon/agents#477, three files only), fully re-synced to
@@ -25,11 +28,9 @@ pass: the three fixes that had been living only in this copy were written
 against `bwsalmon/kontur` itself, and the build-time guest setup hook
 grain needed was landed there rather than carried here as a fourth.
 
-Upstream `c21bace` is on `bwsalmon/kontur`'s
-`claude/kontur-vendoring-grain-sync-k7ha3e` branch, **not yet merged to
-its `main`** -- so a fresh checkout of upstream `main` still lacks all
-four commits below. Re-point this file at the merge commit on the next
-resync.
+`5ed4e00` is the merge of bwsalmon/kontur#28 into that repo's `main`, so
+a fresh checkout of kontur `main` now has all four commits below and
+needs no patching to boot the disks this repo points it at.
 
 The four commits this snapshot adds over `5a63863`:
 
@@ -106,12 +107,13 @@ current.
 
 ## Local patches
 
-None. Keep it that way where it is cheap to: a fix made here has to be
-re-diffed and re-applied by hand on every resync, and two of the three
-just retired (`qcow2.go`, `docker.go`) went undocumented in this file for
-a resync or more precisely because they were made against this copy
-directly. Landing a change in `bwsalmon/kontur` and re-vendoring costs a
-round trip and nothing else.
+None. Keep it that way: grain is kontur's primary consumer, so "upstream
+wouldn't want this" is rarely true here, and a fix made against this copy
+has to be re-diffed and re-applied by hand on every resync. Two of the
+three just retired (`qcow2.go`, `docker.go`) went undocumented in this
+file for a resync or more precisely because they were made against this
+copy directly. Landing a change on `bwsalmon/kontur`'s `main` and
+re-vendoring from it costs a round trip and nothing else.
 
 If one is genuinely unavoidable -- something specific to how this repo
 drives cloud-hypervisor and wrong for upstream -- record it here with

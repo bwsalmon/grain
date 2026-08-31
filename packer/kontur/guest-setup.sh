@@ -8,11 +8,19 @@
 # it into a disk image with `mke2fs -d`, so grain no longer builds one of
 # its own -- it only says what to add.
 #
-# CONTRACT: runs as root inside the guest rootfs (a chroot with /proc,
-# /sys and /dev available and working network access), after kontur's own
-# guest stage has finished, and before that rootfs is packed into
-# disk.img. That is the same contract provision.sh ran under, which is
-# why this is a port rather than a rewrite.
+# CONTRACT: runs as root with the guest rootfs as /, after kontur's own
+# guest stage has finished and before that rootfs is packed into
+# disk.img, with a real /proc and /dev and working network access. Not a
+# chroot, as an earlier version of this header assumed: kontur's
+# guest-customized stage (bwsalmon/kontur#28) promotes the rootfs to an
+# image of its own and runs this as an ordinary Dockerfile RUN, precisely
+# so that a chroot's need for CAP_SYS_ADMIN to bind-mount /proc and /dev
+# never arises. The practical guarantees are the ones provision.sh ran
+# under, which is why this stayed a port rather than becoming a rewrite;
+# the one difference worth knowing is that /sys may be read-only under
+# BuildKit where provision.sh's chroot had it read-write. Nothing here
+# writes to /sys. Neither environment has a running service manager:
+# `systemctl enable` works, `systemctl start` does not.
 #
 # ORDERING: the kernel package must already be installed by the time this
 # runs -- see "Networking" below, whose final `update-initramfs` has

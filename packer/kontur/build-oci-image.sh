@@ -11,19 +11,25 @@
 # `docker build`/`docker push`, no root needed, but still real work worth
 # doing ahead of a deploy rather than inside one.
 #
-# The image this produces is deliberately generic: it leaves
-# GUEST_SSH_AUTHORIZED_KEY at the Dockerfile's own empty default (there is
-# no second build arg for customizing the guest beyond that -- an earlier
-# version of this comment named a GUEST_SETUP_SCRIPT that
-# third_party/kontur has never actually had) because a real deployment
-# never boots its bundled guest disk at all -- KonturConfig.CreateArgs always points
-# -disk/-kernel/-initramfs at this directory's own build.sh output
-# instead (see README.md's own -kontur-create-arg example). All this
-# image contributes at runtime is the `kontur` binary and the pinned
-# cloud-hypervisor release inside it; v2/scripts/setup.sh's own
-# ensure_kontur_images retags whatever is pulled here to konturctl's own
-# default "localhost:5000/kontur:latest" so no -kontur-image override is
-# needed either.
+# The image this produces is deliberately generic: it leaves both guest
+# build args -- GUEST_SSH_AUTHORIZED_KEY and GUEST_SETUP_SCRIPT (the
+# build-time customization hook, which third_party/kontur does now carry
+# as of bwsalmon/kontur#28) -- at the Dockerfile's own empty defaults,
+# because a real deployment never boots its bundled guest disk at all:
+# KonturConfig.CreateArgs always points -disk/-kernel/-initramfs at this
+# directory's own build.sh output instead (see README.md's own
+# -kontur-create-arg example). All this image contributes at runtime is
+# the `kontur` binary and the pinned cloud-hypervisor release inside it;
+# v2/scripts/setup.sh's own ensure_kontur_images retags whatever is
+# pulled here to konturctl's own default "localhost:5000/kontur:latest"
+# so no -kontur-image override is needed either.
+#
+# That split is what README.md's "Wiring, still to do" would collapse:
+# passing GUEST_SETUP_SCRIPT=guest-setup.sh here and building the
+# guest-artifacts target would make this one build produce the guest too,
+# retiring build.sh/provision.sh. It waits on that section's four
+# unverified checks, which need a machine that can actually run the
+# build.
 #
 # Needs: docker, authenticated to push to KONTUR_OCI_IMAGE's own registry
 # (e.g. `gcloud auth configure-docker <region>-docker.pkg.dev` for
