@@ -49,7 +49,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,6 +204,23 @@ func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 	return imagesDir, sshKeyPath
 }
 
+// execKeyPathIn renders where a key sitting in the host's images
+// directory shows up inside a VM's container: internal/dockervm mounts
+// that directory read-only at /images, so the private key
+// KonturConfig.ExecKeyPath names needs no copying and no extra mount --
+// buildKonturGuestImage already generates its throwaway keypair there.
+//
+// It fails the test rather than guessing if the two ever stop being the
+// same place: the failure that would otherwise produce is an
+// authentication error deep inside a guest, which says nothing about why.
+func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
+	t.Helper()
+	if got, want := filepath.Dir(sshKeyPath), imagesHostPath; got != want {
+		t.Fatalf("guest image helper put its SSH key in %s, want it inside the images directory %s that gets mounted at /images -- ExecKeyPath depends on those being the same place", got, want)
+	}
+	return "/images/" + filepath.Base(sshKeyPath)
+}
+
 func mustRunOutput(t *testing.T, name string, args ...string) string {
 	t.Helper()
 	out, err := exec.Command(name, args...).CombinedOutput()
@@ -212,153 +228,6 @@ func mustRunOutput(t *testing.T, name string, args ...string) string {
 		t.Fatalf("running %s %v: %v\n%s", name, args, err, out)
 	}
 	return string(out)
-}
-
-func TestKonturSandboxesToolsForAgainstARealDockerBackedVM(t *testing.T) {
-	konturDockerRealTestPrereqs(t)
-
-	konturctlDir := buildKonturctl(t)
-	image := buildKonturDockerImage(t)
-	imagesHostPath, sshKeyPath := buildKonturGuestImage(t)
-
-	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	stateDir := t.TempDir()
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		// Short on purpose: netshim's docker backend names each VM's tap
-		// device "tap-"+name, and Linux caps interface names at 15 bytes
-		// (IFNAMSIZ-1) -- confirmed by hand while writing this test, which
-		// first failed against a longer, more descriptive prefix with
-		// exactly that error. See KonturConfig.NamePrefix's own doc
-		// comment.
-		NamePrefix: "kdrt-",
-		Backend:    kontur.BackendDocker,
-		StateDir:   stateDir,
-		CreateArgs: []string{
-			"-kontur-image", image,
-			"-images-hostpath", imagesHostPath,
-			"-disk", "/images/disk.img",
-			"-kernel", "/images/vmlinuz",
-			"-initramfs", "/images/initrd.img",
-			// -guest-port defaults to 80 (internal/netshim/config.go's own
-			// defaultGuestPort) -- netshim's DNAT rule forwards the
-			// external -port below to this port inside the guest, so
-			// without overriding it here every packet would be forwarded
-			// to a port nothing in this guest listens on, not to sshd.
-			// Confirmed by hand: connections refused indefinitely, no
-			// matter how long ToolsFor waited, until this was added.
-			"-guest-port", "22",
-			"-ip", "169.254.100.2",
-			"-port", "31080",
-		},
-		// "debian", not "root": packer/kontur/provision.sh bakes the
-		// operator's key into the debian user's authorized_keys, matching
-		// v1's own sandbox convention (grain/adapter/libvirt.py) -- see
-		// that script's own comment on why the account has to be created
-		// there at all rather than assumed present.
-		SSHUser:           "debian",
-		SSHKey:            sshKeyPath,
-		Workspace:         "/home/debian",
-		ReadyTimeout:      3 * time.Minute,
-		ReadyPollInterval: time.Second,
-	})
-
-	name := k.VMNameFor("1")
-	t.Cleanup(func() {
-		if err := kontur.Delete(context.Background(), stateDir, name); err != nil {
-			t.Logf("cleaning up real kontur VM %q: %v", name, err)
-		}
-	})
-
-	tools, err := k.ToolsFor(context.Background(), "1")
-	if err != nil {
-		t.Fatalf("ToolsFor against a real konturctl/docker/cloud-hypervisor VM: %v", err)
-	}
-	wantNames := map[string]bool{"run_command": true, "read_file": true, "write_file": true, "edit_file": true}
-	if len(tools) != len(wantNames) {
-		t.Fatalf("ToolsFor() returned %d tools, want %d", len(tools), len(wantNames))
-	}
-	var runCommand *mcp.Tool
-	for i, tool := range tools {
-		if !wantNames[tool.Name] {
-			t.Errorf("unexpected tool %q", tool.Name)
-		}
-		if tool.Name == "run_command" {
-			runCommand = &tools[i]
-		}
-	}
-	if runCommand == nil {
-		t.Fatal("no run_command tool returned")
-	}
-
-	// The whole point of building a real guest image in this test (see its
-	// own doc comment): a dispatched task's run_command tool call actually
-	// executes inside the guest over SSH, not just that ToolsFor resolved
-	// an address for a VM that may or may not ever finish booting.
-	//
-	// ToolsFor/resolveEndpoint above only wait for the VM's container/pod
-	// to get an IP, not for the cloud-hypervisor guest inside it to finish
-	// booting to sshd -- those are different points in time, confirmed by
-	// hand: a docker-backed VM's container is reachable by IP the moment
-	// "docker run" starts it, well before the nested guest has actually
-	// booted. So the first run_command call here retries for a while
-	// rather than asserting success on the first attempt.
-	var result mcp.Result
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		result = runCommand.Handler(context.Background(), map[string]any{"command": "echo grain-kontur-e2e-marker; id -un; uname -s"})
-		if !result.IsError {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("run_command over SSH against the real guest never succeeded within %s: %s", 2*time.Minute, result.Text)
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if !strings.Contains(result.Text, "grain-kontur-e2e-marker") {
-		t.Errorf("run_command output = %q, want it to contain the echoed marker", result.Text)
-	}
-	if !strings.Contains(result.Text, "debian") {
-		t.Errorf("run_command output = %q, want it to show the debian user (id -un)", result.Text)
-	}
-	if !strings.Contains(result.Text, "Linux") {
-		t.Errorf("run_command output = %q, want it to show the guest's own uname -s", result.Text)
-	}
-
-	// Confirm konturctl actually persisted a port for the VM this test
-	// asked for (31080, via -port above) -- kontur.Port is how
-	// KonturSandboxes.resolveEndpoint above found it, but reading it back
-	// independently here confirms it is real state konturctl wrote, not
-	// an artifact of ToolsFor's own bookkeeping.
-	port, err := kontur.Port(stateDir, name)
-	if err != nil {
-		t.Fatalf("kontur.Port after a real vm create: %v", err)
-	}
-	if port != 31080 {
-		t.Errorf("kontur.Port() = %d, want 31080", port)
-	}
-
-	// Confirm the resolved address is real -- a genuine docker-assigned IP
-	// on the network namespace netshim actually configured, resolved via
-	// a real "docker inspect", not a fake standing in for one.
-	ip, err := kontur.DockerPodIP(context.Background(), name)
-	if err != nil {
-		t.Fatalf("kontur.DockerPodIP after a real vm create: %v", err)
-	}
-	if net.ParseIP(ip) == nil {
-		t.Errorf("kontur.DockerPodIP() = %q, want a valid IP address", ip)
-	}
-
-	// The VM container itself should still be running: the guest booted
-	// all the way to sshd (run_command above already proved that), and
-	// cloud-hypervisor supervises it rather than exiting once it has.
-	statusOut, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "kontur-vm-"+name).CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, statusOut)
-	}
-	if status := string(bytes.TrimSpace(statusOut)); status != "running" {
-		t.Errorf("real VM container status = %q, want %q", status, "running")
-	}
 }
 
 // TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently is the
@@ -403,7 +272,6 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		// names each VM's tap device "tap-"+name, and Linux caps interface
 		// names at 15 bytes).
 		NamePrefix: "kdc-",
-		Backend:    kontur.BackendDocker,
 		StateDir:   stateDir,
 		CreateArgs: []string{
 			"-kontur-image", image,
@@ -414,7 +282,7 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 			"-guest-port", "22",
 		},
 		SSHUser:           "debian",
-		SSHKey:            sshKeyPath,
+		ExecKeyPath:       execKeyPathIn(t, imagesHostPath, sshKeyPath),
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,
@@ -465,27 +333,34 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		toolsBySlot[r.slot] = r.tools
 	}
 
-	// Each VM got its own independently-derived port -- confirms BaseIP/
-	// BasePort's arithmetic actually reached real konturctl's "-port" flag
-	// for both slots, not just the first.
-	port1, err := kontur.Port(stateDir, names[0])
-	if err != nil {
-		t.Fatalf("kontur.Port(%s): %v", names[0], err)
+	// Each VM got its own independently-derived guest address -- confirms
+	// BaseIP/BasePort's arithmetic actually reached real konturctl for
+	// both slots, not just the first. The address is what matters now
+	// rather than the forwarded port: it is what each VM's guest
+	// configures from its own kernel cmdline, and what `kontur exec`
+	// connects to (KONTUR_EXEC_ADDR).
+	addrs := map[string]string{}
+	for _, name := range names {
+		out, err := exec.Command("docker", "inspect", "-f",
+			`{{range .Config.Env}}{{println .}}{{end}}`, "kontur-vm-"+name).CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker inspect on %s: %v\n%s", name, err, out)
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "KONTUR_EXEC_ADDR=") {
+				addrs[name] = strings.TrimPrefix(line, "KONTUR_EXEC_ADDR=")
+			}
+		}
+		if addrs[name] == "" {
+			t.Fatalf("%s: no KONTUR_EXEC_ADDR in the VM container's env:\n%s", name, out)
+		}
 	}
-	port2, err := kontur.Port(stateDir, names[1])
-	if err != nil {
-		t.Fatalf("kontur.Port(%s): %v", names[1], err)
-	}
-	if port1 == port2 {
-		t.Errorf("both slots' VMs got the same port %d, want BasePort-derived distinct ports", port1)
-	}
-	if port1 != 31090 || port2 != 31091 {
-		t.Errorf("ports = %d, %d, want 31090, 31091 (BasePort=31090, offsets 0 and 1)", port1, port2)
+	if addrs[names[0]] == addrs[names[1]] {
+		t.Errorf("both slots' VMs got the same guest address %q, want BaseIP-derived distinct ones", addrs[names[0]])
 	}
 
-	// Each guest actually runs and answers a distinct command over SSH --
-	// the same boot-time race TestKonturSandboxesToolsForAgainstARealDockerBackedVM's
-	// own retry loop works around, run for two guests at once this time.
+	// Each guest actually runs and answers a distinct command, for two
+	// guests at once this time.
 	for _, slot := range slots {
 		var runCommand *mcp.Tool
 		for i, tool := range toolsBySlot[slot] {
@@ -515,7 +390,7 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 	}
 }
 
-// TestKonturSandboxesDockerExecAgainstARealDockerBackedVM is the
+// TestKonturSandboxesAgainstARealDockerBackedVM is the
 // docker-exec transport's (KonturConfig.DockerExec) counterpart to
 // TestKonturSandboxesToolsForAgainstARealDockerBackedVM above: the same
 // real konturctl, real docker, real cloud-hypervisor guest under real
@@ -552,7 +427,7 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 // It skips under exactly the same conditions the tests above do, and
 // shares their build helpers, so it costs a host without docker/KVM
 // nothing.
-func TestKonturSandboxesDockerExecAgainstARealDockerBackedVM(t *testing.T) {
+func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
@@ -564,20 +439,13 @@ func TestKonturSandboxesDockerExecAgainstARealDockerBackedVM(t *testing.T) {
 	// buildKonturGuestImage generates its throwaway keypair *into*
 	// imagesHostPath, and internal/dockervm mounts that same directory
 	// read-only at /images in every VM container it starts -- so the
-	// private key DockerExecKeyPath names is already somewhere the
+	// private key ExecKeyPath names is already somewhere the
 	// container can read it, with nothing to copy and no mount to add.
-	// That is the same arrangement KonturConfig.DockerExecKeyPath's own
+	// That is the same arrangement KonturConfig.ExecKeyPath's own
 	// doc comment recommends to a real deployment, exercised here rather
 	// than only described.
 	//
-	// Asserted rather than assumed: if that helper ever puts its keypair
-	// somewhere else, the failure this would otherwise produce is an
-	// authentication error deep inside a guest, which says nothing about
-	// why.
-	if got, want := filepath.Dir(sshKeyPath), imagesHostPath; got != want {
-		t.Fatalf("guest image helper put its SSH key in %s, want it inside the images directory %s that gets mounted at /images -- this test's DockerExecKeyPath depends on those being the same place", got, want)
-	}
-	dockerExecKey := "/images/" + filepath.Base(sshKeyPath)
+	execKey := execKeyPathIn(t, imagesHostPath, sshKeyPath)
 
 	stateDir := t.TempDir()
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
@@ -586,7 +454,6 @@ func TestKonturSandboxesDockerExecAgainstARealDockerBackedVM(t *testing.T) {
 		// distinct from the two tests above so all three can run back to
 		// back.
 		NamePrefix: "kde-",
-		Backend:    kontur.BackendDocker,
 		StateDir:   stateDir,
 		CreateArgs: []string{
 			"-kontur-image", image,
@@ -600,19 +467,14 @@ func TestKonturSandboxesDockerExecAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
-			// Distinct from both tests above (169.254.100.2:31080 and
-			// 169.254.100.20+:31090+) so none of the three fight over an
+			// Distinct from the concurrent test above
+			// (169.254.100.20+:31090+) so the two never fight over an
 			// address if run back to back without a clean teardown.
 			"-ip", "169.254.100.40",
 			"-port", "31110",
 		},
-		SSHUser: "debian",
-		// Still set, and still the host path: nothing on this transport
-		// reads it, but leaving it out would make this config differ from
-		// a real deployment's in a way this test has no reason to.
-		SSHKey:            sshKeyPath,
-		DockerExec:        true,
-		DockerExecKeyPath: dockerExecKey,
+		SSHUser:           "debian",
+		ExecKeyPath:       execKey,
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,

@@ -224,8 +224,12 @@ Terraform state:
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
 - **The kontur SSH private key** (with `enable_kontur_sandboxes`, the
-  default) -- what `grain daemon`'s own `-kontur-ssh-key` authenticates
-  to each slot's VM with. See "Kontur sandboxing" below.
+  default) -- what authenticates to each slot's VM guest. `setup.sh`
+  stages it into the images directory konturctl mounts read-only at
+  `/images` in every VM container, and `grain daemon`'s own
+  `-kontur-exec-key` names it there, since the daemon reaches a guest by
+  exec'ing into that VM's container rather than connecting to it from
+  outside. See "Kontur sandboxing" below.
 
 All four go straight into the host instance's own metadata via
 `push-secrets.sh`, which any identity with `deployer_manages_minter_keys`

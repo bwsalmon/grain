@@ -29,29 +29,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 )
-
-// listenTCP opens a real TCP listener at 127.0.0.1:port, closed
-// automatically when t ends -- KonturSandboxes.resolveEndpoint
-// (bwsalmon/agents#504) now dials the resolved host:port for real once
-// the pod/container IP itself resolves (closing the gap where a fresh
-// VM's container is reachable well before the guest has actually booted
-// to sshd), so any test driving that path past IP resolution needs
-// something real listening there, standing in for the guest's sshd.
-func listenTCP(t *testing.T, port int) {
-	t.Helper()
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Fatalf("listening on 127.0.0.1:%d: %v", port, err)
-	}
-	t.Cleanup(func() { ln.Close() })
-}
 
 func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	t.Helper()
@@ -77,36 +60,35 @@ fi
 	install(t, dir, "konturctl", script)
 }
 
-func writeFakeCrictlBinary(t *testing.T, ip string) {
+// writeFakeDockerBinary installs a fake "docker" whose `exec` runs the
+// command it was handed in vmHome, standing in for the guest's own
+// filesystem, and reports every container as running. The docker-exec
+// counterpart to the fake `ssh` (and the crictl address lookup) this
+// replaced -- everything after "kontur exec --" is a real argv, so the
+// fake can exec it directly.
+func writeFakeDockerBinary(t *testing.T, vmHome string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fake crictl script is POSIX shell only")
+		t.Skip("fake docker script is POSIX shell only")
 	}
 	dir := t.TempDir()
-	script := fmt.Sprintf(`#!/bin/sh
-case "$*" in
-  *pods*) echo '{"items":[{"id":"abc123"}]}' ;;
-  *inspectp*) echo '{"status":{"network":{"ip":"%s"}}}' ;;
+	install(t, dir, "docker", fmt.Sprintf(`#!/bin/sh
+case "$1" in
+exec)
+  shift
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+  shift
+  cd %q && exec "$@"
+  ;;
+inspect)
+  echo running
+  ;;
+*)
+  echo "fake docker: unexpected subcommand: $*" >&2
+  exit 1
+  ;;
 esac
-`, ip)
-	install(t, dir, "crictl", script)
-}
-
-// writeFakeSSHBinary stands in for a real sshd: it ignores every
-// connection flag SSHRunner.Run passes and runs its trailing shell-quoted
-// command (SSHRunner.Run's own doc comment) against homeDir, the same
-// technique pkg/orchestrator/kontur_sandboxes_test.go's own writeFakeSSH
-// uses.
-func writeFakeSSHBinary(t *testing.T, homeDir string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake ssh script is POSIX shell only")
-	}
-	dir := t.TempDir()
-	script := fmt.Sprintf(`#!/bin/bash
-cd %q && exec bash -c "${@: -1}"
-`, homeDir)
-	install(t, dir, "ssh", script)
+`, vmHome))
 }
 
 func install(t *testing.T, dir, name, script string) {
@@ -125,10 +107,8 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	const slot = "1"
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKonturBinary(t, argvLog, 30080)
-	writeFakeCrictlBinary(t, "127.0.0.1")
-	listenTCP(t, 30080)
 	vmHome := t.TempDir()
-	writeFakeSSHBinary(t, vmHome)
+	writeFakeDockerBinary(t, vmHome)
 
 	dataDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dataDir, "secrets", "github"), 0o755); err != nil {
@@ -149,9 +129,8 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 
 		konturVMNamePrefix: "grain-graind-test-",
 		konturStateDir:     t.TempDir(),
-		criRuntimeEndpoint: "unix:///run/containerd/containerd.sock",
 		konturSSHUser:      "debian",
-		konturSSHKey:       "/key",
+		konturExecKey:      "/images/key",
 		konturWorkspace:    "/workspace",
 		konturCreateArgs:   []string{"-image", "gs://bucket/kontur-guest-deadbeef.qcow2"},
 	}
@@ -191,7 +170,7 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kontur was never invoked: %v", err)
 	}
-	want := "vm create " + cfg.konturVMNamePrefix + slot + " -state-dir " + cfg.konturStateDir + " -image gs://bucket/kontur-guest-deadbeef.qcow2\n"
+	want := "vm create " + cfg.konturVMNamePrefix + slot + " -state-dir " + cfg.konturStateDir + " -backend docker -image gs://bucket/kontur-guest-deadbeef.qcow2\n"
 	if string(data) != want {
 		t.Errorf("kontur invoked as %q, want %q", data, want)
 	}

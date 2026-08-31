@@ -1,45 +1,32 @@
-// Package kontur resolves how to reach a sandbox VM that bwsalmon/kontur
-// is running under a static kubelet (see that repo's top-level README and
-// deploy/static-kubelet/README.md) -- the two pieces of information
-// mcp.SSHRunner needs that neither `konturctl vm list` nor `konturctl vm
-// create` prints on its own:
+// Package kontur drives the `konturctl` binary: creating, updating and
+// deleting the sandbox VMs bwsalmon/kontur runs, plus the one `docker
+// inspect` a caller needs to tell a VM whose container died from one
+// still on its way up.
 //
-//   - The external port netshim forwards to the VM's guest, which kontur
-//     itself persists per VM. Port reads it straight out of kontur's own
-//     state file rather than importing bwsalmon/kontur as a Go module --
-//     the same "read the shape, don't import the writer" choice
-//     v2/pkg/secrets makes for a Kubernetes Secret volume mount, and one
-//     this package needs for the same reason: pulling in kontur's module
-//     graph (containerd, cloud-hypervisor's own client, ...) to read one
-//     integer out of a JSON file it already writes to a well-known path
-//     would be a strange trade.
-//   - The pod IP that port actually answers on. kontur never records this
-//     at all -- there is no apiserver for a static pod to report its
-//     assigned address back to, which is the entire premise of running a
-//     kubelet standalone -- so PodIP asks containerd directly, via
-//     crictl, the exact tool deploy/static-kubelet/README.md already
-//     points an operator at by hand ("crictl ... is the standalone
-//     equivalent for inspecting pods/containers").
+// It never reads kontur's own state files and never resolves an address
+// for a VM, because nothing here needs one: a VM's guest is reached by
+// exec'ing into its own container (mcp.DockerExecRunner), where the
+// guest's address is already configured and directly reachable. This
+// package used to carry a Port (kontur's state file) and a PodIP/
+// DockerPodIP (crictl or `docker inspect`) for the SSH-to-a-forwarded-
+// port transport that preceded it; all three existed only to describe a
+// route in from outside the VM's network namespace, and went away with
+// it.
 //
-// Create and Delete, unlike Port and PodIP, do not read kontur's own state
-// -- they just run the `konturctl` binary itself ("konturctl vm create"/
-// "konturctl vm delete"), the same command an operator would type by
-// hand -- never the `kontur` binary itself, which is a different program
-// with a different job: the container-facing entrypoint that boots a
-// single VM or sets up netshim networking (bwsalmon/kontur's own
+// What is left is a deliberately shallow dependency on kontur: the
+// `konturctl` subcommand names, the container names it derives from a VM
+// name (PodName), and one `docker inspect` field. Never the `kontur`
+// binary itself, which is a different program with a different job --
+// the container-facing entrypoint that boots a single VM, sets up
+// netshim networking, or execs into the guest (bwsalmon/kontur's own
 // cmd/kontur/main.go doc comment: "distinct from cmd/konturctl, which is
-// the operator-facing CLI"), not the one an operator's own PATH ever runs
-// "vm create"/"vm delete" against. That is a different, much shallower
-// kind of dependency than importing bwsalmon/kontur as a Go module would
-// be (see above): this package still never needs to agree with kontur's
-// own code on any Go type, only on the two subcommand names and the state
-// file Port and PodIP already read.
+// the operator-facing CLI"). This package still never needs to agree
+// with kontur's own code on any Go type.
 package kontur
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,12 +38,6 @@ import (
 // defaultStateDir, which every "konturctl vm" subcommand's "-state-dir"
 // flag defaults to.
 const DefaultStateDir = "/var/lib/kontur/vms"
-
-// DefaultRuntimeEndpoint matches the containerd CRI socket
-// deploy/static-kubelet/containerd-config.toml and kubelet-config.yaml
-// both point at on a node kontur set up. Only meaningful for
-// BackendStaticPod (below); the docker backend has no CRI to ask.
-const DefaultRuntimeEndpoint = "unix:///run/containerd/containerd.sock"
 
 // BackendDocker is the value `konturctl vm create -backend` takes to run a VM
 // directly against a local docker daemon instead of writing a static pod
@@ -77,126 +58,16 @@ func PodName(vmName string) string {
 	return "kontur-vm-" + vmName
 }
 
-// vmState is the subset of bwsalmon/kontur's internal/staticpod.VMSpec
-// this package needs -- just the one field, out of the one
-// "<state-dir>/<name>.json" file kontur's own staticpod.Save/Load already
-// read and write, that PodIP's crictl lookup can't recover on its own.
-type vmState struct {
-	Port int `json:"port"`
+// Exists reports whether kontur has state for VM name under stateDir --
+// i.e. whether `konturctl vm create` has ever succeeded for it. kontur
+// writes one "<state-dir>/<name>.json" per VM (its own staticpod.Save)
+// and removes it on delete, so the file's presence is the same signal a
+// `konturctl vm list` would report, without this package having to agree
+// with kontur on anything inside it.
+func Exists(stateDir, name string) bool {
+	_, err := os.Stat(filepath.Join(stateDir, name+".json"))
+	return err == nil
 }
-
-// Port reads the external port kontur assigned VM name at "konturctl vm
-// create"/"update" time, out of stateDir (see DefaultStateDir). This is
-// the port SSHRunner should connect to -- guestPort (also in the state
-// file) is only meaningful inside the VM's own network namespace.
-func Port(stateDir, name string) (int, error) {
-	path := filepath.Join(stateDir, name+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, fmt.Errorf("kontur: reading %s: %w", path, err)
-	}
-	var s vmState
-	if err := json.Unmarshal(data, &s); err != nil {
-		return 0, fmt.Errorf("kontur: parsing %s: %w", path, err)
-	}
-	if s.Port < 1 || s.Port > 65535 {
-		return 0, fmt.Errorf("kontur: %s has no valid port", path)
-	}
-	return s.Port, nil
-}
-
-// crictl runs `crictl -runtime-endpoint runtimeEndpoint <args...>` and
-// returns its stdout, wrapping a non-zero exit (crictl's own error, e.g.
-// "not found", ends up on stderr) into the returned error so PodIP's
-// caller sees why the lookup failed rather than just that it did.
-func crictl(ctx context.Context, runtimeEndpoint string, args ...string) ([]byte, error) {
-	full := append([]string{"--runtime-endpoint", runtimeEndpoint}, args...)
-	cmd := exec.CommandContext(ctx, "crictl", full...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("kontur: crictl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.Bytes(), nil
-}
-
-// PodIP resolves the CNI-assigned IP address of the static pod backing VM
-// vmName, via two crictl calls -- `crictl pods` to turn PodName(vmName)
-// into a sandbox ID (a pod's name isn't itself something `inspectp` takes)
-// then `crictl inspectp` for that ID's network status -- the same two
-// steps deploy/static-kubelet/README.md's own "crictl ps -a" / "crictl
-// logs <container-id>" walkthrough takes to go from a pod's name to its
-// detail. This is the address netshim's DNAT rule (inside the pod's own
-// network namespace) forwards Port to the guest on; it changes on every
-// pod recreate, so nothing caches it across calls.
-func PodIP(ctx context.Context, runtimeEndpoint, vmName string) (string, error) {
-	podName := PodName(vmName)
-	out, err := crictl(ctx, runtimeEndpoint, "pods", "--name", podName, "--state", "Ready", "-o", "json")
-	if err != nil {
-		return "", err
-	}
-	var list struct {
-		Items []struct {
-			ID string `json:"id"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(out, &list); err != nil {
-		return "", fmt.Errorf("kontur: parsing crictl pods output for %q: %w", podName, err)
-	}
-	if len(list.Items) == 0 {
-		return "", fmt.Errorf("kontur: no ready pod named %q -- is the VM up?", podName)
-	}
-
-	out, err = crictl(ctx, runtimeEndpoint, "inspectp", "-o", "json", list.Items[0].ID)
-	if err != nil {
-		return "", err
-	}
-	var status struct {
-		Status struct {
-			Network struct {
-				IP string `json:"ip"`
-			} `json:"network"`
-		} `json:"status"`
-	}
-	if err := json.Unmarshal(out, &status); err != nil {
-		return "", fmt.Errorf("kontur: parsing crictl inspectp output for %q: %w", podName, err)
-	}
-	if status.Status.Network.IP == "" {
-		return "", fmt.Errorf("kontur: pod %q has no network IP yet", podName)
-	}
-	return status.Status.Network.IP, nil
-}
-
-// dockerNetnsContainerName returns the name of the otherwise-idle
-// container bwsalmon/kontur's docker backend (internal/dockervm) starts
-// per VM purely to hold open the network namespace netshim and the VM
-// container share -- see that package's own doc comment for why a plain
-// docker container needs one at all. Duplicated here for the same reason
-// PodName is: this package reads kontur's own naming convention rather
-// than importing it.
-func dockerNetnsContainerName(vmName string) string {
-	return PodName(vmName) + "-netns"
-}
-
-// dockerIPFormat is a docker inspect Go template that prefers
-// NetworkSettings.IPAddress (populated on docker's default bridge
-// network) and falls back to the first network under
-// NetworkSettings.Networks (where IPAddress is always empty instead) --
-// covering a container attached to a named network, e.g. via `docker run
-// --network`. The top-level lookup goes through "index" rather than a
-// plain ".IPAddress", confirmed necessary by hand against a real docker
-// daemon (29.7.2): docker inspect's own template execution runs against
-// the JSON response decoded as a bare map[string]interface{}, not a fixed
-// Go struct, and that version omits the "IPAddress" key from
-// NetworkSettings entirely (not just empty-strings it) once a container
-// has no legacy single-network attachment -- and unlike a struct field, a
-// plain ".Field" access on a map with no such key is a template execution
-// error ("map has no entry for key \"IPAddress\""), not a zero value.
-// "index" sidesteps that: indexing a map for an absent key yields the
-// untyped nil <no value> instead of erroring, which the "if" below
-// already treats as falsy.
-const dockerIPFormat = `{{$ip := index .NetworkSettings "IPAddress"}}{{if $ip}}{{$ip}}{{else}}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{end}}`
 
 // dockerInspect runs `docker inspect -f format name` and returns its
 // trimmed stdout, folding stderr into the returned error the same way
@@ -210,27 +81,6 @@ func dockerInspect(ctx context.Context, format, name string) (string, error) {
 		return "", fmt.Errorf("kontur: docker inspect %s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
-}
-
-// DockerPodIP resolves the address netshim's DNAT rules listen on for a VM
-// created with `konturctl vm create -backend docker` (BackendDocker): the
-// docker-assigned address of that VM's network-namespace-holder container
-// (dockerNetnsContainerName) -- what internal/netshim/setup.go's
-// ensurePortForward calls "the pod IP" when there is no real Kubernetes
-// pod to ask. The docker backend has no CRI for crictl to ask the way
-// PodIP (above) does, which is why this is a separate function rather
-// than a branch inside that one; callers building a docker-backed
-// KonturSandboxes call this instead of PodIP.
-func DockerPodIP(ctx context.Context, vmName string) (string, error) {
-	name := dockerNetnsContainerName(vmName)
-	ip, err := dockerInspect(ctx, dockerIPFormat, name)
-	if err != nil {
-		return "", err
-	}
-	if ip == "" {
-		return "", fmt.Errorf("kontur: container %q has no network IP yet -- is the VM up?", name)
-	}
-	return ip, nil
 }
 
 // DockerContainerStatus returns the docker State.Status (e.g. "running",

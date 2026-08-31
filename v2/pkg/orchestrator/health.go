@@ -3,14 +3,10 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/bwsalmon/grain/v2/pkg/kontur"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 // SlotHealth is one dispatch slot's own sandbox status, as HostSandboxes'
@@ -96,24 +92,22 @@ const healthTimeout = 5 * time.Second
 // lifetime -- see the type's own doc comment on why that, not "every VM
 // that exists," is what this package tracks), each with a best-effort
 // live /proc/loadavg and /proc/meminfo reading pulled out of the guest
-// over the same SSH path ToolsFor's own tools use. Unlike resolveEndpoint,
+// over the same transport ToolsFor's own tools use. Unlike runnerFor,
 // this never waits out a VM's multi-minute boot -- a slot whose VM is not
 // reachable within healthTimeout gets Error set instead, which is exactly
 // the condition this pane exists to surface (bwsalmon/agents#536), not one
 // this method should hide behind a long wait or an error return that would
 // take the whole pane down with it.
 //
-// It does, within that short budget, retry a refused/unreachable dial to
-// the guest's SSH port (waitForPortHealthy) before giving up: ensure()
-// marks a slot "created" the instant kontur.Create's subprocess returns,
-// which for BackendDocker is before resolveEndpoint's own TCP-dial wait
-// has ever run for that slot -- so a slot can become visible to Health()
-// while docker is still finishing the veth/ARP setup netshim depends on,
-// the same brief window resolveEndpoint/waitForSSHPort exist to ride out
-// for ToolsFor (bwsalmon/agents#478). Without this, that transient state
-// surfaced verbatim as "reading guest stats over SSH: ssh: connect to
-// host ...: No route to host" with nothing in the daemon's own logs, since
-// nothing here was actually wrong long enough to log (bwsalmon/agents#553).
+// It does, within that short budget, retry a guest that is not answering
+// yet (waitForGuestExec) before giving up: ensure() marks a slot
+// "created" the instant kontur.Create's subprocess returns, well before
+// the guest inside that container has booted, so a slot can become
+// visible to Health() while it is still coming up -- the same brief
+// window runnerFor waits out for ToolsFor (bwsalmon/agents#478). Without
+// this, that transient state surfaced verbatim as a connection error with
+// nothing in the daemon's own logs, since nothing here was actually wrong
+// long enough to log (bwsalmon/agents#553).
 func (k *KonturSandboxes) Health(ctx context.Context) []SlotHealth {
 	k.mu.Lock()
 	names := make([]string, 0, len(k.created))
@@ -134,46 +128,23 @@ func (k *KonturSandboxes) Health(ctx context.Context) []SlotHealth {
 }
 
 // healthRunner returns the transport slotHealth reads a VM's guest stats
-// over, resolved the same way ToolsFor's own is (cfg.DockerExec picks
-// between the two) but without runnerFor's boot-length wait: Health is a
-// status pane, and a slot that is not reachable right now is exactly what
-// it exists to report rather than something to block on -- see Health's
-// own doc comment.
+// over, without runnerFor's boot-length wait: Health is a status pane,
+// and a slot that is not reachable right now is exactly what it exists to
+// report rather than something to block on -- see Health's own doc
+// comment.
 //
-// The one wait it does keep is the short retry on a guest that is not
-// answering yet, within slotHealth's own healthTimeout budget: for the
-// SSH path that is waitForPortHealthy's dial retry, and for the
-// docker-exec path (which has no port out here to dial) it is
-// waitForGuestExec against the same short deadline.
+// The one wait it keeps is the short retry on a guest that is not
+// answering yet, bounded by slotHealth's own healthTimeout budget rather
+// than cfg.readyTimeout.
 func (k *KonturSandboxes) healthRunner(ctx context.Context, name string) (sandboxRunner, error) {
-	if k.cfg.DockerExec {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			deadline = time.Now().Add(healthTimeout)
-		}
-		if err := k.waitForGuestExec(ctx, name, deadline); err != nil {
-			return nil, fmt.Errorf("reaching guest over docker exec: %w", err)
-		}
-		return k.dockerExecRunner(name), nil
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(healthTimeout)
 	}
-
-	port, err := kontur.Port(k.cfg.stateDir(), name)
-	if err != nil {
-		return nil, err
+	if err := k.waitForGuestExec(ctx, name, deadline); err != nil {
+		return nil, fmt.Errorf("reaching guest: %w", err)
 	}
-	var host string
-	if k.cfg.Backend == kontur.BackendDocker {
-		host, err = kontur.DockerPodIP(ctx, name)
-	} else {
-		host, err = kontur.PodIP(ctx, k.cfg.runtimeEndpoint(), name)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := waitForPortHealthy(ctx, host, port); err != nil {
-		return nil, fmt.Errorf("reaching guest SSH port: %w", err)
-	}
-	return &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}, nil
+	return k.execRunner(name), nil
 }
 
 func (k *KonturSandboxes) slotHealth(ctx context.Context, slot, name string) SlotHealth {
@@ -210,33 +181,6 @@ func (k *KonturSandboxes) slotHealth(ctx context.Context, slot, name string) Slo
 // whole multi-minute boot, far coarser than the sub-second docker
 // networking race waitForPortHealthy actually needs to ride out.
 const healthPortDialTimeout = 500 * time.Millisecond
-
-// waitForPortHealthy polls a plain TCP dial to host:port, on
-// healthPortDialTimeout's own interval, until one succeeds or ctx is done.
-// A refused or "no route to host" dial here means the guest's own network
-// setup has not finished yet (see slotHealth's own doc comment), not that
-// the guest is actually unreachable -- the same distinction
-// KonturSandboxes.waitForSSHPort draws for ToolsFor's own, much longer
-// wait, just scaled down to fit inside a health check's short budget
-// instead of a VM's boot time.
-func waitForPortHealthy(ctx context.Context, host string, port int) error {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	dialer := net.Dialer{Timeout: healthPortDialTimeout}
-	var lastErr error
-	for {
-		conn, err := dialer.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return lastErr
-		case <-time.After(healthPortDialTimeout):
-		}
-	}
-}
 
 // parseProcStats picks the three /proc/loadavg fields and MemTotal/
 // MemAvailable out of "cat /proc/loadavg /proc/meminfo"'s combined

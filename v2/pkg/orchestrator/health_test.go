@@ -53,17 +53,15 @@ func TestHostSandboxesHealthReportsEveryCreatedSlotAsReady(t *testing.T) {
 func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30082)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
-	listenTCP(t, 30082)
 	home := t.TempDir()
-	writeFakeSSH(t, home)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix: "grain-test-",
-		StateDir:   stateDir,
-		SSHUser:    "debian",
-		SSHKey:     "/key",
-		Workspace:  "/workspace",
+		NamePrefix:  "grain-test-",
+		StateDir:    stateDir,
+		SSHUser:     "debian",
+		ExecKeyPath: "/images/key",
+		Workspace:   "/workspace",
 	})
 
 	if got := k.Health(context.Background()); len(got) != 0 {
@@ -108,13 +106,13 @@ func TestKonturSandboxesHealthReportsErrorWhenThePodNeverBecomesReady(t *testing
 	// port-dial retry (waitForPortHealthy), exercising the "not ready
 	// right now" branch deterministically rather than racing a real
 	// timeout.
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 1000, "127.0.0.1")
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 1000, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
-		SSHKey:            "/key",
+		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
 		ReadyTimeout:      20 * time.Millisecond,
 		ReadyPollInterval: 5 * time.Millisecond,

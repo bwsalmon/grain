@@ -35,71 +35,29 @@ type KonturConfig struct {
 	// StateDir is kontur's VM state directory (kontur.DefaultStateDir if
 	// empty), used to look up a slot's VM's external port.
 	StateDir string
-	// RuntimeEndpoint is the containerd CRI socket (kontur.
-	// DefaultRuntimeEndpoint if empty), used to resolve a slot's VM's pod
-	// IP via crictl. Ignored when Backend is kontur.BackendDocker, which
-	// has no CRI to ask.
-	RuntimeEndpoint string
-	// Backend selects the value `konturctl vm create -backend` builds each
-	// slot's VM with, and which of pkg/kontur's two ways of finding a
-	// VM's reachable address resolveEndpoint uses to match. Empty means
-	// kontur's own default, the static-pod backend under a standalone
-	// kubelet, resolved via kontur.PodIP (crictl). kontur.BackendDocker
-	// runs the VM directly against a local docker daemon instead --
-	// bwsalmon/agents#353's ask, since it needs neither `konturctl setup`
-	// nor containerd/CNI/kubelet on the host -- and is resolved via
-	// kontur.DockerPodIP (docker inspect) instead.
-	Backend string
 	// CreateArgs is appended to "konturctl vm create <name> -state-dir
 	// <dir>" verbatim when a slot's VM does not exist yet -- guest image,
 	// guest SSH port, resource sizing, and anything else a deployment's
 	// own "konturctl vm create" needs beyond a name, since this package has
 	// no way to know those on its own (see package kontur's doc comment).
 	CreateArgs []string
-	// SSHUser is the username KonturSandboxes authenticates to each VM
-	// as.
+	// SSHUser is the guest account KonturSandboxes runs every tool call
+	// as -- passed to `kontur exec` as KONTUR_EXEC_USER. Still an SSH
+	// login into the guest, just one originating inside the VM's own
+	// container.
 	SSHUser string
-	// SSHKey is the path to the private key KonturSandboxes authenticates
-	// to each VM with. Under DockerExec (below) this is still the key
-	// that gets used, but it is DockerExecKeyPath -- the same key, named
-	// by where the VM's own container can read it -- that names it.
-	SSHKey string
-	// DockerExec routes every sandbox tool call through
-	// `docker exec <vm container> kontur exec` (mcp.DockerExecRunner)
-	// instead of an SSH connection to netshim's externally forwarded
-	// port (mcp.SSHRunner). Only meaningful under
-	// Backend/kontur.BackendDocker, which is the only backend whose VM
-	// containers `docker exec` can reach at all.
-	//
-	// The two transports reach the same guest sshd, as the same account,
-	// with the same key; what changes is where the connection originates.
-	// SSHRunner needs a path *into* the VM's network namespace from
-	// outside it, and so needs everything that builds and describes one:
-	// netshim's inbound DNAT rules, the external port kontur assigned the
-	// VM (kontur.Port), and the container address that port answers on
-	// (kontur.DockerPodIP). DockerExecRunner starts inside that namespace
-	// already, so it needs none of them -- see that type's own doc
-	// comment.
-	//
-	// Left off by default: the SSH path is what every deployment runs
-	// today, and leaving both wired lets a deployment turn this on and
-	// compare rather than having to switch outright.
-	DockerExec bool
-	// DockerExecKeyPath is the private key `kontur exec` authenticates to
-	// the guest with, as a path *inside the VM's own container* rather
-	// than on the host -- which is why it is a separate field from
-	// SSHKey (the host path ssh -i takes) even when both name the same
-	// deployment keypair. Required when DockerExec is set: leaving it
-	// empty falls back to kontur's own baked-in key
-	// (/etc/kontur/exec_id_ed25519), which only a guest image built by
-	// kontur's own Dockerfile authorizes -- and a deployment pointing
-	// -disk at packer/kontur/build.sh's output, as every grain
-	// deployment does, is not using such an image.
+	// ExecKeyPath is the private key `kontur exec` authenticates to the
+	// guest with, as a path *inside the VM's own container* rather than
+	// on the host. Required: left empty, `kontur exec` falls back to the
+	// dedicated key bwsalmon/kontur's own Dockerfile bakes into the image
+	// and authorizes on the guest rootfs that same Dockerfile builds --
+	// which a deployment pointing -disk at packer/kontur/build.sh's
+	// output is not booting.
 	//
 	// The images directory internal/dockervm already mounts read-only at
-	// /images is the natural place to put it, since it needs no change to
+	// /images is the natural place to put it: it needs no change to
 	// kontur to be readable there.
-	DockerExecKeyPath string
+	ExecKeyPath string
 	// Workspace is the working directory run_command/read_file/edit_file/
 	// write_file operate in on each VM.
 	Workspace string
@@ -146,13 +104,6 @@ func (c KonturConfig) stateDir() string {
 	return kontur.DefaultStateDir
 }
 
-func (c KonturConfig) runtimeEndpoint() string {
-	if c.RuntimeEndpoint != "" {
-		return c.RuntimeEndpoint
-	}
-	return kontur.DefaultRuntimeEndpoint
-}
-
 func (c KonturConfig) readyTimeout() time.Duration {
 	if c.ReadyTimeout > 0 {
 		return c.ReadyTimeout
@@ -168,8 +119,10 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 }
 
 // createArgs returns the full argument list ensure passes to kontur.Create
-// for slot's VM beyond a name and -state-dir: -backend cfg.Backend first,
-// when set, so a caller's own CreateArgs never needs to repeat it, then
+// for slot's VM beyond a name and -state-dir: -backend docker first, the
+// only backend this package supports (its transport reaches a guest by
+// exec'ing into that VM's docker container, which no other backend gives
+// it), so a caller's own CreateArgs never needs to repeat it, then
 // cfg.CreateArgs verbatim, then DefaultCPUs/DefaultMemoryMB (if set) as
 // "-cpus"/"-memory-mb", then a "-ip"/"-port" pair derived from
 // BaseIP/BasePort and slot's own number last -- each later group winning
@@ -178,10 +131,7 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // applied consistently, not overridden per slot by a CreateArgs list that
 // is otherwise identical across every slot's call.
 func (c KonturConfig) createArgs(slot string) ([]string, error) {
-	args := c.CreateArgs
-	if c.Backend != "" {
-		args = append([]string{"-backend", c.Backend}, args...)
-	}
+	args := append([]string{"-backend", kontur.BackendDocker}, c.CreateArgs...)
 	if c.DefaultCPUs != 0 {
 		args = append(args, "-cpus", strconv.Itoa(c.DefaultCPUs))
 	}
@@ -393,7 +343,7 @@ func (k *KonturSandboxes) ensure(ctx context.Context, name, slot string) error {
 	if k.alreadyCreated(name) {
 		return nil
 	}
-	if _, err := kontur.Port(k.cfg.stateDir(), name); err == nil {
+	if kontur.Exists(k.cfg.stateDir(), name) {
 		k.markCreated(name)
 		return nil
 	}
@@ -523,33 +473,18 @@ type sandboxRunner interface {
 }
 
 // runnerFor returns the transport reaching name's guest, once that guest
-// is actually reachable over it -- so a caller that gets a runner back
-// has already waited out the VM's boot, the same guarantee resolveEndpoint
-// gave every caller before cfg.DockerExec existed.
+// is actually reachable over it -- so a caller holding a runner has
+// already waited out the VM's boot.
 //
-// The wait is per-transport because what "reachable" can even be observed
-// through differs: the SSH path can watch for a TCP port to start
-// answering before anything authenticates (waitForSSHPort), while the
-// docker-exec path's first observable success is a whole command running
-// in the guest (waitForGuestExec) -- there is no port to dial from out
-// here, which is the entire point of it.
+// The wait is waitForGuestExec rather than anything watching a port,
+// because there is no port out here to watch: reaching this guest means
+// exec'ing into its own container, and the first thing that can be
+// observed succeeding is a whole command running inside the guest.
 func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRunner, error) {
-	if !k.cfg.DockerExec {
-		host, port, err := k.resolveEndpoint(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		return &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}, nil
-	}
-
-	if k.cfg.Backend != kontur.BackendDocker {
-		return nil, fmt.Errorf("orchestrator: DockerExec needs Backend %q, not %q: there is no docker container to exec into under any other backend", kontur.BackendDocker, k.cfg.Backend)
-	}
-	runner := k.dockerExecRunner(name)
 	if err := k.waitForGuestExec(ctx, name, time.Now().Add(k.cfg.readyTimeout())); err != nil {
-		return nil, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest to become reachable over docker exec: %w", name, err)
+		return nil, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest to become reachable: %w", name, err)
 	}
-	return runner, nil
+	return k.execRunner(name), nil
 }
 
 // dockerExecRunner builds the docker-exec transport for name's VM. Its
@@ -559,11 +494,11 @@ func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRu
 // is left for this to ride out is only the ordinary case of a guest that
 // blinks mid-task -- the same thing SSHRunner covers with its own fixed
 // ConnectTimeout=10 rather than anything derived from cfg.
-func (k *KonturSandboxes) dockerExecRunner(name string) *mcp.DockerExecRunner {
+func (k *KonturSandboxes) execRunner(name string) *mcp.DockerExecRunner {
 	return &mcp.DockerExecRunner{
 		Container: kontur.PodName(name),
 		User:      k.cfg.SSHUser,
-		KeyPath:   k.cfg.DockerExecKeyPath,
+		KeyPath:   k.cfg.ExecKeyPath,
 	}
 }
 
@@ -584,7 +519,7 @@ func (k *KonturSandboxes) dockerExecRunner(name string) *mcp.DockerExecRunner {
 // already exited rather than waiting out the rest of deadline exec'ing
 // into something that will never answer.
 func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, deadline time.Time) error {
-	probe := k.dockerExecRunner(name)
+	probe := k.execRunner(name)
 	probe.ConnectTimeout = k.cfg.readyPollInterval()
 	var lastErr error
 	for {
@@ -593,7 +528,7 @@ func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, dea
 			return nil
 		}
 		lastErr = guestExecProbeError(probe.Container, stderr, exitCode)
-		if status, dead := dockerExitedEarly(ctx, k.cfg.Backend, name); dead {
+		if status, dead := dockerExitedEarly(ctx, name); dead {
 			return fmt.Errorf("VM container %q exited (status %q) before its guest ever ran a command -- check `docker logs %s`: %w", probe.Container, status, probe.Container, lastErr)
 		}
 		if time.Now().After(deadline) {
@@ -618,57 +553,6 @@ func guestExecProbeError(container, stderr string, exitCode int) error {
 	return fmt.Errorf("`docker exec %s kontur exec -- true`: %s", container, detail)
 }
 
-// resolveEndpoint reads name's assigned port and polls PodIP until it
-// resolves or cfg.readyTimeout runs out -- a VM this process just created
-// takes real wall-clock time to boot, get scheduled, and reach Ready
-// before crictl has a pod to ask about, which a single PodIP call (as
-// cmd/mcpserver's own, always-preexisting-VM wiring makes do with) would
-// almost always lose the race with, so ToolsFor waits it out here instead
-// of surfacing that as a caller-visible error on every freshly created VM.
-//
-// Getting a pod/container IP is not the same as the cloud-hypervisor
-// guest inside it being ready for SSH -- those are different points in
-// time (confirmed by hand against a real guest, bwsalmon/agents#478): a
-// docker-backed VM's container is reachable by IP the moment "docker run"
-// starts it, well before the nested guest has actually booted to sshd. So
-// once host/port resolve, resolveEndpoint also waits (against the same
-// deadline) for a plain TCP dial to host:port to succeed, the same signal
-// TestKonturSandboxesToolsForAgainstARealDockerBackedVM's own retry loop
-// around its first run_command call used to work around this by hand --
-// this makes that retry unnecessary for any real caller, not just that
-// test.
-func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (host string, port int, err error) {
-	port, err = kontur.Port(k.cfg.stateDir(), name)
-	if err != nil {
-		return "", 0, err
-	}
-
-	deadline := time.Now().Add(k.cfg.readyTimeout())
-	for {
-		if k.cfg.Backend == kontur.BackendDocker {
-			host, err = kontur.DockerPodIP(ctx, name)
-		} else {
-			host, err = kontur.PodIP(ctx, k.cfg.runtimeEndpoint(), name)
-		}
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			return "", 0, fmt.Errorf("orchestrator: waiting for kontur VM %q to become ready: %w", name, err)
-		}
-		select {
-		case <-ctx.Done():
-			return "", 0, ctx.Err()
-		case <-time.After(k.cfg.readyPollInterval()):
-		}
-	}
-
-	if err := k.waitForSSHPort(ctx, name, host, port, deadline); err != nil {
-		return "", 0, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest sshd to become reachable: %w", name, err)
-	}
-	return host, port, nil
-}
-
 // dockerContainerDead is the set of docker State.Status values
 // waitForSSHPort treats as "this container will never answer" rather than
 // "not ready yet" -- see dockerExitedEarly's own doc comment. "created" is
@@ -678,59 +562,16 @@ func (k *KonturSandboxes) resolveEndpoint(ctx context.Context, name string) (hos
 var dockerContainerDead = map[string]bool{"exited": true, "dead": true}
 
 // dockerExitedEarly reports whether name's own VM container (not the
-// "-netns" holder) has already exited under BackendDocker -- see
-// kontur.DockerContainerStatus's own doc comment for why "vm create"
-// returning success does not mean this can't happen. Errors from the
-// status lookup itself (e.g. a transient docker daemon hiccup) are
-// treated as "not dead" rather than propagated: this is only ever a
-// fast-fail optimization layered on top of waitForSSHPort's own deadline,
-// which still applies regardless.
-func dockerExitedEarly(ctx context.Context, backend, name string) (status string, dead bool) {
-	if backend != kontur.BackendDocker {
-		return "", false
-	}
+// "-netns" holder) has already exited -- see kontur.DockerContainerStatus's
+// own doc comment for why "vm create" returning success does not mean
+// this can't happen. Errors from the status lookup itself (e.g. a
+// transient docker daemon hiccup) are treated as "not dead" rather than
+// propagated: this is only ever a fast-fail optimization layered on top
+// of waitForGuestExec's own deadline, which still applies regardless.
+func dockerExitedEarly(ctx context.Context, name string) (status string, dead bool) {
 	status, err := kontur.DockerContainerStatus(ctx, name)
 	if err != nil {
 		return "", false
 	}
 	return status, dockerContainerDead[status]
-}
-
-// waitForSSHPort polls a plain TCP dial against host:port until it
-// succeeds or deadline passes -- a lightweight stand-in for "sshd is
-// actually accepting connections," cheap enough to poll on the same
-// interval resolveEndpoint's own IP wait uses, and enough to close the
-// boot-time gap described on resolveEndpoint's own doc comment: a refused
-// or timed-out connection means the guest has not finished booting yet,
-// not that anything is actually wrong.
-//
-// Under BackendDocker it also checks, on every failed dial, whether name's
-// own VM container has already exited (dockerExitedEarly) and fails
-// immediately if so, rather than waiting out the rest of deadline dialing
-// a port a dead container will never answer on -- see
-// kontur.DockerContainerStatus's own doc comment for why "vm create"
-// returning success does not already rule this out.
-func (k *KonturSandboxes) waitForSSHPort(ctx context.Context, name, host string, port int, deadline time.Time) error {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	dialer := net.Dialer{Timeout: k.cfg.readyPollInterval()}
-	var lastErr error
-	for {
-		conn, err := dialer.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		lastErr = err
-		if status, dead := dockerExitedEarly(ctx, k.cfg.Backend, name); dead {
-			return fmt.Errorf("VM container %q exited (status %q) before its guest ever answered on %s -- check `docker logs %s`: %w", kontur.PodName(name), status, addr, kontur.PodName(name), lastErr)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%s: %w", addr, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(k.cfg.readyPollInterval()):
-		}
-	}
 }

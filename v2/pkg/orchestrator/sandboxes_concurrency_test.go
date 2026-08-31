@@ -78,14 +78,13 @@ func TestHostSandboxesRootForIsSafeForConcurrentCallers(t *testing.T) {
 func TestKonturSandboxesToolsForIsSafeForManyConcurrentDistinctSlots(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
-	listenTCP(t, 30080)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
-		SSHKey:            "/key",
+		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
 		ReadyPollInterval: time.Millisecond,
 	})
@@ -188,14 +187,13 @@ func TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially(t *testin
 	stateDir := t.TempDir()
 	timesLog := filepath.Join(t.TempDir(), "times.log")
 	writeFakeKonturWithDelay(t, filepath.Join(t.TempDir(), "kontur-argv.log"), timesLog, 30081, 300*time.Millisecond)
-	writeFakeCrictl(t, filepath.Join(t.TempDir(), "counter"), 0, "127.0.0.1")
-	listenTCP(t, 30081)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		NamePrefix:        "grain-test-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
-		SSHKey:            "/key",
+		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
 		ReadyPollInterval: time.Millisecond,
 	})

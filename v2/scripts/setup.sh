@@ -149,6 +149,10 @@ GRAIN_KONTUR_REQUESTED="$GRAIN_KONTUR_ENABLE"
 GRAIN_KONTUR_IMAGE_BUCKET="${GRAIN_KONTUR_IMAGE_BUCKET:-}"
 GRAIN_KONTUR_OCI_IMAGE="${GRAIN_KONTUR_OCI_IMAGE:-}"
 GRAIN_KONTUR_IMAGES_HOSTPATH="${GRAIN_KONTUR_IMAGES_HOSTPATH:-/var/lib/vm-images}"
+# Filename the kontur SSH private key is staged under inside
+# GRAIN_KONTUR_IMAGES_HOSTPATH (see ensure_kontur_exec_key), and so the
+# basename of the /images path -kontur-exec-key points the daemon at.
+GRAIN_KONTUR_EXEC_KEY_NAME="${GRAIN_KONTUR_EXEC_KEY_NAME:-kontur-exec-key}"
 # -images-hostpath is always mounted read-only (it's a shared, node-local
 # image cache several VMs may read from concurrently -- see
 # third_party/kontur/README.md, "Operating a node (konturctl CLI)"), so a
@@ -786,6 +790,32 @@ kontur_image_tag() {
 # once and share the result across many hosts than pay debootstrap's cost
 # -- several minutes, against a real Debian mirror -- on every one of
 # them.
+# ensure_kontur_exec_key copies the deployment's kontur SSH private key
+# into GRAIN_KONTUR_IMAGES_HOSTPATH, which konturctl mounts read-only at
+# /images inside every VM container it starts. That is where `kontur exec`
+# reads it from (-kontur-exec-key, below): the daemon reaches a sandbox
+# guest by exec'ing into that VM's own container, so the key has to be
+# readable *there*, not on the host where the daemon runs.
+#
+# It is the same key ensure_kontur_ssh_key already generated and
+# packer/kontur/provision.sh already baked into the guest's own
+# authorized_keys -- copied, not moved, since $GRAIN_DATA_DIR/secrets
+# remains where the deployment's own copy lives.
+ensure_kontur_exec_key() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+  if [ ! -s "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" ]; then
+    log "kontur exec key: $GRAIN_DATA_DIR/secrets/kontur-ssh-key is missing or empty -- leaving kontur sandboxing off this run"
+    GRAIN_KONTUR_ENABLE=0
+    return
+  fi
+  install -d -m 0755 "$GRAIN_KONTUR_IMAGES_HOSTPATH"
+  install -m 0600 "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" \
+    "$GRAIN_KONTUR_IMAGES_HOSTPATH/$GRAIN_KONTUR_EXEC_KEY_NAME"
+  log "kontur exec key staged at $GRAIN_KONTUR_IMAGES_HOSTPATH/$GRAIN_KONTUR_EXEC_KEY_NAME (/images/$GRAIN_KONTUR_EXEC_KEY_NAME in each VM container)"
+}
+
 ensure_kontur_images() {
   if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     return
@@ -1406,9 +1436,8 @@ write_systemd_units() {
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
     daemon_args+=(
       -kontur-vm-name-prefix "$GRAIN_KONTUR_VM_NAME_PREFIX"
-      -kontur-backend docker
       -kontur-ssh-user "$GRAIN_KONTUR_SSH_USER"
-      -kontur-ssh-key "$GRAIN_DATA_DIR/secrets/kontur-ssh-key"
+      -kontur-exec-key "/images/$GRAIN_KONTUR_EXEC_KEY_NAME"
       -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
       -kontur-base-ip "$GRAIN_KONTUR_BASE_IP"
       -kontur-base-port "$GRAIN_KONTUR_BASE_PORT"
@@ -1565,6 +1594,11 @@ main() {
   ensure_konturctl
   ensure_kontur_kvm_access
   setup_data_dir
+  # After setup_data_dir: seed_kontur_ssh_key, which it calls, is what
+  # actually writes $GRAIN_DATA_DIR/secrets/kontur-ssh-key -- the key this
+  # then stages into the images directory for `kontur exec` to read from
+  # inside each VM container.
+  ensure_kontur_exec_key
   reformat_store_if_schema_changed
   format_target_repo_if_empty
   write_systemd_units
