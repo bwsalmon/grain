@@ -39,7 +39,25 @@ log_hint() {
   echo "    --tunnel-through-iap --command 'sudo journalctl -u grain-v2-config-sync -n 200'"
 }
 
+# config-sync.sh retries a failed generation on its own -- see that
+# script's own top comment, "self-heals without a second apply" -- so the
+# first "failed" this sees is not yet a verdict: config-sync has already
+# gone back to watching for the next wake-up and will re-run deploy.sh
+# against this same generation. Bailing out here on that first sighting
+# reported deploys as broken that the host went on to land on its own a
+# few minutes later (bwsalmon/agents#554) -- a real deploy, doing exactly
+# what config-sync.sh promises, still got reported as a hard failure.
+#
+# So this only gives up once the host's own retry has *also* failed:
+# seen_failure remembers the first "failed", retried notices deploy-status
+# move to "running" again afterward (config-sync starting that retry),
+# and a second "failed" seen after that is what actually exits 1. A
+# "failed" that never resolves and never gets retried (config-sync itself
+# wedged, say) still surfaces through the timeout branch below, whose own
+# comment already accounts for this.
 deadline=$(( SECONDS + timeout_minutes * 60 ))
+seen_failure=0
+retried=0
 while [ "$SECONDS" -lt "$deadline" ]; do
   status="$(attr deploy-status)"
   generation="$(attr deploy-generation)"
@@ -49,16 +67,35 @@ while [ "$SECONDS" -lt "$deadline" ]; do
         echo "host converged on $deploy_generation"
         exit 0
         ;;
-      failed)
-        echo "::error::the host failed to converge on $deploy_generation: $(attr deploy-detail)"
-        tail="$(attr deploy-tail)"
-        if [ -n "$tail" ]; then
-          echo "--- the last of the host's own deploy output ---"
-          echo "$tail"
-          echo "--- end ---"
+      running)
+        if [ "$seen_failure" -eq 1 ]; then
+          retried=1
         fi
-        log_hint
-        exit 1
+        ;;
+      failed)
+        if [ "$seen_failure" -eq 0 ] || [ "$retried" -eq 0 ]; then
+          if [ "$seen_failure" -eq 0 ]; then
+            echo "host reported generation $deploy_generation failed once: $(attr deploy-detail)"
+            echo "config-sync retries a failed generation on its own -- waiting for that retry rather than giving up immediately"
+            tail="$(attr deploy-tail)"
+            if [ -n "$tail" ]; then
+              echo "--- the last of the host's own deploy output (may be superseded by a retry) ---"
+              echo "$tail"
+              echo "--- end ---"
+            fi
+          fi
+          seen_failure=1
+        else
+          echo "::error::the host failed to converge on $deploy_generation, twice in a row: $(attr deploy-detail)"
+          tail="$(attr deploy-tail)"
+          if [ -n "$tail" ]; then
+            echo "--- the last of the host's own deploy output ---"
+            echo "$tail"
+            echo "--- end ---"
+          fi
+          log_hint
+          exit 1
+        fi
         ;;
     esac
   fi
