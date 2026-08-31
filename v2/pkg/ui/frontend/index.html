@@ -3,11 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- The fixed mark, 1.4 (-), as scripts/export-brand-assets.mjs writes
-     it. The light file is what a browser gets before any script runs;
-     AppThemeProvider swaps this href for the dark one once it has
-     resolved which theme the app is actually in. -->
-<link id="favicon" rel="icon" type="image/png" href="/grain-mark-light.png">
+<!-- The fixed mark, 2.3 (+), as scripts/export-brand-assets.mjs writes
+     it. The SVG is the real icon -- one scale-free file for the 16px tab
+     slot and the 180px installed one alike; the PNG is the fallback for
+     browsers with no SVG-favicon support (Safari before 16.4), and is
+     declared first because a browser that understands both should land
+     on the SVG. Both are the same geometry, so which one a browser picks
+     is not visible. The light files are what a browser gets before any
+     script runs; AppThemeProvider swaps both hrefs for the dark ones
+     once it has resolved which theme the app is actually in. -->
+<link id="favicon-png" rel="icon" type="image/png" sizes="128x128" href="/grain-mark-light.png">
+<link id="favicon" rel="icon" type="image/svg+xml" href="/grain-mark-light.svg">
 <title>grain</title>
 </head>
 <body>

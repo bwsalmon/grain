@@ -6,17 +6,18 @@ scatter and snap to the next figure. The name is literal — sand
 organizing into structure under vibration is the visual metaphor for many
 parallel agent processes converging into one deterministic workflow.
 
-![the fixed mark](brand/grain-1-4minus-light.svg)
+![the fixed mark](brand/grain-hero-2-3plus-light.svg)
 
 ## What is where
 
 | Path | What it is |
 |---|---|
-| `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
-| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still and the animation; see below. |
+| `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. Vendored from the design pack (build 35); its header lists the three deviations. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
+| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still and the animation, and picks the tier; see below. |
 | `v2/pkg/ui/frontend/scripts/export-brand-assets.mjs` | `npm run brand` in `v2/pkg/ui/frontend`. Regenerates everything below out of the renderer. |
-| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The fixed mark at 128px, filled. The favicon, and the still the sidebar shows. |
-| `docs/brand/grain-1-4minus-{light,dark}.svg` | The fixed mark at hero scale, as grains. For a README, a slide, print. |
+| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The fixed mark as the tiny-tier glyph, as stroke vectors. Scale-free: the favicon, and the still the sidebar shows. |
+| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The same glyph at 128px. Favicon fallback only, for browsers with no SVG-favicon support (Safari before 16.4). |
+| `docs/brand/grain-hero-2-3plus-{light,dark}.svg` | The fixed mark at hero scale, as grains. For a README, a slide, print. |
 
 The assets are committed rather than generated during `npm run build`, so
 a checkout builds without running the export. Change the mark or the
@@ -32,30 +33,51 @@ f(x, y) = cos(nπx)·cos(mπy) + s·cos(mπx)·cos(nπy)      s ∈ {−1, +1}
 
 Nodal lines are the zero set. `s = −1` (antisymmetric) always contains the
 diagonals; `s = +1` (symmetric) does not. Only **integer** `n, m` are real
-resonances — fractional values pile up spurious zero-crossings.
+resonances — fractional values pile up spurious zero-crossings, so never
+interpolate a mode number to get between two figures. Scale is the free
+parameter instead: the tiny tier reaches its figures by zooming the field
+(0.78× and 1.5×) and filtering chains by radial extent, never by moving
+`n` or `m`.
 
 ## The two states
 
 The mark has exactly two jobs in the app, and the split between them is
 the point of it:
 
-**Fixed — 1·4 (−).** Everywhere an icon has to hold still: the favicon,
+**Fixed — 2·3 (+).** Everywhere an icon has to hold still: the favicon,
 and the mark beside the wordmark in the sidebar whenever nothing is
-running. Drawn in the renderer's `filled` style, which paints the
-positive region of the field rather than the nodal lines, because at
-16–32px a nodal line is thinner than a pixel and washes out to nothing.
+running. Below 40px the pack zooms this figure 1.5× and keeps only the
+chains inside 0.97 R, which crops the outer square off-frame and leaves
+the **plus** and its centre ring — a figure that still reads at 16px,
+where the un-zoomed nodal lines would be thinner than a pixel and wash
+out to nothing. It ships as a stroke vector, so one file is sharp in
+every slot from the 16px tab to a 180px installed shortcut.
 
 **Animated — the cycle.** Shown while agents are actually working, which
-in the UI means at least one task is in the `running` state. The grains
-scatter and snap around the four modes:
+in the UI means at least one task is in the `running` state. The pack
+runs two cycles on one clock, and which one you see is the size you are
+looking at:
 
-```
-1·4 (−)  →  2·3 (+)  →  2·3 (−)  →  1·4 (+)
-```
+| Slot | Full tier (≥ 40px) | Tiny tier (< 40px) |
+|---|---|---|
+| 0 | 1·4 (−) | X-and-arcs — 1·2 (−) |
+| 1 | **2·3 (+)** | diamond — 1·2 (+) |
+| 2 | 2·3 (−) | rosette — 2·3 (−) @ 0.78× |
+| 3 | 1·4 (+) | **plus** — 2·3 (+) @ 1.5× |
 
-The cycle starts on 1·4 (−), so the animation begins on the figure the
-still was showing and the change reads as the mark coming to life rather
-than as a different image.
+The tiny figures are real eigenmodes too, chosen and cropped to survive
+at icon size rather than simplified by hand. The sidebar mark is 24px,
+so the tiny cycle is the working animation; `LoadingScreen` runs the
+same clock at hero size and so shows the full one.
+
+Both tiers hold the same rule: the animation **opens on the slot its own
+tier draws the still with** — slot 3 for the sidebar, slot 1 for the
+hero — so the mark comes to life on the figure it was already showing
+rather than cutting to a different image. `GrainMark.jsx` looks those
+slots up from `MODES`/`TINY_MODES` rather than hard-coding them.
+
+A full loop is about 6.5s: 1.3s of flight between figures, 0.33s held on
+each.
 
 Two things suppress the animation and fall back to the still: a reader
 who has asked for reduced motion, and an environment with no canvas to
@@ -85,13 +107,18 @@ it; `info` is the one cool tone left, gold's complement.
 
 ## Rendering rules by size
 
-- **≥ 300px** — grains with jitter (hero, marketing, splash)
-- **80–300px** — grains, no jitter, denser (app icon, avatar)
-- **40–80px** — grains, no jitter, larger radius (nav, toolbar)
-- **< 40px** — filled positive regions (favicon, tab, badge)
+- **≥ 300px** — 2000 grains, 0.65% radius, 0.9px jitter (hero, splash)
+- **80–300px** — 520 grains, 1.3% radius, no jitter (app icon, avatar)
+- **40–80px** — 520 grains, 1.7% radius, no jitter (nav, toolbar)
+- **< 40px** — the tiny cycle; 3.75 grains per pixel of width, ~1px
+  radius (24px → 90 grains) (sidebar, favicon, badge)
 
-`GrainMark.jsx` keys these to CSS pixels rather than the canvas's own
-backing pixels, so a mark reads the same on a 2x display as on a 1x one.
+These are keyed to **CSS pixels, not the canvas's backing pixels** —
+that is the `sizePx` deviation in the vendored renderer, and it is not
+just a density question. The pack tiers off `canvas.width`, so on a 2×
+display a 24px mark backs onto a 48px canvas and would fall into the
+40–80px tier: the full cycle's figures instead of the glyphs, which is
+the wrong picture rather than a sharper one.
 
 ## Notes from the design session
 
@@ -104,7 +131,13 @@ backing pixels, so a mark reads the same on a 2x display as on a 1x one.
   is still supported in the renderer if you want it back.
 - The canvas particle system is a proof of concept; a version that ran
   the mark large and continuously should move it to a shader. At sidebar
-  size it is a few hundred filled arcs a frame, which is why it is worth
-  keeping here — and why it stops when the tab is hidden.
+  size it is 90 filled arcs a frame, which is why it is worth keeping
+  here — and why it stops when the tab is hidden.
+- Grains are allocated to chains **by length**, and chains shorter than
+  ~1.5 grain spacings get none — they are marching-squares artifacts,
+  and feeding them a minimum starves the real figure.
+- The endpoint-matching quantum scales with the marching-squares cell
+  (`step/8`). A fixed quantum shatters a 24px figure into sub-pixel
+  crumbs.
 - Wordmark: **Space Grotesk 600**, lowercase `grain`. The app itself
   ships no webfont and sets the wordmark in the system stack.

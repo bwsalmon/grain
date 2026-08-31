@@ -23,6 +23,7 @@ describe("AppThemeProvider", () => {
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
     document.getElementById("favicon")?.remove();
+    document.getElementById("favicon-png")?.remove();
   });
 
   it("resolves auto to the OS preference and tags <html> with it", () => {
@@ -53,15 +54,21 @@ describe("AppThemeProvider", () => {
   // the wheat one in the tab rather than the bronze one drawn for a
   // light ground.
   it("points the tab icon at the mark drawn for the resolved theme", () => {
-    const link = document.createElement("link");
-    link.id = "favicon";
-    link.rel = "icon";
-    link.href = "/grain-mark-light.png";
-    document.head.appendChild(link);
+    // Both links, because a browser picks whichever of the two it can
+    // render and either one left on the light mark is a bronze icon in a
+    // dark tab on some machines and not others.
+    for (const [id, href] of [["favicon", "/grain-mark-light.svg"], ["favicon-png", "/grain-mark-light.png"]]) {
+      const link = document.createElement("link");
+      link.id = id;
+      link.rel = "icon";
+      link.href = href;
+      document.head.appendChild(link);
+    }
 
     stubMatchMedia(true);
     render(<AppThemeProvider><div>content</div></AppThemeProvider>);
 
-    expect(document.getElementById("favicon").getAttribute("href")).toBe("/grain-mark-dark.png");
+    expect(document.getElementById("favicon").getAttribute("href")).toBe("/grain-mark-dark.svg");
+    expect(document.getElementById("favicon-png").getAttribute("href")).toBe("/grain-mark-dark.png");
   });
 });

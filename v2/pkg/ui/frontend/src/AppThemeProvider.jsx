@@ -27,8 +27,10 @@ function ResolvedThemeProvider({ children }) {
   // alternative (one file that has to work on both) is the washed-out
   // middle the brand explicitly avoided.
   useEffect(() => {
-    const link = document.getElementById("favicon");
-    if (link) link.href = `/grain-mark-${resolvedMode}.png`;
+    const svg = document.getElementById("favicon");
+    if (svg) svg.href = `/grain-mark-${resolvedMode}.svg`;
+    const png = document.getElementById("favicon-png");
+    if (png) png.href = `/grain-mark-${resolvedMode}.png`;
   }, [resolvedMode]);
 
   return (
