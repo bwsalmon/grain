@@ -51,18 +51,14 @@ func sshRunCommandTool(runner remoteRunner, workspace string) Tool {
 			// exactly as mcp_server.py's run_command does, rather than
 			// bounding the local ssh subprocess: SSH has no per-command
 			// timeout of its own to hook, and a remote `timeout` bounds
-			// the thing that's actually slow.
+			// the thing that's actually slow. Applied unconditionally,
+			// not only when the caller passes its own "timeout", so an
+			// omitted one still gets runCommandTimeout's own default
+			// rather than running with no server-side bound at all
+			// (bwsalmon/agents#575).
 			shell := fmt.Sprintf("cd %s && %s", shellQuote(workspace), command)
-			if ms, ok := argFloat(args, "timeout"); ok {
-				seconds := int(ms / 1000)
-				if seconds < 1 {
-					seconds = 1
-				}
-				if seconds > 600 {
-					seconds = 600
-				}
-				shell = fmt.Sprintf("timeout %d bash -c %s", seconds, shellQuote(shell))
-			}
+			seconds := int(runCommandTimeout(args).Seconds())
+			shell = fmt.Sprintf("timeout %d bash -c %s", seconds, shellQuote(shell))
 
 			stdout, stderr, exitCode := runner.Run(ctx, []string{"bash", "-c", shell}, "")
 			text := fmt.Sprintf("exit=%d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)

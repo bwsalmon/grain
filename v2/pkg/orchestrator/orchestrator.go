@@ -95,6 +95,36 @@ type Config struct {
 	// prove cancellation happens promptly, without waiting seconds for
 	// real, sets this to something much smaller.
 	CancelPollInterval time.Duration
+	// MaxRunRuntime bounds how long RunDispatch lets one run's
+	// framework.Run call stay live before cancelling it outright --
+	// v2's own equivalent of v1's AutomationConfig.max_runtime_minutes
+	// plus its sweeper (bwsalmon/agents#575), both aimed at the same
+	// failure: a run that is alive but stuck making no progress, tying
+	// up its dispatch slot indefinitely with nothing to notice or
+	// recover it. A tool call with no bound of its own is exactly how
+	// that happens in practice (a run_command whose own caller omitted
+	// "timeout" -- see mcp.defaultRunCommandTimeout, the fix for the
+	// same issue's other half), but this is the backstop for any way a
+	// framework can end up wedged, not only that one.
+	//
+	// v1 needed a whole separate sweeper process for this because its
+	// controller launches each run as an external unit, polled between
+	// cron invocations, with no long-lived supervisor of its own to hand
+	// a deadline to. RunDispatch already is that supervisor -- one
+	// goroutine, alive for exactly as long as the run is -- so a
+	// deadline on the very ctx framework.Run receives is the whole
+	// mechanism; see RunDispatch's own use of context.WithTimeoutCause.
+	// It reaches an already-live tool call the same way task-closed
+	// cancellation does (bwsalmon/agents#346's "actually terminate a
+	// running task's sandbox process on cancel"), through
+	// exec.CommandContext/procgroup.
+	//
+	// Zero uses defaultMaxRunRuntime. There is no "uncapped" value the
+	// way MaxAgentTurns' own zero means "the framework's own default":
+	// an uncapped run is exactly the gap this field exists to close, so
+	// a deployment that really wants a longer ceiling sets one
+	// explicitly instead of switching this off.
+	MaxRunRuntime time.Duration
 	// TranscriptDir, if set, is a directory RunDispatch asks each run's
 	// agent.Framework to mirror its own transcript-in-progress into, one
 	// file per run named after d.RunID -- agent.RunConfig.TranscriptPath's
@@ -140,6 +170,19 @@ func (c Config) cancelPollInterval() time.Duration {
 		return c.CancelPollInterval
 	}
 	return 2 * time.Second
+}
+
+// defaultMaxRunRuntime is Config.maxRunRuntime's fallback -- the same
+// 120-minute value v1's own AutomationConfig.max_runtime_minutes
+// defaulted to, so a deployment moving from v1 gets back the ceiling it
+// already had rather than a new, differently-tuned one.
+const defaultMaxRunRuntime = 120 * time.Minute
+
+func (c Config) maxRunRuntime() time.Duration {
+	if c.MaxRunRuntime > 0 {
+		return c.MaxRunRuntime
+	}
+	return defaultMaxRunRuntime
 }
 
 // HostSandboxes hands out one directory per slot, on the host this

@@ -64,7 +64,7 @@ var runCommandInputSchema = map[string]any{
 		"command": map[string]any{"type": "string"},
 		"timeout": map[string]any{
 			"type":        "number",
-			"description": "Timeout in milliseconds, max 600000",
+			"description": "Timeout in milliseconds, max 600000. Defaults to 300000 (5 minutes) if omitted.",
 		},
 		"description": map[string]any{
 			"type":        "string",
@@ -72,6 +72,44 @@ var runCommandInputSchema = map[string]any{
 		},
 	},
 	"required": []string{"command"},
+}
+
+// defaultRunCommandTimeout is the bound run_command applies when its
+// caller omits "timeout" entirely, so an unbounded command (e.g. an
+// unbounded `grep -r /`) can never wedge its sandbox slot indefinitely
+// with no automatic recovery (bwsalmon/agents#575) -- relying on the
+// model to remember to pass "timeout" was the actual gap: a run only
+// advances to its next turn once the current tool call returns, so an
+// omitted timeout left a stuck run_command with no server-side bound at
+// all. maxRunCommandTimeout is the ceiling runCommandInputSchema already
+// advertises for a caller-supplied value.
+//
+// defaultRunCommandTimeout is a var, not a const, solely so a test can
+// shrink it for the duration of a single test rather than actually
+// waiting out the real default.
+var defaultRunCommandTimeout = 5 * time.Minute
+
+const maxRunCommandTimeout = 600 * time.Second
+
+// runCommandTimeout resolves run_command's "timeout" argument
+// (milliseconds, matching native Bash's own unit) into a duration
+// clamped to [1s, maxRunCommandTimeout], or defaultRunCommandTimeout when
+// the caller supplies none -- shared by both this package's run_command
+// (a local subprocess) and ssh_tools.go's (a remote `timeout` coreutil
+// invocation) so the two apply the identical bound.
+func runCommandTimeout(args map[string]any) time.Duration {
+	ms, ok := argFloat(args, "timeout")
+	if !ok {
+		return defaultRunCommandTimeout
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if d < time.Second {
+		d = time.Second
+	}
+	if d > maxRunCommandTimeout {
+		d = maxRunCommandTimeout
+	}
+	return d
 }
 
 var readFileInputSchema = map[string]any{
@@ -118,18 +156,9 @@ func runCommandTool(root string) Tool {
 				return Result{Text: "command is required", IsError: true}
 			}
 
-			if ms, ok := argFloat(args, "timeout"); ok {
-				seconds := int(ms / 1000)
-				if seconds < 1 {
-					seconds = 1
-				}
-				if seconds > 600 {
-					seconds = 600
-				}
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
-				defer cancel()
-			}
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, runCommandTimeout(args))
+			defer cancel()
 
 			cmd := exec.CommandContext(ctx, "bash", "-c", command)
 			procgroup.Prepare(cmd)

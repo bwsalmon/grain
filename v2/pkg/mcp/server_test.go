@@ -226,6 +226,36 @@ func TestRunCommandIsKilledWhenItsCallersCtxIsCancelled(t *testing.T) {
 	}
 }
 
+// TestRunCommandAppliesDefaultTimeoutWhenNoneGiven is bwsalmon/agents#575's
+// own regression test: a run_command call that omits "timeout" entirely
+// used to run with no server-side bound at all, so a caller that forgot
+// to pass one (or an unbounded command like a `grep -r` from $HOME) could
+// wedge the tool call, and the sandbox slot behind it, indefinitely.
+// defaultRunCommandTimeout is shrunk for this test only, so it can prove
+// the bound applies without actually waiting out the real 5-minute
+// default.
+func TestRunCommandAppliesDefaultTimeoutWhenNoneGiven(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not installed")
+	}
+	old := defaultRunCommandTimeout
+	defaultRunCommandTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { defaultRunCommandTimeout = old })
+
+	client := newTestClient(t, t.TempDir())
+	start := time.Now()
+	res, err := client.CallTool(context.Background(), "run_command", map[string]any{"command": "sleep 30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("run_command with no timeout took %s, want near-instant given the shrunk default, not close to the full 30s sleep", elapsed)
+	}
+	if !res.IsError {
+		t.Error("run_command killed by the default timeout: want IsError true")
+	}
+}
+
 func TestRunCommandSeesGitCredentialsConfiguredForItsSandboxRoot(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")

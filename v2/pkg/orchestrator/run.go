@@ -25,6 +25,14 @@ import (
 // exactly that case.
 var errTaskClosed = errors.New("orchestrator: task closed while its run was still live")
 
+// errRunTimedOut is context.Cause's own report, by identity, for a run
+// RunDispatch cancelled itself because it outran cfg.maxRunRuntime() --
+// Config.MaxRunRuntime's own doc comment has the reasoning
+// (bwsalmon/agents#575). Checked the same way errTaskClosed is, and
+// recorded as outcome "cancelled" for the same reason: the run did not
+// fail on its own, RunDispatch ended it.
+var errRunTimedOut = errors.New("orchestrator: run exceeded its wall-clock time limit")
+
 // checkTaskClosed reads store.State(taskID) once and calls
 // cancel(errTaskClosed) if it reads model.StateClosed, reporting whether
 // it did. A store error is treated as "not closed" rather than
@@ -327,14 +335,26 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		runErr = fmt.Errorf("orchestrator: preparing %s: %w", d.RunID, prepErr)
 		detail = prepErr.Error()
 	default:
-		// runCtx, not ctx, is what framework.Run actually gets: it is
-		// what watchForTaskClosed cancels the instant it sees this task
-		// closed, which is what makes cancelling this run from outside
-		// the process running it possible at all -- see that func's own
-		// doc comment. cancelRun(nil) once framework.Run returns is what
-		// stops the watcher goroutine either way, whether or not it was
-		// the one that ended the run.
+		// runCtx, not ctx, is what watchForTaskClosed cancels the instant
+		// it sees this task closed, which is what makes cancelling this
+		// run from outside the process running it possible at all -- see
+		// that func's own doc comment. cancelRun(nil) once framework.Run
+		// returns is what stops the watcher goroutine either way, whether
+		// or not it was the one that ended the run.
+		//
+		// agentCtx, not runCtx, is what framework.Run actually gets: a
+		// child of runCtx carrying its own deadline, cfg.maxRunRuntime()
+		// out from now, so a run that outlives it gets cancelled the same
+		// way a task-closed run does (Config.MaxRunRuntime's own doc
+		// comment, bwsalmon/agents#575) without the deadline itself ever
+		// touching runCtx or the watcher goroutine reading it. Its cause,
+		// once framework.Run returns, tells the two forms of cancellation
+		// apart from each other and from any other error framework.Run
+		// might return, and from a runCtx cancellation propagated down to
+		// it: context.Cause walks up to whichever ancestor was cancelled
+		// first.
 		runCtx, cancelRun := context.WithCancelCause(ctx)
+		agentCtx, cancelAgentCtx := context.WithTimeoutCause(runCtx, cfg.maxRunRuntime(), errRunTimedOut)
 		checkTaskClosed(ctx, store, task.ID, cancelRun)
 		watcherDone := make(chan struct{})
 		go func() {
@@ -342,18 +362,23 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
 		}()
 
-		result, runErr = framework.Run(runCtx, agent.RunConfig{
+		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
+		cancelAgentCtx()
 		cancelRun(nil)
 		<-watcherDone
 
 		switch {
-		case runErr != nil && errors.Is(context.Cause(runCtx), errTaskClosed):
+		case runErr != nil && errors.Is(context.Cause(agentCtx), errTaskClosed):
 			outcome = "cancelled"
 			detail = "the task was closed while this run was still live"
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errTaskClosed)
+		case runErr != nil && errors.Is(context.Cause(agentCtx), errRunTimedOut):
+			outcome = "cancelled"
+			detail = fmt.Sprintf("the run exceeded its %s wall-clock limit", cfg.maxRunRuntime()) + partialWorkSuffix(result)
+			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errRunTimedOut)
 		case runErr != nil:
 			// runErr's own text, not the wrapped form below: that form
 			// repeats d.RunID, which is already this row's own id, and

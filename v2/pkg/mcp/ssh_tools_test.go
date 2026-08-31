@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // localExecRunner implements remoteRunner by running argv on this machine
@@ -103,6 +104,38 @@ func TestSSHRunCommandReportsNonZeroExit(t *testing.T) {
 	}
 	if !strings.Contains(res.Text(), "exit=3") {
 		t.Errorf("run_command output %q does not report exit=3", res.Text())
+	}
+}
+
+// TestSSHRunCommandAppliesDefaultTimeoutWhenNoneGiven is ssh_tools.go's
+// side of bwsalmon/agents#575's regression coverage: unlike the local
+// run_command (TestRunCommandAppliesDefaultTimeoutWhenNoneGiven), this
+// path enforces its timeout with the remote `timeout` coreutil rather
+// than ctx cancellation, so it needs its own proof that omitting
+// "timeout" still gets wrapped in one rather than running unbounded on
+// the remote side.
+func TestSSHRunCommandAppliesDefaultTimeoutWhenNoneGiven(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not installed")
+	}
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout not installed")
+	}
+	old := defaultRunCommandTimeout
+	defaultRunCommandTimeout = time.Second
+	t.Cleanup(func() { defaultRunCommandTimeout = old })
+
+	client := newSSHTestClient(t, t.TempDir())
+	start := time.Now()
+	res, err := client.CallTool(context.Background(), "run_command", map[string]any{"command": "sleep 30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("run_command with no timeout took %s, want near-instant given the shrunk default, not close to the full 30s sleep", elapsed)
+	}
+	if !res.IsError {
+		t.Error("run_command killed by the default timeout: want IsError true")
 	}
 }
 

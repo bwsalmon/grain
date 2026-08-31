@@ -646,6 +646,81 @@ func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
 	}
 }
 
+// TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime is bwsalmon/
+// agents#575's own regression test for the run-level wall-clock cap:
+// v1 had AutomationConfig.max_runtime_minutes plus a sweeper for a run
+// that is alive but stuck making no progress (e.g. a run_command with
+// no timeout of its own, hung forever); v2 had nothing playing that
+// role until Config.MaxRunRuntime. fw here blocks on the very ctx
+// RunDispatch hands framework.Run until it is cancelled, exactly like
+// TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight, except
+// nothing ever closes the task here -- only MaxRunRuntime elapsing
+// should end it.
+func TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	started := make(chan struct{})
+	fw := agentFunc(func(runCtx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		close(started)
+		<-runCtx.Done()
+		return nil, runCtx.Err()
+	})
+	cfg := orchestrator.Config{MaxRunRuntime: 20 * time.Millisecond}
+
+	type runOutcome struct {
+		result *agent.Result
+		err    error
+	}
+	done := make(chan runOutcome, 1)
+	go func() {
+		result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime)
+		done <- runOutcome{result, err}
+	}()
+
+	<-started
+
+	select {
+	case out := <-done:
+		if out.result != nil {
+			t.Errorf("result = %+v, want nil for a run cancelled by MaxRunRuntime", out.result)
+		}
+		if out.err == nil || !strings.Contains(out.err.Error(), "wall-clock") {
+			t.Errorf("RunDispatch err = %v, want an error naming the wall-clock limit", out.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunDispatch did not return after MaxRunRuntime elapsed -- the agent's ctx was never cancelled")
+	}
+
+	occupied, err := store.OccupiedSlots(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(occupied) != 0 {
+		t.Errorf("occupied slots after a MaxRunRuntime-cancelled run = %v, want none: FinishRun still frees the slot", occupied)
+	}
+
+	runs, err := store.Runs(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v, want exactly one", runs)
+	}
+	if runs[0].Outcome != "cancelled" {
+		t.Errorf("run outcome = %q, want \"cancelled\"", runs[0].Outcome)
+	}
+	if !strings.Contains(runs[0].Detail, "wall-clock") {
+		t.Errorf("run detail = %q, want it to name the wall-clock limit", runs[0].Detail)
+	}
+}
+
 // TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall is the
 // race e2e/close_while_live_test.go itself exercises: dispatch.Cycle
 // claims a slot while a task is still running, the task is closed before
