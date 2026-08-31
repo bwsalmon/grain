@@ -177,6 +177,16 @@ GRAIN_KONTUR_VM_NAME_PREFIX="${GRAIN_KONTUR_VM_NAME_PREFIX:-kontur-}"
 GRAIN_KONTUR_SSH_USER="${GRAIN_KONTUR_SSH_USER:-debian}"
 GRAIN_KONTUR_SSH_KEY_FILE="${GRAIN_KONTUR_SSH_KEY_FILE:-}"
 GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
+# flat: the guest is spliced onto its sandbox container's own segment and
+# takes over the address docker assigned it, so nothing here has to assign
+# one. nat is kontur's original mode, where each VM needs its own address
+# on a shared private bridge and its own forwarded port -- which is all
+# GRAIN_KONTUR_BASE_IP/GRAIN_KONTUR_BASE_PORT below exist to derive, and
+# which flat mode ignores. Flat mode needs a guest image carrying kontur's
+# own guest overlays (packer/kontur/build-guest.sh builds one); a
+# deployment pulling a prebuilt guest from GRAIN_KONTUR_IMAGE_BUCKET must
+# republish it from that build before switching.
+GRAIN_KONTUR_NET="${GRAIN_KONTUR_NET:-flat}"
 GRAIN_KONTUR_BASE_IP="${GRAIN_KONTUR_BASE_IP:-169.254.100.10}"
 GRAIN_KONTUR_BASE_PORT="${GRAIN_KONTUR_BASE_PORT:-12000}"
 GRAIN_KONTUR_GIT_PROXY_HOST="${GRAIN_KONTUR_GIT_PROXY_HOST:-}"
@@ -326,7 +336,11 @@ Recognized variables:
                              $GRAIN_DATA_DIR/secrets/kontur-ssh-key
   GRAIN_KONTUR_WORKSPACE     working directory tools operate in on each kontur
                              VM (default: /home/debian, GRAIN_KONTUR_SSH_USER's own home)
+  GRAIN_KONTUR_NET           kontur networking mode: "flat" (default) or "nat".
+                             Flat needs a guest built by build-guest.sh; see
+                             packer/kontur/README.md.
   GRAIN_KONTUR_BASE_IP       "-ip" slot 1's kontur VM gets; every later slot's
+                             (nat mode only -- ignored under flat)
                              is the next address after it (default: 169.254.100.10)
   GRAIN_KONTUR_BASE_PORT     "-port" slot 1's kontur VM forwards; every later
                              slot's is this plus its own number minus one
@@ -1504,17 +1518,25 @@ write_systemd_units() {
       -kontur-ssh-user "$GRAIN_KONTUR_SSH_USER"
       -kontur-exec-key "/images/$GRAIN_KONTUR_EXEC_KEY_NAME"
       -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
-      -kontur-base-ip "$GRAIN_KONTUR_BASE_IP"
-      -kontur-base-port "$GRAIN_KONTUR_BASE_PORT"
+      -kontur-net "$GRAIN_KONTUR_NET"
       -kontur-git-proxy-host "$GRAIN_KONTUR_GIT_PROXY_HOST"
       -kontur-create-arg -images-hostpath -kontur-create-arg "$GRAIN_KONTUR_IMAGES_HOSTPATH"
       -kontur-create-arg -disk -kontur-create-arg /images/current/disk.img
       -kontur-create-arg -kernel -kontur-create-arg /images/current/vmlinuz
       -kontur-create-arg -initramfs -kontur-create-arg /images/current/initrd.img
-      -kontur-create-arg -guest-port -kontur-create-arg 22
       -kontur-create-arg -disk-readonly=false
       -kontur-create-arg -disk-hostpath -kontur-create-arg "$GRAIN_KONTUR_DISK_HOSTPATH"
     )
+    # Addressing and the forwarded guest port are NAT-mode concerns: flat
+    # mode takes its address from docker, and konturctl rejects "-ip"
+    # outright under it.
+    if [ "$GRAIN_KONTUR_NET" != "flat" ]; then
+      daemon_args+=(
+        -kontur-base-ip "$GRAIN_KONTUR_BASE_IP"
+        -kontur-base-port "$GRAIN_KONTUR_BASE_PORT"
+        -kontur-create-arg -guest-port -kontur-create-arg 22
+      )
+    fi
   fi
 
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
