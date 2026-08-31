@@ -126,11 +126,12 @@ GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
 # See "Kontur sandboxing" below (ensure_kontur_ssh_key/ensure_kontur_images/
-# ensure_kontur_kvm_access) and terraform/gcp-v2/README.md's own section of
-# the same name. GRAIN_KONTUR_ENABLE=1 (off by default here -- terraform/
-# gcp-v2's own enable_kontur_sandboxes variable is what actually turns this
-# on for that deployment shape) needs no manual build-and-publish step
-# first (bwsalmon/agents#531): with GRAIN_KONTUR_IMAGE_BUCKET/
+# ensure_konturctl/ensure_kontur_kvm_access) and terraform/gcp-v2/README.md's
+# own section of the same name. GRAIN_KONTUR_ENABLE=1 (off by default here
+# -- terraform/gcp-v2's own enable_kontur_sandboxes variable is what
+# actually turns this on for that deployment shape) needs no manual
+# build-and-publish step first (bwsalmon/agents#531): with
+# GRAIN_KONTUR_IMAGE_BUCKET/
 # GRAIN_KONTUR_OCI_IMAGE left empty (the default), this script builds its
 # own guest image and OCI image, and generates its own SSH keypair for
 # the former if none is already provided or seeded. Set both of those two
@@ -897,6 +898,81 @@ ensure_kontur_images_build() {
   ln -s "$tag" "$current"
 }
 
+# konturctl_tag names the currently-vendored third_party/kontur tree, the
+# same "the git tree object ID already is the hash" trick kontur_image_tag
+# uses above -- a vendor bump changes this tag, which is exactly what
+# tells ensure_konturctl it has to rebuild rather than reuse whatever is
+# already installed.
+konturctl_tag() {
+  git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:third_party/kontur" 2>/dev/null || echo unknown
+}
+
+# ensure_konturctl builds and installs `konturctl` itself onto this
+# host's PATH.
+#
+# Every other ensure_kontur_* function above sets up something konturctl
+# *uses* once it runs -- a guest/OCI image pair, KVM/docker access, an
+# SSH keypair -- but nothing ever built or installed the binary itself
+# (bwsalmon/agents#549): v2/pkg/kontur execs the bare command name
+# ("konturctl vm create"/"vm update"/"vm delete", relying on PATH to find
+# it -- see that package's own doc comment), so a host with none of this
+# came up dispatching real tasks into kontur VMs and failing every single
+# one with "exec: \"konturctl\": executable file not found in $PATH".
+#
+# third_party/kontur/README.md's "Operating a node (konturctl CLI)":
+# `cmd/konturctl` builds a single static binary, meant to run on the node
+# itself, not inside a container the way `kontur` (the guest-side image
+# built into the OCI image above) does -- so this builds straight to a
+# host path rather than pulling anything from a registry.
+#
+# Built inside the same grain-builder image build_and_install's own
+# `make container-build` already produced (Makefile's `builder` target),
+# reusing its already-pinned Go toolchain rather than pulling a second
+# one -- third_party/kontur is a separate module (its own go.mod, go
+# 1.22) from v2's, but a newer toolchain building an older-declared
+# module is exactly what Go itself supports, and GOTOOLCHAIN=local in
+# that image only forbids fetching a *different* one mid-build, not using
+# the one already there for a module that asks for less. The container
+# caches -- $GRAIN_SRC_DIR/v2/.container-cache -- are shared with that
+# same build, so this pays its own module-download cost once, not on
+# every run.
+ensure_konturctl() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+
+  local tag installed_tag konturctl_bin cache_dir
+  konturctl_bin="$GRAIN_DATA_DIR/bin/konturctl"
+  cache_dir="$GRAIN_SRC_DIR/v2/.container-cache"
+  tag="$(konturctl_tag)"
+  installed_tag=""
+  [ -s "${konturctl_bin}.tag" ] && installed_tag="$(cat "${konturctl_bin}.tag")"
+
+  if [ -x "$konturctl_bin" ] && [ "$installed_tag" = "$tag" ]; then
+    log "konturctl ${tag} already built -- reusing it"
+  else
+    log "Building konturctl ${tag} (third_party/kontur/cmd/konturctl, containerised)"
+    mkdir -p "$(dirname "$konturctl_bin")" "$cache_dir/build" "$cache_dir/mod"
+    if ! docker run --rm \
+        -v "$GRAIN_SRC_DIR/third_party/kontur":/src \
+        -v "$(dirname "$konturctl_bin")":/out \
+        -v "$cache_dir/build":/gocache \
+        -v "$cache_dir/mod":/gomodcache \
+        -e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
+        -e CGO_ENABLED=0 \
+        -w /src grain-builder:bookworm \
+        go build -trimpath -ldflags="-s -w" -o /out/konturctl.tmp ./cmd/konturctl; then
+      log "  building konturctl failed -- leaving kontur sandboxing off this run"
+      GRAIN_KONTUR_ENABLE=0
+      return
+    fi
+    mv -f "${konturctl_bin}.tmp" "$konturctl_bin"
+    chmod 0755 "$konturctl_bin"
+    printf '%s' "$tag" > "${konturctl_bin}.tag"
+  fi
+  ln -sf "$konturctl_bin" /usr/local/bin/konturctl
+}
+
 # ensure_kontur_kvm_access grants $GRAIN_USER /dev/kvm (for the nested
 # cloud-hypervisor guest itself), the docker group (for the docker
 # kontur backend's own `docker run`) -- the same grant
@@ -1454,6 +1530,7 @@ main() {
   ensure_self_upgrade
   ensure_kontur_ssh_key
   ensure_kontur_images
+  ensure_konturctl
   ensure_kontur_kvm_access
   setup_data_dir
   reformat_store_if_schema_changed

@@ -295,13 +295,17 @@ Unlike most of this module, a first `terraform apply` with this left on
 pays a real, one-time cost on the host itself before it produces a fully
 working deployment -- but it no longer needs anything built or published
 by hand first (bwsalmon/agents#531): `v2/scripts/setup.sh`'s own
-`ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_kontur_kvm_access`
-generate an SSH keypair, build the guest image (`packer/kontur/build.sh`
--- `debootstrap`+`chroot`, no VM boot, several minutes against a real
-Debian mirror) and the OCI image (`build-oci-image.sh` -- a plain `docker
-build`, no push), grant `$GRAIN_USER` `/dev/kvm` and `docker` group
-access, and seed the generated SSH key, all before `write_systemd_units`
-wires up `grain daemon`'s own `-kontur-*` flags. This runs every deploy
+`ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_konturctl`/
+`ensure_kontur_kvm_access` generate an SSH keypair, build the guest image
+(`packer/kontur/build.sh` -- `debootstrap`+`chroot`, no VM boot, several
+minutes against a real Debian mirror) and the OCI image
+(`build-oci-image.sh` -- a plain `docker build`, no push), build and
+install `konturctl` itself onto the host's `PATH` (`grain-daemon` execs
+it directly to manage each slot's VM -- see
+`third_party/kontur/README.md`'s "Operating a node (`konturctl` CLI)"),
+grant `$GRAIN_USER` `/dev/kvm` and `docker` group access, and seed the
+generated SSH key, all before `write_systemd_units` wires up
+`grain daemon`'s own `-kontur-*` flags. This runs every deploy
 generation, not just the first, but `ensure_kontur_images`'s own
 `kontur_image_tag` -- a hash of `packer/kontur`'s own git tree (what the
 guest image is provisioned from), `third_party/kontur`'s own vendored git
