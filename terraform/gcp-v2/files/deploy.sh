@@ -171,7 +171,12 @@ kontur_ssh_key="$(md_optional instance/attributes/grain-kontur-ssh-key)"
 if [ -n "$kontur_ssh_key" ]; then
   KONTUR_SSH_KEY_FILE="$SECRET_DIR/kontur-ssh-key"
   umask 077
-  printf '%s' "$kontur_ssh_key" > "$KONTUR_SSH_KEY_FILE"
+  # Trailing newline appended deliberately: the "$(...)" above already
+  # stripped whatever the metadata value ended with, and an OpenSSH
+  # private key one newline short of its original bytes fails to parse
+  # ("error in libcrypto") -- v2/scripts/setup.sh's own seed_secret has
+  # the same fix, for the same reason (bwsalmon/agents#543).
+  printf '%s\n' "$kontur_ssh_key" > "$KONTUR_SSH_KEY_FILE"
 fi
 if [ "$ENABLE_KONTUR_SANDBOXES" = "True" ] && [ -z "$KONTUR_SSH_KEY_FILE" ]; then
   log "enable_kontur_sandboxes is on but no grain-kontur-ssh-key is in instance metadata yet -- setup.sh will leave kontur sandboxing off until push-secrets.sh has pushed one (see terraform/gcp-v2 README, \"Kontur sandboxing\")"
