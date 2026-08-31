@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"bytes"
 	"embed"
 	"io/fs"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
@@ -104,5 +107,35 @@ func (s *Server) routes() {
 		// condition a caller can do anything about.
 		panic("ui: embedding static/: " + err.Error())
 	}
-	s.mux.Handle("/", http.FileServerFS(static))
+	s.mux.Handle("/", spaHandler(static))
+}
+
+// spaHandler serves static assets straight out of fsys, the same as
+// http.FileServerFS -- except a request for a path that isn't an actual
+// file falls back to index.html instead of 404ing. App.jsx (bwsalmon/
+// agents#548) now reads a sub-page like "/repos" or "/tasks/42" out of
+// the URL itself, but that only works for a client-side navigation that
+// starts from "/" already loaded; a direct hit on that URL -- a bookmark,
+// a shared link, a hard refresh -- is a real request this server has to
+// answer, and the only page it has to answer with is the one App.jsx's
+// own routing already knows how to parse.
+//
+// A //go:embed'd static/ with no built frontend yet (a fresh checkout
+// under `go test`, where static/ carries only placeholder.html) has no
+// index.html to fall back to; that case is left to fall through to the
+// normal file-not-found response rather than serving placeholder.html
+// in its place.
+func spaHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServerFS(fsys)
+	index, indexErr := fs.ReadFile(fsys, "index.html")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upath := strings.TrimPrefix(r.URL.Path, "/")
+		if upath != "" {
+			if _, err := fs.Stat(fsys, upath); err != nil && indexErr == nil {
+				http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(index))
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }

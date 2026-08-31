@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Chip } from "@mui/material";
 import api from "./api.js";
+import { buildPath, parsePath } from "./paths.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import RepoList from "./components/RepoList.jsx";
@@ -35,7 +36,12 @@ export default function App() {
   // stateFilter and survives a trip through the repo page and back,
   // since "which repo" and "which state" are two independent questions
   // about the same task list.
-  const [view, setView] = useState("tasks");
+  //
+  // view and showSettings (below) both seed from the URL the page
+  // loaded with rather than a fixed default, so a direct link to /repos
+  // or /settings lands on that sub-page instead of always opening on
+  // the task list first (bwsalmon/agents#548).
+  const [view, setView] = useState(() => parsePath(window.location.pathname).view);
   const [repoFilter, setRepoFilter] = useState(null);
   // releasesRepo is which repo's release pane is open within the repos
   // view (null shows the repo list instead) -- see RepoList's own
@@ -50,7 +56,7 @@ export default function App() {
   // falls back to repoFilter the same way it always has for the
   // sidebar's own "+ New task" button.
   const [newTaskRepo, setNewTaskRepo] = useState(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(() => parsePath(window.location.pathname).showSettings === true);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -257,6 +263,60 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [openTaskId, refreshList, refreshSchedules, refreshTemplates, view]);
+
+  // Opens whatever task /tasks/:id in the URL the page loaded with names
+  // -- the view/showSettings equivalent of this runs synchronously in
+  // useState's own initializer above, but a task's detail needs an
+  // /api/tasks/:id round trip first, which only a mount effect can do.
+  // Runs once: openTask is a stable callback (its only dependency,
+  // showError, never changes identity either), so this never re-fires
+  // just because some other state the effect doesn't list changed.
+  useEffect(() => {
+    const { taskId } = parsePath(window.location.pathname);
+    if (taskId) openTask(taskId);
+  }, [openTask]);
+
+  // Keeps the address bar in sync with view/openTaskId/showSettings --
+  // the three things paths.js's buildPath encodes -- so every way of
+  // reaching a sub-page (a sidebar click, closing an overlay, the
+  // popstate handler below) ends up shareable/bookmarkable, not just a
+  // page loaded fresh from one. Skips the update entirely once the
+  // computed path already matches the address bar, which is what stops
+  // this from fighting the popstate handler: a back/forward navigation
+  // updates window.location itself before this effect ever runs, so by
+  // the time it does there is nothing left to push.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    const path = buildPath({ view, taskId: openTaskId, showSettings });
+    if (path !== window.location.pathname) {
+      // The very first correction (e.g. an unrecognized path normalized
+      // back to "/") replaces rather than pushes, so a mistyped or
+      // stale URL doesn't leave an extra "back" step to it in history.
+      if (mountedRef.current) {
+        window.history.pushState(null, "", path);
+      } else {
+        window.history.replaceState(null, "", path);
+      }
+    }
+    mountedRef.current = true;
+  }, [view, openTaskId, showSettings]);
+
+  // Mirrors the browser's own back/forward buttons onto the same state
+  // buildPath/parsePath already govern everything else through.
+  useEffect(() => {
+    function onPopState() {
+      const parsed = parsePath(window.location.pathname);
+      setShowSettings(parsed.showSettings === true);
+      setView(parsed.view);
+      if (parsed.taskId) {
+        openTask(parsed.taskId);
+      } else {
+        closeDetail();
+      }
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [openTask, closeDetail]);
 
   const scopedTasks = repoFilter ? tasks.filter((t) => t.repo === repoFilter) : tasks;
 
