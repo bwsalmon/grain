@@ -11,10 +11,12 @@
 # `docker build`/`docker push`, no root needed, but still real work worth
 # doing ahead of a deploy rather than inside one.
 #
-# The image this produces is deliberately generic: it needs neither
-# GUEST_SSH_AUTHORIZED_KEY nor GUEST_SETUP_SCRIPT (both left at the
-# Dockerfile's own empty defaults) because a real deployment never boots
-# its bundled guest disk at all -- KonturConfig.CreateArgs always points
+# The image this produces is deliberately generic: it leaves
+# GUEST_SSH_AUTHORIZED_KEY at the Dockerfile's own empty default (there is
+# no second build arg for customizing the guest beyond that -- an earlier
+# version of this comment named a GUEST_SETUP_SCRIPT that
+# third_party/kontur has never actually had) because a real deployment
+# never boots its bundled guest disk at all -- KonturConfig.CreateArgs always points
 # -disk/-kernel/-initramfs at this directory's own build.sh output
 # instead (see README.md's own -kontur-create-arg example). All this
 # image contributes at runtime is the `kontur` binary and the pinned

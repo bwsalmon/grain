@@ -133,18 +133,34 @@ func (k *KonturSandboxes) Health(ctx context.Context) []SlotHealth {
 	return out
 }
 
-func (k *KonturSandboxes) slotHealth(ctx context.Context, slot, name string) SlotHealth {
-	health := SlotHealth{Slot: slot, Backend: "kontur", Name: name}
-
-	ctx, cancel := context.WithTimeout(ctx, healthTimeout)
-	defer cancel()
+// healthRunner returns the transport slotHealth reads a VM's guest stats
+// over, resolved the same way ToolsFor's own is (cfg.DockerExec picks
+// between the two) but without runnerFor's boot-length wait: Health is a
+// status pane, and a slot that is not reachable right now is exactly what
+// it exists to report rather than something to block on -- see Health's
+// own doc comment.
+//
+// The one wait it does keep is the short retry on a guest that is not
+// answering yet, within slotHealth's own healthTimeout budget: for the
+// SSH path that is waitForPortHealthy's dial retry, and for the
+// docker-exec path (which has no port out here to dial) it is
+// waitForGuestExec against the same short deadline.
+func (k *KonturSandboxes) healthRunner(ctx context.Context, name string) (sandboxRunner, error) {
+	if k.cfg.DockerExec {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(healthTimeout)
+		}
+		if err := k.waitForGuestExec(ctx, name, deadline); err != nil {
+			return nil, fmt.Errorf("reaching guest over docker exec: %w", err)
+		}
+		return k.dockerExecRunner(name), nil
+	}
 
 	port, err := kontur.Port(k.cfg.stateDir(), name)
 	if err != nil {
-		health.Error = err.Error()
-		return health
+		return nil, err
 	}
-
 	var host string
 	if k.cfg.Backend == kontur.BackendDocker {
 		host, err = kontur.DockerPodIP(ctx, name)
@@ -152,22 +168,32 @@ func (k *KonturSandboxes) slotHealth(ctx context.Context, slot, name string) Slo
 		host, err = kontur.PodIP(ctx, k.cfg.runtimeEndpoint(), name)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := waitForPortHealthy(ctx, host, port); err != nil {
+		return nil, fmt.Errorf("reaching guest SSH port: %w", err)
+	}
+	return &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}, nil
+}
+
+func (k *KonturSandboxes) slotHealth(ctx context.Context, slot, name string) SlotHealth {
+	health := SlotHealth{Slot: slot, Backend: "kontur", Name: name}
+
+	ctx, cancel := context.WithTimeout(ctx, healthTimeout)
+	defer cancel()
+
+	runner, err := k.healthRunner(ctx, name)
+	if err != nil {
 		health.Error = err.Error()
 		return health
 	}
 
-	if err := waitForPortHealthy(ctx, host, port); err != nil {
-		health.Error = fmt.Sprintf("reaching guest SSH port: %s", err)
-		return health
-	}
-
-	runner := &mcp.SSHRunner{User: k.cfg.SSHUser, Host: host, Port: port, KeyPath: k.cfg.SSHKey}
 	stdout, stderr, exitCode := runner.Run(ctx, []string{"cat", "/proc/loadavg", "/proc/meminfo"}, "")
 	if exitCode != 0 {
 		if stderr == "" {
-			stderr = fmt.Sprintf("ssh exited %d with no output", exitCode)
+			stderr = fmt.Sprintf("exited %d with no output", exitCode)
 		}
-		health.Error = fmt.Sprintf("reading guest stats over SSH: %s", strings.TrimSpace(stderr))
+		health.Error = fmt.Sprintf("reading guest stats: %s", strings.TrimSpace(stderr))
 		return health
 	}
 

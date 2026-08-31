@@ -996,6 +996,64 @@ holds the same `*model.Store` connection the reply lands on;
 wired into any real deployment, so this is, for now, a gemini-only
 capability in practice, same as the rest of `Config.GrantTools`.
 
+## Reaching a sandbox guest without a route into it
+
+`KonturSandboxes` reaches a slot's VM over SSH to the external port
+netshim forwards on the VM's container address — which is why
+`pkg/kontur` exists at all: neither half of that address is something
+kontur prints, so `Port` reads the port out of kontur's own state file
+and `DockerPodIP`/`PodIP` ask docker (or containerd, under the static-pod
+backend) for the address it answers on.
+
+`-kontur-docker-exec` (with `-kontur-docker-exec-key`) routes the same
+four tools through `docker exec <vm container> kontur exec` instead
+(`mcp.DockerExecRunner`). bwsalmon/kontur already ships the guest-side
+half: `kontur exec` SSHes to the guest's own tap-attached address, which
+the docker backend records as `KONTUR_EXEC_ADDR` when it starts the VM
+container. That address needs no address translation to reach, because
+the container shares the network namespace netshim set the tap up in —
+`internal/guestexec`'s own words, "reachable directly from this
+container's own network namespace ... without going through
+NETSHIM_GUEST_PORT's external DNAT at all."
+
+Nothing about authentication changes: the same guest sshd, the same
+account, and the same keypair `v2/scripts/setup.sh`'s
+`ensure_kontur_ssh_key` already generates and
+`packer/kontur/provision.sh` already installs as the guest's only
+`authorized_keys` entry. What changes is that the connection starts
+inside the VM's own container, so nothing outside it has to be able to
+reach the guest — and so none of the machinery that makes such a
+connection possible has to be consulted: not netshim's inbound DNAT
+rules, not the per-VM external port, not the container-address lookup.
+`TestKonturSandboxesDockerExecReachesTheGuestWithoutResolvingAnAddress`
+is what holds that: its fake docker cannot answer an address lookup and
+nothing is listening on any port, so getting tools back at all is the
+proof none of it was consulted.
+
+Two details are worth knowing before turning it on:
+
+- **`-kontur-docker-exec-key` is a path inside the VM's container**, not
+  on the host — the same deployment keypair `-kontur-ssh-key` names, just
+  named by where the container can read it. The images directory
+  `konturctl vm create -images-hostpath` already mounts read-only at
+  `/images` needs no change to kontur to serve as that place. Left unset,
+  `kontur exec` falls back to the dedicated key kontur's own `Dockerfile`
+  bakes in — which only a guest image built by that same Dockerfile
+  authorizes, and a deployment pointing `-disk` at
+  `packer/kontur/build.sh`'s output is not using one. That is why the
+  flag is required rather than defaulted.
+- **`docker exec` cannot distinguish a failure to reach the guest from a
+  guest command that exited 1**, the way `ssh` can with its own reserved
+  status: it reports the exit status of whatever it started, and
+  `kontur exec` exits with the guest command's own. `DockerExecRunner`
+  tells the two apart by the first line of stderr instead (see
+  `execFailedBeforeGuest`), erring toward "it never ran" — the same
+  `exitCode == -1` `SSHRunner` reports for an unreachable sandbox.
+
+Both transports stay wired, so a deployment can turn this on and compare
+rather than switch outright. The SSH path remains the default.
+
+
 ## The UI
 
 `pkg/ui`, served by `cmd/grain`'s "daemon" subcommand (bwsalmon/agents#237,

@@ -168,6 +168,19 @@ func daemon(args []string) {
 		"username to SSH into each kontur VM as (required with -kontur-vm-name-prefix)")
 	konturSSHKey := fs.String("kontur-ssh-key", "",
 		"path to the SSH private key to authenticate to each kontur VM with (required with -kontur-vm-name-prefix)")
+	konturDockerExec := fs.Bool("kontur-docker-exec", false,
+		"reach each kontur VM's guest through `docker exec <vm container> kontur exec` instead of SSH to netshim's "+
+			"externally forwarded port. Same guest, same account, same key -- the connection just originates "+
+			"inside the VM's own container, which is where the guest's address is directly reachable, so none of "+
+			"netshim's inbound DNAT, the per-VM external port, or the container-IP lookup is involved. Requires "+
+			"-kontur-backend docker and -kontur-docker-exec-key. Only used with -kontur-vm-name-prefix.")
+	konturDockerExecKey := fs.String("kontur-docker-exec-key", "",
+		"path, *inside the VM's container*, of the private key `kontur exec` authenticates to the guest with "+
+			"(required with -kontur-docker-exec). This is the same deployment keypair -kontur-ssh-key names on "+
+			"the host, but named by where the container can read it -- e.g. /images/kontur_id_ed25519 for a key "+
+			"placed in the directory -kontur-create-arg's own -images-hostpath already mounts read-only at "+
+			"/images. Leaving it unset would fall back to kontur's own baked-in key, which only a guest image "+
+			"built by kontur's own Dockerfile authorizes.")
 	konturWorkspace := fs.String("kontur-workspace", "",
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
@@ -231,6 +244,24 @@ func daemon(args []string) {
 			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-workspace is required with -kontur-vm-name-prefix")
 			os.Exit(2)
 		}
+		if *konturDockerExec {
+			// Both of these are rejected here rather than left to fail at
+			// the first dispatch: a daemon that starts and only then
+			// cannot reach any sandbox is a much worse way to find out
+			// than not starting at all.
+			if *konturBackend != kontur.BackendDocker {
+				fmt.Fprintf(os.Stderr, "grain daemon: -kontur-docker-exec requires -kontur-backend %s (got %q): no other backend runs its VMs as docker containers to exec into\n", kontur.BackendDocker, *konturBackend)
+				os.Exit(2)
+			}
+			if *konturDockerExecKey == "" {
+				fmt.Fprintln(os.Stderr, "grain daemon: -kontur-docker-exec-key is required with -kontur-docker-exec")
+				os.Exit(2)
+			}
+		}
+	}
+	if *konturDockerExecKey != "" && !*konturDockerExec {
+		fmt.Fprintln(os.Stderr, "grain daemon: -kontur-docker-exec-key does nothing without -kontur-docker-exec")
+		os.Exit(2)
 	}
 	if *maxConcurrent < 1 {
 		fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent must be at least 1")
@@ -255,6 +286,7 @@ func daemon(args []string) {
 		konturVMNamePrefix: *konturVMNamePrefix, konturBackend: *konturBackend,
 		konturStateDir: *konturStateDir, criRuntimeEndpoint: *criRuntimeEndpoint,
 		konturSSHUser: *konturSSHUser, konturSSHKey: *konturSSHKey, konturWorkspace: *konturWorkspace,
+		konturDockerExec: *konturDockerExec, konturDockerExecKey: *konturDockerExecKey,
 		konturCreateArgs: konturCreateArgs, konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 		sandboxCPUs: *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
 	}); err != nil {
@@ -303,16 +335,18 @@ type config struct {
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
 	// kontur* fields are only consulted then. See run()'s own comment on
 	// sandboxes.
-	konturVMNamePrefix string
-	konturBackend      string
-	konturStateDir     string
-	criRuntimeEndpoint string
-	konturSSHUser      string
-	konturSSHKey       string
-	konturWorkspace    string
-	konturCreateArgs   []string
-	konturBaseIP       string
-	konturBasePort     int
+	konturVMNamePrefix  string
+	konturBackend       string
+	konturStateDir      string
+	criRuntimeEndpoint  string
+	konturSSHUser       string
+	konturDockerExec    bool
+	konturDockerExecKey string
+	konturSSHKey        string
+	konturWorkspace     string
+	konturCreateArgs    []string
+	konturBaseIP        string
+	konturBasePort      int
 	// sandboxCPUs and sandboxMemoryMB are store-backed
 	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
 	// like poll-interval and the rest of the seedOnly flags above --
@@ -362,18 +396,20 @@ func run(ctx context.Context, cfg config) error {
 	var konturSandboxes *orchestrator.KonturSandboxes
 	if cfg.konturVMNamePrefix != "" {
 		konturSandboxes = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-			NamePrefix:      cfg.konturVMNamePrefix,
-			Backend:         cfg.konturBackend,
-			StateDir:        cfg.konturStateDir,
-			RuntimeEndpoint: cfg.criRuntimeEndpoint,
-			CreateArgs:      cfg.konturCreateArgs,
-			SSHUser:         cfg.konturSSHUser,
-			SSHKey:          cfg.konturSSHKey,
-			Workspace:       cfg.konturWorkspace,
-			BaseIP:          cfg.konturBaseIP,
-			BasePort:        cfg.konturBasePort,
-			DefaultCPUs:     cfg.sandboxCPUs,
-			DefaultMemoryMB: cfg.sandboxMemoryMB,
+			NamePrefix:        cfg.konturVMNamePrefix,
+			Backend:           cfg.konturBackend,
+			StateDir:          cfg.konturStateDir,
+			RuntimeEndpoint:   cfg.criRuntimeEndpoint,
+			CreateArgs:        cfg.konturCreateArgs,
+			SSHUser:           cfg.konturSSHUser,
+			DockerExec:        cfg.konturDockerExec,
+			DockerExecKeyPath: cfg.konturDockerExecKey,
+			SSHKey:            cfg.konturSSHKey,
+			Workspace:         cfg.konturWorkspace,
+			BaseIP:            cfg.konturBaseIP,
+			BasePort:          cfg.konturBasePort,
+			DefaultCPUs:       cfg.sandboxCPUs,
+			DefaultMemoryMB:   cfg.sandboxMemoryMB,
 		})
 		sandboxes = konturSandboxes
 	} else {

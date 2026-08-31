@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
@@ -760,4 +761,208 @@ func splitNonEmptyLines(s string) []string {
 		}
 	}
 	return lines
+}
+
+// writeFakeDockerExecBackend installs a shell script named "docker" on
+// PATH for the cfg.DockerExec path: it answers `docker exec` by running
+// execBody, answers kontur.DockerContainerStatus's own
+// "docker inspect -f {{.State.Status}}" with status, and *fails* every
+// other inspect -- notably DockerPodIP's own (its format string mentions
+// NetworkSettings).
+//
+// That last part is the point: under DockerExec nothing should ever look
+// a VM's container address up, so a test whose fake cannot answer that
+// lookup proves the lookup never happened rather than merely asserting
+// its absence from a log. The same goes for the guest's sshd -- these
+// tests deliberately never listenTCP, since there is no port for anything
+// out here to dial.
+func writeFakeDockerExecBackend(t *testing.T, argvLog, status, execBody string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake docker script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+case "$1" in
+exec)
+  %s
+  ;;
+inspect)
+  case "$*" in
+  *State.Status*) echo %q ;;
+  *) echo "fake docker: unexpected inspect: $*" >&2; exit 1 ;;
+  esac
+  ;;
+*)
+  echo "fake docker: unexpected subcommand: $*" >&2
+  exit 1
+  ;;
+esac
+`, argvLog, execBody, status)
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func dockerExecTestConfig(stateDir string) orchestrator.KonturConfig {
+	return orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		Backend:           "docker",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		SSHKey:            "/host/key",
+		DockerExec:        true,
+		DockerExecKeyPath: "/images/kontur_id_ed25519",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+		ReadyTimeout:      5 * time.Second,
+	}
+}
+
+// Under DockerExec, ToolsFor has to reach the guest without resolving any
+// address for it at all: no external port out of kontur's state file, no
+// container IP out of `docker inspect`, and no TCP dial to confirm a port
+// is answering. The fake docker here cannot answer an address lookup and
+// nothing is listening anywhere, so getting tools back at all is what
+// proves none of that was consulted.
+func TestKonturSandboxesDockerExecReachesTheGuestWithoutResolvingAnAddress(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30090)
+	dockerLog := filepath.Join(t.TempDir(), "docker-argv.log")
+	writeFakeDockerExecBackend(t, dockerLog, "running", "exit 0")
+
+	k := orchestrator.NewKonturSandboxes(dockerExecTestConfig(stateDir))
+
+	tools, err := k.ToolsFor(context.Background(), "slot-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 4 {
+		t.Fatalf("ToolsFor() returned %d tools, want the same 4 the SSH path returns", len(tools))
+	}
+
+	argv, err := os.ReadFile(dockerLog)
+	if err != nil {
+		t.Fatalf("docker was never invoked at all: %v", err)
+	}
+	if !strings.Contains(string(argv), "exec ") {
+		t.Errorf("docker invoked with %q, want a `docker exec` among the calls", argv)
+	}
+	if strings.Contains(string(argv), "NetworkSettings") {
+		t.Errorf("docker invoked with %q, want no container-address lookup under DockerExec", argv)
+	}
+	if strings.Contains(string(argv), "-netns") {
+		t.Errorf("docker invoked with %q, want it to exec into the VM container, never the netns holder", argv)
+	}
+}
+
+// A tool call has to arrive in the guest through
+// `docker exec <vm container> kontur exec --`, carrying the guest account
+// and the in-container key path -- the same guest, account and key the
+// SSH path uses, reached from inside the VM's own container instead.
+func TestKonturSandboxesDockerExecRunsToolCallsThroughTheVMContainer(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30091)
+	dockerLog := filepath.Join(t.TempDir(), "docker-argv.log")
+	writeFakeDockerExecBackend(t, dockerLog, "running", `echo "hello from the guest"`)
+
+	k := orchestrator.NewKonturSandboxes(dockerExecTestConfig(stateDir))
+	tools, err := k.ToolsFor(context.Background(), "slot-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var runCommand *mcp.Tool
+	for i := range tools {
+		if tools[i].Name == "run_command" {
+			runCommand = &tools[i]
+		}
+	}
+	if runCommand == nil {
+		t.Fatal("ToolsFor() returned no run_command tool")
+	}
+	result := runCommand.Handler(context.Background(), map[string]any{"command": "echo hi"})
+	if result.IsError {
+		t.Fatalf("run_command reported an error: %+v", result)
+	}
+
+	argv, err := os.ReadFile(dockerLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execLine string
+	for _, line := range strings.Split(string(argv), "\n") {
+		if strings.HasPrefix(line, "exec ") && strings.Contains(line, "kontur exec --") {
+			execLine = line
+		}
+	}
+	if execLine == "" {
+		t.Fatalf("docker invoked with %q, want a `docker exec ... kontur exec --` call", argv)
+	}
+	for _, want := range []string{
+		"KONTUR_EXEC_USER=debian",
+		"KONTUR_EXEC_KEY=/images/kontur_id_ed25519",
+		"kontur-vm-grain-test-slot-0 kontur exec --",
+	} {
+		if !strings.Contains(execLine, want) {
+			t.Errorf("docker exec line = %q, want it to carry %q", execLine, want)
+		}
+	}
+}
+
+// The dead-VM-container fast fail waitForSSHPort gives the SSH path has
+// to hold for the docker-exec path too: exec'ing into a container that
+// has already exited will never start answering, so waiting out the full
+// ReadyTimeout finding that out is just a slower way to fail.
+func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30092)
+	writeFakeDockerExecBackend(t, filepath.Join(t.TempDir(), "docker-argv.log"), "exited",
+		`echo "Error response from daemon: container is not running" >&2; exit 1`)
+
+	cfg := dockerExecTestConfig(stateDir)
+	cfg.ReadyPollInterval = 10 * time.Millisecond
+	cfg.ReadyTimeout = 10 * time.Second
+	k := orchestrator.NewKonturSandboxes(cfg)
+
+	started := time.Now()
+	_, err := k.ToolsFor(context.Background(), "slot-0")
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("ToolsFor() against a VM container that already exited: got nil error, want one")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("ToolsFor() took %s to fail, want well under the 10s ReadyTimeout", elapsed)
+	}
+	if !strings.Contains(err.Error(), "exited") {
+		t.Errorf("error = %q, want it to mention the container's \"exited\" status", err)
+	}
+	if !strings.Contains(err.Error(), "kontur-vm-grain-test-slot-0") {
+		t.Errorf("error = %q, want it to name the container", err)
+	}
+}
+
+// DockerExec against any other backend has no container to exec into at
+// all, so it fails with an error saying that rather than one about
+// whatever `docker exec` happens to report for a container that was never
+// created.
+func TestKonturSandboxesDockerExecRejectsANonDockerBackend(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30093)
+
+	cfg := dockerExecTestConfig(stateDir)
+	cfg.Backend = ""
+	k := orchestrator.NewKonturSandboxes(cfg)
+
+	_, err := k.ToolsFor(context.Background(), "slot-0")
+	if err == nil {
+		t.Fatal("ToolsFor() with DockerExec under the static-pod backend: got nil error, want one")
+	}
+	if !strings.Contains(err.Error(), "DockerExec needs Backend") {
+		t.Errorf("error = %q, want it to explain that DockerExec needs the docker backend", err)
+	}
 }
