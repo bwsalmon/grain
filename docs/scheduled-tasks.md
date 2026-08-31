@@ -324,3 +324,35 @@ the same gap schedules already have); no UI affordance yet for the "more
 places to use them" this issue asks for beyond schedules -- creating an
 ordinary task from a template, most plausibly, is left for whenever a
 concrete caller actually needs it.
+
+## Update: templates page split into a list and a sub-page overlay (bwsalmon/agents#545)
+
+`TemplatesList.jsx`'s list-plus-form shape (previous section) put every
+template's full form inline in the row being edited, plus a permanently
+open "New template" form at the foot of the list -- fine when templates
+were new and few, but unlike `TaskList.jsx` it had no search, no sort,
+and nothing to keep a longer list scannable.
+
+`TemplatesList.jsx` is now a flat list of key details only -- name,
+target repo, task title -- with `TaskList.jsx`'s own search-and-sort
+toolbar (`SORTS` here has no `manual` entry: a template has no backlog
+order, so `name` is the default instead). Everything about one
+template -- description, base branch, read-only repos, capabilities,
+auto-merge, and now delete too -- moved into a new `TemplateOverlay.jsx`,
+opened either by the list's own "+ New template" button (blank) or by
+clicking a row (pre-filled), `NewTaskOverlay.jsx`/`DetailOverlay.jsx`'s
+own split between a list of key details and everything about one item
+living behind a click. `TemplateOverlay` stays owned by `TemplatesList`
+itself rather than lifting to `App.jsx` the way task detail/creation
+does -- `SchedulesList.jsx`'s own form state is local for the same
+reason: nothing outside this pane needs to know a template is mid-edit.
+
+No API or model changes: `Template`'s wire shape already carried
+everything the new overlay needed, including `createdAt` for the
+Newest/Oldest sorts.
+
+Tests: `TemplatesList.test.jsx` covers the list (search, sort, empty and
+no-match states) and, since `TemplateOverlay` has no store state of its
+own outside this pane, exercises create/edit/delete/cancel through it
+the same way `SchedulesList.test.jsx` already exercises `ScheduleForm`
+inline rather than as a separate suite.
