@@ -515,6 +515,14 @@ type CreateTaskRequest struct {
 	Repo        string `json:"repo"`
 	Base        string `json:"base"`
 	AutoMerge   bool   `json:"autoMerge"`
+	// Interactive files this task as a live chat rather than a change
+	// handed off to run unattended (bwsalmon/agents#539) -- model.Task's
+	// own field of the same name. It also, regardless of Approved, files
+	// the task already approved and dispatches it ahead of the ordinary
+	// backlog (see CreateTask): a chat nobody has opened yet, sitting as
+	// an unapproved proposal or waiting behind everything already
+	// queued, has nothing to show for itself.
+	Interactive bool `json:"interactive"`
 	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) set model.Task's
 	// own fields of the same name -- a per-task override of the
 	// deployment's default sandbox shape. 0 (the default for both) means
@@ -607,8 +615,12 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	// everything already queued (Store.OrderKeyForNewTask's own doc
 	// comment), not merely to display first -- the default (false) files
 	// it behind everything queued instead, the FIFO backlog grain has
-	// always defaulted to.
-	orderKey, err := c.Store.OrderKeyForNewTask(ctx, newestFirst)
+	// always defaulted to. An interactive task asks for the same
+	// treatment unconditionally, on top of whatever NewestFirst already
+	// says, since somebody is waiting on it right now rather than
+	// checking back on it later (CreateTaskRequest.Interactive's own doc
+	// comment).
+	orderKey, err := c.Store.OrderKeyForNewTask(ctx, newestFirst || req.Interactive)
 	if err != nil {
 		return Task{}, err
 	}
@@ -625,6 +637,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Binding:         model.BindingDirective,
 		Base:            req.Base,
 		AutoMerge:       req.AutoMerge,
+		Interactive:     req.Interactive,
 		SandboxCPUs:     req.SandboxCPUs,
 		SandboxMemoryMB: req.SandboxMemoryMB,
 		Grants:          grants,
@@ -633,7 +646,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		CreatedAt:       &now,
 		OrderKey:        orderKey,
 	}
-	if req.Approved {
+	if req.Approved || req.Interactive {
 		task.Approval = &model.Attribution{Actor: c.Config.Actor}
 		task.ApprovedAt = &now
 	}

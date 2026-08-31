@@ -42,7 +42,7 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 14
+const SchemaVersion = 15
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{
@@ -75,6 +75,7 @@ var Tables = []string{
   ` + "`order_key`" + `             REAL     NOT NULL DEFAULT 0,
   ` + "`sandbox_cpus`" + `          INTEGER  NOT NULL DEFAULT 0,
   ` + "`sandbox_memory_mb`" + `     INTEGER  NOT NULL DEFAULT 0,
+  ` + "`interactive`" + `           INTEGER  NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

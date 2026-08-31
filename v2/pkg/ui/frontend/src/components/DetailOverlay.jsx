@@ -142,6 +142,10 @@ function Declared({ t }) {
   // the JSON response at all (Task's own omitempty).
   if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
   if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
+  // Most tasks are not interactive, so this row only shows up for the
+  // ones that are -- the same "shown only when set" treatment the
+  // sandbox override rows above already get.
+  if (t.interactive) rows.push(["Mode", "Interactive"]);
   return (
     <div className="declared">
       {rows.map(([key, value]) => (
@@ -516,7 +520,10 @@ function Timeline({ t, act, showError }) {
 
   return (
     <div className="timeline">
-      <h3>Timeline</h3>
+      {/* bwsalmon/agents#539: an interactive task's Timeline *is* its
+          chat, so it reads as one instead of as a history of a task
+          nobody is meant to be watching live. */}
+      <h3>{t.interactive ? "Chat" : "Timeline"}</h3>
       {events.length > 0 && (
         <ul className="timeline-list">
           {events.map((e) => (
@@ -559,7 +566,15 @@ function Timeline({ t, act, showError }) {
           this component with fresh props, but never touches the
           textarea's own DOM value, so an unsent draft survives it. */}
       <div className="comment-form">
-        <TextField multiline rows={2} placeholder="Reply..." inputRef={textareaRef} fullWidth size="small" />
+        <TextField
+          multiline
+          rows={2}
+          placeholder={t.interactive ? "Message..." : "Reply..."}
+          inputRef={textareaRef}
+          autoFocus={t.interactive}
+          fullWidth
+          size="small"
+        />
         <AttachmentPicker files={attachments} onChange={setAttachments} />
         <Button variant="outlined" onClick={send}>Comment</Button>
       </div>

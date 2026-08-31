@@ -39,6 +39,7 @@ describe("NewTaskOverlay", () => {
         dependsOn: [],
         reads: [],
         approved: false,
+        interactive: false,
         attachments: [],
       }),
     });
@@ -120,6 +121,28 @@ describe("NewTaskOverlay", () => {
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
     expect(payload.repo).toBe("acme/other");
+  });
+
+  // bwsalmon/agents#539: an interactive task always queues immediately
+  // (no "Queue immediately" checkbox left to check), and its creator is
+  // taken straight to its chat rather than back to the task list.
+  it("files an interactive task as approved and opens its chat once created", async () => {
+    api.mockResolvedValueOnce({ id: "42" });
+    const onOpenTask = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} onOpenTask={onOpenTask} showError={() => {}} />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Talk this through");
+    await user.click(screen.getByLabelText(/Interactive session/));
+    expect(screen.queryByLabelText(/Queue immediately/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.interactive).toBe(true);
+    expect(payload.approved).toBe(true);
+    expect(onOpenTask).toHaveBeenCalledWith("42");
   });
 
   it("reports the error and leaves the overlay open when the request fails", async () => {

@@ -337,6 +337,7 @@ export default function App() {
           defaultRepo={newTaskRepo !== null ? newTaskRepo : repoFilter}
           onClose={() => setShowNewTask(false)}
           onCreated={refreshList}
+          onOpenTask={openTask}
           showError={showError}
         />
       )}

@@ -8,7 +8,7 @@ import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
-export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, showError }) {
+export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, onOpenTask, showError }) {
   const formRef = useRef(null);
   const repoOptions = knownRepos(config, tasks);
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
@@ -19,6 +19,12 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // attachments is File objects, not yet read -- AttachmentPicker's own
   // doc comment on why that read is deferred to submit.
   const [attachments, setAttachments] = useState([]);
+  // interactive is lifted to state, unlike autoMerge/approved below,
+  // because whether "Queue immediately" even makes sense to show depends
+  // on its live value (bwsalmon/agents#539: an interactive task always
+  // queues at once, so that checkbox would just be a second control for
+  // the same fact).
+  const [interactive, setInteractive] = useState(false);
 
   const addDependency = (t) => {
     setDependsOn((prev) => (prev.some((p) => p.id === t.id) ? prev : [...prev, t]));
@@ -44,17 +50,30 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       capabilities,
       dependsOn: dependsOn.map((t) => t.id),
       reads,
-      approved: form.elements.approved.checked,
+      // form.elements.approved does not exist once interactive has
+      // hidden it -- interactive queues immediately regardless (see the
+      // checkbox below), so there is nothing to read from the form in
+      // that case anyway.
+      approved: interactive || form.elements.approved.checked,
+      interactive,
       attachments: await Promise.all(attachments.map((f) => fileToAttachment(f))),
     };
     try {
-      await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
+      const task = await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
       form.reset();
       setDependsOn([]);
       setCapabilities([]);
       setAttachments([]);
+      setInteractive(false);
       onClose();
       await onCreated();
+      // An interactive task's whole point is the chat, not the task
+      // list it was just filed from -- open it straight away rather
+      // than making whoever asked for a live conversation go find it
+      // (bwsalmon/agents#539).
+      if (payload.interactive) {
+        onOpenTask(task.id);
+      }
     } catch (err) {
       showError(err);
     }
@@ -67,6 +86,11 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
         <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
         <AttachmentPicker files={attachments} onChange={setAttachments} />
+        <FormControlLabel
+          control={<Checkbox checked={interactive} onChange={(e) => setInteractive(e.target.checked)} />}
+          label="Interactive session (open a live chat here instead of running in the background)"
+          sx={{ display: "flex", mt: 1 }}
+        />
         <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
             Target repo <span className="hint">owner/name, optional</span>
@@ -164,11 +188,17 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             placeholder="Search tasks to depend on…"
           />
         </fieldset>
-        <FormControlLabel
-          control={<Checkbox name="approved" />}
-          label="Queue immediately (unchecked files it as a proposal, needing approval)"
-          sx={{ display: "flex", mt: 1 }}
-        />
+        {interactive ? (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+            Interactive sessions always queue immediately.
+          </Typography>
+        ) : (
+          <FormControlLabel
+            control={<Checkbox name="approved" />}
+            label="Queue immediately (unchecked files it as a proposal, needing approval)"
+            sx={{ display: "flex", mt: 1 }}
+          />
+        )}
         <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
           <Button type="submit" variant="contained">Create task</Button>
         </Stack>
