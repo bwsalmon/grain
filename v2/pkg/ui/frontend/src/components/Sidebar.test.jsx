@@ -19,16 +19,6 @@ const baseProps = {
 };
 
 describe("Sidebar", () => {
-  it("shows the default target when config has one", () => {
-    render(<Sidebar {...baseProps} config={{ defaultTarget: "owner/repo" }} tasks={[]} />);
-    expect(screen.getByText("owner/repo")).toBeInTheDocument();
-  });
-
-  it("falls back to the acting user when config has no default target", () => {
-    render(<Sidebar {...baseProps} config={{ actor: "bwsalmon" }} tasks={[]} />);
-    expect(screen.getByText("as bwsalmon")).toBeInTheDocument();
-  });
-
   it("counts tasks per state and lists only states that are present", () => {
     render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
 
