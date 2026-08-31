@@ -1,5 +1,6 @@
 import { Box, Button, Divider, List, ListItemButton, ListItemText, Typography } from "@mui/material";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
+import GrainMark from "./GrainMark.jsx";
 
 const SIDEBAR_WIDTH = 232;
 
@@ -69,8 +70,14 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         borderColor: "divider",
       }}
     >
+      {/* The mark beside the wordmark is the one place the whole
+          deployment's state shows as something other than a number: it
+          sits still while nothing is running and its grains scatter and
+          re-form while agents are working, so a glance at the sidebar
+          says whether the machine is busy without reading the counts
+          below it. See docs/brand.md. */}
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.9, px: 0.5 }}>
-        <span className="brand-mark" />
+        <GrainMark size={26} animated={(counts.running || 0) > 0} />
         <Typography variant="subtitle1" fontWeight={600} letterSpacing="-0.01em" component="h1" sx={{ m: 0 }}>
           grain
         </Typography>

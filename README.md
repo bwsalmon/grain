@@ -155,6 +155,9 @@ afterwards, unlike a question — there is no reply to wait for.
   whether to rebuild on incus (a third host-adapter driver) and beads (a
   graph issue tracker): what each buys, what incus costs the macOS plan,
   and why beads' source of truth decides it.
+- **[`docs/brand.md`](docs/brand.md)** — the mark: what the figure is,
+  which one is fixed and which one animates, and the colours the UI is
+  built out of.
 - **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
 - **[`docs/next-session.md`](docs/next-session.md)** — what is left before
   a first real run, in the order worth doing it. Start here.

@@ -20,3 +20,13 @@ afterEach(cleanup);
 afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
+
+// jsdom ships no canvas: HTMLCanvasElement.prototype.getContext is a
+// not-implemented stub that logs through the virtual console rather than
+// returning anything useful. GrainMark (the brand mark, which paints its
+// animated form on a canvas) already treats a context it cannot get as
+// "render the still instead", so making that the explicit, quiet default
+// here keeps every test that happens to mount a Sidebar off jsdom's
+// error path. A test that wants the animated path stubs in its own
+// context object.
+HTMLCanvasElement.prototype.getContext = () => null;

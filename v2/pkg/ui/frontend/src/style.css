@@ -5,37 +5,49 @@
    family as Plane's own UI" rather than lifted from its (private,
    generated) design tokens -- this ships with no build step beyond Vite,
    so the tokens live here as plain custom properties instead of an
-   imported theme. */
+   imported theme.
+
+   The accent and the greys are the brand's, not Plane's: the mark is
+   sand on a vibrating plate, so the accent is the grain colour itself --
+   bronze on white, wheat on black (docs/brand.md) -- and the neutrals
+   are warmed to sit under it rather than the blue-greys that went with
+   the blue accent this replaced. src/theme.js carries the same values
+   for the MUI primitives; the two are edited together. */
 :root {
   color-scheme: light dark;
 
-  --canvas: #f6f6f8;
+  --canvas: #f7f6f3;
   --surface: #ffffff;
-  --surface-hover: #f1f1f4;
-  --surface-active: #eef1ff;
-  --border: #e5e5ea;
-  --border-strong: #d3d4db;
+  --surface-hover: #f1efea;
+  --surface-active: #f6eeda;
+  --border: #e6e3dc;
+  --border-strong: #d5d1c7;
 
-  --text: #23242a;
-  --text-secondary: #6d6f78;
-  --text-tertiary: #9a9ba4;
-  --text-placeholder: #b3b4bd;
+  --text: #24221d;
+  --text-secondary: #6e6a60;
+  --text-tertiary: #9a9588;
+  --text-placeholder: #b5b0a3;
 
-  --accent: #3f76ff;
-  --accent-hover: #3163e0;
+  /* Bronze, not the wheat gold the dark theme uses: the gold washes out
+     on white, and this has to carry white button text at 5:1. */
+  --accent: #8a6a2e;
+  --accent-hover: #6d5324;
   --on-accent: #ffffff;
-  --accent-subtle: #eaf0ff;
+  --accent-subtle: #f6eeda;
 
   --danger: #d0453a;
   --danger-subtle: #fbebe9;
 
-  --state-proposed: #9a9ba4;
-  --state-queued: #6d6f78;
-  --state-running: #f0a020;
+  --state-proposed: #9a9588;
+  --state-queued: #6e6a60;
+  /* Running is the accent itself rather than a colour of its own: it is
+     the state the animated mark in the sidebar is reporting, and the two
+     should read as the same signal. */
+  --state-running: var(--accent);
   --state-awaiting: #a855f7;
   --state-failed: var(--danger);
   --state-completed: #1a9c53;
-  --state-closed: #9a9ba4;
+  --state-closed: #9a9588;
   /* pr-merged is GitHub's own colour for a merged pull request -- the
      one timeline dot (Timeline's own "PR merged" event, bwsalmon/
      agents#493) that state-completed's green would otherwise collide
@@ -43,8 +55,8 @@
      its own instead. */
   --pr-merged: #8250df;
 
-  --shadow-panel: 0 16px 40px rgba(20, 21, 26, 0.16), 0 2px 8px rgba(20, 21, 26, 0.08);
-  --shadow-toast: 0 10px 28px rgba(20, 21, 26, 0.28);
+  --shadow-panel: 0 16px 40px rgba(26, 24, 19, 0.16), 0 2px 8px rgba(26, 24, 19, 0.08);
+  --shadow-toast: 0 10px 28px rgba(26, 24, 19, 0.28);
 }
 
 /* AppThemeProvider sets data-theme on <html> to "light" or "dark" --
@@ -61,33 +73,34 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --canvas: #101115;
-  --surface: #18191e;
-  --surface-hover: #212228;
-  --surface-active: #1c2740;
-  --border: #2b2c33;
-  --border-strong: #3a3b43;
+  --canvas: #0f1013;
+  --surface: #14161a;
+  --surface-hover: #1c1f24;
+  --surface-active: #2a2314;
+  --border: #292b31;
+  --border-strong: #3a3d44;
 
-  --text: #e8e8ec;
-  --text-secondary: #9799a3;
-  --text-tertiary: #6d6f78;
-  --text-placeholder: #55565f;
+  --text: #e9e7e1;
+  --text-secondary: #9b988f;
+  --text-tertiary: #6f6c65;
+  --text-placeholder: #57544e;
 
-  --accent: #6f95ff;
-  --accent-hover: #85a5ff;
-  --on-accent: #0c1730;
-  --accent-subtle: #1a2338;
+  /* The grain colour, on the two grounds the mark was drawn against. */
+  --accent: #d9a441;
+  --accent-hover: #e8b962;
+  --on-accent: #17130a;
+  --accent-subtle: #2a2314;
 
   --danger: #ec7469;
   --danger-subtle: #3a201e;
 
-  --state-proposed: #83848d;
-  --state-queued: #9799a3;
-  --state-running: #f0ad3f;
+  --state-proposed: #85827b;
+  --state-queued: #9b988f;
+  --state-running: var(--accent);
   --state-awaiting: #c084fc;
   --state-failed: var(--danger);
   --state-completed: #3ec573;
-  --state-closed: #83848d;
+  --state-closed: #85827b;
   --pr-merged: #a371f7;
 
   --shadow-panel: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -126,15 +139,10 @@ body {
 
 /* Sidebar's own layout (width, padding, nav rows) now comes from
    AppThemeProvider's theme plus MUI primitives (Box, List,
-   ListItemButton) rather than from rules here -- .brand-mark is the one
-   piece with no MUI equivalent worth reaching for. */
-.brand-mark {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  background: var(--accent);
-  flex: none;
-}
+   ListItemButton) rather than from rules here. The plain accent square
+   that used to stand in for a logo beside the wordmark is now the real
+   mark -- see components/GrainMark.jsx, which sizes and paints itself
+   and so needs no rule here either. */
 
 .main-column {
   flex: 1;

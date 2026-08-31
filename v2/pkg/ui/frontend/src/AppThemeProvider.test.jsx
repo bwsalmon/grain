@@ -22,6 +22,7 @@ describe("AppThemeProvider", () => {
 
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
+    document.getElementById("favicon")?.remove();
   });
 
   it("resolves auto to the OS preference and tags <html> with it", () => {
@@ -45,5 +46,22 @@ describe("AppThemeProvider", () => {
     render(<AppThemeProvider><div>content</div></AppThemeProvider>);
 
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  // index.html ships the light mark, since it has to name something
+  // before any of this has run; a reader in dark mode should end up with
+  // the wheat one in the tab rather than the bronze one drawn for a
+  // light ground.
+  it("points the tab icon at the mark drawn for the resolved theme", () => {
+    const link = document.createElement("link");
+    link.id = "favicon";
+    link.rel = "icon";
+    link.href = "/grain-mark-light.png";
+    document.head.appendChild(link);
+
+    stubMatchMedia(true);
+    render(<AppThemeProvider><div>content</div></AppThemeProvider>);
+
+    expect(document.getElementById("favicon").getAttribute("href")).toBe("/grain-mark-dark.png");
   });
 });
