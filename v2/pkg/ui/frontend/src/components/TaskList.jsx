@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Checkbox, Chip, FormControl, FormControlLabel, InputLabel, MenuItem, Select, TextField, Typography } from "@mui/material";
+import { Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
+import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 
 const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
 
@@ -125,30 +126,11 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 
   return (
     <main>
-      <div className="content-header">
-        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>{title}</Typography>
-        <span className="count">{visibleIds.length}</span>
-      </div>
+      <ListHeader title={title} count={visibleIds.length} />
       {tasks.length > 0 && (
-        <div className="task-list-toolbar">
-          <TextField
-            size="small"
-            placeholder="Search tasks…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            sx={{ flex: 1, maxWidth: 320 }}
-          />
-          <FormControl size="small" sx={{ minWidth: 170 }}>
-            <InputLabel id="task-sort-label">Sort</InputLabel>
-            <Select
-              labelId="task-sort-label"
-              label="Sort"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-            >
-              {Object.entries(SORTS).map(([id, { label }]) => <MenuItem key={id} value={id}>{label}</MenuItem>)}
-            </Select>
-          </FormControl>
+        <ListToolbar>
+          <ListSearchField placeholder="Search tasks…" value={search} onChange={setSearch} />
+          <ListSortSelect id="task-sort" value={sortBy} onChange={setSortBy} options={SORTS} />
           {closedCount > 0 && stateFilter !== "closed" && (
             <FormControlLabel
               control={(
@@ -161,7 +143,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
               label="Show closed tasks"
             />
           )}
-        </div>
+        </ListToolbar>
       )}
       {visibleIds.length > 0 && (
         <div className="select-all">
@@ -214,13 +196,13 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
         )}
       </ul>
       {topLevel.length === 0 && (
-        <p className="empty">
+        <ListEmpty>
           {q
             ? "No tasks match your search."
             : !showClosed && closedCount > 0 && stateFilter !== "closed"
               ? "No tasks in this state (closed tasks are hidden)."
               : "No tasks in this state."}
-        </p>
+        </ListEmpty>
       )}
     </main>
   );
