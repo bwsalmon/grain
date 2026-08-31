@@ -107,6 +107,20 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 	netnsName := netnsContainerName(spec.Name)
 	vmName := vmContainerName(spec.Name)
 
+	// A previous Create for this VM name may have died partway through
+	// -- e.g. the daemon restarting between "docker run"ning these
+	// containers and konturctl persisting that success to local state --
+	// leaving one or both containers running under the names this
+	// Create is about to reuse. Force-remove any such leftovers first so
+	// Create is idempotent the same way Delete already is, rather than
+	// failing outright on docker's "name already in use" error.
+	if err := d.remove(ctx, vmName); err != nil {
+		return fmt.Errorf("removing stale VM container %s: %w", vmName, err)
+	}
+	if err := d.remove(ctx, netnsName); err != nil {
+		return fmt.Errorf("removing stale network namespace holder %s: %w", netnsName, err)
+	}
+
 	if err := d.run(ctx, io.Discard, "run", "-d",
 		"--name", netnsName,
 		"--label", "kontur.dev/vm="+spec.Name,

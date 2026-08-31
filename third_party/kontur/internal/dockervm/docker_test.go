@@ -94,11 +94,18 @@ func TestCreate_RunsNetnsHolderNetshimThenVM(t *testing.T) {
 	}
 
 	got := calls()
-	if len(got) != 3 {
-		t.Fatalf("Create() issued %d docker calls, want 3:\n%v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("Create() issued %d docker calls, want 5:\n%v", len(got), got)
 	}
 
-	netnsCall, netshimCall, vmCall := got[0], got[1], got[2]
+	staleVMRm, staleNetnsRm, netnsCall, netshimCall, vmCall := got[0], got[1], got[2], got[3], got[4]
+
+	if staleVMRm[0] != "rm" || !containsArg(staleVMRm, "kontur-vm-web") {
+		t.Errorf("first call = %v, want `docker rm -f kontur-vm-web` clearing any stale container", staleVMRm)
+	}
+	if staleNetnsRm[0] != "rm" || !containsArg(staleNetnsRm, "kontur-vm-web-netns") {
+		t.Errorf("second call = %v, want `docker rm -f kontur-vm-web-netns` clearing any stale container", staleNetnsRm)
+	}
 
 	if netnsCall[0] != "run" || !containsArg(netnsCall, "kontur-vm-web-netns") || !containsArg(netnsCall, "sleep") {
 		t.Errorf("first call = %v, want a `docker run` starting the kontur-vm-web-netns holder", netnsCall)
@@ -138,7 +145,7 @@ func TestCreate_OmitsUnsetOptionalEnv(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	vmCall := calls()[2]
+	vmCall := calls()[4]
 	for _, unwanted := range []string{"CHV_KERNEL", "CHV_INITRAMFS", "CHV_CMDLINE"} {
 		for _, a := range vmCall {
 			if strings.HasPrefix(a, unwanted+"=") {
@@ -161,7 +168,7 @@ func TestCreate_WritableDiskMountsDiskHostPathReadWrite(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	vmCall := calls()[2]
+	vmCall := calls()[4]
 	if !containsArg(vmCall, "-v") || !containsArg(vmCall, "/var/lib/kontur/vm-disks/web:/disk") {
 		t.Errorf("VM call = %v, want a read-write /disk mount of the writable disk dir", vmCall)
 	}
@@ -177,7 +184,7 @@ func TestCreate_ReadOnlyDiskHasNoDiskMount(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	vmCall := calls()[2]
+	vmCall := calls()[4]
 	for _, a := range vmCall {
 		if strings.HasSuffix(a, ":/disk") {
 			t.Errorf("VM call = %v, unexpectedly contains a /disk mount for a read-only disk", vmCall)
@@ -198,12 +205,31 @@ func TestCreate_NetshimFailureRemovesNetnsHolder(t *testing.T) {
 	}
 
 	got := calls()
-	if len(got) != 3 {
-		t.Fatalf("Create() issued %d docker calls, want 3 (holder, failing netshim, cleanup rm):\n%v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("Create() issued %d docker calls, want 5 (2 stale-cleanup rm, holder, failing netshim, cleanup rm):\n%v", len(got), got)
 	}
-	cleanup := got[2]
+	cleanup := got[4]
 	if cleanup[0] != "rm" || !containsArg(cleanup, "kontur-vm-web-netns") {
 		t.Errorf("cleanup call = %v, want `docker rm -f` of the netns holder", cleanup)
+	}
+}
+
+func TestCreate_RemovesStaleContainersBeforeCreating(t *testing.T) {
+	d, calls := testDocker(t)
+
+	if err := Create(context.Background(), d, testSpec(), &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	got := calls()
+	if len(got) < 2 {
+		t.Fatalf("Create() issued %d docker calls, want at least 2 leading stale-cleanup calls:\n%v", len(got), got)
+	}
+	if got[0][0] != "rm" || !containsArg(got[0], "kontur-vm-web") {
+		t.Errorf("first call = %v, want `docker rm -f kontur-vm-web` (clearing a stale VM container left by an interrupted prior Create)", got[0])
+	}
+	if got[1][0] != "rm" || !containsArg(got[1], "kontur-vm-web-netns") {
+		t.Errorf("second call = %v, want `docker rm -f kontur-vm-web-netns` (clearing a stale netns holder left by an interrupted prior Create)", got[1])
 	}
 }
 
