@@ -174,8 +174,10 @@ func sortByName(specs []VMSpec) {
 }
 
 // Validate checks that spec is complete and internally consistent, filling
-// in a default Cmdline (derived from IP/BridgeCIDR) if a kernel was given
-// without one.
+// in a default Cmdline (derived from IP/BridgeCIDR) unless Firmware is set
+// -- Cmdline only applies to direct kernel boot, which is still what
+// happens even with Kernel left empty (kontur run's own CHV_KERNEL
+// default then applies, see internal/config's defaultKernel).
 func (s *VMSpec) Validate() error {
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
@@ -233,7 +235,7 @@ func (s *VMSpec) Validate() error {
 		return fmt.Errorf("backend must be %q or %q, got %q", BackendStaticPod, BackendDocker, s.Backend)
 	}
 	s.CmdlineAuto = false
-	if s.Kernel != "" && s.Cmdline == "" {
+	if s.Firmware == "" && s.Cmdline == "" {
 		root := "rw"
 		if s.DiskReadOnly {
 			root = "ro"

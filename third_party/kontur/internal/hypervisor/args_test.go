@@ -73,6 +73,30 @@ func TestBuildArgs_FirmwareBoot(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_CPUHotplugAddsMaxVcpus(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CPUs = 2
+	cfg.CPUsMax = 8
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--cpus"); got != "boot=2,max=8" {
+		t.Errorf("--cpus = %q, want boot=2,max=8", got)
+	}
+}
+
+func TestBuildArgs_CPUHotplugWithNoGrowthRoomOmitsMax(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CPUs = 2
+	cfg.CPUsMax = 2
+
+	args := BuildArgs(cfg)
+
+	if got := argValue(t, args, "--cpus"); got != "boot=2" {
+		t.Errorf("--cpus = %q, want boot=2 (no max= when there's no room to grow into)", got)
+	}
+}
+
 func TestBuildArgs_MemoryHotplugAddsVirtioMemDevice(t *testing.T) {
 	cfg := baseConfig()
 	cfg.MemoryMB = 256

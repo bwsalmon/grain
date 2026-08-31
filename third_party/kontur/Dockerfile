@@ -4,11 +4,24 @@
 # cloud-hypervisor VM as PID 1 of a container ("run", the default) or sets
 # up pod-local networking for a group of such VMs as an init container
 # ("netshim"), plus the cloud-hypervisor binary itself and a minimal guest
-# disk image usable out of the box. See README.md and
+# disk image *and* kernel, both usable out of the box -- the image is
+# self-contained: nothing needs to be supplied from outside it (a
+# node-local cache, a hostPath, an init container) to boot a VM, in
+# either Docker or Kubernetes. See README.md and
 # deploy/guest-image/README.md.
 
 ARG GO_VERSION=1.22
 ARG CLOUD_HYPERVISOR_VERSION=v53.0
+# KONTUR_KERNEL_VERSION pins the guest kernel baked into the final kontur
+# image (see the "fetch-kernel" stage below) -- a release of
+# cloud-hypervisor/linux, the same known-good, PVH-entry, virtio-pci/
+# virtio-blk/virtio-net-enabled kernel already used to validate direct
+# kernel boot elsewhere in this repo (see the top-level README's
+# "Validated on a real VM with nested virtualization" and
+# deploy/k8s/gke-pod-example.yaml's now-removed fetch-kernel init
+# container), just baked in at build time instead of fetched at pod
+# start.
+ARG KONTUR_KERNEL_VERSION=ch-release-v6.16.9-20260508
 # GUEST_DISTRO selects the guest disk image baked into the final kontur
 # image (not the kontur image's own base, which is always Alpine -- see
 # the "final" stage below): "debian" (the default, via debootstrap) or
@@ -89,6 +102,37 @@ RUN set -eux; \
       "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CLOUD_HYPERVISOR_VERSION}/${asset}"; \
     echo "${sha256}  cloud-hypervisor" | sha256sum -c -; \
     chmod +x cloud-hypervisor
+
+# The guest kernel baked into the final image at
+# /var/lib/kontur/guest/vmlinux (see the "final" stage below), so a
+# direct-kernel-boot VM works out of the box the same way the bundled
+# guest disk image already does -- see internal/config's defaultKernel.
+# Same trust model as fetch-chv above: cloud-hypervisor/linux publishes
+# release binaries but no published checksum file, so the expected
+# sha256 for each architecture is pinned here and verified at build
+# time. amd64 gets the ELF vmlinux build (PVH entry point, what
+# cloud-hypervisor's x86_64 --kernel wants); arm64 gets the raw Image
+# build (cloud-hypervisor's aarch64 --kernel wants a PE-format Image,
+# not vmlinux) -- both are renamed to the same "vmlinux" output name so
+# the final stage's COPY, and CHV_KERNEL's default, don't need to know
+# which architecture produced it.
+FROM debian:bookworm-slim AS fetch-kernel
+ARG KONTUR_KERNEL_VERSION
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /out
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) asset="vmlinux-x86_64"; \
+             sha256="9d3570b47d5abb069ca00edfbfcef4c68306a9c3d078a01f10082b258f1001b8" ;; \
+      arm64) asset="Image-arm64"; \
+             sha256="69d1b1235381ec50f1b45cf771a7dff4a9013d452833ab34682d6283e2114010" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o vmlinux \
+      "https://github.com/cloud-hypervisor/linux/releases/download/${KONTUR_KERNEL_VERSION}/${asset}"; \
+    echo "${sha256}  vmlinux" | sha256sum -c -
 
 # Builds the Debian variant of the guest rootfs baked into the final
 # kontur image: a minimal Debian rootfs with sshd, via `debootstrap`. See
@@ -249,6 +293,12 @@ COPY --from=build /out/kontur /usr/local/bin/kontur
 # it just also answers to "sh"/"bash" the way one would.
 COPY --from=build /out/shims/ /
 COPY --from=guest-image /disk.img /var/lib/kontur/guest/disk.img
+# See the "fetch-kernel" stage above and internal/config's defaultKernel:
+# a direct-kernel-boot VM works out of the box, the same way the guest
+# disk image above does, without anything needing to be supplied from
+# outside the image (a node-local kernel cache, a hostPath, or an
+# emptyDir populated by a fetch-at-pod-start init container).
+COPY --from=fetch-kernel /out/vmlinux /var/lib/kontur/guest/vmlinux
 # internal/guestexec's default KONTUR_EXEC_KEY -- see the exec-keypair
 # stage above for why this is generated at build time rather than passed
 # in, and deploy/guest-image/README.md for the matching public half this

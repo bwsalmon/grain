@@ -86,6 +86,30 @@ func (c *APIClient) Resize(ctx context.Context, desiredRAMBytes uint64) error {
 	}{DesiredRAM: desiredRAMBytes})
 }
 
+// ResizeCPUs asks cloud-hypervisor to live-resize the guest's vCPU count
+// to desiredVCPUs, via the ACPI CPU hotplug headroom configured at boot
+// (see internal/config's CHV_CPUS_MAX and hypervisor.BuildArgs/cpusArg).
+// desiredVCPUs must fall between 1 and the VM's ceiling (CHV_CPUS_MAX,
+// which defaults to CHV_CPUS itself, i.e. no headroom); cloud-hypervisor
+// rejects the request otherwise.
+//
+// Both directions are asynchronous from the guest's point of view, same
+// as memory hotplug -- but unlike virtio-mem, newly added vCPUs are not
+// auto-onlined: a guest kernel must online them itself (e.g. `echo 1 >
+// /sys/devices/system/cpu/cpuN/online`) before it will actually use
+// them. Removal is guest-driven too (no online/offline command needed),
+// but only takes effect once the guest acknowledges the ACPI eject; a
+// second resize call made before that finishes is rejected by
+// cloud-hypervisor with 429 ("a cpu removal is still pending"), which
+// surfaces here as a plain error -- wait for one shrink to complete
+// rather than retrying blindly. See the README's "CPU hotplug" section
+// for how this interacts with Snapshot/suspend.
+func (c *APIClient) ResizeCPUs(ctx context.Context, desiredVCPUs uint32) error {
+	return c.putJSON(ctx, "/api/v1/vm.resize", struct {
+		DesiredVCPUs uint32 `json:"desired_vcpus"`
+	}{DesiredVCPUs: desiredVCPUs})
+}
+
 // WaitReady polls the API socket until it accepts connections or ctx is
 // done. cloud-hypervisor creates the socket very early in startup, but the
 // runtime may race it right after Start returns.

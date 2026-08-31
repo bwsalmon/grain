@@ -309,12 +309,13 @@ the single largest time sink in validating this whole pipeline, since a
 refused connection looks identical whether the guest hasn't finished
 booting yet or is listening on a port nothing is forwarded to.
 
-**One local patch to the vendored `third_party/kontur` copy is required
+**Local patches to the vendored `third_party/kontur` copy are required
 for the `-disk` path above to actually boot** -- see
-`third_party/kontur/VENDORED.md` for what it is and why (`image_type=raw`
-on every disk device); a deployment building its own `kontur`/`konturctl`
-from a *fresh*, unpatched checkout of bwsalmon/kontur needs the same
-one-line change until it lands upstream.
+`third_party/kontur/VENDORED.md`'s "Local patches" section for what they
+are and why (`internal/hypervisor/args.go`'s `image_type=raw` on every
+raw disk device, chiefly); a deployment building its own
+`kontur`/`konturctl` from a *fresh*, unpatched checkout of bwsalmon/kontur
+needs the same changes until they land upstream.
 
 `orchestrator.KonturConfig.CreateArgs` (bwsalmon/agents#262) is the
 passthrough a deployment sets this through -- `grain daemon` constructs a

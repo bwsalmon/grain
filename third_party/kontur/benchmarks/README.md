@@ -123,8 +123,9 @@ solely for this benchmark, both torn down afterward.
   if per-pod networking setup time turns out to matter in practice.
 - The image built by this benchmark's Dockerfile has grown substantially
   since the ~3.6s cold-pull number above was measured: it now bundles a
-  full guest disk image (see `../deploy/guest-image/README.md`). Re-measure
-  the cold-pull case if that number matters.
+  full guest disk image (see `../deploy/guest-image/README.md`) and a
+  guest kernel (see the main README's "Guest disk image and kernel").
+  Re-measure the cold-pull case if that number matters.
 - Only tested with `/dev/kvm` via `privileged: true` + hostPath, not the
   `kubevirt/kubernetes-device-plugins` route the main README recommends
   for production; the device plugin shouldn't change VM boot time itself

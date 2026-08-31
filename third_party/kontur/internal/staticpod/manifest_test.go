@@ -65,10 +65,19 @@ func TestRender_OmitsUnsetOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	for _, key := range []string{"CHV_KERNEL", "CHV_INITRAMFS", "CHV_FIRMWARE", "CHV_CMDLINE"} {
+	// CHV_KERNEL/CHV_INITRAMFS/CHV_FIRMWARE stay omitted: kontur run's own
+	// baked-in CHV_KERNEL default takes over. CHV_CMDLINE is still
+	// rendered, though, since Validate auto-derives it whenever Firmware
+	// is unset (see TestValidate_Minimal) -- direct kernel boot still
+	// applies even with no explicit Kernel, so the guest still needs its
+	// netshim-matching "ip=" boot parameter.
+	for _, key := range []string{"CHV_KERNEL", "CHV_INITRAMFS", "CHV_FIRMWARE"} {
 		if strings.Contains(out, key) {
 			t.Errorf("manifest unexpectedly contains %s when unset:\n%s", key, out)
 		}
+	}
+	if !strings.Contains(out, "CHV_CMDLINE") {
+		t.Errorf("manifest missing auto-derived CHV_CMDLINE:\n%s", out)
 	}
 }
 

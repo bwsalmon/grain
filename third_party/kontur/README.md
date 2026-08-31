@@ -1,14 +1,17 @@
 # kontur
 
-`kontur` is a single OCI image and Go binary that boots a single
-[cloud-hypervisor](https://www.cloudhypervisor.org/) VM as its entrypoint,
-configured entirely from environment variables so it can be driven
-directly from a Kubernetes pod spec. It's meant for workloads where the
-VM's disk image (and kernel, if using direct kernel boot) are already
-present on the node, or where the reference guest image baked into the
-`kontur` image itself is good enough -- this runtime never fetches images
-at boot time, so there is nothing on the startup path except launching
-the VMM.
+`kontur` is a single, self-contained OCI image and Go binary that boots a
+single [cloud-hypervisor](https://www.cloudhypervisor.org/) VM as its
+entrypoint, configured entirely from environment variables so it can be
+driven directly from a Kubernetes pod spec. The image bakes in everything
+a VM needs to boot -- a reference guest disk image and a matching guest
+kernel (see "Guest disk image and kernel" below) -- so `docker run
+kontur` or a bare Kubernetes pod using it, with no other flags or
+volumes, already boots a working VM; point `CHV_DISK_IMAGE`/`CHV_KERNEL`
+(or `CHV_FIRMWARE`) at a node-local image cache, hostPath, or PVC instead
+when the built-in reference guest isn't the guest you actually want to
+run. This runtime never fetches images at boot time, so there is nothing
+on the startup path except launching the VMM.
 
 The same image also sets up the pod-local networking that lets several
 such VMs share one pod's IP, as an init container. See "How it works"
@@ -40,10 +43,11 @@ The image contains three things:
     already-running `sshd`, rather than in this otherwise-empty
     container -- meant to be `kubectl exec`'s own command, so that ends
     up in the guest too; see "Execing into a VM" below.
-  - **`resize`** live-resizes an already-running VM's memory via
-    cloud-hypervisor's own API, within the range `run` configured at boot
-    -- also meant to be `kubectl exec`'s own command (it needs to reach
-    the API socket inside this container); see "Memory hotplug" below.
+  - **`resize`** live-resizes an already-running VM's memory and/or
+    vCPU count via cloud-hypervisor's own API, within the ranges `run`
+    configured at boot -- also meant to be `kubectl exec`'s own command
+    (it needs to reach the API socket inside this container); see
+    "Memory hotplug" and "CPU hotplug" below.
   - **`sleep`** just blocks until killed. It exists purely so
     `-backend docker` (see "Operating a node" below) can hold a network
     namespace open with the `kontur` image itself, without needing a
@@ -56,9 +60,11 @@ The image contains three things:
   (see "Building" below).
 - `cloud-hypervisor`: the actual VMM, fetched from the upstream static
   release build and pinned by checksum in the `Dockerfile`.
-- A reference guest disk image (see "Guest disk image" below): a minimal
-  Debian system with `sshd`, baked into the image so a VM container works
-  out of the box without a separately-managed disk image.
+- A reference guest disk image and a matching guest kernel (see "Guest
+  disk image and kernel" below): a minimal Debian system with `sshd`,
+  plus a kernel that can boot it via cloud-hypervisor's direct-kernel-boot
+  path, both baked into the image so a VM container works out of the box
+  without a separately-managed disk image or kernel.
 
 A VM pod is one `netshim`-mode init container plus one or more `run`-mode
 containers, all using the *same* `kontur` image -- just invoked with
@@ -73,14 +79,17 @@ health checks -- not for driving the boot.
 
 ### Fast startup
 
-- No image fetching: `CHV_DISK_IMAGE` (and `CHV_KERNEL`/`CHV_FIRMWARE`)
-  are expected to already be on the local filesystem, e.g. via a hostPath
-  or a PVC backed by a node-local image cache, or baked into the `kontur`
-  image itself (see "Guest disk image").
-- Direct kernel boot (`CHV_KERNEL`) skips firmware/UEFI entirely when the
-  guest kernel is known ahead of time; only fall back to `CHV_FIRMWARE`
-  (e.g. an OVMF/CLOUDHV build) for guests that need to run their own
-  bootloader.
+- No image fetching: `CHV_DISK_IMAGE` and `CHV_KERNEL`/`CHV_FIRMWARE` are
+  expected to already be on the local filesystem, e.g. via a hostPath or a
+  PVC backed by a node-local image cache -- or, left unset, default to the
+  reference guest disk image and kernel already baked into the `kontur`
+  image itself (see "Guest disk image and kernel"), so there is nothing to
+  provision out of band just to get a VM running.
+- Direct kernel boot (`CHV_KERNEL`, the default) skips firmware/UEFI
+  entirely, since the guest kernel is known ahead of time; only fall back
+  to `CHV_FIRMWARE` (e.g. an OVMF/CLOUDHV build) for guests that need to
+  run their own bootloader -- the bundled reference guest has no
+  bootloader of its own, so it only ever boots via `CHV_KERNEL`.
 
 ### Shutdown
 
@@ -144,11 +153,12 @@ even if the process is killed mid-snapshot.
 | `CHV_DISK_IMAGE`       | no       | the guest image baked into this image (`/var/lib/kontur/guest/disk.img`) | Path to the primary disk image. |
 | `CHV_DISK_READONLY`    | no       | `false`                           | Attach the primary disk read-only. |
 | `CHV_EXTRA_DISKS`      | no       | —                                 | Comma-separated additional disks: `path[:ro\|rw]`. |
-| `CHV_KERNEL`           | one of `CHV_KERNEL`/`CHV_FIRMWARE` | — | Path to a kernel for direct boot (PVH/`vmlinux`). |
+| `CHV_KERNEL`           | no       | the kernel baked into this image (`/var/lib/kontur/guest/vmlinux`), unless `CHV_FIRMWARE` is set | Path to a kernel for direct boot (PVH/`vmlinux`). Mutually exclusive with `CHV_FIRMWARE`. |
 | `CHV_INITRAMFS`        | no       | —                                 | Path to an initramfs, used with `CHV_KERNEL`. |
 | `CHV_CMDLINE`          | no       | `console=ttyS0 root=/dev/vda rw` | Kernel command line, used with `CHV_KERNEL`. |
-| `CHV_FIRMWARE`         | one of `CHV_KERNEL`/`CHV_FIRMWARE` | — | Path to firmware (e.g. `CLOUDHV.fd`) for firmware boot. |
+| `CHV_FIRMWARE`         | no       | —                                 | Path to firmware (e.g. `CLOUDHV.fd`) for firmware boot, instead of `CHV_KERNEL`'s default. Mutually exclusive with `CHV_KERNEL`. |
 | `CHV_CPUS`             | no       | `2`                               | Boot vCPU count. |
+| `CHV_CPUS_MAX`         | no       | `CHV_CPUS`                        | Ceiling `CHV_CPUS` can grow to via hotplug. See "CPU hotplug" below. |
 | `CHV_MEMORY_MB`        | no       | `256`                             | Guest memory at boot, in MiB. See "Memory hotplug" below. |
 | `CHV_MEMORY_MAX_MB`    | no       | `2048`, or `CHV_MEMORY_MB` if larger | Ceiling `CHV_MEMORY_MB` can grow to via hotplug. See "Memory hotplug" below. |
 | `CHV_MEMORY_HOTPLUG`   | no       | `true`                            | Attach a memory hotplug device sized for growth up to `CHV_MEMORY_MAX_MB`. See "Memory hotplug" below. |
@@ -165,10 +175,11 @@ even if the process is killed mid-snapshot.
 | `CHV_MEM_AGENT_STEP_MB`| no       | `256`                             | How much a single pressure signal grows the guest by, capped at `CHV_MEMORY_MAX_MB`. See "Memory hotplug". |
 | `CHV_MEM_AGENT_COOLDOWN` | no     | `30s` (Go duration syntax)        | Minimum time between two guest-triggered resizes. See "Memory hotplug". |
 
-Every configured path -- `CHV_DISK_IMAGE` (including its default) and, if
-set, `CHV_KERNEL`/`CHV_INITRAMFS`/`CHV_FIRMWARE` -- must already exist on
-disk: `kontur run` checks this at startup and fails fast with a clear
-error rather than letting cloud-hypervisor fail deeper into boot.
+Every configured path -- `CHV_DISK_IMAGE` and `CHV_KERNEL` (including
+their defaults) and, if set, `CHV_INITRAMFS`/`CHV_FIRMWARE` -- must
+already exist on disk: `kontur run` checks this at startup and fails fast
+with a clear error rather than letting cloud-hypervisor fail deeper into
+boot.
 
 ## Memory hotplug
 
@@ -267,6 +278,64 @@ support is known to have rough edges in general (see its own docs) and
 neither feature here was built with the other specifically in mind. If
 you rely on both together, verify that combination yourself rather than
 assuming it works exactly like either one alone.
+
+## CPU hotplug
+
+`CHV_CPUS` sets the guest's vCPU count at boot, same as always. `CHV_CPUS_MAX`
+is new: set it above `CHV_CPUS` and the guest can grow up to that many vCPUs
+later, on demand, via cloud-hypervisor's ACPI-based CPU hotplug. Left at its
+default (`CHV_CPUS` itself, i.e. no headroom), nothing changes from before
+this existed -- a fixed vCPU count for the VM's whole lifetime.
+
+Unlike memory's virtio-mem device, CPU hotplug has no separate
+`hotplug_method` or enable flag: cloud-hypervisor treats any `CHV_CPUS_MAX`
+above `CHV_CPUS` as hotplug-capable on its own, and it needs an ACPI GED
+device the guest kernel already brings up, not a driver built specifically
+for it (`CONFIG_ACPI_REDUCED_HARDWARE_ONLY`, or Linux 5.5+).
+
+`kontur resize` (`kubectl exec <pod> -c <container> -- kontur resize
+-cpus=4`) asks cloud-hypervisor's API to resize the guest to a vCPU count
+between `1` and `CHV_CPUS_MAX`. It can be combined with `-memory-mb` in the
+same invocation to resize both together. Unlike memory hotplug, there is
+currently no automatic trigger analogous to `CHV_MEM_AGENT` -- growing and
+shrinking the vCPU count is manual only.
+
+Growing and shrinking behave differently, and both are guest-driven rather
+than instant:
+
+- Growing creates the extra vCPU threads and advertises them to the guest,
+  but -- unlike virtio-mem's memory, which onlines itself automatically --
+  a guest kernel must online each one itself (e.g. `echo 1 | tee
+  /sys/devices/system/cpu/cpu{4,5,6,7}/online`) before it actually uses
+  them. A guest image with no such automation still boots and runs fine at
+  its current count; it just never grows on its own.
+- Shrinking marks the excess vCPUs for removal and the guest ejects them in
+  the background with no command needed from inside it, but this only
+  *completes* once the guest acknowledges that ejection. A second `kontur
+  resize -cpus=...` call made before a prior shrink finishes is rejected by
+  cloud-hypervisor itself with a 429 ("a cpu removal is still pending")
+  rather than queued or merged -- surfaced here as a plain error from
+  `APIClient.ResizeCPUs` -- so wait for one shrink to finish before
+  requesting another rather than retrying blindly.
+
+Combining this with "Suspend and resume" above -- unlike the same
+combination with memory hotplug, which remains untested -- has been
+verified directly against the real `cloud-hypervisor` v53.0 binary under
+KVM, including the awkward case: pausing and snapshotting while a vCPU
+removal was still pending (immediately after a shrink `vm.resize`, with
+no wait for the guest to finish ejecting it). In every case tried --
+growing then immediately suspending, and shrinking then immediately
+suspending with the removal still pending -- `vm.pause`/`vm.snapshot`/
+`vm.resume` all succeeded regardless, and restoring from the resulting
+snapshot came back `Running` with `boot_vcpus` at the post-resize target
+and no leftover "pending removal" state: a further `kontur resize`
+against the restored VM succeeded immediately rather than hitting the
+429 described above. cloud-hypervisor's own snapshot format captures
+`boot_vcpus` as already updated to the target the same instant
+`vm.resize` is accepted (see `APIClient.ResizeCPUs`'s doc comment) and
+apparently resolves any in-flight removal as part of snapshotting itself
+-- kontur doesn't need to wait out a pending removal, or otherwise guard
+Suspend against one, before it's safe to call.
 
 ## Execing into a VM
 
@@ -376,21 +445,27 @@ two variants differ beyond package manager, and their own build args
 ## Running locally
 
 ```sh
+docker run --rm --device=/dev/kvm kontur
+```
+
+`CHV_DISK_IMAGE` and `CHV_KERNEL` are both left unset here, so this boots
+the reference guest disk image and kernel baked into `kontur` itself --
+see "Guest disk image and kernel" below for what that gets you (mainly:
+SSH in, once `CHV_NET`/`netshim` gives it a reachable address, and its
+session output shows up right here in the container's own output). Point
+`CHV_DISK_IMAGE`/`CHV_KERNEL` at paths under a mounted volume instead to
+boot a different guest:
+
+```sh
 docker run --rm \
   --device=/dev/kvm \
+  -e CHV_DISK_IMAGE=/images/disk.img \
   -e CHV_KERNEL=/images/vmlinux \
   -v /path/to/images:/images:ro \
   kontur
 ```
 
-`CHV_DISK_IMAGE` is left unset here, so this boots the reference guest
-image baked into `kontur` itself -- see "Guest disk image" below for what
-that gets you (mainly: SSH in, once `CHV_NET`/`netshim` gives it a
-reachable address, and its session output shows up right here in the
-container's own output). Point `CHV_DISK_IMAGE` at `/images/disk.img`
-instead to boot a different guest.
-
-## Guest disk image
+## Guest disk image and kernel
 
 The disk image baked into `kontur` at `/var/lib/kontur/guest/disk.img`
 (built by the `Dockerfile`'s `guest-image` stage, from whichever of the
@@ -411,6 +486,18 @@ at all (root has no password; `GUEST_SSH_AUTHORIZED_KEY` bakes in a key
 at build time, alongside a keypair generated for `kontur exec`'s own use
 -- see "Execing into a VM" above), and how host keys avoid being shared
 across every VM booted from the image.
+
+The kernel baked in alongside it, at `/var/lib/kontur/guest/vmlinux`
+(built by the `Dockerfile`'s `fetch-kernel` stage), is a pinned
+`cloud-hypervisor/linux` release build -- the same known-good, PVH-entry
+kernel with virtio-pci/virtio-blk/virtio-net/virtio-mem already built in
+that this repo's own testing has used for direct kernel boot elsewhere
+(see "Validated on a real VM with nested virtualization" below), just
+fetched and checksummed at image build time (`KONTUR_KERNEL_VERSION`
+build arg) instead of at pod start. It's what actually boots the bundled
+disk image above; bring your own `CHV_KERNEL` (or `CHV_FIRMWARE`, for a
+guest with its own bootloader -- the bundled reference guest has none) if
+your own guest needs a different one.
 
 ## Running on Kubernetes
 
@@ -674,6 +761,23 @@ fails to apply `kernel.pid_max=4194304` at the default `CHV_MEMORY_MB`
 ACPI power-button shutdown isn't handled without `logind`/`dbus` in the
 guest, so `kontur run`'s SIGTERM path falls back to its forced-shutdown
 step every time -- still exiting cleanly, just not via the graceful path.
+The guest kernel used for that smoke test was, at the time, supplied
+externally (`CHV_KERNEL` pointed at a hand-built kernel, since none was
+baked into the image yet); with the guest kernel now baked in alongside
+the disk image (see "Guest disk image and kernel"), the same boot -- to
+`multi-user.target` with `ssh.service` up -- was re-run against the built
+image with *both* `CHV_DISK_IMAGE` and `CHV_KERNEL` left unset (`docker
+run --device=/dev/kvm kontur`), confirming `kontur run`'s own default now
+resolves `CHV_KERNEL` to the image's baked-in
+`/var/lib/kontur/guest/vmlinux` (visible in its own startup log line)
+the same way `CHV_DISK_IMAGE` already defaulted to the bundled
+`disk.img`, with no environment variables, hostPath, or init container
+needed at all. Setting `CHV_KERNEL`/`CHV_FIRMWARE` together was also
+re-confirmed to still fail fast with the existing "mutually exclusive"
+error, and setting `CHV_FIRMWARE` alone was confirmed to skip the
+`CHV_KERNEL` default and validate the firmware path instead -- both
+`internal/config`'s default-resolution and its pre-existing validation
+still compose correctly.
 Memory hotplug (`internal/config`'s `CHV_MEMORY_HOTPLUG`/
 `CHV_MEMORY_MAX_MB` and `hypervisor.BuildArgs`'s resulting `--memory`
 argument) has been smoke-tested directly against the real
@@ -689,6 +793,25 @@ confirm a guest actually consuming the hotplugged memory, since that
 needs a `CONFIG_VIRTIO_MEM` guest kernel and neither of this repo's own
 kernels (the benchmark suite's marker kernel, or the purpose-built one
 used for the guest disk image smoke test above) currently is one.
+CPU hotplug (`internal/config`'s `CHV_CPUS`/`CHV_CPUS_MAX` and
+`hypervisor.BuildArgs`'s resulting `--cpus` argument) has similarly been
+smoke-tested directly against the real `cloud-hypervisor` v53.0 binary
+under KVM, this time with a guest kernel (the benchmark suite's own
+firecracker-ci `vmlinux-5.10.223`, booted with its initramfs, ACPI
+enabled): booted with `boot=2,max=4`, a `vm.resize` call with
+`desired_vcpus: 4` (what `kontur resize -cpus=4` sends, see
+`hypervisor.APIClient.ResizeCPUs`) returned `204` and the guest's own
+kernel log showed `CPU2 has been hot-added`/`CPU3 has been hot-added`,
+confirming a real guest observes the new vCPUs, not just `vm.info`.
+Shrinking back to 2 also returned `204`, and a second resize attempted
+immediately after (before the guest had acknowledged the removal) came
+back `429` with cloud-hypervisor's own `CpuManager(VcpuPendingRemovedVcpu)`
+error, exactly as `ResizeCPUs`'s doc comment describes. Suspend was then
+exercised on top of both cases -- pausing/snapshotting right after a
+grow, and right after a shrink with the removal still pending -- and
+restoring from each resulting snapshot came back `Running` at the
+expected vCPU count with no leftover pending-removal state; see "CPU
+hotplug" above for what this rules out.
 `internal/setup` (which `konturctl setup` drives) is tested
 against a fake `install.sh` stand-in (`fstest.MapFS`) that only records
 what it was invoked with, so the wiring -- asset extraction, environment
@@ -785,8 +908,11 @@ node rather than a real one. This pass instead ran on an actual VM with
 nested virtualization enabled (real `/dev/kvm`, confirmed `vmx`/`svm` CPU
 flags), using cloud-hypervisor's own published PVH-entry kernel
 (`cloud-hypervisor/linux`'s `ch-release-v6.16.9-*` release, which has
-virtio-pci/virtio-blk/virtio-net built in) instead of hand-building one,
-so it could go further: a full Debian and Alpine guest boot to a working
+virtio-pci/virtio-blk/virtio-net built in) instead of hand-building one --
+the same release now pinned and baked into the image itself by the
+Dockerfile's `fetch-kernel` stage (`KONTUR_KERNEL_VERSION`), so this run
+is what gave confidence that release was a suitable default in the first
+place -- so it could go further: a full Debian and Alpine guest boot to a working
 SSH login, `netshim`'s bridge/tap/DNAT forwarding a real SSH session
 end-to-end, and the static pod backend exercised against a real
 standalone kubelet (`deploy/static-kubelet/`) rather than by hand. It
@@ -894,10 +1020,13 @@ wrong (a `/dev/kvm` bind mount with capabilities dropped and no
 `Operation not permitted`, since the non-privileged pod's device cgroup
 doesn't allow it through regardless of the file's own permissions).
 `deploy/k8s/gke.md` also adds a fully self-contained example
-(`gke-pod-example.yaml`) that fetches its own kernel into an `emptyDir`
-via an init container rather than assuming a pre-populated node-local
-cache, so a single `kubectl apply` is enough to see a VM boot on a fresh
-cluster with no other setup -- both that and the existing
+(`gke-pod-example.yaml`) that needs no node-local image cache and no
+init container at all -- the guest disk image and kernel it boots both
+come straight from the `kontur` image itself -- so a single `kubectl
+apply` is enough to see a VM boot on a fresh cluster with no other setup
+(see `deploy/k8s/gke.md`'s own "Validated" section for how that example
+has evolved since this pass, now that the kernel it once had to fetch at
+pod start is baked in instead). Both that and the existing
 `netshim`-networked `pod-example.yaml` shape were confirmed working,
 including a real `kontur exec` SSH session reaching the guest and a
 clean sub-3-second shutdown on pod deletion.
