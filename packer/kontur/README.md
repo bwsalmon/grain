@@ -46,13 +46,73 @@ authorizes it on -- the keypair becomes self-contained again, which would
 retire `-kontur-exec-key` and the key-staging step `v2/scripts/setup.sh`
 does for it.
 
-### What still has to come from somewhere
+### Status: the kernel landed, the hook did not
 
-**A kernel.** kontur ships none -- `deploy/k8s/gke.md` says a kernel comes
-*"from somewhere outside the image (it never fetches one itself)"* -- and
-its guest rootfs installs no `linux-image-*`. "Why no custom kernel" above
-is still the operative finding: Debian's stock `linux-image-amd64` already
-has PVH entry and virtio-pci, with nothing built from source.
+The `third_party/kontur` resync (upstream `dd6e306`) bakes a guest kernel
+into the kontur OCI image -- a new `fetch-kernel` stage pulling
+cloud-hypervisor's own published PVH `vmlinux`, plus a `CHV_KERNEL`
+default pointing at it. That closes kontur's "a kernel comes from
+somewhere outside the image" gap **for kontur's own bundled guest**.
+
+It does not close it for grain's, and grain should not adopt that kernel:
+this guest runs docker and `kind`, which need a far richer kernel config
+(overlayfs, cgroup v2, bridge netfilter, veth) than a release kernel built
+for cloud-hypervisor's own CI is likely to carry, and "Why no custom
+kernel" below records Debian's stock `linux-image-amd64` being verified by
+hand under real KVM for exactly this guest. So `guest-setup.sh` installs
+`linux-image-amd64` itself, and the patch below publishes the resulting
+`vmlinuz`/`initrd.img` beside `disk.img`.
+
+The build-time setup hook did **not** land -- the resync brought CPU
+hotplug and the kernel, and kontur's build args remain `GO_VERSION`,
+`CLOUD_HYPERVISOR_VERSION`, `KONTUR_KERNEL_VERSION`, `GUEST_DISTRO`,
+`GUEST_SUITE`, `GUEST_ALPINE_VERSION` and `GUEST_SSH_AUTHORIZED_KEY`.
+`upstream-guest-setup-hook.patch` in this directory is the change to land
+in bwsalmon/kontur for it; it applies to that repo's `Dockerfile`.
+
+### What the patch does, and the one problem it exists to solve
+
+Customizing kontur's guest rootfs is not simply "run a script in it",
+because the rootfs is a *directory* in a build stage. Running anything in
+it means `chroot`, and a useful chroot needs `/proc` and `/dev`
+bind-mounted -- which needs `CAP_SYS_ADMIN`, which an ordinary
+`docker build` does not have. Without them, apt postinsts,
+`systemctl enable` and `update-initramfs` variously misbehave or fail.
+This is precisely why `build.sh` needs root today, and it would have
+undone the "no extra privileges beyond an ordinary docker build" property
+kontur's own `guest-image` stage calls out for `mke2fs -d`.
+
+The patch sidesteps it rather than paying it: a new `guest-customized`
+stage promotes the rootfs to an image of its own
+(`FROM scratch` + `COPY --from=guest-rootfs /rootfs/ /`), so
+`GUEST_SETUP_SCRIPT` runs as an ordinary `RUN` -- real `/proc`, real
+`/dev`, working network, rootfs as `/` -- with no chroot and no
+privileges. `guest-image` then packs that stage instead of the raw
+rootfs. It also adds a `guest-artifacts` target so
+`docker build --target guest-artifacts --output type=local,dest=<dir>`
+yields `disk.img` plus the guest's own kernel and initramfs when it has
+them, without bloating the runtime image with any of it. `final` stays
+last, so the default build target is unchanged.
+
+### Not yet verified
+
+This environment has no docker daemon (`/var/run/docker.sock` absent) and
+no `/dev/kvm`, so the patch has been reviewed but never built. What needs
+checking on a machine that can:
+
+1. **Device nodes survive the copy.** `COPY --from=guest-rootfs /rootfs/ /`
+   has to carry debootstrap's `/dev` entries through BuildKit. If it
+   chokes, empty `/dev` in the rootfs stages first -- both variants'
+   kernels mount devtmpfs over it during early boot anyway.
+2. **`RUN` works on the scratch-derived stage.** It needs the `/bin/sh`
+   the rootfs provides; the patch sets `PATH` explicitly rather than
+   relying on the runtime's default for an image config that sets none.
+3. **The Alpine variant still builds.** The hook is written to be
+   distro-agnostic (busybox `sh` satisfies it), but only the Debian path
+   is what grain exercises.
+4. **`update-initramfs` inside the RUN** produces an initramfs the guest
+   actually boots from -- the step `guest-setup.sh` depends on for its
+   `eth0`/`ip=` units to stick.
 
 ### Two things measured while porting, both load-bearing
 
