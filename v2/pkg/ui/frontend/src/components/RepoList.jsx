@@ -6,6 +6,7 @@ import { Button, Chip, IconButton, Stack, TextField, Typography } from "@mui/mat
 import api from "../api.js";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { TaskRow } from "./TaskList.jsx";
+import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
 // RepoList is the repo page: one row per known repo -- every
 // config.targetRepos entry, plus any repo tasks target that isn't one --
@@ -87,30 +88,27 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
 
   return (
     <main>
-      <div className="content-header" style={{ alignItems: "center" }}>
-        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Repos</Typography>
-        <span className="count">{visible.length}</span>
-        <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ ml: "auto" }}>
-          <TextField
-            value={newRepo}
-            onChange={(evt) => setNewRepo(evt.target.value)}
-            placeholder="owner/name"
-            size="small"
-            autoComplete="off"
-          />
-          <Button type="submit" variant="outlined" size="small">Add repo</Button>
-        </Stack>
-      </div>
+      <ListHeader
+        title="Repos"
+        count={visible.length}
+        style={{ alignItems: "center" }}
+        action={(
+          <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ ml: "auto" }}>
+            <TextField
+              value={newRepo}
+              onChange={(evt) => setNewRepo(evt.target.value)}
+              placeholder="owner/name"
+              size="small"
+              autoComplete="off"
+            />
+            <Button type="submit" variant="outlined" size="small">Add repo</Button>
+          </Stack>
+        )}
+      />
       {repos.length > 0 && (
-        <div className="task-list-toolbar">
-          <TextField
-            size="small"
-            placeholder="Search repos…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            sx={{ flex: 1, maxWidth: 320 }}
-          />
-        </div>
+        <ListToolbar>
+          <ListSearchField placeholder="Search repos…" value={search} onChange={setSearch} />
+        </ListToolbar>
       )}
       <ul className="repo-list">
         {visible.map((r) => {
@@ -170,10 +168,10 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
         })}
       </ul>
       {repos.length === 0 && (
-        <p className="empty">No repos yet -- add one above, or file a task with a target repo.</p>
+        <ListEmpty>No repos yet -- add one above, or file a task with a target repo.</ListEmpty>
       )}
       {repos.length > 0 && visible.length === 0 && (
-        <p className="empty">No repos match your search.</p>
+        <ListEmpty>No repos match your search.</ListEmpty>
       )}
     </main>
   );

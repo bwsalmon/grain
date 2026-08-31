@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Button, Chip, FormControl, InputLabel, MenuItem, Select, TextField, Typography } from "@mui/material";
+import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
 import ScheduleOverlay from "./ScheduleOverlay.jsx";
+import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 
 // SORTS mirrors TaskList's own toolbar Select (bwsalmon/agents#547): a
 // schedule has no backlog order to sort by (it is never itself dispatched
@@ -37,32 +38,16 @@ export default function SchedulesList({ schedules, templates = [], config, tasks
 
   return (
     <main>
-      <div className="content-header">
-        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Scheduled tasks</Typography>
-        <span className="count">{visible.length}</span>
-        <Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New schedule</Button>
-      </div>
+      <ListHeader
+        title="Scheduled tasks"
+        count={visible.length}
+        action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New schedule</Button>}
+      />
       {schedules.length > 0 && (
-        <div className="task-list-toolbar">
-          <TextField
-            size="small"
-            placeholder="Search schedules…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            sx={{ flex: 1, maxWidth: 320 }}
-          />
-          <FormControl size="small" sx={{ minWidth: 170 }}>
-            <InputLabel id="schedule-sort-label">Sort</InputLabel>
-            <Select
-              labelId="schedule-sort-label"
-              label="Sort"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-            >
-              {Object.entries(SORTS).map(([id, { label }]) => <MenuItem key={id} value={id}>{label}</MenuItem>)}
-            </Select>
-          </FormControl>
-        </div>
+        <ListToolbar>
+          <ListSearchField placeholder="Search schedules…" value={search} onChange={setSearch} />
+          <ListSortSelect id="schedule-sort" value={sortBy} onChange={setSortBy} options={SORTS} />
+        </ListToolbar>
       )}
       <ul className="schedules-list">
         {visible.map((s) => (
@@ -81,8 +66,8 @@ export default function SchedulesList({ schedules, templates = [], config, tasks
           </li>
         ))}
       </ul>
-      {schedules.length === 0 && <p className="empty">No scheduled tasks.</p>}
-      {schedules.length > 0 && visible.length === 0 && <p className="empty">No schedules match your search.</p>}
+      {schedules.length === 0 && <ListEmpty>No scheduled tasks.</ListEmpty>}
+      {schedules.length > 0 && visible.length === 0 && <ListEmpty>No schedules match your search.</ListEmpty>}
 
       {showNew && (
         <ScheduleOverlay repoOptions={repoOptions} templates={templates} config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
