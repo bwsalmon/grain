@@ -91,6 +91,14 @@ type Settings struct {
 	// "claude" does not yet change what a run actually does -- see that
 	// field's own doc comment.
 	AgentFramework string `json:"agentFramework"`
+	// Capabilities is every capability grain ships a provider for, with
+	// this deployment's own readiness computed against it -- capability_
+	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
+	// populated, even before Settings has ever been saved (GetSettings),
+	// since self-debug/self-repair need no configuration to be ready and
+	// an operator setting up a fresh deployment still benefits from
+	// seeing that gcp-key/gemini-key/github-sandbox are not yet.
+	Capabilities []CapabilityStatus `json:"capabilities"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -117,6 +125,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		AgentFramework:                agentFramework,
+		Capabilities:                  c.capabilityStatuses(cfg),
 	}
 }
 
@@ -152,7 +161,11 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{}, err
 	}
 	if cfg == nil {
-		return Settings{SandboxCPUsDefault: kontur.DefaultCPUs, SandboxMemoryMBDefault: kontur.DefaultMemoryMB}, nil
+		return Settings{
+			SandboxCPUsDefault:     kontur.DefaultCPUs,
+			SandboxMemoryMBDefault: kontur.DefaultMemoryMB,
+			Capabilities:           c.capabilityStatuses(model.Config{}),
+		}, nil
 	}
 	return c.settingsFrom(*cfg), nil
 }
