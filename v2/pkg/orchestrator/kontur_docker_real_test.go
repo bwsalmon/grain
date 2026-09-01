@@ -333,20 +333,38 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 	wg.Wait()
 	close(results)
 
+	// Every outcome is reported before failing, rather than t.Fatalf on
+	// whichever error came off the channel first. Which VMs failed is the
+	// whole diagnosis here: one failing where the other came up is a
+	// concurrency problem in this package, while both failing is the
+	// guest image's own flat-mode control link never coming up, which is
+	// nothing to do with how the VMs were created.
 	toolsBySlot := map[string][]mcp.Tool{}
+	var failures []string
 	for r := range results {
 		if r.err != nil {
-			t.Fatalf("Acquire(%s) against real konturctl/docker/cloud-hypervisor: %v", r.slot, r.err)
+			failures = append(failures, fmt.Sprintf("%s: %v", r.slot, r.err))
+			continue
 		}
 		toolsBySlot[r.slot] = r.tools
 	}
+	if len(failures) > 0 {
+		t.Fatalf("%d of %d VMs failed against real konturctl/docker/cloud-hypervisor:\n  %s",
+			len(failures), len(slots), strings.Join(failures, "\n  "))
+	}
 
-	// Each VM got its own independently-derived guest address -- confirms
-	// BaseIP/BasePort's arithmetic actually reached real konturctl for
-	// both slots, not just the first. The address is what matters now
-	// rather than the forwarded port: it is what each VM's guest
-	// configures from its own kernel cmdline, and what `kontur exec`
-	// connects to (KONTUR_EXEC_ADDR).
+	// Both VMs are reached at the *same* guest address, and that is the
+	// point rather than a defect: under flat mode (the default) netshim
+	// gives each VM its own network namespace, so each guest takes the
+	// same control-link address inside its own, and `kontur exec` reaches
+	// it by exec'ing into that VM's own container (KONTUR_EXEC_ADDR).
+	//
+	// This assertion used to be the opposite -- that the two addresses
+	// differed, "want BaseIP-derived distinct ones" -- which was true
+	// while KonturConfig derived an -ip per slot. It would now fail on a
+	// perfectly healthy pair of VMs, and it is worth more inverted than
+	// deleted: two guests answering independently on one address is the
+	// evidence for the claim that removing that derivation is safe.
 	addrs := map[string]string{}
 	for _, name := range names {
 		out, err := exec.Command("docker", "inspect", "-f",
@@ -363,8 +381,9 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 			t.Fatalf("%s: no KONTUR_EXEC_ADDR in the VM container's env:\n%s", name, out)
 		}
 	}
-	if addrs[names[0]] == addrs[names[1]] {
-		t.Errorf("both slots' VMs got the same guest address %q, want BaseIP-derived distinct ones", addrs[names[0]])
+	if addrs[names[0]] != addrs[names[1]] {
+		t.Errorf("VMs got different guest addresses %q and %q, want the same one: under flat mode each VM has its own network namespace, so nothing derives a per-VM address",
+			addrs[names[0]], addrs[names[1]])
 	}
 
 	// Each guest actually runs and answers a distinct command, for two
