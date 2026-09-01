@@ -105,27 +105,62 @@ last, so the default build target is unchanged. See
 `third_party/kontur/deploy/guest-image/README.md`'s "Running a custom
 setup script" and "Exporting the built guest".
 
-### Not yet verified
+### Verified: builds, and boots to a login prompt
 
 The hook was written and reviewed, and landed upstream, without ever
-being built: no image registry is reachable from where it was written
-(the egress policy denies Docker's blob CDN, so `docker build` cannot
-resolve a single base image), and there is no `/dev/kvm` to boot the
-result under. What needs checking on a machine that can:
+being built: no image registry was reachable from where it was written
+(the egress policy denied Docker's blob CDN, so `docker build` could not
+resolve a single base image), and there was no `/dev/kvm` to boot the
+result under. That left the four items below unchecked. Two later
+sessions, each with a reachable registry and `/dev/kvm`, closed out all
+but one of them:
 
-1. **Device nodes survive the copy.** `COPY --from=guest-rootfs /rootfs/ /`
-   has to carry debootstrap's `/dev` entries through BuildKit. If it
-   chokes, empty `/dev` in the rootfs stages first -- both variants'
-   kernels mount devtmpfs over it during early boot anyway.
-2. **`RUN` works on the scratch-derived stage.** It needs the `/bin/sh`
-   the rootfs provides; the patch sets `PATH` explicitly rather than
-   relying on the runtime's default for an image config that sets none.
-3. **The Alpine variant still builds.** The hook is written to be
-   distro-agnostic (busybox `sh` satisfies it), but only the Debian path
-   is what grain exercises.
-4. **`update-initramfs` inside the RUN** produces an initramfs the guest
-   actually boots from -- the step `guest-setup.sh` depends on for its
-   `eth0`/`ip=` units to stick.
+1. **Device nodes survive the copy.** Confirmed: a real
+   `docker build --target guest-artifacts` completes and the resulting
+   `disk.img` boots.
+2. **`RUN` works on the scratch-derived stage.** Confirmed the same way --
+   `GUEST_SETUP_SCRIPT` (this script) is itself one such `RUN`, and it
+   completes.
+3. **The Alpine variant still builds.** Still not tried; only the Debian
+   path (`GUEST_DISTRO=debian`, the default and the only one grain sets)
+   has ever been built or booted.
+4. **`update-initramfs` inside the `RUN` produces a bootable initramfs.**
+   Confirmed by an actual boot, below.
+
+The first real build (bwsalmon/agents#583) found one bug on the way: every
+comment around the `apt-get install` line in this script asserted
+`linux-image-amd64` was "installed above" -- its own klibc-utils
+rationale, the ORDERING note near the top, and "Why no custom kernel"
+below all describe it as already there -- but the actual install line
+never listed it. `debootstrap --variant=minbase`, what kontur's own
+`guest-rootfs-debian` stage produces, carries no kernel package on its
+own, so nothing failed loudly: `guest-image`'s final stage simply had
+nothing under `/boot` to copy out, and `build-guest.sh`'s own post-build
+check (added for exactly this) caught the resulting empty `vmlinuz`/
+`initrd.img` and refused to ship them. Fixed by adding the package to
+that line.
+
+With the fix, a later session went one step further than "the build
+succeeds": it downloaded and checksum-verified the same cloud-hypervisor
+v53.0 release binary the vendored Dockerfile pins, and booted the built
+`disk.img`/`vmlinuz`/`initrd.img` directly against real KVM (`--kernel`/
+`--initramfs`/`--disk ...,image_type=raw`, no `-net`/`ip=` given, so this
+did not exercise static addressing -- see "Still not verified" below).
+The guest reaches a login prompt cleanly: `kontur-net-cmdline.service`
+finishes immediately with nothing to configure (as intended, when no
+`ip=` argument is present at all), `ssh.service` and
+`kontur-control-net` both start, and `docker.socket`/`containerd` come
+up. That is what closes out items 1, 2 and 4 above -- a disk-image-only
+build, which is all bwsalmon/agents#583 itself checked, doesn't by
+itself prove the guest actually boots into a working system.
+
+**Still not verified**: a real `ip=`/static-addressing boot (the units
+this script adds specifically for that were only proven not to crash
+when idle, not to actually configure an address with no DHCP or `ip=` to
+respond to), the Alpine variant, and the full
+`konturctl vm create -backend docker`/flat-networking path this image is
+actually meant to run under, as opposed to a bare `cloud-hypervisor`
+invocation constructed by hand.
 
 ### Two things measured while porting, both load-bearing
 
@@ -195,8 +230,9 @@ do *not* fall out of this change for free, the way this section
 previously assumed -- retiring them needs the exec key authorized for
 `debian` too, or the sandbox account moved to root.
 
-The four checks below still have not been run: the build has never been
-executed anywhere, here or upstream.
+The four checks above -- once true of every build, here or upstream -- are
+now closed out by "Verified: builds, and boots to a login prompt" above,
+except the untried Alpine variant.
 
 
 ## Why no custom kernel
