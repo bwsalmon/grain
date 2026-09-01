@@ -445,22 +445,32 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		}
 	}
 
-	var sandboxRoot string
-	if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
-		rooted, ok := sandbox.(rootedSandbox)
-		if !ok {
-			return fmt.Errorf("orchestrator: task %s requests capabilities but its sandbox has no local directory to place them in", task.ID)
-		}
+	// sandboxRoot and konturVM are the two ways a Sandbox can describe
+	// itself to a Framework with no in-process route to it (agent/claude,
+	// via agent.RunConfig.SandboxRoot/.KonturVM -- see that struct's own
+	// doc comment): a local directory for a rootedSandbox (HostSandboxes'
+	// own), or a named VM for a vmNamedSandbox (KonturSandboxes' own).
+	// Computed unconditionally, not just when the task has capabilities to
+	// place, since Root()/VMName() are always available where they exist
+	// at all and cost nothing to read -- a claude-selected run needs one
+	// of them regardless of whether this task granted anything.
+	var sandboxRoot, konturVM string
+	if rooted, ok := sandbox.(rootedSandbox); ok {
 		sandboxRoot, err = rooted.Root()
 		if err != nil {
 			return err
 		}
+	} else if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
+		return fmt.Errorf("orchestrator: task %s requests capabilities but its sandbox has no local directory to place them in", task.ID)
+	}
+	if named, ok := sandbox.(vmNamedSandbox); ok {
+		konturVM = named.VMName()
 	}
 
 	// From here on RunDispatch owns finishing this run, on every path it
 	// can take -- so the setup guard above must not also finish it.
 	ranAgent = true
-	result, runErr := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
+	result, runErr := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, konturVM, now)
 
 	if runErr != nil {
 		// A failed run is not necessarily an empty one. The framework

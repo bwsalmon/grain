@@ -164,7 +164,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 		tools := mcp.NewSandboxTools(root)
 
 		start := time.Now()
-		result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, fullTask, d, tools, root, baseTime.Add(time.Minute))
+		result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, fullTask, d, tools, root, "", baseTime.Add(time.Minute))
 		if elapsed := time.Since(start); elapsed > 5*time.Second {
 			t.Errorf("RunDispatch took %s for an already-closed task, want near-instant cancellation", elapsed)
 		}

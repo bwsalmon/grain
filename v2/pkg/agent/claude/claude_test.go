@@ -228,7 +228,58 @@ func TestRunReportsAnErrorResultEvent(t *testing.T) {
 func TestRunFailsWithoutSandboxRoot(t *testing.T) {
 	f := newFramework(&fakeRunner{}, "mcpserver-path")
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x"}); err == nil {
-		t.Fatal("expected an error for a missing SandboxRoot")
+		t.Fatal("expected an error for a missing SandboxRoot and KonturVM")
+	}
+}
+
+func TestRunFailsWithKonturVMButNoKonturSSHConfig(t *testing.T) {
+	f := newFramework(&fakeRunner{}, "mcpserver-path")
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", KonturVM: "g-1-1"}); err == nil {
+		t.Fatal("expected an error for a KonturVM run with no WithKonturSSH config")
+	}
+}
+
+func TestRunWritesMCPConfigPointingAtTheKonturVM(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "/path/to/grain", WithKonturSSH("root", "/images/key", "/workspace"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", KonturVM: "g-1-1"}); err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(fake.gotMCPConfig, &cfg); err != nil {
+		t.Fatalf("mcp-config was not valid JSON: %v (%s)", err, fake.gotMCPConfig)
+	}
+	server, ok := cfg.MCPServers["grain-sandbox"]
+	if !ok {
+		t.Fatalf("mcp-config missing grain-sandbox server: %+v", cfg)
+	}
+	want := []string{"mcpserver", "-kontur-vm", "g-1-1", "-ssh-user", "root", "-exec-key", "/images/key", "-workspace", "/workspace"}
+	if len(server.Args) != len(want) {
+		t.Fatalf("args = %v, want %v", server.Args, want)
+	}
+	for i, w := range want {
+		if server.Args[i] != w {
+			t.Errorf("args[%d] = %q, want %q (full args %v)", i, server.Args[i], w, server.Args)
+		}
+	}
+}
+
+func TestRunPrefersSandboxRootOverKonturVMWhenBothAreSet(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	root := t.TempDir()
+	f := newFramework(fake, "mcpserver-path", WithKonturSSH("root", "/images/key", "/workspace"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: root, KonturVM: "g-1-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if v := argValue(fake.gotArgs, "--mcp-config"); v == "" {
+		t.Fatal("--mcp-config not passed")
 	}
 }
 

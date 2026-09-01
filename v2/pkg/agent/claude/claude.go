@@ -15,12 +15,15 @@
 // connection at grainBinaryPath (this same grain binary -- bwsalmon/
 // agents#313 combined what used to be a standalone cmd/mcpserver build
 // into a subcommand of the one binary everything else here runs as too)
-// with "mcpserver" and -sandbox-root set to RunConfig.SandboxRoot as its
-// args -- claude forks that command itself once it loads --mcp-config,
-// the "forking off processes" v2/cmd/grain/main.go's own doc comment on
-// this package refers to. Nothing in a tool call itself can ever change
-// where that lands, mirroring v1's own "only place it's named"
-// discipline (dispatch.py's _mcp_config_json).
+// with "mcpserver" and either -sandbox-root (RunConfig.SandboxRoot, a
+// local directory) or -kontur-vm (RunConfig.KonturVM, a named
+// orchestrator.KonturSandboxes VM, plus WithKonturSSH's own
+// -ssh-user/-exec-key/-workspace) as its args -- claude forks that
+// command itself once it loads --mcp-config, the "forking off processes"
+// v2/cmd/grain/main.go's own doc comment on this package refers to.
+// Nothing in a tool call itself can ever change where that lands,
+// mirroring v1's own "only place it's named" discipline (dispatch.py's
+// _mcp_config_json).
 package claude
 
 import (
@@ -103,6 +106,9 @@ type Framework struct {
 	grainBinaryPath string
 	oauthToken      string
 	maxTurns        int
+	konturSSHUser   string
+	konturExecKey   string
+	konturWorkspace string
 }
 
 // Option configures a Framework at construction time.
@@ -120,6 +126,20 @@ func WithMaxTurns(n int) Option {
 // CONTROLLER_AGENT_TOKEN_PATH; see dispatch.py's start_unit call site).
 func WithOAuthToken(token string) Option {
 	return func(f *Framework) { f.oauthToken = token }
+}
+
+// WithKonturSSH gives a Framework what it needs to reach a
+// RunConfig.KonturVM instead of a RunConfig.SandboxRoot: the same
+// deployment-wide sshUser/execKey/workspace triple
+// orchestrator.KonturConfig already carries, passed straight through as
+// the forked "mcpserver -kontur-vm"'s own -ssh-user/-exec-key/-workspace
+// (mirroring mcpserver.go's mustKonturSandboxTools). A deployment that
+// never sets -kontur-sandboxes has no use for this; Run rejects a
+// RunConfig.KonturVM without it.
+func WithKonturSSH(sshUser, execKey, workspace string) Option {
+	return func(f *Framework) {
+		f.konturSSHUser, f.konturExecKey, f.konturWorkspace = sshUser, execKey, workspace
+	}
 }
 
 // New builds a Framework that runs the real claude binary at claudePath
@@ -157,26 +177,51 @@ func allowedTools() []string {
 }
 
 // mcpConfigJSON is the --mcp-config file content: grainBinaryPath spawned
-// with "mcpserver -sandbox-root sandboxRoot" -- the "mcpserver" argument
+// with mcpArgs (built by mcpServerArgs below) -- the "mcpserver" argument
 // selects the same subcommand mcpserver.go implements, so claude forking
 // this exact command is what actually starts an MCP server, rather than
 // needing a separately built binary on disk.
-func mcpConfigJSON(grainBinaryPath, sandboxRoot string) ([]byte, error) {
+func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
 			mcpServerName: map[string]any{
 				"command": grainBinaryPath,
-				"args":    []string{"mcpserver", "-sandbox-root", sandboxRoot},
+				"args":    mcpArgs,
 			},
 		},
 	})
 }
 
+// mcpServerArgs builds the arguments the forked "mcpserver" subcommand
+// needs to reach cfg's sandbox: "-sandbox-root <dir>" for a local
+// directory, or "-kontur-vm <name> -ssh-user ... -exec-key ... -workspace
+// ..." (mirroring mcpserver.go's own mustKonturSandboxTools) for a named
+// kontur VM, whichever RunConfig set. SandboxRoot wins if somehow both
+// are -- RunDispatch never sets both at once in practice (a sandbox is
+// either host-rooted or kontur-named, never both), but a Framework this
+// simple is not the place to enforce that.
+func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
+	switch {
+	case cfg.SandboxRoot != "":
+		return []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}, nil
+	case cfg.KonturVM != "":
+		if f.konturSSHUser == "" || f.konturExecKey == "" || f.konturWorkspace == "" {
+			return nil, fmt.Errorf("claude: RunConfig.KonturVM is set but this Framework has no kontur SSH config (see WithKonturSSH)")
+		}
+		return []string{
+			"mcpserver", "-kontur-vm", cfg.KonturVM,
+			"-ssh-user", f.konturSSHUser, "-exec-key", f.konturExecKey, "-workspace", f.konturWorkspace,
+		}, nil
+	default:
+		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot or .KonturVM is required")
+	}
+}
+
 // Run implements agent.Framework: it writes an --mcp-config file pointing
-// at grainBinaryPath and cfg.SandboxRoot, runs claude -p with its native
-// tool roster emptied out and only the grain-sandbox MCP tools admitted,
-// and parses the resulting --output-format stream-json transcript into a
-// Result.
+// at grainBinaryPath and cfg.SandboxRoot or cfg.KonturVM (mcpServerArgs),
+// runs claude -p with its native tool roster emptied out and only the
+// grain-sandbox MCP tools admitted, and parses the resulting
+// --output-format stream-json transcript into a Result.
 //
 // When cfg.TranscriptPath is set, the raw stream-json this produces is
 // also mirrored there live, one line per event, as claude itself emits
@@ -192,8 +237,9 @@ func mcpConfigJSON(grainBinaryPath, sandboxRoot string) ([]byte, error) {
 // the same way orchestrator.RunDispatch owns cfg.SandboxRoot's own
 // lifecycle rather than this package.
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
-	if cfg.SandboxRoot == "" {
-		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot is required")
+	mcpArgs, err := f.mcpServerArgs(cfg)
+	if err != nil {
+		return nil, err
 	}
 	if f.grainBinaryPath == "" {
 		return nil, fmt.Errorf("claude: grainBinaryPath is required")
@@ -213,7 +259,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		tee = transcriptFile
 	}
 
-	configJSON, err := mcpConfigJSON(f.grainBinaryPath, cfg.SandboxRoot)
+	configJSON, err := mcpConfigJSON(f.grainBinaryPath, mcpArgs)
 	if err != nil {
 		return nil, fmt.Errorf("claude: building mcp config: %w", err)
 	}

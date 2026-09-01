@@ -34,8 +34,8 @@
 // resolution/materialization and reconcile-loop shape onto it. See
 // v2/README.md for what that merge kept and dropped.
 //
-// Most of this file's own flags (-max-concurrent, -poll-interval, -gemini-model,
-// -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
+// Most of this file's own flags (-max-concurrent, -poll-interval, -agent-framework,
+// -gemini-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
 // -gcp-agent-service-account, -target-repos) are store-backed now
 // (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
@@ -44,8 +44,11 @@
 // what the next restart runs with. What stays flags-only either has to
 // be known before there is a store to read it from (-data-dir) or names
 // secret material rather than being configuration itself
-// (-gemini-api-key-file, -kontur-ssh-key) -- bwsalmon/agents#320's own
-// "but not the secrets."
+// (-gemini-api-key-file, -kontur-ssh-key, -claude-oauth-token-file) --
+// bwsalmon/agents#320's own "but not the secrets." -claude-path joins
+// them not because it is secret but because, like -kontur-ssh-key, it
+// names something about *this host's* filesystem rather than the
+// deployment's own behaviour.
 package main
 
 import (
@@ -68,6 +71,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent/claude"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
@@ -125,9 +129,29 @@ func daemon(args []string) {
 	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task created through the UI/API with no repo of its own targets")
 	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any"+seedOnly)
 
+	agentFramework := fs.String("agent-framework", model.AgentFrameworkGemini,
+		"which agent.Framework a run is driven by: \""+model.AgentFrameworkGemini+"\" (agent/gemini, the in-process "+
+			"Gemini API loop) or \""+model.AgentFrameworkClaude+"\" (agent/claude, the real claude CLI as a "+
+			"subprocess -- see -claude-path/-claude-oauth-token-file)"+seedOnly)
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
 	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)"+seedOnly)
+
+	// claudePath and claudeOAuthTokenFile are only consulted when the
+	// store's agent-framework setting (bwsalmon/agents#609, `grain
+	// settings`) reads back "claude" -- unlike -gemini-api-key-file above,
+	// neither is required at flag-parse time, since which framework a
+	// deployment actually runs is store-backed and not known until
+	// loadConfig has read it back (runDaemon fails, at that point, with a
+	// clear error if -claude-oauth-token-file is still unset and "claude"
+	// was chosen). Modeled on -gemini-api-key-file: secret material, not
+	// configuration itself, so both stay flags-only rather than moving
+	// into model.Config the way -gemini-model did.
+	claudePath := fs.String("claude-path", "", "path to the claude CLI binary agent/claude runs as a subprocess; "+
+		"empty resolves \"claude\" against $PATH instead. Only used when the agent-framework setting is \"claude\"")
+	claudeOAuthTokenFile := fs.String("claude-oauth-token-file", "", "file holding the Claude Code OAuth token the "+
+		"agent authenticates as, passed to the claude subprocess as CLAUDE_CODE_OAUTH_TOKEN (required when the "+
+		"agent-framework setting is \"claude\")")
 
 	githubHost := fs.String("github-host", "github.com", "GitHub git host -- what the proxy forwards to and, via github.APIHost, where REST calls go; override to point at a mock for local testing"+seedOnly)
 	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)"+seedOnly)
@@ -270,6 +294,10 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent must be at least 1")
 		os.Exit(2)
 	}
+	if *agentFramework != model.AgentFrameworkGemini && *agentFramework != model.AgentFrameworkClaude {
+		fmt.Fprintf(os.Stderr, "grain daemon: -agent-framework must be %q or %q\n", model.AgentFrameworkGemini, model.AgentFrameworkClaude)
+		os.Exit(2)
+	}
 	var targetReposList []string
 	if strings.TrimSpace(*targetRepos) != "" {
 		targetReposList = strings.Split(*targetRepos, ",")
@@ -282,7 +310,9 @@ func daemon(args []string) {
 		dataDir: *dataDir, sandboxDir: *sandboxDir, maxConcurrent: *maxConcurrent, pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
+		agentFramework:   *agentFramework,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
+		claudePath: *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
@@ -327,6 +357,19 @@ type config struct {
 	geminiAPIKeyFile string
 	geminiModel      string
 	maxAgentTurns    int
+
+	// agentFramework selects which agent.Framework runDaemon builds --
+	// model.AgentFrameworkGemini or model.AgentFrameworkClaude -- and is
+	// store-backed (model.Config.AgentFramework) the same way geminiModel
+	// is: -agent-framework only seeds it the first time a deployment's
+	// store has none; `grain settings` (or the Settings UI) is what
+	// changes it after that.
+	agentFramework string
+	// claudePath and claudeOAuthTokenFile are flags-only, like
+	// geminiAPIKeyFile -- see -claude-path/-claude-oauth-token-file's own
+	// flag doc comments for why neither is store-backed.
+	claudePath           string
+	claudeOAuthTokenFile string
 
 	githubHost         string
 	githubInsecureHTTP bool
@@ -506,9 +549,10 @@ func run(ctx context.Context, cfg config) error {
 }
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
-// and reconcile tasks: the git proxy, the Gemini agent framework,
-// orphaned-run and orphaned-VM recovery, and RunCycle's own reconcile
-// loop. Sandbox tokens and git credentials are not among them any more:
+// and reconcile tasks: the git proxy, the agent framework
+// (buildAgentFramework), orphaned-run and orphaned-VM recovery, and
+// RunCycle's own reconcile loop. Sandbox tokens and git credentials are
+// not among them any more:
 // both are per run now, minted and configured as each run's sandbox is
 // built (orchestrator's runOne). run() calls it exactly once, either
 // inline (-ui-addr disabled, so there is no UI server worth
@@ -546,13 +590,9 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	}
 	defer stopProxy(context.Background())
 
-	apiKey, err := readTrimmedFile(cfg.geminiAPIKeyFile)
+	agentFramework, err := buildAgentFramework(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("reading -gemini-api-key-file: %w", err)
-	}
-	agentFramework, err := gemini.New(ctx, apiKey, gemini.WithModel(cfg.geminiModel))
-	if err != nil {
-		return fmt.Errorf("building the Gemini agent: %w", err)
+		return err
 	}
 
 	credentials, err := gitproxy.LoadCredentialSet(filepath.Join(cfg.dataDir, "secrets", "github"))
@@ -611,6 +651,67 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s)", cfg.pollInterval, cfg.maxConcurrent)
 	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
+}
+
+// buildAgentFramework constructs the one agent.Framework this deployment
+// runs every dispatched run against, chosen by cfg.agentFramework --
+// model.AgentFrameworkGemini (agent/gemini, the in-process API loop this
+// package always built before bwsalmon/agents#615) or
+// model.AgentFrameworkClaude (agent/claude, the real claude CLI as a
+// subprocess -- bwsalmon/agents#609 added the setting, #615 this
+// branch). Chosen once, here, rather than re-read per run: cfg itself is
+// only ever loaded once, at startup (loadConfig's own doc comment), so a
+// change made through `grain settings` needs a restart to take effect
+// either way.
+//
+// liveTranscriptDir (startUIServer, below) has to agree with whichever
+// branch this takes: gemini.LiveTranscriptDir and claude.LiveTranscriptDir
+// read two different transcript file formats (RunConfig.TranscriptPath's
+// own doc comment), and only the one matching the Framework a run actually
+// used will ever find one.
+func buildAgentFramework(ctx context.Context, cfg config) (agent.Framework, error) {
+	switch cfg.agentFramework {
+	case model.AgentFrameworkClaude:
+		claudePath := cfg.claudePath
+		if claudePath == "" {
+			resolved, err := exec.LookPath("claude")
+			if err != nil {
+				return nil, fmt.Errorf("resolving the claude binary (-claude-path is unset, and none found on $PATH): %w", err)
+			}
+			claudePath = resolved
+		}
+		if cfg.claudeOAuthTokenFile == "" {
+			return nil, fmt.Errorf("-claude-oauth-token-file is required when -agent-framework is %q", model.AgentFrameworkClaude)
+		}
+		oauthToken, err := readTrimmedFile(cfg.claudeOAuthTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading -claude-oauth-token-file: %w", err)
+		}
+		grainBinaryPath, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("resolving this binary's own path, for claude's --mcp-config: %w", err)
+		}
+		opts := []claude.Option{claude.WithOAuthToken(oauthToken)}
+		if cfg.konturSandboxes {
+			// Only meaningful with -kontur-sandboxes: a run dispatched
+			// onto a plain orchestrator.HostSandboxes directory reaches it
+			// through RunConfig.SandboxRoot instead (RunDispatch, via
+			// cycle.go's own rootedSandbox/vmNamedSandbox split), which
+			// needs none of this.
+			opts = append(opts, claude.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
+		}
+		return claude.New(claudePath, grainBinaryPath, opts...), nil
+	default:
+		apiKey, err := readTrimmedFile(cfg.geminiAPIKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading -gemini-api-key-file: %w", err)
+		}
+		f, err := gemini.New(ctx, apiKey, gemini.WithModel(cfg.geminiModel))
+		if err != nil {
+			return nil, fmt.Errorf("building the Gemini agent: %w", err)
+		}
+		return f, nil
+	}
 }
 
 // reconcilerDown reports whether runDaemon has given up entirely --
@@ -765,6 +866,7 @@ func (c config) logStoreOverrides(mc model.Config) {
 	}
 	warn("poll-interval", c.pollInterval, mc.PollInterval)
 	warn("max-concurrent", c.maxConcurrent, mc.MaxConcurrent)
+	warn("agent-framework", c.agentFramework, mc.AgentFramework)
 	warn("gemini-model", c.geminiModel, mc.GeminiModel)
 	warn("max-agent-turns", c.maxAgentTurns, mc.MaxAgentTurns)
 	warn("github-host", c.githubHost, mc.GitHubHost)
@@ -782,7 +884,8 @@ func (c config) logStoreOverrides(mc model.Config) {
 func (c config) toModelConfig() model.Config {
 	return model.Config{
 		PollInterval: c.pollInterval, MaxConcurrent: c.maxConcurrent,
-		GeminiModel: c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
+		AgentFramework: c.agentFramework,
+		GeminiModel:    c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
 		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
 		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
 		TargetRepos: c.targetRepos,
@@ -796,6 +899,7 @@ func (c config) toModelConfig() model.Config {
 func (c config) withModelConfig(mc model.Config) config {
 	c.pollInterval = mc.PollInterval
 	c.maxConcurrent = mc.MaxConcurrent
+	c.agentFramework = mc.AgentFramework
 	c.geminiModel = mc.GeminiModel
 	c.maxAgentTurns = mc.MaxAgentTurns
 	c.githubHost = mc.GitHubHost
@@ -896,6 +1000,16 @@ func openStore(dataDir string) (*model.Store, *sql.DB, error) {
 		return nil, nil, fmt.Errorf("applying schema: %w", err)
 	}
 	return store, db, nil
+}
+
+// liveTranscriptDir returns the ui.LiveTranscript reader matching
+// whichever agent.Framework buildAgentFramework built for cfg -- see
+// startUIServer's own comment on why the two must agree.
+func liveTranscriptDir(cfg config, transcriptDir string) ui.LiveTranscript {
+	if cfg.agentFramework == model.AgentFrameworkClaude {
+		return claude.LiveTranscriptDir{Dir: transcriptDir}
+	}
+	return gemini.LiveTranscriptDir{Dir: transcriptDir}
 }
 
 // startGitProxy serves gitproxy.NewHandler on a random port, and returns
@@ -999,15 +1113,16 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
 			"config-sync":     systemlog.Journalctl{Unit: "grain-v2-config-sync.service"},
 		},
-		// gemini.LiveTranscriptDir reads back whatever gemini.Framework.Run
-		// (the framework agentFramework below actually wires in) has
-		// mirrored so far into transcriptDir/<runID> for a still-running
-		// attempt (transcriptDir's own doc comment on the shared directory
-		// convention). If a deployment ever wires claude.New in instead,
-		// this must change alongside it -- claude.LiveTranscriptDir reads a
-		// different file format (its own doc comment), and the two are not
-		// interchangeable.
-		LiveTranscripts: gemini.LiveTranscriptDir{Dir: transcriptDir},
+		// liveTranscriptDir reads back whatever buildAgentFramework's own
+		// choice of Framework.Run has mirrored so far into
+		// transcriptDir/<runID> for a still-running attempt (transcriptDir's
+		// own doc comment on the shared directory convention).
+		// gemini.LiveTranscriptDir and claude.LiveTranscriptDir read two
+		// different file formats (RunConfig.TranscriptPath's own doc
+		// comment) and are not interchangeable, so this has to agree with
+		// cfg.agentFramework -- the same setting buildAgentFramework
+		// switches on in runDaemon, cfg being the one thing both share.
+		LiveTranscripts: liveTranscriptDir(cfg, transcriptDir),
 		// orchestrator.ChecksUnavailable reads process-lifetime state
 		// RunCycle's own reconcile loop sets the first time GitHub 403s a
 		// check-runs read against this deployment's credential -- see its

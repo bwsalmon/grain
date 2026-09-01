@@ -15,19 +15,30 @@ import (
 )
 
 // RunConfig is what one agent run needs to start: a prompt and where its
-// sandbox tools should reach. Exactly one of SandboxRoot or Tools is
-// expected to be set. SandboxRoot is the original, simpler shape --
-// confine the run to a local directory, which a Framework turns into
-// mcp.NewSandboxTools itself. Tools is the more general seam a caller that
-// already has a real sandbox to hand over uses instead -- an
-// orchestrator.KonturSandboxes-built mcp.NewSSHSandboxTools set, for
-// instance -- letting a Framework stay agnostic about what backs a run's
-// tool calls rather than only ever knowing how to build the local-
-// directory kind itself.
+// sandbox tools should reach. A Framework that loops its own tool calls
+// in-process (agent/gemini) wants Tools, or failing that SandboxRoot, and
+// ignores KonturVM entirely -- see gemini.Framework.Run's own doc
+// comment. A Framework that instead forks a real MCP client as a
+// subprocess and lets it manage its own connection (agent/claude) cannot
+// consume Tools at all -- there is no in-process registry to hand a
+// forked process -- so it reads SandboxRoot or KonturVM instead, whichever
+// is set, and builds the arguments its own forked "mcpserver" subcommand
+// needs to reach the same sandbox: -sandbox-root for a local directory, or
+// -kontur-vm for a named orchestrator.KonturSandboxes VM. Tools and
+// SandboxRoot/KonturVM are not alternatives to choose between so much as
+// two different Frameworks' own ways of reaching the one sandbox a
+// caller's RunDispatch resolved; RunDispatch populates all it can and
+// leaves it to whichever Framework it calls to read what it understands.
 type RunConfig struct {
 	Prompt      string
 	SandboxRoot string
-	Tools       []mcp.Tool
+	// KonturVM, when SandboxRoot is empty, names a bwsalmon/kontur-managed
+	// VM (orchestrator.KonturSandboxes.VMNameFor's own result, not the
+	// sandbox/run's own name) a Framework with no in-process route to a
+	// sandbox can point its own forked "mcpserver -kontur-vm" subprocess
+	// at instead of a local directory -- see agent/claude's Framework.Run.
+	KonturVM string
+	Tools    []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
 	// before Run gives up and returns an error, guarding against a run
 	// that never stops asking for tools. Zero means the framework's own

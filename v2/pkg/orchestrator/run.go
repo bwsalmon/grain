@@ -266,6 +266,12 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 // since deciding what a run produced is a different question from
 // deciding what to do about it.
 //
+// sandboxRoot and konturVM both also travel straight into the
+// agent.RunConfig framework.Run is given, for a Framework with no
+// in-process route to tools to reach the same sandbox by itself -- see
+// RunConfig's own doc comment. Either may be empty; runOne computes
+// whichever this run's own Sandbox can actually offer.
+//
 // While the agent runs, a background watchForTaskClosed goroutine polls
 // store for this task being closed and cancels the ctx the agent itself
 // (and every tool call it makes) was given the moment it sees that --
@@ -276,7 +282,7 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 // killed this way finishes with outcome "cancelled", distinct from
 // "failed", and returns a non-nil error wrapping errTaskClosed.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
-	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot string, at time.Time) (*agent.Result, error) {
+	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot, konturVM string, at time.Time) (*agent.Result, error) {
 
 	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Sandbox: d.RunID, Attempt: d.Attempt, StartedAt: at}
 	cc := model.CapabilityContext{Task: task, Run: run, Now: at, Workdir: sandboxRoot, Credentials: cfg.Credentials}
@@ -366,7 +372,8 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		}()
 
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
-			Prompt: prompt, Tools: tools, MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
+			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
+			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
 		cancelAgentCtx()
