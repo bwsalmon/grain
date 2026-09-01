@@ -1463,12 +1463,16 @@ yet (see "What this does not have yet" above), and its daemon already
 defaults to `orchestrator.HostSandboxes` — plain host directories, not a
 VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
-not have either way yet). It builds with `make container-build`, so a
-working `docker` is the one thing it assumes about the host at build
-time -- `make` itself it installs when the host has none, since the
-compile happens inside Docker and make is the one piece of that
-toolchain the host still needs, which no Debian cloud image carries
-(`ensure_make`); it also re-runs itself when the update it just pulled
+not have either way yet). It builds with `make container-build`, so
+`git`, `docker` and `make` are the only things it needs of the host,
+and it installs all three itself on a vanilla Debian VM that has none
+of them (`ensure_git`, `ensure_docker`, `ensure_make` --
+bwsalmon/agents#617: until then, only `terraform/gcp-v2/files/deploy.sh`
+guaranteed `git` and `docker` before ever invoking this script, which
+was no help to a host that reaches this script the way this section's
+own opening line describes -- cloning the repo and running it
+directly, no Terraform involved); it also re-runs itself when the
+update it just pulled
 replaced the script mid-run, so a deploy never builds with the copy it
 started with (`reexec_if_updated`). There used to be a second service
 (`grain-ui.service`) and, before
