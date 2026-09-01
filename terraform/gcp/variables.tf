@@ -97,9 +97,16 @@ variable "enable_shielded_vm" {
 variable "deploy_generation" {
   type        = string
   description = <<-EOT
-    Opaque token written to instance metadata. The on-VM config-sync
-    service watches it and redeploys whenever it changes; CI sets it to
-    the commit SHA, which is what makes a push to this repo roll out.
+    Opaque token folded into instance metadata's grain-deploy-generation
+    alongside a hash of grain_config itself (instance.tf); the on-VM
+    config-sync service watches that combined value and redeploys
+    whenever it changes. CI sets this variable to the commit SHA, which is
+    what makes a push to this repo roll out; the grain_config hash is what
+    makes a change to a value like sandbox_count roll out too, even on a
+    manual `terraform apply` (this variable's own "manual" default) that
+    never touches deploy_generation at all -- see instance.tf's own
+    grain-deploy-generation comment for the bug (bwsalmon/agents#592) this
+    closes.
   EOT
   default     = "manual"
 }

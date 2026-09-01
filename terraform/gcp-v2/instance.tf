@@ -162,8 +162,14 @@ resource "google_compute_instance" "host" {
     grain-config = jsonencode(local.grain_config)
 
     # Changing this is what triggers a rollout -- see variables.tf's
-    # deploy_generation.
-    grain-deploy-generation = var.deploy_generation
+    # deploy_generation. Folded together with a hash of grain_config
+    # itself, the same fix terraform/gcp/instance.tf's own copy of this
+    # line got for bwsalmon/agents#592: without it, a manual `terraform
+    # apply` (deploy_generation's own "manual" default) that only edits a
+    # grain_config value never rolls out, because config-sync's whole
+    # trigger is this one field and nothing rechecks grain_config on its
+    # own -- not on the next tick, not after rebooting the host.
+    grain-deploy-generation = "${var.deploy_generation}-${substr(sha256(jsonencode(local.grain_config)), 0, 12)}"
   }
 
   lifecycle {

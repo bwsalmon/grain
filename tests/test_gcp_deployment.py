@@ -148,6 +148,43 @@ def test_the_host_reads_every_key_terraform_puts_in_grain_config():
     assert not unread, f"instance.tf publishes config the host never reads: {sorted(unread)}"
 
 
+def test_grain_deploy_generation_changes_when_grain_config_does():
+    """Regression test for bwsalmon/agents#592 ("changing max concurrent
+    agents takes no effect even after reboot").
+
+    config-sync.sh's whole rollout trigger is instance metadata's
+    grain-deploy-generation changing (config-sync.sh's own "watching
+    grain-deploy-generation"); it never rechecks grain_config on its own.
+    var.deploy_generation defaults to the literal string "manual", for an
+    operator applying by hand rather than through CI -- so a manual
+    `terraform apply` that only edits a grain_config value (sandbox_count
+    being the field #592 actually changed) left grain-deploy-generation
+    completely unchanged, and nothing ever rolled out: not on the next
+    config-sync tick, not after rebooting the host, since neither one
+    rereads grain_config outside of that one trigger. Folding a hash of
+    grain_config into grain-deploy-generation closes the gap: this test
+    pins the metadata expression down to one that actually depends on
+    local.grain_config, so a future edit that drops the hash again (a
+    revert, or a refactor of instance.tf's metadata block) fails a test
+    instead of silently reintroducing the bug.
+    """
+    instance_tf = (TERRAFORM / "instance.tf").read_text()
+    metadata = re.search(r"metadata = \{(.*?)\n  \}", instance_tf, re.S)
+    assert metadata, "instance.tf's google_compute_instance has no metadata block"
+    generation = re.search(r"grain-deploy-generation\s*=\s*(.+)", metadata.group(1))
+    assert generation, "instance.tf's metadata has no grain-deploy-generation key"
+    expr = generation.group(1)
+    assert "var.deploy_generation" in expr, (
+        "grain-deploy-generation must still depend on var.deploy_generation "
+        "(CI's own commit-SHA-driven rollout trigger)"
+    )
+    assert "local.grain_config" in expr, (
+        "grain-deploy-generation must also depend on local.grain_config, or a "
+        "grain_config-only change (e.g. sandbox_count) never triggers a "
+        "rollout -- see bwsalmon/agents#592"
+    )
+
+
 def test_config_sync_reads_the_deploy_timeout():
     assert "deploy_timeout_secs" in (TERRAFORM / "files" / "config-sync.sh").read_text()
 
