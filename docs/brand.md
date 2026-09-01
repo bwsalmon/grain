@@ -77,15 +77,44 @@ sharp from the 16px tab slot to a 180px installed shortcut.
 
 **Animated — the cycle.** Shown while agents are actually working, which
 in the UI means at least one task is in the `running` state. Grains
-scatter and fly between the four glyphs on the pack's own clock: a full
-loop is about 6.5s, 1.3s of flight between glyphs and 0.33s held on
-each. Grains are matched to their targets by nearest free slot, so the
-flight reads as sand reorganizing rather than as a crossfade.
+scatter and fly between the four glyphs, matched to their targets by
+nearest free slot, so the flight reads as sand reorganizing rather than
+as a crossfade.
 
-The animation **opens on slot 2** — the rosette, the figure the still
-was already showing — so the mark comes to life rather than cutting to a
-different image. `GrainMark.jsx` reads that slot from the module's
-`STATIC_SLOT` rather than hard-coding it.
+It comes in two forms, split at the same 48px the grain density is.
+
+*Below 48px the mark holds its dwell crisp.* It settles, sharpens into
+the solid glyph, dissolves back into sand to move, and re-forms. A
+stipple standing still at icon size is the thing that reads as mush, and
+this takes that away without giving up the flight. The dwell is 0.9s
+rather than the pack's 0.33s — held that briefly the settled glyph would
+read as a flicker in the flight rather than as a state — which makes the
+loop about 10s against the pack's 6.5s.
+
+The fade between the two is doing real work, not softening a seam.
+`sampleGlyph` places grain *centres* inside the region, so every grain
+bleeds a radius past its edge: the settled cloud is the solid glyph
+**dilated** by that much, and at 20px it carries about three quarters
+again as much ink, with the rosette's holes nearly closed. Cutting
+between them would be a visible pop four times a loop. Faded over 240ms,
+the same difference is the point — the mark reads loose while the sand
+is in the air and tight once it lands.
+
+*Above 48px it runs the pack's own uninterrupted cycle* — 1.3s of flight
+and 0.33s held, about 6.5s round. Not because crisping would be
+invisible at that size (the gap is a thin outline there and would fade
+cleanly) but because the stipple **is** the picture at hero scale, and
+flattening it to a fill four times a loop would throw away the texture
+that makes the mark worth showing large.
+
+Either way the animation **opens on slot 2** — the rosette, the figure
+the still was already showing — so the mark comes to life rather than
+cutting to a different image. `GrainMark.jsx` reads that slot from the
+module's `STATIC_SLOT` rather than hard-coding it. The settled glyph is
+a second canvas under the grains carrying the module's own solid render
+of whichever figure they landed on; it cannot be the still `<img>`,
+tempting as that is, because that file is the rosette and only the
+rosette.
 
 Two things suppress the animation and fall back to the still: a reader
 who has asked for reduced motion, and an environment with no canvas to
