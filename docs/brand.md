@@ -17,7 +17,10 @@ is the mark.
 | Path | What it is |
 |---|---|
 | `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. A verbatim copy of the design pack (v2) — see its header. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
-| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still and the animation; see below. |
+| `v2/pkg/ui/frontend/src/brand/mark-sheet.js` | The contract between the recorded animation and the component that plays it: which sizes have a sheet, how many frames, how long a loop. |
+| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still, the recorded animation and the live one; see below. |
+| `v2/pkg/ui/frontend/scripts/export-mark-sheets.mjs` | `npm run brand:sheets`. Records the animation to the sprite sheets below, out of a real browser running the renderer. |
+| `v2/pkg/ui/frontend/public/grain-mark-{20,32}.png` | The recorded animation, one sprite sheet per size. Alpha masks, so one file serves both themes. |
 | `v2/pkg/ui/frontend/scripts/export-brand-assets.mjs` | `npm run brand` in `v2/pkg/ui/frontend`. Regenerates everything below out of the renderer. |
 | `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The static logo as a solid filled path. Scale-free: the favicon, and the still the app shows wherever the mark is not animating. |
 | `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The same fill at 128px. Favicon fallback only, for browsers with no SVG-favicon support (Safari before 16.4). |
@@ -25,7 +28,10 @@ is the mark.
 
 The assets are committed rather than generated during `npm run build`, so
 a checkout builds without running the export. Change the mark or the
-colours and you re-run `npm run brand` and commit what it writes.
+colours and you re-run `npm run brand` and commit what it writes. That
+is two halves: `brand:assets` is plain node, `brand:sheets` needs a
+Playwright browser (or `CHROMIUM_PATH` pointing at one already on the
+machine).
 
 ## The math
 
@@ -116,12 +122,52 @@ that makes the mark worth showing large.
 
 Either way the animation **opens on slot 2** — the rosette, the figure
 the still was already showing — so the mark comes to life rather than
-cutting to a different image. `GrainMark.jsx` reads that slot from the
-module's `STATIC_SLOT` rather than hard-coding it. The settled glyph is
-a second canvas under the grains carrying the module's own solid render
-of whichever figure they landed on; it cannot be the still `<img>`,
-tempting as that is, because that file is the rosette and only the
-rosette.
+cutting to a different image.
+
+## Recorded, not simulated
+
+Every animated mark but the hero plays a **sprite sheet** rather than
+running the particle system. `npm run brand:sheets` captures one cycle
+frame by frame out of a real browser running `grain-mark.js` itself, on
+a stubbed clock and a seeded `Math.random` — so a sheet is not an
+imitation of the animation, it is that animation, recorded. Nothing in
+the exporter reimplements the flight, which is what keeps it from
+drifting; all it shares with `GrainMark.jsx` is the four timeline
+constants.
+
+| | |
+|---|---|
+| Frames | 204 — one full cycle of all four glyphs |
+| Rate | 24fps. At the peak of a flight a grain covers about half a CSS pixel per frame, so the quantization is invisible and there is nothing to gain from more. Frames are the whole cost of a sheet, so this is the dial. |
+| Size | Rendered at 2× device pixels: sharp on a retina display, clean downscaled on a 1× one |
+| Weight | 114 KB at 20px, 221 KB at 32px, fetched only when a mark first animates |
+
+Three things make it cheap. The sheet is an **alpha mask**, not a
+picture — every pixel of the mark is one colour at a varying alpha — so
+`background: var(--accent)` supplies the colour and one file serves both
+themes and follows a theme change with no reload. (It is a
+grayscale+*alpha* PNG for that reason: a CSS mask reads the alpha
+channel, and a plain grayscale image has none, so it masks nothing and
+the mark renders as a filled square.) Frames are stacked **vertically**,
+so the 43% of them that are held dwells become repeated scanlines that
+PNG's Up filter collapses to nothing; in a row they would be repeated
+columns, which it cannot. And playing it is a `steps()` animation on
+`mask-position` — compositor work that costs the same whether one mark
+is on screen or twenty. A task list with twenty running rows used to be
+twenty particle systems.
+
+It also fixes something the live renderer could not do: every mark is
+**in lockstep**. A CSS animation starts when its element is attached, so
+a task row that started running ten seconds after the sidebar would keep
+its own phase; `GrainMark.jsx` pins every one to the document timeline's
+origin instead, so the sidebar and every running row scatter and settle
+together.
+
+The hero keeps the live renderer. Its frames would be 640px square —
+80MB of pixels in a strip, past what a browser will decode — and it is
+one canvas on a screen with nothing else on it, which is the case the
+pack's renderer was written for. Any size without a sheet falls there
+too, so a new call site works before anyone has recorded one for it.
 
 Two things suppress the animation and fall back to the still: a reader
 who has asked for reduced motion, and an environment with no canvas to
