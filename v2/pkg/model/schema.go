@@ -433,6 +433,8 @@ var Tables = []string{
   ` + "`sandbox_memory_mb`" + `            INTEGER NOT NULL DEFAULT 0,
   ` + "`show_closed_by_default`" + `       INTEGER NOT NULL DEFAULT 0,
   ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'gemini',
+  ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 0,
+  ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
