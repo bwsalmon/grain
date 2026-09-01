@@ -156,14 +156,14 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	assertState(w, "iss-1", model.StateClosed, false)
 }
 
-// TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos proves the
-// same decision pkg/dispatch/dispatch_test.go's
-// TestCycleRespectsTheSlotCount pins down at the store level -- one
-// Cycle call filling two free slots at once -- all the way through two
-// real pushes, each in its own sandbox-stand-in directory, against two
-// different repos, and checks that running both dispatches within the
-// same cycle left neither slot's bookkeeping corrupted.
-func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
+// TestCycleDispatchesTwoRunsAtOnceAgainstDifferentRepos proves the same
+// decision pkg/dispatch/dispatch_test.go's
+// TestCycleRespectsTheConcurrencyLimit pins down at the store level --
+// one Cycle call starting two runs at once -- all the way through two
+// real pushes, each in its own sandbox, against two different repos, and
+// checks that running both dispatches within the same cycle left
+// neither run's bookkeeping corrupted.
+func TestCycleDispatchesTwoRunsAtOnceAgainstDifferentRepos(t *testing.T) {
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "gadgets")

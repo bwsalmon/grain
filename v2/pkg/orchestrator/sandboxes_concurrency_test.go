@@ -169,10 +169,10 @@ fi
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially holds
-// cycle.go's reconcileDispatch doc comment to its word: "HostSandboxes and
-// KonturSandboxes both guard their own per-slot state with a mutex keyed
-// by slot ... so nothing here needs to hold a lock of its own" -- which is
+// TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially holds
+// cycle.go's reconcileDispatch doc comment to its word: two dispatches
+// never touch the same sandbox, "so nothing here needs to hold a lock of
+// its own" -- which is
 // exactly what makes -max-concurrent/GRAIN_MAX_CONCURRENT a real
 // concurrency knob rather than just a scheduling one (that same comment,
 // bwsalmon/agents#435). If KonturSandboxes held one lock across the whole

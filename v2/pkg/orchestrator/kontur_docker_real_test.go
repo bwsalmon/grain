@@ -1,6 +1,6 @@
 package orchestrator_test
 
-// TestKonturSandboxesAcquireAgainstARealDockerBackedVM is the one place
+// TestKonturSandboxesAgainstARealDockerBackedVM is the one place
 // in this repo that drives orchestrator.KonturSandboxes against the real
 // `konturctl` and `docker` binaries and a real cloud-hypervisor VM under
 // real KVM, instead of the hand-written shell-script doubles every other
@@ -230,7 +230,7 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 }
 
 // TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently is the
-// concurrency counterpart to TestKonturSandboxesAcquireAgainstARealDockerBackedVM
+// concurrency counterpart to TestKonturSandboxesAgainstARealDockerBackedVM
 // above: that test proves Acquire works against one real cloud-hypervisor
 // VM under KVM, this one proves two slots' worth of real VMs actually come
 // up side by side under real docker/netshim/cloud-hypervisor, driven the
@@ -419,7 +419,7 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 
 // TestKonturSandboxesAgainstARealDockerBackedVM is the
 // docker-exec transport's (KonturConfig.DockerExec) counterpart to
-// TestKonturSandboxesAcquireAgainstARealDockerBackedVM above: the same
+// TestKonturSandboxesAgainstARealDockerBackedVM above: the same
 // real konturctl, real docker, real cloud-hypervisor guest under real
 // KVM, reached through `docker exec <vm container> kontur exec` instead
 // of SSH to netshim's externally forwarded port.

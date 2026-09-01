@@ -741,9 +741,9 @@ and `ensure` derives slot's own `-ip`/`-port` from it and the slot's own
 number (`model.SlotNames`' own 1-based, all-numeric contract), rather
 than repeating a literal `-ip`/`-port` in `-kontur-create-arg` that could
 only ever be right for one slot. `pkg/orchestrator`'s
-`TestKonturSandboxesAcquireAgainstARealDockerBackedVM` is the test that
+`TestKonturSandboxesAgainstARealDockerBackedVM` is the test that
 found all three: it builds `konturctl` and bwsalmon/kontur's own OCI
-image from the vendored source and drives `KonturSandboxes.ToolsFor`
+image from the vendored source and drives `KonturSandboxes.Acquire`
 against a real docker daemon and a real cloud-hypervisor VM under real
 KVM, skipping outright on a host missing either (as of this writing, that
 still stops short of a real dispatched tool call actually executing
@@ -766,7 +766,7 @@ disk, for a while a one-line vendored patch, now upstream — see
 `third_party/kontur/VENDORED.md`) and
 two guest-side gaps (systemd renaming the NIC away from `eth0`, and no
 `CONFIG_IP_PNP` to act on `konturctl`'s own `ip=` cmdline — both closed in
-`provision.sh`) were found and fixed. `TestKonturSandboxesAcquireAgainstARealDockerBackedVM`
+`provision.sh`) were found and fixed. `TestKonturSandboxesAgainstARealDockerBackedVM`
 now builds that real guest image as part of the test itself and asserts a
 `run_command` tool call actually executes inside it over SSH, closing the
 gap this paragraph used to describe.
