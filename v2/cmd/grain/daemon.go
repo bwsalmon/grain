@@ -73,6 +73,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/claude"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/githubsandbox"
@@ -939,7 +940,7 @@ func capabilityProviders(cfg config) []model.CapabilityProvider {
 	providers = append(providers, githubsandbox.NewProvider(githubsandbox.Config{
 		Host: cfg.githubHost, InsecureHTTP: cfg.githubInsecureHTTP,
 	}))
-	providers = append(providers, selfdebug.New(), selfrepair.New())
+	providers = append(providers, selfdebug.New(), selfrepair.New(), bootstrap.New())
 	return providers
 }
 
@@ -960,6 +961,9 @@ func grantTools(srcDir string) map[string]func(store *model.Store, taskID string
 		},
 		selfrepair.CapabilityName: func(store *model.Store, taskID string) []mcp.Tool {
 			return selfrepair.HostCommandTools(store, taskID, 0, 0)
+		},
+		bootstrap.CapabilityName: func(*model.Store, string) []mcp.Tool {
+			return bootstrap.PlaybookTools()
 		},
 	}
 }

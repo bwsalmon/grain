@@ -85,9 +85,10 @@ type Settings struct {
 	// this deployment's own readiness computed against it -- capability_
 	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
 	// populated, even before Settings has ever been saved (GetSettings),
-	// since self-debug/self-repair need no configuration to be ready and
-	// an operator setting up a fresh deployment still benefits from
-	// seeing that gcp-key/gemini-key/github-sandbox are not yet.
+	// since self-debug/self-repair/bootstrap-playbooks need no
+	// configuration to be ready and an operator setting up a fresh
+	// deployment still benefits from seeing that
+	// gcp-key/gemini-key/github-sandbox are not yet.
 	Capabilities []CapabilityStatus `json:"capabilities"`
 	// ApprovedByDefault and AutoMergeByDefault are model.Config's own
 	// fields of the same name (bwsalmon/agents#612): deployment-wide

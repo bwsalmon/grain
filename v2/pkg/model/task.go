@@ -374,14 +374,15 @@ type Task struct {
 	// Configuration marks a task as grain's own "configuration agent"
 	// (bwsalmon/agents#621): the one-click interactive session, opened
 	// from an overlay the frontend keeps reachable at all times, that
-	// carries the self-debug/self-repair grants and a prompt oriented at
+	// carries the self-debug/self-repair/bootstrap-playbooks grants
+	// (bwsalmon/agents#620 added the third) and a prompt oriented at
 	// helping whoever opened it with a problem, a question, or grain's
 	// own configuration -- rather than a human assembling that
 	// combination by hand through Interactive and Capabilities every
 	// time. ui.Client.CreateTask is what actually assembles it (forcing
-	// Interactive true, attaching the two grants, defaulting Title/Body)
-	// so every caller gets the same bundle regardless of what it asked
-	// for individually.
+	// Interactive true, attaching the grants, defaulting Title/Body) so
+	// every caller gets the same bundle regardless of what it asked for
+	// individually.
 	//
 	// It also changes how dispatch.Cycle schedules the task: unlike an
 	// ordinary Interactive task, which still waits its turn for
