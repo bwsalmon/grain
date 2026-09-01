@@ -416,6 +416,13 @@ func run(ctx context.Context, cfg config) error {
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
 		})
+		// Checked once here rather than discovered one dispatch at a time:
+		// a prefix with no room for a run's own name cannot build a single
+		// VM, and every task that reaches Acquire would fail on it
+		// individually. See KonturSandboxes.CheckNamePrefix.
+		if err := konturSandboxes.CheckNamePrefix(); err != nil {
+			return err
+		}
 		sandboxes = konturSandboxes
 	} else {
 		// orchestrator.NewHostSandboxes' own doc comment says its baseDir
@@ -602,8 +609,9 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			GitRemoteBase: proxyURL,
 			GrantTools:    grantTools(cfg.upgradeSrcDir),
 		},
-		MintSandboxToken: tokens.EnsureToken,
-		MaxConcurrent:    cfg.maxConcurrent,
+		MintSandboxToken:   tokens.EnsureToken,
+		RevokeSandboxToken: tokens.Revoke,
+		MaxConcurrent:      cfg.maxConcurrent,
 	}
 	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s)", cfg.pollInterval, cfg.maxConcurrent)
 	reconcile(ctx, deps, cfg.pollInterval)

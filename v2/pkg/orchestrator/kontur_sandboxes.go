@@ -246,6 +246,40 @@ func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
 // tap device name several layers down.
 const maxVMNameLen = 11
 
+// minRunNameBudget is how many of maxVMNameLen's bytes a usable
+// NamePrefix has to leave for the run's own name -- what CheckNamePrefix
+// enforces.
+//
+// Nine, because a sandbox is named "<task id>-r<attempt>" (dispatch.
+// RunID) and task ids are a monotonically increasing counter
+// (Store.NewTaskID): nine covers a five-digit task id with a double-digit
+// attempt, which is the budget NamePrefix's own doc comment already
+// commits to. A deployment should not get to discover it has outgrown its
+// prefix on the day its task ids reach five digits.
+const minRunNameBudget = 9
+
+// CheckNamePrefix reports whether NamePrefix leaves a usable VM-name
+// budget, for a caller that would rather know at startup than at dispatch.
+//
+// This earns its own check because the budget got tighter without the
+// flag that spends it changing. A sandbox used to be named after a slot,
+// so a VM was "<prefix>1" and nearly any prefix fit; it is named after a
+// run now, so the same configured prefix has several more bytes to
+// accommodate. An existing deployment's -kontur-vm-name-prefix can
+// therefore be one this build cannot build a single VM under -- and
+// without this that surfaces as every dispatch failing to acquire a
+// sandbox, one run at a time, instead of the daemon saying so once.
+func (k *KonturSandboxes) CheckNamePrefix() error {
+	budget := maxVMNameLen - len(k.cfg.NamePrefix)
+	if budget < minRunNameBudget {
+		return fmt.Errorf("orchestrator: kontur VM name prefix %q is %d bytes, leaving %d of the %d-byte budget netshim's "+
+			"tap device naming imposes -- a sandbox is named after its run (\"<task id>-r<attempt>\") and needs at least %d, "+
+			"so shorten -kontur-vm-name-prefix to %d bytes or fewer",
+			k.cfg.NamePrefix, len(k.cfg.NamePrefix), budget, maxVMNameLen, minRunNameBudget, maxVMNameLen-minRunNameBudget)
+	}
+	return nil
+}
+
 // VMNameFor returns the kontur VM name for a sandbox, so something
 // outside this package can predict it without calling Acquire.
 func (k *KonturSandboxes) VMNameFor(sandbox string) (string, error) {

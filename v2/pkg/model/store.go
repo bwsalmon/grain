@@ -49,6 +49,28 @@ type querier interface {
 // confusing missing column.
 var ErrSchemaTooNew = errors.New("database schema is newer than this build")
 
+// ErrSchemaTooOld is returned when the database was written by a build
+// that knows an earlier schema, and so carries columns and indexes this
+// build cannot reconcile it into.
+//
+// It is the same argument ErrSchemaTooNew makes, in the direction that
+// used to be assumed harmless. Init's own CREATE TABLE IF NOT EXISTS
+// never alters a table that already exists, and the ensure*Column
+// migrations above only ever *add* a column -- neither can drop one, or
+// replace an index. A schema change that removes something therefore
+// leaves an older database intact and wrong: SchemaVersion 16 dropped
+// task_run.slot, so a database written at 15 keeps that column, still
+// declared NOT NULL with no default, and every startRun fails to satisfy
+// it.
+//
+// Left unchecked, that surfaces as a dispatch failure on every tick,
+// forever, from a daemon that started up perfectly happily -- so the
+// operator sees a deployment that runs and never runs anything, rather
+// than one that says why. ../scripts/setup.sh moves such a store aside at
+// deploy (cmd/grain/schemaversion.go's own doc comment on how it knows
+// to), and this is what a build started any other way does instead.
+var ErrSchemaTooOld = errors.New("database schema is older than this build")
+
 // Init creates the schema if absent and stamps the version.
 func (s *Store) Init(ctx context.Context) error {
 	for _, stmt := range Statements() {
@@ -106,6 +128,11 @@ func (s *Store) Init(ctx context.Context) error {
 	if version > SchemaVersion {
 		return fmt.Errorf("%w: found %d, this build knows %d",
 			ErrSchemaTooNew, version, SchemaVersion)
+	}
+	if version < SchemaVersion {
+		return fmt.Errorf("%w: found %d, this build knows %d -- ../scripts/setup.sh moves such a store aside at deploy; "+
+			"to do it by hand, move the store file out of the way and let this build create a fresh one",
+			ErrSchemaTooOld, version, SchemaVersion)
 	}
 	return nil
 }

@@ -2126,3 +2126,79 @@ func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {
 		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
 	}
 }
+
+// A schema change that *removes* something -- SchemaVersion 16 dropping
+// task_run.slot and its index -- cannot be applied to an existing
+// database by Init: CREATE TABLE IF NOT EXISTS never alters a table that
+// is already there, and the ensure*Column migrations only ever add. An
+// older store therefore keeps a slot column still declared NOT NULL with
+// no default, and every StartRun fails to satisfy it -- on every dispatch,
+// forever, from a daemon that started up without complaint. Init has to
+// refuse it instead, so the failure names itself once at startup rather
+// than a tick at a time.
+func TestInitRefusesAStoreOlderThanThisBuild(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := model.New(db).Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE `grain_schema` SET `version` = ? WHERE `id` = 1", model.SchemaVersion-1); err != nil {
+		t.Fatal(err)
+	}
+
+	err = model.New(db).Init(ctx)
+	if !errors.Is(err, model.ErrSchemaTooOld) {
+		t.Fatalf("Init against an older store = %v, want ErrSchemaTooOld", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(model.SchemaVersion-1)) ||
+		!strings.Contains(err.Error(), strconv.Itoa(model.SchemaVersion)) {
+		t.Errorf("the error should name both versions, got: %v", err)
+	}
+}
+
+// The other direction, which has always been refused: a store written by
+// a build that knows a later schema.
+func TestInitRefusesAStoreNewerThanThisBuild(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := model.New(db).Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE `grain_schema` SET `version` = ? WHERE `id` = 1", model.SchemaVersion+1); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := model.New(db).Init(ctx); !errors.Is(err, model.ErrSchemaTooNew) {
+		t.Fatalf("Init against a newer store = %v, want ErrSchemaTooNew", err)
+	}
+}
+
+// A store this build itself just created re-opens without complaint --
+// the ordinary daemon restart, which neither guard may catch.
+func TestInitAcceptsAStoreAtThisBuildsOwnVersion(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := model.New(db).Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	if err := model.New(db).Init(ctx); err != nil {
+		t.Fatalf("re-opening a store this build created: %v", err)
+	}
+}

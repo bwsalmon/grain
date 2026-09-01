@@ -866,3 +866,35 @@ func TestKonturSandboxesFlatModeIsTheDefault(t *testing.T) {
 // just finished with always exists, which
 // TestKonturSandboxesRecreateDeletesAndRecreatesTheVM above still proves
 // deletes first.
+
+// A prefix that leaves no room for a run's own name is refused once, at
+// startup, rather than failing every dispatch that reaches Acquire. The
+// pressure is real rather than hypothetical: a sandbox used to be named
+// after a slot ("<prefix>1"), so a prefix that fit comfortably then can be
+// one this build cannot build a single VM under.
+func TestKonturSandboxesCheckNamePrefixRejectsAPrefixWithNoRoomForARunName(t *testing.T) {
+	// "grain-" left 5 bytes, which was plenty for a slot named "1" and is
+	// not enough for any run id at all.
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "grain-"})
+	err := k.CheckNamePrefix()
+	if err == nil {
+		t.Fatal("expected a 6-byte prefix to be refused")
+	}
+	for _, want := range []string{"grain-", "-kontur-vm-name-prefix"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestKonturSandboxesCheckNamePrefixAcceptsAPrefixThatFits(t *testing.T) {
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "g-"})
+	if err := k.CheckNamePrefix(); err != nil {
+		t.Fatalf("CheckNamePrefix for a two-byte prefix: %v", err)
+	}
+	// And the budget it promises is real: a five-digit task id on its
+	// tenth attempt still resolves to a name.
+	if _, err := k.VMNameFor("99999-r10"); err != nil {
+		t.Errorf("VMNameFor at the budget CheckNamePrefix guarantees: %v", err)
+	}
+}

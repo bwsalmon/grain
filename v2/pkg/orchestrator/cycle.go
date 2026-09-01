@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -43,8 +44,35 @@ type Deps struct {
 	// cannot be replayed by, or on behalf of, anything dispatched after
 	// it.
 	MintSandboxToken func(sandbox string) (string, error)
-	MaxConcurrent    int
+	// RevokeSandboxToken drops the token MintSandboxToken made, once the
+	// sandbox it identified has been released -- gitproxy.
+	// SandboxTokenStore.Revoke, in a deployment; nil wherever
+	// MintSandboxToken is.
+	//
+	// It is the other half of minting per run. One token per slot was a
+	// fixed set that a deployment carried for its whole life; one per run
+	// is a new entry every dispatch, in a file every mint reads and
+	// rewrites whole. See that method's own doc comment: this is upkeep,
+	// not authorization, which Store.GitScope already handles by
+	// resolving a sandbox through the live run on it.
+	RevokeSandboxToken func(sandbox string) error
+	MaxConcurrent      int
 }
+
+// runCleanupTimeout bounds each of the two things runOne does after a run
+// is over -- releasing its sandbox and finishing its row -- on a context
+// detached from the caller's own cancellation.
+//
+// Detaching is what makes them happen at all when the daemon is shutting
+// down or a task was closed mid-run (their own comments in runOne).
+// Bounding is what keeps that from being worse than not detaching: both
+// reach something that can hang -- `konturctl vm delete` against a wedged
+// docker, a store write behind a busy database -- and an unbounded
+// detached context would pin the dispatch goroutine, and the run row it
+// has not finished yet, for the life of the process. Generous rather than
+// tight, since a VM teardown is genuinely slow and the alternative to
+// waiting is leaving one running.
+const runCleanupTimeout = 2 * time.Minute
 
 // Reconciler is one independent unit of a cycle: a named function that
 // reads current state, does whatever that state implies, and reports
@@ -258,6 +286,53 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		return fmt.Errorf("orchestrator: dispatch.Cycle dispatched unknown task %s", d.TaskID)
 	}
 
+	// Everything between here and RunDispatch is this run's setup, and any
+	// of it can fail: a kontur VM has to boot, a token has to be minted, a
+	// guest has to accept a git config. dispatch.Cycle has already made
+	// this run durable (its own doc comment), and RunDispatch is what
+	// finishes it on every path once it takes over -- so a setup failure
+	// returning straight out of here would leave the row live with nothing
+	// left to finish it.
+	//
+	// That is not merely untidy. task_state reads a live run as 'running',
+	// so the task never returns to 'queued' and task_ready never offers it
+	// again; LiveRunCount still counts the row, so the deployment
+	// permanently loses one unit of -max-concurrent; and retryEligible
+	// reads *finished* runs, so the backoff that is supposed to retry a
+	// transient failure never sees one to retry. Nothing sweeps it either:
+	// Config.MaxRunRuntime is enforced inside RunDispatch, and
+	// RecoverOrphanedRuns is a startup pass, so the wedge lasts until the
+	// daemon is restarted by hand.
+	//
+	// It mattered less when a slot's VM was built once at startup and
+	// ToolsFor was a cheap lookup after that. A sandbox per run puts a VM
+	// boot -- with a ReadyTimeout measured in minutes -- on the setup path
+	// of every single dispatch, so this is now the ordinary way a run
+	// fails rather than a first-boot curiosity.
+	//
+	// Finishing it here is what makes bwsalmon/agents#576's successor true:
+	// a transient failure costs one run, and dispatch's own backoff
+	// (retryBackoff, and MaxConsecutiveFailures behind it) retries the
+	// task rather than a human noticing a log line. The outcome is its own
+	// word rather than "failed" because no agent ever ran: nothing was
+	// attempted that could have gone wrong on its own terms.
+	//
+	// Detached from ctx's cancellation for the same reason the release
+	// below is: a daemon shutting down mid-Acquire is exactly when this
+	// row would otherwise be stranded.
+	ranAgent := false
+	defer func() {
+		if ranAgent || err == nil {
+			return
+		}
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runCleanupTimeout)
+		defer cancel()
+		if ferr := deps.Store.FinishRun(finishCtx, d.RunID, now, "setup-failed",
+			"this run's sandbox could not be prepared: "+err.Error()); ferr != nil {
+			err = errors.Join(err, fmt.Errorf("orchestrator: finishing run %s after its setup failed: %w", d.RunID, ferr))
+		}
+	}()
+
 	// The sandbox this run gets is named after the run itself. Nothing
 	// else is in a position to name it: it is built for this run and torn
 	// down with it, so there is no longer-lived thing (a slot, a pool
@@ -304,9 +379,31 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// shutting down or the task was closed mid-run, which are exactly the
 	// cases where a VM would otherwise be left running with nothing left
 	// to release it.
+	//
+	// Detached, but not unbounded. Release execs `konturctl vm delete`
+	// against a host that may be wedged, and a context with no deadline
+	// would let that hang hold this goroutine -- and this run's row, which
+	// only gets finished below it -- open forever, which is the failure
+	// the detachment is supposed to prevent rather than cause. A VM that
+	// outlives the timeout is ReapOrphans' problem at the next startup,
+	// which is what that pass is for.
 	defer func() {
-		if rerr := sandbox.Release(context.WithoutCancel(ctx)); rerr != nil {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runCleanupTimeout)
+		defer cancel()
+		if rerr := sandbox.Release(releaseCtx); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("orchestrator: releasing run %s's sandbox: %w", d.RunID, rerr))
+		}
+		// The token identified this sandbox, and the sandbox is gone, so
+		// the entry is too -- see SandboxTokenStore.Revoke on why the file
+		// is worth pruning now that it grows by one per run rather than
+		// holding one entry per slot forever. Logged rather than joined:
+		// a leftover entry authorizes nothing on its own (Store.GitScope
+		// resolves through the live run, and this one has none), so it is
+		// not worth turning a run's own outcome into an error over.
+		if deps.RevokeSandboxToken != nil {
+			if rerr := deps.RevokeSandboxToken(sandboxName); rerr != nil {
+				log.Printf("orchestrator: revoking run %s's sandbox token: %v", d.RunID, rerr)
+			}
 		}
 	}()
 
@@ -360,6 +457,9 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		}
 	}
 
+	// From here on RunDispatch owns finishing this run, on every path it
+	// can take -- so the setup guard above must not also finish it.
+	ranAgent = true
 	result, runErr := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
 
 	if runErr != nil {

@@ -83,21 +83,58 @@ func (t *SandboxTokens) Authenticate(token string) (string, bool) {
 	if ok {
 		return name, true
 	}
-	if err := t.reload(); err != nil {
+	return t.reloadAndLookup(token)
+}
+
+// reloadAndLookup re-reads the file and answers for token, both under one
+// hold of the write lock.
+//
+// Reading the file and swapping the map have to be one critical section,
+// not two. Split, a reload that read the file *earlier* can install its
+// map *later* -- so a goroutine that just re-read a file containing a
+// freshly minted token can have that map replaced by a staler one before
+// it looks the token up, and answer false for a token that is on disk.
+// That is a spurious 401 on a run's very first git operation, which is
+// the exact failure re-reading on a miss exists to prevent.
+//
+// The cost is that concurrent misses serialize, and a miss holds the
+// write lock across a file read. Both are bounded by how rare a miss is:
+// a known token never reaches here, so this runs once per new sandbox and
+// once per genuinely bogus token, not once per request.
+//
+// The re-check before reloading is not just an optimization: whichever
+// goroutine reloaded while this one waited for the lock may have already
+// brought the token in, and answering from that map is both correct and
+// one fewer read.
+func (t *SandboxTokens) reloadAndLookup(token string) (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if name, ok := t.byToken[token]; ok {
+		return name, true
+	}
+	if err := t.reloadLocked(); err != nil {
 		return "", false
 	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	name, ok = t.byToken[token]
+	name, ok := t.byToken[token]
 	return name, ok
 }
 
-// reload replaces the cached map with the file's current contents. A read
-// error leaves the previous map in place: a token minted before a
+// reload takes the write lock and re-reads the file -- LoadSandboxTokens'
+// own first read, where nothing else holds a reference yet.
+func (t *SandboxTokens) reload() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.reloadLocked()
+}
+
+// reloadLocked replaces the cached map with the file's current contents.
+// The caller holds t.mu for writing.
+//
+// A read error leaves the previous map in place: a token minted before a
 // transient failure is still a token this proxy should honour, and
 // dropping the whole map would fail every in-flight run's git rather than
 // the one lookup that could not be answered.
-func (t *SandboxTokens) reload() error {
+func (t *SandboxTokens) reloadLocked() error {
 	raw, err := readTokenFile(t.path)
 	if err != nil {
 		return err
@@ -106,9 +143,7 @@ func (t *SandboxTokens) reload() error {
 	for name, token := range raw {
 		byToken[token] = name
 	}
-	t.mu.Lock()
 	t.byToken = byToken
-	t.mu.Unlock()
 	return nil
 }
 
@@ -133,8 +168,22 @@ func readTokenFile(path string) (map[string]string, error) {
 // SandboxTokens because the two do different things to the same file: the
 // proxy only ever looks tokens up, caching what it has read, while
 // minting one is a read-modify-write against the file the proxy trusts.
+//
+// Every method here is a read-modify-write, and mu is what makes that
+// safe. It did not need to be while a token was minted per slot in
+// runDaemon's own startup preamble -- one goroutine, one call after
+// another, before the daemon dispatched anything. A sandbox per run mints
+// from orchestrator's runOne, which reconcileDispatch runs one goroutine
+// per dispatch of, so two mints genuinely overlap the moment
+// -max-concurrent is above 1. Unguarded, both read the same map, both add
+// their own sandbox, and whichever renames last drops the other's token
+// on the floor: that run then holds a token the proxy will never find in
+// the file, and every git operation inside its sandbox fails closed for
+// the life of the run.
 type SandboxTokenStore struct {
 	path string
+
+	mu sync.Mutex
 }
 
 func NewSandboxTokenStore(path string) *SandboxTokenStore {
@@ -142,8 +191,11 @@ func NewSandboxTokenStore(path string) *SandboxTokenStore {
 }
 
 // EnsureToken returns the sandbox's existing token, or a freshly minted
-// one recorded to disk. Idempotent per sandbox name.
+// one recorded to disk. Idempotent per sandbox name, and safe to call
+// from several goroutines at once -- see the type's own doc comment.
 func (s *SandboxTokenStore) EnsureToken(sandbox string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tokens, err := readTokenFile(s.path)
 	if err != nil {
 		return "", err
@@ -162,6 +214,8 @@ func (s *SandboxTokenStore) EnsureToken(sandbox string) (string, error) {
 // Rotate mints and records a fresh token unconditionally, replacing any
 // existing one.
 func (s *SandboxTokenStore) Rotate(sandbox string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tokens, err := readTokenFile(s.path)
 	if err != nil {
 		return "", err
@@ -174,9 +228,44 @@ func (s *SandboxTokenStore) Rotate(sandbox string) (string, error) {
 	return token, s.save(tokens)
 }
 
+// Revoke drops a sandbox's token, so this file holds one entry per
+// sandbox that still exists rather than one per run the deployment has
+// ever dispatched. A sandbox with no token is not an error: a run that
+// failed before it minted one has nothing to revoke, and revoking twice
+// is what a retried cleanup does.
+//
+// This is upkeep, not authorization. A finished run's token already
+// authorizes nothing -- Store.GitScope resolves a sandbox through the
+// live run on it, and there is none (Store.liveTaskID) -- so nothing is
+// unsafe without this. What it stops is unbounded growth: a token per
+// slot was a fixed handful for the life of a deployment, a token per run
+// is one more every dispatch, and since every mint reads and rewrites the
+// whole file, an un-pruned file makes each mint slower than the last.
+func (s *SandboxTokenStore) Revoke(sandbox string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tokens, err := readTokenFile(s.path)
+	if err != nil {
+		return err
+	}
+	if _, ok := tokens[sandbox]; !ok {
+		return nil
+	}
+	delete(tokens, sandbox)
+	return s.save(tokens)
+}
+
 // save writes tokens atomically: a temp file plus rename, so a killed
 // write can't corrupt the file the proxy trusts on its very next
-// (unrestarted) request.
+// (unrestarted) request. Callers hold s.mu.
+//
+// The temp file carries a random suffix rather than a fixed ".tmp". Two
+// concurrent saves through one fixed name are not atomic at all: the
+// second truncates and rewrites the file the first is about to rename, so
+// a rename can publish a half-written file, and the loser's own rename
+// then fails outright with ENOENT. s.mu already serializes this type's
+// own callers; the suffix keeps that true against a second process, or a
+// leftover from a killed one, sharing the same data dir.
 func (s *SandboxTokenStore) save(tokens map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
@@ -185,11 +274,19 @@ func (s *SandboxTokenStore) save(tokens map[string]string) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
+	suffix, err := randomHex(8)
+	if err != nil {
+		return err
+	}
+	tmp := s.path + "." + suffix + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // ExtractBasicAuthToken pulls the token out of an
