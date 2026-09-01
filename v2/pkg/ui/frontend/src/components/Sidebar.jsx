@@ -15,11 +15,12 @@ const SIDEBAR_WIDTH = 232;
 // Secrets and Upgrade live as tabs inside Settings (bwsalmon/agents#456).
 // Logs, Sandbox health and the reboot control (previously their own nav
 // entries/a "danger zone" on the general tab -- bwsalmon/agents#457,
-// bwsalmon/agents#536, bwsalmon/agents#395) now live together as
-// Settings' own Debug tab instead (bwsalmon/agents#623): all of it is
-// operator-only, deployment-wide diagnostics rather than day-to-day task
-// flow, the same reasoning that already grouped Secrets/Upgrade there.
-export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenNewTask }) {
+// bwsalmon/agents#536, bwsalmon/agents#395) went through Settings' own
+// Debug tab for a while too (bwsalmon/agents#623), but moved back out
+// to a "Debugging" entry of its own here, under Settings (bwsalmon/
+// agents#640) -- diagnosing a deployment gone wrong wants faster reach
+// than a tab buried inside Settings' configuration form.
+export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -117,6 +118,7 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
       <Box sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
         <Divider sx={{ mb: 0.9 }} />
         <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenSettings}>Settings</Button>
+        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenDebug}>Debugging</Button>
       </Box>
     </Box>
   );

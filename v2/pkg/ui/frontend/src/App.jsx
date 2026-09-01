@@ -13,6 +13,7 @@ import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import ConfigurationAgentButton from "./components/ConfigurationAgentButton.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
+import DebugOverlay from "./components/DebugOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
 import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
@@ -58,6 +59,7 @@ export default function App() {
   // sidebar's own "+ New task" button.
   const [newTaskRepo, setNewTaskRepo] = useState(null);
   const [showSettings, setShowSettings] = useState(() => parsePath(window.location.pathname).showSettings === true);
+  const [showDebug, setShowDebug] = useState(() => parsePath(window.location.pathname).showDebug === true);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -293,7 +295,7 @@ export default function App() {
   // the time it does there is nothing left to push.
   const mountedRef = useRef(false);
   useEffect(() => {
-    const path = buildPath({ view, taskId: openTaskId, showSettings });
+    const path = buildPath({ view, taskId: openTaskId, showSettings, showDebug });
     if (path !== window.location.pathname) {
       // The very first correction (e.g. an unrecognized path normalized
       // back to "/") replaces rather than pushes, so a mistyped or
@@ -305,7 +307,7 @@ export default function App() {
       }
     }
     mountedRef.current = true;
-  }, [view, openTaskId, showSettings]);
+  }, [view, openTaskId, showSettings, showDebug]);
 
   // Mirrors the browser's own back/forward buttons onto the same state
   // buildPath/parsePath already govern everything else through.
@@ -313,6 +315,7 @@ export default function App() {
     function onPopState() {
       const parsed = parsePath(window.location.pathname);
       setShowSettings(parsed.showSettings === true);
+      setShowDebug(parsed.showDebug === true);
       setView(parsed.view);
       if (parsed.taskId) {
         openTask(parsed.taskId);
@@ -342,6 +345,7 @@ export default function App() {
             stateFilter={stateFilter}
             onSetFilter={setStateFilter}
             onOpenSettings={() => setShowSettings(true)}
+            onOpenDebug={() => setShowDebug(true)}
             onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
           />
           {view === "repos" && releasesRepo !== null ? (
@@ -413,7 +417,8 @@ export default function App() {
           showError={showError}
         />
       )}
-      {showSettings && <SettingsOverlay config={config} onClose={() => setShowSettings(false)} showError={showError} />}
+      {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
+      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} showError={showError} />}
     </div>
   );
 }

@@ -1,12 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, Divider, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
-import LogsPage from "./LogsPage.jsx";
-import SandboxHealthPage from "./SandboxHealthPage.jsx";
 import { useThemeMode } from "../ThemeModeContext.jsx";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
@@ -14,20 +12,20 @@ import { useThemeMode } from "../ThemeModeContext.jsx";
 // deployment settings, since all three are the same kind of
 // operator-only, deployment-wide configuration.
 //
-// bwsalmon/agents#623: Logs, Sandbox health and the reboot control (which
-// used to be its own "danger zone" on the general tab) join them here as
-// a single Debug tab, for the same reason -- diagnosing a deployment gone
-// wrong is operator-only and deployment-wide too, not day-to-day task
-// flow.
+// Logs, Sandbox health and the reboot control used to join them here as
+// a single Debug tab (bwsalmon/agents#623), but moved back out to their
+// own sidebar entry/overlay, DebugOverlay.jsx (bwsalmon/agents#640): live
+// diagnostics for a deployment gone wrong turned out to want quicker
+// reach than a tab buried inside Settings, unlike the configuration the
+// tabs below actually are.
 const TABS = [
   { id: "general", label: "General" },
   { id: "capabilities", label: "Capabilities" },
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
-  { id: "debug", label: "Debug" },
 ];
 
-export default function SettingsOverlay({ config, onClose, showError }) {
+export default function SettingsOverlay({ onClose, showError }) {
   const [tab, setTab] = useState("general");
   const [settings, setSettings] = useState(null);
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
@@ -116,32 +114,6 @@ export default function SettingsOverlay({ config, onClose, showError }) {
       // Same banner task creation's own validation errors surface
       // through.
       showError(err);
-    }
-  };
-
-  // rebootHost is deliberately its own confirm/try, separate from
-  // submit's settings form: it is not a settings field, and unlike a
-  // failed settings save there is no "current" state to fall back on
-  // showing afterward -- a successful call cuts this same connection
-  // along with everything else on the machine.
-  //
-  // That cut connection is exactly what makes this button look broken
-  // (bwsalmon/agents#581): the reboot itself starts before the daemon's
-  // 200 response finishes its round trip back through this deployment's
-  // load balancer/proxy hops, so the browser's fetch commonly rejects
-  // with its own network-level failure -- a TypeError, per the Fetch
-  // spec -- even though the reboot is under way. api()'s own throw for
-  // a real non-2xx response is always a plain Error carrying the
-  // server's message (api.js), never a TypeError, so that's the signal
-  // this can key on to tell "the machine is going down, as asked" apart
-  // from an actual failure (disabled, or the sudo command itself
-  // erroring) worth showing the operator.
-  const rebootHost = async () => {
-    if (!confirm("Reboot the host machine? Every task currently running is interrupted, and this UI will be unreachable until the machine comes back up.")) return;
-    try {
-      await api("/api/host/reboot", { method: "POST" });
-    } catch (err) {
-      if (!(err instanceof TypeError)) showError(err);
     }
   };
 
@@ -294,23 +266,6 @@ export default function SettingsOverlay({ config, onClose, showError }) {
       {tab === "capabilities" && <CapabilitiesPanel capabilities={settings.capabilities} />}
       {tab === "secrets" && <SecretsPanel showError={showError} />}
       {tab === "upgrade" && <UpgradePanel showError={showError} />}
-      {tab === "debug" && (
-        <>
-          <LogsPage showError={showError} />
-          <Divider sx={{ my: 3 }} />
-          <SandboxHealthPage showError={showError} />
-          {config && config.rebootEnabled && (
-            <>
-              <Divider sx={{ my: 3 }} />
-              <fieldset>
-                <legend>Danger zone</legend>
-                <p className="hint">Reboots the machine grain itself is running on.</p>
-                <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
-              </fieldset>
-            </>
-          )}
-        </>
-      )}
     </Overlay>
   );
 }

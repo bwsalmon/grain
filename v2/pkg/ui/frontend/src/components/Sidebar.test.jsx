@@ -15,6 +15,7 @@ const baseProps = {
   onSetView: noop,
   onSetFilter: noop,
   onOpenSettings: noop,
+  onOpenDebug: noop,
   onOpenNewTask: noop,
 };
 
@@ -50,6 +51,7 @@ describe("Sidebar", () => {
 
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSettings = vi.fn();
+    const onOpenDebug = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
     render(
@@ -58,15 +60,18 @@ describe("Sidebar", () => {
         config={null}
         tasks={[]}
         onOpenSettings={onOpenSettings}
+        onOpenDebug={onOpenDebug}
         onOpenNewTask={onOpenNewTask}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Debugging" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenDebug).toHaveBeenCalledTimes(1);
   });
 
   it("switches to the schedules view and shows its count when clicked", async () => {
@@ -81,13 +86,13 @@ describe("Sidebar", () => {
     expect(onSetView).toHaveBeenCalledWith("schedules");
   });
 
-  // bwsalmon/agents#623: Logs and Sandbox health moved into Settings'
-  // own Debug tab, so they no longer have sidebar nav entries of their
-  // own to click.
+  // bwsalmon/agents#640: Logs and Sandbox health share the "Debugging"
+  // nav entry rather than having one each of their own.
   it("does not show Logs or Sandbox health as their own nav entries", () => {
     render(<Sidebar {...baseProps} config={null} tasks={[]} />);
 
     expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Debugging" })).toBeInTheDocument();
   });
 });

@@ -29,7 +29,7 @@ describe("SettingsOverlay", () => {
 
   it("loads settings and populates the form with them", async () => {
     api.mockResolvedValueOnce(settings);
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
     expect(screen.getByDisplayValue("2")).toBeInTheDocument();
@@ -38,7 +38,7 @@ describe("SettingsOverlay", () => {
 
   it("points to the repos pane instead of editing target repos itself", async () => {
     api.mockResolvedValueOnce(settings);
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     expect(screen.getByText(/Target repos are managed from the Repos pane/)).toBeInTheDocument();
@@ -47,7 +47,7 @@ describe("SettingsOverlay", () => {
 
   it("shows an unconfigured note when settings have never been saved", async () => {
     api.mockResolvedValueOnce({ ...settings, configured: false });
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/Not configured yet/)).toBeInTheDocument();
   });
@@ -56,7 +56,7 @@ describe("SettingsOverlay", () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const onClose = vi.fn();
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={onClose} showError={() => {}} />);
+    render(<SettingsOverlay onClose={onClose} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     const pollInput = screen.getByLabelText(/Poll interval/);
@@ -74,7 +74,7 @@ describe("SettingsOverlay", () => {
   it("sends an empty payload when nothing changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -86,7 +86,7 @@ describe("SettingsOverlay", () => {
   it("toggles newestFirst and includes it in the payload only when changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     const checkbox = screen.getByRole("checkbox", { name: /Work through the backlog newest-first/ });
@@ -104,7 +104,7 @@ describe("SettingsOverlay", () => {
   it("leaves newestFirst out of the payload when already on and left alone", async () => {
     api.mockResolvedValueOnce({ ...settings, newestFirst: true }).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     expect(screen.getByRole("checkbox", { name: /Work through the backlog newest-first/ })).toBeChecked();
@@ -117,7 +117,7 @@ describe("SettingsOverlay", () => {
   it("sets sandboxCpus/sandboxMemoryMb and includes them in the payload only when changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
@@ -138,7 +138,7 @@ describe("SettingsOverlay", () => {
   it("leaves sandboxCpus/sandboxMemoryMb out of the payload when unchanged", async () => {
     api.mockResolvedValueOnce({ ...settings, sandboxCpus: 4, sandboxMemoryMb: 8192 }).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     expect(screen.getByLabelText(/Sandbox vCPUs/)).toHaveValue(4);
@@ -153,7 +153,7 @@ describe("SettingsOverlay", () => {
   // reads as a deliberately zeroed-out sandbox.
   it("shows kontur's default shape as a placeholder, not a literal 0, when unset", async () => {
     api.mockResolvedValueOnce(settings);
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
@@ -171,7 +171,7 @@ describe("SettingsOverlay", () => {
   it("sends an explicit 0 when a sandbox shape override is cleared back to blank", async () => {
     api.mockResolvedValueOnce({ ...settings, sandboxCpus: 4, sandboxMemoryMb: 8192 }).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.clear(screen.getByLabelText(/Sandbox vCPUs/));
@@ -188,7 +188,7 @@ describe("SettingsOverlay", () => {
   it("toggles showClosedByDefault and includes it in the payload only when changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     const checkbox = screen.getByRole("checkbox", { name: /Show closed tasks by default/ });
@@ -206,7 +206,7 @@ describe("SettingsOverlay", () => {
   it("leaves showClosedByDefault out of the payload when already on and left alone", async () => {
     api.mockResolvedValueOnce({ ...settings, showClosedByDefault: true }).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     expect(screen.getByRole("checkbox", { name: /Show closed tasks by default/ })).toBeChecked();
@@ -219,7 +219,7 @@ describe("SettingsOverlay", () => {
   it("switches agentFramework to claude and includes it in the payload only when changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     expect(screen.getByRole("radio", { name: "Gemini" })).toBeChecked();
@@ -236,7 +236,7 @@ describe("SettingsOverlay", () => {
   it("leaves agentFramework out of the payload when already claude and left alone", async () => {
     api.mockResolvedValueOnce({ ...settings, agentFramework: "claude" }).mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     expect(screen.getByRole("radio", { name: "Claude" })).toBeChecked();
@@ -250,110 +250,13 @@ describe("SettingsOverlay", () => {
     const showError = vi.fn();
     const onClose = vi.fn();
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={onClose} showError={showError} />);
+    render(<SettingsOverlay onClose={onClose} showError={showError} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "pollInterval must be positive" }));
     expect(onClose).not.toHaveBeenCalled();
-  });
-
-  // bwsalmon/agents#623: Logs, Sandbox health and the reboot control all
-  // live together on the Debug tab -- opening it mounts LogsPage and
-  // SandboxHealthPage too, so every test below feeds their own
-  // GET /api/logs and GET /api/sandboxes calls a response, same as the
-  // Secrets/Upgrade tab tests already do for their own panel's fetch.
-  describe("Debug tab", () => {
-    const noLogs = { enabled: false };
-    const noSandboxes = { enabled: false };
-
-    const openDebugTab = async (user, config) => {
-      render(<SettingsOverlay config={config} onClose={() => {}} showError={() => {}} />);
-      await screen.findByDisplayValue("30s");
-      await user.click(screen.getByRole("tab", { name: "Debug" }));
-    };
-
-    it("shows Logs and Sandbox health alongside the danger zone", async () => {
-      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
-      const user = userEvent.setup();
-      await openDebugTab(user, { rebootEnabled: true });
-
-      expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
-      expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Reboot host" })).toBeInTheDocument();
-    });
-
-    it("does not show the danger zone when reboot is not enabled", async () => {
-      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
-      const user = userEvent.setup();
-      await openDebugTab(user, { rebootEnabled: false });
-      await screen.findByText(/no log sources configured/i);
-
-      expect(screen.queryByRole("button", { name: "Reboot host" })).not.toBeInTheDocument();
-    });
-
-    it("reboots the host after confirmation", async () => {
-      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes).mockResolvedValueOnce({});
-      vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-      const user = userEvent.setup();
-      await openDebugTab(user, { rebootEnabled: true });
-
-      await user.click(screen.getByRole("button", { name: "Reboot host" }));
-
-      expect(api).toHaveBeenCalledWith("/api/host/reboot", { method: "POST" });
-      vi.unstubAllGlobals();
-    });
-
-    it("does not reboot when the confirmation is declined", async () => {
-      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
-      vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
-      const user = userEvent.setup();
-      await openDebugTab(user, { rebootEnabled: true });
-
-      await user.click(screen.getByRole("button", { name: "Reboot host" }));
-
-      expect(api).toHaveBeenCalledTimes(3);
-      vi.unstubAllGlobals();
-    });
-
-    // bwsalmon/agents#581: a successful reboot cuts the connection out
-    // from under the response before it finishes its round trip, which
-    // the browser reports as a TypeError -- fetch's own shape for a
-    // network-level failure (api.js never throws that type itself). That
-    // used to surface as an error banner on the one action where it is
-    // actually a sign of success, making the button look broken.
-    it("does not show an error when the connection drops as the reboot itself would cause", async () => {
-      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes)
-        .mockRejectedValueOnce(new TypeError("Failed to fetch"));
-      vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-      const user = userEvent.setup();
-      const showError = vi.fn();
-      render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
-      await screen.findByDisplayValue("30s");
-      await user.click(screen.getByRole("tab", { name: "Debug" }));
-
-      await user.click(screen.getByRole("button", { name: "Reboot host" }));
-
-      expect(showError).not.toHaveBeenCalled();
-      vi.unstubAllGlobals();
-    });
-
-    it("still shows an error for a real reboot failure", async () => {
-      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes)
-        .mockRejectedValueOnce(new Error("reboot is not available"));
-      vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-      const user = userEvent.setup();
-      const showError = vi.fn();
-      render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
-      await screen.findByDisplayValue("30s");
-      await user.click(screen.getByRole("tab", { name: "Debug" }));
-
-      await user.click(screen.getByRole("button", { name: "Reboot host" }));
-
-      expect(showError).toHaveBeenCalledWith(new Error("reboot is not available"));
-      vi.unstubAllGlobals();
-    });
   });
 
   it("switches to the Capabilities tab and shows its panel", async () => {
@@ -366,7 +269,7 @@ describe("SettingsOverlay", () => {
     ];
     api.mockResolvedValueOnce({ ...settings, capabilities });
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("tab", { name: "Capabilities" }));
@@ -380,7 +283,7 @@ describe("SettingsOverlay", () => {
   it("switches to the Secrets tab and shows its panel", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("tab", { name: "Secrets" }));
@@ -392,7 +295,7 @@ describe("SettingsOverlay", () => {
   it("switches to the Upgrade tab and shows its panel", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();
-    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
@@ -415,7 +318,7 @@ describe("SettingsOverlay", () => {
       const user = userEvent.setup();
       render(
         <ThemeModeProvider>
-          <SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />
+          <SettingsOverlay onClose={() => {}} showError={() => {}} />
         </ThemeModeProvider>,
       );
       await screen.findByDisplayValue("30s");
@@ -434,7 +337,7 @@ describe("SettingsOverlay", () => {
       api.mockResolvedValueOnce(settings);
       render(
         <ThemeModeProvider>
-          <SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />
+          <SettingsOverlay onClose={() => {}} showError={() => {}} />
         </ThemeModeProvider>,
       );
       await screen.findByDisplayValue("30s");

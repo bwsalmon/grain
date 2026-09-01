@@ -3,8 +3,8 @@ import { Alert, Box, Button, Chip, CircularProgress, Table, TableBody, TableCell
 import api from "../api.js";
 import Sparkline from "./Sparkline.jsx";
 
-// REFRESH_MS matches LogsPage's own polling cadence -- the Debug tab
-// (bwsalmon/agents#623) these two panels share should feel like the same
+// REFRESH_MS matches LogsPage's own polling cadence -- the Debug overlay
+// (bwsalmon/agents#640) these two panels share should feel like the same
 // kind of live view.
 const REFRESH_MS = 5000;
 
@@ -55,18 +55,20 @@ export function appendHistory(prev, result) {
   return { host, sandboxes };
 }
 
-// SandboxHealthPage is the Sandbox health panel of Settings' Debug tab
-// (bwsalmon/agents#623) -- it used to be a full nav entry of its own
-// (bwsalmon/agents#536) before moving in alongside Logs and the reboot
-// control. It shows a live view of every live run's own sandbox -- a
-// kontur VM or a host directory, whichever backend this deployment runs
-// -- plus the daemon's own host machine's CPU/RAM pressure. Both come
-// back from the same GET /api/sandboxes call since a sandbox that looks
-// stuck is often really the host it runs on being starved, so debugging
-// one usually means looking at both at once. GET /api/sandboxes' own
-// "enabled" flag says whether this deployment has either piece
-// configured at all, the same convention LogsPage's own GET /api/logs
-// already establishes for the Debug tab this panel sits alongside.
+// SandboxHealthPage is the Sandbox health panel of DebugOverlay.jsx -- it
+// used to be a full nav entry of its own (bwsalmon/agents#536), then a
+// tab inside Settings alongside Logs and the reboot control (bwsalmon/
+// agents#623), before settling on its own "Debugging" sidebar entry,
+// apart from Settings (bwsalmon/agents#640). It shows a live view of
+// every live run's own sandbox -- a kontur VM or a host directory,
+// whichever backend this deployment runs -- plus the daemon's own host
+// machine's CPU/RAM pressure. Both come back from the same
+// GET /api/sandboxes call since a sandbox that looks stuck is often
+// really the host it runs on being starved, so debugging one usually
+// means looking at both at once. GET /api/sandboxes' own "enabled" flag
+// says whether this deployment has either piece configured at all, the
+// same convention LogsPage's own GET /api/logs already establishes for
+// the Debug overlay this panel sits alongside.
 export default function SandboxHealthPage({ showError }) {
   const [data, setData] = useState(null);
   const [history, setHistory] = useState({ host: emptySeries, sandboxes: {} });
