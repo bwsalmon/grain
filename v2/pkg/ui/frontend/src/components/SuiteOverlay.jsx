@@ -80,7 +80,7 @@ export default function SuiteOverlay({ suite, templates = [], onClose, onSaved, 
         <FormControl fullWidth margin="normal" size="small">
           <InputLabel id="suite-mode-label">Run mode</InputLabel>
           <Select labelId="suite-mode-label" label="Run mode" value={mode} onChange={(e) => setMode(e.target.value)}>
-            <MenuItem value="until_clean">Run until no repo changes or new issues</MenuItem>
+            <MenuItem value="until_clean">Run until no repo changes or new tasks</MenuItem>
             <MenuItem value="count">Run a fixed number of times</MenuItem>
           </Select>
         </FormControl>
