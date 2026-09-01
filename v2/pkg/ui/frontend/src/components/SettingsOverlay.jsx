@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Checkbox, Divider, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
@@ -20,6 +21,7 @@ import { useThemeMode } from "../ThemeModeContext.jsx";
 // flow.
 const TABS = [
   { id: "general", label: "General" },
+  { id: "capabilities", label: "Capabilities" },
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
   { id: "debug", label: "Debug" },
@@ -97,6 +99,12 @@ export default function SettingsOverlay({ config, onClose, showError }) {
 
     const showClosedByDefault = form.elements.showClosedByDefault.checked;
     if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
+
+    const approvedByDefault = form.elements.approvedByDefault.checked;
+    if (approvedByDefault !== !!settings.approvedByDefault) payload.approvedByDefault = approvedByDefault;
+
+    const autoMergeByDefault = form.elements.autoMergeByDefault.checked;
+    if (autoMergeByDefault !== !!settings.autoMergeByDefault) payload.autoMergeByDefault = autoMergeByDefault;
 
     const agentFramework = form.elements.agentFramework.value;
     if (agentFramework !== (settings.agentFramework || "gemini")) payload.agentFramework = agentFramework;
@@ -245,6 +253,33 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               )}
               sx={{ display: "flex", mt: 1 }}
             />
+            <FormControlLabel
+              control={<Checkbox name="approvedByDefault" defaultChecked={!!settings.approvedByDefault} />}
+              label={(
+                <>
+                  Queue new tasks immediately by default
+                  <span className="hint">
+                    off (default): a new task's own "Queue immediately" checkbox starts unchecked, filing it as a
+                    proposal needing approval. on: it starts checked instead, filing a task ready to dispatch at
+                    once.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
+            <FormControlLabel
+              control={<Checkbox name="autoMergeByDefault" defaultChecked={!!settings.autoMergeByDefault} />}
+              label={(
+                <>
+                  Auto-merge new tasks by default
+                  <span className="hint">
+                    off (default): a new task's own "Auto-merge once checks pass" checkbox starts unchecked. on: it
+                    starts checked instead.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
 
             <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
               Target repos are managed from the Repos pane now, not here.
@@ -256,6 +291,7 @@ export default function SettingsOverlay({ config, onClose, showError }) {
           </form>
         </>
       )}
+      {tab === "capabilities" && <CapabilitiesPanel capabilities={settings.capabilities} />}
       {tab === "secrets" && <SecretsPanel showError={showError} />}
       {tab === "upgrade" && <UpgradePanel showError={showError} />}
       {tab === "debug" && (

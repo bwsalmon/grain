@@ -81,6 +81,24 @@ type Settings struct {
 	// has it to seed that toggle with before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// Capabilities is every capability grain ships a provider for, with
+	// this deployment's own readiness computed against it -- capability_
+	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
+	// populated, even before Settings has ever been saved (GetSettings),
+	// since self-debug/self-repair need no configuration to be ready and
+	// an operator setting up a fresh deployment still benefits from
+	// seeing that gcp-key/gemini-key/github-sandbox are not yet.
+	Capabilities []CapabilityStatus `json:"capabilities"`
+	// ApprovedByDefault and AutoMergeByDefault are model.Config's own
+	// fields of the same name (bwsalmon/agents#612): deployment-wide
+	// defaults for whether a new task's "Queue immediately" and
+	// "Auto-merge once checks pass" checkboxes start checked in
+	// NewTaskOverlay.jsx. Also mirrored onto GET /api/config
+	// (configResponse, tasks.go) the same way ShowClosedByDefault is, so
+	// that form has them to seed its checkboxes with before Settings has
+	// ever been opened this session.
+	ApprovedByDefault  bool `json:"approvedByDefault"`
+	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 	// AgentFramework is model.Config's own field of the same name
 	// (bwsalmon/agents#609): "gemini" or "claude"
 	// (model.AgentFrameworkGemini/AgentFrameworkClaude), which
@@ -116,6 +134,9 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxCPUsDefault:            kontur.DefaultCPUs,
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
+		Capabilities:                  c.capabilityStatuses(cfg),
+		ApprovedByDefault:             cfg.ApprovedByDefault,
+		AutoMergeByDefault:            cfg.AutoMergeByDefault,
 		AgentFramework:                agentFramework,
 	}
 }
@@ -152,7 +173,11 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{}, err
 	}
 	if cfg == nil {
-		return Settings{SandboxCPUsDefault: kontur.DefaultCPUs, SandboxMemoryMBDefault: kontur.DefaultMemoryMB}, nil
+		return Settings{
+			SandboxCPUsDefault:     kontur.DefaultCPUs,
+			SandboxMemoryMBDefault: kontur.DefaultMemoryMB,
+			Capabilities:           c.capabilityStatuses(model.Config{}),
+		}, nil
 	}
 	return c.settingsFrom(*cfg), nil
 }
@@ -180,6 +205,8 @@ type UpdateSettingsRequest struct {
 	SandboxCPUs            *int      `json:"sandboxCpus"`
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
+	ApprovedByDefault      *bool     `json:"approvedByDefault"`
+	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 	AgentFramework         *string   `json:"agentFramework"`
 }
 
@@ -283,6 +310,12 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	}
 	if req.ShowClosedByDefault != nil {
 		cfg.ShowClosedByDefault = *req.ShowClosedByDefault
+	}
+	if req.ApprovedByDefault != nil {
+		cfg.ApprovedByDefault = *req.ApprovedByDefault
+	}
+	if req.AutoMergeByDefault != nil {
+		cfg.AutoMergeByDefault = *req.AutoMergeByDefault
 	}
 	if req.AgentFramework != nil {
 		switch *req.AgentFramework {
