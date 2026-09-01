@@ -81,7 +81,12 @@ type Task struct {
 	// (model.ReasonSchedule) -- a UI badge, the same treatment Stacked
 	// already gives model.ReasonFix, so a task that appeared with nobody
 	// having filed it by hand reads as expected rather than as a mystery.
-	Scheduled bool       `json:"scheduled,omitempty"`
+	Scheduled bool `json:"scheduled,omitempty"`
+	// SuiteRun is true for a task a task suite run filed automatically
+	// (model.ReasonSuite, bwsalmon/agents#642) -- Scheduled's own badge
+	// treatment, so a pass of tasks that appeared with nobody filing them
+	// by hand reads as expected rather than as a mystery.
+	SuiteRun  bool       `json:"suiteRun,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,
 	// resolved or not -- the definition. Blocked and BlockedBy are the
@@ -243,6 +248,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix,
 		Scheduled:           t.Origin.Reason == model.ReasonSchedule,
+		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,
 		MergeQueueBlockedAt: mergeQueueBlockedAt,
 	}
@@ -698,6 +704,16 @@ func writeClientError(w http.ResponseWriter, err error) {
 	}
 	var rnf *releaseNotFoundError
 	if errors.As(err, &rnf) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var snf2 *suiteNotFoundError
+	if errors.As(err, &snf2) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var srnf *suiteRunNotFoundError
+	if errors.As(err, &srnf) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}

@@ -90,6 +90,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/templates/{id}", s.handleUpdateTemplate)
 	s.mux.HandleFunc("DELETE /api/templates/{id}", s.handleDeleteTemplate)
 
+	s.mux.HandleFunc("GET /api/suites", s.handleListSuites)
+	s.mux.HandleFunc("POST /api/suites", s.handleCreateSuite)
+	s.mux.HandleFunc("PATCH /api/suites/{id}", s.handleUpdateSuite)
+	s.mux.HandleFunc("DELETE /api/suites/{id}", s.handleDeleteSuite)
+	s.mux.HandleFunc("GET /api/suite-runs", s.handleListSuiteRuns)
+	s.mux.HandleFunc("POST /api/suite-runs", s.handleCreateSuiteRun)
+	s.mux.HandleFunc("GET /api/suite-runs/{id}", s.handleGetSuiteRun)
+
 	s.mux.HandleFunc("GET /api/agent-keys", s.handleListAgentKeys)
 	s.mux.HandleFunc("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
 	s.mux.HandleFunc("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)

@@ -446,9 +446,9 @@ func branchIsAncestor(t *testing.T, bare, ref, ancestor string) bool {
 // promptRe pulls the repo and branch BuildPrompt's own fixed phrasing
 // names back out of the prompt an agent turn receives -- the one channel
 // randomGenerator has to learn which task and branch this dispatch is
-// for, since Deps.Framework is a bare factory func() agent.Framework with
-// no task of its own to be handed (pkg/orchestrator/cycle.go's own Deps
-// doc comment: "a factory, not a shared instance").
+// for, since Deps.Framework is handed only the framework a task names,
+// never the task itself (pkg/orchestrator/cycle.go's own Deps doc
+// comment: "a factory, not a shared instance").
 var promptRe = regexp.MustCompile(`Work in (\S+)\. Push your change to a new branch named "([^"]+)"`)
 
 // randomGenerator implements gemini's own (unexported) contentGenerator

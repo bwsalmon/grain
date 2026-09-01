@@ -80,11 +80,12 @@ const (
 	ReasonReview        OriginReason = "review"        // review threads asked for it
 	ReasonProposal      OriginReason = "proposal"      // an agent or parent proposed it
 	ReasonQualification OriginReason = "qualification" // a release candidate's qualification plan fired it
+	ReasonSuite         OriginReason = "suite"         // a task suite run fired it (bwsalmon/agents#642)
 )
 
 func (r OriginReason) Valid() bool {
 	switch r {
-	case ReasonDirect, ReasonSchedule, ReasonFix, ReasonReview, ReasonProposal, ReasonQualification:
+	case ReasonDirect, ReasonSchedule, ReasonFix, ReasonReview, ReasonProposal, ReasonQualification, ReasonSuite:
 		return true
 	}
 	return false

@@ -20,7 +20,7 @@ const SIDEBAR_WIDTH = 232;
 // to a "Debugging" entry of its own here, under Settings (bwsalmon/
 // agents#640) -- diagnosing a deployment gone wrong wants faster reach
 // than a tab buried inside Settings' configuration form.
-export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
+export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -85,7 +85,7 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
       <Button variant="contained" fullWidth onClick={onOpenNewTask}>+ New task</Button>
 
       <List component="nav" disablePadding sx={{ display: "flex", flexDirection: "column", gap: 0.2 }}>
-        <NavItem id="all" label="All issues" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
+        <NavItem id="all" label="All tasks" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
         {STATE_ORDER.filter((s) => counts[s]).map((s) => (
           <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} active={view === "tasks" && stateFilter === s} />
         ))}
@@ -112,6 +112,11 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           <span className="dot dot-all" />
           <ListItemText primary="Task templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
+        </ListItemButton>
+        <ListItemButton selected={view === "suites"} onClick={() => onSetView("suites")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="dot dot-all" />
+          <ListItemText primary="Task suites" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+          <Typography variant="caption" color="text.secondary">{suites.length}</Typography>
         </ListItemButton>
       </List>
 
