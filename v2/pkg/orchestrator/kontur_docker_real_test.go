@@ -169,6 +169,17 @@ func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
 		t.Fatalf("creating guest image cache directory: %v", err)
 	}
+	// disk.img above is the only thing that marks this directory's cache
+	// as valid, so a run interrupted after the keypair below but before
+	// disk.img is written (a timeout, a panic, a killed process) leaves a
+	// stale keypair behind with nothing to show for it. Without removing
+	// it first, ssh-keygen finds a file already at sshKeyPath and prompts
+	// "Overwrite (y/n)?" on a stdin this test gives it none of, so it
+	// fails immediately -- and every run after the interrupted one fails
+	// the exact same way, forever, until someone clears os.TempDir() by
+	// hand.
+	_ = os.Remove(sshKeyPath)
+	_ = os.Remove(sshKeyPath + ".pub")
 	if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", sshKeyPath, "-q").CombinedOutput(); err != nil {
 		t.Fatalf("generating a throwaway SSH keypair: %v\n%s", err, out)
 	}
