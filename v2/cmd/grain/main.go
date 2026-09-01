@@ -312,6 +312,7 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	title := fs.String("title", "", "task title (required)")
 	body := fs.String("body", "", "task description")
 	repo := fs.String("repo", "", "owner/name of the repo this task's work targets")
+	noRepo := fs.Bool("no-repo", false, "file this task with no repo at all, rather than falling back to the deployment default")
 	base := fs.String("base", "", "base branch, if not the target repo's default")
 	var autoMerge bool
 	fs.BoolVar(&autoMerge, "auto-merge", false, "merge this task's pull request automatically once it reads clean")
@@ -332,7 +333,7 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 		return err
 	}
 	req := ui.CreateTaskRequest{
-		Title: *title, Description: *body, Repo: *repo, Base: *base,
+		Title: *title, Description: *body, Repo: *repo, NoRepo: *noRepo, Base: *base,
 		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
 		Interactive: *interactive, Attachments: attachments,
 	}

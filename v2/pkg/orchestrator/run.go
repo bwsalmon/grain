@@ -98,7 +98,11 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // cloned the target into (prepareCheckout's own CheckoutDir) -- said here
 // because an agent that is not told cannot know, which is the whole
 // failure that made the clone happen up front. Empty is a sandbox left
-// bare, and leaves this prompt exactly as it always read.
+// bare, and leaves this prompt exactly as it always read -- except when
+// task.Target is nil, which is a sandbox that was always going to be
+// bare (checkout.go's prepareCheckout skips cloning outright for a task
+// with no target) and gets its own sentence explaining why, rather than
+// silently reading like a clone that simply failed.
 //
 // task.Reads is mentioned but not enforced here: the git proxy already
 // allows a fetch against any of them and refuses a push to any but
@@ -107,11 +111,21 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // clone, rather than granting anything itself.
 func BuildPrompt(task model.Task, checkoutDir string) string {
 	branch := model.BranchName(task.ID)
-	prompt := fmt.Sprintf(
-		"%s\n\n%s\n\nWork in %s. Push your change to a new branch named %q -- "+
-			"never to the repo's default branch directly.",
-		task.Title, task.Body, task.Target, branch,
-	)
+	var prompt string
+	if task.Target == nil {
+		prompt = fmt.Sprintf(
+			"%s\n\n%s\n\nThis task has no repo attached -- there is nothing to clone, "+
+				"check out, or push a branch to. Do the work directly in the sandbox "+
+				"rather than expecting a git checkout to exist.",
+			task.Title, task.Body,
+		)
+	} else {
+		prompt = fmt.Sprintf(
+			"%s\n\n%s\n\nWork in %s. Push your change to a new branch named %q -- "+
+				"never to the repo's default branch directly.",
+			task.Title, task.Body, task.Target, branch,
+		)
+	}
 	if checkoutDir != "" {
 		prompt += fmt.Sprintf(
 			"\n\nThat repo is already cloned for you at ./%s, with %q checked out and "+
