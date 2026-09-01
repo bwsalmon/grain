@@ -190,6 +190,7 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(await screen.findByText("Ship it")).toBeInTheDocument();

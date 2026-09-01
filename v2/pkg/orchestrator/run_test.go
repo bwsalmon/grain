@@ -153,6 +153,22 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 	}
 }
 
+// A task filed with CreateTaskRequest.NoRepo (bwsalmon/agents#614) has a
+// nil Target -- prepareCheckout already skips cloning outright for one
+// (checkout.go), so this is the other half: the prompt has to say so in
+// words, rather than formatting a nil *model.RepoRef with %s and reading
+// like a clone that silently failed.
+func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
+	task := model.Task{ID: "t1", Title: "Do the thing", Body: "details"}
+	prompt := orchestrator.BuildPrompt(task, "")
+	if !strings.Contains(prompt, "no repo") {
+		t.Fatalf("prompt does not say there is no repo: %q", prompt)
+	}
+	if strings.Contains(prompt, "Push your change") || strings.Contains(prompt, "<nil>") {
+		t.Fatalf("prompt still talks about pushing/branching, or leaked a nil format: %q", prompt)
+	}
+}
+
 func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 	task := model.Task{
 		ID: "t1", Title: "Do the thing", Body: "details",

@@ -18,14 +18,21 @@ const CUSTOM = "custom";
 // Falls back to a plain text input outright when there is nothing to
 // choose from yet, rather than rendering a one-item "Other…" dropdown
 // that would only cost a click for no benefit.
-export default function RepoField({ name, options, defaultValue = "", required = false, placeholder = "owner/name" }) {
+export default function RepoField({ name, options, defaultValue = "", required = false, placeholder = "owner/name", onChange }) {
   const knownDefault = defaultValue === "" || options.includes(defaultValue);
   const [custom, setCustom] = useState(options.length === 0 || !knownDefault);
 
   if (custom) {
     return (
       <div className="repo-field">
-        <input name={name} placeholder={placeholder} defaultValue={defaultValue} required={required} autoComplete="off" />
+        <input
+          name={name}
+          placeholder={placeholder}
+          defaultValue={defaultValue}
+          required={required}
+          autoComplete="off"
+          onChange={(e) => onChange?.(e.target.value)}
+        />
         {options.length > 0 && (
           <button type="button" className="link-button" onClick={() => setCustom(false)}>
             Choose from list
@@ -41,7 +48,10 @@ export default function RepoField({ name, options, defaultValue = "", required =
         name={name}
         defaultValue={defaultValue}
         required={required}
-        onChange={(e) => { if (e.target.value === CUSTOM) setCustom(true); }}
+        onChange={(e) => {
+          if (e.target.value === CUSTOM) { setCustom(true); return; }
+          onChange?.(e.target.value);
+        }}
       >
         {!required && <option value="">—</option>}
         {options.map((r) => (

@@ -12,6 +12,21 @@ import TaskPicker from "./TaskPicker.jsx";
 export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, onOpenTask, showError }) {
   const formRef = useRef(null);
   const repoOptions = knownRepos(config, tasks);
+  // title and repo are lifted to state, unlike most of this form's other
+  // text fields, because the Create button's disabled state (below) has
+  // to read their live value on every keystroke rather than only at
+  // submit.
+  const [title, setTitle] = useState("");
+  const [repo, setRepo] = useState(defaultRepo || "");
+  // noRepo is the explicit "this task has no repo" choice
+  // (bwsalmon/agents#614): distinct from repo simply being blank, which
+  // used to be the only way to skip it and silently fell back to the
+  // deployment default (or failed validation with no warning until
+  // submit). Checking it hides RepoField outright, so its <select>/
+  // <input> is never in the DOM to be submitted -- payload.repo comes
+  // back "" the same way an unset field always has, with noRepo now
+  // saying why.
+  const [noRepo, setNoRepo] = useState(false);
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
@@ -43,7 +58,8 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     const payload = {
       title: data.get("title"),
       description: data.get("description") || "",
-      repo: data.get("repo") || "",
+      repo: noRepo ? "" : (data.get("repo") || ""),
+      noRepo,
       base: data.get("base") || "",
       autoMerge: form.elements.autoMerge.checked,
       sandboxCpus: parseInt(data.get("sandboxCpus"), 10) || 0,
@@ -62,6 +78,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     try {
       const task = await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
       form.reset();
+      setTitle("");
+      setRepo(defaultRepo || "");
+      setNoRepo(false);
       setDependsOn([]);
       setCapabilities([]);
       setAttachments([]);
@@ -84,18 +103,44 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     <Overlay onClose={onClose}>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>New task</Typography>
       <form ref={formRef} onSubmit={submit}>
-        <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
+        <TextField
+          name="title"
+          label="Title"
+          required
+          InputLabelProps={{ required: false }}
+          autoComplete="off"
+          fullWidth
+          margin="normal"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
         <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
         <AttachmentPicker files={attachments} onChange={setAttachments} />
-        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-            Target repo <span className="hint">owner/name, optional</span>
-          </Typography>
-          {/* Pre-filled from the repo the "+ New task" button was opened
-              from -- the repo-centric task list's whole point is filing
-              work against the repo you're already looking at without
-              retyping it. */}
-          <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} />
+        <Box sx={{ mt: 2, mb: 1 }}>
+          <Box component="label" sx={{ display: "block", mb: 0.5 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+              Target repo <span className="hint">owner/name, required</span>
+            </Typography>
+            {/* Pre-filled from the repo the "+ New task" button was
+                opened from -- the repo-centric task list's whole point
+                is filing work against the repo you're already looking
+                at without retyping it. Hidden once "No repo" is
+                checked, so its <select>/<input> never submits a stray
+                value alongside noRepo. */}
+            {!noRepo && (
+              <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} onChange={setRepo} />
+            )}
+          </Box>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={noRepo}
+                onChange={(e) => { setNoRepo(e.target.checked); if (e.target.checked) setRepo(""); }}
+              />
+            }
+            label="No repo (standalone task -- nothing to check out)"
+            sx={{ display: "flex" }}
+          />
         </Box>
         <TextField name="base" label="Base branch" helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
         <TextField
@@ -208,7 +253,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           />
         )}
         <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-          <Button type="submit" variant="contained">Create task</Button>
+          <Button type="submit" variant="contained" disabled={!title.trim() || (!noRepo && !repo.trim())}>
+            Create task
+          </Button>
         </Stack>
       </form>
     </Overlay>
