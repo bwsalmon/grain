@@ -181,10 +181,15 @@ variable "enable_shielded_vm" {
 variable "deploy_generation" {
   type        = string
   description = <<-EOT
-    Opaque token written to instance metadata. files/config-sync.sh on
-    the host watches it and redeploys whenever it changes; CI (or a
-    human applying this by hand) sets it to the commit SHA of whatever
-    grain_ref names, which is what makes a push roll out.
+    Opaque token folded into instance metadata's grain-deploy-generation
+    alongside a hash of grain_config itself (instance.tf); files/config-
+    sync.sh on the host watches that combined value and redeploys
+    whenever it changes. CI (or a human applying this by hand) sets this
+    variable to the commit SHA of whatever grain_ref names, which is what
+    makes a push roll out; the grain_config hash is what makes a change
+    to a value inside grain_config (slots, target_repos, ...) roll out
+    too, even on a manual `terraform apply` that never touches
+    deploy_generation at all (bwsalmon/agents#592).
   EOT
   default     = "manual"
 }

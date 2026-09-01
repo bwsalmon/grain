@@ -143,9 +143,24 @@ resource "google_compute_instance" "host" {
 
     grain-config = jsonencode(local.grain_config)
 
-    # Changing this is what triggers a rollout. CI sets it to the commit
-    # SHA; config-sync notices within seconds and redeploys.
-    grain-deploy-generation = var.deploy_generation
+    # Changing this is what triggers a rollout: config-sync.sh only wakes
+    # up and re-runs deploy.sh when this value differs from the one it
+    # last deployed (files/config-sync.sh's own "watching
+    # grain-deploy-generation"). CI bumps var.deploy_generation to the
+    # config repo's own commit SHA, so a push there always changes it --
+    # but that variable defaults to the literal string "manual" for an
+    # operator applying by hand, and a second manual apply that only
+    # edits, say, sandbox_count leaves that default exactly as it was.
+    # Without the hashed suffix below, that combination -- change
+    # grain_config, `terraform apply`, and nothing rolls out, not even
+    # after rebooting the host, since config-sync's only trigger is this
+    # value and nothing else ever rechecks grain_config on its own -- was
+    # bwsalmon/agents#592 ("changing max concurrent agents takes no
+    # effect even after reboot"; sandbox_count is exactly the grain_config
+    # field that issue changed by hand). Folding a short hash of the whole
+    # grain_config blob in here means any real change to it changes this
+    # value too, whether or not var.deploy_generation itself also moved.
+    grain-deploy-generation = "${var.deploy_generation}-${substr(sha256(jsonencode(local.grain_config)), 0, 12)}"
   }
 
   # Catch the repo-wiring mistakes in the plan, where they cost a comment
