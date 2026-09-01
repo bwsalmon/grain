@@ -22,11 +22,15 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
   await page.goto("/templates");
   await expect(page.getByRole("heading", { name: "Task templates" })).toBeVisible();
 
+  // /logs and /sandboxes were sidebar destinations of their own until
+  // both moved into Settings' Debug tab (bwsalmon/agents#623); paths.js
+  // dropped them from VIEWS deliberately, so a stale bookmark to either
+  // is now just an unrecognized path and lands on the tasks view.
   await page.goto("/logs");
-  await expect(page.getByRole("heading", { name: "Logs" })).toBeVisible();
+  await expect(page.locator(".task-row").first()).toBeVisible();
 
   await page.goto("/sandboxes");
-  await expect(page.getByRole("heading", { name: "Sandbox health" })).toBeVisible();
+  await expect(page.locator(".task-row").first()).toBeVisible();
 });
 
 test("deep-links to a task's detail overlay, including after a hard reload", async ({ page }) => {
