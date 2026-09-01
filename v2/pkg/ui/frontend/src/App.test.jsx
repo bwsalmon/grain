@@ -381,6 +381,7 @@ describe("App", () => {
 
   it.each([
     ["Settings", "Settings"],
+    ["Debugging", "Debug"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
     const user = userEvent.setup();
@@ -392,7 +393,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
   });
 
-  it("opens Secrets, Upgrade and Debug as tabs inside Settings rather than their own sidebar entries", async () => {
+  it("opens Secrets and Upgrade as tabs inside Settings rather than their own sidebar entries", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -400,8 +401,6 @@ describe("App", () => {
 
     expect(screen.queryByRole("button", { name: "Secrets" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upgrade" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
@@ -411,10 +410,21 @@ describe("App", () => {
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
     expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
+  });
 
-    // bwsalmon/agents#623: Logs and Sandbox health live together on the
-    // Debug tab now, alongside the reboot control.
-    await user.click(screen.getByRole("tab", { name: "Debug" }));
+  // bwsalmon/agents#640: Logs and Sandbox health live together on their
+  // own "Debugging" sidebar entry, not inside Settings.
+  it("shows Logs and Sandbox health on the Debugging overlay, not as their own sidebar entries", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Debugging" }));
+
     expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
     expect(screen.getByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
   });
