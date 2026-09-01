@@ -225,6 +225,40 @@ describe("SettingsOverlay", () => {
     vi.unstubAllGlobals();
   });
 
+  // bwsalmon/agents#581: a successful reboot cuts the connection out
+  // from under the response before it finishes its round trip, which
+  // the browser reports as a TypeError -- fetch's own shape for a
+  // network-level failure (api.js never throws that type itself). That
+  // used to surface as an error banner on the one action where it is
+  // actually a sign of success, making the button look broken.
+  it("does not show an error when the connection drops as the reboot itself would cause", async () => {
+    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+    const user = userEvent.setup();
+    const showError = vi.fn();
+    render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("button", { name: "Reboot host" }));
+
+    expect(showError).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("still shows an error for a real reboot failure", async () => {
+    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("reboot is not available"));
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+    const user = userEvent.setup();
+    const showError = vi.fn();
+    render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("button", { name: "Reboot host" }));
+
+    expect(showError).toHaveBeenCalledWith(new Error("reboot is not available"));
+    vi.unstubAllGlobals();
+  });
+
   it("switches to the Secrets tab and shows its panel", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();

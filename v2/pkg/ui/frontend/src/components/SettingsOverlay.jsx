@@ -104,12 +104,24 @@ export default function SettingsOverlay({ config, onClose, showError }) {
   // failed settings save there is no "current" state to fall back on
   // showing afterward -- a successful call cuts this same connection
   // along with everything else on the machine.
+  //
+  // That cut connection is exactly what makes this button look broken
+  // (bwsalmon/agents#581): the reboot itself starts before the daemon's
+  // 200 response finishes its round trip back through this deployment's
+  // load balancer/proxy hops, so the browser's fetch commonly rejects
+  // with its own network-level failure -- a TypeError, per the Fetch
+  // spec -- even though the reboot is under way. api()'s own throw for
+  // a real non-2xx response is always a plain Error carrying the
+  // server's message (api.js), never a TypeError, so that's the signal
+  // this can key on to tell "the machine is going down, as asked" apart
+  // from an actual failure (disabled, or the sudo command itself
+  // erroring) worth showing the operator.
   const rebootHost = async () => {
     if (!confirm("Reboot the host machine? Every task currently running is interrupted, and this UI will be unreachable until the machine comes back up.")) return;
     try {
       await api("/api/host/reboot", { method: "POST" });
     } catch (err) {
-      showError(err);
+      if (!(err instanceof TypeError)) showError(err);
     }
   };
 
