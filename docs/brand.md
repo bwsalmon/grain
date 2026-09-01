@@ -17,6 +17,7 @@ is the mark.
 | Path | What it is |
 |---|---|
 | `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. A verbatim copy of the design pack (v2) — see its header. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
+| `v2/pkg/ui/frontend/src/brand/grain-density.js` | How many grains grain draws, which below 48px is denser than the pack. Kept out of the vendored file so the deviation stays visible as one; see "Sizes". |
 | `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still and the animation; see below. |
 | `v2/pkg/ui/frontend/scripts/export-brand-assets.mjs` | `npm run brand` in `v2/pkg/ui/frontend`. Regenerates everything below out of the renderer. |
 | `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The static logo as a solid filled path. Scale-free: the favicon, and the still the app shows wherever the mark is not animating. |
@@ -98,19 +99,41 @@ paint on. A hidden tab pauses it.
 | Sidebar (`Sidebar.jsx`) | 32px | The four glyphs are clearly distinguishable here, which matters because this mark is a brand element people look at rather than a status light. |
 | Loading screen (`LoadingScreen.jsx`) | 320px | Over the pack's 300px threshold, so it gets the full 3200 grains. |
 
-Grain count and radius come from `grainSpec()`:
+The radius comes from the pack's `grainSpec()` at every size — it is
+what keeps a grain a grain. The count does not.
+
+**The pack's curve** scales with area, so density is flat across its
+middle band:
 
 - **≥ 300px** — 3200 grains, radius 0.55% of the width (hero, splash)
-- **29–299px** — 140·(W/28)² grains, ~1.05px radius (nav, sidebar, avatar)
-- **≤ 28px** — 230·(W/28)² grains, ~0.85px radius (badge, small icons)
+- **29–299px** — 140·(W/28)² grains, ~1.05px radius
+- **≤ 28px** — 230·(W/28)² grains, ~0.85px radius
 
-`GrainMark.jsx` reads that spec at the mark's **CSS size, not the
-canvas's backing size**. The module keys it off `canvas.width`, so on a
-2× display a 20px mark backing onto a 40px canvas would take four times
-the grains at half the size — a finer stipple, not a sharper one. The
-radius is a fraction of `canvas.width` and so scales itself; only the
-count needs the correction. Both are plain options on the module, so
-this costs the vendoring no deviation.
+**Below 48px grain draws more** (`src/brand/grain-density.js`). Scaling
+with area means a mark that halves keeps a quarter of its grains, which
+is right for a hero and wrong for an icon: at the sidebar and badge
+sizes there are too few grains to fill the glyph, and the rosette reads
+as a hatched disc rather than as a shape. So under 48px the count stops
+falling — a small mark keeps the **grain count of a 48px one**, 411, and
+the shrinking area raises the density instead. A 20px badge goes from
+117 grains to 411.
+
+There is no seam at the threshold, because 411 is the pack's own count
+at exactly that size; and there is no reason to push further, since past
+about this count the grains are already touching and the picture stops
+changing. What that buys is the behaviour these sizes want: the glyph
+reads **solid at rest and grainy only in flight**, which is when the
+grains separate anyway. It costs frame time rather than saving it —
+several running task rows are several hundred filled arcs each — which
+is why the animation still stops on a hidden tab.
+
+`GrainMark.jsx` reads all of this at the mark's **CSS size, not the
+canvas's backing size**. The module keys the spec off `canvas.width`, so
+on a 2× display a 20px mark backing onto a 40px canvas would take four
+times the grains at half the size — a finer stipple, not a sharper one.
+The radius is a fraction of `canvas.width` and so scales itself; only
+the count needs the correction. Count and radius are both plain options
+on the module, so all of this costs the vendoring no deviation.
 
 ## Colour
 

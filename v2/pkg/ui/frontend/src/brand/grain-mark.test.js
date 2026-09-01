@@ -13,6 +13,7 @@ import {
   grainSpec,
   sampleGlyph,
 } from "./grain-mark.js";
+import { DENSE_BELOW_PX, markSpec } from "./grain-density.js";
 
 // The geometry half of the mark is pure maths -- no canvas, no React --
 // so it can be pinned down directly. The module itself is a verbatim
@@ -144,12 +145,56 @@ describe("grain spec", () => {
     expect(grainSpec(cssPx * 2).count).not.toBe(spec.count);
   });
 
-  it("scales the grain count with area across the app's sizes", () => {
-    // The sidebar mark, the task-row badge and the loading screen, in
-    // the sizes their components ask for.
-    expect(grainSpec(20).count).toBe(117);
-    expect(grainSpec(32).count).toBe(183);
+  it("scales the pack's count with area, so density is flat", () => {
+    // The pack's own curve, which grain follows from 48px up: count goes
+    // as the square of the size, so a mark that halves keeps a quarter
+    // of its grains.
+    expect(grainSpec(48).count).toBe(411);
+    expect(grainSpec(96).count / grainSpec(48).count).toBeCloseTo(4, 2);
     expect(grainSpec(320).count).toBe(3200);
+  });
+});
+
+describe("grain's own density below 48px", () => {
+  it("holds the 48px count all the way down", () => {
+    // The deviation grain-density.js exists for: the pack's count leaves
+    // a small glyph too sparse to read as a shape, so under the
+    // threshold the count stops falling and the shrinking area raises
+    // the density instead.
+    const dense = grainSpec(DENSE_BELOW_PX).count;
+    for (const px of [14, 20, 24, 32, 44]) {
+      expect(markSpec(px).count).toBe(dense);
+      expect(markSpec(px).count).toBeGreaterThan(grainSpec(px).count);
+    }
+  });
+
+  it("meets the pack exactly at the threshold, and defers to it above", () => {
+    // No seam at 48: the count held below it is the pack's own count at
+    // that size, so the two curves join rather than step.
+    expect(markSpec(DENSE_BELOW_PX)).toEqual(grainSpec(DENSE_BELOW_PX));
+    expect(markSpec(DENSE_BELOW_PX - 1).count).toBe(grainSpec(DENSE_BELOW_PX).count);
+    for (const px of [64, 128, 320]) expect(markSpec(px)).toEqual(grainSpec(px));
+  });
+
+  it("leaves the grain radius to the pack", () => {
+    // Only the count changes. The radius is what keeps a grain a grain
+    // at each size, and it is the pack's business.
+    for (const px of [14, 20, 32, 44, 64]) {
+      expect(markSpec(px).radius).toBe(grainSpec(px).radius);
+    }
+  });
+
+  it("packs the small marks densely enough to fill the glyph", () => {
+    // The point of the whole deviation, stated as area: at the badge
+    // size the grains cover the filled region several times over, which
+    // is what makes the rosette read solid at rest and grainy only in
+    // flight.
+    for (const px of [20, 32]) {
+      const { count, radius } = markSpec(px);
+      const grainArea = count * Math.PI * (px * radius) ** 2;
+      const frameArea = Math.PI * (px * 0.44) ** 2;
+      expect(grainArea / frameArea).toBeGreaterThan(1.5);
+    }
   });
 });
 

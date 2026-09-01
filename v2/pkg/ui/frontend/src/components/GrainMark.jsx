@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "@mui/material";
 
-import { STATIC_SLOT, createGrainMark, grainSpec } from "../brand/grain-mark.js";
+import { STATIC_SLOT, createGrainMark } from "../brand/grain-mark.js";
+import { markSpec } from "../brand/grain-density.js";
 
 // GrainMark is the brand mark: a Chladni glyph -- the filled regions of a
 // square-plate eigenmode, stippled into grains -- inside an invisible
@@ -74,7 +75,11 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
     // the reader sees and leaves the backing store free to be as dense
     // as the display allows -- the radius is a fraction of canvas.width,
     // so it already scales itself and needs no dpr correction.
-    const spec = grainSpec(size);
+    //
+    // markSpec, not the module's grainSpec: below 48px grain stipples
+    // the glyph more thickly than the pack does, so the small marks read
+    // as shapes rather than as hatching. See grain-density.js.
+    const spec = markSpec(size);
     const mark = createGrainMark(canvas, {
       theme: mode,
       count: spec.count,
@@ -88,10 +93,11 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
     // concept meant for a splash or a hero, not something left running
     // as a persistent UI element -- a fair warning for a mark that
     // animates for as long as anything is running, which on a busy
-    // deployment is most of the day. At the sizes the app uses it is a
-    // hundred-odd filled arcs a frame, cheap enough to keep; what it
-    // still should not do is keep spending them on a tab nobody is
-    // looking at.
+    // deployment is most of the day. The denser small marks make that
+    // bill bigger, not smaller -- a 20px badge is 411 filled arcs a
+    // frame now rather than 117, and a task list can hold several of
+    // them at once -- so what it still must not do is keep spending
+    // them on a tab nobody is looking at.
     const onVisibility = () => (document.hidden ? mark.stop() : mark.start());
     document.addEventListener("visibilitychange", onVisibility);
     onVisibility();
