@@ -117,6 +117,26 @@ gcloud compute ssh "$INSTANCE" --zone "$ZONE" --project "$PROJECT" \
 `gcloud compute start-iap-tunnel` line to forward the UI to
 `http://localhost:8080`.
 
+## Bootstrapping the rest of a hand-created VM
+
+Everything above assumes Terraform creates the VM itself, applied from
+outside it, state in the GCS bucket `bootstrap-gcp.sh` creates. That's
+not the only starting point: bwsalmon/agents#620 added a second one, for
+a VM created by hand (the Console, a one-off `gcloud compute instances
+create`, ...) that still wants this module's service accounts, IAM
+grants, and IAP/Cloud Run access set up afterward -- run from the VM
+itself, against `-target`ed subsets of this same module, with state kept
+on the VM's own data disk (`backend-local.hcl.example`) instead of GCS.
+
+That path is written up as playbooks grain's own configuration agent can
+read and act on -- `v2/pkg/capability/bootstrap/playbooks/
+gcp-capabilities.md` and `cloudrun-iap.md` -- rather than repeated here;
+open the configuration agent from the UI and ask it to bootstrap GCP
+capabilities or CloudRun IAP access, or read those two files directly.
+The GitHub-side setup (`github-connections.md`, `github-test-repos.md`
+in the same directory) has no Terraform involved at all -- see those
+playbooks for why.
+
 ## Deploying it from CI
 
 Everything above is the by-hand path. To have a config repo's GitHub

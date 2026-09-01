@@ -55,6 +55,8 @@ func DefaultCapabilities() []Capability {
 			Description: "Let this task read grain's own source checkout, to help it debug or explain grain's own behavior"},
 		{ID: "self-repair", Name: "Self repair",
 			Description: "Let this task run commands on grain's own host -- restart services, edit config, call the grain CLI -- each one needing a live reply in the task's chat before it runs"},
+		{ID: "bootstrap-playbooks", Name: "Bootstrap playbooks",
+			Description: "Let this task read grain's own bootstrap playbooks -- the runbooks for setting up GCP service accounts, the primary GitHub connection, CloudRun-based IAP access, and test repos -- so it can walk whoever is on the other end of this chat through one of them"},
 		{ID: "scratch-repo", Name: "Scratch repo",
 			Description: "Dispatch this task into its sandbox's own scratch repo instead of /repo"},
 	}

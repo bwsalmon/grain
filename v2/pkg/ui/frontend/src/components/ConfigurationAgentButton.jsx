@@ -7,9 +7,12 @@ import api from "../api.js";
 // from the bottom-right corner of the screen no matter what view is on
 // screen, it files grain's own configuration agent -- an interactive
 // task the backend (ui.Client.CreateTask) bundles with the self-debug/
-// self-repair grants and a prompt oriented at helping with a problem, a
-// question, or grain's own configuration -- and opens its chat the
-// moment it exists, the same way NewTaskOverlay already does for an
+// self-repair/bootstrap-playbooks grants (the third added by
+// bwsalmon/agents#620, so it can read and act on the GCP/GitHub setup
+// runbooks under v2/pkg/capability/bootstrap/playbooks/) and a prompt
+// oriented at helping with a problem, a question, grain's own
+// configuration, or one of those bootstrap flows -- and opens its chat
+// the moment it exists, the same way NewTaskOverlay already does for an
 // ordinary interactive task (bwsalmon/agents#539).
 //
 // One click, no form: everything the task needs (Interactive,
