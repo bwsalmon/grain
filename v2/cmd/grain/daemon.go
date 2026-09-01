@@ -110,7 +110,12 @@ func daemon(args []string) {
 	const seedOnly = " (bwsalmon/agents#320: seeds the stored configuration on first use; ignored once one exists -- see loadConfig)"
 
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
-	dataDir := fs.String("data-dir", "", "root directory for the store, secrets, and sandbox roots (required)")
+	dataDir := fs.String("data-dir", "", "root directory for the store and secrets -- the state a redeploy must not lose (required)")
+	sandboxDir := fs.String("sandbox-dir", "", "root directory orchestrator.HostSandboxes creates one per-slot working directory under, for local "+
+		"(non-kontur) sandboxing -- required unless -kontur-vm-name-prefix selects orchestrator.KonturSandboxes instead. Deliberately a separate "+
+		"flag from -data-dir rather than a subdirectory of it (bwsalmon/agents#587): a task's checked-out repo and whatever it wrote into its "+
+		"sandbox are disposable, unlike the store and secrets under -data-dir, so this belongs on storage that a VM wipe or redeploy is free to "+
+		"discard along with the rest of the host")
 	maxConcurrent := fs.Int("max-concurrent", 1, "maximum number of tasks dispatched at once -- the size of the concurrency pool dispatch.Cycle fills"+seedOnly)
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
 
@@ -227,6 +232,10 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -data-dir is required")
 		os.Exit(2)
 	}
+	if *sandboxDir == "" && *konturVMNamePrefix == "" {
+		fmt.Fprintln(os.Stderr, "grain daemon: -sandbox-dir is required unless -kontur-vm-name-prefix is set")
+		os.Exit(2)
+	}
 	if *geminiAPIKeyFile == "" {
 		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
@@ -266,7 +275,7 @@ func daemon(args []string) {
 	defer stop()
 
 	if err := run(ctx, config{
-		dataDir: *dataDir, maxConcurrent: *maxConcurrent, pollInterval: *pollInterval,
+		dataDir: *dataDir, sandboxDir: *sandboxDir, maxConcurrent: *maxConcurrent, pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
@@ -290,6 +299,12 @@ type config struct {
 	dataDir       string
 	maxConcurrent int
 	pollInterval  time.Duration
+	// sandboxDir roots orchestrator.HostSandboxes -- see -sandbox-dir's
+	// own flag doc comment for why this is not just a subdirectory of
+	// dataDir. Only consulted when konturVMNamePrefix is empty, the same
+	// as every other non-kontur-only field would be if HostSandboxes had
+	// more than this one.
+	sandboxDir string
 
 	// uiAddr, uiOpen, actor and defaultTargetRepo configure the in-process
 	// pkg/ui.Server this daemon serves alongside RunCycle (bwsalmon/agents#363);
@@ -352,7 +367,10 @@ type config struct {
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
-// under cfg.dataDir and starts the reconcile loop; it returns only once
+// under cfg.dataDir (the store, secrets) and, for local sandboxing,
+// cfg.sandboxDir (HostSandboxes' own per-slot directories -- deliberately
+// not under cfg.dataDir, see -sandbox-dir's own flag doc comment), and
+// starts the reconcile loop; it returns only once
 // ctx is cancelled. With -ui-addr set, a failure in the rest of the
 // daemon -- runDaemon, below -- no longer counts as "ctx cancelled" for
 // this purpose (bwsalmon/agents#550): only a failure to open the store,
@@ -405,7 +423,14 @@ func run(ctx context.Context, cfg config) error {
 		})
 		sandboxes = konturSandboxes
 	} else {
-		hostSandboxes = orchestrator.NewHostSandboxes(filepath.Join(cfg.dataDir, "sandbox"))
+		// orchestrator.NewHostSandboxes' own doc comment says its baseDir
+		// "must already exist" -- true of scripts/setup.sh's own
+		// GRAIN_SANDBOX_DIR, but not of every caller (the tests below
+		// among them), so make that true here rather than leaning on it.
+		if err := os.MkdirAll(cfg.sandboxDir, 0o755); err != nil {
+			return fmt.Errorf("creating sandbox directory: %w", err)
+		}
+		hostSandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
 		sandboxes = hostSandboxes
 	}
 

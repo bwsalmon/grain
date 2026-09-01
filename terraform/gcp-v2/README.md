@@ -601,9 +601,13 @@ lists in sync automatically; an operator who changes one by hand (via
   state bucket, the deployer account, and the workload identity pool and
   provider all derive from `name_prefix` already.
 - **Destroying it is deliberately awkward.** The data disk carries
-  `prevent_destroy` (`instance.tf`) -- it holds the SQLite store, the
-  secrets database, and the sandbox working directories. Remove that
-  block first if you really mean to lose it.
+  `prevent_destroy` (`instance.tf`) -- it holds the SQLite store and the
+  secrets database, the state a wipe or redeploy must not lose. Remove
+  that block first if you really mean to lose it. The sandbox working
+  directories `orchestrator.HostSandboxes` clones each task's repo into
+  live on the boot disk instead, deliberately (`boot_disk_gb`'s own doc
+  comment, bwsalmon/agents#587), so they go with the rest of the host on
+  a wipe rather than surviving it.
 - **The load balancer can front a Cloud Run proxy instead of the VM
   directly.** Set `use_cloudrun_iap_proxy = true` (needs
   `expose_ui_publicly = true`) and `google_compute_backend_service.ui`
