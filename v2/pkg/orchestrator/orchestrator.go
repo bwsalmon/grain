@@ -23,7 +23,7 @@
 // comment: "root stands in for the sandbox"). It carries no isolation at
 // all — an agent given a directory here can do anything this process's own
 // user can do. KonturSandboxes is the real alternative: one
-// bwsalmon/kontur-managed VM per dispatch slot, reached over SSH the way
+// bwsalmon/kontur-managed VM per run, reached over SSH the way
 // v1 runs the agent process itself against a real, separate sandbox VM.
 // Neither this package nor pkg/kontur builds that VM's guest image —
 // KonturSandboxes assumes one already exists that carries the operator's
@@ -160,7 +160,7 @@ type Config struct {
 	// v2's own equivalent of v1's AutomationConfig.max_runtime_minutes
 	// plus its sweeper (bwsalmon/agents#575), both aimed at the same
 	// failure: a run that is alive but stuck making no progress, tying
-	// up its dispatch slot indefinitely with nothing to notice or
+	// up its share of the concurrency limit indefinitely with nothing to notice or
 	// recover it. A tool call with no bound of its own is exactly how
 	// that happens in practice (a run_command whose own caller omitted
 	// "timeout" -- see mcp.defaultRunCommandTimeout, the fix for the

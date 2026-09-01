@@ -32,9 +32,10 @@ function pushSample(series, value) {
 }
 
 // appendHistory folds one GET /api/sandboxes response into the running
-// per-host and per-slot history SandboxHealthPage charts from. Load
-// average, not a CPU percentage, is what SlotHealth/HostPressure actually
-// report (see orchestrator.SlotHealth's own doc comment on why), so the
+// per-host and per-sandbox history SandboxHealthPage charts from. Load
+// average, not a CPU percentage, is what SandboxHealth/HostPressure
+// actually report (see orchestrator.SandboxHealth's own doc comment on
+// why), so the
 // "CPU" trend charts below are the 1-minute load average over time, same
 // as the existing text summary already shows.
 export function appendHistory(prev, result) {
@@ -44,9 +45,9 @@ export function appendHistory(prev, result) {
 
   const sandboxes = { ...prev.sandboxes };
   for (const s of result?.sandboxes || []) {
-    const existing = sandboxes[s.slot] || emptySeries;
+    const existing = sandboxes[s.sandbox] || emptySeries;
     const load1 = s.ready && s.loadAverage ? parseFloat(s.loadAverage.split(" ")[0]) : null;
-    sandboxes[s.slot] = {
+    sandboxes[s.sandbox] = {
       cpu: pushSample(existing.cpu, load1),
       mem: pushSample(existing.mem, s.ready ? s.memoryUsedMB : null),
     };
@@ -55,7 +56,7 @@ export function appendHistory(prev, result) {
 }
 
 // SandboxHealthPage is the sandbox health pane (bwsalmon/agents#536): a
-// live view of every dispatch slot's own sandbox -- a kontur VM or a host
+// live view of every live run's own sandbox -- a kontur VM or a host
 // directory, whichever backend this deployment runs -- plus the daemon's
 // own host machine's CPU/RAM pressure. Both come back from the same
 // GET /api/sandboxes call since a sandbox that looks stuck is often
@@ -134,12 +135,12 @@ export default function SandboxHealthPage({ showError }) {
 
           <Typography variant="subtitle2" sx={{ mb: "0.5rem" }}>Sandboxes</Typography>
           {(!data.sandboxes || data.sandboxes.length === 0) ? (
-            <Typography variant="body2" color="text.secondary">No sandboxes tracked yet.</Typography>
+            <Typography variant="body2" color="text.secondary">No runs in flight, so no sandboxes exist.</Typography>
           ) : (
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell>Slot</TableCell>
+                  <TableCell>Run</TableCell>
                   <TableCell>Backend</TableCell>
                   <TableCell>Name</TableCell>
                   <TableCell>Status</TableCell>
@@ -151,10 +152,10 @@ export default function SandboxHealthPage({ showError }) {
               </TableHead>
               <TableBody>
                 {data.sandboxes.map((s) => {
-                  const series = history.sandboxes[s.slot] || emptySeries;
+                  const series = history.sandboxes[s.sandbox] || emptySeries;
                   return (
-                    <TableRow key={s.slot}>
-                      <TableCell>{s.slot}</TableCell>
+                    <TableRow key={s.sandbox}>
+                      <TableCell>{s.sandbox}</TableCell>
                       <TableCell>{s.backend}</TableCell>
                       <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}>{s.name}</TableCell>
                       <TableCell>

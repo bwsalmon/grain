@@ -12,12 +12,13 @@ pkg/model/sqlite/  opening the embedded SQLite database (modernc.org/sqlite,
                 is only one writer to serialise now that the daemon is the
                 only thing that ever opens the store directly (see "The UI
                 and the CLI talk to the daemon over REST" below)
-pkg/dispatch/   which task takes which slot: what one cycle decides to
+pkg/dispatch/   which tasks run now: what one cycle decides to
                 do with the store, with no side effect beyond that
                 decision. It does not loop itself -- cmd/grain's "daemon"
                 subcommand's timer does, through pkg/orchestrator -- and
                 it carries no
-                scheduling policy: it drains task_ready into free slots
+                scheduling policy: it drains task_ready until
+                max_concurrent runs are live
 pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
@@ -28,8 +29,8 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 kontur-managed sandbox VM's guest instead, by exec'ing
                 into that VM's own container -- see "Reaching a sandbox
                 guest without a route into it" below
-pkg/kontur/     drives the `konturctl` binary: create/update/delete for a
-                slot's VM, the container names kontur derives from a VM
+pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
+                run's VM, the container names kontur derives from a VM
                 name, and the one `docker inspect` that tells a VM whose
                 container died from one still on its way up. It resolves
                 no address for a VM, because nothing needs one
@@ -1582,3 +1583,95 @@ exactly that, since Terraform's own state is the record of what
 upgrade it out from under a `terraform apply` (or the reverse) would let
 the two silently disagree about what's actually running
 (bwsalmon/agents#405).
+
+
+## Slots are gone; a sandbox belongs to one run
+
+A *slot* was one identifier doing five unrelated jobs: the concurrency
+unit `dispatch.Cycle` drew from a fixed pool, the name a long-lived
+sandbox was built under and reused across tasks, the identity the git
+proxy authenticated, the number a kontur VM's `-ip`/`-port` were derived
+from, and the row the sandbox-health pane keyed on. Only the first was
+ever a real idea. The rest existed because that identifier happened to be
+durable, and each one cost something:
+
+- **Isolation had to be bolted on.** A slot's VM outlived every task
+  dispatched onto it, so `runOne` deleted and rebuilt it after each run,
+  `runDaemon` ran a reset pass over every slot at startup to cover the
+  runs a crash interrupted, and `KonturSandboxes` remembered each slot's
+  git credentials so the rebuild could reapply them.
+- **`HostSandboxes` never got that at all.** Its directories were
+  deliberately long-lived — resetting one between tasks was "the caller's
+  job", and no caller did — so sequential tasks on one slot genuinely
+  shared a filesystem.
+- **A proxy token outlived the tasks that used it.** One token per slot,
+  minted at startup, shared by every run that ever landed there.
+
+Now `Sandboxes` is a lifecycle rather than a lookup: `Acquire` builds one
+sandbox for one run, and the `Sandbox` it returns is `Release`d when that
+run ends, success or failure alike. A task cannot inherit a filesystem
+that no longer exists, so the recreate, the reset pass, the remembered
+credentials, and the `recreatingSandboxes`/`shapedSandboxes` optional
+interfaces are all gone with the problem they solved. What
+`../docs/design.md` lists as a non-goal for v1 — "isolating *sequential*
+tasks on one sandbox from each other" — is here a property rather than
+something knowingly given up.
+
+**Concurrency is a count.** `Cycle` takes `max_concurrent` and starts
+runs until that many are live. The DB-level backstop that used to be a
+unique index on the slot each run claimed (bwsalmon/agents#434, catching
+two overlapping cycles that both thought a slot was free) is now a count
+inside `StartRun`'s own transaction, which rules that race out rather
+than detecting it after the fact; the index that remains says a task has
+at most one run in flight, which is what `task_state` already assumed.
+
+**A sandbox is named after its run.** Nothing else is in a position to
+name it — it is built for that run and destroyed with it — and a run ID
+is already unique, already durable, and already what a log line or a
+`konturctl vm list` most usefully shows. `task_run.sandbox` is that name;
+`task_run.slot` is gone. Under the docker backend the whole VM name must
+fit 11 bytes (netshim derives `tap-<name>` and `ctl-<name>` from it, and
+Linux caps an interface name at 15), so `VMNameFor` checks that budget
+and says what is spending it rather than letting `konturctl vm create`
+refuse an interface name several layers down. A two-byte prefix leaves
+nine, which covers five-digit task ids with double-digit attempts.
+
+**The proxy token dies with the run.** It is minted as that run's sandbox
+is prepared rather than once per slot at startup — the security property
+`docs/data-model.md` predicted would fall out of a sandbox per task. That
+required `gitproxy.SandboxTokens` to start re-reading its file when shown
+a token it does not recognise: pinning the map at startup was correct
+while every token was minted before the proxy started, and would now
+reject every run's git. `cmd/grain/daemon_token_ordering_test.go` used to
+pin the opposite guarantee and now pins this one.
+
+**`ReapOrphans` replaced the reset pass.** At startup no VM can belong to
+this process, so any under the deployment's own prefix is a leftover from
+one that died before it could release it — the same argument, at the same
+moment, `RecoverOrphanedRuns` makes for the rows such a process leaves
+live. It deletes them rather than rebuilding them, because they are meant
+to have been deleted already.
+
+**`KonturConfig.BaseIP`/`BasePort` became `IP`/`Port`,** passed verbatim
+to every VM rather than offset by a slot number. Under the docker backend
+— the only one this package builds VMs under — `internal/dockervm.Create`
+gives every VM its own netns-holder container that the VM joins with
+`--network container:`, so they share no bridge and cannot collide on an
+address, and `Port` only ever reaches `NETSHIM_VMS` inside that
+namespace. The derivation was guarding a collision that shape makes
+impossible; it dates from the static-pod backend, where a pod's
+containers genuinely did share a namespace. That reasoning is from
+kontur's own source rather than from two VMs observed coming up on one
+address, so it is worth confirming against a real NAT-mode host before
+leaning on it. Flat mode, the default, ignores both.
+
+**What this costs.** A VM boot moves onto the critical path of every
+task, where it used to be paid once at startup. `docs/data-model.md`
+already names the mitigations — a golden image, and a warm spare booting
+ahead of demand — and neither is in place yet. Worth measuring before
+reaching for either: a warm spare is a pool of *VMs*, which is a much
+smaller idea than a pool of assignments, and does not bring slots back.
+
+The sandbox-health pane changed meaning with everything else: it reports
+live sandboxes, so an idle deployment shows nothing rather than a table
+of idle slots.

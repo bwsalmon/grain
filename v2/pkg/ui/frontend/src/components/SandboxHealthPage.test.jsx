@@ -48,8 +48,8 @@ describe("SandboxHealthPage", () => {
     api.mockResolvedValueOnce({
       enabled: true,
       sandboxes: [
-        { slot: "0", backend: "kontur", name: "grain-0", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 },
-        { slot: "1", backend: "kontur", name: "grain-1", ready: false, error: "connection refused" },
+        { sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 },
+        { sandbox: "t2-r1", backend: "kontur", name: "g-t2-r1", ready: false, error: "connection refused" },
       ],
       host: null,
     });
@@ -65,7 +65,7 @@ describe("SandboxHealthPage", () => {
   it("shows a host error without hiding the sandbox list", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
-      sandboxes: [{ slot: "0", backend: "host", name: "/tmp/sandbox-0", ready: true }],
+      sandboxes: [{ sandbox: "t1-r1", backend: "host", name: "/tmp/sandbox-0", ready: true }],
       hostError: "not on linux",
     });
     render(<SandboxHealthPage showError={() => {}} />);
@@ -77,7 +77,7 @@ describe("SandboxHealthPage", () => {
   it("re-fetches when Refresh is clicked", async () => {
     api
       .mockResolvedValueOnce({ enabled: true, sandboxes: [], host: null })
-      .mockResolvedValueOnce({ enabled: true, sandboxes: [{ slot: "0", backend: "host", name: "/tmp/s0", ready: true }], host: null });
+      .mockResolvedValueOnce({ enabled: true, sandboxes: [{ sandbox: "t1-r1", backend: "host", name: "/tmp/s0", ready: true }], host: null });
     const user = userEvent.setup();
     render(<SandboxHealthPage showError={() => {}} />);
 
@@ -90,7 +90,7 @@ describe("SandboxHealthPage", () => {
   it("labels the host and per-sandbox trend charts", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
-      sandboxes: [{ slot: "0", backend: "kontur", name: "grain-0", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 }],
+      sandboxes: [{ sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 }],
       host: { loadAverage1: 0.5, loadAverage5: 0.4, loadAverage15: 0.3, memoryUsedMB: 512, memoryTotalMB: 1024 },
     });
     render(<SandboxHealthPage showError={() => {}} />);
@@ -130,13 +130,13 @@ describe("appendHistory", () => {
   });
 
   it("skips a sandbox that is not ready", () => {
-    const result = appendHistory(empty, { sandboxes: [{ slot: "0", ready: false, error: "boom" }] });
+    const result = appendHistory(empty, { sandboxes: [{ sandbox: "t1-r1", ready: false, error: "boom" }] });
     expect(result.sandboxes["0"]).toEqual({ cpu: [], mem: [] });
   });
 
   it("appends a ready sandbox's load average and memory", () => {
     const result = appendHistory(empty, {
-      sandboxes: [{ slot: "0", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40, memoryTotalMB: 100 }],
+      sandboxes: [{ sandbox: "t1-r1", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40, memoryTotalMB: 100 }],
     });
     expect(result.sandboxes["0"]).toEqual({ cpu: [0.25], mem: [40] });
   });

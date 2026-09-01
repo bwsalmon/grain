@@ -139,7 +139,7 @@ type Config struct {
 	// nothing to show until it finishes (bwsalmon/agents#467).
 	LiveTranscripts LiveTranscript
 	// Sandboxes, when set, is what GET /api/sandboxes calls to report
-	// every dispatch slot's own live sandbox status -- cmd/grain/daemon.go's
+	// every live run's own sandbox status -- cmd/grain/daemon.go's
 	// sandboxHealthAdapter over whichever of orchestrator.KonturSandboxes/
 	// HostSandboxes this deployment actually runs (run()'s own doc
 	// comment: exactly one of the two). nil means this deployment's UI

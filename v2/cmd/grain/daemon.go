@@ -21,9 +21,9 @@
 // fleet this deployment shape has nowhere to run. -kontur-vm-name-prefix
 // is the opt in to the real alternative (bwsalmon/agents#274):
 // orchestrator.KonturSandboxes, one real bwsalmon/kontur-managed VM per
-// slot, reached over SSH. -max-concurrent sizes the pool either way
-// (bwsalmon/agents#461: model.SlotNames turns the count into the
-// generated slot identifiers each backend actually keys on); nothing
+// run, reached over SSH. -max-concurrent caps how many runs are in
+// flight at once either way, and a sandbox is built for each of them and
+// destroyed with it; nothing
 // above pkg/orchestrator.Deps needs to change to serve more than one.
 //
 // graind originally drove pkg/orchestrate, a package built independently
@@ -111,7 +111,7 @@ func daemon(args []string) {
 
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store and secrets -- the state a redeploy must not lose (required)")
-	sandboxDir := fs.String("sandbox-dir", "", "root directory orchestrator.HostSandboxes creates one per-slot working directory under, for local "+
+	sandboxDir := fs.String("sandbox-dir", "", "root directory orchestrator.HostSandboxes creates one working directory per run under, for local "+
 		"(non-kontur) sandboxing -- required unless -kontur-vm-name-prefix selects orchestrator.KonturSandboxes instead. Deliberately a separate "+
 		"flag from -data-dir rather than a subdirectory of it (bwsalmon/agents#587): a task's checked-out repo and whatever it wrote into its "+
 		"sandbox are disposable, unlike the store and secrets under -data-dir, so this belongs on storage that a VM wipe or redeploy is free to "+
@@ -157,7 +157,7 @@ func daemon(args []string) {
 	// host, no isolation) exactly as it always has -- see run()'s own
 	// comment on sandboxes below. -kontur-vm-name-prefix is the opt in to
 	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
-	// managed VM per slot, reached over SSH.
+	// managed VM per run, reached over SSH.
 	konturVMNamePrefix := fs.String("kontur-vm-name-prefix", "",
 		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per run, named <prefix>+<run id>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
@@ -199,7 +199,8 @@ func daemon(args []string) {
 	konturBaseIP := fs.String("kontur-base-ip", "",
 		"the -ip every kontur VM is created with under -kontur-net nat, passed verbatim. Each VM has its own "+
 			"network namespace under the docker backend (its own netns-holder container), so they do not "+
-			"collide; this used to be a base that each slot's number was added to, which was guarding against "+
+			"collide; this used to be a base that each slot's number was added to, back when a slot's VM was "+
+			"long-lived, which was guarding against "+
 			"a shared bridge the docker backend does not have. Ignored under flat mode, and only used with "+
 			"-kontur-vm-name-prefix.")
 	konturBasePort := fs.Int("kontur-base-port", 0,
@@ -214,7 +215,7 @@ func daemon(args []string) {
 			"127.0.0.1 that never reaches this process's -- so a clone against the default 127.0.0.1 proxy URL "+
 			"fails the moment it leaves the guest (bwsalmon/agents#567: \"Failed to connect to 127.0.0.1 ... "+
 			"Couldn't connect to server\"). Setting this makes startGitProxy bind on every interface instead of "+
-			"just loopback, and advertise this host to every slot's sandbox in loopback's place -- typically the "+
+			"just loopback, and advertise this host to every run's sandbox in loopback's place -- typically the "+
 			"docker bridge gateway address the guest's own outbound NAT routes through to reach this host (see "+
 			"netshim's masqueradeExprs); run `docker network inspect bridge` (or whichever network the kontur VM "+
 			"containers join) and read \"Gateway\" if unsure -- commonly 172.17.0.1.")
@@ -368,7 +369,7 @@ type config struct {
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
 // under cfg.dataDir (the store, secrets) and, for local sandboxing,
-// cfg.sandboxDir (HostSandboxes' own per-slot directories -- deliberately
+// cfg.sandboxDir (HostSandboxes' own per-run directories -- deliberately
 // not under cfg.dataDir, see -sandbox-dir's own flag doc comment), and
 // starts the reconcile loop; it returns only once
 // ctx is cancelled. With -ui-addr set, a failure in the rest of the
@@ -390,9 +391,9 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("loading deployment configuration: %w", err)
 	}
 	// Sandboxing defaults to orchestrator.HostSandboxes -- one local
-	// directory per slot, no isolation -- exactly as it always has;
-	// -kontur-vm-name-prefix opts into orchestrator.KonturSandboxes
-	// instead: one real bwsalmon/kontur-managed VM per slot, reached over
+	// directory per run, torn down with it; -kontur-vm-name-prefix opts
+	// into orchestrator.KonturSandboxes instead: one real
+	// bwsalmon/kontur-managed VM per run, reached over
 	// SSH (pkg/orchestrator's own doc comment: "Sandboxing defaults to
 	// 'execute on the host,' deliberately, for now, with a real host
 	// adapter available as an opt in"). Exactly one of hostSandboxes/
@@ -447,7 +448,7 @@ func run(ctx context.Context, cfg config) error {
 
 	// The UI/API server starts here, as early as its own dependencies (the
 	// store, sandboxes, and transcriptDir above) allow -- deliberately
-	// before the git proxy, per-slot credentials, the Gemini agent
+	// before the git proxy, the Gemini agent
 	// framework, and RunCycle's own reconcile loop, none of which the UI
 	// needs a working copy of to serve the store's existing tasks, runs,
 	// and logs (bwsalmon/agents#550: "make sure ui with logs stays up even
@@ -503,10 +504,11 @@ func run(ctx context.Context, cfg config) error {
 }
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
-// and reconcile tasks: minting per-slot sandbox tokens, the git proxy,
-// rebuilding every kontur-backed slot's sandbox, per-slot git
-// credentials, the Gemini agent framework, orphaned-run recovery, and
-// RunCycle's own reconcile loop. run() calls it exactly once, either
+// and reconcile tasks: the git proxy, the Gemini agent framework,
+// orphaned-run and orphaned-VM recovery, and RunCycle's own reconcile
+// loop. Sandbox tokens and git credentials are not among them any more:
+// both are per run now, minted and configured as each run's sandbox is
+// built (orchestrator's runOne). run() calls it exactly once, either
 // inline (-ui-addr disabled, so there is no UI server worth
 // keeping up on its own -- a setup failure here is still this process's
 // only job, so it is still fatal the way it always was) or in a goroutine

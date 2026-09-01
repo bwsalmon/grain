@@ -7,7 +7,8 @@ import (
 
 // SandboxSnapshot is one live sandbox's status, as GET /api/sandboxes
 // reports it -- one per run currently in flight, so an idle deployment
-// reports none rather than a row of idle slots. Deliberately its own type
+// reports none rather than one row per slot, most of them idle.
+// Deliberately its own type
 // rather than orchestrator.SandboxHealth itself: this package does not import
 // pkg/orchestrator (a presentation-layer package importing core dispatch
 // logic runs the wrong way), so cmd/grain/daemon.go's own
