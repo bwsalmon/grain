@@ -22,13 +22,15 @@
 #      of this one (reexec_if_updated), so a run always builds with the
 #      code it just pulled rather than the code it started with
 #   2. builds bin/grain with `make container-build` (v2/Makefile) -- the
-#      containerised build, not the host toolchain, so a working
-#      `docker` is the one thing this script assumes about the host
-#      (`make` itself it installs, see ensure_make). grain is pure Go
-#      (bwsalmon/agents#366 removed the one dependency that wasn't), so
-#      this buys reproducibility -- one pinned Go toolchain regardless of
-#      what is or isn't installed on this machine -- rather than working
-#      around any host-specific linkage problem.
+#      containerised build, not the host toolchain, so nothing beyond
+#      `git`, `docker` and `make` is required of the host, and this
+#      script installs all three itself if a vanilla Debian VM doesn't
+#      already have them (ensure_git, ensure_docker, ensure_make;
+#      bwsalmon/agents#617). grain is pure Go (bwsalmon/agents#366
+#      removed the one dependency that wasn't), so this buys
+#      reproducibility -- one pinned Go toolchain regardless of what is
+#      or isn't installed on this machine -- rather than working around
+#      any host-specific linkage problem.
 #   3. installs it to $GRAIN_DATA_DIR/bin/grain, with a stable
 #      /usr/local/bin/grain symlink to that path for an operator's own
 #      shell
@@ -396,12 +398,54 @@ fi
 SELF_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 SELF_SUM_BEFORE="$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}' || true)"
 
-for cmd in git docker systemctl install useradd visudo; do
+for cmd in systemctl install useradd visudo; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
     exit 1
   fi
 done
+
+# git and docker are installed rather than only reported missing, same
+# as ensure_make just below -- bwsalmon/agents#617. Until now both were
+# only ever guaranteed by terraform/gcp-v2/files/deploy.sh's own
+# install_prerequisites, which runs *before* this script but is no help
+# to anyone who reaches this script the way its own header comment says
+# it should be reachable: cloning this repo onto a bare Debian VM and
+# running it directly, no Terraform or GCP metadata involved. A vanilla
+# Debian cloud image carries neither.
+ensure_git() {
+  command -v git >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    log "installing git (needed to clone/update $GRAIN_SRC_DIR)"
+    apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates || true
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    echo "setup.sh: required command not found: git, and it could not be installed automatically -- install it (e.g. 'apt-get install git') and re-run" >&2
+    exit 1
+  fi
+}
+ensure_git
+
+# Installs the docker.io package if the CLI is missing, then makes sure
+# the daemon is actually up -- a fresh install's postinst usually starts
+# it already, but this does not rely on that. The `docker info` check a
+# few lines down is what actually gates the rest of the script; this is
+# just the one attempt to make that check pass on its own rather than
+# hand the operator a cryptic failure for a one-line fix.
+ensure_docker() {
+  if ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    log "installing docker (the build step runs 'make -C v2 container-build' inside it; no Debian cloud image carries it)"
+    apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io || true
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "setup.sh: required command not found: docker, and it could not be installed automatically -- install it (e.g. 'apt-get install docker.io') and re-run" >&2
+    exit 1
+  fi
+  systemctl enable --now docker >/dev/null 2>&1 || true
+}
+ensure_docker
 
 # make is the odd one out, so this installs it rather than only reporting
 # it missing like the loop above. build_and_install runs `make -C v2
