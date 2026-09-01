@@ -59,9 +59,8 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 	ctx := context.Background()
 
 	task := dispatchTask(t, ctx, store1, "t1")
-	slots := []string{"slot-1"}
 
-	dispatches, err := dispatch.Cycle(ctx, store1, len(slots), baseTime)
+	dispatches, err := dispatch.Cycle(ctx, store1, 1, baseTime)
 	if err != nil {
 		t.Fatalf("Cycle: %v", err)
 	}
@@ -86,7 +85,7 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 	// still excludes t1 -- this must hold across the restart exactly as
 	// it holds within one process (dispatch_test.go's own
 	// TestCycleLeavesAnAlreadyRunningTaskAlone).
-	again, err := dispatch.Cycle(ctx, store2, len(slots), baseTime.Add(time.Minute))
+	again, err := dispatch.Cycle(ctx, store2, 1, baseTime.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Cycle after restart: %v", err)
 	}
@@ -237,7 +236,7 @@ func TestCrashAfterMaterializingACapabilityDoesNotLeakItPastReapsWindow(t *testi
 		t.Fatal(err)
 	}
 	if occupied != 1 {
-		t.Fatalf("occupied slots after restart = %v, want exactly one: the crashed run must not be lost", occupied)
+		t.Fatalf("live runs after restart = %v, want exactly one: the crashed run must not be lost", occupied)
 	}
 
 	// A reap comfortably inside the 24h default window must leave the

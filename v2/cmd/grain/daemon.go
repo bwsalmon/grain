@@ -175,8 +175,8 @@ func daemon(args []string) {
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
 	fs.Var(&konturCreateArgs, "kontur-create-arg",
-		"one argument appended verbatim to `konturctl vm create <name> -state-dir <dir>` when a run's VM is "+
-			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
+		"one argument appended verbatim to the `konturctl vm create <name> -state-dir <dir>` that builds a run's "+
+			"VM -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
 			"-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images -kontur-create-arg=-disk "+
 			"-kontur-create-arg=/images/current/disk.img -kontur-create-arg=-kernel "+
@@ -446,8 +446,8 @@ func run(ctx context.Context, cfg config) error {
 	// orchestrator.RunDispatch and gemini.LiveTranscriptDir each
 	// independently compute) is what lets them talk to each other without
 	// either package importing the other. It must exist before any run
-	// can write into it -- orchestrator's own HostSandboxes.RootFor makes
-	// the same "must already exist" assumption about its own baseDir.
+	// can write into it -- orchestrator's own NewHostSandboxes makes the
+	// same "must already exist" assumption about its own baseDir.
 	transcriptDir := filepath.Join(cfg.dataDir, "state", "transcripts")
 	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		return fmt.Errorf("creating transcript directory: %w", err)
@@ -1115,7 +1115,7 @@ func rebootHost(ctx context.Context) error {
 	return exec.CommandContext(ctx, "sudo", "systemctl", "reboot").Run()
 }
 
-// sandboxHealthAdapter adapts orchestrator's own SlotHealth (a core
+// sandboxHealthAdapter adapts orchestrator's own SandboxHealth (a core
 // dispatch type) onto ui.SandboxSnapshot (a presentation DTO) field by
 // field -- the one place both types are ever in scope together, so
 // neither package needs to import the other (see ui/sandbox_health.go's

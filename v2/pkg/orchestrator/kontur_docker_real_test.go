@@ -1,6 +1,6 @@
 package orchestrator_test
 
-// TestKonturSandboxesToolsForAgainstARealDockerBackedVM is the one place
+// TestKonturSandboxesAcquireAgainstARealDockerBackedVM is the one place
 // in this repo that drives orchestrator.KonturSandboxes against the real
 // `konturctl` and `docker` binaries and a real cloud-hypervisor VM under
 // real KVM, instead of the hand-written shell-script doubles every other
@@ -46,7 +46,7 @@ package orchestrator_test
 // own stock kernel already has everything a cloud-hypervisor direct-
 // kernel-boot guest needs, nothing built from source), so this test now
 // builds that real guest image and asserts a real dispatched tool call
-// actually runs inside it over SSH, not just that ToolsFor resolves an
+// actually runs inside it over SSH, not just that Acquire resolves an
 // address.
 
 import (
@@ -229,9 +229,9 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 	return "/images/" + filepath.Base(sshKeyPath)
 }
 
-// TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently is the
-// concurrency counterpart to TestKonturSandboxesToolsForAgainstARealDockerBackedVM
-// above: that test proves ToolsFor works against one real cloud-hypervisor
+// TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently is the
+// concurrency counterpart to TestKonturSandboxesAcquireAgainstARealDockerBackedVM
+// above: that test proves Acquire works against one real cloud-hypervisor
 // VM under KVM, this one proves two slots' worth of real VMs actually come
 // up side by side under real docker/netshim/cloud-hypervisor, driven the
 // same way reconcileDispatch's own goroutine-per-dispatch loop
@@ -254,7 +254,7 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 // thing, where "does it still work" -- two independent netshim network
 // namespaces, two independent cloud-hypervisor guests -- matters more
 // than exact timing.
-func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
+func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
@@ -419,7 +419,7 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 
 // TestKonturSandboxesAgainstARealDockerBackedVM is the
 // docker-exec transport's (KonturConfig.DockerExec) counterpart to
-// TestKonturSandboxesToolsForAgainstARealDockerBackedVM above: the same
+// TestKonturSandboxesAcquireAgainstARealDockerBackedVM above: the same
 // real konturctl, real docker, real cloud-hypervisor guest under real
 // KVM, reached through `docker exec <vm container> kontur exec` instead
 // of SSH to netshim's externally forwarded port.
@@ -559,7 +559,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	// first tool call. resolveEndpoint's readiness wait can only watch a
 	// TCP port start answering, which happens before the guest has
 	// finished booting to a usable sshd; waitForGuestExec's probe is a
-	// whole command *running in the guest*, so ToolsFor returning here
+	// whole command *running in the guest*, so Acquire returning here
 	// already means the guest ran one. Asserting that directly, rather
 	// than retrying and hiding it, is what would catch that guarantee
 	// regressing.
@@ -567,7 +567,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		"command": "echo grain-kontur-dockerexec-marker; id -un; uname -s",
 	})
 	if result.IsError {
-		t.Fatalf("run_command over docker exec failed on the first attempt, though ToolsFor had already run a command in this guest to decide it was ready: %s", result.Text)
+		t.Fatalf("run_command over docker exec failed on the first attempt, though Acquire had already run a command in this guest to decide it was ready: %s", result.Text)
 	}
 	for _, want := range []string{"grain-kontur-dockerexec-marker", "debian", "Linux"} {
 		if !strings.Contains(result.Text, want) {

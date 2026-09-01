@@ -385,12 +385,13 @@ type Task struct {
 	//
 	// Applied by orchestrator.runOne, once per dispatch, immediately
 	// before the sandbox is handed to the run: a slot's sandbox is
-	// otherwise sized once, at VM-create time, from
-	// orchestrator.KonturConfig's own deployment-wide default and never
-	// revisited, so a task asking for a different shape needs its own
-	// hook rather than reusing that one-time creation path. Only
-	// orchestrator.KonturSandboxes can honour it (see that package's
-	// shapedSandboxes interface) -- a task with either field set,
+	// otherwise sized from orchestrator.KonturConfig's own
+	// deployment-wide default, so a task asking for a different shape
+	// overrides that default for its own sandbox -- per dimension, at the
+	// moment the sandbox is created, which is the only moment its size is
+	// decided now that one is built per run (orchestrator.Shape, passed to
+	// Sandboxes.Acquire). Only orchestrator.KonturSandboxes can honour it
+	// -- a task with either field set,
 	// dispatched onto the default orchestrator.HostSandboxes backend
 	// (no VM to resize), fails that dispatch outright rather than
 	// silently running at whatever shape the host itself happens to be,

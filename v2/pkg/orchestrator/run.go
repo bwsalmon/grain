@@ -240,10 +240,9 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 // RunDispatch drives one dispatch.Dispatch to completion: resolve and
 // materialize its task's capabilities (writing any SideSandbox placements
 // into sandboxRoot, which may be empty when the task has none to place),
-// run the agent against tools (whatever Deps.Sandboxes.ToolsFor produced
-// for this run's own sandbox -- see the package doc comment on the
-// local-directory-vs-real-VM choice that makes), revoke whatever was
-// materialized, and
+// run the agent against tools (whatever this run's own Sandbox.Tools
+// produced -- see the package doc comment on the local-directory-vs-
+// real-VM choice that makes), revoke whatever was materialized, and
 // record the run's outcome. Every path here finishes the run, even a
 // failing one -- ported from pkg/orchestrate's own runDispatch
 // (bwsalmon/agents#254) when that package merged into this one: an

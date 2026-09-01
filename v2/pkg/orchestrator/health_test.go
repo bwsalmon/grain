@@ -3,7 +3,7 @@ package orchestrator_test
 // bwsalmon/agents#536: the sandbox health pane's own backend. These cover
 // HostSandboxes.Health directly and reuse kontur_sandboxes_test.go's own
 // writeFakeKontur/writeFakeCrictl/writeFakeSSH helpers -- the same real
-// *mcp.SSHRunner path ToolsFor and ConfigureGitCredentials already
+// *mcp.SSHRunner path Acquire and ConfigureGitCredentials already
 // exercise against a fake sshd, rather than a mock of KonturSandboxes
 // itself -- for KonturSandboxes.Health.
 

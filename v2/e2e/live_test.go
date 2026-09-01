@@ -30,7 +30,6 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		t.Skip("GEMINI_API_KEY not set; skipping live Gemini integration test")
 	}
 
-	const slot = "sandbox-bd453be9-live-1"
 	w := newWorld(t)
 	w.newRepo("acme", "live")
 

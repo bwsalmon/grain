@@ -287,7 +287,6 @@ func (panicIfRun) Run(context.Context, agent.RunConfig) (*agent.Result, error) {
 }
 
 func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *testing.T) {
-	const slot = "sandbox-bd453be9-cap-1"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 

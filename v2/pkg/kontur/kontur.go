@@ -192,13 +192,10 @@ func Delete(ctx context.Context, stateDir, name string) error {
 	return vm(ctx, "delete", stateDir, name)
 }
 
-// Update runs "konturctl vm update" against an already-created name,
-// changing only whatever flags extraArgs passes -- bwsalmon/kontur's own
-// registerVMFlags doc comment: "makes 'konturctl vm update' a partial
-// update instead of requiring every flag to be repeated." Used by
-// orchestrator.KonturSandboxes.Reshape (bwsalmon/agents#534) to resize an
-// existing VM's -cpus/-memory-mb for one task's own run without touching
-// its disk, network, or anything else update was not asked to change.
-func Update(ctx context.Context, stateDir, name string, extraArgs ...string) error {
-	return vm(ctx, "update", stateDir, name, extraArgs...)
-}
+// There is no Update. "konturctl vm update" had exactly one caller,
+// orchestrator.KonturSandboxes.Reshape, which resized a slot's
+// already-created VM to one task's own -cpus/-memory-mb (bwsalmon/
+// agents#534) -- a partial update that existed only because the VM
+// outlived the task that wanted it a different size. A sandbox is built
+// for one run now, so its size is decided once, at create time
+// (KonturConfig.createArgs), and there is nothing left to update.

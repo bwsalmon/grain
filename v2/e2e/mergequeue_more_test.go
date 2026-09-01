@@ -108,7 +108,6 @@ func fixDoesNotResolveScript(remote, baseBranch, fixBranch string) []*genai.Gene
 }
 
 func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *testing.T) {
-	const slot = "sandbox-337-mq-1"
 	w := newWorld(t)
 	const owner, repoName = "acme", "widgets"
 	w.newRepo(owner, repoName)
@@ -280,7 +279,6 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 }
 
 func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *testing.T) {
-	const slot = "sandbox-337-mq-2"
 	w := newWorld(t)
 	const owner, repoName = "acme", "checks"
 	w.newRepo(owner, repoName)
@@ -394,7 +392,6 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 }
 
 func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *testing.T) {
-	const slot = "sandbox-337-mq-3"
 	w := newWorld(t)
 	const owner, repoName = "acme", "declined"
 	w.newRepo(owner, repoName)
@@ -459,7 +456,6 @@ func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *tes
 }
 
 func TestAutoMergeLeavesAPullRequestOfUnknownMergeabilityAloneUntilItResolves(t *testing.T) {
-	const slot = "sandbox-337-mq-4"
 	w := newWorld(t)
 	const owner, repoName = "acme", "pending"
 	w.newRepo(owner, repoName)

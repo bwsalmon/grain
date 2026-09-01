@@ -46,7 +46,6 @@ func preClonedPushScript(branch, taskID string) []*genai.GenerateContentResponse
 }
 
 func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
-	const slot = "sandbox-preclone-1"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
@@ -112,7 +111,6 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 // has to observe too now that it is the run's own first touch of that
 // sandbox (see close_while_live_test.go for the agent half of it).
 func TestDispatchDoesNotCloneForATaskClosedBeforeItRan(t *testing.T) {
-	const slot = "sandbox-preclone-2"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 

@@ -68,11 +68,12 @@ func newPRReuseSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *g
 // already pushed -- pushScript alone can't do that, since it always
 // creates a fresh branch off the clone's default branch.
 //
-// It also removes any leftover "work" directory before cloning: an
-// attempt's slot directory (HostSandboxes.RootFor) is the same one the
-// previous attempt used, exactly as a real sandbox persisting across
-// retries of the same task would be, so the first attempt's own clone is
-// still sitting there.
+// It also removes any leftover "work" directory before cloning. That is
+// belt-and-braces now rather than load-bearing: each attempt gets a
+// sandbox of its own, built for that run and destroyed with it, so there
+// is no previous attempt's clone left to trip over. It was load-bearing
+// while a sandbox was a slot's and outlived every attempt dispatched onto
+// it.
 func pushMoreScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout " + branch + " && " +
@@ -104,7 +105,6 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 		t.Skip("git not installed")
 	}
 
-	const slot = "sandbox-c16814cc-1"
 	const owner, repoName = "acme", "widgets"
 	repo := model.RepoRef{Owner: owner, Name: repoName}
 

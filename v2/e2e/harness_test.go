@@ -560,18 +560,28 @@ func (s *credentialedSandboxes) Acquire(ctx context.Context, name string, shape 
 	if err != nil {
 		return nil, err
 	}
+	// Returned, never t.Fatalf'd: reconcileDispatch calls Acquire on its
+	// own goroutine, one per dispatch, and t.Fatalf outside the test
+	// goroutine calls runtime.Goexit on the wrong one -- the test does not
+	// stop where it says it did, and the failure surfaces somewhere less
+	// useful. runOne already turns this error into a failed dispatch.
 	if err := sb.ConfigureGitCredentials(ctx, s.remote, "unused"); err != nil {
-		s.t.Fatalf("configuring git credentials on %s: %v", name, err)
+		return nil, fmt.Errorf("configuring git credentials on %s: %w", name, err)
 	}
-	var root string
-	if rooted, ok := sb.(interface{ Root() (string, error) }); ok {
-		if root, err = rooted.Root(); err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		s.roots[name] = root
-		s.mu.Unlock()
+	rooted, ok := sb.(interface{ Root() (string, error) })
+	if !ok {
+		// Only HostSandboxes is wired up here, and a sandbox with no local
+		// directory would silently give runOne an empty sandboxRoot to
+		// place capabilities into -- see keptSandbox.
+		return nil, fmt.Errorf("e2e: sandbox %s has no local directory; this harness only wraps HostSandboxes", name)
 	}
+	root, err := rooted.Root()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.roots[name] = root
+	s.mu.Unlock()
 	return keptSandbox{Sandbox: sb, root: root}, nil
 }
 
@@ -601,6 +611,12 @@ type keptSandbox struct {
 	root string
 }
 
+// Root is unconditional, which is only safe because Acquire above refuses
+// a sandbox that has no local directory of its own. rootedSandbox is an
+// optional interface runOne type-asserts for, so a wrapper that always
+// implements it turns "this backend has no directory to place
+// capabilities in" from a refused dispatch into a placement written to
+// "".
 func (s keptSandbox) Root() (string, error) { return s.root, nil }
 
 func (keptSandbox) Release(ctx context.Context) error { return nil }

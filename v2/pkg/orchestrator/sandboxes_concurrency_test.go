@@ -175,13 +175,13 @@ fi
 // by slot ... so nothing here needs to hold a lock of its own" -- which is
 // exactly what makes -max-concurrent/GRAIN_MAX_CONCURRENT a real
 // concurrency knob rather than just a scheduling one (that same comment,
-// bwsalmon/agents#435). If KonturSandboxes' locking were actually keyed
-// by the whole map instead of by slot, two dispatches landing on distinct,
-// freshly-unseen slots at the same time would still create their VMs one
-// at a time -- indistinguishable from -max-concurrent=1 for exactly the
-// case (a cold sandbox after Recreate, or first use) where creation is
-// slow enough to matter. This drives ToolsFor for several distinct slots
-// at once, each behind a fake konturctl that sleeps for delay inside "vm
+// bwsalmon/agents#435). If KonturSandboxes held one lock across the whole
+// map rather than none at all here, two dispatches acquiring distinct
+// sandboxes at the same time would still create their VMs one at a time
+// -- indistinguishable from -max-concurrent=1 for exactly the case that
+// matters now, since every run builds a VM from scratch rather than
+// reusing a slot's. This drives Acquire for several distinct sandboxes at
+// once, each behind a fake konturctl that sleeps for delay inside "vm
 // create", and asserts that at least one pair of those sleeps overlapped
 // in wall-clock time -- something full serialization could never produce.
 func TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially(t *testing.T) {

@@ -23,9 +23,9 @@ import (
 // -state-dir <dir> ..." by writing <dir>/<name>.json with the given port
 // (kontur's own real behavior, which is what Port later reads back) and
 // "vm delete <name> -state-dir <dir>" by removing that same file (kontur's
-// own staticpod.Delete, mirrored here so a Recreate test's second "vm
-// create" sees a VM that genuinely doesn't exist yet rather than reusing
-// stale state) -- logs every invocation's argv (one line per call) to
+// own staticpod.Delete, mirrored here so a test that rebuilds under a
+// name sees, on its second "vm create", a VM that genuinely doesn't exist
+// yet rather than reusing stale state) -- logs every invocation's argv (one line per call) to
 // argvLog, and otherwise succeeds silently.
 func writeFakeKontur(t *testing.T, argvLog string, port int) {
 	t.Helper()
@@ -258,7 +258,7 @@ func TestKonturSandboxesWaitsForVMToBecomeReady(t *testing.T) {
 	})
 
 	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
-		t.Fatalf("ToolsFor() did not wait out the VM's slow start: %v", err)
+		t.Fatalf("Acquire() did not wait out the VM's slow start: %v", err)
 	}
 }
 
@@ -278,7 +278,7 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 	})
 
 	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err == nil {
-		t.Fatal("ToolsFor() on a VM that never becomes ready: got nil error, want one")
+		t.Fatal("Acquire() on a VM that never becomes ready: got nil error, want one")
 	}
 }
 
@@ -290,14 +290,14 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 // -- like any "docker run -d" -- reports success the instant the
 // container starts, not once cloud-hypervisor inside it has actually
 // proven itself alive. A guest that fails before finishing boot exits
-// within seconds of that "success", and without this check ToolsFor would
+// within seconds of that "success", and without this check Acquire would
 // have no way to tell that apart from "still booting," so it would poll a
 // dead port for the entire ReadyTimeout before finally giving up with a
-// generic connection-refused error. This drives ToolsFor against a fake
+// generic connection-refused error. This drives Acquire against a fake
 // docker whose VM container is already "exited" from the first inspect
 // call, with a ReadyTimeout generous enough that a timing-based pass would
 // be meaningless (a slow CI host might legitimately not fail by then) and
-// asserts instead that ToolsFor returns quickly, well under that timeout,
+// asserts instead that Acquire returns quickly, well under that timeout,
 // and that the error names the container and mentions its exited status
 // rather than just "connection refused."
 func TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
@@ -324,10 +324,10 @@ func TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
 	elapsed := time.Since(started)
 
 	if err == nil {
-		t.Fatal("ToolsFor() against a VM container that already exited: got nil error, want one")
+		t.Fatal("Acquire() against a VM container that already exited: got nil error, want one")
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("ToolsFor() took %s to fail, want well under the 10s ReadyTimeout -- it should fast-fail on the dead container instead of polling out the full deadline", elapsed)
+		t.Errorf("Acquire() took %s to fail, want well under the 10s ReadyTimeout -- it should fast-fail on the dead container instead of polling out the full deadline", elapsed)
 	}
 	if !strings.Contains(err.Error(), "exited") {
 		t.Errorf("error = %q, want it to mention the container's \"exited\" status", err)
@@ -646,7 +646,7 @@ func konturTestConfig(stateDir string) orchestrator.KonturConfig {
 	}
 }
 
-// Under DockerExec, ToolsFor has to reach the guest without resolving any
+// Under DockerExec, Acquire has to reach the guest without resolving any
 // address for it at all: no external port out of kontur's state file, no
 // container IP out of `docker inspect`, and no TCP dial to confirm a port
 // is answering. The fake docker here cannot answer an address lookup and
@@ -765,10 +765,10 @@ func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testi
 	elapsed := time.Since(started)
 
 	if err == nil {
-		t.Fatal("ToolsFor() against a VM container that already exited: got nil error, want one")
+		t.Fatal("Acquire() against a VM container that already exited: got nil error, want one")
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("ToolsFor() took %s to fail, want well under the 10s ReadyTimeout", elapsed)
+		t.Errorf("Acquire() took %s to fail, want well under the 10s ReadyTimeout", elapsed)
 	}
 	if !strings.Contains(err.Error(), "exited") {
 		t.Errorf("error = %q, want it to mention the container's \"exited\" status", err)
@@ -855,17 +855,6 @@ func TestKonturSandboxesFlatModeIsTheDefault(t *testing.T) {
 		t.Errorf("kontur invocation = %q, want it to carry %q", string(data), want)
 	}
 }
-
-// TestKonturSandboxesRecreateWithNoExistingVMOnlyCreates covers the case
-// cmd/grain daemon's own startup reset pass introduces: Recreate called
-// for a slot that has never had a VM. There is nothing to tear down, so
-// it must be a plain create -- not a `konturctl vm delete` for a name
-// kontur has no saved state for, which only ever reaches the static-pod
-// backend this package never builds VMs under (Recreate's own doc
-// comment). The per-task call site is unaffected either way: the VM it
-// just finished with always exists, which
-// TestKonturSandboxesRecreateDeletesAndRecreatesTheVM above still proves
-// deletes first.
 
 // A prefix that leaves no room for a run's own name is refused once, at
 // startup, rather than failing every dispatch that reaches Acquire. The

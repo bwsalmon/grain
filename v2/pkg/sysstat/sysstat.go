@@ -4,7 +4,7 @@
 // ui.Config.HostStats (bwsalmon/agents#536's "sandbox health" pane: a
 // sandbox that looks stuck is often really the host it runs on being
 // starved, and that is a question about the daemon's own machine, not
-// about any one sandbox -- see orchestrator.SlotHealth's own doc comment
+// about any one sandbox -- see orchestrator.SandboxHealth's own doc comment
 // on why a sandbox's usage is reported separately from this).
 package sysstat
 

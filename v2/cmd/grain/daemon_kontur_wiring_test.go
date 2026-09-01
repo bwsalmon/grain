@@ -48,8 +48,9 @@ import (
 // create" by writing the state file kontur.Exists reads back and "vm
 // delete" by removing it (kontur's own staticpod.Save/Delete), logging
 // every invocation's argv to argvLog. Handling delete is what lets a test
-// observe a sandbox's Release, and the startup reap pass that deletes
-// a VM a previous process left behind -- see daemon_sandbox_reset_test.go.
+// observe a sandbox's Release, and the startup reap pass
+// (KonturSandboxes.ReapOrphans) that deletes a VM a previous process left
+// behind.
 func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {

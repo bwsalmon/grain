@@ -4,7 +4,7 @@
 // prove SourceTools/HostCommandTools work in isolation; this proves
 // RunCycle wires them in (or doesn't) the way that field's own doc
 // comment promises, the same "prove the wiring, not the backend again"
-// split shape_test.go already draws for Reshape.
+// split lifecycle_test.go already draws for Acquire and Release.
 package orchestrator_test
 
 import (

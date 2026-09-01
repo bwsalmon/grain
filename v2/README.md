@@ -655,6 +655,14 @@ disable kontur sandboxing for this run rather than install a daemon that
 would fail every task" shape `ensure_kontur_kvm_access` already uses for
 `/dev/kvm`.
 
+> **Superseded.** Everything in the next four paragraphs — `Recreate`, the
+> startup reset pass, `ensure` adopting a VM that already exists — was
+> removed when a sandbox stopped outliving the run that used it. It is
+> kept here because the *problem* it describes is the one "Slots are gone;
+> a sandbox belongs to one run" (below) solves differently, and that
+> section reads better against this one. For what the code does now, read
+> that.
+
 bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
 `KonturConfig.Backend` selects the value `konturctl vm create -backend`
 builds each slot's VM with, and defaults (`-kontur-backend`'s own default)
@@ -687,9 +695,9 @@ inherited the dead run's checkout, credentials and leftover processes.
 from that death: it finishes the rows a killed process left live, and has
 no sandbox to reach.
 
-`runDaemon` now closes that gap with a reset pass over every slot at
-startup, before per-slot git credentials are configured and long before
-`RunCycle` can dispatch: one `Recreate` per kontur-backed slot, retried
+`runDaemon` closed that gap with a reset pass over every slot at
+startup, before per-slot git credentials were configured and long before
+`RunCycle` could dispatch: one `Recreate` per kontur-backed slot, retried
 with the same capped backoff `configureSlotGitCredentials` uses
 (`resetSlotSandbox`). A slot that cannot be rebuilt stalls rather than
 being dispatched onto dirty — the isolation is the point of the pass, so
@@ -704,10 +712,13 @@ manifest path it never needed to touch, which fails outright when that
 directory is a root-owned `/etc/kubernetes/manifests` and the daemon runs
 as `grain`.
 
-Rebuilding at startup rather than lazily at the next dispatch also keeps
-the VM boot off the critical path — it happens while the process is still
-coming up, not while a ready task waits on it. Host-backed deployments
-skip the pass entirely, `HostSandboxes` having no `Recreate` to call.
+Rebuilding at startup rather than lazily at the next dispatch also kept
+the VM boot off the critical path — it happened while the process was
+still coming up, not while a ready task waited on it. Host-backed
+deployments skipped the pass entirely, `HostSandboxes` having no
+`Recreate` to call. That is the one property a sandbox per run gives up
+rather than improves on, and "What this costs" at the end of the slots
+section below is where that trade is written down.
 
 bwsalmon/agents#466 ("Use kontur sandboxes") found and fixed three bugs
 that every other kontur test in this repo, all built against hand-written
@@ -730,7 +741,7 @@ and `ensure` derives slot's own `-ip`/`-port` from it and the slot's own
 number (`model.SlotNames`' own 1-based, all-numeric contract), rather
 than repeating a literal `-ip`/`-port` in `-kontur-create-arg` that could
 only ever be right for one slot. `pkg/orchestrator`'s
-`TestKonturSandboxesToolsForAgainstARealDockerBackedVM` is the test that
+`TestKonturSandboxesAcquireAgainstARealDockerBackedVM` is the test that
 found all three: it builds `konturctl` and bwsalmon/kontur's own OCI
 image from the vendored source and drives `KonturSandboxes.ToolsFor`
 against a real docker daemon and a real cloud-hypervisor VM under real
@@ -755,7 +766,7 @@ disk, for a while a one-line vendored patch, now upstream — see
 `third_party/kontur/VENDORED.md`) and
 two guest-side gaps (systemd renaming the NIC away from `eth0`, and no
 `CONFIG_IP_PNP` to act on `konturctl`'s own `ip=` cmdline — both closed in
-`provision.sh`) were found and fixed. `TestKonturSandboxesToolsForAgainstARealDockerBackedVM`
+`provision.sh`) were found and fixed. `TestKonturSandboxesAcquireAgainstARealDockerBackedVM`
 now builds that real guest image as part of the test itself and asserts a
 `run_command` tool call actually executes inside it over SSH, closing the
 gap this paragraph used to describe.
@@ -1645,6 +1656,27 @@ while every token was minted before the proxy started, and would now
 reject every run's git. `cmd/grain/daemon_token_ordering_test.go` used to
 pin the opposite guarantee and now pins this one.
 
+Moving the mint also made `SandboxTokenStore` concurrent for the first
+time. Every method on it is a read-modify-write of one JSON file, which
+was safe while `runDaemon` minted a slot at a time in its own startup
+preamble and is not while `reconcileDispatch` runs a goroutine per
+dispatch: unguarded, two mints lose each other's tokens and publish
+half-written JSON through a shared temp-file name, so a run ends up
+holding a token that never reached the file and fails every git operation
+it makes. It takes a mutex now, and writes through a uniquely-named temp
+file. `SandboxTokens.reload` had a matching hazard on the read side — it
+read the file and swapped the map in two critical sections, so a reload
+that read *earlier* could install its map over one that read *later* and
+answer "unknown" for a token that is on disk — and now does both under
+one hold of the write lock.
+
+And the file shrinks as well as grows: `Deps.RevokeSandboxToken` drops a
+sandbox's entry once it is released. One token per slot was a fixed set
+for a deployment's life; one per run is a new entry every dispatch, in a
+file every mint rewrites whole. This is upkeep rather than
+authorization — `Store.GitScope` already answers "no live run" for a
+finished run's sandbox, so a stale entry authorizes nothing either way.
+
 **`ReapOrphans` replaced the reset pass.** At startup no VM can belong to
 this process, so any under the deployment's own prefix is a leftover from
 one that died before it could release it — the same argument, at the same
@@ -1664,6 +1696,32 @@ containers genuinely did share a namespace. That reasoning is from
 kontur's own source rather than from two VMs observed coming up on one
 address, so it is worth confirming against a real NAT-mode host before
 leaning on it. Flat mode, the default, ignores both.
+
+**A run that cannot get a sandbox still has to be finished.**
+`dispatch.Cycle` makes a run durable before anything builds a sandbox for
+it, and `RunDispatch` — the only thing that finishes a run — is never
+reached when setup fails. Left there, the row stays live forever:
+`task_state` reads it as `running` so the task never returns to `queued`,
+`LiveRunCount` keeps counting it so the deployment loses a unit of
+`max_concurrent`, and `retryEligible` reads *finished* runs so the
+backoff never retries. Nothing sweeps it — `MaxRunRuntime` is enforced
+inside `RunDispatch`, `RecoverOrphanedRuns` is a startup pass — so it
+lasts until someone restarts the daemon. That was survivable while a
+slot's VM was built once at startup; with a VM boot on every dispatch's
+setup path it is the ordinary way a run fails, so `runOne` finishes such
+a run itself, outcome `setup-failed`, and dispatch's own backoff retries
+the task.
+
+Two smaller consequences of the same move: the VM-name budget got tighter
+without the flag that spends it changing, since a name built from a run
+id needs more of `maxVMNameLen`'s 11 bytes than one built from a slot
+number — so `CheckNamePrefix` refuses an outgrown
+`-kontur-vm-name-prefix` at startup rather than letting every dispatch
+discover it separately. And `Release` runs on a context detached from
+cancellation, which is right, but now with a deadline: unbounded, a hung
+`konturctl vm delete` would pin the dispatch goroutine and the unfinished
+run row beneath it for the life of the process, which is the failure
+detaching is meant to prevent.
 
 **What this costs.** A VM boot moves onto the critical path of every
 task, where it used to be paid once at startup. `docs/data-model.md`

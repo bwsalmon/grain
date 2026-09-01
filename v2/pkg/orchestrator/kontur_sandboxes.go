@@ -532,10 +532,10 @@ func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, dea
 // guestContainerDeadError is what waitForGuestExec returns when it gives
 // up specifically because the VM's own container has already exited or
 // died, never for any other probe failure (a timeout, a guest still
-// booting, ...) -- see dockerExitedEarly. recoverableRunnerFor matches on
-// this type alone (errors.As) to decide whether a failure is worth
-// recovering from with a Recreate, so it stays its own type rather than a
-// sentinel value or a string match against the formatted message below.
+// booting, ...) -- see dockerExitedEarly. Acquire matches on this type
+// alone (errors.As) to decide whether a failure is worth one rebuild, so
+// it stays its own type rather than a sentinel value or a string match
+// against the formatted message below.
 type guestContainerDeadError struct{ err error }
 
 func (e *guestContainerDeadError) Error() string { return e.err.Error() }

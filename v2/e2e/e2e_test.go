@@ -93,7 +93,6 @@ func assertState(w *world, id string, want model.State, active bool) {
 }
 
 func TestIssueCompletesEndToEnd(t *testing.T) {
-	const slot = "sandbox-bd453be9-1"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
@@ -165,8 +164,6 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 // different repos, and checks that running both dispatches within the
 // same cycle left neither slot's bookkeeping corrupted.
 func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
-	const slotA = "sandbox-bd453be9-a"
-	const slotB = "sandbox-bd453be9-b"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "gadgets")
@@ -251,7 +248,6 @@ func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
 }
 
 func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
-	const slot = "sandbox-bd453be9-2"
 	w := newWorld(t)
 	w.newRepo("acme", "gadgets")
 
@@ -356,7 +352,6 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	// clones into a fixed "work" directory under its slot's sandbox root,
 	// so reusing slotA or slotB for the parent after a child already
 	// cloned there would collide with that leftover directory.
-	const slotA, slotB, slotC = "sandbox-bd453be9-4a", "sandbox-bd453be9-4b", "sandbox-bd453be9-4c"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "other")
@@ -483,7 +478,6 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 }
 
 func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
-	const slot = "sandbox-bd453be9-3"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "other")
@@ -661,8 +655,6 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 // authorizes per-run/per-slot rather than "any repo any live run
 // happens to target."
 func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T) {
-	const slotA = "sandbox-bd453be9-4"
-	const slotB = "sandbox-bd453be9-5"
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "gadgets")

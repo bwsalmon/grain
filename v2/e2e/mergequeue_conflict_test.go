@@ -166,7 +166,6 @@ func (w *world) fileAt(owner, name, ref, path string) string {
 }
 
 func TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead(t *testing.T) {
-	const slot = "sandbox-6b07cbf7-1"
 	w := newWorld(t)
 	const owner, repoName = "acme", "widgets"
 	w.newRepo(owner, repoName)
