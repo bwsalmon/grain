@@ -85,7 +85,7 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
       <Button variant="contained" fullWidth onClick={onOpenNewTask}>+ New task</Button>
 
       <List component="nav" disablePadding sx={{ display: "flex", flexDirection: "column", gap: 0.2 }}>
-        <NavItem id="all" label="All issues" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
+        <NavItem id="all" label="All tasks" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
         {STATE_ORDER.filter((s) => counts[s]).map((s) => (
           <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} active={view === "tasks" && stateFilter === s} />
         ))}
