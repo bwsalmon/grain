@@ -556,11 +556,21 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 // into the sandbox), and nothing in v2 has decided what a controller-side
 // destination for one even is yet. Ported from pkg/orchestrate
 // (bwsalmon/agents#254).
+//
+// root is empty for a task dispatched onto a sandbox with no local
+// directory (a kontur VM -- see rootedSandbox's own doc comment). That is
+// only a problem for a grant that actually materializes a SideSandbox
+// placement (gcpkey, geminikey): most grants, including the Configuration
+// agent's own self-debug/self-repair, materialize none and so never reach
+// the loop body below at all (bwsalmon/agents#643).
 func applyPlacements(root string, materialized []model.Materialized) error {
 	for _, m := range materialized {
 		for _, p := range m.Materialization.Placements {
 			if p.Side != model.SideSandbox {
 				continue
+			}
+			if root == "" {
+				return fmt.Errorf("capability %q placed %s in the sandbox, but this sandbox has no local directory to place it in", m.Grant.Capability, p.Path)
 			}
 			full := filepath.Join(root, strings.TrimPrefix(p.Path, "/"))
 			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {

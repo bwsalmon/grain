@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
@@ -123,6 +124,72 @@ func TestRunCycleReleasesTheSandboxAfterAFailedDispatch(t *testing.T) {
 	if _, released := sandboxes.calls(); len(released) != 1 || released[0] != "t1-1" {
 		t.Errorf("Release calls after a failed dispatch = %v, want exactly one for t1-1 -- a failed run "+
 			"must not leave its sandbox running", released)
+	}
+}
+
+// TestRunCycleDispatchesAGrantWithNoPlacementOntoANonRootedSandbox is a
+// regression test for bwsalmon/agents#643: a grant like self-debug or
+// self-repair materializes no SideSandbox placement at all, so a task
+// holding one -- every Configuration agent task, since ui.Client always
+// grants both -- must still dispatch cleanly onto a sandbox with no local
+// directory (recordingSandbox is one; see its own doc comment). Before
+// the fix, runOne refused any task with Grants at all once its sandbox
+// wasn't rootedSandbox, whether or not those grants ever needed one.
+func TestRunCycleDispatchesAGrantWithNoPlacementOntoANonRootedSandbox(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.Interactive = true
+	task.Grants = []model.Grant{{Capability: selfdebug.CapabilityName, Via: model.GrantByLabel}}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
+	deps := orchestrator.Deps{
+		Store: store, Client: client, Sandboxes: sandboxes,
+		Framework:     completesWithAComment(),
+		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(selfdebug.New())},
+		MaxConcurrent: 1,
+	}
+
+	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v, want a grant with no placement to dispatch fine with no local sandbox directory", err)
+	}
+}
+
+// TestRunCycleFailsAGrantThatPlacesSomethingOntoANonRootedSandbox is the
+// counterpart to the regression test above: a grant that does
+// materialize a SideSandbox placement (bwsalmon/agents#643's gcpkey and
+// geminikey, faked here) still has nowhere to write it once its sandbox
+// has no local directory, and must fail with a clear reason rather than
+// silently writing under the process's own working directory.
+func TestRunCycleFailsAGrantThatPlacesSomethingOntoANonRootedSandbox(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.Grants = []model.Grant{{Capability: "keyed", Via: model.GrantByLabel}}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
+	cap := &fakeCapability{name: "keyed", path: "/etc/keyed/key.json", content: "secret"}
+	deps := orchestrator.Deps{
+		Store: store, Client: client, Sandboxes: sandboxes,
+		Framework:     completesWithAComment(),
+		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		MaxConcurrent: 1,
+	}
+
+	err := orchestrator.RunCycle(ctx, deps, baseTime)
+	if err == nil {
+		t.Fatal("expected RunCycle to report the placement with nowhere to land")
+	}
+	if !strings.Contains(err.Error(), "no local directory to place it in") {
+		t.Errorf("RunCycle error = %v, want it to explain there was no local directory", err)
 	}
 }
 
