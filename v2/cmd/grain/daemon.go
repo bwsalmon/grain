@@ -18,7 +18,7 @@
 // bwsalmon/agents#254 asked for exactly this, with one simplification: by
 // default, sandboxing is still local -- the MCP server's sandbox tools
 // confined to a directory on this host, no isolation -- rather than a
-// fleet this deployment shape has nowhere to run. -kontur-vm-name-prefix
+// fleet this deployment shape has nowhere to run. -kontur-sandboxes
 // is the opt in to the real alternative (bwsalmon/agents#274):
 // orchestrator.KonturSandboxes, one real bwsalmon/kontur-managed VM per
 // run, reached over SSH. -max-concurrent caps how many runs are in
@@ -112,7 +112,7 @@ func daemon(args []string) {
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store and secrets -- the state a redeploy must not lose (required)")
 	sandboxDir := fs.String("sandbox-dir", "", "root directory orchestrator.HostSandboxes creates one working directory per run under, for local "+
-		"(non-kontur) sandboxing -- required unless -kontur-vm-name-prefix selects orchestrator.KonturSandboxes instead. Deliberately a separate "+
+		"(non-kontur) sandboxing -- required unless -kontur-sandboxes selects orchestrator.KonturSandboxes instead. Deliberately a separate "+
 		"flag from -data-dir rather than a subdirectory of it (bwsalmon/agents#587): a task's checked-out repo and whatever it wrote into its "+
 		"sandbox are disposable, unlike the store and secrets under -data-dir, so this belongs on storage that a VM wipe or redeploy is free to "+
 		"discard along with the rest of the host")
@@ -155,24 +155,27 @@ func daemon(args []string) {
 
 	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
 	// host, no isolation) exactly as it always has -- see run()'s own
-	// comment on sandboxes below. -kontur-vm-name-prefix is the opt in to
+	// comment on sandboxes below. -kontur-sandboxes is the opt in to
 	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
 	// managed VM per run, reached over SSH.
-	konturVMNamePrefix := fs.String("kontur-vm-name-prefix", "",
-		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per run, named <prefix>+<run id>) over SSH, "+
-			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
+	konturSandboxes := fs.Bool("kontur-sandboxes", false,
+		"dispatch onto real bwsalmon/kontur-managed VMs (one per run, named orchestrator.VMNamePrefix+<run id>) "+
+			"over SSH, instead of local host directories. This was -kontur-vm-name-prefix, whose value both opted "+
+			"in and named the VMs; the name is a constant now, since a VM name has 11 bytes to live in and a run "+
+			"id needs nine of them, leaving nothing an operator could usefully choose -- see "+
+			"orchestrator.VMNamePrefix")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
-		"kontur's VM state directory (only used with -kontur-vm-name-prefix)")
+		"kontur's VM state directory (only used with -kontur-sandboxes)")
 	konturSSHUser := fs.String("kontur-ssh-user", "",
-		"username to SSH into each kontur VM as (required with -kontur-vm-name-prefix)")
+		"username to SSH into each kontur VM as (required with -kontur-sandboxes)")
 	konturExecKey := fs.String("kontur-exec-key", "",
 		"path, *inside the VM's container*, of the private key `kontur exec` authenticates to the guest with "+
-			"(required with -kontur-vm-name-prefix) -- e.g. /images/kontur-exec-key for a key placed in the "+
+			"(required with -kontur-sandboxes) -- e.g. /images/kontur-exec-key for a key placed in the "+
 			"directory -kontur-create-arg's own -images-hostpath already mounts read-only at /images. Left "+
 			"unset, `kontur exec` falls back to the key bwsalmon/kontur bakes into its own image, which only a "+
 			"guest image built by that same Dockerfile authorizes.")
 	konturWorkspace := fs.String("kontur-workspace", "",
-		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
+		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-sandboxes)")
 	var konturCreateArgs stringSliceFlag
 	fs.Var(&konturCreateArgs, "kontur-create-arg",
 		"one argument appended verbatim to the `konturctl vm create <name> -state-dir <dir>` that builds a run's "+
@@ -187,7 +190,7 @@ func daemon(args []string) {
 			"publishing\", and v2/scripts/setup.sh's own ensure_kontur_images, which is what actually copies "+
 			"it there for terraform/gcp-v2 -- -guest-port 22 is not optional: konturctl's own default is 80, "+
 			"which silently refuses every connection to this image's actual sshd). Only used with "+
-			"-kontur-vm-name-prefix. Under -kontur-net nat, prefer -kontur-base-ip/-kontur-base-port over "+
+			"-kontur-sandboxes. Under -kontur-net nat, prefer -kontur-base-ip/-kontur-base-port over "+
 			"putting -ip/-port here: they are appended last, so they win over this list.")
 	konturNet := fs.String("kontur-net", kontur.NetModeFlat,
 		"how a kontur VM reaches the network: \"flat\" (the default -- the guest is spliced onto the sandbox "+
@@ -202,14 +205,14 @@ func daemon(args []string) {
 			"collide; this used to be a base that each slot's number was added to, back when a slot's VM was "+
 			"long-lived, which was guarding against "+
 			"a shared bridge the docker backend does not have. Ignored under flat mode, and only used with "+
-			"-kontur-vm-name-prefix.")
+			"-kontur-sandboxes.")
 	konturBasePort := fs.Int("kontur-base-port", 0,
 		"the -port every kontur VM is created with under -kontur-net nat, passed verbatim -- a DNAT target "+
 			"inside that VM's own namespace, not a port published on this host. Ignored under flat mode, and "+
-			"only used with -kontur-vm-name-prefix.")
+			"only used with -kontur-sandboxes.")
 	konturGitProxyHost := fs.String("kontur-git-proxy-host", "",
 		"host (no port) this daemon's git proxy is reachable at from inside a kontur VM's own guest, in place "+
-			"of the loopback address the proxy binds to by default -- required with -kontur-vm-name-prefix. A "+
+			"of the loopback address the proxy binds to by default -- required with -kontur-sandboxes. A "+
 			"kontur VM (KonturConfig.createArgs always builds one against -backend docker) runs its guest in its "+
 			"own network namespace behind netshim's NAT (third_party/kontur/internal/netshim), with its own "+
 			"127.0.0.1 that never reaches this process's -- so a clone against the default 127.0.0.1 proxy URL "+
@@ -221,11 +224,11 @@ func daemon(args []string) {
 			"containers join) and read \"Gateway\" if unsure -- commonly 172.17.0.1.")
 	sandboxCPUs := fs.Int("sandbox-cpus", 0,
 		"deployment-wide default vCPU count for a kontur-managed sandbox VM, passed as `konturctl vm create`'s "+
-			"own -cpus (only used with -kontur-vm-name-prefix); 0 leaves bwsalmon/kontur's own default in place. "+
+			"own -cpus (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own default in place. "+
 			"Overridable per task from the UI/API (model.Task.SandboxCPUs)"+seedOnly)
 	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
 		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM, passed as `konturctl vm "+
-			"create`'s own -memory-mb (only used with -kontur-vm-name-prefix); 0 leaves bwsalmon/kontur's own "+
+			"create`'s own -memory-mb (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own "+
 			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
 	fs.Parse(args)
 
@@ -233,8 +236,8 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -data-dir is required")
 		os.Exit(2)
 	}
-	if *sandboxDir == "" && *konturVMNamePrefix == "" {
-		fmt.Fprintln(os.Stderr, "grain daemon: -sandbox-dir is required unless -kontur-vm-name-prefix is set")
+	if *sandboxDir == "" && !*konturSandboxes {
+		fmt.Fprintln(os.Stderr, "grain daemon: -sandbox-dir is required unless -kontur-sandboxes is set")
 		os.Exit(2)
 	}
 	if *geminiAPIKeyFile == "" {
@@ -245,21 +248,21 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -upgrade-install-path is required with -upgrade-src-dir")
 		os.Exit(2)
 	}
-	if *konturVMNamePrefix != "" {
+	if *konturSandboxes {
 		if *konturSSHUser == "" {
-			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-user is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-user is required with -kontur-sandboxes")
 			os.Exit(2)
 		}
 		if *konturExecKey == "" {
-			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-exec-key is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-exec-key is required with -kontur-sandboxes")
 			os.Exit(2)
 		}
 		if *konturWorkspace == "" {
-			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-workspace is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-workspace is required with -kontur-sandboxes")
 			os.Exit(2)
 		}
 		if *konturGitProxyHost == "" {
-			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-git-proxy-host is required with -kontur-vm-name-prefix")
+			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-git-proxy-host is required with -kontur-sandboxes")
 			os.Exit(2)
 		}
 	}
@@ -283,9 +286,9 @@ func daemon(args []string) {
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
-		konturVMNamePrefix: *konturVMNamePrefix,
-		konturStateDir:     *konturStateDir,
-		konturSSHUser:      *konturSSHUser, konturWorkspace: *konturWorkspace,
+		konturSandboxes: *konturSandboxes,
+		konturStateDir:  *konturStateDir,
+		konturSSHUser:   *konturSSHUser, konturWorkspace: *konturWorkspace,
 		konturExecKey:    *konturExecKey,
 		konturCreateArgs: konturCreateArgs, konturNet: *konturNet,
 		konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
@@ -302,7 +305,7 @@ type config struct {
 	pollInterval  time.Duration
 	// sandboxDir roots orchestrator.HostSandboxes -- see -sandbox-dir's
 	// own flag doc comment for why this is not just a subdirectory of
-	// dataDir. Only consulted when konturVMNamePrefix is empty, the same
+	// dataDir. Only consulted when konturSandboxes is false, the same
 	// as every other non-kontur-only field would be if HostSandboxes had
 	// more than this one.
 	sandboxDir string
@@ -339,29 +342,29 @@ type config struct {
 	upgradeInstallPath string
 	upgradeRestartCmd  []string
 
-	// konturVMNamePrefix selects orchestrator.KonturSandboxes over the
+	// konturSandboxes selects orchestrator.KonturSandboxes over the
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
 	// kontur* fields are only consulted then. See run()'s own comment on
 	// sandboxes.
-	konturVMNamePrefix string
-	konturStateDir     string
-	konturSSHUser      string
-	konturExecKey      string
-	konturWorkspace    string
-	konturCreateArgs   []string
-	konturNet          string
-	konturBaseIP       string
-	konturBasePort     int
+	konturSandboxes  bool
+	konturStateDir   string
+	konturSSHUser    string
+	konturExecKey    string
+	konturWorkspace  string
+	konturCreateArgs []string
+	konturNet        string
+	konturBaseIP     string
+	konturBasePort   int
 	// konturGitProxyHost is the address startGitProxy advertises to a
 	// kontur-managed sandbox in place of the loopback address it binds to
 	// by default -- see -kontur-git-proxy-host's own flag doc comment for
 	// why a kontur VM cannot reach that default (bwsalmon/agents#567).
-	// Required whenever konturVMNamePrefix is set; unused otherwise.
+	// Required whenever konturSandboxes is set; unused otherwise.
 	konturGitProxyHost string
 	// sandboxCPUs and sandboxMemoryMB are store-backed
 	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
 	// like poll-interval and the rest of the seedOnly flags above --
-	// only consulted with -kontur-vm-name-prefix, the same as every
+	// only consulted with -kontur-sandboxes, the same as every
 	// other kontur* field here.
 	sandboxCPUs     int
 	sandboxMemoryMB int
@@ -391,21 +394,20 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("loading deployment configuration: %w", err)
 	}
 	// Sandboxing defaults to orchestrator.HostSandboxes -- one local
-	// directory per run, torn down with it; -kontur-vm-name-prefix opts
+	// directory per run, torn down with it; -kontur-sandboxes opts
 	// into orchestrator.KonturSandboxes instead: one real
 	// bwsalmon/kontur-managed VM per run, reached over
 	// SSH (pkg/orchestrator's own doc comment: "Sandboxing defaults to
 	// 'execute on the host,' deliberately, for now, with a real host
 	// adapter available as an opt in"). sandboxes is Deps.Sandboxes either
 	// way; konturSandboxes is kept as its concrete self alongside it
-	// purely for the two things only that backend has -- CheckNamePrefix
-	// below, and ReapOrphans in runDaemon -- and stays nil for a
-	// host-backed deployment, which is how both are skipped.
+	// purely for the one thing only that backend has -- ReapOrphans, in
+	// runDaemon -- and stays nil for a host-backed deployment, which is
+	// how that is skipped.
 	var sandboxes orchestrator.Sandboxes
 	var konturSandboxes *orchestrator.KonturSandboxes
-	if cfg.konturVMNamePrefix != "" {
+	if cfg.konturSandboxes {
 		konturSandboxes = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-			NamePrefix:      cfg.konturVMNamePrefix,
 			StateDir:        cfg.konturStateDir,
 			CreateArgs:      cfg.konturCreateArgs,
 			NetMode:         cfg.konturNet,
@@ -417,13 +419,6 @@ func run(ctx context.Context, cfg config) error {
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
 		})
-		// Checked once here rather than discovered one dispatch at a time:
-		// a prefix with no room for a run's own name cannot build a single
-		// VM, and every task that reaches Acquire would fail on it
-		// individually. See KonturSandboxes.CheckNamePrefix.
-		if err := konturSandboxes.CheckNamePrefix(); err != nil {
-			return err
-		}
 		sandboxes = konturSandboxes
 	} else {
 		// orchestrator.NewHostSandboxes' own doc comment says its baseDir
@@ -917,7 +912,7 @@ func openStore(dataDir string) (*model.Store, *sql.DB, error) {
 // hands back names that same loopback address, exactly as it always has.
 // A kontur VM's guest runs in its own network namespace behind netshim's
 // NAT (third_party/kontur/internal/netshim) with its own unrelated
-// 127.0.0.1, so a deployment naming one in -kontur-vm-name-prefix passes
+// 127.0.0.1, so a deployment opting in with -kontur-sandboxes passes
 // -kontur-git-proxy-host as advertiseHost instead: the proxy then binds
 // every interface rather than just loopback, and hands back a URL naming
 // advertiseHost (typically the docker bridge gateway address the guest's

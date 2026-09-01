@@ -114,7 +114,7 @@ func capTask(grants ...string) Task {
 func capContext(t Task) CapabilityContext {
 	return CapabilityContext{
 		Task: t,
-		Run:  Run{ID: "cap-task-r1", TaskID: t.ID},
+		Run:  Run{ID: "cap-task-1", TaskID: t.ID},
 		Now:  time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC),
 	}
 }

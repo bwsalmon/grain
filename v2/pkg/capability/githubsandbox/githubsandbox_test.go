@@ -134,7 +134,7 @@ func testProvider(client *fakeAppClient) *Provider {
 func testContext(creds model.CredentialResolver, now time.Time) model.CapabilityContext {
 	return model.CapabilityContext{
 		Task:        model.Task{ID: "t1"},
-		Run:         model.Run{ID: "t1-r1", TaskID: "t1"},
+		Run:         model.Run{ID: "t1-1", TaskID: "t1"},
 		Now:         now,
 		Credentials: creds,
 	}
@@ -199,7 +199,7 @@ func TestMaterializeCreatesARepoAndMintsAScopedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wantRepo := "grain-sandbox-t1-r1"
+	wantRepo := "grain-sandbox-t1-1"
 	if _, ok := client.repos[wantRepo]; !ok {
 		t.Fatalf("repo %q was not created; have %v", wantRepo, client.repos)
 	}
@@ -326,14 +326,14 @@ func TestPromptSectionErrorsWithoutBothPlacements(t *testing.T) {
 
 func TestRevokeDeletesTheRepo(t *testing.T) {
 	client := newFakeAppClient("grain-bot")
-	client.repos["grain-sandbox-t1-r1"] = &fakeRepo{createdAt: time.Now()}
+	client.repos["grain-sandbox-t1-1"] = &fakeRepo{createdAt: time.Now()}
 	p := testProvider(client)
 
-	lease := model.Lease{Capability: "github-sandbox", Resource: "grain-bot/grain-sandbox-t1-r1"}
+	lease := model.Lease{Capability: "github-sandbox", Resource: "grain-bot/grain-sandbox-t1-1"}
 	if err := p.Revoke(context.Background(), testContext(testCredentials(), time.Now()), lease); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := client.repos["grain-sandbox-t1-r1"]; ok {
+	if _, ok := client.repos["grain-sandbox-t1-1"]; ok {
 		t.Errorf("repo was not deleted")
 	}
 }
@@ -342,7 +342,7 @@ func TestRevokeIsIdempotentAgainstAnAlreadyGoneRepo(t *testing.T) {
 	client := newFakeAppClient("grain-bot") // no repo seeded
 	p := testProvider(client)
 
-	lease := model.Lease{Capability: "github-sandbox", Resource: "grain-bot/grain-sandbox-t1-r1"}
+	lease := model.Lease{Capability: "github-sandbox", Resource: "grain-bot/grain-sandbox-t1-1"}
 	if err := p.Revoke(context.Background(), testContext(testCredentials(), time.Now()), lease); err != nil {
 		t.Errorf("Revoke of an already-gone repo returned an error: %v", err)
 	}

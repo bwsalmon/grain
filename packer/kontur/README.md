@@ -543,7 +543,7 @@ Anything earlier than that merge still needs them applied by hand.
 `orchestrator.KonturConfig.CreateArgs` (bwsalmon/agents#262) is the
 passthrough a deployment sets this through -- `grain daemon` constructs a
 real `KonturSandboxes`/`KonturConfig` from it (bwsalmon/agents#274) via
-`-kontur-vm-name-prefix` and a repeatable `-kontur-create-arg` flag, e.g.
+`-kontur-sandboxes` and a repeatable `-kontur-create-arg` flag, e.g.
 `-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images
 -kontur-create-arg=-disk -kontur-create-arg=/images/current/disk.img
 -kontur-create-arg=-kernel -kontur-create-arg=/images/current/vmlinuz

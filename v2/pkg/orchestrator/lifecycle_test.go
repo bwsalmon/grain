@@ -89,11 +89,11 @@ func TestRunCycleReleasesTheSandboxAfterASuccessfulDispatch(t *testing.T) {
 	}
 
 	acquired, released := sandboxes.calls()
-	if len(acquired) != 1 || acquired[0].name != "t1-r1" {
+	if len(acquired) != 1 || acquired[0].name != "t1-1" {
 		t.Errorf("Acquire calls = %+v, want exactly one, named for the run", acquired)
 	}
-	if len(released) != 1 || released[0] != "t1-r1" {
-		t.Errorf("Release calls = %v, want exactly one for t1-r1", released)
+	if len(released) != 1 || released[0] != "t1-1" {
+		t.Errorf("Release calls = %v, want exactly one for t1-1", released)
 	}
 }
 
@@ -120,8 +120,8 @@ func TestRunCycleReleasesTheSandboxAfterAFailedDispatch(t *testing.T) {
 		t.Fatal("expected RunCycle to report the refused capability")
 	}
 
-	if _, released := sandboxes.calls(); len(released) != 1 || released[0] != "t1-r1" {
-		t.Errorf("Release calls after a failed dispatch = %v, want exactly one for t1-r1 -- a failed run "+
+	if _, released := sandboxes.calls(); len(released) != 1 || released[0] != "t1-1" {
+		t.Errorf("Release calls after a failed dispatch = %v, want exactly one for t1-1 -- a failed run "+
 			"must not leave its sandbox running", released)
 	}
 }
@@ -185,10 +185,10 @@ func TestRunCycleAcquiresWithNoShapeForATaskThatSetsNeitherField(t *testing.T) {
 // rather than silently getting the whole host.
 func TestHostSandboxesRefusesAShapeItCannotHonour(t *testing.T) {
 	h := orchestrator.NewHostSandboxes(t.TempDir())
-	if _, err := h.Acquire(context.Background(), "t1-r1", orchestrator.Shape{CPUs: 4}); err == nil {
+	if _, err := h.Acquire(context.Background(), "t1-1", orchestrator.Shape{CPUs: 4}); err == nil {
 		t.Fatal("expected HostSandboxes.Acquire to refuse a shape it cannot honour")
 	}
-	if _, err := h.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
+	if _, err := h.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
 		t.Fatalf("Acquire with no shape: %v", err)
 	}
 }
@@ -300,7 +300,7 @@ func TestATaskWhoseSandboxFailedIsDispatchedAgainAfterItsBackoff(t *testing.T) {
 	}
 
 	acquired, _ := sandboxes.calls()
-	if len(acquired) != 1 || acquired[0].name != "t1-r2" {
+	if len(acquired) != 1 || acquired[0].name != "t1-2" {
 		t.Fatalf("Acquire calls on the retry = %+v, want one for t1's second attempt", acquired)
 	}
 }
@@ -327,8 +327,8 @@ func TestRunCycleFinishesAndReleasesWhenMintingTheSandboxTokenFails(t *testing.T
 		t.Fatal("expected RunCycle to report the failed mint")
 	}
 
-	if _, released := sandboxes.calls(); len(released) != 1 || released[0] != "t1-r1" {
-		t.Errorf("Release calls = %v, want exactly one for t1-r1", released)
+	if _, released := sandboxes.calls(); len(released) != 1 || released[0] != "t1-1" {
+		t.Errorf("Release calls = %v, want exactly one for t1-1", released)
 	}
 	if live, err := store.LiveRunCount(ctx); err != nil || live != 0 {
 		t.Fatalf("live runs = %d (%v), want 0", live, err)
@@ -380,10 +380,10 @@ func TestRunCycleRevokesTheSandboxTokenAfterReleasingTheSandbox(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(minted) != 1 || minted[0] != "t1-r1" {
-		t.Errorf("minted = %v, want one token for t1-r1", minted)
+	if len(minted) != 1 || minted[0] != "t1-1" {
+		t.Errorf("minted = %v, want one token for t1-1", minted)
 	}
-	if len(revoked) != 1 || revoked[0] != "t1-r1" {
+	if len(revoked) != 1 || revoked[0] != "t1-1" {
 		t.Errorf("revoked = %v, want the same sandbox's token dropped once its sandbox was released", revoked)
 	}
 }

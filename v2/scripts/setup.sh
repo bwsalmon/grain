@@ -188,15 +188,6 @@ GRAIN_KONTUR_EXEC_KEY_NAME="${GRAIN_KONTUR_EXEC_KEY_NAME:-kontur-exec-key}"
 # ensure_kontur_kvm_access creates it -- since konturctl runs directly as
 # that user, not inside a container the way -disk itself is read.
 GRAIN_KONTUR_DISK_HOSTPATH="${GRAIN_KONTUR_DISK_HOSTPATH:-/var/lib/kontur/vm-disks}"
-# Two bytes, and it has to stay that short. A VM name must fit 11 bytes
-# under the docker backend (netshim derives "tap-<name>"/"ctl-<name>" and
-# Linux caps an interface name at 15), and a sandbox is named after its
-# run -- "<task id>-r<attempt>" -- which needs nine of them. `grain daemon`
-# refuses a longer prefix outright at startup (KonturSandboxes.
-# CheckNamePrefix), so this is not a soft preference: "kontur-", the
-# default while a VM was named after a slot ("kontur-1"), leaves four and
-# will not start.
-GRAIN_KONTUR_VM_NAME_PREFIX="${GRAIN_KONTUR_VM_NAME_PREFIX:-g-}"
 GRAIN_KONTUR_SSH_USER="${GRAIN_KONTUR_SSH_USER:-debian}"
 GRAIN_KONTUR_SSH_KEY_FILE="${GRAIN_KONTUR_SSH_KEY_FILE:-}"
 GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
@@ -350,9 +341,6 @@ Recognized variables:
                              own default) -- without this, a VM's root
                              filesystem is read-only, since
                              GRAIN_KONTUR_IMAGES_HOSTPATH always is
-  GRAIN_KONTUR_VM_NAME_PREFIX  prefix for each run's kontur VM name (default: g-;
-                             at most 2 bytes -- grain daemon refuses a
-                             longer one, see the assignment above)
   GRAIN_KONTUR_SSH_USER      username to SSH into each kontur VM as (default: debian)
   GRAIN_KONTUR_SSH_KEY_FILE  path to the private half of a specific SSH keypair
                              to bake the public half of into the guest image,
@@ -1530,8 +1518,10 @@ write_systemd_units() {
   [ -n "$GRAIN_TARGET_REPO" ] && daemon_args+=(-default-target-repo "$GRAIN_TARGET_REPO")
   [ -n "$GRAIN_TARGET_REPOS" ] && daemon_args+=(-target-repos "$GRAIN_TARGET_REPOS")
 
-  # -kontur-vm-name-prefix is what actually selects orchestrator.
-  # KonturSandboxes over HostSandboxes (cmd/grain/daemon.go's run()) --
+  # -kontur-sandboxes is what actually selects orchestrator.
+  # KonturSandboxes over HostSandboxes (cmd/grain/daemon.go's run()); the
+  # VM name itself is not configurable, since a VM name has 11 bytes to
+  # live in and a run id needs nine of them (orchestrator.VMNamePrefix) --
   # only ever passed once ensure_kontur_images/ensure_kontur_kvm_access/
   # seed_kontur_ssh_key have all actually succeeded this run (each resets
   # GRAIN_KONTUR_ENABLE to 0 on its own failure), so a host that cannot
@@ -1556,7 +1546,7 @@ write_systemd_units() {
   # writable.
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
     daemon_args+=(
-      -kontur-vm-name-prefix "$GRAIN_KONTUR_VM_NAME_PREFIX"
+      -kontur-sandboxes
       -kontur-ssh-user "$GRAIN_KONTUR_SSH_USER"
       -kontur-exec-key "/images/$GRAIN_KONTUR_EXEC_KEY_NAME"
       -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
@@ -1665,7 +1655,7 @@ report_readiness() {
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
   echo "    max concurrent:    ${GRAIN_MAX_CONCURRENT:-<default>}"
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
-    echo "    sandboxing:        kontur VMs (prefix '${GRAIN_KONTUR_VM_NAME_PREFIX}', over SSH as ${GRAIN_KONTUR_SSH_USER})"
+    echo "    sandboxing:        kontur VMs (one per run, over SSH as ${GRAIN_KONTUR_SSH_USER})"
   else
     echo "    sandboxing:        host directories (orchestrator.HostSandboxes)"
   fi

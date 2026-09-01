@@ -581,22 +581,6 @@ variable "kontur_oci_image" {
   default     = ""
 }
 
-variable "kontur_vm_name_prefix" {
-  type        = string
-  description = <<-EOT
-    Prefix for each run's kontur VM name (orchestrator.KonturConfig.NamePrefix)
-    -- at most 2 bytes, and grain daemon refuses a longer one at startup
-    (KonturSandboxes.CheckNamePrefix) rather than failing every dispatch.
-    The docker backend's netshim names each VM's tap device "tap-"+name and
-    Linux caps interface names at 15 bytes, leaving 11 for the name itself;
-    a sandbox is named after its run ("<task id>-r<attempt>") and needs 9 of
-    those. The old "kontur-" default fit while a VM was named after a slot
-    ("kontur-1") and does not now. Only takes effect when
-    enable_kontur_sandboxes is true.
-  EOT
-  default     = "g-"
-}
-
 variable "kontur_ssh_user" {
   type        = string
   description = "Username KonturSandboxes authenticates to each VM as -- matches packer/kontur/guest-setup.sh's own baked-in account. Only used when enable_kontur_sandboxes is true."

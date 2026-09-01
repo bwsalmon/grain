@@ -131,7 +131,6 @@ GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
 ENABLE_KONTUR_SANDBOXES="$(cfg enable_kontur_sandboxes)"
 KONTUR_IMAGE_BUCKET="$(cfg kontur_image_bucket)"
 KONTUR_OCI_IMAGE="$(cfg kontur_oci_image)"
-KONTUR_VM_NAME_PREFIX="$(cfg kontur_vm_name_prefix)"
 KONTUR_SSH_USER="$(cfg kontur_ssh_user)"
 KONTUR_WORKSPACE="$(cfg kontur_workspace)"
 KONTUR_BASE_IP="$(cfg kontur_base_ip)"
@@ -251,7 +250,6 @@ env \
   GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "True" ] && echo 1 || echo 0)" \
   GRAIN_KONTUR_IMAGE_BUCKET="$KONTUR_IMAGE_BUCKET" \
   GRAIN_KONTUR_OCI_IMAGE="$KONTUR_OCI_IMAGE" \
-  GRAIN_KONTUR_VM_NAME_PREFIX="$KONTUR_VM_NAME_PREFIX" \
   GRAIN_KONTUR_SSH_USER="$KONTUR_SSH_USER" \
   GRAIN_KONTUR_SSH_KEY_FILE="$KONTUR_SSH_KEY_FILE" \
   GRAIN_KONTUR_WORKSPACE="$KONTUR_WORKSPACE" \

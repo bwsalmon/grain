@@ -43,7 +43,7 @@ func TestHostSandboxesAcquireIsSafeForConcurrentCallers(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			sb, err := h.Acquire(context.Background(), fmt.Sprintf("t%d-r1", i), orchestrator.Shape{})
+			sb, err := h.Acquire(context.Background(), fmt.Sprintf("t%d-1", i), orchestrator.Shape{})
 			if err != nil {
 				errs <- err
 				return
@@ -82,7 +82,6 @@ func TestKonturSandboxesAcquireIsSafeForManyConcurrentSandboxes(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -97,7 +96,7 @@ func TestKonturSandboxesAcquireIsSafeForManyConcurrentSandboxes(t *testing.T) {
 
 	wg.Add(sandboxes)
 	for i := 0; i < sandboxes; i++ {
-		name := fmt.Sprintf("t%d-r1", i)
+		name := fmt.Sprintf("t%d-1", i)
 		go func(name string) {
 			defer wg.Done()
 			<-start
@@ -114,7 +113,7 @@ func TestKonturSandboxesAcquireIsSafeForManyConcurrentSandboxes(t *testing.T) {
 	}
 
 	for i := 0; i < sandboxes; i++ {
-		name := fmt.Sprintf("t%d-r1", i)
+		name := fmt.Sprintf("t%d-1", i)
 		got, err := k.VMNameFor(name)
 		if err != nil {
 			t.Fatal(err)
@@ -191,7 +190,6 @@ func TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially(t *testing.T) 
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -205,7 +203,7 @@ func TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially(t *testing.T) 
 	errs := make(chan error, sandboxes)
 	wg.Add(sandboxes)
 	for i := 0; i < sandboxes; i++ {
-		name := fmt.Sprintf("t%d-r1", i)
+		name := fmt.Sprintf("t%d-1", i)
 		go func(name string) {
 			defer wg.Done()
 			<-start

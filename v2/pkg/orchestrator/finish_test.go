@@ -59,7 +59,7 @@ func TestProcessResultOpensAPullRequestForAPushedBranch(t *testing.T) {
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
 	result := toolResult(agent.ToolCall{Name: "run_command", Text: "pushed"})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestProcessResultReusesAnAlreadyOpenPullRequest(t *testing.T) {
 	}
 
 	result := toolResult(agent.ToolCall{Name: "run_command", Text: "pushed"})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 	if len(sim.PullRequests) != 1 {
@@ -127,7 +127,7 @@ func TestProcessResultRelaysAQuestionAndParksTheTask(t *testing.T) {
 	result := toolResult(agent.ToolCall{
 		Name: "ask_question", Arguments: map[string]any{"question": "which config file?"},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	result := toolResult(agent.ToolCall{
 		Name: "comment_on_issue", Arguments: map[string]any{"comment": "the answer is 4"},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -201,7 +201,7 @@ func TestProcessResultCorrectsARunThatProducedNothingToActOn(t *testing.T) {
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	task := filedTask(t, ctx, store, "t1", repo)
 
-	runID := "t1-r1"
+	runID := "t1-1"
 	if err := store.StartRun(ctx, model.Run{
 		ID: runID, TaskID: task.ID, Sandbox: "s1", Attempt: 1, StartedAt: baseTime,
 	}, 0); err != nil {
@@ -253,7 +253,7 @@ func TestProcessResultFilesAProposedTaskIntoTheStore(t *testing.T) {
 			"title": "follow-up work", "body": "do more of this",
 		},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestProcessResultProposedTaskInheritsAutoMergeFromItsParent(t *testing.T) {
 			"title": "follow-up work", "body": "do more of this",
 		},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 
@@ -370,7 +370,7 @@ func TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent
 			"title": "follow-up work", "body": "do more of this",
 		},
 	})
-	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-r1", baseTime); err != nil {
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
 

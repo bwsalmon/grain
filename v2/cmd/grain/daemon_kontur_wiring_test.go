@@ -5,7 +5,7 @@ package main
 // of KonturSandboxes.ConfigureGitCredentials: that file proves the method
 // itself does the right thing over SSH; this proves run() -- the exact
 // function daemon() (daemon.go) calls -- actually reaches it when
-// -kontur-vm-name-prefix is set, with -kontur-create-arg's values landing
+// -kontur-sandboxes is set, with -kontur-create-arg's values landing
 // in the real `konturctl vm create` invocation verbatim. That plumbing
 // (flags into a real KonturConfig.CreateArgs, in a binary that actually
 // constructs orchestrator.KonturSandboxes) is what bwsalmon/agents#274
@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
+	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
 // writeFakeKonturBinary installs a fake "konturctl" that answers "vm
@@ -124,7 +125,7 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 	// A sandbox is named after its run, so the VM name this test expects
 	// is the prefix plus the seeded task's own first-attempt run id.
 	const taskID = "kw"
-	const sandbox = taskID + "-r1"
+	const sandbox = taskID + "-1"
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKonturBinary(t, argvLog, 30080)
 	vmHome := t.TempDir()
@@ -169,12 +170,12 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 		geminiAPIKeyFile: geminiKeyFile,
 		githubHost:       "127.0.0.1:0", githubInsecureHTTP: true,
 
-		konturVMNamePrefix: "g-",
-		konturStateDir:     t.TempDir(),
-		konturSSHUser:      "debian",
-		konturExecKey:      "/images/key",
-		konturWorkspace:    "/workspace",
-		konturCreateArgs:   []string{"-image", "gs://bucket/kontur-guest-deadbeef.qcow2"},
+		konturSandboxes:  true,
+		konturStateDir:   t.TempDir(),
+		konturSSHUser:    "debian",
+		konturExecKey:    "/images/key",
+		konturWorkspace:  "/workspace",
+		konturCreateArgs: []string{"-image", "gs://bucket/kontur-guest-deadbeef.qcow2"},
 	}
 
 	// run() only returns once ctx is cancelled (it drives reconcile
@@ -209,7 +210,7 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kontur was never invoked: %v", err)
 	}
-	want := "vm create " + cfg.konturVMNamePrefix + sandbox + " -state-dir " + cfg.konturStateDir + " -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2"
+	want := "vm create " + orchestrator.VMNamePrefix + sandbox + " -state-dir " + cfg.konturStateDir + " -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2"
 	if !strings.Contains(string(data), want) {
 		t.Errorf("kontur invoked as %q, want a %q among the calls", data, want)
 	}

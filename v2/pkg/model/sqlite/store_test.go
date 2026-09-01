@@ -1307,12 +1307,12 @@ func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first := model.Run{ID: "a1b2-r1", TaskID: "a1b2", Sandbox: "a1b2-r1", Attempt: 1, StartedAt: now}
+	first := model.Run{ID: "a1b2-1", TaskID: "a1b2", Sandbox: "a1b2-1", Attempt: 1, StartedAt: now}
 	if err := store.StartRun(ctx, first, 0); err != nil {
 		t.Fatalf("first StartRun for an idle task: %v", err)
 	}
 
-	second := model.Run{ID: "a1b2-r2", TaskID: "a1b2", Sandbox: "a1b2-r2", Attempt: 2, StartedAt: now}
+	second := model.Run{ID: "a1b2-2", TaskID: "a1b2", Sandbox: "a1b2-2", Attempt: 2, StartedAt: now}
 	if err := store.StartRun(ctx, second, 0); err == nil {
 		t.Fatal("a second live run on a task that already has one should have failed, not landed")
 	}
@@ -1334,7 +1334,7 @@ func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 
 	// Once the first attempt has finished, a second one starts fine --
 	// the index guards against an overlap, not against a retry.
-	if err := store.FinishRun(ctx, "a1b2-r1", now.Add(time.Hour), "failed", ""); err != nil {
+	if err := store.FinishRun(ctx, "a1b2-1", now.Add(time.Hour), "failed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, second, 0); err != nil {
@@ -1358,13 +1358,13 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 	}
 
 	for _, id := range []string{"a1b2", "c3d4"} {
-		run := model.Run{ID: id + "-r1", TaskID: id, Sandbox: id + "-r1", Attempt: 1, StartedAt: now}
+		run := model.Run{ID: id + "-1", TaskID: id, Sandbox: id + "-1", Attempt: 1, StartedAt: now}
 		if err := store.StartRun(ctx, run, 2); err != nil {
 			t.Fatalf("StartRun for %s within the limit: %v", id, err)
 		}
 	}
 
-	third := model.Run{ID: "e5f6-r1", TaskID: "e5f6", Sandbox: "e5f6-r1", Attempt: 1, StartedAt: now}
+	third := model.Run{ID: "e5f6-1", TaskID: "e5f6", Sandbox: "e5f6-1", Attempt: 1, StartedAt: now}
 	err := store.StartRun(ctx, third, 2)
 	if !errors.Is(err, model.ErrAtCapacity) {
 		t.Fatalf("StartRun past the limit = %v, want ErrAtCapacity", err)
@@ -1374,7 +1374,7 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 	}
 
 	// Finishing one makes room for exactly one more.
-	if err := store.FinishRun(ctx, "a1b2-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
+	if err := store.FinishRun(ctx, "a1b2-1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, third, 2); err != nil {
@@ -1383,7 +1383,7 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 
 	// A limit of zero or less means "no limit of mine to enforce" -- what
 	// a caller with its own reason to record a run passes.
-	fourth := model.Run{ID: "a1b2-r2", TaskID: "a1b2", Sandbox: "a1b2-r2", Attempt: 2, StartedAt: now.Add(2 * time.Hour)}
+	fourth := model.Run{ID: "a1b2-2", TaskID: "a1b2", Sandbox: "a1b2-2", Attempt: 2, StartedAt: now.Add(2 * time.Hour)}
 	if err := store.StartRun(ctx, fourth, 0); err != nil {
 		t.Fatalf("StartRun with no limit: %v", err)
 	}

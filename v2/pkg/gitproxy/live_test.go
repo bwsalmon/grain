@@ -221,7 +221,7 @@ func TestLiveCloneAndPushThroughTheWholeStack(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "t1-r1", TaskID: "t1", Sandbox: "sandbox-0",
+		ID: "t1-1", TaskID: "t1", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: time.Now(),
 	}, 0); err != nil {
 		t.Fatal(err)
@@ -315,7 +315,7 @@ func TestLivePushToARepoOutsideTheTasksScopeIsDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "t1-r1", TaskID: "t1", Sandbox: "sandbox-0",
+		ID: "t1-1", TaskID: "t1", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: time.Now(),
 	}, 0); err != nil {
 		t.Fatal(err)
