@@ -307,6 +307,11 @@ func (k *KonturSandboxes) Acquire(ctx context.Context, sandbox string, shape Sha
 		return nil, err
 	}
 	if err := k.create(ctx, name, shape); err != nil {
+		// Even a failed create can leave a VM behind -- `konturctl vm
+		// create` brings up a netns holder and the VM's own container in
+		// separate steps, so a failure between them is a half-built VM
+		// with nothing holding a handle to it.
+		k.deleteQuietly(ctx, name)
 		return nil, err
 	}
 
@@ -323,6 +328,7 @@ func (k *KonturSandboxes) Acquire(ctx context.Context, sandbox string, shape Sha
 			return nil, err
 		}
 		if err := k.create(ctx, name, shape); err != nil {
+			k.deleteQuietly(ctx, name)
 			return nil, fmt.Errorf("orchestrator: kontur VM %q's container was found dead, rebuilding it: %w", name, err)
 		}
 		if runner, err = k.runnerFor(ctx, name); err != nil {
@@ -358,16 +364,38 @@ func (k *KonturSandboxes) create(ctx context.Context, name string, shape Shape) 
 	return nil
 }
 
+// acquireCleanupTimeout bounds deleteQuietly's own detached delete, the
+// same trade konturSandbox.Release makes with runCleanupTimeout and for
+// the same two reasons: unbounded, a wedged `konturctl vm delete` would
+// pin the dispatch goroutine that is already on its way out, and a VM
+// that outlives the timeout is ReapOrphans' problem at the next startup.
+// Shorter than runCleanupTimeout because nothing is waiting on this VM --
+// it never became usable, so there is no guest to shut down gracefully.
+const acquireCleanupTimeout = 30 * time.Second
+
 // deleteQuietly tears down a VM that never became usable, so a failed
 // Acquire does not leave one running with no handle to release it. The
 // error is dropped deliberately: the caller is already failing for a
 // reason it can act on, and "the cleanup after that also failed" would
 // replace it with a less useful one. ReapOrphans catches whatever this
 // misses at the next startup.
+//
+// It runs on a context detached from the caller's cancellation, exactly
+// as konturSandbox.Release does. kontur.Delete execs konturctl through
+// exec.CommandContext, so on an already-cancelled ctx the delete does not
+// merely fail -- it never runs at all, and the VM is left behind. That is
+// not a rare shutdown-only case: ctx is cancelled whenever the daemon is
+// stopping *or* a task was closed mid-run, so the ordinary way an Acquire
+// is interrupted is also the way it would leak. Detaching here is what
+// makes "a failed Acquire leaves nothing behind" true on the path that
+// most needs it.
 func (k *KonturSandboxes) deleteQuietly(ctx context.Context, name string) {
-	if kontur.Exists(k.cfg.stateDir(), name) {
-		_ = kontur.Delete(ctx, k.cfg.stateDir(), name)
+	if !kontur.Exists(k.cfg.stateDir(), name) {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acquireCleanupTimeout)
+	defer cancel()
+	_ = kontur.Delete(ctx, k.cfg.stateDir(), name)
 }
 
 // ReapOrphans deletes every VM under this deployment's own NamePrefix,
@@ -490,21 +518,19 @@ func (k *KonturSandboxes) execRunner(name string) *mcp.DockerExecRunner {
 }
 
 // waitForGuestExec polls a trivial command through the docker-exec
-// transport until it succeeds or deadline passes -- the docker-exec
-// counterpart to waitForSSHPort, and for the same reason: a VM whose
-// container is up is not yet a VM whose guest has finished booting, and
-// everything short of that looks like a failure to reach it.
+// transport until it succeeds or deadline passes: a VM whose container is
+// up is not yet a VM whose guest has finished booting, and everything
+// short of that looks like a failure to reach it.
 //
 // It probes with a runner of its own whose ConnectTimeout is one poll
 // interval, so a probe against a guest that is not up yet gives up and
 // lets this loop decide whether to keep waiting, rather than each probe
 // sitting on guestexec's own 30s default and overshooting the deadline
-// this is measuring against. That mirrors what waitForSSHPort gets from
-// giving its dialer a readyPollInterval timeout.
+// this is measuring against.
 //
-// Like waitForSSHPort, it fails immediately on a VM container that has
-// already exited rather than waiting out the rest of deadline exec'ing
-// into something that will never answer.
+// It fails immediately on a VM container that has already exited rather
+// than waiting out the rest of deadline exec'ing into something that will
+// never answer.
 func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, deadline time.Time) error {
 	probe := k.execRunner(name)
 	probe.ConnectTimeout = k.cfg.readyPollInterval()
@@ -553,8 +579,8 @@ func guestExecProbeError(container, stderr string, exitCode int) error {
 }
 
 // dockerContainerDead is the set of docker State.Status values
-// waitForSSHPort treats as "this container will never answer" rather than
-// "not ready yet" -- see dockerExitedEarly's own doc comment. "created" is
+// dockerExitedEarly treats as "this container will never answer" rather
+// than "not ready yet" -- see its own doc comment. "created" is
 // deliberately absent: a container docker has accepted but not yet
 // started is still on its way up, same as "running" itself taking a
 // moment to start accepting connections.

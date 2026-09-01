@@ -396,11 +396,12 @@ func run(ctx context.Context, cfg config) error {
 	// bwsalmon/kontur-managed VM per run, reached over
 	// SSH (pkg/orchestrator's own doc comment: "Sandboxing defaults to
 	// 'execute on the host,' deliberately, for now, with a real host
-	// adapter available as an opt in"). Exactly one of hostSandboxes/
-	// konturSandboxes is non-nil below; sandboxes is Deps.Sandboxes
-	// either way.
+	// adapter available as an opt in"). sandboxes is Deps.Sandboxes either
+	// way; konturSandboxes is kept as its concrete self alongside it
+	// purely for the two things only that backend has -- CheckNamePrefix
+	// below, and ReapOrphans in runDaemon -- and stays nil for a
+	// host-backed deployment, which is how both are skipped.
 	var sandboxes orchestrator.Sandboxes
-	var hostSandboxes *orchestrator.HostSandboxes
 	var konturSandboxes *orchestrator.KonturSandboxes
 	if cfg.konturVMNamePrefix != "" {
 		konturSandboxes = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
@@ -432,8 +433,7 @@ func run(ctx context.Context, cfg config) error {
 		if err := os.MkdirAll(cfg.sandboxDir, 0o755); err != nil {
 			return fmt.Errorf("creating sandbox directory: %w", err)
 		}
-		hostSandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
-		sandboxes = hostSandboxes
+		sandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
 	}
 
 	// transcriptDir is where a run's own agent.Framework may mirror its
@@ -479,7 +479,7 @@ func run(ctx context.Context, cfg config) error {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			if err := runDaemon(ctx, cfg, store, sandboxes, hostSandboxes, konturSandboxes, transcriptDir); err != nil {
+			if err := runDaemon(ctx, cfg, store, sandboxes, konturSandboxes, transcriptDir); err != nil {
 				// reconcilerDown is what turns this log line into
 				// something GET /api/config (and, through it, the UI
 				// itself) can also see -- bwsalmon/agents#576: before
@@ -507,7 +507,7 @@ func run(ctx context.Context, cfg config) error {
 		return nil
 	}
 
-	return runDaemon(ctx, cfg, store, sandboxes, hostSandboxes, konturSandboxes, transcriptDir)
+	return runDaemon(ctx, cfg, store, sandboxes, konturSandboxes, transcriptDir)
 }
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
@@ -524,7 +524,7 @@ func run(ctx context.Context, cfg config) error {
 // take the UI server run() already started down with it
 // (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
 // reconcile itself does; a non-nil error means it never got that far.
-func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, hostSandboxes *orchestrator.HostSandboxes, konturSandboxes *orchestrator.KonturSandboxes, transcriptDir string) (err error) {
+func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, konturSandboxes *orchestrator.KonturSandboxes, transcriptDir string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
@@ -618,39 +618,13 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	return nil
 }
 
-// retryWithBackoff calls fn until it returns nil or ctx is cancelled,
-// waiting baseDelay after the first failure and doubling that wait after
-// every failure thereafter, capped at maxDelay, so a caller retrying
-// forever settles into a steady interval rather than hammering whatever
-// fn talks to. onFailure runs
-// between an attempt and the wait that follows it, purely to report the
-// failure -- daemon_reconciler_retry_test.go's own coverage of this
-// passes baseDelay/maxDelay small enough to run fast rather than mocking
-// time itself.
-func retryWithBackoff(ctx context.Context, baseDelay, maxDelay time.Duration, onFailure func(attempt int, err error), fn func() error) error {
-	delay := baseDelay
-	for attempt := 1; ; attempt++ {
-		err := fn()
-		if err == nil {
-			return nil
-		}
-		onFailure(attempt, err)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-		if delay *= 2; delay > maxDelay {
-			delay = maxDelay
-		}
-	}
-}
-
 // reconcilerDown reports whether runDaemon has given up entirely --
 // returned a non-nil error, including from a recovered panic -- rather
-// than a transient step it is still retrying (configureSlotGitCredentials's
-// own retry loop above no longer counts as "given up" on its own, so a slot
-// stuck retrying VM creation does not flip this true). Set once, from
+// than a run-level failure the next tick can still recover from. It was
+// once also the "not given up yet" side of a per-slot provisioning step
+// that retried with backoff; there is no such step now, since a sandbox
+// is prepared per run and a failure there finishes that one run rather
+// than wedging the deployment (orchestrator's runOne). Set once, from
 // run()'s own goroutine, alongside the log line that already reports the
 // same failure; never cleared, since -- like orchestrator.
 // ChecksUnavailable -- this is a standing fact about *this process*, not

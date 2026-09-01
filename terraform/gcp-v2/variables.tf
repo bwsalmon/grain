@@ -509,7 +509,7 @@ variable "poll_interval" {
 variable "enable_kontur_sandboxes" {
   type        = bool
   description = <<-EOT
-    Dispatch onto real bwsalmon/kontur-managed VMs, one per slot, over SSH
+    Dispatch onto real bwsalmon/kontur-managed VMs, one per run, over SSH
     (orchestrator.KonturSandboxes) instead of plain host directories
     (orchestrator.HostSandboxes) -- bwsalmon/agents#504's own "flip the
     default", now that build.sh/setup.sh actually wire the rest of this
@@ -584,13 +584,17 @@ variable "kontur_oci_image" {
 variable "kontur_vm_name_prefix" {
   type        = string
   description = <<-EOT
-    Prefix for each slot's kontur VM name (orchestrator.KonturConfig.NamePrefix)
-    -- kept short by default (7 bytes) because the docker backend's netshim
-    names each VM's tap device "tap-"+prefix+slot, and Linux caps interface
-    names at 15 bytes; see that field's own doc comment for the exact
-    arithmetic. Only takes effect when enable_kontur_sandboxes is true.
+    Prefix for each run's kontur VM name (orchestrator.KonturConfig.NamePrefix)
+    -- at most 2 bytes, and grain daemon refuses a longer one at startup
+    (KonturSandboxes.CheckNamePrefix) rather than failing every dispatch.
+    The docker backend's netshim names each VM's tap device "tap-"+name and
+    Linux caps interface names at 15 bytes, leaving 11 for the name itself;
+    a sandbox is named after its run ("<task id>-r<attempt>") and needs 9 of
+    those. The old "kontur-" default fit while a VM was named after a slot
+    ("kontur-1") and does not now. Only takes effect when
+    enable_kontur_sandboxes is true.
   EOT
-  default     = "kontur-"
+  default     = "g-"
 }
 
 variable "kontur_ssh_user" {
@@ -608,20 +612,27 @@ variable "kontur_workspace" {
 variable "kontur_base_ip" {
   type        = string
   description = <<-EOT
-    The "-ip" slot "1"'s kontur VM gets on netshim's bridge subnet; every
-    later slot's is the next IPv4 address after it
-    (orchestrator.KonturConfig.BaseIP). 169.254.100.10 is inside netshim's
-    own default bridge CIDR (169.254.100.1/24, internal/netshim/config.go's
-    defaultBridgeCIDR) with room after it for slots is safely below
-    var.slots' own realistic range. Only used when enable_kontur_sandboxes
-    is true.
+    The "-ip" every kontur VM is created with under NAT mode, passed
+    verbatim (orchestrator.KonturConfig.IP). 169.254.100.10 is inside
+    netshim's own default bridge CIDR (169.254.100.1/24,
+    internal/netshim/config.go's defaultBridgeCIDR).
+
+    The same value goes to every VM rather than being offset per VM: under
+    the docker backend each one gets its own netns-holder container to join
+    with "--network container:", so they share no bridge and cannot collide
+    on an address. The offset dates from the static-pod backend, where a
+    pod's containers genuinely did share a namespace.
+
+    Ignored under kontur_net "flat" (the default), where the container
+    runtime assigns the address. Only used when enable_kontur_sandboxes is
+    true.
   EOT
   default     = "169.254.100.10"
 }
 
 variable "kontur_base_port" {
   type        = number
-  description = "The \"-port\" slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own number minus one (orchestrator.KonturConfig.BasePort). Only used when enable_kontur_sandboxes is true."
+  description = "The \"-port\" every kontur VM is created with under NAT mode, passed verbatim (orchestrator.KonturConfig.Port) -- a DNAT target inside that VM's own network namespace, not a port published on the host, so the same value on every VM does not collide. Ignored under kontur_net \"flat\" (the default). Only used when enable_kontur_sandboxes is true."
   default     = 12000
 }
 

@@ -887,3 +887,72 @@ func TestKonturSandboxesCheckNamePrefixAcceptsAPrefixThatFits(t *testing.T) {
 		t.Errorf("VMNameFor at the budget CheckNamePrefix guarantees: %v", err)
 	}
 }
+
+// A cancelled Acquire still tears its half-built VM down. kontur.Delete
+// execs konturctl through exec.CommandContext, so cleanup that rode on
+// the caller's own ctx did not merely fail on an already-cancelled one --
+// it never ran, and the VM was left behind with nothing holding a handle
+// to it until the next startup's ReapOrphans.
+//
+// This is the ordinary interruption, not a rare one: runOne's ctx is
+// cancelled whenever the daemon is shutting down or the task was closed
+// mid-run, which is exactly why konturSandbox.Release already detaches.
+func TestKonturSandboxesAcquireDeletesTheVMWhenTheContextIsCancelled(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
+	// A guest that never answers, so Acquire is still waiting when ctx dies.
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"),
+		filepath.Join(t.TempDir(), "counter"), 1<<30, "")
+
+	cfg := konturTestConfig(stateDir)
+	cfg.ReadyTimeout = 30 * time.Second
+	cfg.ReadyPollInterval = time.Millisecond
+	k := orchestrator.NewKonturSandboxes(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	if _, err := k.Acquire(ctx, "t1-r1", orchestrator.Shape{}); err == nil {
+		t.Fatal("expected Acquire to fail once its context was cancelled")
+	}
+	if kontur.Exists(stateDir, "g-t1-r1") {
+		t.Error("the VM is still there after a cancelled Acquire -- cleanup has to run on a " +
+			"context detached from the caller's, or `konturctl vm delete` never executes at all")
+	}
+}
+
+// The same holds when the create itself fails: konturctl brings a VM's
+// netns holder and its own container up in separate steps, so a failure
+// between them leaves a half-built VM that no Release will ever reach.
+func TestKonturSandboxesAcquireDeletesTheVMWhenCreateFails(t *testing.T) {
+	stateDir := t.TempDir()
+	dir := t.TempDir()
+	// A konturctl that writes the state file and *then* fails the create,
+	// standing in for a create that got partway and gave up.
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "vm" ] && [ "$2" = "create" ]; then
+  echo '{"port": 1}' > %q/"$3".json
+  echo "boom" >&2
+  exit 1
+fi
+if [ "$1" = "vm" ] && [ "$2" = "delete" ]; then
+  rm -f %q/"$3".json
+fi
+`, stateDir, stateDir)
+	path := filepath.Join(dir, "konturctl")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	k := orchestrator.NewKonturSandboxes(konturTestConfig(stateDir))
+	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err == nil {
+		t.Fatal("expected Acquire to fail when create does")
+	}
+	if kontur.Exists(stateDir, "g-t1-r1") {
+		t.Error("a failed create left its VM behind")
+	}
+}

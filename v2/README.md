@@ -1717,11 +1717,27 @@ without the flag that spends it changing, since a name built from a run
 id needs more of `maxVMNameLen`'s 11 bytes than one built from a slot
 number — so `CheckNamePrefix` refuses an outgrown
 `-kontur-vm-name-prefix` at startup rather than letting every dispatch
-discover it separately. And `Release` runs on a context detached from
+discover it separately. That check is only as good as the value a
+deployment actually starts with, and that value is not in this repo's Go
+at all: `v2/scripts/setup.sh` and `terraform/gcp-v2`'s own variable both
+defaulted to `kontur-`, which fit while a VM was named `kontur-1` and
+leaves four of the nine bytes a run id needs — so the default deploy
+path, with kontur sandboxing on by default, refused to start at all. Both
+ship `g-` now, and `cmd/grain`'s own
+`TestShippedKonturVMNamePrefixDefaultsFitTheVMNameBudget` reads them back
+and asks the real `CheckNamePrefix` about them, since a unit test that
+picks its own prefix is exactly the one that cannot catch this. And
+`Release` runs on a context detached from
 cancellation, which is right, but now with a deadline: unbounded, a hung
 `konturctl vm delete` would pin the dispatch goroutine and the unfinished
 run row beneath it for the life of the process, which is the failure
-detaching is meant to prevent.
+detaching is meant to prevent. `Acquire`'s own cleanup needs that same
+detachment for a sharper reason: `kontur.Delete` execs through
+`exec.CommandContext`, so against an already-cancelled context
+`deleteQuietly` did not merely fail — it never ran at all. Since `ctx` is
+cancelled whenever the daemon is stopping *or* a task was closed mid-run,
+the ordinary way an `Acquire` is interrupted was also the way it leaked a
+VM, until the next startup's `ReapOrphans` got to it.
 
 **What this costs.** A VM boot moves onto the critical path of every
 task, where it used to be paid once at startup. `docs/data-model.md`

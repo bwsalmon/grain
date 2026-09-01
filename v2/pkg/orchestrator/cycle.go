@@ -466,8 +466,8 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		// A failed run is not necessarily an empty one. The framework
 		// hands back what the agent managed to do before it broke (see
 		// agent.Framework), and the one part of that which outlives the
-		// run is a branch it already pushed -- the sandbox above has just
-		// been recreated, but GitHub still has the commits. Skipping
+		// run is a branch it already pushed -- the sandbox above is about
+		// to be released, but GitHub still has the commits. Skipping
 		// ProcessResult here left such a branch permanently stranded:
 		// pushed, with no pull request, no closing comment and no second
 		// run able to find it, until a daemon restart happened to run

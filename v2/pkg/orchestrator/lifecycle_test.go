@@ -250,8 +250,16 @@ func TestRunCycleFinishesARunWhoseSandboxCouldNotBeAcquired(t *testing.T) {
 	if runs[0].FinishedAt == nil {
 		t.Fatal("the run was left unfinished")
 	}
-	if runs[0].Outcome == "succeeded" {
-		t.Errorf("outcome = %q, want a failure -- no agent ever ran", runs[0].Outcome)
+	// The literal, not merely "not succeeded". This string is a contract
+	// with the UI: DetailOverlay.jsx keys its label and badge off it by
+	// name, and its own test pins the same word, because without a match
+	// "setup-failed" falls through the raw-string path to a *queued* badge
+	// -- a run that could not be given a sandbox rendered as one that has
+	// not started yet. Asserting only "a failure" here would let a rename
+	// keep this suite green while silently reintroducing that.
+	if runs[0].Outcome != "setup-failed" {
+		t.Errorf("outcome = %q, want %q -- no agent ever ran, and pkg/ui's DetailOverlay keys off this exact word",
+			runs[0].Outcome, "setup-failed")
 	}
 	if !strings.Contains(runs[0].Detail, "guest never became reachable") {
 		t.Errorf("detail = %q, want it to carry the acquisition error", runs[0].Detail)
