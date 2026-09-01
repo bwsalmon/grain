@@ -39,6 +39,23 @@ log_hint() {
   echo "    --tunnel-through-iap --command 'sudo journalctl -u grain-v2-config-sync -n 200'"
 }
 
+# terraform/gcp-v2/instance.tf folds a short hash of grain_config's own
+# content onto the end of the value it writes to grain-deploy-generation
+# (bwsalmon/agents#592: "changing max concurrent agents takes no effect
+# even after reboot"), so the host reports "$deploy_generation-<hash>",
+# never the bare token CI passed to `terraform apply` as
+# var.deploy_generation. A plain string comparison against that bare
+# token therefore never matched, even once the host had actually
+# converged -- every rollout after #592 landed ran out the clock here and
+# was reported as hung/failed despite the host finishing within seconds
+# (bwsalmon/agents#633).
+generation_matches() {
+  case "$1" in
+    "$deploy_generation" | "$deploy_generation"-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # config-sync.sh retries a failed generation on its own -- see that
 # script's own top comment, "self-heals without a second apply" -- so the
 # first "failed" this sees is not yet a verdict: config-sync has already
@@ -61,7 +78,7 @@ retried=0
 while [ "$SECONDS" -lt "$deadline" ]; do
   status="$(attr deploy-status)"
   generation="$(attr deploy-generation)"
-  if [ "$generation" = "$deploy_generation" ]; then
+  if generation_matches "$generation"; then
     case "$status" in
       ok)
         echo "host converged on $deploy_generation"

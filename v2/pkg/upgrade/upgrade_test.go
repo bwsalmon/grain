@@ -344,6 +344,53 @@ func TestUpgraderStartReportsFailure(t *testing.T) {
 	}
 }
 
+// TestUpgraderTimesOutInsteadOfHangingForever is bwsalmon/agents#633's
+// regression test ("v2 Deploys are hanging"): before Config.Timeout
+// existed, run's ctx was context.Background(), so a build command that
+// simply never returned -- a stalled network fetch, a wedged docker
+// daemon -- left Status on PhaseRunning forever and u.running permanently
+// true, with no way for a second Start to ever get through. A tiny
+// Config.Timeout here stands in for that stall: the real default
+// (defaultTimeout, 45 minutes) is not something a test can wait out, but
+// the mechanism bounding it is the same regardless of the value.
+func TestUpgraderTimesOutInsteadOfHangingForever(t *testing.T) {
+	_, checkout := newFixtureRepo(t, "feature")
+	v2Dir := filepath.Join(checkout, "v2")
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	u := New(Config{
+		SrcDir: checkout,
+		// Far longer than Timeout below -- stands in for a build that
+		// hangs rather than one that is merely slow.
+		BuildCmd:    []string{"sh", "-c", "sleep 300"},
+		BuiltBinary: filepath.Join(v2Dir, "bin", "grain"),
+		InstallPath: filepath.Join(t.TempDir(), "grain"),
+		StatusFile:  filepath.Join(t.TempDir(), "upgrade-status.json"),
+		Timeout:     50 * time.Millisecond,
+	})
+
+	if err := u.Start("feature"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// waitForPhase's own 5-second deadline is the assertion: without the
+	// fix this never reaches PhaseFailed at all, and the test times out
+	// the same way the hang it is guarding against would.
+	status := waitForPhase(t, u, PhaseFailed)
+	if status.Detail == "" {
+		t.Error("failed status carries no Detail")
+	}
+
+	// u.running must have cleared too -- otherwise a second Start after
+	// the timeout still gets ErrUpgradeInProgress forever, which is the
+	// same stuck deployment by another name.
+	if err := u.Start("feature"); err != nil {
+		t.Errorf("Start after a timed-out upgrade: %v, want nil (u.running should have cleared)", err)
+	}
+}
+
 func TestUpgraderStartRejectsInvalidBranch(t *testing.T) {
 	u := New(Config{StatusFile: filepath.Join(t.TempDir(), "upgrade-status.json")})
 	if err := u.Start("-not-a-branch"); err == nil {

@@ -30,6 +30,13 @@
 // that class of failure needs a real health check against the running
 // service, which is out of this package's reach (see HealthCheckArgs's
 // own doc comment).
+//
+// bwsalmon/agents#633: checkout and build both used to run under
+// context.Background(), so a git fetch against a stalled connection or a
+// docker build stuck on an unresponsive registry never returned at all --
+// Status sat on PhaseRunning forever, and nothing short of restarting the
+// whole daemon process cleared u.running to let a retry through. Config.
+// Timeout (defaultTimeout, 45 minutes, if left unset) now bounds both.
 package upgrade
 
 import (
@@ -43,6 +50,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -113,10 +121,70 @@ type Config struct {
 	// binary up on its own -- useful for a deployment with no restart
 	// mechanism of its own, and for tests.
 	RestartCmd []string
+	// Timeout bounds checkout and build together -- the only two steps
+	// here that touch the network (a git fetch against origin) or a cold
+	// docker build (pulling a builder image plus every Go module and npm
+	// package), either of which can, on a bad day, simply stop rather
+	// than return an error: a stalled TCP connection, an unresponsive
+	// registry, a wedged Docker daemon. Neither used to be bounded at
+	// all -- run's own ctx was context.Background() -- so that failure
+	// mode did not fail: Status sat on PhaseRunning forever, u.running
+	// never cleared, the UI's Upgrade button stayed on "Upgrading…"
+	// indefinitely, and a second click just got ErrUpgradeInProgress
+	// (bwsalmon/agents#633, "v2 Deploys are hanging"). Zero uses
+	// defaultTimeout -- the same 45 minutes
+	// terraform/gcp-v2/files/config-sync.sh's own DEPLOY_TIMEOUT_SECS
+	// budgets for this identical cold-build cost on the other path to
+	// this same build, for the same reason.
+	Timeout time.Duration
 	// StatusFile persists Status across the very restart RestartCmd
 	// triggers -- an in-memory field would be lost the moment the new
 	// binary's own process replaces this one. Required.
 	StatusFile string
+}
+
+// defaultTimeout is Config.Timeout's fallback when left at its zero
+// value -- see that field's own doc comment.
+const defaultTimeout = 45 * time.Minute
+
+// waitDelay bounds how long Wait (via CombinedOutput/Output, below)
+// waits for a command's own stdio to actually finish once ctx cancels it
+// and newCommand's own Cancel func has run. Context cancellation alone --
+// even exec.CommandContext's default Cancel, which kills only the direct
+// child -- does not unblock a Read against a pipe some surviving
+// descendant still holds open, and that is exactly the shape a hung
+// `make container-build` takes: make forks docker/npm/go, each of which
+// inherits make's own stdout/stderr, so killing make itself leaves
+// nothing to make the read end of that pipe see EOF. Verified live
+// against `sh -c "sleep 300"` standing in for a wedged build: without
+// WaitDelay, CombinedOutput blocked for the full 300 seconds despite a
+// 50ms ctx deadline. newCommand's own process-group kill (below) reaches
+// every descendant directly and makes this bound almost never the thing
+// that actually fires; it exists as the backstop for whatever that kill
+// still somehow misses.
+const waitDelay = 5 * time.Second
+
+// newCommand builds an *exec.Cmd whose cancellation -- ctx's Timeout
+// expiring, most notably -- reliably bounds it even when the command
+// forks children of its own that inherit its stdout/stderr pipes, the
+// shape make/docker/npm take and exactly what checkout and build run.
+// Setpgid puts the whole tree in a process group of its own; Cancel
+// kills that group (a negative pid to syscall.Kill) rather than
+// exec.CommandContext's own default of the direct child alone, so a
+// grandchild cannot simply outlive its parent's death and keep running,
+// orphaned, in the background; WaitDelay is waitDelay's own backstop.
+func newCommand(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = waitDelay
+	return cmd
 }
 
 // Upgrader runs at most one upgrade at a time against a Config.
@@ -213,7 +281,12 @@ func (u *Upgrader) run(branch string, status Status) {
 		u.mu.Unlock()
 	}()
 
-	ctx := context.Background()
+	timeout := u.cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
 	fail := func(err error) {
 		finished := time.Now().UTC()
@@ -306,7 +379,7 @@ func (u *Upgrader) checkout(ctx context.Context, branch string) error {
 }
 
 func (u *Upgrader) dirty(ctx context.Context) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", u.cfg.SrcDir, "status", "--porcelain")
+	cmd := newCommand(ctx, "", "git", "-C", u.cfg.SrcDir, "status", "--porcelain")
 	out, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git status: %w", err)
@@ -316,7 +389,7 @@ func (u *Upgrader) dirty(ctx context.Context) (bool, error) {
 
 func (u *Upgrader) git(ctx context.Context, args ...string) error {
 	full := append([]string{"-C", u.cfg.SrcDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := newCommand(ctx, "", "git", full...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -328,8 +401,7 @@ func (u *Upgrader) build(ctx context.Context) error {
 	if len(u.cfg.BuildCmd) == 0 {
 		return errors.New("no build command configured")
 	}
-	cmd := exec.CommandContext(ctx, u.cfg.BuildCmd[0], u.cfg.BuildCmd[1:]...)
-	cmd.Dir = filepath.Join(u.cfg.SrcDir, "v2")
+	cmd := newCommand(ctx, filepath.Join(u.cfg.SrcDir, "v2"), u.cfg.BuildCmd[0], u.cfg.BuildCmd[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w: %s", strings.Join(u.cfg.BuildCmd, " "), err, strings.TrimSpace(string(out)))
@@ -420,7 +492,7 @@ func (u *Upgrader) removeBackup() {
 func (u *Upgrader) healthCheck(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, u.cfg.InstallPath, u.cfg.HealthCheckArgs...)
+	cmd := newCommand(ctx, "", u.cfg.InstallPath, u.cfg.HealthCheckArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %w: %s", u.cfg.InstallPath, strings.Join(u.cfg.HealthCheckArgs, " "), err, strings.TrimSpace(string(out)))

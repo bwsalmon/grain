@@ -1583,6 +1583,16 @@ a build or install failure leaves the old binary running untouched
 a build that succeeds and then misbehaves at runtime is not something
 this catches.
 
+Checkout and build together are bounded by `Config.Timeout` (45 minutes
+by default) rather than running unbounded, and every command either one
+runs is killed by its whole process group, not just its own direct
+child, once that bound trips — bwsalmon/agents#633 ("v2 Deploys are
+hanging"): a stalled `git fetch` or a `make container-build` stuck on an
+unresponsive docker registry used to leave `GET /api/upgrade` reporting
+`running` forever, with no way for a second click to ever get past
+`ErrUpgradeInProgress` short of restarting the whole daemon process by
+hand.
+
 All three flags are empty by default, which disables the feature
 entirely (the UI's own Upgrade pane reports itself unavailable, the same
 convention the Secrets pane already uses for its own optional
