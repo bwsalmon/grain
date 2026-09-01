@@ -94,3 +94,20 @@ export function knownRepos(config, tasks) {
   }
   return [...repos].sort((a, b) => a.localeCompare(b));
 }
+
+// lastBaseForRepo is the branch NewTaskOverlay prefills "Base branch"
+// with once a repo is picked (bwsalmon/agents#641): whatever base the
+// most recently created task targeting that repo used, so a repo whose
+// work currently lives off a release branch (or any other non-default
+// base) doesn't make every new task against it retype that branch name.
+// Empty when nothing on record for that repo ever set a base (the
+// ordinary case of building off the deployment's default branch).
+export function lastBaseForRepo(tasks, repo) {
+  if (!repo) return "";
+  let latest = null;
+  for (const t of tasks || []) {
+    if (t.repo !== repo || !t.base) continue;
+    if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0)) latest = t;
+  }
+  return latest ? latest.base : "";
+}
