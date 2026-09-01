@@ -68,6 +68,7 @@ apt-get update
 # Debian package, say) would silently take ipconfig with it and leave
 # every guest without an address.
 apt-get install -y --no-install-recommends \
+  linux-image-amd64 \
   sudo libnss-myhostname klibc-utils \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
   pipx tmux unzip ca-certificates bubblewrap gnupg
