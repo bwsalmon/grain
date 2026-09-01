@@ -168,6 +168,67 @@ func TestCreateTaskInteractiveJumpsTheQueue(t *testing.T) {
 	}
 }
 
+// TestCreateTaskConfigurationAssemblesTheWholeBundle is bwsalmon/
+// agents#621: a caller asking for nothing but Configuration gets back a
+// task that is interactive, carries both the self-debug and self-repair
+// grants, and has a non-empty title and body -- CreateTask assembles the
+// whole thing itself rather than trusting a caller to ask for each piece
+// by hand.
+func TestCreateTaskConfigurationAssemblesTheWholeBundle(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Configuration: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !task.Interactive {
+		t.Error("task.Interactive = false, want true")
+	}
+	if !task.Configuration {
+		t.Error("task.Configuration = false, want true")
+	}
+	if task.Title == "" {
+		t.Error("task.Title is empty, want a default")
+	}
+	if task.Description == "" {
+		t.Error("task.Description is empty, want the default prompt")
+	}
+	want := []string{"self-debug", "self-repair"}
+	sort.Strings(task.Capabilities)
+	if !reflect.DeepEqual(task.Capabilities, want) {
+		t.Fatalf("capabilities = %v, want %v", task.Capabilities, want)
+	}
+}
+
+// TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities
+// checks the other half of the bundle: Configuration only fills in what
+// the request left blank, rather than overwriting a title, description
+// or capability list the caller actually supplied.
+func TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Configuration: true,
+		Title:         "why is the daemon restarting",
+		Description:   "it keeps crash-looping, please debug",
+		Capabilities:  []string{"gemini-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Title != "why is the daemon restarting" {
+		t.Errorf("task.Title = %q, want the caller's own", task.Title)
+	}
+	if task.Description != "it keeps crash-looping, please debug" {
+		t.Errorf("task.Description = %q, want the caller's own", task.Description)
+	}
+	want := []string{"gemini-key", "self-debug", "self-repair"}
+	sort.Strings(task.Capabilities)
+	if !reflect.DeepEqual(task.Capabilities, want) {
+		t.Fatalf("capabilities = %v, want the caller's own plus the configuration agent's", task.Capabilities)
+	}
+}
+
 // A repo outside Config.TargetRepos is filed exactly as asked, but
 // parked awaiting reply -- v1's "a task naming anything else is parked
 // with a comment rather than dispatched" -- so it never reaches

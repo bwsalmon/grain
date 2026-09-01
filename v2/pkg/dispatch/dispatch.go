@@ -32,6 +32,10 @@
 // comment (bwsalmon/agents#389) for why. A package that ranked ready
 // tasks against each other on some richer notion of priority would be a
 // scheduler; this one drains a queue into whatever headroom there is.
+//
+// One exception to "drains into whatever headroom there is": the
+// configuration agent (Task.Configuration, bwsalmon/agents#621) is not
+// drawn from that headroom at all -- see dispatchConfiguration.
 package dispatch
 
 import (
@@ -161,13 +165,25 @@ func retryEligible(ctx context.Context, store *model.Store, taskID string, now t
 // ready order is not made to wait behind one that is not actually
 // eligible yet.
 func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.Time) ([]Dispatch, error) {
+	// The configuration agent (Task.Configuration, bwsalmon/agents#621)
+	// dispatches first, and unconditionally -- see dispatchConfiguration's
+	// own doc comment for why it cannot wait on the same headroom check
+	// below. Doing this before LiveRunCount is read is what makes the
+	// free-capacity math that follows accurate for everything else: a
+	// configuration task started here already counts as live by the time
+	// this function asks.
+	out, err := dispatchConfiguration(ctx, store, now)
+	if err != nil {
+		return nil, err
+	}
+
 	live, err := store.LiveRunCount(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: counting live runs: %w", err)
 	}
 	free := maxConcurrent - live
 	if free <= 0 {
-		return nil, nil
+		return out, nil
 	}
 
 	ready, err := store.Ready(ctx)
@@ -175,7 +191,6 @@ func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.
 		return nil, fmt.Errorf("dispatch: reading ready tasks: %w", err)
 	}
 
-	var out []Dispatch
 	readyIdx := 0
 	for started := 0; started < free; started++ {
 		var taskID string
@@ -195,28 +210,77 @@ func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.
 			}
 		}
 
-		attempts, err := store.Attempts(ctx, taskID)
+		d, err := startTask(ctx, store, taskID, now, maxConcurrent)
 		if err != nil {
-			return nil, fmt.Errorf("dispatch: counting attempts for %s: %w", taskID, err)
-		}
-		attempt := attempts + 1
-		// Sandbox is deliberately left empty: no sandbox exists for this
-		// run yet, and inventing a name here for one nothing has built
-		// would be a claim this package is in no position to make. The
-		// orchestrator acquires one and records it (Store.SetRunSandbox).
-		run := model.Run{
-			ID:        RunID(taskID, attempt),
-			TaskID:    taskID,
-			Attempt:   attempt,
-			StartedAt: now,
-		}
-		if err := store.StartRun(ctx, run, maxConcurrent); err != nil {
 			if errors.Is(err, model.ErrAtCapacity) {
 				return out, nil
 			}
 			return nil, fmt.Errorf("dispatch: starting run for %s: %w", taskID, err)
 		}
-		out = append(out, Dispatch{TaskID: taskID, RunID: run.ID, Attempt: attempt})
+		out = append(out, d)
 	}
 	return out, nil
+}
+
+// dispatchConfiguration starts every configuration-agent task
+// (Store.ReadyConfiguration) that is ready and not still backing off
+// after a failed run, regardless of how much of Config.MaxConcurrent is
+// already spent -- it calls startTask with a limit of 0, which StartRun
+// takes to mean "no limit of mine to enforce" (its own doc comment).
+//
+// The configuration agent is what bwsalmon/agents#621 added for a person
+// to reach for when something about this deployment needs a live look --
+// a question, a problem, or its own configuration -- and a deployment
+// already at its concurrency limit is exactly the kind of "something"
+// that might be. Making it wait behind the same headroom check as
+// ordinary work would strand it at the one moment it is most likely to
+// be needed.
+func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Time) ([]Dispatch, error) {
+	ready, err := store.ReadyConfiguration(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: reading ready configuration tasks: %w", err)
+	}
+	var out []Dispatch
+	for _, taskID := range ready {
+		eligible, err := retryEligible(ctx, store, taskID, now)
+		if err != nil {
+			return nil, fmt.Errorf("dispatch: %w", err)
+		}
+		if !eligible {
+			continue
+		}
+		d, err := startTask(ctx, store, taskID, now, 0)
+		if err != nil {
+			return nil, fmt.Errorf("dispatch: starting configuration run for %s: %w", taskID, err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// startTask records taskID's next run (Store.Attempts + 1) and starts
+// it, against maxConcurrent the same way StartRun itself interprets that
+// limit -- 0 disables the check entirely. Factored out of Cycle's own
+// loop so dispatchConfiguration can share it rather than duplicate the
+// attempt bookkeeping.
+func startTask(ctx context.Context, store *model.Store, taskID string, now time.Time, maxConcurrent int) (Dispatch, error) {
+	attempts, err := store.Attempts(ctx, taskID)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("counting attempts for %s: %w", taskID, err)
+	}
+	attempt := attempts + 1
+	// Sandbox is deliberately left empty: no sandbox exists for this run
+	// yet, and inventing a name here for one nothing has built would be a
+	// claim this package is in no position to make. The orchestrator
+	// acquires one and records it (Store.SetRunSandbox).
+	run := model.Run{
+		ID:        RunID(taskID, attempt),
+		TaskID:    taskID,
+		Attempt:   attempt,
+		StartedAt: now,
+	}
+	if err := store.StartRun(ctx, run, maxConcurrent); err != nil {
+		return Dispatch{}, err
+	}
+	return Dispatch{TaskID: taskID, RunID: run.ID, Attempt: attempt}, nil
 }

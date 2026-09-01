@@ -148,8 +148,11 @@ function Declared({ t }) {
   if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
   // Most tasks are not interactive, so this row only shows up for the
   // ones that are -- the same "shown only when set" treatment the
-  // sandbox override rows above already get.
-  if (t.interactive) rows.push(["Mode", "Interactive"]);
+  // sandbox override rows above already get. Configuration is always
+  // also Interactive (model.Task.Configuration's own doc comment), so it
+  // takes over the same row rather than adding a second one.
+  if (t.configuration) rows.push(["Mode", "Configuration agent"]);
+  else if (t.interactive) rows.push(["Mode", "Interactive"]);
   return (
     <div className="declared">
       {rows.map(([key, value]) => (
