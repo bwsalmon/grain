@@ -2,7 +2,7 @@
 
 This directory is a source snapshot of [bwsalmon/kontur](https://github.com/bwsalmon/kontur)'s
 `main` branch, pulled through the grain git proxy at commit
-`9a43152b09807814ba1a364fab313a72183f9bac` (2026-08-31). Always vendor
+`63b5defa558f9f9c96f68d122eb1e63ce4eaa199` (2026-09-01). Always vendor
 from `main`: grain is kontur's primary consumer, so a change grain needs
 belongs on kontur's `main` and reaches here by a resync, not by being
 applied to this copy (see "Local patches" below). It was first
@@ -17,58 +17,56 @@ bwsalmon/agents#510, a writable qcow2-overlay disk and `kontur exec`),
 fully re-synced to `57bf95d223edc839ccfa0447a051024fe88229d9` (2026-08-30,
 bwsalmon/agents#534, memory hotplug and a mem-agent), and fully re-synced
 again to `5a63863262e9cfb0a5544f36f4e66d247c4058e5` (2026-08-30,
-bwsalmon/agents#562, CPU hotplug and a baked-in guest kernel), and fully
+bwsalmon/agents#562, CPU hotplug and a baked-in guest kernel), fully
 re-synced to `5ed4e0017f5337bc3fde3ab8c29ef42dd1dac848` (2026-08-31, the
-three local patches going upstream plus the build-time guest setup hook).
+three local patches going upstream plus the build-time guest setup hook),
+and fully re-synced to `9a43152b09807814ba1a364fab313a72183f9bac`
+(2026-08-31, flat networking mode and CI, bwsalmon/kontur#29 and #30).
 
-## This resync: flat networking mode
+## This resync: mask udev's NIC rename for the flat-mode control link
 
-`9a43152` is the merge of bwsalmon/kontur#30 into that repo's `main`, and
-carries #29 with it. **This snapshot still has no local patches** -- every
-file here is byte-for-byte upstream, verified with `diff -r` against a
-fresh checkout (which reports only this file). Keep it that way; see
-"Local patches" below.
+`63b5def` is the merge of a single upstream commit, `6d69560`, into
+`main`. **This snapshot still has no local patches** -- every file here is
+byte-for-byte upstream, verified with `diff -r` against a fresh checkout
+(which reports only this file). Keep it that way; see "Local patches"
+below. Only `Dockerfile` and `README.md` changed; no Go source is touched
+by this resync, so `go build ./...`, `go vet ./...` and `go test ./...`
+are unaffected and remain passing as they were at `9a43152`.
 
-Two changes over `5ed4e00`:
+`6d69560` fixes a real bug found by testing kontur end to end against a
+real docker daemon and real KVM (a GCE VM with nested virtualization
+enabled): flat mode's guest-side control link never came up, so `kontur
+exec` timed out and `kontur-mem-agent` never got a target. The guest's
+second NIC boots as `eth1`, which is what `kontur-control-net`'s default
+`KONTUR_CONTROL_IFACE` (and, for the first NIC, the flat-mode `ip=`
+kernel parameter) assume -- but systemd-udevd's stock
+`80-net-setup-link.rules` renames it to a PCI-slot-based name (`ens3`)
+before `kontur-control-net.service` runs, so its `-e /sys/class/net/eth1`
+check silently found nothing and exited 0 without ever configuring an
+address. The first NIC was unaffected only because the kernel's own `ip=`
+autoconfiguration applies before udev renames it, and the rename doesn't
+clear an address once set. Fixed in the Dockerfile's Debian guest-rootfs
+stage by masking `80-net-setup-link.rules` (a `/dev/null` symlink under
+`/etc/udev/rules.d`, which overrides the same filename under
+`/lib/udev/rules.d`), so every NIC keeps the kernel's own enumeration
+order instead of being renamed. Alpine's guest isn't affected -- OpenRC
+plus mdev doesn't do udev's predictable-naming renaming in the first
+place.
 
-- **Flat networking mode** (bwsalmon/kontur#29). kontur's original mode
-  puts each guest on a private in-namespace subnet and shares the
-  namespace's single IP between them with nftables DNAT and masquerade
-  rules. Flat mode (`NETSHIM_MODE=flat`, `konturctl vm create -net flat`)
-  instead splices one guest directly onto the segment the container
-  runtime already put the namespace on, where it takes over the address
-  *and* MAC assigned to it -- an ingress qdisc plus a `mirred egress
-  redirect` filter on each of the external interface and the tap, so the
-  kernel moves every frame between them with no bridge, no routing, no
-  NAT and nothing copied. From outside, the VM is one ordinary container:
-  `-p`, `--network` and DNS all work on the sandbox itself.
-
-  What this repo gets from it: no `-ip`/`-port` to assign, because docker
-  assigns the address; and, because a bridge cannot carry one MAC on two
-  ports while a splice has no forwarding database to confuse, a guest
-  whose MAC is the one the runtime authorized rather than a second one
-  appearing behind the same port. `KonturConfig`'s `BaseIP`/`BasePort`
-  slot derivation exists only to serve the NAT mode's shared bridge and
-  is unused under it.
-
-  It also adds a *second* guest NIC: since the guest now answers to the
-  namespace's own address, anything inside the namespace dialing that
-  address reaches its own stack, so `kontur exec` and the memory agent
-  get a private control link instead. kontur configures the guest side of
-  it in a new `kontur-control-net` overlay service -- which is only in
-  this repo's guest image because `packer/kontur/build-guest.sh` now
-  builds on kontur's rootfs rather than debootstrapping its own.
-
-- **CI** (bwsalmon/kontur#30), including the first automated build of
-  kontur's own OCI image. Note `.github/` is now part of this snapshot;
-  it is inert here, since GitHub only reads workflows from a repository's
-  root `.github/workflows`.
-
-`go build ./...`, `go vet ./...` and `go test ./...` all pass against this
-snapshot. Its own kernel-touching tests (the netshim splice and NAT
-integration tests) skip without `CAP_NET_ADMIN` and `/dev/net/tun`; they
-were run upstream, where CI now runs them as root with
-`KONTUR_NETNS_TESTS=required` so they cannot skip silently.
+`packer/kontur/build-guest.sh` builds this repo's sandbox guest on top of
+kontur's own Dockerfile stages, so this class of bug -- systemd renaming a
+NIC before the service that configures it can find it -- is one grain
+already hit and fixed independently: `packer/kontur/guest-setup.sh`'s
+`GUEST_SETUP_SCRIPT` hook has masked `/etc/systemd/network/99-default.link`
+since the previous resync (`9a43152`), for exactly the same symptom on
+exactly the same NIC. That mask runs on top of kontur's
+guest-rootfs stage and disables the same NamePolicy-driven renaming this
+upstream fix masks a layer lower (`80-net-setup-link.rules` itself), so
+this resync does not change grain's own guest image's behavior -- the two
+fixes overlap rather than stack. It does fix kontur's *own* bundled
+default guest disk image (the one a plain `docker run kontur` boots
+without `packer/kontur` in the picture at all), which had no such
+workaround.
 
 ## Why this copy exists
 
