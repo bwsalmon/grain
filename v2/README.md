@@ -1066,6 +1066,24 @@ holds the same `*model.Store` connection the reply lands on;
 wired into any real deployment, so this is, for now, a gemini-only
 capability in practice, same as the rest of `Config.GrantTools`.
 
+bwsalmon/agents#621 turned that pair of capabilities into an explicit
+"configuration agent": an overlay button the frontend keeps reachable in
+the bottom-right corner of the screen no matter what view is on screen
+(`ConfigurationAgentButton.jsx`), which files a task with nothing but
+`{"configuration": true}` and opens its chat the moment it exists. What
+that one field expands into -- `Interactive` forced true, `self-debug`
+and `self-repair` both granted, a default title and a prompt oriented at
+helping with a problem, a question, or grain's own configuration -- is
+assembled once, server-side, in `ui.Client.CreateTask`, so nobody
+filing one (this button today, conceivably a CLI flag later) has to
+reassemble the bundle by hand. `Task.Configuration` also changes how
+`dispatch.Cycle` schedules the task: `dispatchConfiguration` starts every
+such task unconditionally, ahead of the capacity-gated loop that governs
+everything else, so the configuration agent can always start a sandbox
+even when the deployment is already at `MaxConcurrent` -- the moment
+someone reaches for it is often exactly the moment the deployment is
+already saturated.
+
 ## Reaching a sandbox guest without a route into it
 
 A slot's VM guest is reached by exec'ing into that VM's own container:

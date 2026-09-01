@@ -66,6 +66,16 @@ func fixTask(id string) model.Task {
 	return tk
 }
 
+// configurationTask builds an approved task carrying Task.Configuration
+// (bwsalmon/agents#621) -- the one property Cycle itself cares about is
+// this flag, so nothing else about the task needs to differ from an
+// ordinary one built by task().
+func configurationTask(id string) model.Task {
+	tk := task(id, true)
+	tk.Configuration = true
+	return tk
+}
+
 func putTasks(t *testing.T, store *model.Store, ctx context.Context, tasks ...model.Task) {
 	t.Helper()
 	for _, tk := range tasks {
@@ -175,6 +185,67 @@ func TestCycleRespectsTheConcurrencyLimit(t *testing.T) {
 	}
 	if live, err := store.LiveRunCount(ctx); err != nil || live != 2 {
 		t.Errorf("live runs after the freed capacity was refilled = %d (%v), want 2", live, err)
+	}
+}
+
+// TestCycleDispatchesAConfigurationTaskEvenAtTheConcurrencyLimit is
+// bwsalmon/agents#621's whole point: the configuration agent must always
+// be able to start a sandbox, even when the deployment is already at
+// MaxConcurrent -- unlike TestCycleRespectsTheConcurrencyLimit's ordinary
+// tasks, which the same setup here leaves stuck at capacity.
+func TestCycleDispatchesAConfigurationTaskEvenAtTheConcurrencyLimit(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, task("t0", true), task("t1", true))
+	const maxConcurrent = 2
+
+	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	if err != nil || len(first) != 2 {
+		t.Fatalf("first cycle: %v, %+v", err, first)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != 2 {
+		t.Fatalf("live runs after first cycle: %v, %d", err, live)
+	}
+
+	// The deployment is now saturated -- an ordinary task would get
+	// nothing (TestCycleRespectsTheConcurrencyLimit). Filing the
+	// configuration agent into exactly this situation is the scenario
+	// bwsalmon/agents#621 exists for.
+	putTasks(t, store, ctx, configurationTask("config"))
+	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].TaskID != "config" {
+		t.Fatalf("cycle at the concurrency limit = %+v, want the configuration task dispatched anyway", second)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != 3 {
+		t.Fatalf("live runs after dispatching over the limit = %d (%v), want 3", live, err)
+	}
+}
+
+// TestCycleDispatchesAConfigurationTaskAheadOfOrdinaryTasksWithoutSpendingTheirCapacity
+// checks the other half of dispatchConfiguration's contract: it runs
+// before the ordinary capacity-gated loop, but does not itself eat into
+// the headroom that loop computes -- an ordinary ready task still gets
+// dispatched up to the real limit in the same cycle.
+func TestCycleDispatchesAConfigurationTaskAheadOfOrdinaryTasksWithoutSpendingTheirCapacity(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, configurationTask("config"), task("t0", true), task("t1", true))
+	const maxConcurrent = 2
+
+	got, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched := map[string]bool{}
+	for _, d := range got {
+		dispatched[d.TaskID] = true
+	}
+	if !dispatched["config"] || !dispatched["t0"] || len(got) != 2 {
+		t.Fatalf("cycle = %+v, want the configuration task plus exactly one ordinary task", got)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != 2 {
+		t.Fatalf("live runs after the cycle = %d (%v), want 2", live, err)
 	}
 }
 

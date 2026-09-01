@@ -85,6 +85,7 @@ var Tables = []string{
   ` + "`sandbox_cpus`" + `          INTEGER  NOT NULL DEFAULT 0,
   ` + "`sandbox_memory_mb`" + `     INTEGER  NOT NULL DEFAULT 0,
   ` + "`interactive`" + `           INTEGER  NOT NULL DEFAULT 0,
+  ` + "`configuration`" + `         INTEGER  NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
