@@ -130,6 +130,19 @@ variable "boot_disk_gb" {
     which is the whole point of splitting them: this disk can be
     recreated from scratch (a new boot_image, a bigger machine_type) with
     no state lost.
+
+    Also holds v2/scripts/setup.sh's own $GRAIN_SANDBOX_DIR default
+    (/var/lib/grain-sandbox) -- the per-slot working directories
+    orchestrator.HostSandboxes clones each task's repo into, when
+    enable_kontur_sandboxes is off. Deliberately here rather than on the
+    data disk (bwsalmon/agents#587): unlike the store and secrets, a
+    task's checked-out repo is disposable, and putting it on the disk a
+    redeploy discards is what makes a wipe actually wipe it, rather than
+    leaving one task's leftovers on disk for whatever the next one
+    happens to be. With enable_kontur_sandboxes on (the default), a
+    slot's sandbox is a kontur VM instead, and its own state
+    (kontur_state_dir, /var/lib/kontur, /var/lib/vm-images) already lives
+    here for the same reason.
   EOT
   default     = 40
 }
@@ -140,11 +153,11 @@ variable "data_disk_gb" {
     Persistent disk mounted at /var/lib/grain -- v2/scripts/setup.sh's
     own $GRAIN_DATA_DIR default, so no override is needed for the daemon
     to find it there. Holds the embedded SQLite store
-    (pkg/model/sqlite), the secrets database and credential files
-    (pkg/secrets), and the sandbox working directories
-    orchestrator.HostSandboxes clones each task's repo into. 20 GB is
-    generous for a staging deployment working against a handful of test
-    repos; grow it if the sandbox directory becomes the bottleneck.
+    (pkg/model/sqlite) and the secrets database and credential files
+    (pkg/secrets) -- state a redeploy must not lose. 20 GB is generous
+    for a staging deployment working against a handful of test repos;
+    grow it if the store becomes the bottleneck. Sandbox working
+    directories do not live here -- see boot_disk_gb.
   EOT
   default     = 20
 }

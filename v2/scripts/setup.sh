@@ -41,10 +41,16 @@
 #      its Upgrade button (bwsalmon/agents#396, v2/pkg/upgrade) to check
 #      out a different branch, rebuild, install, and restart
 #      grain-daemon.service later, with no further privilege of its own
-#   5. lays out the rest of $GRAIN_DATA_DIR (secrets, the sandbox root,
-#      the embedded SQLite store) and seeds secrets from environment
-#      variables -- only if they are not already there, so a second run
-#      never overwrites a credential placed by the first one or by hand
+#   5. lays out the rest of $GRAIN_DATA_DIR (secrets, the embedded SQLite
+#      store) and seeds secrets from environment variables -- only if
+#      they are not already there, so a second run never overwrites a
+#      credential placed by the first one or by hand. Also lays out
+#      $GRAIN_SANDBOX_DIR, HostSandboxes' own per-slot working
+#      directories -- deliberately not under $GRAIN_DATA_DIR
+#      (bwsalmon/agents#587): a task's checked-out repo is disposable,
+#      unlike the store and secrets, so it belongs on whatever storage a
+#      VM wipe or redeploy is free to discard along with the rest of the
+#      host, not the one directory meant to survive it
 #   6. compares the freshly built binary's schema version (`grain
 #      schema-version`) against the version recorded in
 #      $GRAIN_DATA_DIR/.schema_version from the last run of this script,
@@ -110,6 +116,15 @@ GRAIN_REPO_URL="${GRAIN_REPO_URL:-https://github.com/bwsalmon/grain.git}"
 GRAIN_REF="${GRAIN_REF:-main}"
 GRAIN_SRC_DIR="${GRAIN_SRC_DIR:-/opt/grain}"
 GRAIN_DATA_DIR="${GRAIN_DATA_DIR:-/var/lib/grain}"
+# Root for HostSandboxes' per-slot working directories -- only used
+# without kontur sandboxing (GRAIN_KONTUR_ENABLE=0). Deliberately not
+# under $GRAIN_DATA_DIR (bwsalmon/agents#587, see this file's own header
+# comment, item 5): unlike GRAIN_DATA_DIR, nothing under here needs to
+# survive a redeploy, so its default lives outside whatever separate,
+# persistent disk an operator mounts at $GRAIN_DATA_DIR (terraform/gcp-v2's
+# own data_disk_gb) -- the same reasoning GRAIN_KONTUR_IMAGES_HOSTPATH and
+# GRAIN_KONTUR_DISK_HOSTPATH below already follow for kontur's own state.
+GRAIN_SANDBOX_DIR="${GRAIN_SANDBOX_DIR:-/var/lib/grain-sandbox}"
 GRAIN_USER="${GRAIN_USER:-grain}"
 
 GRAIN_UI_ADDR="${GRAIN_UI_ADDR:-127.0.0.1:80}"
@@ -222,7 +237,11 @@ Recognized variables:
   GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
   GRAIN_REF                branch to build (default: main)
   GRAIN_SRC_DIR             where the checkout lives (default: /opt/grain)
-  GRAIN_DATA_DIR            secrets/store/sandbox root (default: /var/lib/grain)
+  GRAIN_DATA_DIR            secrets/store root -- state that must survive a redeploy
+                             (default: /var/lib/grain)
+  GRAIN_SANDBOX_DIR         HostSandboxes' per-slot working directory root, only used
+                             without kontur sandboxing -- state that a redeploy is free
+                             to discard (default: /var/lib/grain-sandbox)
   GRAIN_USER                unprivileged account grain runs as (default: grain)
 
   GRAIN_UI_ADDR             UI/API bind address (default: 127.0.0.1:80 -- loopback
@@ -1234,6 +1253,19 @@ seed_github_app_credential() {
   chown "$GRAIN_USER:$GRAIN_USER" "$path"
 }
 
+# setup_sandbox_dir lays out GRAIN_SANDBOX_DIR, orchestrator.HostSandboxes'
+# own baseDir (-sandbox-dir, cmd/grain/daemon.go) -- deliberately its own
+# function, separate from setup_data_dir below, since the whole point
+# (bwsalmon/agents#587) is that this directory is not part of
+# $GRAIN_DATA_DIR: run unconditionally, since a deployment can flip
+# GRAIN_KONTUR_ENABLE later without a fresh install, and grain-daemon.service
+# always passes -sandbox-dir either way (write_systemd_units) even though
+# only the non-kontur path ever reads it.
+setup_sandbox_dir() {
+  log "Laying out $GRAIN_SANDBOX_DIR"
+  install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_SANDBOX_DIR"
+}
+
 setup_data_dir() {
   log "Laying out $GRAIN_DATA_DIR"
   install -d -m0750 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR"
@@ -1246,7 +1278,6 @@ setup_data_dir() {
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/bin"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
-  install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/sandbox"
   # grain-daemon.service's own -data-dir/store, embedded SQLite -- the
   # one process that ever opens it now (this file's own header on
   # bwsalmon/agents#363), so no separate store container or directory
@@ -1457,6 +1488,7 @@ write_systemd_units() {
   local daemon_args=(
     daemon
     -data-dir "$GRAIN_DATA_DIR"
+    -sandbox-dir "$GRAIN_SANDBOX_DIR"
     -max-concurrent "$GRAIN_MAX_CONCURRENT"
     -poll-interval "$GRAIN_POLL_INTERVAL"
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
@@ -1682,6 +1714,7 @@ main() {
   ensure_konturctl
   ensure_kontur_kvm_access
   ensure_kontur_git_proxy_host
+  setup_sandbox_dir
   setup_data_dir
   # After setup_data_dir: seed_kontur_ssh_key, which it calls, is what
   # actually writes $GRAIN_DATA_DIR/secrets/kontur-ssh-key -- the key this

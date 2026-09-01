@@ -39,7 +39,7 @@ func TestRunKeepsTheUIServerUpWhenTheRestOfTheDaemonFails(t *testing.T) {
 
 	uiAddr := freeTCPAddr(t)
 	cfg := config{
-		dataDir: dataDir, maxConcurrent: 1, pollInterval: time.Hour,
+		dataDir: dataDir, sandboxDir: t.TempDir(), maxConcurrent: 1, pollInterval: time.Hour,
 		// A gemini API key file that was never written: runDaemon's own
 		// readTrimmedFile(cfg.geminiAPIKeyFile) fails on its very first
 		// call, before the git proxy, credentials, or reconcile loop ever
