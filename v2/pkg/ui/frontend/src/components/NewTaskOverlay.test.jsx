@@ -23,6 +23,7 @@ describe("NewTaskOverlay", () => {
     render(<NewTaskOverlay config={null} onClose={onClose} onCreated={onCreated} showError={() => {}} />);
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(api).toHaveBeenCalledWith("/api/tasks", {
@@ -31,6 +32,7 @@ describe("NewTaskOverlay", () => {
         title: "Fix the thing",
         description: "",
         repo: "",
+        noRepo: true,
         base: "",
         autoMerge: false,
         sandboxCpus: 0,
@@ -47,6 +49,22 @@ describe("NewTaskOverlay", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 
+  it("greys out Create task until the title and target repo are both filled", async () => {
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    const createButton = screen.getByRole("button", { name: "Create task" });
+
+    expect(createButton).toBeDisabled();
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    expect(createButton).toBeDisabled();
+    await user.click(screen.getByLabelText(/No repo/));
+    expect(createButton).toBeEnabled();
+
+    // Unchecking "No repo" reinstates the requirement to pick one.
+    await user.click(screen.getByLabelText(/No repo/));
+    expect(createButton).toBeDisabled();
+  });
+
   // bwsalmon/agents#534: a per-task sandbox shape override.
   // bwsalmon/agents#613: it now lives behind the "Advanced options" toggle
   // alongside the interactive-session checkbox, so open that first.
@@ -55,6 +73,7 @@ describe("NewTaskOverlay", () => {
     render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
     await user.type(screen.getByLabelText(/vCPUs/), "4");
     await user.type(screen.getByLabelText(/Memory \(MiB\)/), "8192");
@@ -72,6 +91,7 @@ describe("NewTaskOverlay", () => {
     render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
     const file = new File(["fake"], "screenshot.png", { type: "image/png" });
     await user.upload(screen.getByLabelText("Attach files"), file);
     expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
@@ -93,6 +113,7 @@ describe("NewTaskOverlay", () => {
     render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
 
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
+    await user.click(screen.getByLabelText(/No repo/));
 
     const dependsOnInput = screen.getByPlaceholderText("Search tasks to depend on…");
     await user.type(dependsOnInput, "12");
@@ -142,6 +163,7 @@ describe("NewTaskOverlay", () => {
     await user.type(screen.getByLabelText(/Title/), "Talk this through");
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
     await user.click(screen.getByLabelText(/Interactive session/));
+    await user.click(screen.getByLabelText(/No repo/));
     expect(screen.queryByLabelText(/Queue immediately/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
@@ -159,6 +181,7 @@ describe("NewTaskOverlay", () => {
     render(<NewTaskOverlay config={null} onClose={onClose} onCreated={() => {}} showError={showError} />);
 
     await user.type(screen.getByLabelText(/Title/), "x");
+    await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "title is required" }));

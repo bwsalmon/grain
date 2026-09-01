@@ -381,6 +381,39 @@ func TestCreateTaskNeedsATargetWhenThereIsNoDefault(t *testing.T) {
 	}
 }
 
+// NoRepo (bwsalmon/agents#614) is the deliberate choice, distinct from a
+// blank Repo: even with a configured DefaultTarget to fall back to, an
+// explicit NoRepo files the task standalone rather than pinning it to
+// the default.
+func TestCreateTaskNoRepoFilesAStandaloneTask(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "standalone", NoRepo: true})
+	if err != nil {
+		t.Fatalf("creating a no-repo task: %v", err)
+	}
+	if task.Repo != "" {
+		t.Fatalf("repo = %q, want none", task.Repo)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("reading the stored task: %v", err)
+	}
+	if stored.Target != nil {
+		t.Fatalf("stored target = %+v, want nil", stored.Target)
+	}
+}
+
+func TestCreateTaskRejectsRepoAndNoRepoTogether(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	_, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "confused", Repo: "acme/other", NoRepo: true})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
 func TestUpdateTaskChangesOnlyTheFieldsGiven(t *testing.T) {
 	c, _, ctx := testClient(t)
 	task := create(t, c, ctx)
