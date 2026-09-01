@@ -177,6 +177,36 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // bwsalmon/agents#609: which agent.Framework a run is driven by.
+  it("switches agentFramework to claude and includes it in the payload only when changed", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByRole("radio", { name: "Gemini" })).toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "Claude" }));
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ agentFramework: "claude" }),
+    });
+  });
+
+  it("leaves agentFramework out of the payload when already claude and left alone", async () => {
+    api.mockResolvedValueOnce({ ...settings, agentFramework: "claude" }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByRole("radio", { name: "Claude" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+  });
+
   it("reports the error and does not close on a failed save", async () => {
     api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("pollInterval must be positive"));
     const showError = vi.fn();
