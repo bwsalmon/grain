@@ -98,7 +98,7 @@ func testProvider(minter *fakeMinter) *Provider {
 func testContext(creds model.CredentialResolver, now time.Time) model.CapabilityContext {
 	return model.CapabilityContext{
 		Task:        model.Task{ID: "t1"},
-		Run:         model.Run{ID: "t1-r1", TaskID: "t1"},
+		Run:         model.Run{ID: "t1-1", TaskID: "t1"},
 		Now:         now,
 		Credentials: creds,
 	}

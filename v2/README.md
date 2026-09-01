@@ -589,7 +589,7 @@ accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached via
 `mcp.NewSSHSandboxTools` instead of a local directory, created
 via `kontur.Create` on first use and reused across cycles the same way
 `HostSandboxes` reuses its directories — and the daemon can now be
-pointed at it for real: `-kontur-vm-name-prefix` opts a deployment in,
+pointed at it for real: `-kontur-sandboxes` opts a deployment in,
 with `-kontur-ssh-user`/`-kontur-exec-key`/`-kontur-workspace` for
 reaching the guest and repeatable `-kontur-create-arg` flags building
 `KonturConfig.CreateArgs` (bwsalmon/agents#274) — a deployment's own
@@ -638,7 +638,7 @@ nothing could route to.
 
 bwsalmon/agents#567 closed that gap: `-kontur-git-proxy-host` (required
 alongside `-kontur-ssh-user`/`-kontur-exec-key`/`-kontur-workspace`
-whenever `-kontur-vm-name-prefix` is set) names the address a kontur VM's
+whenever `-kontur-sandboxes` is set) names the address a kontur VM's
 guest can actually reach this daemon at — typically the docker bridge
 gateway its own outbound NAT (`third_party/kontur/internal/netshim`)
 routes through, since the guest's `127.0.0.1` is its own, unrelated
@@ -1007,7 +1007,7 @@ vm create` flag a deployment's own `KonturConfig.CreateArgs` above would
 pass the built image's location through as, owned by bwsalmon/kontur's
 own CLI and still not confirmed from this repo — bwsalmon/agents#274).
 The daemon still defaults `Deps.Sandboxes` to `HostSandboxes`, but
-`-kontur-vm-name-prefix` (and the rest of its `-kontur-*`/
+`-kontur-sandboxes` (and the rest of its `-kontur-*`/
 `-cri-runtime-endpoint` flags, see "What this does not have yet" above)
 now opts a real deployment into `KonturSandboxes` instead — the flag that
 picks the image lives in `-kontur-create-arg`, repeated once per
@@ -1712,16 +1712,45 @@ setup path it is the ordinary way a run fails, so `runOne` finishes such
 a run itself, outcome `setup-failed`, and dispatch's own backoff retries
 the task.
 
-Two smaller consequences of the same move: the VM-name budget got tighter
-without the flag that spends it changing, since a name built from a run
-id needs more of `maxVMNameLen`'s 11 bytes than one built from a slot
-number — so `CheckNamePrefix` refuses an outgrown
+Two smaller consequences of the same move. The first: **a VM's name stopped
+being anyone's choice.** The budget got tighter without the flag that spends
+it changing, since a name built from a run id needs more of
+`maxVMNameLen`'s 11 bytes than one built from a slot number. The first
+answer was `CheckNamePrefix`, refusing an outgrown
 `-kontur-vm-name-prefix` at startup rather than letting every dispatch
-discover it separately. And `Release` runs on a context detached from
+discover it separately — which caught nothing, because the value it checks
+was never in this repo's Go: `v2/scripts/setup.sh` and `terraform/gcp-v2`
+both defaulted to `kontur-`, which fit while a VM was named `kontur-1`, and
+the default deploy path (kontur sandboxing being on by default) therefore
+refused to start at all.
+
+The check was the wrong shape. 11 bytes minus a run id's nine leaves two,
+and there is no useful choice to make inside two bytes — only a wrong one,
+whose cost is a daemon that cannot build a single VM. So the name is
+`orchestrator.VMNamePrefix`, a constant, and the flag that used to carry it
+is `-kontur-sandboxes`, a bool that only opts in. Deployments that must not
+reap each other's VMs get that from separate `-kontur-state-dir` values,
+which is what `ReapOrphans` actually lists from.
+
+`dispatch.RunID` gave a byte back at the same time: it reads
+`<task>-<attempt>` rather than `<task>-r<attempt>`, the `r` having said
+only what the field's position already said, while costing a decimal digit
+of task id. The nine bytes now cover eight digits of task id and attempt
+combined — `999999-99` fits exactly — and
+`TestVMNameBudgetCoversRealisticRunIDs` pins where that ceiling actually
+bites, since task ids only ever climb toward it.
+
+The second: `Release` runs on a context detached from
 cancellation, which is right, but now with a deadline: unbounded, a hung
 `konturctl vm delete` would pin the dispatch goroutine and the unfinished
 run row beneath it for the life of the process, which is the failure
-detaching is meant to prevent.
+detaching is meant to prevent. `Acquire`'s own cleanup needs that same
+detachment for a sharper reason: `kontur.Delete` execs through
+`exec.CommandContext`, so against an already-cancelled context
+`deleteQuietly` did not merely fail — it never ran at all. Since `ctx` is
+cancelled whenever the daemon is stopping *or* a task was closed mid-run,
+the ordinary way an `Acquire` is interrupted was also the way it leaked a
+VM, until the next startup's `ReapOrphans` got to it.
 
 **What this costs.** A VM boot moves onto the critical path of every
 task, where it used to be paid once at startup. `docs/data-model.md`

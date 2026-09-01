@@ -247,7 +247,7 @@ func TestEnsureTokenIsSafeForConcurrentCallers(t *testing.T) {
 	errs := make([]error, sandboxes)
 	var wg sync.WaitGroup
 	for i := range names {
-		names[i] = fmt.Sprintf("t%d-r1", i)
+		names[i] = fmt.Sprintf("t%d-1", i)
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -301,7 +301,7 @@ func TestAuthenticateSeesTokensMintedConcurrentlyAfterLoad(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			name := fmt.Sprintf("t%d-r1", i)
+			name := fmt.Sprintf("t%d-1", i)
 			token, err := store.EnsureToken(name)
 			if err != nil {
 				t.Errorf("EnsureToken(%s): %v", name, err)
@@ -315,7 +315,7 @@ func TestAuthenticateSeesTokensMintedConcurrentlyAfterLoad(t *testing.T) {
 
 	for i, ok := range results {
 		if !ok {
-			t.Errorf("t%d-r1's freshly minted token did not authenticate", i)
+			t.Errorf("t%d-1's freshly minted token did not authenticate", i)
 		}
 	}
 }
@@ -324,15 +324,15 @@ func TestRevokeDropsOneSandboxAndLeavesTheRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sandbox-tokens.json")
 	store := NewSandboxTokenStore(path)
 
-	gone, err := store.EnsureToken("t1-r1")
+	gone, err := store.EnsureToken("t1-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	kept, err := store.EnsureToken("t2-r1")
+	kept, err := store.EnsureToken("t2-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Revoke("t1-r1"); err != nil {
+	if err := store.Revoke("t1-1"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -343,7 +343,7 @@ func TestRevokeDropsOneSandboxAndLeavesTheRest(t *testing.T) {
 	if _, ok := tokens.Authenticate(gone); ok {
 		t.Error("a revoked sandbox's token should no longer authenticate")
 	}
-	if name, ok := tokens.Authenticate(kept); !ok || name != "t2-r1" {
+	if name, ok := tokens.Authenticate(kept); !ok || name != "t2-1" {
 		t.Errorf("revoking one sandbox took another's token with it: got %q, %v", name, ok)
 	}
 }
@@ -357,13 +357,13 @@ func TestRevokeAnUnknownSandboxIsNotAnError(t *testing.T) {
 	if err := store.Revoke("never-minted"); err != nil {
 		t.Fatalf("Revoke against a missing file: %v", err)
 	}
-	if _, err := store.EnsureToken("t1-r1"); err != nil {
+	if _, err := store.EnsureToken("t1-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Revoke("t1-r1"); err != nil {
+	if err := store.Revoke("t1-1"); err != nil {
 		t.Fatalf("first Revoke: %v", err)
 	}
-	if err := store.Revoke("t1-r1"); err != nil {
+	if err := store.Revoke("t1-1"); err != nil {
 		t.Fatalf("second Revoke: %v", err)
 	}
 }

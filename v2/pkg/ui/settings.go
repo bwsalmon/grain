@@ -61,7 +61,7 @@ type Settings struct {
 	// (the default for both) means "use bwsalmon/kontur's own default"
 	// rather than a deliberately tiny VM. Meaningless, and simply unused,
 	// under a deployment running the default local-directory sandboxing
-	// (no -kontur-vm-name-prefix); GetSettings still reports whatever is
+	// (no -kontur-sandboxes); GetSettings still reports whatever is
 	// stored either way, the same as every other kontur* setting here.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`

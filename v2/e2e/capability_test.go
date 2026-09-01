@@ -234,7 +234,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	// independently of the agent's tool calls, the same way harness_test.go's
 	// own assertions read back the upstream repo rather than trusting the
 	// agent's report of what it did.
-	placed := filepath.Join(sandboxes.rootOf(task.ID+"-r1"), strings.TrimPrefix(placementPath, "/"))
+	placed := filepath.Join(sandboxes.rootOf(task.ID+"-1"), strings.TrimPrefix(placementPath, "/"))
 	data, err := os.ReadFile(placed)
 	if err != nil {
 		t.Fatalf("placement was not written to %s: %v", placed, err)

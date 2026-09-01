@@ -679,7 +679,7 @@ func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T)
 			dB = d
 		}
 	}
-	if dA.RunID != "iss-4a-r1" || dB.RunID != "iss-4b-r1" {
+	if dA.RunID != "iss-4a-1" || dB.RunID != "iss-4b-1" {
 		t.Fatalf("expected first attempts for iss-4a and iss-4b, got %+v", dispatches)
 	}
 	assertState(w, "iss-4a", model.StateRunning, true)

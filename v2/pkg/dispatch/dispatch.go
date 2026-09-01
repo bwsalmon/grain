@@ -63,8 +63,17 @@ type Dispatch struct {
 // run's name must agree without coordinating, and a name that already
 // encodes its own attempt is self-describing in a log with nothing to
 // look up.
+//
+// The separator carries no letter of its own. It used to read
+// "<task>-r<attempt>", which was a byte better spent: a run id is what a
+// kontur VM is named after, and that name has 11 bytes to live in
+// (orchestrator.maxVMNameLen), so the "r" cost real headroom -- one
+// decimal digit of task id -- to say something the position of the field
+// already says. Task ids never contain "-" (Store.NewTaskID hands out
+// decimal counters), so the last "-" still splits the two halves
+// unambiguously.
 func RunID(taskID string, attempt int) string {
-	return fmt.Sprintf("%s-r%d", taskID, attempt)
+	return fmt.Sprintf("%s-%d", taskID, attempt)
 }
 
 // baseRetryBackoff and maxRetryBackoff bound how long Cycle waits after a

@@ -24,11 +24,11 @@ func TestHostSandboxesHealthReportsEveryLiveSandboxAsReady(t *testing.T) {
 		t.Fatalf("Health with nothing running = %v, want empty", got)
 	}
 
-	first, err := h.Acquire(ctx, "t1-r1", orchestrator.Shape{})
+	first, err := h.Acquire(ctx, "t1-1", orchestrator.Shape{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := h.Acquire(ctx, "t2-r1", orchestrator.Shape{})
+	second, err := h.Acquire(ctx, "t2-1", orchestrator.Shape{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +55,8 @@ func TestHostSandboxesHealthReportsEveryLiveSandboxAsReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = h.Health(ctx)
-	if len(got) != 1 || got[0].Sandbox != "t2-r1" {
-		t.Fatalf("Health after releasing one = %v, want only t2-r1", got)
+	if len(got) != 1 || got[0].Sandbox != "t2-1" {
+		t.Fatalf("Health after releasing one = %v, want only t2-1", got)
 	}
 	if err := second.Release(ctx); err != nil {
 		t.Fatal(err)
@@ -73,7 +73,6 @@ func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "g-",
 		StateDir:    stateDir,
 		SSHUser:     "debian",
 		ExecKeyPath: "/images/key",
@@ -84,7 +83,7 @@ func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
 		t.Fatalf("Health before any VM exists = %v, want empty", got)
 	}
 
-	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
+	if _, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,8 +92,8 @@ func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
 		t.Fatalf("Health = %v, want 1 entry", got)
 	}
 	h := got[0]
-	if h.Sandbox != "t1-r1" || h.Backend != "kontur" || h.Name != "g-t1-r1" {
-		t.Errorf("Sandbox/Backend/Name = %q/%q/%q, want t1-r1/kontur/g-t1-r1", h.Sandbox, h.Backend, h.Name)
+	if h.Sandbox != "t1-1" || h.Backend != "kontur" || h.Name != "g-t1-1" {
+		t.Errorf("Sandbox/Backend/Name = %q/%q/%q, want t1-1/kontur/g-t1-1", h.Sandbox, h.Backend, h.Name)
 	}
 	if h.Error != "" {
 		t.Errorf("Error = %q, want none", h.Error)
@@ -131,7 +130,6 @@ func TestKonturSandboxesHealthReportsErrorWhenAVMStopsAnswering(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -140,7 +138,7 @@ func TestKonturSandboxesHealthReportsErrorWhenAVMStopsAnswering(t *testing.T) {
 		ReadyPollInterval: 5 * time.Millisecond,
 	})
 
-	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
+	if _, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
 

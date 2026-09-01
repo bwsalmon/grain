@@ -242,7 +242,7 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 		}
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "t0-r1", TaskID: "t0", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now,
+		ID: "t0-1", TaskID: "t0", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now,
 	}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -252,14 +252,14 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 
 	// A sandbox is long-lived and recreated on demand, not per task: what
 	// frees it is the run finishing, not a reset the store knows about.
-	if err := store.FinishRun(ctx, "t0-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
+	if err := store.FinishRun(ctx, "t0-1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
 	if occ, _ := store.LiveRunCount(ctx); occ != 0 {
 		t.Fatalf("occupied after finish = %v, want none", occ)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "t1-r1", TaskID: "t1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour),
+		ID: "t1-1", TaskID: "t1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour),
 	}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, r
 		}
 
 		attempt := ts.attempts + 1
-		runID := fmt.Sprintf("%s-r%d", id, attempt)
+		runID := fmt.Sprintf("%s-%d", id, attempt)
 		// The sandbox is the run's own, named after it -- what
 		// orchestrator.runOne records via SetRunSandbox once it has
 		// acquired one.

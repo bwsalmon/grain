@@ -202,11 +202,11 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 
 			uiAddr: uiAddr, actor: "tester",
 
-			konturVMNamePrefix: "grain-true-e2e-7e64d1b4-",
-			konturStateDir:     konturStateDir,
-			konturSSHUser:      "debian",
-			konturExecKey:      "/images/key",
-			konturWorkspace:    workspace,
+			konturSandboxes: true,
+			konturStateDir:  konturStateDir,
+			konturSSHUser:   "debian",
+			konturExecKey:   "/images/key",
+			konturWorkspace: workspace,
 		})
 	}()
 

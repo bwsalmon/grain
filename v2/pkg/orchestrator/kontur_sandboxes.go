@@ -17,21 +17,6 @@ import (
 // bwsalmon/kontur-managed VM per run. StateDir defaults to
 // kontur.DefaultStateDir when left zero.
 type KonturConfig struct {
-	// NamePrefix is prepended to a sandbox's own name to make its VM
-	// name, so every VM a deployment owns is identifiable as its own --
-	// which is what the startup sweep (ReapOrphans) matches on to find
-	// VMs a previous process left behind.
-	//
-	// Keep it short. Under BackendDocker the whole VM name must fit 11
-	// bytes: netshim names each VM's tap device "tap-"+name (and its
-	// flat-mode control link "ctl-"+name), and Linux caps interface names
-	// at 15 bytes (IFNAMSIZ-1) -- internal/staticpod.VMSpec.Validate
-	// refuses a longer one at "vm create" time. A sandbox is named after
-	// its run ("<task>-r<attempt>", dispatch.RunID), so a two-byte prefix
-	// leaves nine, which covers five-digit task ids with double-digit
-	// attempts. VMNameFor is where that budget is actually checked, per
-	// sandbox, since only there is the run's own name known.
-	NamePrefix string
 	// StateDir is kontur's VM state directory (kontur.DefaultStateDir if
 	// empty), where kontur records one "<name>.json" per VM.
 	StateDir string
@@ -240,53 +225,55 @@ func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
 
 // maxVMNameLen is how long a kontur VM name may be under the docker
 // backend: netshim derives "tap-<name>" and "ctl-<name>" from it, and
-// Linux caps an interface name at 15 bytes (IFNAMSIZ-1). Checked here so
-// an over-long name fails with something that says what the budget is and
-// what is spending it, rather than as `konturctl vm create` refusing a
-// tap device name several layers down.
+// Linux caps an interface name at 15 bytes (IFNAMSIZ-1). Checked in
+// VMNameFor so an over-long name fails with something that says what the
+// budget is and what is spending it, rather than as `konturctl vm create`
+// refusing a tap device name several layers down.
 const maxVMNameLen = 11
 
-// minRunNameBudget is how many of maxVMNameLen's bytes a usable
-// NamePrefix has to leave for the run's own name -- what CheckNamePrefix
-// enforces.
+// VMNamePrefix is prepended to a sandbox's own name to make its VM name,
+// so every VM this deployment owns is identifiable as its own -- which is
+// what the startup sweep (ReapOrphans) matches on to find VMs a previous
+// process left behind.
 //
-// Nine, because a sandbox is named "<task id>-r<attempt>" (dispatch.
-// RunID) and task ids are a monotonically increasing counter
-// (Store.NewTaskID): nine covers a five-digit task id with a double-digit
-// attempt, which is the budget NamePrefix's own doc comment already
-// commits to. A deployment should not get to discover it has outgrown its
-// prefix on the day its task ids reach five digits.
-const minRunNameBudget = 9
+// A constant rather than configuration, because there is nothing left to
+// configure. maxVMNameLen leaves 11 bytes for the whole name and a run id
+// ("<task id>-<attempt>", dispatch.RunID) needs most of them, so the only
+// prefixes that fit at all are one or two bytes -- a choice too narrow to
+// be worth an operator's attention, and one where a wrong answer is not a
+// preference but a daemon that cannot build a single VM. It was
+// -kontur-vm-name-prefix until now, defaulting (in v2/scripts/setup.sh
+// and terraform/gcp-v2 alike) to "kontur-", which fit while a VM was
+// named after a *slot* ("kontur-1") and stopped fitting the moment one
+// was named after its run.
+//
+// Two bytes rather than one: this is the whole of what tells a grain VM
+// apart from anything else on the host, and ReapOrphans deletes what it
+// matches. Deployments that must not reap each other's VMs get that from
+// separate -kontur-state-dir values, which is what ReapOrphans actually
+// lists from.
+const VMNamePrefix = "g-"
 
-// CheckNamePrefix reports whether NamePrefix leaves a usable VM-name
-// budget, for a caller that would rather know at startup than at dispatch.
+// maxRunNameLen is how much of maxVMNameLen is left for the run's own
+// name once VMNamePrefix has taken its share.
 //
-// This earns its own check because the budget got tighter without the
-// flag that spends it changing. A sandbox used to be named after a slot,
-// so a VM was "<prefix>1" and nearly any prefix fit; it is named after a
-// run now, so the same configured prefix has several more bytes to
-// accommodate. An existing deployment's -kontur-vm-name-prefix can
-// therefore be one this build cannot build a single VM under -- and
-// without this that surfaces as every dispatch failing to acquire a
-// sandbox, one run at a time, instead of the daemon saying so once.
-func (k *KonturSandboxes) CheckNamePrefix() error {
-	budget := maxVMNameLen - len(k.cfg.NamePrefix)
-	if budget < minRunNameBudget {
-		return fmt.Errorf("orchestrator: kontur VM name prefix %q is %d bytes, leaving %d of the %d-byte budget netshim's "+
-			"tap device naming imposes -- a sandbox is named after its run (\"<task id>-r<attempt>\") and needs at least %d, "+
-			"so shorten -kontur-vm-name-prefix to %d bytes or fewer",
-			k.cfg.NamePrefix, len(k.cfg.NamePrefix), budget, maxVMNameLen, minRunNameBudget, maxVMNameLen-minRunNameBudget)
-	}
-	return nil
-}
+// Nine, one of which "<task id>-<attempt>" (dispatch.RunID) spends on its
+// own separator -- so eight digits of task id and attempt combined, and
+// "999999-99" sits exactly at the limit. Task ids are a monotonically
+// increasing counter (Store.NewTaskID), so that is a ceiling a long-lived
+// deployment climbs toward rather than a fixed fact; see
+// TestVMNameBudgetCoversRealisticRunIDs for where it actually bites.
+const maxRunNameLen = maxVMNameLen - len(VMNamePrefix)
 
 // VMNameFor returns the kontur VM name for a sandbox, so something
 // outside this package can predict it without calling Acquire.
 func (k *KonturSandboxes) VMNameFor(sandbox string) (string, error) {
-	name := k.cfg.NamePrefix + sandbox
+	name := VMNamePrefix + sandbox
 	if len(name) > maxVMNameLen {
-		return "", fmt.Errorf("orchestrator: kontur VM name %q is %d bytes, over the %d-byte limit netshim's tap device naming imposes -- shorten -kontur-vm-name-prefix (%q)",
-			name, len(name), maxVMNameLen, k.cfg.NamePrefix)
+		return "", fmt.Errorf("orchestrator: kontur VM name %q is %d bytes, over the %d-byte limit netshim's tap "+
+			"device naming imposes -- a sandbox is named after its run (\"<task id>-<attempt>\", dispatch.RunID), "+
+			"and %q leaves %d bytes for one",
+			name, len(name), maxVMNameLen, VMNamePrefix, maxRunNameLen)
 	}
 	return name, nil
 }
@@ -307,6 +294,11 @@ func (k *KonturSandboxes) Acquire(ctx context.Context, sandbox string, shape Sha
 		return nil, err
 	}
 	if err := k.create(ctx, name, shape); err != nil {
+		// Even a failed create can leave a VM behind -- `konturctl vm
+		// create` brings up a netns holder and the VM's own container in
+		// separate steps, so a failure between them is a half-built VM
+		// with nothing holding a handle to it.
+		k.deleteQuietly(ctx, name)
 		return nil, err
 	}
 
@@ -323,6 +315,7 @@ func (k *KonturSandboxes) Acquire(ctx context.Context, sandbox string, shape Sha
 			return nil, err
 		}
 		if err := k.create(ctx, name, shape); err != nil {
+			k.deleteQuietly(ctx, name)
 			return nil, fmt.Errorf("orchestrator: kontur VM %q's container was found dead, rebuilding it: %w", name, err)
 		}
 		if runner, err = k.runnerFor(ctx, name); err != nil {
@@ -358,19 +351,42 @@ func (k *KonturSandboxes) create(ctx context.Context, name string, shape Shape) 
 	return nil
 }
 
+// acquireCleanupTimeout bounds deleteQuietly's own detached delete, the
+// same trade konturSandbox.Release makes with runCleanupTimeout and for
+// the same two reasons: unbounded, a wedged `konturctl vm delete` would
+// pin the dispatch goroutine that is already on its way out, and a VM
+// that outlives the timeout is ReapOrphans' problem at the next startup.
+// Shorter than runCleanupTimeout because nothing is waiting on this VM --
+// it never became usable, so there is no guest to shut down gracefully.
+const acquireCleanupTimeout = 30 * time.Second
+
 // deleteQuietly tears down a VM that never became usable, so a failed
 // Acquire does not leave one running with no handle to release it. The
 // error is dropped deliberately: the caller is already failing for a
 // reason it can act on, and "the cleanup after that also failed" would
 // replace it with a less useful one. ReapOrphans catches whatever this
 // misses at the next startup.
+//
+// It runs on a context detached from the caller's cancellation, exactly
+// as konturSandbox.Release does. kontur.Delete execs konturctl through
+// exec.CommandContext, so on an already-cancelled ctx the delete does not
+// merely fail -- it never runs at all, and the VM is left behind. That is
+// not a rare shutdown-only case: ctx is cancelled whenever the daemon is
+// stopping *or* a task was closed mid-run, so the ordinary way an Acquire
+// is interrupted is also the way it would leak. Detaching here is what
+// makes "a failed Acquire leaves nothing behind" true on the path that
+// most needs it.
 func (k *KonturSandboxes) deleteQuietly(ctx context.Context, name string) {
-	if kontur.Exists(k.cfg.stateDir(), name) {
-		_ = kontur.Delete(ctx, k.cfg.stateDir(), name)
+	if !kontur.Exists(k.cfg.stateDir(), name) {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acquireCleanupTimeout)
+	defer cancel()
+	_ = kontur.Delete(ctx, k.cfg.stateDir(), name)
 }
 
-// ReapOrphans deletes every VM under this deployment's own NamePrefix,
+// ReapOrphans deletes every VM under VMNamePrefix in this deployment's
+// own state directory,
 // and reports how many it removed. A daemon calls it once, at startup,
 // before anything can dispatch -- the same moment, and for the same
 // reason, orchestrator.RecoverOrphanedRuns reconciles the run rows a dead
@@ -383,9 +399,6 @@ func (k *KonturSandboxes) deleteQuietly(ctx context.Context, name string) {
 // been deleted already, and the only question is whether something died
 // before that could happen.
 func (k *KonturSandboxes) ReapOrphans(ctx context.Context) (int, error) {
-	if k.cfg.NamePrefix == "" {
-		return 0, nil
-	}
 	names, err := kontur.List(k.cfg.stateDir())
 	if err != nil {
 		return 0, fmt.Errorf("orchestrator: listing kontur VMs to reap: %w", err)
@@ -393,7 +406,7 @@ func (k *KonturSandboxes) ReapOrphans(ctx context.Context) (int, error) {
 	var reaped int
 	var errs []error
 	for _, name := range names {
-		if !strings.HasPrefix(name, k.cfg.NamePrefix) {
+		if !strings.HasPrefix(name, VMNamePrefix) {
 			continue
 		}
 		if err := kontur.Delete(ctx, k.cfg.stateDir(), name); err != nil {
@@ -490,21 +503,19 @@ func (k *KonturSandboxes) execRunner(name string) *mcp.DockerExecRunner {
 }
 
 // waitForGuestExec polls a trivial command through the docker-exec
-// transport until it succeeds or deadline passes -- the docker-exec
-// counterpart to waitForSSHPort, and for the same reason: a VM whose
-// container is up is not yet a VM whose guest has finished booting, and
-// everything short of that looks like a failure to reach it.
+// transport until it succeeds or deadline passes: a VM whose container is
+// up is not yet a VM whose guest has finished booting, and everything
+// short of that looks like a failure to reach it.
 //
 // It probes with a runner of its own whose ConnectTimeout is one poll
 // interval, so a probe against a guest that is not up yet gives up and
 // lets this loop decide whether to keep waiting, rather than each probe
 // sitting on guestexec's own 30s default and overshooting the deadline
-// this is measuring against. That mirrors what waitForSSHPort gets from
-// giving its dialer a readyPollInterval timeout.
+// this is measuring against.
 //
-// Like waitForSSHPort, it fails immediately on a VM container that has
-// already exited rather than waiting out the rest of deadline exec'ing
-// into something that will never answer.
+// It fails immediately on a VM container that has already exited rather
+// than waiting out the rest of deadline exec'ing into something that will
+// never answer.
 func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, deadline time.Time) error {
 	probe := k.execRunner(name)
 	probe.ConnectTimeout = k.cfg.readyPollInterval()
@@ -553,8 +564,8 @@ func guestExecProbeError(container, stderr string, exitCode int) error {
 }
 
 // dockerContainerDead is the set of docker State.Status values
-// waitForSSHPort treats as "this container will never answer" rather than
-// "not ready yet" -- see dockerExitedEarly's own doc comment. "created" is
+// dockerExitedEarly treats as "this container will never answer" rather
+// than "not ready yet" -- see its own doc comment. "created" is
 // deliberately absent: a container docker has accepted but not yet
 // started is still on its way up, same as "running" itself taking a
 // moment to start accepting connections.

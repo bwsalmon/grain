@@ -265,12 +265,7 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 
 	stateDir := t.TempDir()
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		// "kdc-" + a one-digit slot number stays well under the 11-byte
-		// cap KonturConfig.NamePrefix's own doc comment explains (netshim
-		// names each VM's tap device "tap-"+name, and Linux caps interface
-		// names at 15 bytes).
-		NamePrefix: "kdc-",
-		StateDir:   stateDir,
+		StateDir: stateDir,
 		CreateArgs: []string{
 			"-kontur-image", image,
 			"-images-hostpath", imagesHostPath,
@@ -292,7 +287,11 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 		// it does not.
 	})
 
-	slots := []string{"1", "2"}
+	// Two run-shaped sandbox names, distinct from the other real test's
+	// below. The prefix is a constant now (orchestrator.VMNamePrefix), so
+	// keeping these tests' VMs apart on a shared docker daemon is the
+	// sandbox name's job rather than the prefix's.
+	slots := []string{"c1-1", "c1-2"}
 	names := make([]string, len(slots))
 	for i, slot := range slots {
 		name, err := k.VMNameFor(slot)
@@ -478,12 +477,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 
 	stateDir := t.TempDir()
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		// "kde-" + a one-digit slot, staying under the 11-byte cap
-		// KonturConfig.NamePrefix's own doc comment explains, and
-		// distinct from the two tests above so all three can run back to
-		// back.
-		NamePrefix: "kde-",
-		StateDir:   stateDir,
+		StateDir: stateDir,
 		CreateArgs: []string{
 			"-kontur-image", image,
 			"-images-hostpath", imagesHostPath,
@@ -514,7 +508,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		ReadyPollInterval: time.Second,
 	})
 
-	name, err := k.VMNameFor("1")
+	name, err := k.VMNameFor("e1-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +518,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		}
 	})
 
-	sb, err := k.Acquire(context.Background(), "1", orchestrator.Shape{})
+	sb, err := k.Acquire(context.Background(), "e1-1", orchestrator.Shape{})
 	if err != nil {
 		t.Fatalf("Acquire over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
 	}

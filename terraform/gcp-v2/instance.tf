@@ -36,7 +36,6 @@ locals {
     enable_kontur_sandboxes = var.enable_kontur_sandboxes
     kontur_image_bucket     = var.kontur_image_bucket
     kontur_oci_image        = var.kontur_oci_image
-    kontur_vm_name_prefix   = var.kontur_vm_name_prefix
     kontur_ssh_user         = var.kontur_ssh_user
     kontur_workspace        = var.kontur_workspace
     kontur_base_ip          = var.kontur_base_ip

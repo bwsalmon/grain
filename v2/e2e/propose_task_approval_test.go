@@ -124,7 +124,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 	// Phase 1: file the parent task the way a human would, dispatch it,
 	// and have its own run both push a branch and call propose_task.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{parentID + "-r1": credentialedRoot()}}
+		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{parentID + "-1": credentialedRoot()}}
 		fileIssue(w, parentID, human("alice"), parentTarget)
 		assertState(w, parentID, model.StateQueued, false)
 
@@ -222,7 +222,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 	// Phase 3: now it dispatches, and runs a normal push/PR/merge/close
 	// cycle of its own, exactly like any other task.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{proposalID + "-r1": credentialedRoot()}}
+		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{proposalID + "-1": credentialedRoot()}}
 
 		clock = clock.Add(time.Minute)
 		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)
