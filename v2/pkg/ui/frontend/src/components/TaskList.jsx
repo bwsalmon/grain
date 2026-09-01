@@ -3,6 +3,7 @@ import { Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
+import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
 const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
 
@@ -237,7 +238,12 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
           inputProps={{ "aria-label": `Select ${t.id}` }}
         />
       )}
-      <span className={`badge badge-${t.state}`} title={STATE_LABELS[t.state] || t.state} />
+      <span
+        className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
+        title={STATE_LABELS[t.state] || t.state}
+      >
+        <StateDot state={t.state} title={STATE_LABELS[t.state] || t.state} />
+      </span>
       <span className="task-number">{t.id}</span>
       <span className="task-title">{t.title}</span>
       <span className="chips">

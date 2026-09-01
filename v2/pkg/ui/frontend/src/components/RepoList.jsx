@@ -125,6 +125,11 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                 </IconButton>
                 <span className="repo-list-name">{r.repo}</span>
                 <span className="chips">
+                  {/* Each chip here counts a repo's tasks in one state, not one
+                      task's own status, so "running" keeps the plain CSS spin
+                      (style.css's .badge-running) rather than StateDot's grain
+                      mark (bwsalmon/agents#586) -- there is no single task for
+                      the mark to represent. */}
                   {STATE_ORDER.filter((s) => r.counts[s]).map((s) => (
                     <Chip key={s} size="small" className={`badge badge-${s}`} label={`${STATE_LABELS[s]} ${r.counts[s]}`} />
                   ))}

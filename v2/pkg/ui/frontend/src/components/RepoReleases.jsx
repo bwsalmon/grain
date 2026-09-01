@@ -5,6 +5,7 @@ import {
 } from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS } from "../state.js";
+import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
 // POLL_INTERVAL_MS mirrors App.jsx's own poll: a candidate can move
 // through "cutting"/"promoting", a release through
@@ -326,7 +327,12 @@ function QualificationSummary({ run, onApprove }) {
       <ul className="qualification-task-list">
         {run.tasks.map((t) => (
           <li key={t.taskId}>
-            <span className={`badge badge-${t.state}`} title={STATE_LABELS[t.state] || t.state} />
+            <span
+              className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
+              title={STATE_LABELS[t.state] || t.state}
+            >
+              <StateDot state={t.state} title={STATE_LABELS[t.state] || t.state} />
+            </span>
             {t.templateName}
             {t.repeat > 1 && <span className="hint"> ({t.instanceIndex}/{t.repeat})</span>}
             {!t.approved && <Chip size="small" label="Unapproved" sx={{ ml: 1 }} />}
