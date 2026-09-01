@@ -169,11 +169,12 @@ func TestCreateTaskInteractiveJumpsTheQueue(t *testing.T) {
 }
 
 // TestCreateTaskConfigurationAssemblesTheWholeBundle is bwsalmon/
-// agents#621: a caller asking for nothing but Configuration gets back a
-// task that is interactive, carries both the self-debug and self-repair
-// grants, and has a non-empty title and body -- CreateTask assembles the
-// whole thing itself rather than trusting a caller to ask for each piece
-// by hand.
+// agents#621 (widened by bwsalmon/agents#620's bootstrap-playbooks
+// grant): a caller asking for nothing but Configuration gets back a
+// task that is interactive, carries the self-debug, self-repair and
+// bootstrap-playbooks grants, and has a non-empty title and body --
+// CreateTask assembles the whole thing itself rather than trusting a
+// caller to ask for each piece by hand.
 func TestCreateTaskConfigurationAssemblesTheWholeBundle(t *testing.T) {
 	c, _, ctx := testClient(t)
 
@@ -193,7 +194,7 @@ func TestCreateTaskConfigurationAssemblesTheWholeBundle(t *testing.T) {
 	if task.Description == "" {
 		t.Error("task.Description is empty, want the default prompt")
 	}
-	want := []string{"self-debug", "self-repair"}
+	want := []string{"bootstrap-playbooks", "self-debug", "self-repair"}
 	sort.Strings(task.Capabilities)
 	if !reflect.DeepEqual(task.Capabilities, want) {
 		t.Fatalf("capabilities = %v, want %v", task.Capabilities, want)
@@ -222,7 +223,7 @@ func TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities(t *test
 	if task.Description != "it keeps crash-looping, please debug" {
 		t.Errorf("task.Description = %q, want the caller's own", task.Description)
 	}
-	want := []string{"gemini-key", "self-debug", "self-repair"}
+	want := []string{"bootstrap-playbooks", "gemini-key", "self-debug", "self-repair"}
 	sort.Strings(task.Capabilities)
 	if !reflect.DeepEqual(task.Capabilities, want) {
 		t.Fatalf("capabilities = %v, want the caller's own plus the configuration agent's", task.Capabilities)

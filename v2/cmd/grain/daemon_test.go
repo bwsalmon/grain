@@ -119,19 +119,19 @@ func TestCapabilityProviders(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "no gcp project configured still registers github-sandbox, self-debug and self-repair",
+			name: "no gcp project configured still registers github-sandbox, self-debug, self-repair and bootstrap-playbooks",
 			cfg:  config{},
-			want: []string{"github-sandbox", "self-debug", "self-repair"},
+			want: []string{"github-sandbox", "self-debug", "self-repair", "bootstrap-playbooks"},
 		},
 		{
-			name: "a gcp project with no agent service account only mints gemini-key, plus github-sandbox, self-debug and self-repair",
+			name: "a gcp project with no agent service account only mints gemini-key, plus github-sandbox, self-debug, self-repair and bootstrap-playbooks",
 			cfg:  config{gcpProject: "proj"},
-			want: []string{"gemini-key", "github-sandbox", "self-debug", "self-repair"},
+			want: []string{"gemini-key", "github-sandbox", "self-debug", "self-repair", "bootstrap-playbooks"},
 		},
 		{
-			name: "a gcp project with an agent service account mints both, plus github-sandbox, self-debug and self-repair",
+			name: "a gcp project with an agent service account mints both, plus github-sandbox, self-debug, self-repair and bootstrap-playbooks",
 			cfg:  config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"},
-			want: []string{"gcp-key", "gemini-key", "github-sandbox", "self-debug", "self-repair"},
+			want: []string{"gcp-key", "gemini-key", "github-sandbox", "self-debug", "self-repair", "bootstrap-playbooks"},
 		},
 	}
 	for _, tc := range cases {

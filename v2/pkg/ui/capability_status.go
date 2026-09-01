@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/bwsalmon/grain/v2/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/githubsandbox"
@@ -20,7 +21,8 @@ import (
 // would actually work. Ready mirrors what cmd/grain/daemon.go's own
 // capabilityProviders would register plus, for a capability that
 // registers unconditionally (github-sandbox, self-debug, self-repair,
-// per that function's own doc comment), whether every secret it
+// bootstrap-playbooks, per that function's own doc comment), whether
+// every secret it
 // resolves through CapabilityContext.Credentials is actually set --
 // registering is not the same as working, and a task granted an
 // unready capability today only discovers that later as a refused
@@ -33,8 +35,8 @@ type CapabilityStatus struct {
 	// MissingConfig is every deployment setting (this Settings tab's own
 	// General fields) this capability still needs -- e.g. "GCP project"
 	// for gcp-key/gemini-key. Empty for a capability with no such gate
-	// (github-sandbox, self-debug, self-repair all register
-	// unconditionally).
+	// (github-sandbox, self-debug, self-repair and bootstrap-playbooks
+	// all register unconditionally).
 	MissingConfig []string `json:"missingConfig,omitempty"`
 	// MissingSecrets is every CapabilitySpec.Requires entry this
 	// deployment's secrets store has no matching secret/key for -- the
@@ -60,11 +62,12 @@ type CapabilityStatus struct {
 // DefaultCapabilities and each provider's own Spec().Description
 // already accept for their descriptions.
 var capabilityDisplayNames = map[string]string{
-	"gcp-key":        "GCP key",
-	"gemini-key":     "Gemini key",
-	"github-sandbox": "GitHub sandbox",
-	"self-debug":     "Self debug",
-	"self-repair":    "Self repair",
+	"gcp-key":             "GCP key",
+	"gemini-key":          "Gemini key",
+	"github-sandbox":      "GitHub sandbox",
+	"self-debug":          "Self debug",
+	"self-repair":         "Self repair",
+	"bootstrap-playbooks": "Bootstrap playbooks",
 }
 
 // capabilityCatalog is every capability grain ships a provider for,
@@ -86,6 +89,7 @@ func capabilityCatalog() []model.CapabilitySpec {
 		githubsandbox.NewProvider(githubsandbox.Config{}).Spec(),
 		selfdebug.New().Spec(),
 		selfrepair.New().Spec(),
+		bootstrap.New().Spec(),
 	}
 }
 
