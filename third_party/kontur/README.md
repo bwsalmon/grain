@@ -872,6 +872,52 @@ but is exactly the same `kontur run` invocation the static pod backend
 already makes, config-checked and smoke-tested against a real KVM guest
 as described above.
 
+That gap -- an actual guest boot through `-backend docker`, on a real
+docker daemon and real KVM together -- was closed on a real GCE VM with
+nested virtualization enabled (`--enable-nested-virtualization`, `vmx`
+confirmed present) and Docker CE (`docker version` 29.7.2) installed.
+Both net modes were exercised end to end, not just the container
+sequencing: in NAT mode, `konturctl vm create -backend docker` booted the
+bundled guest to `multi-user.target` with `sshd` up, and a real `ssh`
+client on the host (not `kontur exec`, and not from inside the shared
+network namespace) reached the guest's login prompt through the actual
+DNAT rule `netshim` installed, on the external port `-port` published --
+confirming the whole path from a real external client to the guest and
+back, not just that the rule existed. The same guest also ran arbitrary
+commands over `kontur exec` (`docker exec <vm> kontur exec -- <cmd>`) and
+via the `sh`/`bash` shim (`docker exec <vm> sh -c '...'`), and shut down
+cleanly on `docker stop` (SIGTERM). Flat mode was exercised the same way
+-- `-net flat` with a published port (`-docker-run-opt -p -docker-run-opt
+<port>:22`) -- and a real `ssh` client reached the guest through the
+splice after it took over the namespace's own address, the same
+external-client validation NAT mode got.
+
+This found one real bug, now fixed: flat mode's guest-side control link
+(`kontur-control-net`, see "Flat mode" below) never came up under this
+guest image. `kontur exec` timed out dialing the control address, and
+`kontur-mem-agent` never received its target either. The guest's second
+NIC boots as `eth1`, which is what both `kontur-control-net`'s default
+`KONTUR_CONTROL_IFACE` and (for the first NIC) the flat-mode `ip=`
+kernel parameter assume -- but systemd-udevd's stock
+`80-net-setup-link.rules` renames it to a slot-based name (`ens3`) before
+`kontur-control-net.service` runs, so its `[ ! -e
+/sys/class/net/eth1 ]` check silently found nothing and exited 0 without
+configuring an address; `ip -brief addr` on the running guest showed
+`ens3` present but `DOWN` with no address, and `/run/kontur-control-net.env`
+was never written. The first NIC was unaffected only because the
+kernel's own `ip=` autoconfiguration runs before udev renames it, and the
+rename doesn't clear the address once applied. Fixed by masking
+`80-net-setup-link.rules` for the Debian guest (a `/dev/null` symlink
+under `/etc/udev/rules.d`, which overrides the same filename under
+`/lib/udev/rules.d`) so every NIC keeps the kernel's own enumeration
+order instead; confirmed the guest now reports `eth0`/`eth1` (not
+`ens2`/`ens3`), the control link comes up at the expected address, `kontur
+exec` reaches the guest immediately, and `kontur-mem-agent` picks up the
+right target from `/run/kontur-control-net.env`. The full unprivileged
+test suite and the privileged `internal/netshim` kernel tests
+(`KONTUR_NETNS_TESTS=required`) were re-run on this same VM afterward and
+all still pass.
+
 ## Benchmarks
 
 See [`benchmarks/`](benchmarks/README.md) for startup-latency measurements
