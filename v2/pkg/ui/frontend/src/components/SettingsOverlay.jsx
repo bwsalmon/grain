@@ -100,6 +100,12 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const showClosedByDefault = form.elements.showClosedByDefault.checked;
     if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
 
+    const approvedByDefault = form.elements.approvedByDefault.checked;
+    if (approvedByDefault !== !!settings.approvedByDefault) payload.approvedByDefault = approvedByDefault;
+
+    const autoMergeByDefault = form.elements.autoMergeByDefault.checked;
+    if (autoMergeByDefault !== !!settings.autoMergeByDefault) payload.autoMergeByDefault = autoMergeByDefault;
+
     const agentFramework = form.elements.agentFramework.value;
     if (agentFramework !== (settings.agentFramework || "gemini")) payload.agentFramework = agentFramework;
 
@@ -242,6 +248,33 @@ export default function SettingsOverlay({ config, onClose, showError }) {
                   <span className="hint">
                     off (default): a task list's own "Show closed tasks" checkbox starts unchecked, hiding closed
                     tasks until turned on. on: it starts checked instead, showing them from the start.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
+            <FormControlLabel
+              control={<Checkbox name="approvedByDefault" defaultChecked={!!settings.approvedByDefault} />}
+              label={(
+                <>
+                  Queue new tasks immediately by default
+                  <span className="hint">
+                    off (default): a new task's own "Queue immediately" checkbox starts unchecked, filing it as a
+                    proposal needing approval. on: it starts checked instead, filing a task ready to dispatch at
+                    once.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
+            <FormControlLabel
+              control={<Checkbox name="autoMergeByDefault" defaultChecked={!!settings.autoMergeByDefault} />}
+              label={(
+                <>
+                  Auto-merge new tasks by default
+                  <span className="hint">
+                    off (default): a new task's own "Auto-merge once checks pass" checkbox starts unchecked. on: it
+                    starts checked instead.
                   </span>
                 </>
               )}
