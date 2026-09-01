@@ -882,3 +882,48 @@ func TestKonturSandboxesFlatModeIsTheDefault(t *testing.T) {
 		t.Errorf("kontur invocation = %q, want it to carry %q", string(data), want)
 	}
 }
+
+// TestKonturSandboxesRecreateWithNoExistingVMOnlyCreates covers the case
+// cmd/grain daemon's own startup reset pass introduces: Recreate called
+// for a slot that has never had a VM. There is nothing to tear down, so
+// it must be a plain create -- not a `konturctl vm delete` for a name
+// kontur has no saved state for, which only ever reaches the static-pod
+// backend this package never builds VMs under (Recreate's own doc
+// comment). The per-task call site is unaffected either way: the VM it
+// just finished with always exists, which
+// TestKonturSandboxesRecreateDeletesAndRecreatesTheVM above still proves
+// deletes first.
+func TestKonturSandboxesRecreateWithNoExistingVMOnlyCreates(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+	})
+
+	if err := k.Recreate(context.Background(), "slot-0"); err != nil {
+		t.Fatalf("Recreate on a slot with no VM: %v", err)
+	}
+	// The slot has to be usable afterwards: this is the only thing that
+	// creates its VM when the reset pass runs before anything else does.
+	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+		t.Fatalf("ToolsFor after Recreate: %v", err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat"}
+	got := splitNonEmptyLines(string(data))
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("kontur invocations = %v, want %v", got, want)
+	}
+}

@@ -36,6 +36,12 @@ import (
 	"time"
 )
 
+// writeFakeKonturBinary installs a fake "konturctl" that answers "vm
+// create" by writing the state file kontur.Exists reads back and "vm
+// delete" by removing it (kontur's own staticpod.Save/Delete), logging
+// every invocation's argv to argvLog. Handling delete is what lets a test
+// observe runDaemon's own startup reset pass, which deletes and rebuilds
+// a VM a previous process left behind -- see daemon_sandbox_reset_test.go.
 func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -44,7 +50,8 @@ func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	dir := t.TempDir()
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$*" >> %q
-if [ "$1" = "vm" ] && [ "$2" = "create" ]; then
+if [ "$1" = "vm" ] && { [ "$2" = "create" ] || [ "$2" = "delete" ]; }; then
+  action="$2"
   name="$3"
   statedir=""
   shift 3
@@ -54,7 +61,11 @@ if [ "$1" = "vm" ] && [ "$2" = "create" ]; then
     fi
     shift
   done
-  echo "{\"port\": %d}" > "$statedir/$name.json"
+  if [ "$action" = "create" ]; then
+    echo "{\"port\": %d}" > "$statedir/$name.json"
+  else
+    rm -f "$statedir/$name.json"
+  fi
 fi
 `, argvLog, port)
 	install(t, dir, "konturctl", script)
