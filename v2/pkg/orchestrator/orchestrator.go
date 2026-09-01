@@ -113,6 +113,17 @@ type rootedSandbox interface {
 	Root() (string, error)
 }
 
+// vmNamedSandbox is implemented by a Sandbox reachable only as a named
+// bwsalmon/kontur-managed VM rather than a local directory --
+// konturSandbox's own, and rootedSandbox's counterpart. It is what
+// agent.RunConfig.KonturVM needs: a Framework with no in-process route to
+// a sandbox (agent/claude, which forks a real MCP client as a subprocess
+// rather than looping tool calls itself) points its own forked
+// "mcpserver -kontur-vm" at this name instead of a local -sandbox-root.
+type vmNamedSandbox interface {
+	VMName() string
+}
+
 // Config is what one deployment's orchestrator needs to know: which repo
 // is the task queue, which label marks an issue as ready to dispatch, and
 // what a dispatched run is allowed to do on its own.

@@ -314,7 +314,7 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
 
 	clock = clock.Add(time.Minute)
-	if _, err := orchestrator.RunDispatch(w.ctx, w.store, panicIfRun{}, cfg, *dispatched, d, nil, w.prepareSandbox(d), clock); err == nil {
+	if _, err := orchestrator.RunDispatch(w.ctx, w.store, panicIfRun{}, cfg, *dispatched, d, nil, w.prepareSandbox(d), "", clock); err == nil {
 		t.Fatal("expected RunDispatch to report the refusal")
 	}
 

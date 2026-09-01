@@ -183,7 +183,7 @@ func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T
 	cap := &fakeCapability{name: "keyed", path: "/home/debian/.secret", content: "sh-sh-sh"}
 	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
 
-	result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, root, baseTime)
+	result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, root, "", baseTime)
 	if err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestRunDispatchPlacesAttachmentsAndMentionsThemInThePrompt(t *testing.T) {
 		return pushed(), nil
 	})
 
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, mcp.NewSandboxTools(root), root, baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, mcp.NewSandboxTools(root), root, "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestRunDispatchRecordsTheAgentsTranscript(t *testing.T) {
 	})
 	cfg := orchestrator.Config{}
 
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 
@@ -317,7 +317,7 @@ func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T)
 	cap := &fakeCapability{name: "locked", refuse: "not for you"}
 	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
 
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err == nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", baseTime); err == nil {
 		t.Fatal("expected RunDispatch to report the refusal")
 	}
 	if ran {
@@ -358,7 +358,7 @@ func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 		return &agent.Result{FinalText: "nothing to do here"}, nil
 	})
 
-	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime)
+	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", baseTime)
 	if err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("reading task: %v", err)
 	}
-	result1, err := orchestrator.RunDispatch(ctx, store, fw1, orchestrator.Config{}, *got, d1, nil, t.TempDir(), baseTime)
+	result1, err := orchestrator.RunDispatch(ctx, store, fw1, orchestrator.Config{}, *got, d1, nil, t.TempDir(), "", baseTime)
 	if err != nil {
 		t.Fatalf("first RunDispatch: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
 		gotPrompt = cfg.Prompt
 		return pushed(), nil
 	})
-	if _, err := orchestrator.RunDispatch(ctx, store, fw2, orchestrator.Config{}, *got2, d2, nil, t.TempDir(), baseTime.Add(2*time.Minute)); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw2, orchestrator.Config{}, *got2, d2, nil, t.TempDir(), "", baseTime.Add(2*time.Minute)); err != nil {
 		t.Fatalf("second RunDispatch: %v", err)
 	}
 
@@ -477,7 +477,7 @@ func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 		gotPrompt = cfg.Prompt
 		return pushed(), nil
 	})
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 	if gotPrompt != orchestrator.BuildPrompt(*task, "") {
@@ -521,7 +521,7 @@ func TestRunDispatchLetsAFrameworkPollForACommentAddedMidRun(t *testing.T) {
 		}
 		return pushed(), nil
 	})
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 	if len(gotBefore) != 0 {
@@ -564,7 +564,7 @@ func TestRunDispatchSeedsTheAddendaCursorPastCommentsAlreadyInThePrompt(t *testi
 		}
 		return pushed(), nil
 	})
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 	if len(got) != 0 {
@@ -618,7 +618,7 @@ func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
 	}
 	done := make(chan runOutcome, 1)
 	go func() {
-		result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime)
+		result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", baseTime)
 		done <- runOutcome{result, err}
 	}()
 
@@ -680,7 +680,7 @@ func TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime(t *testing.T) {
 	}
 	done := make(chan runOutcome, 1)
 	go func() {
-		result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime)
+		result, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", baseTime)
 		done <- runOutcome{result, err}
 	}()
 
@@ -755,7 +755,7 @@ func TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall(t *testing.T)
 	// deliberately, so this test can only pass quickly because of the
 	// synchronous check, not because a short poll interval happened to
 	// win a race.
-	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime)
+	result, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", baseTime)
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Errorf("RunDispatch took %s against an already-closed task, want near-instant (no waiting on CancelPollInterval)", elapsed)
 	}
@@ -800,7 +800,7 @@ func TestRunDispatchGivesTheFrameworkATranscriptPathAndCleansItUp(t *testing.T) 
 	})
 	cfg := orchestrator.Config{TranscriptDir: transcriptDir}
 
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 
@@ -833,7 +833,7 @@ func TestRunDispatchLeavesTranscriptPathEmptyWithoutATranscriptDir(t *testing.T)
 		return pushed(), nil
 	})
 
-	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), baseTime); err != nil {
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
 	if gotPath != "" {

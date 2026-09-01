@@ -428,6 +428,13 @@ type konturSandbox struct {
 
 func (s *konturSandbox) Name() string { return s.name }
 
+// VMName implements vmNamedSandbox: the actual kontur VM name
+// (VMNameFor's own result), not the run's own name Name returns above --
+// what agent.RunConfig.KonturVM needs to be, so agent/claude's forked
+// "mcpserver -kontur-vm" names the VM kontur itself knows, not this
+// sandbox's internal key.
+func (s *konturSandbox) VMName() string { return s.vmName }
+
 // Tools implements Sandbox. The runner was resolved by Acquire, which
 // does not return until the guest has answered a command, so there is no
 // boot left to wait out here.
