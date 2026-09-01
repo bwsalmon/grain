@@ -1,0 +1,172 @@
+# Builds v2's release artifacts on every checkin to main and stores them
+# in GitHub, so a deployment (or an operator poking around) can fetch a
+# known-good build without having to check out the repo and run a
+# toolchain locally -- bwsalmon/agents#622.
+#
+# Three artifacts, matching the three build outputs packer/kontur/README.md
+# already documents as "what a deployment needs published":
+#   - the grain binary itself (v2/Makefile's `build`)
+#   - the kontur binaries (`kontur`, `konturctl`, `kontur-mem-agent`) that
+#     manage kontur-backed sandbox VMs
+#   - the default sandbox container: the generic kontur OCI image
+#     (packer/kontur/build-oci-image.sh) a kontur-backed deployment runs
+#     to get those binaries and a pinned cloud-hypervisor release, built
+#     with no guest-specific customization -- see that script's own
+#     comment ("The image this produces is deliberately generic").
+#
+# Deliberately not a fourth artifact here: the guest VM disk
+# (packer/kontur/build-guest.sh's disk.img/vmlinuz/initrd.img) is a
+# per-deployment build (it bakes in an operator's own SSH key, and
+# optionally SANDBOX_SETUP_SCRIPT) rather than a single generic one this
+# workflow could publish for everybody, and that script's existing
+# KONTUR_IMAGE_BUCKET publishing path -- a deployment's own GCS bucket --
+# already covers it. "The default sandbox container" above is the OCI
+# image, not that disk; see build-oci-image.sh's doc comment for how the
+# two relate.
+#
+# Binaries are stored as assets on a single, continuously-updated GitHub
+# Release (tag build-latest) rather than one release per commit: nothing
+# downstream consumes a specific historical build yet, so a release per
+# push to main would just be churn in the Releases list for no reader.
+# The container image goes to GHCR instead -- GitHub's own registry, so
+# still "in github" -- tagged both `latest` and with the commit's short
+# SHA, since a registry (unlike Releases) makes keeping prior tags around
+# free and gives a rollback target the single-release binaries don't
+# have.
+#
+# push-to-main only, not pull_request: publishing needs a GITHUB_TOKEN
+# with contents:write and packages:write, and running that against an
+# unreviewed PR branch is exactly what ../tests.yml's own comment on
+# pull_request-vs-push warns against for a job that holds a credential.
+name: build-artifacts
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One publish at a time, in commit order, and never cancelled -- two
+# pushes racing to overwrite the same build-latest release or :latest
+# tag could otherwise leave it holding whichever run happened to finish
+# first rather than whichever commit is actually newest. Same reasoning
+# ../tests.yml gives for never cancelling a push-to-main run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  binaries:
+    name: binaries (grain, kontur)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # v2/go.mod's toolchain is newer than third_party/kontur/go.mod's
+      # (go1.22) -- fine, since a newer stable Go builds an older
+      # go-directive module without issue, and it saves setting up a
+      # second toolchain just for that.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: v2/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: v2/pkg/ui/frontend/package-lock.json
+
+      # Plain `make build`, not `make container-build`: the Makefile's own
+      # comment on CGO_ENABLED=0 already establishes that this produces a
+      # genuinely static binary with no libc coupling to the build host,
+      # so container-build's pinned-Debian-12 toolchain buys reproducing
+      # a specific glibc that a static binary was never going to link
+      # against anyway -- the same reasoning ../tests.yml's go-test job
+      # already relies on by using plain `go build` under setup-go rather
+      # than the containerised build.
+      - name: Build grain
+        working-directory: v2
+        run: make build
+
+      # Not built through third_party/kontur's Dockerfile (that produces
+      # the OCI image the sandbox-container job below publishes, with no
+      # step of its own that copies the binaries back out) -- a plain `go
+      # build` per cmd/ is the direct way to get the three binaries
+      # themselves. CGO_ENABLED=0 for the same static-binary reasoning as
+      # grain above.
+      - name: Build kontur binaries
+        working-directory: third_party/kontur
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          for cmd in kontur konturctl kontur-mem-agent; do
+            CGO_ENABLED=0 go build -o "bin/$cmd" "./cmd/$cmd"
+          done
+
+      # gh is preinstalled on GitHub-hosted runners and already trusts
+      # GH_TOKEN, so this needs no marketplace action -- matching this
+      # repo's general aversion to pulling in dependencies where a plain
+      # script does the job (../../README.md: grain itself declares none;
+      # ../../ci/*.sh drives everything else the same way).
+      #
+      # `gh release upload --clobber` overwrites same-named assets in
+      # place, so a re-run against an unchanged binary (or a second push
+      # before the first finished) leaves build-latest with exactly the
+      # four files below, not a growing pile of same-named duplicates.
+      - name: Publish to the build-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=build-latest
+          notes="Continuously updated on every push to main (bwsalmon/agents#622). Built from bwsalmon/grain@${GITHUB_SHA}."
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes "$notes"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "Latest build artifacts (main)" --notes "$notes"
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            v2/bin/grain \
+            third_party/kontur/bin/kontur \
+            third_party/kontur/bin/konturctl \
+            third_party/kontur/bin/kontur-mem-agent
+
+  sandbox-container:
+    name: sandbox container (kontur OCI image)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # build-oci-image.sh is the same script an operator publishing to
+      # their own registry would run (KONTUR_OCI_SKIP_PUSH unset here, so
+      # it pushes); this just points KONTUR_OCI_IMAGE at GHCR instead of
+      # a project's Artifact Registry. Tagged with the commit's short SHA
+      # first, then re-tagged `latest` below from the already-built local
+      # image, rather than building twice.
+      - name: Build and push (commit tag)
+        id: build
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:7}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${short_sha}"
+          KONTUR_OCI_IMAGE="$image" ./packer/kontur/build-oci-image.sh
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push :latest
+        run: |
+          set -euo pipefail
+          latest="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:latest"
+          docker tag "${{ steps.build.outputs.image }}" "$latest"
+          docker push "$latest"
