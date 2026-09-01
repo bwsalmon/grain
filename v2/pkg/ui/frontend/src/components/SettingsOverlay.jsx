@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
@@ -12,6 +13,7 @@ import { useThemeMode } from "../ThemeModeContext.jsx";
 // operator-only, deployment-wide configuration.
 const TABS = [
   { id: "general", label: "General" },
+  { id: "capabilities", label: "Capabilities" },
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
 ];
@@ -232,6 +234,7 @@ export default function SettingsOverlay({ config, onClose, showError }) {
           )}
         </>
       )}
+      {tab === "capabilities" && <CapabilitiesPanel capabilities={settings.capabilities} />}
       {tab === "secrets" && <SecretsPanel showError={showError} />}
       {tab === "upgrade" && <UpgradePanel showError={showError} />}
     </Overlay>

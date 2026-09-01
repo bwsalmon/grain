@@ -259,6 +259,27 @@ describe("SettingsOverlay", () => {
     vi.unstubAllGlobals();
   });
 
+  it("switches to the Capabilities tab and shows its panel", async () => {
+    const capabilities = [
+      { id: "self-debug", name: "Self debug", description: "Read grain's own source", ready: true },
+      {
+        id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: false,
+        missingConfig: ["GCP project", "GCP service account email"],
+      },
+    ];
+    api.mockResolvedValueOnce({ ...settings, capabilities });
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    expect(await screen.findByText("Self debug")).toBeInTheDocument();
+    expect(screen.getByText("GCP key")).toBeInTheDocument();
+    expect(screen.getByText(/Needs: GCP project, GCP service account email/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+  });
+
   it("switches to the Secrets tab and shows its panel", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();

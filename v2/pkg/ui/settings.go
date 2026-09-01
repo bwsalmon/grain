@@ -72,6 +72,14 @@ type Settings struct {
 	// has it to seed that toggle with before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// Capabilities is every capability grain ships a provider for, with
+	// this deployment's own readiness computed against it -- capability_
+	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
+	// populated, even before Settings has ever been saved (GetSettings),
+	// since self-debug/self-repair need no configuration to be ready and
+	// an operator setting up a fresh deployment still benefits from
+	// seeing that gcp-key/gemini-key/github-sandbox are not yet.
+	Capabilities []CapabilityStatus `json:"capabilities"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -91,6 +99,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxCPUs:                   cfg.SandboxCPUs,
 		SandboxMemoryMB:               cfg.SandboxMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
+		Capabilities:                  c.capabilityStatuses(cfg),
 	}
 }
 
@@ -126,7 +135,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{}, err
 	}
 	if cfg == nil {
-		return Settings{}, nil
+		return Settings{Capabilities: c.capabilityStatuses(model.Config{})}, nil
 	}
 	return c.settingsFrom(*cfg), nil
 }
