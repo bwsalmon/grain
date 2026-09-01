@@ -98,28 +98,19 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
 	client := github.NewClient(sim, nil)
 
-	// Two slots, not one: a real dispatch lands on a freshly provisioned
-	// sandbox every time, so nothing stops the parent's run and the
-	// approved proposal's run from reusing the same working directory in
-	// production. HostSandboxes' root is the same directory every time it
-	// is asked for slot's root, so this test uses a second slot for the
-	// second run rather than fighting that -- the leftover "work" clone
-	// from the parent's own run would otherwise collide with it.
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot, slot2 = "propose-e2e-1", "propose-e2e-2"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
-	root2, err := sandboxes.RootFor(slot2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root2, remote, "unused"); err != nil {
-		t.Fatal(err)
+	// One credentialed directory per run. This test drives runDispatch
+	// directly rather than through a Sandboxes backend, so it seeds
+	// world.roots itself; a real dispatch builds each of these as it goes.
+	// It used to need two *slots* for the same reason it needs two
+	// directories here -- a slot's root was the same directory every time,
+	// so the leftover "work" clone from the parent's run collided with the
+	// proposal's.
+	credentialedRoot := func() string {
+		root := t.TempDir()
+		if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
+			t.Fatal(err)
+		}
+		return root
 	}
 
 	storeDir := t.TempDir()
@@ -133,7 +124,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 	// Phase 1: file the parent task the way a human would, dispatch it,
 	// and have its own run both push a branch and call propose_task.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{slot: root}}
+		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{parentID + "-r1": credentialedRoot()}}
 		fileIssue(w, parentID, human("alice"), parentTarget)
 		assertState(w, parentID, model.StateQueued, false)
 
@@ -231,7 +222,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 	// Phase 3: now it dispatches, and runs a normal push/PR/merge/close
 	// cycle of its own, exactly like any other task.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{slot2: root2}}
+		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{proposalID + "-r1": credentialedRoot()}}
 
 		clock = clock.Add(time.Minute)
 		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)

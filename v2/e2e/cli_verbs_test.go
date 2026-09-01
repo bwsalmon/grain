@@ -48,7 +48,6 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
@@ -96,15 +95,7 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
 	client := github.NewClient(sim, nil)
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "comment-e2e-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
+	sandboxes := credentialed(t, remote)
 
 	storeDir := t.TempDir()
 	created := runCLIStore(t, bin, storeDir,
@@ -242,15 +233,7 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
 	client := github.NewClient(sim, nil)
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "reopen-e2e-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
+	sandboxes := credentialed(t, remote)
 
 	storeDir := t.TempDir()
 	created := runCLIStore(t, bin, storeDir,
@@ -428,17 +411,7 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
 	client := github.NewClient(sim, nil)
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slotA, slotB = "cap-e2e-a", "cap-e2e-b"
-	for _, slot := range []string{slotA, slotB} {
-		root, err := sandboxes.RootFor(slot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	sandboxes := credentialed(t, remote)
 
 	storeDir := t.TempDir()
 	cap := &countingCapability{name: "gemini-key"}
@@ -504,11 +477,10 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 		t.Fatalf("capabilities after detach = %+v, want none", detachedTask.Capabilities)
 	}
 
-	// A fresh slot, not slotA again: HostSandboxes reuses one directory
-	// per slot, and task A's own "work" clone is still sitting in slotA's
-	// -- the same reason TestProposedTaskWaitsForApprovalThenRunsThrough
-	// TheCLI uses a second slot for its own second dispatch.
-	deps.Slots = []string{slotB}
+	// Nothing to reset between the two dispatches: each run builds its own
+	// sandbox, so task B's clone cannot land on top of task A's. This used
+	// to need a second slot handed to deps, because a slot's directory was
+	// reused and A's "work" clone was still sitting in it.
 	deps.Framework = scriptedFramework(pushScript(remote, model.BranchName(taskB.ID), taskB.ID))
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
 		deps.Store = store
@@ -569,15 +541,7 @@ func TestCLIUpdateChangesBaseAndAutoMergeBeforeDispatchAndBothTakeEffect(t *test
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
 	client := github.NewClient(sim, nil)
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "update-e2e-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
+	sandboxes := credentialed(t, remote)
 
 	storeDir := t.TempDir()
 	created := runCLIStore(t, bin, storeDir, "-json", "create",

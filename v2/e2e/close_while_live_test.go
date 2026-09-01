@@ -88,13 +88,11 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 		t.Fatalf("state after create = %q, want queued", task.State)
 	}
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "close-live-6d934c83-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
+	// This test drives RunDispatch directly, below the Sandboxes layer, so
+	// it builds the one sandbox it needs by hand rather than through a
+	// backend.
+	root := t.TempDir()
 	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +130,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 
 	// Close the task through the real CLI while its run is still live --
 	// the same command an operator would run at a shell, racing an agent
-	// that has already claimed the slot.
+	// whose run is already live.
 	closed := runCLIStore(t, bin, storeDir, "-json", "close", task.ID)
 	var closedTask ui.Task
 	if err := json.Unmarshal([]byte(closed), &closedTask); err != nil {
@@ -142,8 +140,8 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 		t.Fatalf("state after grain close = %q, want closed even with a run still live", closedTask.State)
 	}
 
-	// RunDispatch runs next, exactly as it would for any other claimed
-	// slot -- but the task is already closed by the time it starts, so
+	// RunDispatch runs next, exactly as it would for any other live run --
+	// but the task is already closed by the time it starts, so
 	// bwsalmon/agents#346's own synchronous checkTaskClosed call (see
 	// RunDispatch's own doc comment) must cancel the agent's ctx before
 	// framework.Run is ever invoked, stopping the scripted agent's
@@ -156,10 +154,10 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 			t.Fatal(err)
 		}
 		if st != model.StateClosed {
-			t.Fatalf("state before the run finishes = %q, want closed (the slot is still occupied, but closing outranks running)", st)
+			t.Fatalf("state before the run finishes = %q, want closed (the run is still live, but closing outranks running)", st)
 		}
 		if occ, err := store.LiveRunCount(ctx); err != nil || occ != 1 {
-			t.Fatalf("occupied slots before the run finishes = %v (%v), want the slot still held", occ, err)
+			t.Fatalf("live runs before the run finishes = %d (%v), want the run still live", occ, err)
 		}
 
 		fw := gemini.NewForTest(&scriptedGenerator{responses: pushScript(remote, branch, task.ID)})

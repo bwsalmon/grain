@@ -47,7 +47,7 @@ func preClonedPushScript(branch, taskID string) []*genai.GenerateContentResponse
 
 func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 	const slot = "sandbox-preclone-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
 	task := fileIssue(w, "iss-preclone", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
@@ -67,7 +67,7 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 		t.Fatalf("GetTask(%s): %v (nil=%v)", task.ID, err, full == nil)
 	}
 
-	root := w.roots[slot]
+	root := w.prepareSandbox(d)
 	if entries, err := os.ReadDir(filepath.Join(root, orchestrator.CheckoutDir)); err == nil {
 		t.Fatalf("the sandbox already holds a checkout before the run: %v", entries)
 	}
@@ -113,7 +113,7 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 // sandbox (see close_while_live_test.go for the agent half of it).
 func TestDispatchDoesNotCloneForATaskClosedBeforeItRan(t *testing.T) {
 	const slot = "sandbox-preclone-2"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
 	task := fileIssue(w, "iss-closed", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
@@ -134,7 +134,7 @@ func TestDispatchDoesNotCloneForATaskClosedBeforeItRan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root := w.roots[slot]
+	root := w.prepareSandbox(dispatches[0])
 	cfg := orchestrator.Config{GitRemoteBase: w.proxyURL}
 	fw := gemini.NewForTest(&scriptedGenerator{responses: preClonedPushScript(model.BranchName(task.ID), task.ID)})
 	if _, err := orchestrator.RunDispatch(w.ctx, w.store, fw, cfg, *full, dispatches[0],

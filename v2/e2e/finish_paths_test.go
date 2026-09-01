@@ -50,7 +50,7 @@ func commentOnlyScript(comment string) []*genai.GenerateContentResponse {
 
 func TestAgentCompletesByCommentingWithNoPushOpensNoPullRequest(t *testing.T) {
 	const slot = "sandbox-337-finish-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "gadgets"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -112,7 +112,7 @@ func TestAgentCompletesByCommentingWithNoPushOpensNoPullRequest(t *testing.T) {
 
 func TestSyncPullRequestsClosesATaskWhosePullRequestWasClosedWithoutMerging(t *testing.T) {
 	const slot = "sandbox-337-finish-2"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "gizmos"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}

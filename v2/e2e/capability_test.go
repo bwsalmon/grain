@@ -35,7 +35,6 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
@@ -189,16 +188,8 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	// lease into the sandbox root before the agent's first turn, the
 	// scripted agent reads that placement back and then pushes as normal,
 	// and revokeAll tears the lease down again once the run finishes.
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "cap-e2e-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
+	sandboxes := credentialed(t, remote)
 
 	const placementPath = "/secrets/self-debug-token"
 	const placementContent = "sh-sh-sh-e2e"
@@ -243,7 +234,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	// independently of the agent's tool calls, the same way harness_test.go's
 	// own assertions read back the upstream repo rather than trusting the
 	// agent's report of what it did.
-	placed := filepath.Join(root, strings.TrimPrefix(placementPath, "/"))
+	placed := filepath.Join(sandboxes.rootOf(task.ID+"-r1"), strings.TrimPrefix(placementPath, "/"))
 	data, err := os.ReadFile(placed)
 	if err != nil {
 		t.Fatalf("placement was not written to %s: %v", placed, err)
@@ -297,7 +288,7 @@ func (panicIfRun) Run(context.Context, agent.RunConfig) (*agent.Result, error) {
 
 func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *testing.T) {
 	const slot = "sandbox-bd453be9-cap-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
 	clock := baseTime
@@ -324,7 +315,7 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
 
 	clock = clock.Add(time.Minute)
-	if _, err := orchestrator.RunDispatch(w.ctx, w.store, panicIfRun{}, cfg, *dispatched, d, nil, w.roots[slot], clock); err == nil {
+	if _, err := orchestrator.RunDispatch(w.ctx, w.store, panicIfRun{}, cfg, *dispatched, d, nil, w.prepareSandbox(d), clock); err == nil {
 		t.Fatal("expected RunDispatch to report the refusal")
 	}
 

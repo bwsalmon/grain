@@ -83,7 +83,7 @@ import (
 // on -- an env var apiece here instead of flags, since `go test` is how
 // this file is invoked either way.
 type loadConfig struct {
-	slots         int
+	slots         int // the concurrency limit; still named for the env var that sets it
 	repos         int
 	writers       int
 	initialTasks  int
@@ -162,10 +162,6 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 	}
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	slots := make([]string, cfg.slots)
-	for i := range slots {
-		slots[i] = fmt.Sprintf("sandbox-a9918c9a-load-%d", i)
-	}
 	repos := make([]model.RepoRef, cfg.repos)
 	for i := range repos {
 		repos[i] = model.RepoRef{Owner: "acme", Name: fmt.Sprintf("repo-%d", i)}
@@ -186,7 +182,7 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 			return gemini.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics))
 		},
 		Config:        orchestrator.Config{Capabilities: registry},
-		MaxConcurrent: len(slots),
+		MaxConcurrent: cfg.slots,
 	}
 
 	// Seed a backlog before the sustained phase starts, so every slot has

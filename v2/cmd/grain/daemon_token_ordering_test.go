@@ -1,27 +1,27 @@
 package main
 
-// TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates is a fast,
-// keyless regression test for a real bug run()'s own ordering had until
-// bwsalmon/agents#265: gitproxy.BuildProxy's own doc comment says the
-// proxy's SandboxTokens "loads the map once at startup and only ever
-// looks tokens up" -- it never rereads sandbox-tokens.json. run() used
-// to call startGitProxy before minting any slot's token, which means the
-// running proxy's token map was permanently whatever was on disk before
-// any slot existed (nothing, on a fresh -data-dir): every token minted
-// afterward -- i.e. every token any real deployment would ever have --
-// was one the proxy could never recognize, so every git push through it
-// failed closed with 401 "authentication required," for the entire
-// life of the process. daemon_live_test.go's
-// TestRunLiveDispatchesAndOpensAPullRequest is what actually caught this
-// (a live dispatched agent's push was rejected every time); this test
-// isolates the same mechanism without a live Gemini key, so it runs in
-// CI and fails fast if the ordering regresses.
+// TestSandboxTokenMintedAfterGitProxyStartsAuthenticates is the inverse
+// of the regression this file used to guard, and it exists because the
+// old guarantee was turned inside out.
 //
-// This drives the same three calls run() itself makes -- openStore,
-// NewSandboxTokenStore.EnsureToken, startGitProxy, mcp.ConfigureGitCredentials
-// -- in the order run() now uses (token minted first), and then performs
+// gitproxy's SandboxTokens used to load sandbox-tokens.json once and
+// never reread it, so a token had to be minted before the proxy started
+// or the proxy could never recognise it. run() minted one per slot up
+// front for exactly that reason, and bwsalmon/agents#265 was the bug
+// where it did not: every push through the proxy failed closed with 401
+// for the life of the process.
+//
+// There is no set of sandboxes to mint for ahead of time now. A sandbox
+// is built for one run, so its token is minted while the proxy is
+// already serving -- which is safe only because SandboxTokens rereads
+// the file when shown a token it does not know. That reread is the whole
+// mechanism this test covers: mint *after* the proxy is up, then perform
 // the exact clone/branch/commit/push sequence a dispatched agent would,
-// by hand, against the resulting proxy.
+// by hand, against the running proxy.
+//
+// It stays keyless and fast, the same way the ordering test it replaces
+// was: daemon_live_test.go's TestRunLiveDispatchesAndOpensAPullRequest is
+// what would catch this with a real agent, but only with a Gemini key.
 
 import (
 	"context"
@@ -38,11 +38,11 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
-func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
+func TestSandboxTokenMintedAfterGitProxyStartsAuthenticates(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	const owner, repoName, slot = "acme", "widgets", "local"
+	const owner, repoName = "acme", "widgets"
 
 	upstream := t.TempDir()
 	bare := filepath.Join(upstream, owner, repoName+".git")
@@ -92,24 +92,33 @@ func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
 	if err := store.PutTask(context.Background(), task); err != nil {
 		t.Fatal(err)
 	}
-	// gitproxy's Authorizer reads the sandbox's live dispatched task, so
-	// this slot needs a real Dispatch on record, not just a queued task.
-	if dispatches, err := dispatch.Cycle(context.Background(), store, 1, time.Now().UTC()); err != nil || len(dispatches) != 1 {
+	// gitproxy's Authorizer reads the sandbox's live dispatched run, so
+	// this needs a real Dispatch on record, not just a queued task -- and
+	// the run has to name its sandbox, which is what orchestrator.runOne
+	// records via SetRunSandbox once it has acquired one.
+	dispatches, err := dispatch.Cycle(context.Background(), store, 1, time.Now().UTC())
+	if err != nil || len(dispatches) != 1 {
 		t.Fatalf("expected exactly one dispatch, got %v (err=%v)", dispatches, err)
 	}
-
-	// The order under test: mint the token, *then* start the proxy --
-	// matching run()'s own fixed order in main.go.
-	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(dataDir, "secrets", "sandbox-tokens.json"))
-	token, err := tokens.EnsureToken(slot)
-	if err != nil {
+	sandbox := dispatches[0].RunID
+	if err := store.SetRunSandbox(context.Background(), dispatches[0].RunID, sandbox); err != nil {
 		t.Fatal(err)
 	}
+
+	// The order under test: start the proxy against an empty token file,
+	// *then* mint -- the order a sandbox per run forces, and the one the
+	// old ordering would have failed closed on.
 	proxyURL, stop, err := startGitProxy(dataDir, store, githubHost, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stop(context.Background())
+
+	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(dataDir, "secrets", "sandbox-tokens.json"))
+	token, err := tokens.EnsureToken(sandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	root := t.TempDir()
 	if err := mcp.ConfigureGitCredentials(root, proxyURL+"/placeholder/placeholder.git", token); err != nil {
@@ -129,6 +138,6 @@ func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
 	cmd.Env = append(os.Environ(), "HOME="+root)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("push through the proxy failed even though the token was minted before the proxy started: %v\n%s", err, out)
+		t.Fatalf("push through the proxy failed for a token minted after the proxy started -- SandboxTokens must reread on an unknown token: %v\n%s", err, out)
 	}
 }

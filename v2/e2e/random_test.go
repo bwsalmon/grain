@@ -71,7 +71,6 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
@@ -195,21 +194,8 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	remote := "http://" + githubHost + "/" + clusterRepoOwner + "/" + clusterRepoName + ".git"
 
 	storeDir := t.TempDir()
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	slots := []string{
-		"sandbox-d0e0cc6a-rand-1",
-		"sandbox-d0e0cc6a-rand-2",
-		"sandbox-d0e0cc6a-rand-3",
-	}
-	for _, slot := range slots {
-		root, err := sandboxes.RootFor(slot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	sandboxes := credentialed(t, remote)
+	const maxConcurrent = 3
 
 	client := github.NewClient(sim, nil)
 	rng := rand.New(cfg.seed)
@@ -234,7 +220,7 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	// used by one run at a time.
 	var genMu sync.Mutex
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: len(slots),
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: maxConcurrent,
 		Framework: func() agent.Framework {
 			return gemini.NewForTest(&randomGenerator{
 				mu: &genMu, rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,

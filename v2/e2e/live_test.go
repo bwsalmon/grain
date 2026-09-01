@@ -31,7 +31,7 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 	}
 
 	const slot = "sandbox-bd453be9-live-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "live")
 
 	clock := baseTime
@@ -62,7 +62,7 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		"5. Push the " + branch + " branch to the origin remote (not main).\n" +
 		"Reply with a short confirmation once the push has succeeded."
 
-	result, err := fw.Run(ctx, agent.RunConfig{Prompt: prompt, SandboxRoot: w.roots[slot], MaxTurns: 15})
+	result, err := fw.Run(ctx, agent.RunConfig{Prompt: prompt, SandboxRoot: w.prepareSandbox(dispatches[0]), MaxTurns: 15})
 	if err != nil {
 		t.Fatalf("agent run failed: %v", err)
 	}

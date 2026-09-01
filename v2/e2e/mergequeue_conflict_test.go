@@ -17,7 +17,6 @@ package e2e
 // resolved to -- not just that some merge commit exists.
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,21 +33,39 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
-// worldSandboxes adapts world's own already-credentialed slot directories
-// (newWorld already pointed each one's git config at this world's real
-// gitproxy) into the orchestrator.Sandboxes interface RunCycle wants --
-// orchestrator.HostSandboxes hands out fresh, uncredentialed directories,
-// which is the wrong tool here since this test needs every push RunCycle
-// makes, including the fix task's own, to actually go through the proxy.
+// worldSandboxes builds each run's sandbox out of this world's own
+// already-credentialed directories (world.sandboxRoot mints that
+// sandbox's proxy token and points its git config at this world's real
+// gitproxy) rather than through orchestrator.HostSandboxes, which hands
+// out uncredentialed ones -- the wrong tool here, since this test needs
+// every push RunCycle makes, including the fix task's own, to actually go
+// through the proxy.
 type worldSandboxes struct{ w *world }
 
-func (s worldSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
-	root, ok := s.w.roots[slot]
-	if !ok {
-		return nil, fmt.Errorf("mergequeue conflict test: no sandbox configured for slot %q", slot)
-	}
-	return mcp.NewSandboxTools(root), nil
+func (s worldSandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
+	return worldSandbox{name: name, root: s.w.sandboxRoot(name)}, nil
 }
+
+// worldSandbox is one run's directory in this world. Release is a no-op:
+// the directory is under the test's own TempDir, and keeping it lets an
+// assertion read back what the run wrote.
+type worldSandbox struct{ name, root string }
+
+func (s worldSandbox) Name() string { return s.name }
+
+func (s worldSandbox) Root() (string, error) { return s.root, nil }
+
+func (s worldSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
+	return mcp.NewSandboxTools(s.root), nil
+}
+
+// ConfigureGitCredentials is a no-op: world.sandboxRoot has already
+// pointed this directory at the world's proxy with its own minted token.
+func (s worldSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
+	return nil
+}
+
+func (s worldSandbox) Release(ctx context.Context) error { return nil }
 
 // configPushScript is the scripted turn the original task's own agent
 // takes: push a branch that adds CONFIG.md with content, the file this
@@ -150,7 +167,7 @@ func (w *world) fileAt(owner, name, ref, path string) string {
 
 func TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead(t *testing.T) {
 	const slot = "sandbox-6b07cbf7-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "widgets"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}

@@ -45,7 +45,6 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
@@ -264,16 +263,8 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	// orchestrator reads the very task the CLI just wrote -- the two share
 	// the store, where before they shared only a GitHub issue and each
 	// kept its own store, which is exactly the split the inversion closed.
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "cli-e2e-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
+	sandboxes := credentialed(t, remote)
 
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)

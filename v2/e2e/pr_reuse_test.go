@@ -34,7 +34,6 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
@@ -60,24 +59,6 @@ func newPRReuseSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *g
 
 	sim := githubsim.New(owner, repo, bare, branch)
 	return sim, github.NewClient(sim, nil)
-}
-
-// credentialSlot gives slot's own sandbox directory a git identity --
-// duplicated from pkg/orchestrator/live_test.go's own helper of the same
-// name, for the same reason: a fresh sandbox has none configured anywhere,
-// which makes `git commit` fail outright. This test clones straight off a
-// bare repo path rather than through a real gitproxy, so the placeholder
-// remote's scheme and host (never its path) are the only part of this
-// call that matters here.
-func credentialSlot(t *testing.T, sandboxes *orchestrator.HostSandboxes, slot string) {
-	t.Helper()
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root, "http://placeholder.example/x/y.git", "unused"); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // pushMoreScript is pushScript's second-attempt counterpart: it checks out
@@ -140,8 +121,7 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 
 	sim, client := newPRReuseSim(t, owner, repoName, "main")
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	credentialSlot(t, sandboxes, slot)
+	sandboxes := credentialed(t, "http://placeholder.example/x/y.git")
 
 	actor := human("dana")
 	task := model.Task{
