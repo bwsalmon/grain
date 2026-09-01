@@ -185,8 +185,8 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 		Framework: func() agent.Framework {
 			return gemini.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics))
 		},
-		Config: orchestrator.Config{Capabilities: registry},
-		Slots:  slots,
+		Config:        orchestrator.Config{Capabilities: registry},
+		MaxConcurrent: len(slots),
 	}
 
 	// Seed a backlog before the sustained phase starts, so every slot has
@@ -258,11 +258,11 @@ func storeIsQuiet(t *testing.T, ctx context.Context, store *model.Store) bool {
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
-		t.Fatalf("OccupiedSlots: %v", err)
+		t.Fatalf("LiveRunCount: %v", err)
 	}
-	return len(ready) == 0 && len(occupied) == 0
+	return len(ready) == 0 && occupied == 0
 }
 
 func runOneTick(t *testing.T, ctx context.Context, store *model.Store, deps orchestrator.Deps, metrics *loadMetrics) {
@@ -513,12 +513,12 @@ func loadRetryBackoff(streak int) time.Duration {
 // (dispatch.go's own doc comment) and so lists a backing-off task too.
 func assertDrainedCleanly(t *testing.T, ctx context.Context, store *model.Store) {
 	t.Helper()
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
-		t.Fatalf("OccupiedSlots: %v", err)
+		t.Fatalf("LiveRunCount: %v", err)
 	}
-	if len(occupied) != 0 {
-		t.Errorf("scheduling: %d slot(s) still occupied after draining -- a dispatched run never finished: %v", len(occupied), occupied)
+	if occupied != 0 {
+		t.Errorf("scheduling: %d slot(s) still occupied after draining -- a dispatched run never finished: %v", occupied, occupied)
 	}
 
 	ready, err := store.Ready(ctx)

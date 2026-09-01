@@ -234,7 +234,7 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	// used by one run at a time.
 	var genMu sync.Mutex
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, Slots: slots,
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: len(slots),
 		Framework: func() agent.Framework {
 			return gemini.NewForTest(&randomGenerator{
 				mu: &genMu, rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,
@@ -268,12 +268,12 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 			if err := orchestrator.RunCycle(cctx, deps, clock); err != nil {
 				t.Fatalf("round %d: RunCycle: %v", round, err)
 			}
-			occ, err := store.OccupiedSlots(ctx)
+			occ, err := store.LiveRunCount(ctx)
 			if err != nil {
-				t.Fatalf("round %d: OccupiedSlots: %v", round, err)
+				t.Fatalf("round %d: LiveRunCount: %v", round, err)
 			}
-			if len(occ) != 0 {
-				t.Fatalf("round %d: %d slot(s) still occupied once RunCycle returned -- a dispatched run never finished, blocking its slot: %v", round, len(occ), occ)
+			if occ != 0 {
+				t.Fatalf("round %d: %d slot(s) still occupied once RunCycle returned -- a dispatched run never finished, blocking its slot: %v", round, occ, occ)
 			}
 		})
 

@@ -60,8 +60,8 @@ func TestRunCycleReshapesTheSandboxForATaskWithASandboxShapeOverride(t *testing.
 	sandboxes := &recordingReshapeSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework: completesWithAComment(),
-		Slots:     []string{"slot-0"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -83,8 +83,8 @@ func TestRunCycleDoesNotReshapeForATaskWithNoSandboxShapeOverride(t *testing.T) 
 	sandboxes := &recordingReshapeSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework: completesWithAComment(),
-		Slots:     []string{"slot-0"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -113,8 +113,8 @@ func TestRunCycleRefusesATaskWithASandboxShapeOverrideAgainstAnUnsupportedBacken
 	// capability with no local directory to place it in.
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: completesWithAComment(),
-		Slots:     []string{"slot-0"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err == nil {

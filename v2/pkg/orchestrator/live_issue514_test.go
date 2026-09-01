@@ -61,7 +61,7 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 	}
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Store: store, Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: func() agent.Framework { return framework },
 		// The real repro: a budget so tight the model cannot possibly
 		// also reply with a final answer once it has spent its one turn

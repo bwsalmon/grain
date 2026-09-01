@@ -137,7 +137,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		fileIssue(w, parentID, human("alice"), parentTarget)
 		assertState(w, parentID, model.StateQueued, false)
 
-		dispatches, err := dispatch.Cycle(ctx, store, []string{slot}, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		if !pushedOK(result) {
 			t.Fatalf("parent run did not push cleanly: %+v", result.ToolCalls)
 		}
-		if occ, _ := store.OccupiedSlots(ctx); len(occ) != 0 {
+		if occ, _ := store.LiveRunCount(ctx); occ != 0 {
 			t.Fatalf("occupied slots after finish = %v, want none", occ)
 		}
 
@@ -205,7 +205,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		// Not dispatchable, even with the slot the parent's own run just
 		// freed up.
 		clock = clock.Add(time.Minute)
-		stillProposed, err := dispatch.Cycle(ctx, store, []string{slot}, clock)
+		stillProposed, err := dispatch.Cycle(ctx, store, 1, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -234,7 +234,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{slot2: root2}}
 
 		clock = clock.Add(time.Minute)
-		dispatches, err := dispatch.Cycle(ctx, store, []string{slot2}, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)
 		if err != nil {
 			t.Fatal(err)
 		}

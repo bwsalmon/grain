@@ -189,9 +189,9 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	assertState(model.StateQueued)
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "sandbox-1", Sandbox: "sandbox-1",
+		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-1",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	assertState(model.StateRunning)
@@ -285,13 +285,13 @@ func TestLeasesAreQueryableByMintingCredential(t *testing.T) {
 	}
 	expires := now.Add(24 * time.Hour)
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: 1, StartedAt: now,
+		ID: "r1", TaskID: "a1b2", Sandbox: "s1", Attempt: 1, StartedAt: now,
 		Leases: []model.Lease{{
 			Capability: "gemini-key", Resource: "projects/p/keys/k",
 			MintedBy: model.CredentialRef{Name: "gcp-host-service-account"},
 			IssuedAt: now, ExpiresAt: &expires,
 		}},
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -334,9 +334,9 @@ func TestAttemptsCountsRuns(t *testing.T) {
 	}
 	for i, id := range []string{"r1", "r2", "r3"} {
 		if err := store.StartRun(ctx, model.Run{
-			ID: id, TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+			ID: id, TaskID: "a1b2", Sandbox: "s1",
 			Attempt: i + 1, StartedAt: now,
-		}); err != nil {
+		}, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, now.Add(time.Hour), "requeued", ""); err != nil {
@@ -355,25 +355,28 @@ func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
-	// Started out of attempt order, to prove Runs sorts by attempt rather
-	// than by id or insertion order.
+	// Attempt 1 is given the id that sorts *last*, to prove Runs sorts by
+	// attempt rather than by id. It cannot also be started last: a task
+	// has at most one live run (schema.go's task_run_open_task), so the
+	// earlier attempt has to have finished before the later one starts,
+	// which is the order a real dispatch produces them in anyway.
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r2", TaskID: "a1b2", Slot: "s2", Sandbox: "s2",
-		Attempt: 2, StartedAt: now.Add(time.Hour),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+		ID: "r-second-by-id", TaskID: "a1b2", Sandbox: "s1",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.FinishRun(ctx, "r1", now.Add(30*time.Minute), "failed", "build error"); err != nil {
+	if err := store.FinishRun(ctx, "r-second-by-id", now.Add(30*time.Minute), "failed", "build error"); err != nil {
 		t.Fatal(err)
 	}
-	// r2 is left unfinished, to prove a still-running attempt comes back
-	// with a nil FinishedAt and empty Outcome rather than erroring.
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r-first-by-id", TaskID: "a1b2", Sandbox: "s2",
+		Attempt: 2, StartedAt: now.Add(time.Hour),
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Attempt 2 is left unfinished, to prove a still-running attempt comes
+	// back with a nil FinishedAt and empty Outcome rather than erroring.
 
 	runs, err := store.Runs(ctx, "a1b2")
 	if err != nil {
@@ -403,9 +406,9 @@ func TestRunTranscriptRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: "a1b2", Sandbox: "s1",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -444,9 +447,9 @@ func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -479,9 +482,9 @@ func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
@@ -505,9 +508,9 @@ func TestGitCredentialOverrideFollowsTheLiveRunOnASandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -528,9 +531,9 @@ func TestGitCredentialOverrideIsAbsentWithoutAGitCredentialGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "sandbox-0", Sandbox: "sandbox-0",
+		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1018,9 +1021,9 @@ func TestReadsSeeConsistentStateWhileWritersAreActive(t *testing.T) {
 				return
 			}
 			writeErrs[i] = store.StartRun(ctx, model.Run{
-				ID: "r-" + id, TaskID: id, Slot: fmt.Sprintf("sandbox-%d", i),
+				ID: "r-" + id, TaskID: id,
 				Sandbox: fmt.Sprintf("sandbox-%d", i), Attempt: 1, StartedAt: now,
-			})
+			}, 0)
 		}(i)
 	}
 	for i := 0; i < readers; i++ {
@@ -1032,8 +1035,8 @@ func TestReadsSeeConsistentStateWhileWritersAreActive(t *testing.T) {
 					readErrs[i] = fmt.Errorf("Ready: %w", err)
 					return
 				}
-				if _, err := store.OccupiedSlots(ctx); err != nil {
-					readErrs[i] = fmt.Errorf("OccupiedSlots: %w", err)
+				if _, err := store.LiveRunCount(ctx); err != nil {
+					readErrs[i] = fmt.Errorf("LiveRunCount: %w", err)
 					return
 				}
 			}
@@ -1193,8 +1196,8 @@ func TestFailureStreakCountsConsecutiveFailuresAndStopsAtASuccess(t *testing.T) 
 	for i, at := range starts {
 		id := fmt.Sprintf("r%d", i+1)
 		if err := store.StartRun(ctx, model.Run{
-			ID: id, TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
-		}); err != nil {
+			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
+		}, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, at.Add(time.Minute), outcomes[i], "boom"); err != nil {
@@ -1231,8 +1234,8 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 		id := fmt.Sprintf("r%d", i+1)
 		at := now.Add(time.Duration(i) * time.Hour)
 		if err := store.StartRun(ctx, model.Run{
-			ID: id, TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
-		}); err != nil {
+			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
+		}, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, at.Add(time.Minute), "failed", "boom"); err != nil {
@@ -1274,9 +1277,9 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 	freshID := "r" + fmt.Sprint(model.MaxConsecutiveFailures+1)
 	freshAt := retryAt.Add(time.Hour)
 	if err := store.StartRun(ctx, model.Run{
-		ID: freshID, TaskID: "a1b2", Slot: "s1", Sandbox: "s1",
+		ID: freshID, TaskID: "a1b2", Sandbox: "s1",
 		Attempt: model.MaxConsecutiveFailures + 1, StartedAt: freshAt,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, freshID, freshAt.Add(time.Minute), "failed", "boom again"); err != nil {
@@ -1289,55 +1292,100 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 	}
 }
 
-// TestStartRunRejectsASecondOpenRunOnTheSameSlot pins the bwsalmon/
-// agents#434 guard: dispatch.Cycle reads OccupiedSlots and Ready outside
-// of any one transaction, so nothing stops two overlapping callers from
-// both deciding a slot is free and both calling StartRun onto it. Before
-// task_run_open_slot existed, the second StartRun would silently
-// overwrite the first's row (REPLACE INTO has no conflict signal); now it
-// must fail outright, and the first dispatch's row must survive intact.
-func TestStartRunRejectsASecondOpenRunOnTheSameSlot(t *testing.T) {
+// TestStartRunRejectsASecondLiveRunOnTheSameTask pins what is left of
+// the bwsalmon/agents#434 guard once slots stopped existing. It used to
+// be one live run per slot, catching two overlapping dispatch.Cycle
+// callers that both decided the same slot was free; the concurrency
+// limit is now enforced inside StartRun's own transaction instead, and
+// what this index still rules out is a task running twice at once --
+// which task_state assumes when it reads a live run as 'running', and
+// which a REPLACE INTO would have hidden by silently overwriting the
+// first run's row.
+func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 	store, _, ctx := openStore(t)
 	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutTask(ctx, task("c3d4", true)); err != nil {
-		t.Fatal(err)
+
+	first := model.Run{ID: "a1b2-r1", TaskID: "a1b2", Sandbox: "a1b2-r1", Attempt: 1, StartedAt: now}
+	if err := store.StartRun(ctx, first, 0); err != nil {
+		t.Fatalf("first StartRun for an idle task: %v", err)
 	}
 
-	first := model.Run{ID: "a1b2-r1", TaskID: "a1b2", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now}
-	if err := store.StartRun(ctx, first); err != nil {
-		t.Fatalf("first StartRun onto a free slot: %v", err)
+	second := model.Run{ID: "a1b2-r2", TaskID: "a1b2", Sandbox: "a1b2-r2", Attempt: 2, StartedAt: now}
+	if err := store.StartRun(ctx, second, 0); err == nil {
+		t.Fatal("a second live run on a task that already has one should have failed, not landed")
 	}
 
-	second := model.Run{ID: "c3d4-r1", TaskID: "c3d4", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now}
-	if err := store.StartRun(ctx, second); err == nil {
-		t.Fatal("a second open run on an already-occupied slot should have failed, not landed")
-	}
-
-	occupied, err := store.OccupiedSlots(ctx)
+	live, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 1 || occupied[0] != "sandbox-1" {
-		t.Fatalf("occupied slots = %v, want exactly [sandbox-1] -- the rejected second run must not have landed", occupied)
+	if live != 1 {
+		t.Fatalf("live runs = %d, want exactly 1 -- the rejected second run must not have landed", live)
 	}
 	streak, err := store.FailureStreak(ctx, "a1b2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if streak != nil {
-		t.Fatalf("first dispatch's own run row was overwritten: FailureStreak(a1b2) = %+v, want nil (never finished)", streak)
+		t.Fatalf("first run's row was overwritten: FailureStreak(a1b2) = %+v, want nil (never finished)", streak)
 	}
 
-	// Once the slot is actually free again, a fresh dispatch onto it
-	// succeeds -- the index guards against an overlap, not against reuse.
+	// Once the first attempt has finished, a second one starts fine --
+	// the index guards against an overlap, not against a retry.
+	if err := store.FinishRun(ctx, "a1b2-r1", now.Add(time.Hour), "failed", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, second, 0); err != nil {
+		t.Fatalf("StartRun for a second attempt after the first finished: %v", err)
+	}
+}
+
+// TestStartRunRefusesToExceedTheConcurrencyLimit pins the guard that
+// replaced the one-run-per-slot index as the thing keeping two
+// overlapping dispatch.Cycle callers from over-dispatching. Cycle reads
+// the live-run count and task_ready outside any one transaction, so
+// nothing in Go stops both from seeing the same headroom; StartRun
+// re-counts inside the transaction that records the run, so the second
+// one loses with model.ErrAtCapacity rather than landing an extra run.
+func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
+	store, _, ctx := openStore(t)
+	for _, id := range []string{"a1b2", "c3d4", "e5f6"} {
+		if err := store.PutTask(ctx, task(id, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, id := range []string{"a1b2", "c3d4"} {
+		run := model.Run{ID: id + "-r1", TaskID: id, Sandbox: id + "-r1", Attempt: 1, StartedAt: now}
+		if err := store.StartRun(ctx, run, 2); err != nil {
+			t.Fatalf("StartRun for %s within the limit: %v", id, err)
+		}
+	}
+
+	third := model.Run{ID: "e5f6-r1", TaskID: "e5f6", Sandbox: "e5f6-r1", Attempt: 1, StartedAt: now}
+	err := store.StartRun(ctx, third, 2)
+	if !errors.Is(err, model.ErrAtCapacity) {
+		t.Fatalf("StartRun past the limit = %v, want ErrAtCapacity", err)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != 2 {
+		t.Fatalf("live runs = %d (%v), want exactly 2 -- the refused run must not have landed", live, err)
+	}
+
+	// Finishing one makes room for exactly one more.
 	if err := store.FinishRun(ctx, "a1b2-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	third := model.Run{ID: "c3d4-r1", TaskID: "c3d4", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour)}
-	if err := store.StartRun(ctx, third); err != nil {
-		t.Fatalf("StartRun onto a slot freed by FinishRun: %v", err)
+	if err := store.StartRun(ctx, third, 2); err != nil {
+		t.Fatalf("StartRun into freed capacity: %v", err)
+	}
+
+	// A limit of zero or less means "no limit of mine to enforce" -- what
+	// a caller with its own reason to record a run passes.
+	fourth := model.Run{ID: "a1b2-r2", TaskID: "a1b2", Sandbox: "a1b2-r2", Attempt: 2, StartedAt: now.Add(2 * time.Hour)}
+	if err := store.StartRun(ctx, fourth, 0); err != nil {
+		t.Fatalf("StartRun with no limit: %v", err)
 	}
 }
 

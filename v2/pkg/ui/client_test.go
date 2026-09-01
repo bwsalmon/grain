@@ -877,18 +877,18 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	task := create(t, c, ctx)
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "build error"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r2", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r2", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 2, StartedAt: baseTime.Add(time.Hour),
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -930,9 +930,9 @@ func TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted(t *testing.T) {
 	task := create(t, c, ctx)
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "exceeded max turns (2) without a final answer"); err != nil {
@@ -973,9 +973,9 @@ func TestRetryClearsAFailedTasksStreak(t *testing.T) {
 		id := "r" + strconv.Itoa(i+1)
 		started := baseTime.Add(time.Duration(i) * time.Hour)
 		if err := store.StartRun(ctx, model.Run{
-			ID: id, TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+			ID: id, TaskID: task.ID, Sandbox: "s1",
 			Attempt: i + 1, StartedAt: started,
-		}); err != nil {
+		}, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, started.Add(time.Minute), "failed", "boom"); err != nil {
@@ -1106,9 +1106,9 @@ func TestAttemptTranscript(t *testing.T) {
 	task := create(t, c, ctx)
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "succeeded", ""); err != nil {
@@ -1153,9 +1153,9 @@ func TestAttemptTranscriptPrefersTheLiveTranscriptWhileARunIsStillGoing(t *testi
 	c.Config.LiveTranscripts = fakeLiveTranscript{"r1": "still working on it"}
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1177,9 +1177,9 @@ func TestAttemptTranscriptFallsBackToTheStoreOnceALiveRunFinishes(t *testing.T) 
 	c.Config.LiveTranscripts = fakeLiveTranscript{"r1": "stale in-progress text"}
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(time.Minute), "succeeded", ""); err != nil {
@@ -1206,9 +1206,9 @@ func TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet(t *testing.T)
 	c.Config.LiveTranscripts = fakeLiveTranscript{}
 
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 

@@ -144,7 +144,6 @@ var Tables = []string{
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
   ` + "`id`" + `          TEXT     NOT NULL,
   ` + "`task_id`" + `     TEXT     NOT NULL,
-  ` + "`slot`" + `        TEXT     NOT NULL,
   ` + "`sandbox`" + `     TEXT     NOT NULL,
   ` + "`unit`" + `        TEXT     NULL,
   ` + "`attempt`" + `     INTEGER  NOT NULL,
@@ -156,20 +155,29 @@ var Tables = []string{
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
-	// At most one open (finished_at IS NULL) run per slot -- the DB-level
-	// backstop bwsalmon/agents#434 asks for. dispatch.Cycle reads
-	// OccupiedSlots and Ready outside of any single transaction and then
-	// issues one StartRun per free slot it found, so nothing in Go stops
-	// two overlapping Cycle calls (nothing makes one today -- cycle.go's
-	// own doc comments -- but nothing enforces that either) from both
-	// seeing the same slot as free and both dispatching onto it. Paired
-	// with startRun's own INSERT (its doc comment), the second StartRun
-	// now fails outright on this index instead of landing a second live
-	// run on a slot the first dispatch already claimed. A partial index
-	// rather than a plain UNIQUE column, since the same slot legitimately
-	// appears in many finished rows over a store's lifetime and only the
-	// currently-open one must be unique.
-	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`task_run_open_slot`" + ` ON ` + "`task_run`" + ` (` + "`slot`" + `) WHERE ` + "`finished_at`" + ` IS NULL`,
+	// At most one open (finished_at IS NULL) run per task -- what is left
+	// of the DB-level backstop bwsalmon/agents#434 asked for once slots
+	// stopped existing. It used to be one open run per *slot*: dispatch.
+	// Cycle read OccupiedSlots and Ready outside any single transaction
+	// and then issued one StartRun per free slot it found, so two
+	// overlapping Cycle calls could both see the same slot as free and
+	// both dispatch onto it, and this index was what made the second one
+	// fail loudly instead of quietly landing a second live run on a
+	// claimed slot.
+	//
+	// A sandbox per task removes that race at its source rather than
+	// catching it here: startRun now counts live runs and enforces the
+	// concurrency limit inside its own transaction (its doc comment), so
+	// there is no window between deciding a run may start and recording
+	// that it has. What is still worth an index is the invariant that
+	// outlived slots -- a task has at most one run in flight at a time,
+	// which task_state already assumes when it reads a live run as
+	// 'running', and which dispatch.Cycle relies on when it takes
+	// task_ready's own order at face value. A partial index rather than a
+	// plain UNIQUE column, since the same task legitimately appears in
+	// many finished rows over a store's lifetime (one per attempt) and
+	// only the currently-open one must be unique.
+	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`task_run_open_task`" + ` ON ` + "`task_run`" + ` (` + "`task_id`" + `) WHERE ` + "`finished_at`" + ` IS NULL`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`lease`" + ` (
   ` + "`run_id`" + `     TEXT     NOT NULL,
@@ -382,9 +390,10 @@ var Tables = []string{
 	//
 	// max_concurrent replaced a slots column (a comma-separated list of
 	// operator-chosen concurrency-slot names) here for bwsalmon/agents#461:
-	// Config.MaxConcurrent is a plain count now, and dispatch.Cycle's own
-	// slot identifiers are generated from it (model.SlotNames) rather than
-	// configured. The same CREATE TABLE IF NOT EXISTS limitation applies,
+	// Config.MaxConcurrent is a plain count. It stayed one when slots
+	// themselves were removed -- dispatch.Cycle no longer expands it into
+	// identifiers at all, it simply starts runs until this many are live.
+	// The same CREATE TABLE IF NOT EXISTS limitation applies,
 	// so an already-created grain_config gets max_concurrent added, and
 	// backfilled from however many names its old slots column held, by
 	// Store.Init's own ensureConfigMaxConcurrentColumn, which also drops

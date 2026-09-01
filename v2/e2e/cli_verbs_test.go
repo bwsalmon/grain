@@ -121,7 +121,7 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 	// comment on the task -- no CLI subprocess yet, since nothing but the
 	// scripted agent's own turn happens here.
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: scriptedFramework(askScript("should this touch the public API or stay internal?")),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
@@ -276,7 +276,7 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 
 	// A closed task is not dispatchable, however free the slot.
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(remote, model.BranchName(task.ID), task.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
@@ -464,8 +464,8 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 
 	deps := orchestrator.Deps{
 		Client: client, Sandboxes: sandboxes, Config: cfg,
-		Slots:     []string{slotA},
-		Framework: scriptedFramework(pushScript(remote, model.BranchName(taskA.ID), taskA.ID)),
+		MaxConcurrent: 1,
+		Framework:     scriptedFramework(pushScript(remote, model.BranchName(taskA.ID), taskA.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
 		deps.Store = store
@@ -606,7 +606,7 @@ func TestCLIUpdateChangesBaseAndAutoMergeBeforeDispatchAndBothTakeEffect(t *test
 
 	branch := model.BranchName(task.ID)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: scriptedFramework(releaseBranchPushScript(remote, branch, task.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {

@@ -95,7 +95,7 @@ func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
 		// itself excludes anything already running, so a task with an
 		// unresolved live run from an earlier round is never redispatched
 		// out from under itself.
-		dispatches, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
+		dispatches, err := dispatch.Cycle(w.ctx, w.store, len(slots), clock)
 		if err != nil {
 			t.Fatalf("round %d: Cycle: %v", round, err)
 		}
@@ -312,14 +312,14 @@ func checkSimInvariants(t *testing.T, w *world, round int, tasks map[string]*sim
 		}
 	}
 
-	occ, err := w.store.OccupiedSlots(w.ctx)
+	occ, err := w.store.LiveRunCount(w.ctx)
 	if err != nil {
-		t.Fatalf("round %d: OccupiedSlots: %v", round, err)
+		t.Fatalf("round %d: LiveRunCount: %v", round, err)
 	}
-	if len(occ) != wantOccupied {
-		t.Fatalf("round %d: store reports %d occupied slots, sim expects %d: %v", round, len(occ), wantOccupied, occ)
+	if occ != wantOccupied {
+		t.Fatalf("round %d: store reports %d occupied slots, sim expects %d: %v", round, occ, wantOccupied, occ)
 	}
-	if len(occ) > len(slots) {
-		t.Fatalf("round %d: %d slots occupied, only %d exist", round, len(occ), len(slots))
+	if occ > len(slots) {
+		t.Fatalf("round %d: %d slots occupied, only %d exist", round, occ, len(slots))
 	}
 }

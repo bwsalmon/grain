@@ -155,7 +155,7 @@ func TestCLICreateWithBaseOpensPullRequestAgainstThatBranch(t *testing.T) {
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: scriptedFramework(releaseBranchPushScript(remote, branch, task.ID)),
 	}
 

@@ -1,17 +1,25 @@
-// Package dispatch decides which task takes which slot: what one
-// controller cycle assigns, and nothing more. It does not loop — a
-// deployment's own timer does, through orchestrator.RunCycle, which
-// calls Cycle once per tick.
+// Package dispatch decides which tasks run now: what one controller
+// cycle starts, and nothing more. It does not loop — a deployment's own
+// timer does, through orchestrator.RunCycle, which calls Cycle once per
+// tick.
 //
 // Cycle calls StartRun and nothing else — no sandbox is created, no
 // GitHub is touched, no agent runs. Those are side effects bwsalmon/
 // agents#219 deliberately defers: this package exists to pin down that
-// the *decisions* — which task takes which slot, when, and how often —
-// are correct on their own, against a real store, before anything
-// external is wired to react to them. pkg/orchestrator is the
-// side-effecting counterpart that grew around it, and nothing here had
-// to change shape when it did, since a Dispatch already says everything
-// that side effect needs to know.
+// the *decisions* — which task runs, when, and how often — are correct
+// on their own, against a real store, before anything external is wired
+// to react to them. pkg/orchestrator is the side-effecting counterpart
+// that grew around it, and nothing here had to change shape when it did,
+// since a Dispatch already says everything that side effect needs to
+// know.
+//
+// It used to decide which task took which *slot*, drawing from a fixed
+// pool of generated identifiers that a long-lived sandbox was named
+// after and reused under. A sandbox is now created for a run and
+// destroyed with it, so there is no pool to assign out of and nothing
+// for an identifier to name: concurrency is a count of live runs against
+// Config.MaxConcurrent, and the run's own ID is the only name anything
+// downstream needs.
 //
 // There is almost no scheduling policy here: no fairness, no preemption.
 // Ordering is whatever task_ready yields, and Cycle takes its prefix,
@@ -23,24 +31,29 @@
 // rather than a policy Cycle itself makes -- see Store.Ready's doc
 // comment (bwsalmon/agents#389) for why. A package that ranked ready
 // tasks against each other on some richer notion of priority would be a
-// scheduler; this one drains a queue into free slots.
+// scheduler; this one drains a queue into whatever headroom there is.
 package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
-// Dispatch is one decision a cycle made: task TaskID was started in slot
-// Slot, as its Attempt'th run. The store write is already durable by the
-// time a Dispatch is returned — this is a record of what happened, for a
+// Dispatch is one decision a cycle made: task TaskID was started as its
+// Attempt'th run. The store write is already durable by the time a
+// Dispatch is returned — this is a record of what happened, for a
 // side-effecting layer to act on, not a request for one to decide.
+//
+// It named a Slot until slots stopped existing. Nothing replaced that
+// field: the layer that acts on a Dispatch acquires a sandbox for it and
+// records the name itself (Store.SetRunSandbox), so there is nothing
+// about a sandbox for this package to have an opinion on.
 type Dispatch struct {
 	TaskID  string
-	Slot    string
 	RunID   string
 	Attempt int
 }
@@ -55,8 +68,8 @@ func RunID(taskID string, attempt int) string {
 }
 
 // baseRetryBackoff and maxRetryBackoff bound how long Cycle waits after a
-// task's run ends without succeeding before offering it a free slot
-// again: baseRetryBackoff after the first such run in a row, doubling
+// task's run ends without succeeding before dispatching it again:
+// baseRetryBackoff after the first such run in a row, doubling
 // each further one, capped at maxRetryBackoff -- so a task whose agent
 // hits a transient failure gets a handful of prompt retries, while one
 // that is wrong in a way no retry fixes stops hammering a real API and a
@@ -107,42 +120,44 @@ func retryEligible(ctx context.Context, store *model.Store, taskID string, now t
 	return !now.Before(streak.LastFinishedAt.Add(retryBackoff(streak.Count))), nil
 }
 
-// Cycle is one pass: fill every free slot with the next ready, backed-off
-// task, in task_ready's own order, and start nothing else. It is the
-// entire dispatch decision for now — no polling, no completion detection,
-// no side effect beyond the store writes StartRun already makes durable.
+// Cycle is one pass: start the next ready, backed-off tasks in
+// task_ready's own order until maxConcurrent runs are in flight, and
+// start nothing else. It is the entire dispatch decision for now — no
+// polling, no completion detection, no side effect beyond the store
+// writes StartRun already makes durable.
 //
-// slots is the whole concurrency pool, not just the free ones. Cycle
-// works out what is occupied itself, from the store, on every call,
-// rather than trusting a caller's idea of it left over from the last
-// one — a run can finish and free a slot with nothing about this cycle's
-// caller changing, the same "re-read, never pin" discipline IsBlocked's
-// docstring argues for and for the same reason.
+// maxConcurrent is the whole limit, not the remaining headroom. Cycle
+// works out how much of it is already spent itself, from the store, on
+// every call, rather than trusting a caller's idea of it left over from
+// the last one — a run can finish and free capacity with nothing about
+// this cycle's caller changing, the same "re-read, never pin" discipline
+// IsBlocked's docstring argues for and for the same reason.
+//
+// That count is read once, up front, and then spent down as this loop
+// starts runs; it is not the thing that enforces the limit. StartRun
+// re-checks it inside the transaction that records each run, and returns
+// model.ErrAtCapacity if another caller took the last of the headroom in
+// between -- which Cycle treats as "no more room this tick" and stops on,
+// returning what it did manage to start. See StartRun's own doc comment:
+// the check has to happen there to be a check at all, and this one exists
+// only to avoid asking for capacity that is obviously not there.
 //
 // A task already running never appears in Ready — task_ready requires
 // state = 'queued', and a live run makes the state 'running' — so Cycle
 // needs no check of its own to avoid dispatching one twice; that
 // invariant lives in the view, not here. A task still backing off after a
 // failed run does appear in Ready (task_ready has no notion of time), so
-// Cycle itself skips it via retryEligible -- without consuming the free
-// slot it would otherwise have taken, so a task further down the ready
-// order is not made to wait behind one that is not actually eligible yet.
-func Cycle(ctx context.Context, store *model.Store, slots []string, now time.Time) ([]Dispatch, error) {
-	occupied, err := store.OccupiedSlots(ctx)
+// Cycle itself skips it via retryEligible -- without consuming the
+// capacity it would otherwise have taken, so a task further down the
+// ready order is not made to wait behind one that is not actually
+// eligible yet.
+func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.Time) ([]Dispatch, error) {
+	live, err := store.LiveRunCount(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch: reading occupied slots: %w", err)
+		return nil, fmt.Errorf("dispatch: counting live runs: %w", err)
 	}
-	busy := make(map[string]bool, len(occupied))
-	for _, s := range occupied {
-		busy[s] = true
-	}
-	var free []string
-	for _, s := range slots {
-		if !busy[s] {
-			free = append(free, s)
-		}
-	}
-	if len(free) == 0 {
+	free := maxConcurrent - live
+	if free <= 0 {
 		return nil, nil
 	}
 
@@ -153,7 +168,7 @@ func Cycle(ctx context.Context, store *model.Store, slots []string, now time.Tim
 
 	var out []Dispatch
 	readyIdx := 0
-	for _, slot := range free {
+	for started := 0; started < free; started++ {
 		var taskID string
 		for {
 			if readyIdx >= len(ready) {
@@ -176,18 +191,23 @@ func Cycle(ctx context.Context, store *model.Store, slots []string, now time.Tim
 			return nil, fmt.Errorf("dispatch: counting attempts for %s: %w", taskID, err)
 		}
 		attempt := attempts + 1
+		// Sandbox is deliberately left empty: no sandbox exists for this
+		// run yet, and inventing a name here for one nothing has built
+		// would be a claim this package is in no position to make. The
+		// orchestrator acquires one and records it (Store.SetRunSandbox).
 		run := model.Run{
 			ID:        RunID(taskID, attempt),
 			TaskID:    taskID,
-			Slot:      slot,
-			Sandbox:   slot,
 			Attempt:   attempt,
 			StartedAt: now,
 		}
-		if err := store.StartRun(ctx, run); err != nil {
+		if err := store.StartRun(ctx, run, maxConcurrent); err != nil {
+			if errors.Is(err, model.ErrAtCapacity) {
+				return out, nil
+			}
 			return nil, fmt.Errorf("dispatch: starting run for %s: %w", taskID, err)
 		}
-		out = append(out, Dispatch{TaskID: taskID, Slot: slot, RunID: run.ID, Attempt: attempt})
+		out = append(out, Dispatch{TaskID: taskID, RunID: run.ID, Attempt: attempt})
 	}
 	return out, nil
 }

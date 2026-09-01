@@ -50,7 +50,13 @@ import (
 // deployment needs to make to move a slot from the local stand-in to a
 // real VM.
 type Sandboxes interface {
-	ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error)
+	ToolsFor(ctx context.Context, sandbox string) ([]mcp.Tool, error)
+	// ConfigureGitCredentials points sandbox's git at the proxy, using
+	// the bearer token minted for that sandbox. Every backend implements
+	// it: a sandbox now exists for exactly one run, so pointing it at the
+	// proxy is part of preparing that run rather than a one-time setup
+	// step a daemon performs per slot at startup.
+	ConfigureGitCredentials(ctx context.Context, sandbox, remoteURL, token string) error
 }
 
 // Config is what one deployment's orchestrator needs to know: which repo
@@ -205,27 +211,45 @@ func NewHostSandboxes(baseDir string) *HostSandboxes {
 	return &HostSandboxes{baseDir: baseDir, roots: map[string]string{}}
 }
 
-// RootFor returns slot's sandbox directory, creating it on first use.
-func (h *HostSandboxes) RootFor(slot string) (string, error) {
+// RootFor returns sandbox's own directory, creating it on first use.
+func (h *HostSandboxes) RootFor(sandbox string) (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if root, ok := h.roots[slot]; ok {
+	if root, ok := h.roots[sandbox]; ok {
 		return root, nil
 	}
-	root := filepath.Join(h.baseDir, slot)
+	root := filepath.Join(h.baseDir, sandbox)
 	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", fmt.Errorf("orchestrator: creating sandbox directory for slot %q: %w", slot, err)
+		return "", fmt.Errorf("orchestrator: creating sandbox directory for %q: %w", sandbox, err)
 	}
-	h.roots[slot] = root
+	h.roots[sandbox] = root
 	return root, nil
 }
 
 // ToolsFor implements Sandboxes: mcp.NewSandboxTools confined to
-// RootFor(slot).
-func (h *HostSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
-	root, err := h.RootFor(slot)
+// RootFor(sandbox).
+func (h *HostSandboxes) ToolsFor(ctx context.Context, sandbox string) ([]mcp.Tool, error) {
+	root, err := h.RootFor(sandbox)
 	if err != nil {
 		return nil, err
 	}
 	return mcp.NewSandboxTools(root), nil
+}
+
+// ConfigureGitCredentials points sandbox's git at the proxy, the
+// local-directory counterpart to KonturSandboxes' own method of the same
+// name -- an ordinary file write under RootFor(sandbox), where that one
+// has to reach into a VM's guest to do the same thing.
+//
+// This used to be done once per slot, at daemon startup, because a slot's
+// sandbox outlived every run dispatched onto it. A sandbox that exists
+// for one run is configured as part of preparing that run instead (see
+// cycle.go's runOne), which is why both backends now expose it under one
+// interface rather than the daemon calling each concretely.
+func (h *HostSandboxes) ConfigureGitCredentials(ctx context.Context, sandbox, remoteURL, token string) error {
+	root, err := h.RootFor(sandbox)
+	if err != nil {
+		return err
+	}
+	return mcp.ConfigureGitCredentials(root, remoteURL, token)
 }

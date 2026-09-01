@@ -117,7 +117,7 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
 	sim := githubsim.New(owner, repoName, bare, "main")
 	client := github.NewClient(sim, nil)
-	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot}}
+	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1}
 
 	task1 := model.Task{
 		ID: "t1", Intent: model.IntentImplement, Title: "task1",
@@ -289,7 +289,7 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
 	sim := githubsim.New(owner, repoName, bare, "main")
 	client := github.NewClient(sim, nil)
-	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot}}
+	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1}
 
 	task1 := model.Task{
 		ID: "t1", Intent: model.IntentImplement, Title: "task1",
@@ -416,7 +416,7 @@ func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *tes
 
 	branch := model.BranchName("t-closed-early")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-closed-early")),
 	}
 	clock := baseTime
@@ -481,7 +481,7 @@ func TestAutoMergeLeavesAPullRequestOfUnknownMergeabilityAloneUntilItResolves(t 
 
 	branch := model.BranchName("t-pending")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-pending")),
 	}
 	clock := baseTime

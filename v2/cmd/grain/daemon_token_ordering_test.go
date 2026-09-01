@@ -94,7 +94,7 @@ func TestSandboxTokenMintedBeforeGitProxyStartsAuthenticates(t *testing.T) {
 	}
 	// gitproxy's Authorizer reads the sandbox's live dispatched task, so
 	// this slot needs a real Dispatch on record, not just a queued task.
-	if dispatches, err := dispatch.Cycle(context.Background(), store, []string{slot}, time.Now().UTC()); err != nil || len(dispatches) != 1 {
+	if dispatches, err := dispatch.Cycle(context.Background(), store, 1, time.Now().UTC()); err != nil || len(dispatches) != 1 {
 		t.Fatalf("expected exactly one dispatch, got %v (err=%v)", dispatches, err)
 	}
 

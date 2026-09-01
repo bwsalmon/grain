@@ -19,14 +19,31 @@ import (
 // conversation, the way gemini.Framework.Run's own in-process MCP server
 // is scoped to one run's own tools at a time. Sandboxes is HostSandboxes
 // for the local-directory stand-in, or KonturSandboxes for a real
-// bwsalmon/kontur-managed VM per slot — see the package doc comment.
+// bwsalmon/kontur-managed VM — see the package doc comment.
+//
+// MaxConcurrent is how many runs may be in flight at once. It was a
+// []string of slot identifiers until slots stopped existing; dispatch.
+// Cycle counts live runs against this instead of differencing a pool.
 type Deps struct {
 	Store     *model.Store
 	Client    github.Client
 	Sandboxes Sandboxes
 	Framework func() agent.Framework
 	Config    Config
-	Slots     []string
+	// MintSandboxToken returns the git-proxy bearer token identifying a
+	// sandbox -- gitproxy.SandboxTokenStore.EnsureToken, in a deployment;
+	// nil in a test with no proxy, which skips configuring credentials
+	// altogether.
+	//
+	// A token is minted here, per run, rather than once per slot at
+	// daemon startup as it was while a sandbox outlived the runs
+	// dispatched onto it. That is the security property docs/
+	// data-model.md predicted would fall out of a sandbox per task: a
+	// proxy token now dies with the run that used it, so one that leaks
+	// cannot be replayed by, or on behalf of, anything dispatched after
+	// it.
+	MintSandboxToken func(sandbox string) (string, error)
+	MaxConcurrent    int
 }
 
 // Reconciler is one independent unit of a cycle: a named function that
@@ -164,24 +181,24 @@ func reconcileQualifications(ctx context.Context, deps Deps, now time.Time) erro
 //
 // This is what actually makes -max-concurrent/GRAIN_MAX_CONCURRENT a
 // concurrency knob rather than just a scheduling one (bwsalmon/
-// agents#435): each Dispatch names a
-// distinct, free slot (dispatch.Cycle's own loop draws each one from
-// store.OccupiedSlots-filtered "free" without repeats), so two dispatches
-// from the same Cycle call never touch the same sandbox, the same
-// model.Run row, or the same task -- there is nothing for concurrent
-// runOne calls to race over. HostSandboxes and KonturSandboxes both guard
-// their own per-slot state with a mutex keyed by slot, and model.Store is
-// already built for concurrent callers (pkg/model/sqlite's own doc
-// comment: "the single writer for the whole store" -- serialization
-// happens inside Store, not by a caller taking turns), so nothing here
-// needs to hold a lock of its own.
+// agents#435): each Dispatch names a distinct task and a distinct run,
+// and each run acquires a sandbox of its own, so two dispatches from the
+// same Cycle call never touch the same sandbox, the same model.Run row,
+// or the same task -- there is nothing for concurrent runOne calls to
+// race over. That used to rest on dispatch.Cycle handing out distinct
+// slots from a pool; it now rests on the simpler fact that a sandbox
+// belongs to one run and is built for it. model.Store is already built
+// for concurrent callers (pkg/model/sqlite's own doc comment: "the
+// single writer for the whole store" -- serialization happens inside
+// Store, not by a caller taking turns), so nothing here needs to hold a
+// lock of its own.
 //
 // One dispatch failing does not abandon the others. Every Dispatch
 // dispatch.Cycle returns already has its own durable store row (its own
 // doc comment: "the store write is already durable by the time a Dispatch
-// is returned"), so a slot whose run fails here is a slot whose task is
-// recorded as attempted either way — dropping the remaining dispatches on
-// the floor would leave their slots idle for a tick without changing
+// is returned"), so a run that fails here is one whose task is recorded
+// as attempted either way — dropping the remaining dispatches on the
+// floor would leave that capacity idle for a tick without changing
 // anything about the one that failed. errs is appended to under errsMu
 // since the goroutines below share it; ctx itself (passed to every
 // runOne unchanged) is what stops them early on cancellation -- framework.
@@ -189,7 +206,7 @@ func reconcileQualifications(ctx context.Context, deps Deps, now time.Time) erro
 // is no separate ctx.Err() check to make before launching them the way
 // the old sequential loop needed one before each iteration.
 func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
-	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.Slots, now)
+	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.MaxConcurrent, now)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
@@ -262,26 +279,55 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		return fmt.Errorf("orchestrator: dispatch.Cycle dispatched unknown task %s", d.TaskID)
 	}
 
+	// The sandbox this run gets is named after the run itself. Nothing
+	// else is in a position to name it: it is built for this run and torn
+	// down with it, so there is no longer-lived thing (a slot, a pool
+	// entry) whose name it could inherit, and the run's own ID is already
+	// unique, already durable, and already what a log line or a
+	// `konturctl vm list` would most usefully show.
+	//
+	// Recording it in the store is what lets the git proxy resolve a
+	// caller back to this run's task (Store.GitScope), so it has to
+	// happen before anything inside the sandbox can reach the proxy --
+	// which the ordering here gives: the checkout RunDispatch performs is
+	// the run's own first use of it.
+	sandbox := d.RunID
+	if err := deps.Store.SetRunSandbox(ctx, d.RunID, sandbox); err != nil {
+		return fmt.Errorf("orchestrator: recording run %s's sandbox: %w", d.RunID, err)
+	}
+
+	// Mint this sandbox's own proxy token and point its git at the proxy,
+	// before the checkout RunDispatch performs needs either. Both used to
+	// happen once per slot in cmd/grain's own runDaemon, at startup,
+	// which is where they belonged while a slot's sandbox was long-lived
+	// and shared across every run that landed on it. Neither is a
+	// deployment-wide setup step any more: there is nothing to configure
+	// until a run has a sandbox, and what is configured is thrown away
+	// with it.
+	if deps.MintSandboxToken != nil {
+		token, err := deps.MintSandboxToken(sandbox)
+		if err != nil {
+			return fmt.Errorf("orchestrator: minting run %s's sandbox token: %w", d.RunID, err)
+		}
+		if err := deps.Sandboxes.ConfigureGitCredentials(ctx, sandbox,
+			deps.Config.GitRemoteBase+"/placeholder/placeholder.git", token); err != nil {
+			return fmt.Errorf("orchestrator: configuring git credentials for run %s: %w", d.RunID, err)
+		}
+	}
+
 	// A task's own SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534)
-	// resizes this slot's sandbox before it is handed to the run below --
-	// the one place a per-task override can still take effect, since a
-	// slot's VM is otherwise sized once, at create time, from the
-	// deployment's own default and never revisited. Recreate (below,
-	// after this task finishes) rebuilds from that default again, so the
-	// override applies to this task's run alone. A task with neither
-	// field set never reaches this at all, so a deployment using no
-	// per-task overrides sees no behavior change here.
+	// resizes this run's sandbox before it is handed to the run below.
 	if task.SandboxCPUs != 0 || task.SandboxMemoryMB != 0 {
 		reshaper, ok := deps.Sandboxes.(shapedSandboxes)
 		if !ok {
-			return fmt.Errorf("orchestrator: task %s overrides its sandbox shape but slot %s's sandbox backend does not support resizing", task.ID, d.Slot)
+			return fmt.Errorf("orchestrator: task %s overrides its sandbox shape but the sandbox backend does not support resizing", task.ID)
 		}
-		if err := reshaper.Reshape(ctx, d.Slot, task.SandboxCPUs, task.SandboxMemoryMB); err != nil {
+		if err := reshaper.Reshape(ctx, sandbox, task.SandboxCPUs, task.SandboxMemoryMB); err != nil {
 			return fmt.Errorf("orchestrator: applying task %s's sandbox shape override: %w", task.ID, err)
 		}
 	}
 
-	tools, err := deps.Sandboxes.ToolsFor(ctx, d.Slot)
+	tools, err := deps.Sandboxes.ToolsFor(ctx, sandbox)
 	if err != nil {
 		return err
 	}
@@ -304,9 +350,9 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
 		rooted, ok := deps.Sandboxes.(rootedSandboxes)
 		if !ok {
-			return fmt.Errorf("orchestrator: task %s requests capabilities but slot %s's sandbox has no local directory to place them in", task.ID, d.Slot)
+			return fmt.Errorf("orchestrator: task %s requests capabilities but its sandbox has no local directory to place them in", task.ID)
 		}
-		sandboxRoot, err = rooted.RootFor(d.Slot)
+		sandboxRoot, err = rooted.RootFor(sandbox)
 		if err != nil {
 			return err
 		}
@@ -324,8 +370,8 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// succeeded.
 	var recreateErr error
 	if recreater, ok := deps.Sandboxes.(recreatingSandboxes); ok {
-		if err := recreater.Recreate(ctx, d.Slot); err != nil {
-			recreateErr = fmt.Errorf("orchestrator: recreating slot %s's sandbox after task %s: %w", d.Slot, task.ID, err)
+		if err := recreater.Recreate(ctx, sandbox); err != nil {
+			recreateErr = fmt.Errorf("orchestrator: recreating sandbox %s after task %s: %w", sandbox, task.ID, err)
 		}
 	}
 

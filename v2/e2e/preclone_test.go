@@ -53,7 +53,7 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 	task := fileIssue(w, "iss-preclone", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	branch := model.BranchName(task.ID)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, baseTime)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestDispatchDoesNotCloneForATaskClosedBeforeItRan(t *testing.T) {
 	w.newRepo("acme", "widgets")
 
 	task := fileIssue(w, "iss-closed", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, baseTime)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}

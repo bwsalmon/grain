@@ -79,9 +79,9 @@ func TestRunCycleAddsGrantToolsForAnInteractiveTasksGrant(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return framework },
-		Config:    grantToolsConfig(),
-		Slots:     []string{"slot-0"},
+		Framework:     func() agent.Framework { return framework },
+		Config:        grantToolsConfig(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -106,9 +106,9 @@ func TestRunCycleDoesNotAddGrantToolsForANonInteractiveTask(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return framework },
-		Config:    grantToolsConfig(),
-		Slots:     []string{"slot-0"},
+		Framework:     func() agent.Framework { return framework },
+		Config:        grantToolsConfig(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -134,9 +134,9 @@ func TestRunCycleAddsNoGrantToolsForAGrantWithNoEntry(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return framework },
-		Config:    grantToolsConfig(),
-		Slots:     []string{"slot-0"},
+		Framework:     func() agent.Framework { return framework },
+		Config:        grantToolsConfig(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {

@@ -160,7 +160,7 @@ func TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead(t *te
 	client := github.NewClient(sim, nil)
 
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 	}
 
 	task1 := model.Task{

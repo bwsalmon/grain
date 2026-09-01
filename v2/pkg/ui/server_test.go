@@ -273,8 +273,8 @@ func TestRetryRouteClearsAFailedTasksStreak(t *testing.T) {
 		runID := id + "-r" + strconv.Itoa(i+1)
 		started := baseTime.Add(time.Duration(i) * time.Hour)
 		if err := client.Store.StartRun(context.Background(), model.Run{
-			ID: runID, TaskID: id, Slot: "s1", Sandbox: "s1", Attempt: i + 1, StartedAt: started,
-		}); err != nil {
+			ID: runID, TaskID: id, Sandbox: "s1", Attempt: i + 1, StartedAt: started,
+		}, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := client.Store.FinishRun(context.Background(), runID, started.Add(time.Minute), "failed", "boom"); err != nil {

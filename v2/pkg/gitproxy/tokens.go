@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 func randomHex(n int) (string, error) {
@@ -36,9 +37,27 @@ func randomHex(n int) (string, error) {
 // SandboxTokens maps a bearer token to the sandbox it identifies.
 //
 // File format: {"sandbox-0": "<token>", "sandbox-1": "<token>", ...},
-// generated and injected at provisioning time, replaced at recreate -- see
-// docs/design.md, "sandbox identity."
+// minted as each sandbox is created -- see docs/design.md, "sandbox
+// identity."
+//
+// It re-reads that file whenever it is shown a token it does not
+// recognise. That used to be unnecessary and was deliberately not done:
+// every sandbox was a slot, every slot's token was minted before the
+// proxy started, and the map could be read once and then treated as
+// fixed for the life of the process. A sandbox created per run mints its
+// token while the proxy is already serving, so a map pinned at startup
+// would reject every git operation from every run -- fail-closed, but
+// closed against everything.
+//
+// Re-reading on a miss rather than on every request keeps the ordinary
+// path (a known token, already cached) a map lookup with no I/O, and
+// bounds the extra reads to genuinely unknown tokens. A token that is
+// unknown because it is bogus costs one file read to establish that,
+// which is the same cost as one that is unknown because it is new.
 type SandboxTokens struct {
+	path string
+
+	mu      sync.RWMutex
 	byToken map[string]string
 }
 
@@ -46,22 +65,51 @@ type SandboxTokens struct {
 // an empty map, matching the Python original: the git-proxy service can
 // be enabled before any sandbox has ever minted a token.
 func LoadSandboxTokens(path string) (*SandboxTokens, error) {
-	raw, err := readTokenFile(path)
-	if err != nil {
+	t := &SandboxTokens{path: path}
+	if err := t.reload(); err != nil {
 		return nil, err
+	}
+	return t, nil
+}
+
+// Authenticate returns the sandbox name owning this token, and false if it
+// is unknown -- unknown meaning "not in the file as of just now," since a
+// miss against the cached map re-reads the file before answering (see the
+// type's own doc comment).
+func (t *SandboxTokens) Authenticate(token string) (string, bool) {
+	t.mu.RLock()
+	name, ok := t.byToken[token]
+	t.mu.RUnlock()
+	if ok {
+		return name, true
+	}
+	if err := t.reload(); err != nil {
+		return "", false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	name, ok = t.byToken[token]
+	return name, ok
+}
+
+// reload replaces the cached map with the file's current contents. A read
+// error leaves the previous map in place: a token minted before a
+// transient failure is still a token this proxy should honour, and
+// dropping the whole map would fail every in-flight run's git rather than
+// the one lookup that could not be answered.
+func (t *SandboxTokens) reload() error {
+	raw, err := readTokenFile(t.path)
+	if err != nil {
+		return err
 	}
 	byToken := make(map[string]string, len(raw))
 	for name, token := range raw {
 		byToken[token] = name
 	}
-	return &SandboxTokens{byToken: byToken}, nil
-}
-
-// Authenticate returns the sandbox name owning this token, and false if it
-// is unknown.
-func (t *SandboxTokens) Authenticate(token string) (string, bool) {
-	name, ok := t.byToken[token]
-	return name, ok
+	t.mu.Lock()
+	t.byToken = byToken
+	t.mu.Unlock()
+	return nil
 }
 
 func readTokenFile(path string) (map[string]string, error) {
@@ -80,11 +128,11 @@ func readTokenFile(path string) (map[string]string, error) {
 }
 
 // SandboxTokenStore is the write side of the same sandbox-tokens.json file
-// SandboxTokens reads -- called wherever a sandbox is dispatched to for
-// the first time, to mint its token. Split from SandboxTokens because the
-// two run with different lifecycles: the proxy loads the map once at
-// startup and only ever looks tokens up, while minting one is a
-// read-modify-write against the file the proxy trusts.
+// SandboxTokens reads -- called as each run's sandbox is prepared, to mint
+// that sandbox's token (orchestrator's own runOne). Split from
+// SandboxTokens because the two do different things to the same file: the
+// proxy only ever looks tokens up, caching what it has read, while
+// minting one is a read-modify-write against the file the proxy trusts.
 type SandboxTokenStore struct {
 	path string
 }

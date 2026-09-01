@@ -1,9 +1,6 @@
 package model
 
-import (
-	"strconv"
-	"time"
-)
+import "time"
 
 // Config is a deployment's tunable, non-secret configuration -- the
 // knobs bwsalmon/agents#320 asked to move off the daemon's own flags and
@@ -27,13 +24,17 @@ import (
 type Config struct {
 	// PollInterval is how often pkg/orchestrator's RunCycle runs.
 	PollInterval time.Duration
-	// MaxConcurrent is the size of the concurrency pool dispatch.Cycle
-	// fills -- the same count -max-concurrent parses. bwsalmon/agents#461
-	// replaced named slots (an operator-chosen list, each entry its own
-	// sandbox directory or kontur VM name) with this plain count: SlotNames
-	// turns it into the []string dispatch.Cycle and orchestrator.Deps
-	// still take, since nothing below that layer needs to know a slot's
-	// name was ever chosen rather than generated.
+	// MaxConcurrent is how many runs dispatch.Cycle lets be in flight at
+	// once -- the same count -max-concurrent parses.
+	//
+	// bwsalmon/agents#461 replaced named slots (an operator-chosen list,
+	// each entry its own sandbox directory or kontur VM name) with this
+	// plain count, but kept generating identifiers from it, so a "slot"
+	// still existed as the thing a sandbox was named after and reused
+	// under. With a sandbox created and deleted per run, there is nothing
+	// left for such an identifier to name: this is now read as a limit
+	// and nothing else, by dispatch.Cycle counting live runs against it
+	// and by nobody else at all.
 	MaxConcurrent int
 	// GeminiModel is the Gemini model the agent framework calls.
 	GeminiModel string
@@ -97,20 +98,4 @@ type Config struct {
 	// like NewestFirst, nothing here forces it to stay that way, and
 	// nothing in the daemon's own dispatch loop reads it.
 	ShowClosedByDefault bool
-}
-
-// SlotNames returns the n dispatch.Cycle slot identifiers a deployment
-// configured for MaxConcurrent == n fills -- "1" through strconv.Itoa(n).
-// A slot's name is otherwise meaningless (dispatch.Cycle only cares that
-// each one is distinct), but orchestrator.HostSandboxes and
-// orchestrator.KonturSandboxes turn it into a directory or VM name apiece,
-// so callers wiring either one need a stable, generated set rather than
-// picking their own the way -slots let an operator do before bwsalmon/
-// agents#461.
-func SlotNames(n int) []string {
-	names := make([]string, n)
-	for i := range names {
-		names[i] = strconv.Itoa(i + 1)
-	}
-	return names
 }

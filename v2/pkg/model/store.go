@@ -92,6 +92,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskInteractiveColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureTaskRunSlotColumnDropped(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -168,6 +171,41 @@ func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `slots`")
+	return err
+}
+
+// ensureTaskRunSlotColumnDropped removes task_run's old slot column, and
+// with it the one-open-run-per-slot index that column carried, from a
+// database created while slots still existed. It is the task_run
+// counterpart to ensureConfigMaxConcurrentColumn above, which did the
+// same for grain_config's own slots column one step earlier -- and it
+// drops rather than backfills for the reason that one gives too: a
+// column still declared NOT NULL with no default breaks every later
+// startRun, which stops supplying it.
+//
+// Nothing reads a historical run's slot, so nothing is migrated out of
+// it before it goes. A finished run's slot said which of N interchangeable,
+// generated identifiers ("1", "2", ...) that run happened to be assigned;
+// its sandbox column already says the more useful half of the same thing,
+// and under a sandbox per run says it exactly.
+//
+// The index is dropped explicitly rather than left to SQLite: DROP COLUMN
+// refuses outright while an index still references the column, so the
+// order here is load-bearing. task_run_open_task (schema.go) is created
+// by the DDL pass that runs before this one, so the invariant is never
+// unindexed in between.
+func (s *Store) ensureTaskRunSlotColumnDropped(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `slot` FROM `task_run` WHERE 1 = 0")
+	if err != nil {
+		// No slot column -- a database created after slots, or one this
+		// has already run against.
+		return nil
+	}
+	rows.Close()
+	if _, err := s.db.ExecContext(ctx, "DROP INDEX IF EXISTS `task_run_open_slot`"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` DROP COLUMN `slot`")
 	return err
 }
 
@@ -1101,28 +1139,62 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	return &o, nil
 }
 
-// StartRun records a run and its leases together.
-func (s *Store) StartRun(ctx context.Context, r Run) error {
-	return s.write(ctx, "start run "+r.ID+" for task "+r.TaskID, func(tx *sql.Tx) error { return startRun(ctx, tx, r) })
+// ErrAtCapacity is what StartRun returns instead of recording a run when
+// maxConcurrent runs are already live. It is an ordinary outcome, not a
+// fault: dispatch.Cycle counts live runs before it decides what to start,
+// so seeing this means another caller started one in between -- the race
+// this exists to lose safely. A caller treats it as "no free capacity
+// this tick" and tries again on the next one.
+var ErrAtCapacity = errors.New("model: the concurrency limit is already reached")
+
+// StartRun records a run and its leases together, so long as fewer than
+// maxConcurrent runs are already live.
+//
+// The capacity check happens here, inside the same transaction as the
+// insert, rather than in the caller that decided to start this run --
+// which is the whole reason it takes a limit at all. dispatch.Cycle reads
+// the live-run count and task_ready outside any single transaction and
+// then issues a StartRun per unit of headroom it found, so nothing in Go
+// stops two overlapping Cycle calls from both seeing the same headroom
+// and both spending it. Under slots, a unique index on the slot each run
+// claimed caught that after the fact (schema.go's own task_run_open_slot,
+// bwsalmon/agents#434); with nothing left to claim, the count and the
+// insert simply happen together instead, which rules the race out rather
+// than detecting it. A maxConcurrent of 0 or less disables the check --
+// for a caller with no limit of its own to enforce, such as a test
+// starting a run directly.
+func (s *Store) StartRun(ctx context.Context, r Run, maxConcurrent int) error {
+	return s.write(ctx, "start run "+r.ID+" for task "+r.TaskID, func(tx *sql.Tx) error {
+		if maxConcurrent > 0 {
+			var live int
+			if err := tx.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM `task_run` WHERE `finished_at` IS NULL").Scan(&live); err != nil {
+				return fmt.Errorf("counting live runs: %w", err)
+			}
+			if live >= maxConcurrent {
+				return ErrAtCapacity
+			}
+		}
+		return startRun(ctx, tx, r)
+	})
 }
 
 // startRun uses INSERT rather than REPLACE, unlike most writes in this
 // file, precisely so it does not behave like them here: REPLACE INTO
-// resolves a conflict -- on task_run's own id, or on task_run_open_slot's
-// one-open-run-per-slot index (schema.go's own doc comment on it,
-// bwsalmon/agents#434) -- by silently deleting the conflicting row and
-// inserting this one, which is exactly the silent-overwrite failure mode
-// that index exists to rule out. A caller never legitimately starts the
-// same run id twice (RunID's own doc comment: an id already names its
-// task and attempt), so INSERT's ordinary conflict error is both correct
-// and, for the slot index specifically, the loud failure a double
-// dispatch onto one slot should produce instead of one run's row quietly
-// clobbering the other's.
+// resolves a conflict -- on task_run's own id, or on task_run_open_task's
+// one-live-run-per-task index (schema.go's own doc comment on it) -- by
+// silently deleting the conflicting row and inserting this one, which is
+// exactly the silent-overwrite failure mode that index exists to rule
+// out. A caller never legitimately starts the same run id twice (RunID's
+// own doc comment: an id already names its task and attempt), so INSERT's
+// ordinary conflict error is both correct and, for the task index
+// specifically, the loud failure a second live run on one task should
+// produce instead of one run's row quietly clobbering the other's.
 func startRun(ctx context.Context, tx *sql.Tx, r Run) error {
 	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO `task_run` (`id`,`task_id`,`slot`,`sandbox`,`unit`,`attempt`,"+
-			"`started_at`,`finished_at`,`outcome`) VALUES (?,?,?,?,?,?,?,?,?)",
-		r.ID, r.TaskID, r.Slot, r.Sandbox, nullable(r.Unit), r.Attempt,
+		"INSERT INTO `task_run` (`id`,`task_id`,`sandbox`,`unit`,`attempt`,"+
+			"`started_at`,`finished_at`,`outcome`) VALUES (?,?,?,?,?,?,?,?)",
+		r.ID, r.TaskID, r.Sandbox, nullable(r.Unit), r.Attempt,
 		r.StartedAt.UTC(), timeOf(r.FinishedAt), nullable(r.Outcome)); err != nil {
 		return err
 	}
@@ -1161,6 +1233,29 @@ func (s *Store) SetRunOutcome(ctx context.Context, runID, outcome, detail string
 		_, err := tx.ExecContext(ctx,
 			"UPDATE `task_run` SET `outcome` = ?, `detail` = ? WHERE `id` = ?",
 			outcome, nullable(detail), runID)
+		return err
+	})
+}
+
+// SetRunSandbox records which sandbox a run was actually given, once one
+// has been acquired for it. It is a write of its own, after StartRun
+// rather than part of it, because the two happen at genuinely different
+// moments: dispatch decides a run may start and records that decision
+// durably (dispatch.Cycle's own doc comment) before any sandbox exists,
+// and the orchestrator then builds one -- a kontur VM that has to boot,
+// or a directory that has to be made -- and names it here.
+//
+// The gap between the two is deliberately visible rather than papered
+// over. A live run whose sandbox is still "" is one whose sandbox is
+// still being built, and every reader that resolves a sandbox to its task
+// (Store.GitScope, Store.GitCredentialOverride) answers "no live run" for
+// the empty name, which is the fail-closed default gitproxy already
+// applies to a sandbox it does not recognise: a run that has not got a
+// sandbox yet cannot have anything calling the proxy on its behalf.
+func (s *Store) SetRunSandbox(ctx context.Context, runID, sandbox string) error {
+	return s.write(ctx, "set run "+runID+" sandbox", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `sandbox` = ? WHERE `id` = ?", sandbox, runID)
 		return err
 	})
 }
@@ -1234,13 +1329,13 @@ func (s *Store) Attempts(ctx context.Context, taskID string) (int, error) {
 func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
 	var out []Run
 	err := each(ctx, s.db,
-		"SELECT `id`,`slot`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail` "+
+		"SELECT `id`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail` "+
 			"FROM `task_run` WHERE `task_id` = ? ORDER BY `attempt` ASC", taskID,
 		func(rows *sql.Rows) error {
 			r := Run{TaskID: taskID}
 			var unit, outcome, detail sql.NullString
 			var finishedAt sql.NullTime
-			if err := rows.Scan(&r.ID, &r.Slot, &r.Sandbox, &unit, &r.Attempt,
+			if err := rows.Scan(&r.ID, &r.Sandbox, &unit, &r.Attempt,
 				&r.StartedAt, &finishedAt, &outcome, &detail); err != nil {
 				return err
 			}
@@ -1610,31 +1705,38 @@ func rebalanceOrderKeys(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// OccupiedSlots is every slot currently holding a live run — a run with
-// no `finished_at`. A dispatch loop reads this, rather than remembering
-// what it handed out last cycle, for the same reason IsBlocked re-reads
-// closed dependencies: a run can finish between cycles with nothing
-// about the loop's own state changing, and a slot freed that way must
-// show up as free the moment it is asked about.
-func (s *Store) OccupiedSlots(ctx context.Context) ([]string, error) {
-	var out []string
-	err := each(ctx, s.db,
-		"SELECT `slot` FROM `task_run` WHERE `finished_at` IS NULL ORDER BY `slot`", nil,
-		func(rows *sql.Rows) error {
-			var slot string
-			if err := rows.Scan(&slot); err != nil {
-				return err
-			}
-			out = append(out, slot)
-			return nil
-		})
-	return out, err
+// LiveRunCount is how many runs are currently in flight -- rows with no
+// `finished_at`. A dispatch loop reads this, rather than remembering what
+// it handed out last cycle, for the same reason IsBlocked re-reads closed
+// dependencies: a run can finish between cycles with nothing about the
+// loop's own state changing, and the headroom that frees must show up the
+// moment it is asked about.
+//
+// This is the count on its own because a count is all a caller deciding
+// what to dispatch needs now. It replaced OccupiedSlots, which returned
+// the identifier of every slot holding a live run, back when what a cycle
+// needed was the difference between a fixed pool and the part of it in
+// use. There is no pool to difference against any more: a sandbox is
+// created for a run and destroyed with it, so the only question left is
+// how many are in flight against MaxConcurrent.
+//
+// It is deliberately not what StartRun enforces the limit with -- see
+// that method's own doc comment on why the check has to happen inside the
+// insert's transaction rather than against a count read beforehand.
+func (s *Store) LiveRunCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM `task_run` WHERE `finished_at` IS NULL").Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("counting live runs: %w", err)
+	}
+	return n, nil
 }
 
 // LiveRuns is every task_run row with no `finished_at` -- the same rows
-// OccupiedSlots counts, in full, for a caller (orchestrator.
+// LiveRunCount counts, in full, for a caller (orchestrator.
 // RecoverOrphanedRuns) that needs to know which task and run each one
-// belongs to rather than just which slots they occupy. A daemon calls
+// belongs to rather than just how many there are. A daemon calls
 // this exactly once, at startup, before it has driven any run of its
 // own: at that point every row here can only be left over from a
 // process that is no longer around to finish it -- see that func's own
@@ -1643,11 +1745,11 @@ func (s *Store) OccupiedSlots(ctx context.Context) ([]string, error) {
 func (s *Store) LiveRuns(ctx context.Context) ([]Run, error) {
 	var out []Run
 	err := each(ctx, s.db,
-		"SELECT `id`,`task_id`,`slot`,`sandbox`,`attempt`,`started_at` "+
+		"SELECT `id`,`task_id`,`sandbox`,`attempt`,`started_at` "+
 			"FROM `task_run` WHERE `finished_at` IS NULL ORDER BY `id`", nil,
 		func(rows *sql.Rows) error {
 			var r Run
-			if err := rows.Scan(&r.ID, &r.TaskID, &r.Slot, &r.Sandbox, &r.Attempt, &r.StartedAt); err != nil {
+			if err := rows.Scan(&r.ID, &r.TaskID, &r.Sandbox, &r.Attempt, &r.StartedAt); err != nil {
 				return err
 			}
 			out = append(out, r)
@@ -1721,6 +1823,14 @@ func (s *Store) GitCredentialOverride(ctx context.Context, sandbox string) (name
 // different questions about the same live task. live is false, with a
 // nil error, for a sandbox with nothing running on it right now.
 func (s *Store) liveTaskID(ctx context.Context, sandbox string) (taskID string, live bool, err error) {
+	// A run records its sandbox only once one has been acquired for it
+	// (SetRunSandbox), so "" is not a name -- it is the absence of one,
+	// and matching it against the rows that have not been filled in yet
+	// would hand a caller some arbitrary still-provisioning run's task.
+	// Refusing it here keeps that out of every reader below at once.
+	if sandbox == "" {
+		return "", false, nil
+	}
 	err = s.db.QueryRowContext(ctx,
 		"SELECT `task_id` FROM `task_run` WHERE `sandbox` = ? AND `finished_at` IS NULL "+
 			"ORDER BY `started_at` DESC LIMIT 1", sandbox).Scan(&taskID)

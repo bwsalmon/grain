@@ -106,7 +106,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 	var d dispatch.Dispatch
 	var fullTask model.Task
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		dispatches, err := dispatch.Cycle(ctx, store, []string{slot}, baseTime)
+		dispatches, err := dispatch.Cycle(ctx, store, 1, baseTime)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +158,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 		if st != model.StateClosed {
 			t.Fatalf("state before the run finishes = %q, want closed (the slot is still occupied, but closing outranks running)", st)
 		}
-		if occ, err := store.OccupiedSlots(ctx); err != nil || len(occ) != 1 {
+		if occ, err := store.LiveRunCount(ctx); err != nil || occ != 1 {
 			t.Fatalf("occupied slots before the run finishes = %v (%v), want the slot still held", occ, err)
 		}
 
@@ -184,7 +184,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 		if st != model.StateClosed {
 			t.Fatalf("state after FinishRun = %q, want still closed", st)
 		}
-		if occ, err := store.OccupiedSlots(ctx); err != nil || len(occ) != 0 {
+		if occ, err := store.LiveRunCount(ctx); err != nil || occ != 0 {
 			t.Fatalf("occupied slots after FinishRun = %v (%v), want none: FinishRun still frees the slot even for a cancelled run", occ, err)
 		}
 	})
@@ -192,7 +192,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 	// The slot is free again, but dispatch.Cycle must never hand a closed
 	// task another run.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		again, err := dispatch.Cycle(ctx, store, []string{slot}, baseTime.Add(2*time.Minute))
+		again, err := dispatch.Cycle(ctx, store, 1, baseTime.Add(2*time.Minute))
 		if err != nil {
 			t.Fatal(err)
 		}

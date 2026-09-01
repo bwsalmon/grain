@@ -142,8 +142,8 @@ func TestRunCycleSyncsPullRequestsEvenWhenDispatchFails(t *testing.T) {
 			inner: orchestrator.NewHostSandboxes(t.TempDir()),
 			slot:  "bad",
 		},
-		Framework: completesWithAComment(),
-		Slots:     []string{"bad"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -166,11 +166,11 @@ func TestRunCycleDispatchesEvenWhenPullRequestSyncFails(t *testing.T) {
 	queued := filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:     store,
-		Client:    failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
-		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: completesWithAComment(),
-		Slots:     []string{"good"},
+		Store:         store,
+		Client:        failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
+		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -216,8 +216,8 @@ func TestRunCycleReportsEveryFailingReconcilerNotJustTheFirst(t *testing.T) {
 			inner: orchestrator.NewHostSandboxes(t.TempDir()),
 			slot:  "bad",
 		},
-		Framework: completesWithAComment(),
-		Slots:     []string{"bad"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -278,8 +278,8 @@ func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
 			inner: orchestrator.NewHostSandboxes(t.TempDir()),
 			slot:  "bad",
 		},
-		Framework: completesWithAComment(),
-		Slots:     []string{"bad", "good"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 2,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)

@@ -37,7 +37,7 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 	clock := baseTime
 	fileIssue(w, "iss-live", human("tester"), model.RepoRef{Owner: "acme", Name: "live"})
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil || len(dispatches) != 1 {
 		t.Fatalf("Cycle: %v, %+v", err, dispatches)
 	}

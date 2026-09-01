@@ -471,9 +471,20 @@ type Observation struct {
 type Run struct {
 	ID     string
 	TaskID string
-	// The concurrency unit and the VM instance. Equal while sandboxes are
-	// long-lived; distinct once one is created per task.
-	Slot       string
+	// Sandbox is the sandbox this run was given -- the kontur VM name, or
+	// the host directory's own name. It used to sit alongside a Slot, the
+	// concurrency unit a long-lived sandbox was reused under, the two
+	// being equal in practice and distinct only in principle. A sandbox
+	// created and destroyed with the run has no such unit to belong to,
+	// so only this half is left, and it names something that exists for
+	// exactly as long as the run does.
+	//
+	// It is written after the row is: dispatch records a run before any
+	// sandbox exists for it, and orchestrator fills this in via
+	// SetRunSandbox once one has actually been acquired. A live run with
+	// an empty Sandbox is one whose sandbox is still being built -- which
+	// gitproxy reads, correctly, as a sandbox identity that authorizes
+	// nothing (Store.GitScope).
 	Sandbox    string
 	Unit       string
 	Attempt    int
