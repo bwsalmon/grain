@@ -27,11 +27,27 @@ attr() {
     --format='value(value)' 2>/dev/null || true
 }
 
+# instance.tf folds a short hash of grain_config's own content onto the
+# end of the value it writes to grain-deploy-generation (bwsalmon/agents#592:
+# "changing max concurrent agents takes no effect even after reboot"), so
+# the host reports "$deploy_generation-<hash>", never the bare token CI
+# passed to `terraform apply` as var.deploy_generation. A plain string
+# comparison against that bare token therefore never matched, even on a
+# rollout the host had already finished -- every deploy after #592
+# landed waited out the full timeout and was reported as hung/failed
+# despite the host converging within seconds (bwsalmon/agents#633).
+generation_matches() {
+  case "$1" in
+    "$deploy_generation" | "$deploy_generation"-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 deadline=$(( SECONDS + timeout_minutes * 60 ))
 while [ "$SECONDS" -lt "$deadline" ]; do
   status="$(attr deploy-status)"
   generation="$(attr deploy-generation)"
-  if [ "$generation" = "$deploy_generation" ]; then
+  if generation_matches "$generation"; then
     case "$status" in
       ok)
         echo "host converged on $deploy_generation"

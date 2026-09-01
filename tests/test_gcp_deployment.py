@@ -42,6 +42,8 @@ ENSURE_LABELS = CI / "ensure-task-labels.sh"
 TERRAFORM_APPLY = CI / "terraform-apply.sh"
 READ_OUTPUTS = CI / "read-terraform-outputs.sh"
 PUSH_SECRETS = CI / "push-host-secrets.sh"
+WAIT_FOR_HOST = CI / "wait-for-host.sh"
+V2_WAIT_FOR_HOST = CI / "v2-staging-wait-for-host.sh"
 
 # The two steps allowed to keep a body in deploy.yml, because neither can
 # come from grain: the first decides which grain to fetch and runs before
@@ -988,6 +990,92 @@ def test_push_host_secrets_merges_per_secret_named_github_keys():
 
         token_pushed = (metadata_dir / "grain-github-token").read_text()
         assert token_pushed == "ghp_default_secret"
+
+
+# A stand-in for `gcloud compute instances get-guest-attributes`, reading
+# each attribute's value from a same-named file under __STATE_DIR__ (empty
+# string, like a real never-set attribute, when the file is absent) --
+# enough to drive wait-for-host.sh / v2-staging-wait-for-host.sh without a
+# real project.
+_FAKE_GCLOUD_GUEST_ATTRS = """#!/usr/bin/env bash
+set -euo pipefail
+state_dir="__STATE_DIR__"
+path=""
+for arg in "$@"; do
+  case "$arg" in
+    --query-path=*) path="${arg#--query-path=}" ;;
+  esac
+done
+key="${path##*/}"
+file="$state_dir/$key"
+[ -f "$file" ] && cat "$file" || true
+"""
+
+
+def _wait_for_host_env(tmp_path, script, *, generation, status, namespace):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    state_dir = tmp_path / namespace
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "deploy-status").write_text(status)
+    (state_dir / "deploy-generation").write_text(generation)
+
+    fake = _FAKE_GCLOUD_GUEST_ATTRS.replace("__STATE_DIR__", str(state_dir))
+    (bin_dir / "gcloud").write_text(fake)
+    (bin_dir / "gcloud").chmod(0o755)
+
+    return {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PROJECT": "a-project",
+        "INSTANCE": "an-instance",
+        "ZONE": "us-central1-a",
+        "DEPLOY_GENERATION": "abc1234",
+        "TIMEOUT_MINUTES": "1",
+        "POLL_SECONDS": "1",
+    }
+
+
+def test_wait_for_host_matches_a_generation_with_the_grain_config_hash_suffix():
+    """Regression test for bwsalmon/agents#633 ("v2 deploys are hanging").
+
+    terraform/gcp/instance.tf and terraform/gcp-v2/instance.tf both fold a
+    short hash of grain_config's own content onto the end of the value they
+    write to grain-deploy-generation (bwsalmon/agents#592's fix), so the
+    host reports "$DEPLOY_GENERATION-<hash>" through its guest attribute,
+    never the bare token CI passes to `terraform apply` as
+    var.deploy_generation. Before this script matched that suffixed form,
+    the comparison never succeeded even when the host had already
+    converged (deploy-status "ok"), and every rollout ran out its full
+    timeout and was reported as hung/failed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        env = _wait_for_host_env(
+            tmp_path, WAIT_FOR_HOST,
+            generation="abc1234-a1b2c3d4e5f6", status="ok", namespace="grain",
+        )
+        result = subprocess.run(
+            [str(WAIT_FOR_HOST)], env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "converged on abc1234" in result.stdout
+
+
+def test_v2_staging_wait_for_host_matches_a_generation_with_the_grain_config_hash_suffix():
+    """Same regression as test_wait_for_host_matches_a_generation_with_the_grain_config_hash_suffix,
+    for the v2 staging counterpart (bwsalmon/agents#633)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        env = _wait_for_host_env(
+            tmp_path, V2_WAIT_FOR_HOST,
+            generation="abc1234-a1b2c3d4e5f6", status="ok", namespace="grain-v2",
+        )
+        result = subprocess.run(
+            [str(V2_WAIT_FOR_HOST)], env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "converged on abc1234" in result.stdout
 
 
 def test_deploy_yml_never_stores_the_agent_key_as_a_repo_secret():
