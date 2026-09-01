@@ -3,7 +3,7 @@ __pycache__/
 .pytest_cache/
 .claude/settings.local.json
 v2/bin/
-# packer/kontur/build.sh's own output -- a built kernel/initramfs/disk
+# packer/kontur/build-guest.sh's own output -- a built kernel/initramfs/disk
 # triple, multiple GB once docker/gcloud/terraform are provisioned in, not
 # something to ever commit.
 packer/kontur/output/

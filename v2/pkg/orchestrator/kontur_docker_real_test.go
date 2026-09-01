@@ -17,12 +17,16 @@ package orchestrator_test
 // file not found in $PATH" the moment the fake stopped being named to
 // match the bug.
 //
-// It skips outright unless docker, /dev/kvm, and (for the guest image
-// build below) passwordless sudo plus debootstrap/mke2fs are all usable
-// -- the same "skip rather than run" shape tests/test_vm_integration.py's
+// It skips outright unless docker and /dev/kvm are both usable -- the
+// same "skip rather than run" shape tests/test_vm_integration.py's
 // own gate uses for v1's equivalent live suite (that file's own comment:
 // "none of which a hosted runner has, so they skip rather than run").
-// None of these are present on the hosted GitHub Actions runner
+// The guest image build below used to add passwordless sudo plus
+// debootstrap/mke2fs to that list; since packer/kontur converged on
+// kontur's own guest build it needs nothing beyond the docker already
+// required here (packer/kontur/README.md, "Converged on kontur's own
+// guest build").
+// Neither of these is present on the hosted GitHub Actions runner
 // .github/workflows/tests.yml's go-test job runs on, so this never runs
 // there, but it runs for real on any host -- this repo's own dev sandboxes
 // included -- that has all of them, which is the whole point: wherever
@@ -88,16 +92,12 @@ func konturDockerRealTestPrereqs(t *testing.T) {
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		t.Skipf("/dev/kvm not present: %v", err)
 	}
-	// buildKonturGuestImage below needs to run packer/kontur/build.sh as
-	// root (debootstrap, bind-mounts for chroot, mke2fs -d) -- -n fails
-	// fast rather than hanging this test on a password prompt it has no
-	// terminal to satisfy. debootstrap/mke2fs are checked through sudo,
-	// not exec.LookPath, since they typically live under /usr/sbin --
-	// on root's own PATH (and so build.sh's own, since it runs under sudo
-	// too) but not necessarily on this test process's unprivileged one.
-	if err := exec.Command("sudo", "-n", "sh", "-c", "command -v debootstrap && command -v mke2fs").Run(); err != nil {
-		t.Skipf("passwordless sudo, or debootstrap/mke2fs under it, not available (needed for packer/kontur/build.sh): %v", err)
-	}
+	// buildKonturGuestImage below needs no privilege check of its own:
+	// packer/kontur/build-guest.sh is one `docker build`, against the
+	// same daemon already proven reachable above. It deliberately gets no
+	// skip of its own for a docker too old for BuildKit's --output --
+	// that is a broken host rather than a missing prerequisite, and a
+	// build failure naming it says far more than a silent skip would.
 }
 
 // buildKonturctl builds bwsalmon/kontur's own operator-facing CLI from the
@@ -135,21 +135,30 @@ func buildKonturDockerImage(t *testing.T) (image string) {
 	return image
 }
 
-// buildKonturGuestImage runs packer/kontur/build.sh for real -- a
-// debootstrap-based Debian rootfs, provisioned with git/build tooling/
-// docker/gcloud/terraform and this test's own throwaway SSH keypair,
-// packed into the kernel/initramfs/disk triple konturctl's own -kernel/
-// -initramfs/-disk flags point at directly -- and returns the directory
-// holding all three (named exactly "vmlinuz"/"initrd.img"/"disk.img", so
-// a caller's own -images-hostpath/-disk/-kernel/-initramfs arguments don't
-// need to know the version-stamped name build.sh itself gives the output)
-// plus the matching private key's path.
+// buildKonturGuestImage runs packer/kontur/build-guest.sh for real -- one
+// `docker build` against third_party/kontur's Dockerfile, which
+// debootstraps the rootfs and packs it with `mke2fs -d` inside the build,
+// with packer/kontur/guest-setup.sh handed to its GUEST_SETUP_SCRIPT hook
+// to add git/build tooling/docker/gcloud/terraform and this test's own
+// throwaway SSH keypair -- and returns the directory holding the
+// kernel/initramfs/disk triple konturctl's own -kernel/-initramfs/-disk
+// flags point at directly, plus the matching private key's path.
+//
+// OUTPUT_DIR is what makes that directory this function's own to name:
+// build-guest.sh writes "vmlinuz"/"initrd.img"/"disk.img" straight into
+// it, so nothing here has to find, copy out of, or clean up the
+// version-stamped output/<image>-<sha>-<timestamp>/ directory a bare run
+// of that script produces (which is also why this no longer needs sudo to
+// chown the result back: the build writes as the user running it).
 //
 // Cached under a stable directory beneath os.TempDir(), like
-// fetchTestKernel used to: debootstrap plus ~120MB of package downloads
-// is the most expensive single step in this whole test, and neither the
-// packages nor the baked-in key need to change between runs of an
-// already-expensive, opt-in test.
+// fetchTestKernel used to: the rootfs build plus ~120MB of package
+// downloads is the most expensive single step in this whole test, and
+// neither the packages nor the baked-in key need to change between runs
+// of an already-expensive, opt-in test. docker's own layer cache does not
+// replace this one -- guest-setup.sh's text carries a keypair regenerated
+// on every cache miss, so the stage running it re-runs whenever this
+// directory is cold.
 func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 	t.Helper()
 	imagesDir = filepath.Join(os.TempDir(), "grain-kontur-e2e-test-guest-image")
@@ -172,34 +181,33 @@ func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 	if err != nil {
 		t.Fatalf("resolving packer/kontur's absolute path: %v", err)
 	}
-	cmd := exec.Command("sudo", "-E", "./build.sh")
+	cmd := exec.Command("./build-guest.sh")
 	cmd.Dir = packerKonturDir
-	cmd.Env = append(os.Environ(), "OPERATOR_SSH_PUBLIC_KEY="+string(pub))
+	// KONTUR_IMAGE_BUCKET and SANDBOX_SETUP_SCRIPT are pinned empty
+	// rather than inherited: set in the environment of whoever runs this
+	// test, the first would publish this throwaway image to a real GCS
+	// bucket and the second would bake unreviewed content into the guest
+	// the assertions below then run against. build-guest.sh treats both
+	// as unset when empty.
+	cmd.Env = append(os.Environ(),
+		"OPERATOR_SSH_PUBLIC_KEY="+string(pub),
+		"OUTPUT_DIR="+imagesDir,
+		"KONTUR_IMAGE_BUCKET=",
+		"SANDBOX_SETUP_SCRIPT=",
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("running packer/kontur/build.sh: %v\n%s", err, out)
+		t.Fatalf("running packer/kontur/build-guest.sh: %v\n%s", err, out)
 	}
 
-	// build.sh writes into its own output/<image>-<sha>-<timestamp>/
-	// directory, named uniquely every run so repeated manual runs never
-	// collide -- this test doesn't want that versioning, just the three
-	// files under a name it already knows, so it copies them out to
-	// imagesDir and removes build.sh's own copy.
-	outputDirs, err := filepath.Glob(filepath.Join(packerKonturDir, "output", "*"))
-	if err != nil || len(outputDirs) == 0 {
-		t.Fatalf("finding build.sh's output directory under %s/output: err=%v dirs=%v", packerKonturDir, err, outputDirs)
-	}
-	built := outputDirs[len(outputDirs)-1]
+	// build-guest.sh already fails if any of the three is missing or
+	// empty, so this only catches it writing somewhere other than
+	// OUTPUT_DIR -- which would otherwise surface as a VM that never
+	// boots, saying nothing about why.
 	for _, name := range []string{"vmlinuz", "initrd.img", "disk.img"} {
-		if out, err := exec.Command("sudo", "cp", filepath.Join(built, name), filepath.Join(imagesDir, name)).CombinedOutput(); err != nil {
-			t.Fatalf("copying %s out of build.sh's output: %v\n%s", name, err, out)
+		if _, err := os.Stat(filepath.Join(imagesDir, name)); err != nil {
+			t.Fatalf("build-guest.sh reported success but %s is not in OUTPUT_DIR (%s): %v\n%s", name, imagesDir, err, out)
 		}
-	}
-	if out, err := exec.Command("sudo", "chown", "-R", strings.TrimSpace(mustRunOutput(t, "id", "-un")), imagesDir).CombinedOutput(); err != nil {
-		t.Fatalf("chowning guest image cache directory back to the current user: %v\n%s", err, out)
-	}
-	if out, err := exec.Command("sudo", "rm", "-rf", filepath.Join(packerKonturDir, "output")).CombinedOutput(); err != nil {
-		t.Fatalf("removing build.sh's own output directory: %v\n%s", err, out)
 	}
 	return imagesDir, sshKeyPath
 }
@@ -219,15 +227,6 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 		t.Fatalf("guest image helper put its SSH key in %s, want it inside the images directory %s that gets mounted at /images -- ExecKeyPath depends on those being the same place", got, want)
 	}
 	return "/images/" + filepath.Base(sshKeyPath)
-}
-
-func mustRunOutput(t *testing.T, name string, args ...string) string {
-	t.Helper()
-	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("running %s %v: %v\n%s", name, args, err, out)
-	}
-	return string(out)
 }
 
 // TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently is the
@@ -407,8 +406,10 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 //     bwsalmon/kontur's own Dockerfile generates a dedicated keypair and
 //     authorizes it on the guest rootfs that same Dockerfile builds
 //     (its exec-keypair stage), but a grain deployment never boots that
-//     guest -- packer/kontur/build.sh's output, whose only
-//     authorized_keys entry is the operator key, is what -disk points at.
+//     guest -- packer/kontur/build-guest.sh's output is what -disk points
+//     at, and there the operator key is the only authorized_keys entry on
+//     the "debian" account SSHUser names (guest-setup.sh writes it; the
+//     kontur exec keypair that stage authorizes lands on root instead).
 //     So this transport only works here because KONTUR_EXEC_KEY can be
 //     pointed at a key the guest does authorize, which is a claim about
 //     kontur's env handling and this image's authorized_keys that only a

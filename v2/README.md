@@ -237,7 +237,8 @@ about testing this module ships anywhere.
 
 `make container-build` still runs that same `make build`, out of this
 same Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain --
-the release `packer/kontur/build.sh` (bookworm, via `debootstrap`) and
+the release `packer/kontur/build-guest.sh` builds its guest on (bookworm,
+via the `debootstrap` in `third_party/kontur`'s own Dockerfile) and
 `terraform/gcp/variables.tf` both deploy to -- but the image now exists
 purely to pin the Go compiler
 version, with no C toolchain or system library left for it to carry. The
@@ -1058,14 +1059,14 @@ Two details are worth knowing:
 
 - **`-kontur-exec-key` is a path inside the VM's container**, not on the
   host -- the same deployment keypair `ensure_kontur_ssh_key` generates
-  and `packer/kontur/provision.sh` bakes into the guest's
+  and `packer/kontur/guest-setup.sh` bakes into the guest's
   `authorized_keys`, just named by where the container can read it.
   `setup.sh` stages it into the images directory
   `konturctl vm create -images-hostpath` already mounts read-only at
   `/images`, so no new mount is involved. Left unset, `kontur exec` falls
   back to the dedicated key kontur's own `Dockerfile` bakes in -- which
   only a guest image built by that same Dockerfile authorizes, and a
-  deployment pointing `-disk` at `packer/kontur/build.sh`'s output is not
+  deployment pointing `-disk` at `packer/kontur/build-guest.sh`'s output is not
   using one. That is why the flag is required rather than defaulted.
 - **`docker exec` cannot distinguish a failure to reach the guest from a
   guest command that exited 1**, the way `ssh` can with its own reserved
@@ -1083,7 +1084,7 @@ ran. Both fast-fail on a VM container that has already exited.
 
 What a fake cannot settle is whether `kontur exec` authenticates against
 *this* guest image at all -- that rests on kontur's own `KONTUR_EXEC_KEY`
-handling and on `packer/kontur/provision.sh`'s `authorized_keys`, neither
+handling and on `packer/kontur/guest-setup.sh`'s `authorized_keys`, neither
 of which this repo's fakes own -- nor whether `KONTUR_EXEC_ADDR` is
 really set to somewhere the guest answers, nor whether exit statuses and
 stdin survive both hops. `TestKonturSandboxesAgainstARealDockerBackedVM`

@@ -522,7 +522,7 @@ variable "kontur_image_bucket" {
     GCS bucket (name only, no gs:// prefix) to fetch a pre-built guest
     image from instead of building one on the host -- vmlinuz, initrd.img
     and disk.img, under a "latest" alias setup.sh always fetches (see
-    packer/kontur/build.sh's own KONTUR_IMAGE_BUCKET, and its comment on
+    packer/kontur/build-guest.sh's own KONTUR_IMAGE_BUCKET, and its comment on
     why the alias exists). Optional: left empty (the default),
     v2/scripts/setup.sh's own ensure_kontur_images builds the guest image
     itself instead (bwsalmon/agents#531) and this is never read. Set this
@@ -577,7 +577,7 @@ variable "kontur_vm_name_prefix" {
 
 variable "kontur_ssh_user" {
   type        = string
-  description = "Username KonturSandboxes authenticates to each VM as -- matches packer/kontur/provision.sh's own baked-in account. Only used when enable_kontur_sandboxes is true."
+  description = "Username KonturSandboxes authenticates to each VM as -- matches packer/kontur/guest-setup.sh's own baked-in account. Only used when enable_kontur_sandboxes is true."
   default     = "debian"
 }
 

@@ -59,7 +59,7 @@
 #                                      image once, centrally (see this directory's README,
 #                                      "Kontur sandboxing"). The public half then has to be
 #                                      baked into the guest image separately, at build time,
-#                                      via packer/kontur/build.sh's own
+#                                      via packer/kontur/build-guest.sh's own
 #                                      OPERATOR_SSH_PUBLIC_KEY -- both halves have to come
 #                                      from the same keypair, and rotating one without also
 #                                      rebuilding the guest image with the other leaves them
