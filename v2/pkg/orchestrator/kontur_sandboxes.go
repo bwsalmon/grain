@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -283,13 +284,18 @@ func (k *KonturSandboxes) VMNameFor(slot string) string {
 // not the same as "exists," and why that distinction does not matter
 // here), resolves its SSH endpoint via pkg/kontur, and returns
 // mcp.NewSSHSandboxTools against it.
+//
+// If the VM's container turns out to be dead -- most notably, one left
+// behind "exited" by a host reboot (see recoverableRunnerFor) -- ToolsFor
+// rebuilds it once via Recreate before giving up, rather than surfacing
+// that failure to a caller with no way to fix it themselves.
 func (k *KonturSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
 	name := k.VMNameFor(slot)
 	if err := k.ensure(ctx, name, slot); err != nil {
 		return nil, err
 	}
 
-	runner, err := k.runnerFor(ctx, name)
+	runner, err := k.recoverableRunnerFor(ctx, name, slot)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +453,7 @@ func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, rem
 	if err := k.ensure(ctx, name, slot); err != nil {
 		return err
 	}
-	runner, err := k.runnerFor(ctx, name)
+	runner, err := k.recoverableRunnerFor(ctx, name, slot)
 	if err != nil {
 		return err
 	}
@@ -549,6 +555,43 @@ func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRu
 	return k.execRunner(name), nil
 }
 
+// recoverableRunnerFor is runnerFor with one difference: a container found
+// dead (guestContainerDeadError) is not handed back to the caller as-is.
+// ensure's kontur.Exists check (and the in-memory k.created cache it feeds)
+// only prove that "konturctl vm create" once succeeded for name -- neither
+// one notices if the container that created has since gone away, which a
+// host reboot always does under BackendDocker: internal/dockervm.Create
+// starts a VM's containers with a plain "docker run -d" and no restart
+// policy, so docker never brings them back up on its own the way it would
+// under --restart=always. Without this, that first post-reboot ToolsFor
+// call would fail exactly once appropriately (waitForGuestExec's own
+// fast-fail below) and then keep failing identically forever after: ensure
+// never looks past k.created being true to notice anything is wrong, and
+// nothing else on this path ever calls Recreate to fix it -- runOne only
+// does that after a *successful* ToolsFor.
+//
+// So on that one error, and only that one, this rebuilds name's VM via
+// Recreate (the same delete-then-create runOne already runs between every
+// two tasks) and retries once. Recreate discards the runner it fetches
+// while confirming the fresh VM is reachable, hence the second runnerFor
+// call here rather than reusing that one -- a small redundant wait, not a
+// second failure mode, since Recreate having already succeeded means this
+// retry is against a VM already known to answer.
+func (k *KonturSandboxes) recoverableRunnerFor(ctx context.Context, name, slot string) (sandboxRunner, error) {
+	runner, err := k.runnerFor(ctx, name)
+	if err == nil {
+		return runner, nil
+	}
+	var deadErr *guestContainerDeadError
+	if !errors.As(err, &deadErr) {
+		return nil, err
+	}
+	if err := k.Recreate(ctx, slot); err != nil {
+		return nil, fmt.Errorf("orchestrator: kontur VM %q's container was found dead (likely left behind by a host reboot -- see internal/dockervm.Create's doc comment on restart policy), recreating it: %w", name, err)
+	}
+	return k.runnerFor(ctx, name)
+}
+
 // dockerExecRunner builds the docker-exec transport for name's VM. Its
 // ConnectTimeout is left at guestexec's own default rather than tied to
 // cfg.readyTimeout: by the time a caller has a runner back, runnerFor has
@@ -591,7 +634,7 @@ func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, dea
 		}
 		lastErr = guestExecProbeError(probe.Container, stderr, exitCode)
 		if status, dead := dockerExitedEarly(ctx, name); dead {
-			return fmt.Errorf("VM container %q exited (status %q) before its guest ever ran a command -- check `docker logs %s`: %w", probe.Container, status, probe.Container, lastErr)
+			return &guestContainerDeadError{fmt.Errorf("VM container %q exited (status %q) before its guest ever ran a command -- check `docker logs %s`: %w", probe.Container, status, probe.Container, lastErr)}
 		}
 		if time.Now().After(deadline) {
 			return lastErr
@@ -603,6 +646,18 @@ func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, dea
 		}
 	}
 }
+
+// guestContainerDeadError is what waitForGuestExec returns when it gives
+// up specifically because the VM's own container has already exited or
+// died, never for any other probe failure (a timeout, a guest still
+// booting, ...) -- see dockerExitedEarly. recoverableRunnerFor matches on
+// this type alone (errors.As) to decide whether a failure is worth
+// recovering from with a Recreate, so it stays its own type rather than a
+// sentinel value or a string match against the formatted message below.
+type guestContainerDeadError struct{ err error }
+
+func (e *guestContainerDeadError) Error() string { return e.err.Error() }
+func (e *guestContainerDeadError) Unwrap() error { return e.err }
 
 // guestExecProbeError renders one failed waitForGuestExec probe as the
 // error a caller sees if the deadline runs out on it, naming the command

@@ -567,6 +567,160 @@ func TestKonturSandboxesRejectsNonNumericSlotWithBaseIPSet(t *testing.T) {
 	}
 }
 
+// TestKonturSandboxesSelfHealsAVMContainerFoundDeadAfterReboot guards
+// against bwsalmon/agents#591: after a host reboot, a VM's on-disk kontur
+// state survives (kontur.Exists, what ensure() checks -- state files live
+// under /var/lib/kontur/vms, untouched by a reboot), but its docker
+// containers do not, because internal/dockervm.Create starts them with a
+// plain "docker run -d" and no restart policy, so docker never brings
+// them back the way a --restart=always container would. Before this
+// fix, ensure() treated that surviving state file alone as proof the VM
+// was already usable and never looked at the container's real docker
+// status; waitForGuestExec then correctly fast-failed on the dead
+// container (TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly
+// above), but nothing ever rebuilt it afterwards -- ensure() has no
+// reason to look past its own k.created cache once true, so every later
+// ToolsFor call for the same slot hit the exact same dead container and
+// failed identically forever, hanging that slot until an operator
+// intervened by hand.
+//
+// This drives ToolsFor against a slot whose kontur state file already
+// exists (simulating a state directory that survived a reboot) but whose
+// VM container reports "exited" and refuses `docker exec` until a real
+// "vm create" actually runs again (simulating the container itself not
+// surviving that reboot), and asserts ToolsFor recovers on its own --
+// deleting and recreating the VM -- without any caller having to notice
+// the dead container and call Recreate itself.
+func TestKonturSandboxesSelfHealsAVMContainerFoundDeadAfterReboot(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	aliveMarker := filepath.Join(t.TempDir(), "container-alive")
+	writeFakeKonturTouchingMarkerOnCreate(t, argvLog, 30080, aliveMarker)
+	writeFakeDockerDeadUntilMarker(t, filepath.Join(t.TempDir(), "docker-argv.log"), aliveMarker)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix:        "grain-test-",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+		ReadyTimeout:      time.Second,
+	})
+
+	tools, err := k.ToolsFor(context.Background(), "slot-0")
+	if err != nil {
+		t.Fatalf("ToolsFor() did not self-heal a VM container found dead: %v", err)
+	}
+	if len(tools) == 0 {
+		t.Fatal("ToolsFor() returned no tools after recovering")
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"vm delete grain-test-slot-0 -state-dir " + stateDir,
+		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat",
+	}
+	got := splitNonEmptyLines(string(data))
+	if len(got) != len(want) {
+		t.Fatalf("kontur invocations = %v, want %v (ToolsFor should delete then recreate the dead VM, not reuse the stale state file forever)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// writeFakeKonturTouchingMarkerOnCreate is writeFakeKontur plus one thing:
+// a successful "vm create" also touches marker, standing in for a docker
+// container actually coming up alongside konturctl's own state file --
+// the coupling writeFakeDockerDeadUntilMarker's fake docker watches for to
+// know a real recreate happened, not just that the state file changed.
+func writeFakeKonturTouchingMarkerOnCreate(t *testing.T, argvLog string, port int, marker string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake konturctl script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+if [ "$1" = "vm" ] && { [ "$2" = "create" ] || [ "$2" = "delete" ]; }; then
+  action="$2"
+  name="$3"
+  statedir=""
+  shift 3
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "-state-dir" ]; then
+      statedir="$2"
+    fi
+    shift
+  done
+  if [ "$action" = "create" ]; then
+    echo "{\"port\": %d}" > "$statedir/$name.json"
+    touch %q
+  else
+    rm -f "$statedir/$name.json"
+  fi
+fi
+`, argvLog, port, marker)
+	path := filepath.Join(dir, "konturctl")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// writeFakeDockerDeadUntilMarker installs a fake "docker" that answers
+// both `docker inspect -f {{.State.Status}}` and `docker exec` as if the
+// VM container has already exited -- inspect reports "exited", exec fails
+// the way docker actually does against a stopped container -- until
+// marker exists, standing in for the container a fresh
+// "konturctl vm create" would actually start. Once marker exists, both
+// answer as a healthy running container and guest would.
+func writeFakeDockerDeadUntilMarker(t *testing.T, argvLog, marker string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake docker script is POSIX shell only")
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$*" >> %q
+case "$1" in
+exec)
+  if [ ! -f %q ]; then
+    echo "Error response from daemon: Container is not running" >&2
+    exit 1
+  fi
+  exit 0
+  ;;
+inspect)
+  case "$*" in
+  *State.Status*)
+    if [ -f %q ]; then echo running; else echo exited; fi
+    ;;
+  *) echo "fake docker: unexpected inspect: $*" >&2; exit 1 ;;
+  esac
+  ;;
+*)
+  echo "fake docker: unexpected subcommand: $*" >&2
+  exit 1
+  ;;
+esac
+`, argvLog, marker, marker)
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestKonturSandboxesVMNameForUsesPrefix(t *testing.T) {
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "grain-agent-77-"})
 	if got, want := k.VMNameFor("slot-0"), "grain-agent-77-slot-0"; got != want {
