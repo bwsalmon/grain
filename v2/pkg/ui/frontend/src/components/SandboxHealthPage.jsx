@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Chip, CircularProgress, Table, TableBody, TableCell, TableHead, TableRow, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, CircularProgress, Table, TableBody, TableCell, TableHead, TableRow, Typography } from "@mui/material";
 import api from "../api.js";
 import Sparkline from "./Sparkline.jsx";
 
-// REFRESH_MS matches LogsPage's own polling cadence -- the debug section
-// (bwsalmon/agents#536) these two panes share should feel like the same
+// REFRESH_MS matches LogsPage's own polling cadence -- the Debug tab
+// (bwsalmon/agents#623) these two panels share should feel like the same
 // kind of live view.
 const REFRESH_MS = 5000;
 
@@ -55,16 +55,18 @@ export function appendHistory(prev, result) {
   return { host, sandboxes };
 }
 
-// SandboxHealthPage is the sandbox health pane (bwsalmon/agents#536): a
-// live view of every live run's own sandbox -- a kontur VM or a host
-// directory, whichever backend this deployment runs -- plus the daemon's
-// own host machine's CPU/RAM pressure. Both come back from the same
-// GET /api/sandboxes call since a sandbox that looks stuck is often
-// really the host it runs on being starved, so debugging one usually
-// means looking at both at once. GET /api/sandboxes' own "enabled" flag
-// says whether this deployment has either piece configured at all, the
-// same convention LogsPage's own GET /api/logs already establishes for
-// the debug section this pane sits alongside.
+// SandboxHealthPage is the Sandbox health panel of Settings' Debug tab
+// (bwsalmon/agents#623) -- it used to be a full nav entry of its own
+// (bwsalmon/agents#536) before moving in alongside Logs and the reboot
+// control. It shows a live view of every live run's own sandbox -- a
+// kontur VM or a host directory, whichever backend this deployment runs
+// -- plus the daemon's own host machine's CPU/RAM pressure. Both come
+// back from the same GET /api/sandboxes call since a sandbox that looks
+// stuck is often really the host it runs on being starved, so debugging
+// one usually means looking at both at once. GET /api/sandboxes' own
+// "enabled" flag says whether this deployment has either piece
+// configured at all, the same convention LogsPage's own GET /api/logs
+// already establishes for the Debug tab this panel sits alongside.
 export default function SandboxHealthPage({ showError }) {
   const [data, setData] = useState(null);
   const [history, setHistory] = useState({ host: emptySeries, sandboxes: {} });
@@ -87,24 +89,24 @@ export default function SandboxHealthPage({ showError }) {
   }, [refresh]);
 
   return (
-    <main className="logs-page">
-      <div className="content-header">
-        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Sandbox health</Typography>
+    <section className="sandbox-health-panel">
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+        <Typography variant="subtitle2">Sandbox health</Typography>
         {data?.enabled && <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>}
-      </div>
+      </Box>
       {data === null && (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Box sx={{ display: "flex", justifyContent: "center", py: 3 }}>
           <CircularProgress size={28} aria-label="Loading sandbox health" />
-        </div>
+        </Box>
       )}
       {data !== null && !data.enabled && (
-        <Alert severity="info" sx={{ mx: "1.75rem", mt: "1rem" }}>
+        <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this deployment has no sandbox pool or host stats configured.
         </Alert>
       )}
       {data !== null && data.enabled && (
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0 1.75rem 1.75rem" }}>
-          <Typography variant="subtitle2" sx={{ mt: "1rem", mb: "0.5rem" }}>Host</Typography>
+        <Box>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: "0.5rem" }}>Host</Typography>
           {data.hostError && (
             <Alert severity="warning" sx={{ mb: "1rem" }}>Host stats unavailable: {data.hostError}</Alert>
           )}
@@ -133,7 +135,7 @@ export default function SandboxHealthPage({ showError }) {
             </Typography>
           )}
 
-          <Typography variant="subtitle2" sx={{ mb: "0.5rem" }}>Sandboxes</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: "0.5rem" }}>Sandboxes</Typography>
           {(!data.sandboxes || data.sandboxes.length === 0) ? (
             <Typography variant="body2" color="text.secondary">No runs in flight, so no sandboxes exist.</Typography>
           ) : (
@@ -173,8 +175,8 @@ export default function SandboxHealthPage({ showError }) {
               </TableBody>
             </Table>
           )}
-        </div>
+        </Box>
       )}
-    </main>
+    </section>
   );
 }

@@ -1,21 +1,30 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Button, Checkbox, Divider, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
+import LogsPage from "./LogsPage.jsx";
+import SandboxHealthPage from "./SandboxHealthPage.jsx";
 import { useThemeMode } from "../ThemeModeContext.jsx";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
 // sidebar overlays; they live here now as tabs alongside the general
 // deployment settings, since all three are the same kind of
 // operator-only, deployment-wide configuration.
+//
+// bwsalmon/agents#623: Logs, Sandbox health and the reboot control (which
+// used to be its own "danger zone" on the general tab) join them here as
+// a single Debug tab, for the same reason -- diagnosing a deployment gone
+// wrong is operator-only and deployment-wide too, not day-to-day task
+// flow.
 const TABS = [
   { id: "general", label: "General" },
   { id: "capabilities", label: "Capabilities" },
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
+  { id: "debug", label: "Debug" },
 ];
 
 export default function SettingsOverlay({ config, onClose, showError }) {
@@ -76,20 +85,23 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const newestFirst = form.elements.newestFirst.checked;
     if (newestFirst !== !!settings.newestFirst) payload.newestFirst = newestFirst;
 
+    // An empty box is a deliberate "go back to the default" (bwsalmon/agents#610),
+    // not "leave it alone" -- unlike every other field on this form, this one
+    // pre-fills that default in faintly, so an operator who never touched it
+    // and one who cleared it back to blank on purpose type the same thing here.
     const sandboxCpusRaw = form.elements.sandboxCpus.value.trim();
-    if (sandboxCpusRaw !== "") {
-      const sandboxCpus = parseInt(sandboxCpusRaw, 10);
-      if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
-    }
+    const sandboxCpus = sandboxCpusRaw === "" ? 0 : parseInt(sandboxCpusRaw, 10);
+    if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
 
     const sandboxMemoryMbRaw = form.elements.sandboxMemoryMb.value.trim();
-    if (sandboxMemoryMbRaw !== "") {
-      const sandboxMemoryMb = parseInt(sandboxMemoryMbRaw, 10);
-      if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
-    }
+    const sandboxMemoryMb = sandboxMemoryMbRaw === "" ? 0 : parseInt(sandboxMemoryMbRaw, 10);
+    if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
 
     const showClosedByDefault = form.elements.showClosedByDefault.checked;
     if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
+
+    const agentFramework = form.elements.agentFramework.value;
+    if (agentFramework !== (settings.agentFramework || "gemini")) payload.agentFramework = agentFramework;
 
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
@@ -160,6 +172,15 @@ export default function SettingsOverlay({ config, onClose, showError }) {
           <form onSubmit={submit}>
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>Agent framework</Typography>
+            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "gemini"} sx={{ mb: 1 }}>
+              <FormControlLabel value="gemini" control={<Radio />} label="Gemini" />
+              <FormControlLabel value="claude" control={<Radio />} label="Claude" />
+            </RadioGroup>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Which agent.Framework a run is driven by. Claude support is not yet wired into dispatch -- selecting it
+              here does not change what a run actually does.
+            </Typography>
             <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
             <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />
@@ -183,23 +204,33 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               )}
               sx={{ display: "flex", mt: 1 }}
             />
+            {/* bwsalmon/agents#610: an unset override (0, stored) is left blank here
+                rather than shown as a literal 0 -- 0 vCPUs/0 MiB is not what a
+                sandbox actually gets. The shape it does get, kontur's own default,
+                sits in the box as a placeholder instead, so it reads as the faint,
+                inherited value it is rather than something deliberately chosen.
+                Clearing a real override back to blank is itself the way to return
+                to that default (submit()'s own sandboxCpusRaw/sandboxMemoryMbRaw
+                handling). */}
             <TextField
               name="sandboxCpus"
               label="Sandbox vCPUs"
-              helperText="default vCPU count for a kontur-managed sandbox VM; 0 or blank leaves kontur's own default in place. Overridable per task."
+              helperText="default vCPU count for a kontur-managed sandbox VM. Overridable per task."
               type="number"
               inputProps={{ min: 0, step: 1 }}
-              defaultValue={String(settings.sandboxCpus || 0)}
+              defaultValue={settings.sandboxCpus ? String(settings.sandboxCpus) : ""}
+              placeholder={settings.sandboxCpusDefault ? String(settings.sandboxCpusDefault) : undefined}
               fullWidth
               margin="normal"
             />
             <TextField
               name="sandboxMemoryMb"
               label="Sandbox memory (MiB)"
-              helperText="default guest memory, in MiB, for a kontur-managed sandbox VM; 0 or blank leaves kontur's own default in place. Overridable per task."
+              helperText="default guest memory, in MiB, for a kontur-managed sandbox VM. Overridable per task."
               type="number"
               inputProps={{ min: 0, step: 1 }}
-              defaultValue={String(settings.sandboxMemoryMb || 0)}
+              defaultValue={settings.sandboxMemoryMb ? String(settings.sandboxMemoryMb) : ""}
+              placeholder={settings.sandboxMemoryMbDefault ? String(settings.sandboxMemoryMbDefault) : undefined}
               fullWidth
               margin="normal"
             />
@@ -225,18 +256,28 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               <Button type="submit" variant="contained">Save</Button>
             </Stack>
           </form>
-          {config && config.rebootEnabled && (
-            <fieldset>
-              <legend>Danger zone</legend>
-              <p className="hint">Reboots the machine grain itself is running on.</p>
-              <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
-            </fieldset>
-          )}
         </>
       )}
       {tab === "capabilities" && <CapabilitiesPanel capabilities={settings.capabilities} />}
       {tab === "secrets" && <SecretsPanel showError={showError} />}
       {tab === "upgrade" && <UpgradePanel showError={showError} />}
+      {tab === "debug" && (
+        <>
+          <LogsPage showError={showError} />
+          <Divider sx={{ my: 3 }} />
+          <SandboxHealthPage showError={showError} />
+          {config && config.rebootEnabled && (
+            <>
+              <Divider sx={{ my: 3 }} />
+              <fieldset>
+                <legend>Danger zone</legend>
+                <p className="hint">Reboots the machine grain itself is running on.</p>
+                <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
+              </fieldset>
+            </>
+          )}
+        </>
+      )}
     </Overlay>
   );
 }

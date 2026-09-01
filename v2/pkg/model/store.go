@@ -102,6 +102,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigShowClosedByDefaultColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigAgentFrameworkColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureScheduledTaskTemplateColumn(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
@@ -413,6 +416,24 @@ func (s *Store) ensureConfigShowClosedByDefaultColumn(ctx context.Context) error
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `show_closed_by_default` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigAgentFrameworkColumn adds grain_config.agent_framework
+// (model.Config.AgentFramework's own doc comment has the reasoning) to a
+// database created before bwsalmon/agents#609, the same probe-then-ALTER
+// approach ensureConfigShowClosedByDefaultColumn already uses. Defaulting
+// to 'gemini' matches model.AgentFrameworkGemini -- the only framework
+// any deployment has ever actually run -- so an upgraded deployment reads
+// back exactly what it already ran before this column existed, rather
+// than an empty string no agent.Framework implementation is named by.
+func (s *Store) ensureConfigAgentFrameworkColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `agent_framework` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT 'gemini'")
 	return err
 }
 
@@ -1916,7 +1937,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`"
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`,`agent_framework`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -1924,7 +1945,8 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var targetRepos string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault); err != nil {
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
+		&c.AgentFramework); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -1939,10 +1961,11 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault)
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
+			c.AgentFramework)
 		return err
 	})
 }

@@ -13,8 +13,6 @@ import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
-import LogsPage from "./components/LogsPage.jsx";
-import SandboxHealthPage from "./components/SandboxHealthPage.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
 import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
 
@@ -369,10 +367,6 @@ export default function App() {
             />
           ) : view === "templates" ? (
             <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
-          ) : view === "logs" ? (
-            <LogsPage showError={showError} />
-          ) : view === "sandboxes" ? (
-            <SandboxHealthPage showError={showError} />
           ) : (
             <div className="main-column">
               {repoFilter !== null && (

@@ -81,23 +81,13 @@ describe("Sidebar", () => {
     expect(onSetView).toHaveBeenCalledWith("schedules");
   });
 
-  it("switches to the logs view when clicked", async () => {
-    const onSetView = vi.fn();
-    const user = userEvent.setup();
-    render(<Sidebar {...baseProps} config={null} tasks={[]} onSetView={onSetView} />);
+  // bwsalmon/agents#623: Logs and Sandbox health moved into Settings'
+  // own Debug tab, so they no longer have sidebar nav entries of their
+  // own to click.
+  it("does not show Logs or Sandbox health as their own nav entries", () => {
+    render(<Sidebar {...baseProps} config={null} tasks={[]} />);
 
-    await user.click(screen.getByRole("button", { name: "Logs" }));
-
-    expect(onSetView).toHaveBeenCalledWith("logs");
-  });
-
-  it("switches to the sandbox health view when clicked", async () => {
-    const onSetView = vi.fn();
-    const user = userEvent.setup();
-    render(<Sidebar {...baseProps} config={null} tasks={[]} onSetView={onSetView} />);
-
-    await user.click(screen.getByRole("button", { name: "Sandbox health" }));
-
-    expect(onSetView).toHaveBeenCalledWith("sandboxes");
+    expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
   });
 });
