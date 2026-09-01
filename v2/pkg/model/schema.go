@@ -503,6 +503,31 @@ var Tables = []string{
 	// need: every candidate for one release, newest first.
 	`CREATE INDEX IF NOT EXISTS ` + "`release_candidate_release`" + ` ON ` + "`release_candidate`" + ` (` + "`release_id`" + `, ` + "`id`" + `)`,
 
+	// One requested branch (bwsalmon/agents#638) -- a repo page's own
+	// "create a new branch," recorded here as a declared intent the same
+	// way `release` and `release_candidate` are: `status` walks pending ->
+	// created, TEXT rather than a constrained type for the same reason
+	// every other enum column here is (the vocabulary lives in branch.go,
+	// not the schema); `last_error` is the branches reconciler's own
+	// report of why a create has not landed yet, cleared the moment it
+	// succeeds. There is no uniqueness constraint on (`owner`,`repo`,
+	// `name`): whether a name collides with something already on GitHub is
+	// a fact only GitHub itself holds, so a collision only ever surfaces
+	// as `last_error`, not as a rejected insert.
+	`CREATE TABLE IF NOT EXISTS ` + "`branch`" + ` (
+  ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`owner`" + `        TEXT     NOT NULL,
+  ` + "`repo`" + `         TEXT     NOT NULL,
+  ` + "`name`" + `         TEXT     NOT NULL,
+  ` + "`status`" + `       TEXT     NOT NULL,
+  ` + "`created_at`" + `   DATETIME NOT NULL,
+  ` + "`last_error`" + `   TEXT     NULL
+)`,
+
+	// What the repo page's own branch list needs: every branch ever
+	// requested for one repo, newest first.
+	`CREATE INDEX IF NOT EXISTS ` + "`branch_repo`" + ` ON ` + "`branch`" + ` (` + "`owner`" + `, ` + "`repo`" + `, ` + "`id`" + `)`,
+
 	// A repo's qualification setup -- bwsalmon/agents#518's two switches:
 	// require_approval gates every task a run instantiates behind a
 	// human's own bulk approval (Store.ApproveQualificationRun) rather
