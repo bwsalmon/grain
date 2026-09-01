@@ -259,72 +259,101 @@ describe("SettingsOverlay", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("does not show the danger zone when reboot is not enabled", async () => {
-    api.mockResolvedValueOnce(settings);
-    render(<SettingsOverlay config={{ rebootEnabled: false }} onClose={() => {}} showError={() => {}} />);
-    await screen.findByDisplayValue("30s");
+  // bwsalmon/agents#623: Logs, Sandbox health and the reboot control all
+  // live together on the Debug tab -- opening it mounts LogsPage and
+  // SandboxHealthPage too, so every test below feeds their own
+  // GET /api/logs and GET /api/sandboxes calls a response, same as the
+  // Secrets/Upgrade tab tests already do for their own panel's fetch.
+  describe("Debug tab", () => {
+    const noLogs = { enabled: false };
+    const noSandboxes = { enabled: false };
 
-    expect(screen.queryByRole("button", { name: "Reboot host" })).not.toBeInTheDocument();
-  });
+    const openDebugTab = async (user, config) => {
+      render(<SettingsOverlay config={config} onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Debug" }));
+    };
 
-  it("reboots the host after confirmation", async () => {
-    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-    const user = userEvent.setup();
-    render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
-    await screen.findByDisplayValue("30s");
+    it("shows Logs and Sandbox health alongside the danger zone", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
+      const user = userEvent.setup();
+      await openDebugTab(user, { rebootEnabled: true });
 
-    await user.click(screen.getByRole("button", { name: "Reboot host" }));
+      expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
+      expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Reboot host" })).toBeInTheDocument();
+    });
 
-    expect(api).toHaveBeenCalledWith("/api/host/reboot", { method: "POST" });
-    vi.unstubAllGlobals();
-  });
+    it("does not show the danger zone when reboot is not enabled", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
+      const user = userEvent.setup();
+      await openDebugTab(user, { rebootEnabled: false });
+      await screen.findByText(/no log sources configured/i);
 
-  it("does not reboot when the confirmation is declined", async () => {
-    api.mockResolvedValueOnce(settings);
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
-    const user = userEvent.setup();
-    render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
-    await screen.findByDisplayValue("30s");
+      expect(screen.queryByRole("button", { name: "Reboot host" })).not.toBeInTheDocument();
+    });
 
-    await user.click(screen.getByRole("button", { name: "Reboot host" }));
+    it("reboots the host after confirmation", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes).mockResolvedValueOnce({});
+      vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+      const user = userEvent.setup();
+      await openDebugTab(user, { rebootEnabled: true });
 
-    expect(api).toHaveBeenCalledTimes(1);
-    vi.unstubAllGlobals();
-  });
+      await user.click(screen.getByRole("button", { name: "Reboot host" }));
 
-  // bwsalmon/agents#581: a successful reboot cuts the connection out
-  // from under the response before it finishes its round trip, which
-  // the browser reports as a TypeError -- fetch's own shape for a
-  // network-level failure (api.js never throws that type itself). That
-  // used to surface as an error banner on the one action where it is
-  // actually a sign of success, making the button look broken.
-  it("does not show an error when the connection drops as the reboot itself would cause", async () => {
-    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-    const user = userEvent.setup();
-    const showError = vi.fn();
-    render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
-    await screen.findByDisplayValue("30s");
+      expect(api).toHaveBeenCalledWith("/api/host/reboot", { method: "POST" });
+      vi.unstubAllGlobals();
+    });
 
-    await user.click(screen.getByRole("button", { name: "Reboot host" }));
+    it("does not reboot when the confirmation is declined", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
+      vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
+      const user = userEvent.setup();
+      await openDebugTab(user, { rebootEnabled: true });
 
-    expect(showError).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
+      await user.click(screen.getByRole("button", { name: "Reboot host" }));
 
-  it("still shows an error for a real reboot failure", async () => {
-    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("reboot is not available"));
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-    const user = userEvent.setup();
-    const showError = vi.fn();
-    render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
-    await screen.findByDisplayValue("30s");
+      expect(api).toHaveBeenCalledTimes(3);
+      vi.unstubAllGlobals();
+    });
 
-    await user.click(screen.getByRole("button", { name: "Reboot host" }));
+    // bwsalmon/agents#581: a successful reboot cuts the connection out
+    // from under the response before it finishes its round trip, which
+    // the browser reports as a TypeError -- fetch's own shape for a
+    // network-level failure (api.js never throws that type itself). That
+    // used to surface as an error banner on the one action where it is
+    // actually a sign of success, making the button look broken.
+    it("does not show an error when the connection drops as the reboot itself would cause", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes)
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+      vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+      const user = userEvent.setup();
+      const showError = vi.fn();
+      render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Debug" }));
 
-    expect(showError).toHaveBeenCalledWith(new Error("reboot is not available"));
-    vi.unstubAllGlobals();
+      await user.click(screen.getByRole("button", { name: "Reboot host" }));
+
+      expect(showError).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+
+    it("still shows an error for a real reboot failure", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes)
+        .mockRejectedValueOnce(new Error("reboot is not available"));
+      vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+      const user = userEvent.setup();
+      const showError = vi.fn();
+      render(<SettingsOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Debug" }));
+
+      await user.click(screen.getByRole("button", { name: "Reboot host" }));
+
+      expect(showError).toHaveBeenCalledWith(new Error("reboot is not available"));
+      vi.unstubAllGlobals();
+    });
   });
 
   it("switches to the Secrets tab and shows its panel", async () => {

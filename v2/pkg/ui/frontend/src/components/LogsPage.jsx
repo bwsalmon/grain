@@ -2,28 +2,22 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Button, FormControl, InputLabel, MenuItem, Select, Typography } from "@mui/material";
 import api from "../api.js";
 
-// REFRESH_MS is how often this page re-fetches the selected source's log
-// lines while it is the active view -- the same order of magnitude as
-// App.jsx's own POLL_INTERVAL_MS, so a log tailed here moves about as
-// often as the task list it sits alongside does.
+// REFRESH_MS is how often this panel re-fetches the selected source's log
+// lines while Settings' Debug tab is open -- the same order of magnitude
+// as App.jsx's own POLL_INTERVAL_MS, so a log tailed here moves about as
+// often as the task list does.
 const REFRESH_MS = 5000;
 const LINES_TO_FETCH = 500;
 
-// LogsPage is the logs pane (bwsalmon/agents#457): a full nav entry
-// alongside Repos and Scheduled tasks rather than a button that pops a
-// modal, the same promotion bwsalmon/agents#455 already gave
-// SchedulesList. GET /api/logs' own "enabled" flag says whether this
-// deployment has any log sources configured at all; when it doesn't
-// (`grain demo`'s throwaway UI, or any UI not colocated with a real
-// daemon), this shows a note instead of a pane that could only ever
-// 404, the same convention UpgradePanel/SecretsPanel (Settings' own
-// tabs) already use for their own optional pieces.
-//
-// The pane fills the full main column height (bwsalmon/agents#486)
-// rather than capping the log box at a fraction of the viewport --
-// .logs-page is a flex column so the toolbar stays put while .logs-view
-// grows to take up whatever room is left, the same "one scroller fills
-// the panel" shape a terminal tail gives you.
+// LogsPage is the Logs panel of Settings' Debug tab (bwsalmon/agents#623)
+// -- it used to be a full nav entry of its own (bwsalmon/agents#457)
+// before moving in alongside Sandbox health and the reboot control, the
+// same consolidation bwsalmon/agents#456 already gave Secrets/Upgrade.
+// GET /api/logs' own "enabled" flag says whether this deployment has any
+// log sources configured at all; when it doesn't (`grain demo`'s
+// throwaway UI, or any UI not colocated with a real daemon), this shows a
+// note instead of a pane that could only ever 404, the same convention
+// SecretsPanel/UpgradePanel already use for their own optional pieces.
 export default function LogsPage({ showError }) {
   const [sources, setSources] = useState(null);
   const [source, setSource] = useState(null);
@@ -62,12 +56,10 @@ export default function LogsPage({ showError }) {
   if (sources === null) return null;
 
   return (
-    <main className="logs-page">
-      <div className="content-header">
-        <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>Logs</Typography>
-      </div>
+    <section className="logs-panel">
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>Logs</Typography>
       {!sources.enabled && (
-        <Alert severity="info" sx={{ mx: "1.75rem", mt: "1rem" }}>
+        <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this deployment has no log sources configured (bwsalmon/agents#444).
         </Alert>
       )}
@@ -90,6 +82,6 @@ export default function LogsPage({ showError }) {
           <pre className="logs-view">{lines.length > 0 ? lines.join("\n") : "(no log lines)"}</pre>
         </>
       )}
-    </main>
+    </section>
   );
 }
