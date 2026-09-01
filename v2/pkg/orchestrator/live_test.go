@@ -16,29 +16,42 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
 )
 
-// credentialSlot gives slot's own sandbox directory a git identity, the
-// same one-time-per-slot setup v2/e2e/harness_test.go's newWorld gives
-// every slot up front -- mcp.ConfigureGitCredentials' own doc comment
-// explains why a fresh sandbox otherwise has no git identity at all
-// ("makes git commit fail outright"). This test clones straight off a
-// bare repo path rather than through a real gitproxy, so the placeholder
-// remote's scheme and host (never its path) are the only part of this
-// call that matters here.
-func credentialSlot(t *testing.T, sandboxes *orchestrator.HostSandboxes, slot string) {
-	t.Helper()
-	root, err := sandboxes.RootFor(slot)
+// credentialingSandboxes gives every sandbox a dispatch builds a git
+// identity, at the moment a real deployment does -- as part of preparing
+// the run, not before the cycle. Without it `git commit` fails outright
+// in a fresh sandbox (mcp.ConfigureGitCredentials' own doc comment on why
+// a sandbox otherwise has no identity at all).
+//
+// This used to be done by hand, once per slot, before the cycle ran --
+// which is where it belonged while a slot's directory outlived every run
+// dispatched into it. A sandbox does not exist until the dispatch builds
+// it now, so the only place left to configure one is around Acquire.
+//
+// It wraps Sandboxes rather than going through Deps.MintSandboxToken
+// because that path derives its remote from Config.GitRemoteBase, and
+// these tests deliberately leave that unset so a run's checkout clones
+// straight off a bare repo path rather than through a gitproxy. The
+// placeholder remote's scheme and host (never its path) are the only part
+// of this that matters here.
+type credentialingSandboxes struct {
+	inner orchestrator.Sandboxes
+	t     *testing.T
+}
+
+func (s credentialingSandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
+	sb, err := s.inner.Acquire(ctx, name, shape)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	if err := mcp.ConfigureGitCredentials(root, "http://placeholder.example/x/y.git", "unused"); err != nil {
-		t.Fatal(err)
+	if err := sb.ConfigureGitCredentials(ctx, "http://placeholder.example/x/y.git", "unused"); err != nil {
+		s.t.Fatalf("configuring git credentials on %s: %v", name, err)
 	}
+	return sb, nil
 }
 
 // --- scripting helpers for the gemini agent, duplicated from
@@ -122,20 +135,18 @@ func fileTask(t *testing.T, ctx context.Context, store *model.Store, repo model.
 }
 
 func TestRunCycleCompletesEndToEnd(t *testing.T) {
-	const slot = "sandbox-249-1"
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	_, task := fileTask(t, ctx, store, repo, "add a NOTES file", "please add one")
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	credentialSlot(t, sandboxes, slot)
 
 	clock := baseTime
 	branch := model.BranchName(task.ID)
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(sim.BareRepo, branch, task.ID)),
 	}
 	// One cycle, straight from the store write: no poll, and no tick spent
@@ -183,18 +194,16 @@ func TestRunCycleCompletesEndToEnd(t *testing.T) {
 }
 
 func TestRunCycleParksOnAQuestionThenResumesAfterAReply(t *testing.T) {
-	const slot = "sandbox-249-2"
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	tasks, task := fileTask(t, ctx, store, repo, "ambiguous task", "do the thing")
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	credentialSlot(t, sandboxes, slot)
 
 	clock := baseTime
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
 		Framework: scriptedFramework(askScript("which file should this go in?")),
 	}
 	if err := orchestrator.RunCycle(ctx, deps, clock); err != nil {

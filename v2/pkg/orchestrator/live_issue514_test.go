@@ -30,7 +30,6 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 		t.Skip("GEMINI_API_KEY not set; skipping live Gemini integration test")
 	}
 
-	const slot = "sandbox-514-1"
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets514", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets514"}
@@ -51,7 +50,6 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 			"(creating it if needed), commits that change, and pushes the branch to the origin remote.")
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	credentialSlot(t, sandboxes, slot)
 
 	genCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -61,7 +59,7 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 	}
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
 		Framework: func() agent.Framework { return framework },
 		// The real repro: a budget so tight the model cannot possibly
 		// also reply with a final answer once it has spent its one turn

@@ -1,16 +1,17 @@
 package orchestrator_test
 
-// HostSandboxes and KonturSandboxes each hand out one sandbox per slot,
-// created lazily on first use and reused after that -- both guard their
-// bookkeeping (roots, created, gitCreds) with a single mutex. Nothing
-// today calls ToolsFor for more than one slot at a time (reconcileDispatch
-// runs each dispatch's whole RunDispatch in one goroutine, sequentially --
-// cycle.go's own doc comment), but that is a scheduling choice this
-// package could reasonably drop in a later change without either type
-// changing shape, since both were already written to hand out sandboxes
-// concurrently. These tests hold that promise to its word: drive both
-// with many goroutines, mixing repeat calls for the same slot with calls
-// for many distinct slots, and run with -race.
+// HostSandboxes and KonturSandboxes each build one sandbox per run, and
+// reconcileDispatch runs a cycle's dispatches concurrently -- one
+// goroutine each (cycle.go's own doc comment) -- so both are genuinely
+// called from several goroutines at once, each for a different sandbox.
+// These tests drive that: many concurrent Acquires for distinct
+// sandboxes, under -race, and a check that distinct VMs are actually
+// built in parallel rather than serialized behind one lock.
+//
+// They used to also mix in repeat calls for the *same* slot, which was
+// the interesting case while a sandbox was created lazily on first use
+// and reused after. A sandbox belongs to one run now, so no two callers
+// ever ask for the same one.
 
 import (
 	"context"
@@ -27,61 +28,61 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
-func TestHostSandboxesRootForIsSafeForConcurrentCallers(t *testing.T) {
-	h := orchestrator.NewHostSandboxes(t.TempDir())
+func TestHostSandboxesAcquireIsSafeForConcurrentCallers(t *testing.T) {
+	base := t.TempDir()
+	h := orchestrator.NewHostSandboxes(base)
 
-	const (
-		slots        = 8
-		callsPerSlot = 16
-	)
+	const sandboxes = 16
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	roots := make([][]string, slots)
-	var mu sync.Mutex
-	errs := make(chan error, slots*callsPerSlot)
+	errs := make(chan error, sandboxes)
+	roots := make(chan string, sandboxes)
 
-	wg.Add(slots * callsPerSlot)
-	for s := 0; s < slots; s++ {
-		slot := fmt.Sprintf("slot-%d", s)
-		for c := 0; c < callsPerSlot; c++ {
-			go func(s int, slot string) {
-				defer wg.Done()
-				<-start
-				root, err := h.RootFor(slot)
-				if err != nil {
-					errs <- err
-					return
-				}
-				mu.Lock()
-				roots[s] = append(roots[s], root)
-				mu.Unlock()
-			}(s, slot)
-		}
+	wg.Add(sandboxes)
+	for i := 0; i < sandboxes; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			sb, err := h.Acquire(context.Background(), fmt.Sprintf("t%d-r1", i), orchestrator.Shape{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			root, err := sb.(interface{ Root() (string, error) }).Root()
+			if err != nil {
+				errs <- err
+				return
+			}
+			roots <- root
+		}(i)
 	}
 	close(start)
 	wg.Wait()
 	close(errs)
+	close(roots)
+
 	for err := range errs {
 		t.Error(err)
 	}
-
-	for s := 0; s < slots; s++ {
-		want := roots[s][0]
-		for _, got := range roots[s] {
-			if got != want {
-				t.Errorf("slot-%d: RootFor returned %q and %q across concurrent calls, want the same directory every time", s, got, want)
-			}
+	seen := map[string]bool{}
+	for root := range roots {
+		if seen[root] {
+			t.Errorf("two concurrent Acquires got the same directory %q", root)
 		}
+		seen[root] = true
+	}
+	if len(seen) != sandboxes {
+		t.Errorf("got %d distinct directories, want %d", len(seen), sandboxes)
 	}
 }
 
-func TestKonturSandboxesToolsForIsSafeForManyConcurrentDistinctSlots(t *testing.T) {
+func TestKonturSandboxesAcquireIsSafeForManyConcurrentSandboxes(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -89,26 +90,21 @@ func TestKonturSandboxesToolsForIsSafeForManyConcurrentDistinctSlots(t *testing.
 		ReadyPollInterval: time.Millisecond,
 	})
 
-	const (
-		slots        = 12
-		callsPerSlot = 8
-	)
+	const sandboxes = 24
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	errs := make(chan error, slots*callsPerSlot)
+	errs := make(chan error, sandboxes)
 
-	wg.Add(slots * callsPerSlot)
-	for s := 0; s < slots; s++ {
-		slot := fmt.Sprintf("slot-%d", s)
-		for c := 0; c < callsPerSlot; c++ {
-			go func(slot string) {
-				defer wg.Done()
-				<-start
-				if _, err := k.ToolsFor(context.Background(), slot); err != nil {
-					errs <- fmt.Errorf("%s: %w", slot, err)
-				}
-			}(slot)
-		}
+	wg.Add(sandboxes)
+	for i := 0; i < sandboxes; i++ {
+		name := fmt.Sprintf("t%d-r1", i)
+		go func(name string) {
+			defer wg.Done()
+			<-start
+			if _, err := k.Acquire(context.Background(), name, orchestrator.Shape{}); err != nil {
+				errs <- fmt.Errorf("%s: %w", name, err)
+			}
+		}(name)
 	}
 	close(start)
 	wg.Wait()
@@ -117,9 +113,14 @@ func TestKonturSandboxesToolsForIsSafeForManyConcurrentDistinctSlots(t *testing.
 		t.Error(err)
 	}
 
-	for s := 0; s < slots; s++ {
-		if got, want := k.VMNameFor(fmt.Sprintf("slot-%d", s)), fmt.Sprintf("grain-test-slot-%d", s); got != want {
-			t.Errorf("VMNameFor(slot-%d) = %q, want %q", s, got, want)
+	for i := 0; i < sandboxes; i++ {
+		name := fmt.Sprintf("t%d-r1", i)
+		got, err := k.VMNameFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "g-" + name; got != want {
+			t.Errorf("VMNameFor(%s) = %q, want %q", name, got, want)
 		}
 	}
 }
@@ -129,7 +130,7 @@ func TestKonturSandboxesToolsForIsSafeForManyConcurrentDistinctSlots(t *testing.
 // only look non-serialized if they were genuinely run in parallel rather
 // than one after another. It appends "<name> <start-ns> <end-ns>" to
 // timesLog for every "vm create" call, straddling that pause, which
-// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially reads
+// TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially reads
 // back to check for overlap.
 func writeFakeKonturWithDelay(t *testing.T, argvLog, timesLog string, port int, delay time.Duration) {
 	t.Helper()
@@ -183,14 +184,14 @@ fi
 // at once, each behind a fake konturctl that sleeps for delay inside "vm
 // create", and asserts that at least one pair of those sleeps overlapped
 // in wall-clock time -- something full serialization could never produce.
-func TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially(t *testing.T) {
+func TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially(t *testing.T) {
 	stateDir := t.TempDir()
 	timesLog := filepath.Join(t.TempDir(), "times.log")
 	writeFakeKonturWithDelay(t, filepath.Join(t.TempDir(), "kontur-argv.log"), timesLog, 30081, 300*time.Millisecond)
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -198,20 +199,20 @@ func TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially(t *testin
 		ReadyPollInterval: time.Millisecond,
 	})
 
-	const slots = 5
+	const sandboxes = 5
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	errs := make(chan error, slots)
-	wg.Add(slots)
-	for s := 0; s < slots; s++ {
-		slot := fmt.Sprintf("slot-%d", s)
-		go func(slot string) {
+	errs := make(chan error, sandboxes)
+	wg.Add(sandboxes)
+	for i := 0; i < sandboxes; i++ {
+		name := fmt.Sprintf("t%d-r1", i)
+		go func(name string) {
 			defer wg.Done()
 			<-start
-			if _, err := k.ToolsFor(context.Background(), slot); err != nil {
-				errs <- fmt.Errorf("%s: %w", slot, err)
+			if _, err := k.Acquire(context.Background(), name, orchestrator.Shape{}); err != nil {
+				errs <- fmt.Errorf("%s: %w", name, err)
 			}
-		}(slot)
+		}(name)
 	}
 	close(start)
 	wg.Wait()
@@ -241,8 +242,8 @@ func TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially(t *testin
 		}
 		intervals[fields[0]] = interval{s, e}
 	}
-	if len(intervals) != slots {
-		t.Fatalf("times.log recorded %d distinct VM creates, want %d", len(intervals), slots)
+	if len(intervals) != sandboxes {
+		t.Fatalf("times.log recorded %d distinct VM creates, want %d", len(intervals), sandboxes)
 	}
 
 	overlap := false
@@ -259,6 +260,6 @@ func TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially(t *testin
 		}
 	}
 	if !overlap {
-		t.Error("no two of the concurrent slots' \"vm create\" calls overlapped in time -- KonturSandboxes is serializing distinct slots' VM creation behind one lock instead of guarding per-slot state the way cycle.go's reconcileDispatch doc comment says it does")
+		t.Error("no two of the concurrent \"vm create\" calls overlapped in time -- KonturSandboxes is serializing distinct runs' VM creation behind one lock, which would silently undo the concurrency cycle.go's reconcileDispatch promises")
 	}
 }

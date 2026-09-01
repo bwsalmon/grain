@@ -289,14 +289,18 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		// own hardcoded -ip/-port (169.254.100.2:31080) so the two tests
 		// never fight over the same address if run back to back without a
 		// clean teardown in between.
-		BaseIP:   "169.254.100.20",
-		BasePort: 31090,
+		IP:   "169.254.100.20",
+		Port: 31090,
 	})
 
 	slots := []string{"1", "2"}
 	names := make([]string, len(slots))
 	for i, slot := range slots {
-		names[i] = k.VMNameFor(slot)
+		name, err := k.VMNameFor(slot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[i] = name
 	}
 	t.Cleanup(func() {
 		for _, name := range names {
@@ -317,7 +321,13 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		wg.Add(1)
 		go func(slot string) {
 			defer wg.Done()
-			tools, err := k.ToolsFor(context.Background(), slot)
+			sb, err := k.Acquire(context.Background(), slot, orchestrator.Shape{})
+			if err != nil {
+				results <- outcome{slot: slot, err: err}
+				return
+			}
+			t.Cleanup(func() { _ = sb.Release(context.Background()) })
+			tools, err := sb.Tools(context.Background())
 			results <- outcome{slot: slot, tools: tools, err: err}
 		}(slot)
 	}
@@ -327,7 +337,7 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 	toolsBySlot := map[string][]mcp.Tool{}
 	for r := range results {
 		if r.err != nil {
-			t.Fatalf("ToolsFor(%s) against real konturctl/docker/cloud-hypervisor: %v", r.slot, r.err)
+			t.Fatalf("Acquire(%s) against real konturctl/docker/cloud-hypervisor: %v", r.slot, r.err)
 		}
 		toolsBySlot[r.slot] = r.tools
 	}
@@ -481,16 +491,23 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		ReadyPollInterval: time.Second,
 	})
 
-	name := k.VMNameFor("1")
+	name, err := k.VMNameFor("1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		if err := kontur.Delete(context.Background(), stateDir, name); err != nil {
 			t.Logf("cleaning up real kontur VM %q: %v", name, err)
 		}
 	})
 
-	tools, err := k.ToolsFor(context.Background(), "1")
+	sb, err := k.Acquire(context.Background(), "1", orchestrator.Shape{})
 	if err != nil {
-		t.Fatalf("ToolsFor over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
+		t.Fatalf("Acquire over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
+	}
+	tools, err := sb.Tools(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
 	byName := map[string]*mcp.Tool{}
 	for i := range tools {
@@ -498,7 +515,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 	for _, want := range []string{"run_command", "read_file", "write_file", "edit_file"} {
 		if byName[want] == nil {
-			t.Fatalf("ToolsFor() returned no %s tool (got %d tools)", want, len(tools))
+			t.Fatalf("Tools() returned no %s tool (got %d tools)", want, len(tools))
 		}
 	}
 
