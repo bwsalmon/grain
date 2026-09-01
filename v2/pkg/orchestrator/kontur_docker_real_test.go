@@ -169,8 +169,22 @@ func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
 		t.Fatalf("creating guest image cache directory: %v", err)
 	}
-	if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", sshKeyPath, "-q").CombinedOutput(); err != nil {
-		t.Fatalf("generating a throwaway SSH keypair: %v\n%s", err, out)
+	// The disk.img check above only short-circuits once a build has fully
+	// succeeded; a run that generated the keypair and then failed or was
+	// killed before build-guest.sh finished (a real, observed outcome --
+	// this is an expensive, opt-in test, exactly the kind left running
+	// unattended) leaves sshKeyPath behind with no disk.img to match.
+	// ssh-keygen refuses to overwrite an existing file and prompts
+	// interactively for confirmation, which -- with no terminal attached
+	// to answer it -- fails immediately with a misleading "exit status 1"
+	// and no indication a stale key is the reason. Reusing a leftover key
+	// is always correct here: it is a throwaway keypair scoped to this
+	// cache directory alone, not tied to whatever partial state the rest
+	// of the build reached.
+	if _, err := os.Stat(sshKeyPath); err != nil {
+		if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", sshKeyPath, "-q").CombinedOutput(); err != nil {
+			t.Fatalf("generating a throwaway SSH keypair: %v\n%s", err, out)
+		}
 	}
 	pub, err := os.ReadFile(sshKeyPath + ".pub")
 	if err != nil {
@@ -253,8 +267,16 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 // konturctl sleeps a known amount); this test is the same claim proven
 // against the real thing, where "does it still work" -- two independent
 // netshim network namespaces, two independent cloud-hypervisor guests,
-// two independently-derived -ip/-port pairs (KonturConfig.BaseIP/
-// BasePort) -- matters more than exact timing.
+// two independently-derived guest addresses -- matters more than exact
+// timing.
+//
+// KonturConfig.BaseIP/BasePort are not set below: flat mode (this
+// package's default net mode, and the one this test exercises since it
+// leaves KonturConfig.NetMode unset) takes each VM's address from the
+// container runtime itself, and konturctl rejects "-ip"/"-port" outright
+// under it (createArgs's own doc comment) -- two real, distinct
+// addresses fall out of docker's own per-container assignment with no
+// help needed from this config.
 func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
@@ -279,18 +301,26 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 			"-kernel", "/images/vmlinuz",
 			"-initramfs", "/images/initrd.img",
 			"-guest-port", "22",
+			// Without this, root mounts read-only (staticpod.VMSpec's own
+			// Cmdline default appends "ro"), and
+			// kontur-ssh-host-keys.service's own "ssh-keygen -A" then
+			// fails to write real host keys but does not treat that as
+			// fatal (third_party/kontur/README.md's own documented
+			// caveat) -- sshd starts with none and refuses every
+			// connection, so this VM's guest is never actually reachable.
+			// Matches what a real deployment always passes
+			// (v2/scripts/setup.sh's own -disk-readonly=false/
+			// -disk-hostpath, bwsalmon/agents#510) -- found live that
+			// omitting it here silently exercised a configuration no real
+			// deployment ever runs.
+			"-disk-readonly=false",
+			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKeyPathIn(t, imagesHostPath, sshKeyPath),
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,
-		// Distinct from TestKonturSandboxesToolsForAgainstARealDockerBackedVM's
-		// own hardcoded -ip/-port (169.254.100.2:31080) so the two tests
-		// never fight over the same address if run back to back without a
-		// clean teardown in between.
-		BaseIP:   "169.254.100.20",
-		BasePort: 31090,
 	})
 
 	slots := []string{"1", "2"}
@@ -332,12 +362,25 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		toolsBySlot[r.slot] = r.tools
 	}
 
-	// Each VM got its own independently-derived guest address -- confirms
-	// BaseIP/BasePort's arithmetic actually reached real konturctl for
-	// both slots, not just the first. The address is what matters now
-	// rather than the forwarded port: it is what each VM's guest
-	// configures from its own kernel cmdline, and what `kontur exec`
-	// connects to (KONTUR_EXEC_ADDR).
+	// Each VM's own container really carries KONTUR_EXEC_ADDR -- confirms
+	// ToolsFor(slot) actually reached real konturctl for both slots, not
+	// just the first.
+	//
+	// Not asserted to differ between the two: under flat mode (this
+	// package's default, and what this test exercises since it leaves
+	// KonturConfig.NetMode unset), the guest's control link -- the second
+	// NIC `kontur exec` actually dials -- always comes up at the same
+	// fixed link-local address inside every VM's own private network
+	// namespace (internal/netshim's own flat-mode splice), unlike NAT
+	// mode's BaseIP/BasePort-derived host-visible address this test used
+	// to assert distinctness of. Found live: asserting the two differed
+	// failed every single run, deterministically, for exactly that reason
+	// -- not a race or a flake, a fixed address by flat mode's own
+	// design. Two containers legitimately sharing that address is not a
+	// sign they are the same VM: `docker exec kontur-vm-<name> ...`
+	// already addresses a specific, distinct container by name, and the
+	// per-slot distinct-marker-command check right below is what actually
+	// proves the two guests are independent.
 	addrs := map[string]string{}
 	for _, name := range names {
 		out, err := exec.Command("docker", "inspect", "-f",
@@ -353,9 +396,6 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		if addrs[name] == "" {
 			t.Fatalf("%s: no KONTUR_EXEC_ADDR in the VM container's env:\n%s", name, out)
 		}
-	}
-	if addrs[names[0]] == addrs[names[1]] {
-		t.Errorf("both slots' VMs got the same guest address %q, want BaseIP-derived distinct ones", addrs[names[0]])
 	}
 
 	// Each guest actually runs and answers a distinct command, for two
@@ -468,11 +508,27 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
-			// Distinct from the concurrent test above
-			// (169.254.100.20+:31090+) so the two never fight over an
-			// address if run back to back without a clean teardown.
-			"-ip", "169.254.100.40",
-			"-port", "31110",
+			// No "-ip"/"-port" here: this package's default net mode is
+			// flat (KonturConfig.NetMode is left unset above), and
+			// konturctl rejects "-ip" outright under it -- found live,
+			// this used to hardcode 169.254.100.40:31110, a leftover
+			// from before flat mode became the default, and every create
+			// call failed outright with "ip must not be set in \"flat\"
+			// net mode" as a result. Flat mode derives this VM's own
+			// address from the container runtime instead (see the
+			// KONTUR_EXEC_ADDR assertion below), so nothing here needs to
+			// pick one.
+			//
+			// Without -disk-readonly=false/-disk-hostpath, root mounts
+			// read-only and kontur-ssh-host-keys.service's guest-side
+			// "ssh-keygen -A" silently fails to write real host keys
+			// (third_party/kontur/README.md's own documented caveat),
+			// leaving sshd with none to start with -- found live the same
+			// way as the flat-mode -ip rejection above. Matches what a
+			// real deployment always passes (v2/scripts/setup.sh's own
+			// -disk-readonly=false/-disk-hostpath, bwsalmon/agents#510).
+			"-disk-readonly=false",
+			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKey,
@@ -503,16 +559,25 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 
 	// Confirm the variable this whole transport rests on is really set on
-	// the real VM container, by the real internal/dockervm -- and points
-	// at the address this VM was created with. Nothing in this repo sets
-	// it, so nothing in this repo would notice it changing.
+	// the real VM container, by the real internal/dockervm. Not a fixed
+	// address: under flat mode the container runtime assigns it (this
+	// test's own CreateArgs deliberately passes no "-ip"), so only the
+	// ":22" guest port -- the one fixed part of it -- is checked here.
+	// Nothing in this repo sets this variable, so nothing in this repo
+	// would notice it changing.
 	envOut, err := exec.Command("docker", "inspect", "-f",
 		`{{range .Config.Env}}{{println .}}{{end}}`, "kontur-vm-"+name).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, envOut)
 	}
-	if want := "KONTUR_EXEC_ADDR=169.254.100.40:22"; !strings.Contains(string(envOut), want) {
-		t.Errorf("VM container env = %q, want it to carry %q -- `kontur exec` has no other way to know where the guest is", envOut, want)
+	var execAddr string
+	for _, line := range strings.Split(string(envOut), "\n") {
+		if after, ok := strings.CutPrefix(line, "KONTUR_EXEC_ADDR="); ok {
+			execAddr = after
+		}
+	}
+	if execAddr == "" || !strings.HasSuffix(execAddr, ":22") {
+		t.Errorf("VM container env KONTUR_EXEC_ADDR = %q, want a non-empty address ending in %q -- `kontur exec` has no other way to know where the guest is", execAddr, ":22")
 	}
 
 	// Unlike the SSH test above, this needs no retry loop around the
