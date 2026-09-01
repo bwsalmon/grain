@@ -1619,7 +1619,7 @@ report_readiness() {
   echo "    GitHub credential: $github"
   echo "    Gemini key:        $gemini"
   echo "    GCP minter key:    $minter"
-  echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: every task parks>}"
+  echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
   echo "    max concurrent:    ${GRAIN_MAX_CONCURRENT:-<default>}"
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then

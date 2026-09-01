@@ -193,10 +193,23 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 #   appended alongside it for an operator's own interactive access. Root
 #   has no password at all either way (see
 #   overlay-common/etc/ssh/sshd_config.d).
+# - systemd-udevd's own /lib/udev/rules.d/80-net-setup-link.rules renames
+#   NICs to "predictable" names (e.g. virtio-pci's second NIC becomes
+#   "ens3", not "eth1") based on each device's PCI slot -- masked here by
+#   symlinking the same filename under /etc/udev/rules.d (which
+#   overrides it) to /dev/null, so every NIC keeps the kernel's own
+#   enumeration order (eth0, eth1, ...) instead. Both the "ip=" kernel
+#   parameter flat mode's first NIC boots with (see
+#   internal/netshim.FlatGuestConfig) and kontur-control-net's own
+#   default second-NIC name assume that naming; without this, the
+#   control link silently never comes up, since udev has already renamed
+#   "eth1" to "ens3" by the time kontur-control-net.service runs and
+#   checks for it.
 RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
+    ln -sf /dev/null /rootfs/etc/udev/rules.d/80-net-setup-link.rules; \
     ln -sf /etc/systemd/system/kontur-ssh-host-keys.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-ssh-host-keys.service; \
     ln -sf /etc/systemd/system/kontur-mem-agent.service \
