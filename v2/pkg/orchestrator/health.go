@@ -172,15 +172,6 @@ func (k *KonturSandboxes) sandboxHealth(ctx context.Context, sandbox, name strin
 	return health
 }
 
-// healthPortDialTimeout bounds each dial waitForPortHealthy makes, and how
-// long it waits before retrying one that failed -- short enough that
-// several attempts fit inside healthTimeout's own budget. Deliberately its
-// own constant rather than a reuse of KonturConfig.readyPollInterval
-// (2s default): that interval is tuned for spacing out polls across a VM's
-// whole multi-minute boot, far coarser than the sub-second docker
-// networking race waitForPortHealthy actually needs to ride out.
-const healthPortDialTimeout = 500 * time.Millisecond
-
 // parseProcStats picks the three /proc/loadavg fields and MemTotal/
 // MemAvailable out of "cat /proc/loadavg /proc/meminfo"'s combined
 // output. MemAvailable, not MemFree, is the kernel's own estimate of

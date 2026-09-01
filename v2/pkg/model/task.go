@@ -384,9 +384,9 @@ type Task struct {
 	// as an explicit "shrink this VM to nothing."
 	//
 	// Applied by orchestrator.runOne, once per dispatch, immediately
-	// before the sandbox is handed to the run: a slot's sandbox is
-	// otherwise sized from orchestrator.KonturConfig's own
-	// deployment-wide default, so a task asking for a different shape
+	// before the sandbox is handed to the run: a sandbox is otherwise
+	// sized from orchestrator.KonturConfig's own deployment-wide default,
+	// so a task asking for a different shape
 	// overrides that default for its own sandbox -- per dimension, at the
 	// moment the sandbox is created, which is the only moment its size is
 	// decided now that one is built per run (orchestrator.Shape, passed to

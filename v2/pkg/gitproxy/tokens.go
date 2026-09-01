@@ -280,6 +280,7 @@ func (s *SandboxTokenStore) save(tokens map[string]string) error {
 	}
 	tmp := s.path + "." + suffix + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, s.path); err != nil {

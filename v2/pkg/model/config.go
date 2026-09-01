@@ -74,8 +74,8 @@ type Config struct {
 	NewestFirst bool
 	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) are the
 	// deployment-wide default VM shape orchestrator.KonturConfig passes
-	// `konturctl vm create` as `-cpus`/`-memory-mb` when creating a
-	// slot's VM -- an alternative, store-backed way to set what an
+	// `konturctl vm create` as `-cpus`/`-memory-mb` when creating a run's
+	// sandbox VM -- an alternative, store-backed way to set what an
 	// operator could already pass by hand as -kontur-create-arg=-cpus
 	// -kontur-create-arg=<n>, surfaced in the settings UI instead of a
 	// daemon flag. Zero, the default for both, leaves bwsalmon/kontur's

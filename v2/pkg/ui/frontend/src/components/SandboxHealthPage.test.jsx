@@ -166,6 +166,21 @@ describe("appendHistory", () => {
     expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40] });
   });
 
+  it("drops a sandbox's history once it stops appearing in a poll", () => {
+    const withOne = appendHistory(empty, {
+      sandboxes: [{ sandbox: "t1-r1", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40 }],
+    });
+    expect(Object.keys(withOne.sandboxes)).toEqual(["t1-r1"]);
+
+    // t1-r1's run has ended and a different run's sandbox is now live --
+    // a sandbox name is never reused, so a poll that no longer mentions
+    // t1-r1 means it is gone for good, not merely idle.
+    const withNext = appendHistory(withOne, {
+      sandboxes: [{ sandbox: "t2-r1", ready: true, loadAverage: "1.0 1.0 1.0", memoryUsedMB: 10 }],
+    });
+    expect(Object.keys(withNext.sandboxes)).toEqual(["t2-r1"]);
+  });
+
   it("caps each series at 60 samples", () => {
     let history = empty;
     for (let i = 0; i < 65; i++) {

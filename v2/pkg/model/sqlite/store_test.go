@@ -465,6 +465,45 @@ func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 	}
 }
 
+// TestGitScopeStartsFollowingASandboxOnceSetRunSandboxRecordsIt exercises
+// the two-phase flow orchestrator.runOne actually uses -- StartRun with no
+// sandbox yet (dispatch.Cycle has decided the run may start, but nothing
+// has built it a sandbox), then SetRunSandbox once one is acquired --
+// rather than TestGitScopeFollowsTheLiveRunOnASandbox's shortcut of
+// setting Run.Sandbox directly in StartRun. SetRunSandbox's own doc
+// comment calls the gap between the two "deliberately visible": a run
+// whose sandbox is still "" must resolve no git scope at all, the same
+// fail-closed answer GitScope already gives a sandbox it does not
+// recognise, since nothing should be able to call the proxy on that run's
+// behalf before it has a sandbox to call from.
+func TestGitScopeStartsFollowingASandboxOnceSetRunSandboxRecordsIt(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: "a1b2", Attempt: 1, StartedAt: now,
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if target, reads, err := store.GitScope(ctx, "sandbox-0"); err != nil || target != nil || len(reads) != 0 {
+		t.Fatalf("GitScope before the sandbox is recorded = (%+v, %+v, %v), want no scope", target, reads, err)
+	}
+
+	if err := store.SetRunSandbox(ctx, "r1", "sandbox-0"); err != nil {
+		t.Fatal(err)
+	}
+
+	target, _, err := store.GitScope(ctx, "sandbox-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target == nil || target.String() != "owner/payments-api" {
+		t.Errorf("GitScope after SetRunSandbox: target = %+v, want owner/payments-api", target)
+	}
+}
+
 func TestGitScopeIsEmptyWithNoLiveRunOnTheSandbox(t *testing.T) {
 	store, _, ctx := openStore(t)
 	target, reads, err := store.GitScope(ctx, "sandbox-0")
@@ -1386,6 +1425,65 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 	fourth := model.Run{ID: "a1b2-r2", TaskID: "a1b2", Sandbox: "a1b2-r2", Attempt: 2, StartedAt: now.Add(2 * time.Hour)}
 	if err := store.StartRun(ctx, fourth, 0); err != nil {
 		t.Fatalf("StartRun with no limit: %v", err)
+	}
+}
+
+// TestConcurrentStartRunNeverExceedsTheLimit is
+// TestStartRunRefusesToExceedTheConcurrencyLimit's own race made real: that
+// test's doc comment argues the guard exists because dispatch.Cycle reads
+// the live-run count and task_ready outside any one transaction, so two
+// overlapping Cycle callers can both see the same headroom before either
+// records a run. Proving the sequential case refuses a third StartRun says
+// nothing about whether two concurrent ones can each slip past the count
+// the other is also racing to update -- which is exactly the failure mode
+// StartRun's own transaction is supposed to rule out.
+func TestConcurrentStartRunNeverExceedsTheLimit(t *testing.T) {
+	store, _, ctx := openStore(t)
+
+	const writers = 16
+	const limit = 5
+	for i := 0; i < writers; i++ {
+		id := fmt.Sprintf("task-%02d", i)
+		if err := store.PutTask(ctx, task(id, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, writers)
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			id := fmt.Sprintf("task-%02d", i)
+			run := model.Run{ID: id + "-r1", TaskID: id, Sandbox: id + "-r1", Attempt: 1, StartedAt: now}
+			errs[i] = store.StartRun(ctx, run, limit)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var landed, refused int
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			landed++
+		case errors.Is(err, model.ErrAtCapacity):
+			refused++
+		default:
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	if landed != limit {
+		t.Fatalf("landed %d runs against a limit of %d, want exactly %d -- two concurrent StartRun calls slipped past the same headroom", landed, limit, limit)
+	}
+	if refused != writers-limit {
+		t.Fatalf("refused %d of %d writers, want %d", refused, writers, writers-limit)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != limit {
+		t.Fatalf("live runs = %d (%v), want exactly %d", live, err, limit)
 	}
 }
 

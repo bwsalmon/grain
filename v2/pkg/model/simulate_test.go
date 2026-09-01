@@ -229,7 +229,7 @@ func TestGitHubSyncObservationsReplaceTheWholeRowNotJustTheChangedField(t *testi
 	}
 }
 
-func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
+func TestFinishingARunFreesCapacityForTheNextOne(t *testing.T) {
 	store, ctx := open(t)
 	for _, id := range []string{"t0", "t1"} {
 		if err := store.PutTask(ctx, model.Task{
@@ -250,8 +250,11 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 		t.Fatalf("live runs = %d, want 1", occ)
 	}
 
-	// A sandbox is long-lived and recreated on demand, not per task: what
-	// frees it is the run finishing, not a reset the store knows about.
+	// LiveRunCount, not a sandbox reset the store knows about, is what
+	// FinishRun frees: t1's run below reuses the literal sandbox name
+	// only because this test picked it by hand, not because a sandbox is
+	// ever actually reused -- each run gets its own, named after the run
+	// itself (dispatch.RunID).
 	if err := store.FinishRun(ctx, "t0-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}

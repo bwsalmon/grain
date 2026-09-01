@@ -43,9 +43,16 @@ export function appendHistory(prev, result) {
     ? { cpu: pushSample(prev.host.cpu, result.host.loadAverage1), mem: pushSample(prev.host.mem, result.host.memoryUsedMB) }
     : prev.host;
 
-  const sandboxes = { ...prev.sandboxes };
+  // Built fresh rather than spread from prev.sandboxes: a sandbox belongs
+  // to one run and is gone once that run ends, and under the old slot
+  // model this map had a fixed, small set of keys that a spread would
+  // have kept forever anyway. Now every run mints a new, never-reused
+  // name, so carrying forward an entry for a sandbox this poll no longer
+  // reports would grow this map, and the memory behind it, for as long as
+  // the pane stays open.
+  const sandboxes = {};
   for (const s of result?.sandboxes || []) {
-    const existing = sandboxes[s.sandbox] || emptySeries;
+    const existing = prev.sandboxes[s.sandbox] || emptySeries;
     const load1 = s.ready && s.loadAverage ? parseFloat(s.loadAverage.split(" ")[0]) : null;
     sandboxes[s.sandbox] = {
       cpu: pushSample(existing.cpu, load1),
