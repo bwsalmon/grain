@@ -273,6 +273,21 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			"-kernel", "/images/vmlinuz",
 			"-initramfs", "/images/initrd.img",
 			"-guest-port", "22",
+			// -disk-readonly=false/-disk-hostpath give each VM its own
+			// private writable qcow2 overlay (one subdirectory per VM
+			// name under -disk-hostpath, so the two slots' VMs sharing
+			// this one directory is fine) instead of attaching -disk
+			// itself read-only. Without this, the guest's root filesystem
+			// stays read-only end to end (confirmed by hand: a real VM
+			// created without it reports "/dev/vda / ext4 ro,relatime" in
+			// /proc/mounts), which fails kontur-ssh-host-keys.service's
+			// first-boot `ssh-keygen -A` -- so sshd never has a host key
+			// to start with, and the guest never becomes reachable within
+			// ReadyTimeout at all. The same pair v2/scripts/setup.sh's
+			// own GRAIN_KONTUR_ENABLE=1 branch always passes in a real
+			// deployment (bwsalmon/agents#510).
+			"-disk-readonly=false",
+			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKeyPathIn(t, imagesHostPath, sshKeyPath),
@@ -500,6 +515,25 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// namespace under the docker backend, so the "distinct from
 			// the concurrent test above" they used to carry was guarding
 			// a collision that shape makes impossible.
+			//
+			// -disk-readonly defaults to true (staticpod.Defaults),
+			// attaching -disk itself directly rather than a private
+			// overlay -- fine for a guest that only ever reads it, but
+			// this test also proves write_file/edit_file work over this
+			// transport (below), and those need a guest whose root
+			// filesystem is actually writable. Confirmed by hand against
+			// a real VM without this pair: `cat /proc/mounts` inside the
+			// guest reports "/dev/vda / ext4 ro,relatime", and write_file
+			// fails with "Read-only file system". -disk-hostpath (a
+			// directory only this test's VM uses, distinct from
+			// imagesHostPath, which is always mounted read-only since
+			// several VMs may share it) is where konturctl puts the
+			// private qcow2 overlay -disk-readonly=false backs onto
+			// -disk with -- the same pair v2/scripts/setup.sh's own
+			// GRAIN_KONTUR_ENABLE=1 branch always passes in a real
+			// deployment (bwsalmon/agents#510).
+			"-disk-readonly=false",
+			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKey,
@@ -538,14 +572,20 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 
 	// Confirm the variable this whole transport rests on is really set on
 	// the real VM container, by the real internal/dockervm -- and points
-	// at the address this VM was created with. Nothing in this repo sets
-	// it, so nothing in this repo would notice it changing.
+	// at the guest's flat-mode control-link address. Nothing in this repo
+	// sets it, so nothing in this repo would notice it changing.
+	//
+	// 169.254.100.2 rather than a -ip this test chose: under flat mode
+	// (the default since 7a58bec) there is no per-VM address to assign --
+	// konturctl rejects -ip outright -- so this is netshim's own fixed
+	// control-link guest address (ControlGuestIP, one past its default
+	// 169.254.100.1 bridge address), confirmed by hand against a real VM.
 	envOut, err := exec.Command("docker", "inspect", "-f",
 		`{{range .Config.Env}}{{println .}}{{end}}`, "kontur-vm-"+name).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, envOut)
 	}
-	if want := "KONTUR_EXEC_ADDR=169.254.100.40:22"; !strings.Contains(string(envOut), want) {
+	if want := "KONTUR_EXEC_ADDR=169.254.100.2:22"; !strings.Contains(string(envOut), want) {
 		t.Errorf("VM container env = %q, want it to carry %q -- `kontur exec` has no other way to know where the guest is", envOut, want)
 	}
 
