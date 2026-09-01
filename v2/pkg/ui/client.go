@@ -560,6 +560,15 @@ type CreateTaskRequest struct {
 	// every dispatched run's sandbox the same way a comment's own
 	// attachments are (orchestrator.placeAttachments).
 	Attachments []AttachmentUpload `json:"attachments"`
+	// NoRepo files a task with no repo at all, deliberately -- a
+	// standalone task nothing will clone, check out, or push a branch
+	// to. Distinct from simply leaving Repo blank, which instead falls
+	// back to Config.DefaultTarget (or fails validation if there is
+	// none): a blank Repo says nothing either way, while NoRepo says
+	// outright that no target exists. orchestrator.BuildPrompt tells the
+	// dispatched agent as much, rather than leaving it to guess from an
+	// empty checkout directory.
+	NoRepo bool `json:"noRepo"`
 }
 
 // configurationCapabilities are the grants every configuration-agent
@@ -636,17 +645,24 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		return Task{}, validationErrorf("title is required")
 	}
 
-	target := c.Config.DefaultTarget
-	if strings.TrimSpace(req.Repo) != "" {
+	var target *model.RepoRef
+	switch {
+	case req.NoRepo:
+		if strings.TrimSpace(req.Repo) != "" {
+			return Task{}, validationErrorf("repo and noRepo are mutually exclusive")
+		}
+	case strings.TrimSpace(req.Repo) != "":
 		parsed, err := model.ParseRepo(req.Repo)
 		if err != nil {
 			return Task{}, &ValidationError{err: err}
 		}
 		target = &parsed
-	}
-	if target == nil {
-		return Task{}, validationErrorf(
-			"no repo given, and this deployment has no default target repo configured")
+	default:
+		target = c.Config.DefaultTarget
+		if target == nil {
+			return Task{}, validationErrorf(
+				"no repo given, and this deployment has no default target repo configured")
+		}
 	}
 
 	if err := validateSandboxShape(req.SandboxCPUs, req.SandboxMemoryMB); err != nil {
@@ -730,7 +746,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			return Task{}, err
 		}
 	}
-	if !targetAllowed(c.targetRepos(), *target) {
+	if target != nil && !targetAllowed(c.targetRepos(), *target) {
 		if err := c.parkOffAllowlist(ctx, id, *target, now); err != nil {
 			return Task{}, err
 		}

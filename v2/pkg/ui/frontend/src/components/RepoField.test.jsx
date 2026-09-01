@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import RepoField from "./RepoField.jsx";
 
 describe("RepoField", () => {
@@ -45,5 +45,23 @@ describe("RepoField", () => {
 
     await user.click(screen.getByRole("button", { name: "Choose from list" }));
     expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+
+  it("reports the picked value to onChange as the dropdown selection changes", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<RepoField name="repo" options={["acme/widgets", "acme/other"]} onChange={onChange} />);
+
+    await user.selectOptions(screen.getByRole("combobox"), "acme/other");
+    expect(onChange).toHaveBeenCalledWith("acme/other");
+  });
+
+  it("reports the picked value to onChange while typing in the free-text input", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<RepoField name="repo" options={[]} onChange={onChange} />);
+
+    await user.type(screen.getByRole("textbox"), "a");
+    expect(onChange).toHaveBeenCalledWith("a");
   });
 });
