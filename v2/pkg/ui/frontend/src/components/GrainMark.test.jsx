@@ -4,8 +4,8 @@ import GrainMark from "./GrainMark.jsx";
 
 // The animated mark needs a 2D context, which jsdom does not have (see
 // setupTests.js). This is the smallest object grain-mark.js actually
-// touches: it clears, clips to the frame, fills a circle per grain and
-// strokes the frame, and reads nothing back.
+// touches: it clears, clips to the frame, fills a circle per grain, and
+// reads nothing back.
 function stubCanvas() {
   const ctx = {
     clearRect: vi.fn(),

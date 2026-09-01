@@ -1,23 +1,27 @@
 # The grain mark
 
-A Chladni-plate resonance figure inside a circular frame. Grains sit
-along the nodal lines of a square-plate eigenmode; on a mode change they
-scatter and snap to the next figure. The name is literal — sand
-organizing into structure under vibration is the visual metaphor for many
-parallel agent processes converging into one deterministic workflow.
+Four glyphs cut from square-plate Chladni eigenmodes. Each one is a
+region of the vibrating plate, stippled into grains; on a mode change
+every grain scatters and flies to its place in the next glyph. The name
+is literal — sand organizing into structure under vibration is the
+visual metaphor for many parallel agent processes converging into one
+deterministic workflow.
 
-![the fixed mark](brand/grain-hero-2-3plus-light.svg)
+There is no ring. The circle is an invisible clip, so the shape itself
+is the mark.
+
+![the static logo](brand/grain-hero-2-3minus-light.svg)
 
 ## What is where
 
 | Path | What it is |
 |---|---|
-| `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. Vendored from the design pack (build 35); its header lists the three deviations. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
-| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still and the animation, and picks the tier; see below. |
+| `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. A verbatim copy of the design pack (v2) — see its header. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
+| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still and the animation; see below. |
 | `v2/pkg/ui/frontend/scripts/export-brand-assets.mjs` | `npm run brand` in `v2/pkg/ui/frontend`. Regenerates everything below out of the renderer. |
-| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The fixed mark as the tiny-tier glyph, as stroke vectors. Scale-free: the favicon, and the still the sidebar shows. |
-| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The same glyph at 128px. Favicon fallback only, for browsers with no SVG-favicon support (Safari before 16.4). |
-| `docs/brand/grain-hero-2-3plus-{light,dark}.svg` | The fixed mark at hero scale, as grains. For a README, a slide, print. |
+| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The static logo as a solid filled path. Scale-free: the favicon, and the still the app shows wherever the mark is not animating. |
+| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The same fill at 128px. Favicon fallback only, for browsers with no SVG-favicon support (Safari before 16.4). |
+| `docs/brand/grain-hero-2-3minus-{light,dark}.svg` | The static logo at hero scale, as grains. For a README, a slide, print. |
 
 The assets are committed rather than generated during `npm run build`, so
 a checkout builds without running the export. Change the mark or the
@@ -31,57 +35,82 @@ Square-plate Chladni eigenfunction, domain normalized to the frame radius:
 f(x, y) = cos(nπx)·cos(mπy) + s·cos(mπx)·cos(nπy)      s ∈ {−1, +1}
 ```
 
-Nodal lines are the zero set. `s = −1` (antisymmetric) always contains the
-diagonals; `s = +1` (symmetric) does not. Only **integer** `n, m` are real
-resonances — fractional values pile up spurious zero-crossings, so never
-interpolate a mode number to get between two figures. Scale is the free
-parameter instead: the tiny tier reaches its figures by zooming the field
-(0.78× and 1.5×) and filtering chains by radial extent, never by moving
-`n` or `m`.
+v1 of the mark drew the **nodal lines** — the zero set. v2 fills
+**regions** instead: `fillScalar` is the scalar whose positive part is
+solid, which for three of the four glyphs is `−f` (the negative lobes,
+filled) and for 1·3 (+) is the last factor of `2ab(2a²+2b²−3)`, filling
+the centre loop and the corner caps while the grid lines `a = 0`, `b = 0`
+come back as stroke overlays. That change is why nothing from v1's
+notes about tracing and pruning chains carries over.
+
+Only **integer** `n, m` are real resonances — fractional values pile up
+spurious features, so never interpolate a mode number to get between two
+figures. Scale is the free parameter instead: two glyphs reach their
+shape by zooming the field (`glyphZoom`), never by moving `n` or `m`.
+
+## The glyphs
+
+| Slot | Mode | Glyph | Treatment |
+|---|---|---|---|
+| 0 | 1·3 (+) | grid-and-loops | centre loop and corner caps filled; the grid lines are stroke overlays, with grain rows along them |
+| 1 | 1·2 (+) | diamond | inverted fill |
+| 2 | 2·3 (−) | **rosette — the static logo** | inverted fill, zoom 0.78 so the rosette sits inside the circle rather than running off it |
+| 3 | 2·3 (+) | plus | inverted fill, zoom 1.5 so it fills the circle; keeps the centre ring |
+
+Cycle order is 0 → 1 → 2 → 3 → 0.
 
 ## The two states
 
 The mark has exactly two jobs in the app, and the split between them is
 the point of it:
 
-**Fixed — 2·3 (+).** Everywhere an icon has to hold still: the favicon,
-and the mark beside the wordmark in the sidebar whenever nothing is
-running. Below 40px the pack zooms this figure 1.5× and keeps only the
-chains inside 0.97 R, which crops the outer square off-frame and leaves
-the **plus** and its centre ring — a figure that still reads at 16px,
-where the un-zoomed nodal lines would be thinner than a pixel and wash
-out to nothing. It ships as a stroke vector, so one file is sharp in
-every slot from the 16px tab to a 180px installed shortcut.
+**Still — the 2·3 (−) rosette.** Everywhere an icon has to hold still:
+the favicon, the mark beside the wordmark in the sidebar whenever
+nothing is running, and a task row that is not currently running. It is
+drawn as a **solid fill** rather than as grains, at every size — under
+about 20px a grain is smaller than a pixel and the stipple washes out to
+a smudge, and a still that switched treatment partway up the size range
+would make the sidebar and the loading screen two different pictures of
+the same mark. It ships as one scale-free vector, so a single file is
+sharp from the 16px tab slot to a 180px installed shortcut.
 
 **Animated — the cycle.** Shown while agents are actually working, which
-in the UI means at least one task is in the `running` state. The pack
-runs two cycles on one clock, and which one you see is the size you are
-looking at:
+in the UI means at least one task is in the `running` state. Grains
+scatter and fly between the four glyphs on the pack's own clock: a full
+loop is about 6.5s, 1.3s of flight between glyphs and 0.33s held on
+each. Grains are matched to their targets by nearest free slot, so the
+flight reads as sand reorganizing rather than as a crossfade.
 
-| Slot | Full tier (≥ 40px) | Tiny tier (< 40px) |
-|---|---|---|
-| 0 | 1·4 (−) | X-and-arcs — 1·2 (−) |
-| 1 | **2·3 (+)** | diamond — 1·2 (+) |
-| 2 | 2·3 (−) | rosette — 2·3 (−) @ 0.78× |
-| 3 | 1·4 (+) | **plus** — 2·3 (+) @ 1.5× |
-
-The tiny figures are real eigenmodes too, chosen and cropped to survive
-at icon size rather than simplified by hand. The sidebar mark is 24px,
-so the tiny cycle is the working animation; `LoadingScreen` runs the
-same clock at hero size and so shows the full one.
-
-Both tiers hold the same rule: the animation **opens on the slot its own
-tier draws the still with** — slot 3 for the sidebar, slot 1 for the
-hero — so the mark comes to life on the figure it was already showing
-rather than cutting to a different image. `GrainMark.jsx` looks those
-slots up from `MODES`/`TINY_MODES` rather than hard-coding them.
-
-A full loop is about 6.5s: 1.3s of flight between figures, 0.33s held on
-each.
+The animation **opens on slot 2** — the rosette, the figure the still
+was already showing — so the mark comes to life rather than cutting to a
+different image. `GrainMark.jsx` reads that slot from the module's
+`STATIC_SLOT` rather than hard-coding it.
 
 Two things suppress the animation and fall back to the still: a reader
 who has asked for reduced motion, and an environment with no canvas to
 paint on. A hidden tab pauses it.
+
+## Sizes
+
+| Where | Size | Why |
+|---|---|---|
+| Task-row badge (`StateDot.jsx`) | 20px | The floor: below this the glyphs stop being shapes. Replaces an 11px dot, and the ~40px task row absorbs it. |
+| Sidebar (`Sidebar.jsx`) | 32px | The four glyphs are clearly distinguishable here, which matters because this mark is a brand element people look at rather than a status light. |
+| Loading screen (`LoadingScreen.jsx`) | 320px | Over the pack's 300px threshold, so it gets the full 3200 grains. |
+
+Grain count and radius come from `grainSpec()`:
+
+- **≥ 300px** — 3200 grains, radius 0.55% of the width (hero, splash)
+- **29–299px** — 140·(W/28)² grains, ~1.05px radius (nav, sidebar, avatar)
+- **≤ 28px** — 230·(W/28)² grains, ~0.85px radius (badge, small icons)
+
+`GrainMark.jsx` reads that spec at the mark's **CSS size, not the
+canvas's backing size**. The module keys it off `canvas.width`, so on a
+2× display a 20px mark backing onto a 40px canvas would take four times
+the grains at half the size — a finer stipple, not a sharper one. The
+radius is a fraction of `canvas.width` and so scales itself; only the
+count needs the correction. Both are plain options on the module, so
+this costs the vendoring no deviation.
 
 ## Colour
 
@@ -96,8 +125,8 @@ values and are edited together).
 | Light | `#8A6A2E` bronze | `#F7F6F3` canvas, `#FFFFFF` surface |
 
 The gold washes out on white, which is why the light theme gets bronze
-instead of the same value at a different opacity. The neutrals are warmed
-to sit under both.
+instead of the same value at a different opacity. The neutrals are
+warmed to sit under both.
 
 `running` is the accent itself rather than a colour of its own: the dot
 in a task row and the animating mark in the sidebar are reporting the
@@ -105,39 +134,24 @@ same thing. `warning` is pulled off MUI's default bright orange to a
 burnt one so it reads as the accent's louder cousin rather than fighting
 it; `info` is the one cool tone left, gold's complement.
 
-## Rendering rules by size
+## Notes on the assets
 
-- **≥ 300px** — 2000 grains, 0.65% radius, 0.9px jitter (hero, splash)
-- **80–300px** — 520 grains, 1.3% radius, no jitter (app icon, avatar)
-- **40–80px** — 520 grains, 1.7% radius, no jitter (nav, toolbar)
-- **< 40px** — the tiny cycle; 3.75 grains per pixel of width, ~1px
-  radius (24px → 90 grains) (sidebar, favicon, badge)
-
-These are keyed to **CSS pixels, not the canvas's backing pixels** —
-that is the `sizePx` deviation in the vendored renderer, and it is not
-just a density question. The pack tiers off `canvas.width`, so on a 2×
-display a 24px mark backs onto a 48px canvas and would fall into the
-40–80px tier: the full cycle's figures instead of the glyphs, which is
-the wrong picture rather than a sharper one.
-
-## Notes from the design session
-
-- Grains are placed **evenly along the traced figure**, not by falling to
-  the nearest zero — otherwise the diagonals (zero for every
-  antisymmetric mode) hog nearly all the grains and the lobes vanish.
-- Short line fragments that hug the frame edge without reaching inward
-  are pruned; they were the "bumps" on the circle boundary.
-- The circle frame replaced a hexagon late in the session. `shape: 'hex'`
-  is still supported in the renderer if you want it back.
+- The hero SVGs are the pack's own export reproduced: `npm run brand`
+  writes the same 440px, seed-42 grain field the pack's `export-svg.mjs`
+  does, byte for byte. That is what pins the vendoring — if the module
+  drifts from the pack, those two files stop matching.
+- The still's vector is traced out of `fillScalar` by marching squares
+  and then simplified, because a filled region has no chains to export
+  the way v1's line figure did. `grain-mark.test.js` compares the
+  committed path back against the field, so a mark changed without
+  `npm run brand` being re-run fails rather than leaving the tab showing
+  the previous logo.
 - The canvas particle system is a proof of concept; a version that ran
-  the mark large and continuously should move it to a shader. At sidebar
-  size it is 90 filled arcs a frame, which is why it is worth keeping
-  here — and why it stops when the tab is hidden.
-- Grains are allocated to chains **by length**, and chains shorter than
-  ~1.5 grain spacings get none — they are marching-squares artifacts,
-  and feeding them a minimum starves the real figure.
-- The endpoint-matching quantum scales with the marching-squares cell
-  (`step/8`). A fixed quantum shatters a 24px figure into sub-pixel
-  crumbs.
+  the mark large and continuously should move it to a shader.
+  `sampleGlyph()` and `fillScalar()` are pure geometry and port
+  straight — evaluate `fillScalar` per pixel for the solid version, or
+  drive a GPU particle system with `sampleGlyph` output. At the sizes
+  the app uses it is a hundred-odd filled arcs a frame, which is why it
+  is worth keeping here — and why it stops when the tab is hidden.
 - Wordmark: **Space Grotesk 600**, lowercase `grain`. The app itself
   ships no webfont and sets the wordmark in the system stack.
