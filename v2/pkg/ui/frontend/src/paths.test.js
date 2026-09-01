@@ -7,9 +7,14 @@ describe("parsePath", () => {
   });
 
   it("parses each sidebar destination", () => {
-    for (const view of ["repos", "schedules", "templates", "logs", "sandboxes"]) {
+    for (const view of ["repos", "schedules", "templates"]) {
       expect(parsePath(`/${view}`)).toEqual({ view });
     }
+  });
+
+  it("falls back to tasks for the retired logs/sandboxes paths", () => {
+    expect(parsePath("/logs")).toEqual({ view: "tasks" });
+    expect(parsePath("/sandboxes")).toEqual({ view: "tasks" });
   });
 
   it("parses a task detail path", () => {
@@ -47,7 +52,7 @@ describe("buildPath", () => {
   });
 
   it("round-trips every path parsePath recognizes", () => {
-    for (const path of ["/", "/repos", "/schedules", "/templates", "/logs", "/sandboxes", "/tasks/42", "/settings"]) {
+    for (const path of ["/", "/repos", "/schedules", "/templates", "/tasks/42", "/settings"]) {
       expect(buildPath(parsePath(path))).toBe(path);
     }
   });

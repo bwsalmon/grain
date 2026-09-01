@@ -1,9 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import GrainMark from "./GrainMark.jsx";
+import { SHEET_FRAMES, SHEET_LOOP_MS, SHEET_SIZES } from "../brand/mark-sheet.js";
 
-// The animated mark needs a 2D context, which jsdom does not have (see
-// setupTests.js). This is the smallest object grain-mark.js actually
+// A mark small enough to have a sheet plays a recording and needs no
+// canvas. Only the hero-sized live renderer does, and jsdom has none
+// (setupTests.js), so this is the smallest context object grain-mark.js
 // touches: it clears, clips to the frame, fills a circle per grain, and
 // reads nothing back.
 function stubCanvas() {
@@ -33,10 +35,22 @@ function stubMatchMedia(reduced) {
   });
 }
 
+/** jsdom has no Web Animations API; this is the sliver the phase-lock uses. */
+function stubAnimations() {
+  const animation = { startTime: null };
+  Element.prototype.getAnimations = function getAnimations() {
+    return this.classList.contains("grain-mark-sheet") ? [animation] : [];
+  };
+  return animation;
+}
+
 afterEach(() => {
   HTMLCanvasElement.prototype.getContext = () => null;
+  delete Element.prototype.getAnimations;
   delete window.matchMedia;
 });
+
+const marked = () => screen.getByRole("img", { name: "grain — agents working" });
 
 describe("GrainMark", () => {
   it("shows the fixed mark as an image when nothing is animating", () => {
@@ -47,27 +61,70 @@ describe("GrainMark", () => {
     expect(img).toHaveAttribute("src", "/grain-mark-light.svg");
   });
 
-  it("paints an animated canvas while agents are working", () => {
-    const ctx = stubCanvas();
-    render(<GrainMark size={24} animated />);
+  it("plays the recorded sheet at a size that has one", () => {
+    // The sheet is a mask, so the element carries no image of its own --
+    // what it carries is the strip, the frame count and the loop, which
+    // are what style.css steps the mask by. Those three have to come
+    // from mark-sheet.js rather than be written twice, or the animation
+    // and the file it plays would drift.
+    render(<GrainMark size={20} animated />);
 
-    const canvas = screen.getByRole("img", { name: "grain — agents working" });
-    expect(canvas.tagName).toBe("CANVAS");
-    // The mark drew its first frame on mount rather than waiting for an
-    // animation frame that a test environment never delivers.
+    const mark = marked();
+    expect(mark).toHaveClass("grain-mark-sheet");
+    expect(mark.style.getPropertyValue("--mark-sheet")).toBe('url("/grain-mark-20.png")');
+    expect(mark.style.getPropertyValue("--mark-frames")).toBe(String(SHEET_FRAMES));
+    expect(mark.style.getPropertyValue("--mark-loop")).toBe(`${SHEET_LOOP_MS}ms`);
+    // A frame is as tall as the mark is wide, which is what makes
+    // stepping the mask by --mark-size step exactly one frame.
+    expect(mark.style.getPropertyValue("--mark-size")).toBe("20px");
+  });
+
+  it("plays every recorded size, and paints the rest", () => {
+    // Whatever sizes have sheets, play them; anything else falls through
+    // to the live renderer rather than asking for a file that is not
+    // there. That is what lets a new call site work before a sheet has
+    // been recorded for its size.
+    for (const size of SHEET_SIZES) {
+      const { unmount } = render(<GrainMark size={size} animated />);
+      expect(marked()).toHaveClass("grain-mark-sheet");
+      unmount();
+    }
+
+    stubCanvas();
+    render(<GrainMark size={320} animated />);
+    expect(marked().tagName).toBe("CANVAS");
+  });
+
+  it("pins every played mark to the same point of the same loop", () => {
+    // A CSS animation starts when its element is attached, so a task row
+    // that started running long after the sidebar would otherwise hold
+    // its own phase and the two would scatter at different moments.
+    const animation = stubAnimations();
+    render(<GrainMark size={20} animated />);
+
+    expect(animation.startTime).toBe(0);
+  });
+
+  it("paints a hero-sized mark live, since it has no sheet", () => {
+    const ctx = stubCanvas();
+    render(<GrainMark size={320} animated />);
+
+    // It drew its first frame on mount rather than waiting for an
+    // animation frame a test environment never delivers.
     expect(ctx.fill).toHaveBeenCalled();
   });
 
   it("falls back to the fixed mark when the reader asked for less motion", () => {
-    stubCanvas();
     stubMatchMedia(true);
-    render(<GrainMark size={24} animated title="grain" />);
+    render(<GrainMark size={20} animated title="grain" />);
 
     expect(screen.getByTitle("grain").tagName).toBe("IMG");
   });
 
-  it("falls back to the fixed mark when there is no canvas to paint on", () => {
-    render(<GrainMark size={24} animated title="grain" />);
+  it("falls back to the fixed mark when a live mark has no canvas to paint on", () => {
+    // Only the sizes without a sheet can fail this way, since only they
+    // need a canvas at all.
+    render(<GrainMark size={320} animated title="grain" />);
 
     expect(screen.getByTitle("grain").tagName).toBe("IMG");
   });

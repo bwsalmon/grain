@@ -17,10 +17,10 @@ import {
 // The geometry half of the mark is pure maths -- no canvas, no React --
 // so it can be pinned down directly. The module itself is a verbatim
 // copy of the design pack (see its header), so what is worth testing is
-// not the pack's arithmetic but the three things grain leans on: that
-// the static logo is the glyph the rest of the app thinks it is, that
-// the committed favicon is still that same glyph, and that the grain
-// spec behaves across the sizes the app actually renders at.
+// not the pack's arithmetic but the things grain leans on: that the
+// static logo is the glyph the rest of the app thinks it is, that the
+// committed favicon is still that same glyph, and that the grain spec
+// holds at the sizes the app actually renders at.
 // See docs/brand.md for the design.
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -144,9 +144,14 @@ describe("grain spec", () => {
     expect(grainSpec(cssPx * 2).count).not.toBe(spec.count);
   });
 
-  it("scales the grain count with area across the app's sizes", () => {
+  it("scales the count with area across the app's sizes", () => {
     // The sidebar mark, the task-row badge and the loading screen, in
-    // the sizes their components ask for.
+    // the sizes their components ask for. These are the pack's own
+    // numbers: grain stippled the small marks more thickly for a while,
+    // to make a settled one read as a shape, and crisping the dwell
+    // (GrainMark.jsx) made that both unnecessary and harmful -- the only
+    // place those grains are still seen is the flight, and a 20px mark
+    // three times this dense is a blob in the air rather than sand.
     expect(grainSpec(20).count).toBe(117);
     expect(grainSpec(32).count).toBe(183);
     expect(grainSpec(320).count).toBe(3200);

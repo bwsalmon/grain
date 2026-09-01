@@ -313,6 +313,46 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   background: var(--state-running);
 }
 
+/* The pre-recorded mark (GrainMark.jsx, src/brand/mark-sheet.js). The
+   sheet is a vertical strip of frames carrying alpha only, used as a
+   mask so `background` supplies the colour -- which is why one file
+   works in both themes and follows a theme change with no reload.
+
+   Scaled to the mark's width, the strip's frames are each exactly one
+   --mark-size tall, so stepping the mask down by that much is stepping
+   one frame. The keyframes run to a full --mark-frames * --mark-size,
+   one frame past the last, and steps() lands on 0..n-1 rather than ever
+   showing that wrapped frame.
+
+   The animation is what the whole thing costs per frame: a mask offset,
+   which the compositor moves without repainting anything. */
+.grain-mark-sheet {
+  background: var(--accent);
+  -webkit-mask-image: var(--mark-sheet);
+  mask-image: var(--mark-sheet);
+  -webkit-mask-size: 100% auto;
+  mask-size: 100% auto;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  animation: grain-mark-play var(--mark-loop) steps(var(--mark-frames)) infinite;
+}
+@keyframes grain-mark-play {
+  from {
+    -webkit-mask-position: 0 0;
+    mask-position: 0 0;
+  }
+  to {
+    -webkit-mask-position: 0 calc(-1 * var(--mark-frames) * var(--mark-size));
+    mask-position: 0 calc(-1 * var(--mark-frames) * var(--mark-size));
+  }
+}
+/* A reader who asked for less motion gets the still instead, which
+   GrainMark.jsx decides -- this is the belt-and-braces for a mark
+   already on screen when the preference changes. */
+@media (prefers-reduced-motion: reduce) {
+  .grain-mark-sheet { animation: none; }
+}
+
 /* .badge-mark is for a "running" badge showing a task's live status
    (bwsalmon/agents#586): StateDot renders the grain mark's animated
    cycle -- the same "agents are working" figure the sidebar shows -- as
@@ -532,7 +572,7 @@ fieldset legend {
 }
 .upgrade-status dt { color: var(--text-tertiary); font-weight: 500; }
 
-.logs-toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 1.75rem 0.75rem; }
+.logs-toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; }
 .logs-view {
   margin: 0;
   max-height: 60vh;
@@ -547,13 +587,6 @@ fieldset legend {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
-/* .logs-page fills the whole main column (bwsalmon/agents#486) instead
-   of leaving the log box capped at a fraction of the viewport with
-   empty space below it -- the toolbar keeps its own size and .logs-view
-   grows to take up whatever room is left, scrolling internally. */
-.logs-page { display: flex; flex-direction: column; padding-bottom: 0; overflow-y: hidden; }
-.logs-page .logs-view { flex: 1; min-height: 0; max-height: none; margin: 0 1.75rem 1.5rem; }
 .upgrade-status dd { margin: 0; word-break: break-word; }
 .upgrade-phase-running { color: var(--accent); }
 .upgrade-phase-ok { color: var(--state-completed); }

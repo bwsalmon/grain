@@ -171,6 +171,55 @@ func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
 	}
 }
 
+// TestUpdateSettingsRoundTripsAgentFramework is bwsalmon/agents#609's own
+// setting: unset it reads back "gemini" (model.AgentFrameworkGemini, the
+// only framework any deployment has ever run), and setting it to "claude"
+// sticks through a GetSettings read the same way ShowClosedByDefault's
+// own round trip does above.
+func TestUpdateSettingsRoundTripsAgentFramework(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.AgentFramework != model.AgentFrameworkGemini {
+		t.Fatalf("AgentFramework = %q with nothing set, want %q", read.AgentFramework, model.AgentFrameworkGemini)
+	}
+
+	claude := model.AgentFrameworkClaude
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{AgentFramework: &claude}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.AgentFramework != model.AgentFrameworkClaude {
+		t.Fatalf("AgentFramework = %q after UpdateSettings, want %q", read.AgentFramework, model.AgentFrameworkClaude)
+	}
+}
+
+// TestUpdateSettingsRejectsUnknownAgentFramework is UpdateSettings' own
+// allow-list check: anything other than model.AgentFrameworkGemini/
+// AgentFrameworkClaude is a validation error, not a value silently
+// stored, the same way an unparseable pollInterval or an empty
+// geminiModel already are.
+func TestUpdateSettingsRejectsUnknownAgentFramework(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	bogus := "chatgpt"
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{AgentFramework: &bogus}); err == nil {
+		t.Fatal("UpdateSettings with an unknown agentFramework: want an error, got nil")
+	}
+}
+
 func TestSettingsSkipsTheCredentialCheckWithNoCredentialsConfigured(t *testing.T) {
 	// The default testClient -- Config.Credentials left nil, as a UI not
 	// colocated with the proxy's secrets directory always leaves it.

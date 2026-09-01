@@ -103,6 +103,7 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
     }
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
+    if (path === "/api/sandboxes") return Promise.resolve({ enabled: false });
     return Promise.resolve(null);
   });
   return {
@@ -390,7 +391,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
   });
 
-  it("opens Secrets and Upgrade as tabs inside Settings rather than their own sidebar entries", async () => {
+  it("opens Secrets, Upgrade and Debug as tabs inside Settings rather than their own sidebar entries", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -398,6 +399,8 @@ describe("App", () => {
 
     expect(screen.queryByRole("button", { name: "Secrets" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upgrade" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
@@ -407,18 +410,12 @@ describe("App", () => {
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
     expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
-  });
 
-  it("switches to the logs page, hiding the task list", async () => {
-    setupApi();
-    const user = userEvent.setup();
-    render(<App />);
-    await screen.findByText("Fix bug");
-
-    await user.click(screen.getByRole("button", { name: "Logs" }));
-
-    expect(await screen.findByRole("heading", { name: "Logs" })).toBeInTheDocument();
-    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+    // bwsalmon/agents#623: Logs and Sandbox health live together on the
+    // Debug tab now, alongside the reboot control.
+    await user.click(screen.getByRole("tab", { name: "Debug" }));
+    expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
+    expect(screen.getByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {

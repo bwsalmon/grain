@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/kontur"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -65,6 +66,14 @@ type Settings struct {
 	// stored either way, the same as every other kontur* setting here.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`
+	// SandboxCPUsDefault and SandboxMemoryMBDefault are bwsalmon/kontur's
+	// own default VM shape (kontur.DefaultCPUs/DefaultMemoryMB) -- the
+	// shape actually in effect whenever SandboxCPUs/SandboxMemoryMB above
+	// is 0, surfaced so a caller can show that real current shape instead
+	// of a bare, misleadingly literal 0 (bwsalmon/agents#610). Constant,
+	// never read from or written to the store.
+	SandboxCPUsDefault     int `json:"sandboxCpusDefault"`
+	SandboxMemoryMBDefault int `json:"sandboxMemoryMbDefault"`
 	// ShowClosedByDefault is model.Config's own field of the same name
 	// (bwsalmon/agents#537): the deployment-wide default for whether a
 	// task list's own "Show closed tasks" toggle starts checked. Also
@@ -82,9 +91,23 @@ type Settings struct {
 	// ever been opened this session.
 	ApprovedByDefault  bool `json:"approvedByDefault"`
 	AutoMergeByDefault bool `json:"autoMergeByDefault"`
+	// AgentFramework is model.Config's own field of the same name
+	// (bwsalmon/agents#609): "gemini" or "claude"
+	// (model.AgentFrameworkGemini/AgentFrameworkClaude), which
+	// agent.Framework implementation a run is meant to be driven by.
+	// Never empty coming out of here -- GetSettings/UpdateSettings both
+	// default it to "gemini" the same way Config.AgentFramework's own doc
+	// comment says an empty stored value reads back. Setting this to
+	// "claude" does not yet change what a run actually does -- see that
+	// field's own doc comment.
+	AgentFramework string `json:"agentFramework"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
+	agentFramework := cfg.AgentFramework
+	if agentFramework == "" {
+		agentFramework = model.AgentFrameworkGemini
+	}
 	return Settings{
 		Configured:                    true,
 		PollInterval:                  cfg.PollInterval.String(),
@@ -100,9 +123,12 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		NewestFirst:                   cfg.NewestFirst,
 		SandboxCPUs:                   cfg.SandboxCPUs,
 		SandboxMemoryMB:               cfg.SandboxMemoryMB,
+		SandboxCPUsDefault:            kontur.DefaultCPUs,
+		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
 		AutoMergeByDefault:            cfg.AutoMergeByDefault,
+		AgentFramework:                agentFramework,
 	}
 }
 
@@ -138,7 +164,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{}, err
 	}
 	if cfg == nil {
-		return Settings{}, nil
+		return Settings{SandboxCPUsDefault: kontur.DefaultCPUs, SandboxMemoryMBDefault: kontur.DefaultMemoryMB}, nil
 	}
 	return c.settingsFrom(*cfg), nil
 }
@@ -168,6 +194,7 @@ type UpdateSettingsRequest struct {
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
 	ApprovedByDefault      *bool     `json:"approvedByDefault"`
 	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
+	AgentFramework         *string   `json:"agentFramework"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -276,6 +303,22 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	}
 	if req.AutoMergeByDefault != nil {
 		cfg.AutoMergeByDefault = *req.AutoMergeByDefault
+	}
+	if req.AgentFramework != nil {
+		switch *req.AgentFramework {
+		case model.AgentFrameworkGemini, model.AgentFrameworkClaude:
+			cfg.AgentFramework = *req.AgentFramework
+		default:
+			return Settings{}, validationErrorf("agentFramework must be %q or %q", model.AgentFrameworkGemini, model.AgentFrameworkClaude)
+		}
+	}
+	// AgentFramework's own meaningful zero value is "gemini", not "" --
+	// model.Config.AgentFramework's own doc comment -- so a first save
+	// that never mentions it still stores something every agent.Framework
+	// switch can match on, the same as every settings row Store.PutConfig
+	// has ever written from before this field existed.
+	if cfg.AgentFramework == "" {
+		cfg.AgentFramework = model.AgentFrameworkGemini
 	}
 
 	if firstTime {

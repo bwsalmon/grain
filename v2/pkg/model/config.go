@@ -36,6 +36,23 @@ type Config struct {
 	// and nothing else, by dispatch.Cycle counting live runs against it
 	// and by nobody else at all.
 	MaxConcurrent int
+	// AgentFramework selects which agent.Framework a run is meant to be
+	// driven by -- AgentFrameworkGemini (agent/gemini, the in-process
+	// Gemini API loop) or AgentFrameworkClaude (agent/claude, the real
+	// `claude` CLI as a subprocess). Empty reads back as
+	// AgentFrameworkGemini (ui.UpdateSettings' own default), matching
+	// what every deployment has always run before this existed as a
+	// choice at all (bwsalmon/agents#609).
+	//
+	// Nothing dispatches against this yet: cmd/grain/daemon.go's
+	// runDaemon still unconditionally builds a gemini.Framework the same
+	// way it always has, so setting this to AgentFrameworkClaude changes
+	// nothing about what a run actually does until that wiring exists --
+	// see agent.go's own doc comment on agent/claude not being wired into
+	// any real deployment yet. TEXT rather than a constrained type,
+	// enum-vocabulary-in-Go rather than in the schema (schema.go's own
+	// doc comment on why), validated by ui.UpdateSettings instead.
+	AgentFramework string
 	// GeminiModel is the Gemini model the agent framework calls.
 	GeminiModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
@@ -119,3 +136,13 @@ type Config struct {
 	// gets.
 	AutoMergeByDefault bool
 }
+
+// AgentFramework's own vocabulary -- the two agent.Framework
+// implementations v2/pkg/agent has today (v2/pkg/agent/gemini,
+// v2/pkg/agent/claude). Named here, not in either of those packages, so
+// this file can reference them without pkg/model depending on pkg/agent
+// or either of its implementations.
+const (
+	AgentFrameworkGemini = "gemini"
+	AgentFrameworkClaude = "claude"
+)

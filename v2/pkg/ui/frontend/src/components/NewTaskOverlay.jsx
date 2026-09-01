@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
-import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
 import { knownRepos } from "../state.js";
@@ -86,11 +87,6 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
         <TextField name="title" label="Title" required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
         <AttachmentPicker files={attachments} onChange={setAttachments} />
-        <FormControlLabel
-          control={<Checkbox checked={interactive} onChange={(e) => setInteractive(e.target.checked)} />}
-          label="Interactive session (open a live chat here instead of running in the background)"
-          sx={{ display: "flex", mt: 1 }}
-        />
         <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
             Target repo <span className="hint">owner/name, optional</span>
@@ -116,31 +112,6 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           label="Auto-merge once checks pass"
           sx={{ display: "flex", mt: 1 }}
         />
-        <fieldset>
-          <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>
-          <TextField
-            name="sandboxCpus"
-            label="vCPUs"
-            helperText="blank/0 uses the deployment default"
-            type="number"
-            inputProps={{ min: 0, step: 1 }}
-            autoComplete="off"
-            fullWidth
-            margin="normal"
-            size="small"
-          />
-          <TextField
-            name="sandboxMemoryMb"
-            label="Memory (MiB)"
-            helperText="blank/0 uses the deployment default"
-            type="number"
-            inputProps={{ min: 0, step: 1 }}
-            autoComplete="off"
-            fullWidth
-            margin="normal"
-            size="small"
-          />
-        </fieldset>
         <FormControl fullWidth margin="normal" size="small">
           <InputLabel id="new-task-capabilities-label">Capabilities</InputLabel>
           <Select
@@ -188,6 +159,43 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             placeholder="Search tasks to depend on…"
           />
         </fieldset>
+        <Accordion disableGutters sx={{ mt: 2 }}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />} aria-controls="new-task-advanced-content" id="new-task-advanced-header">
+            <Typography>Advanced options</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <FormControlLabel
+              control={<Checkbox checked={interactive} onChange={(e) => setInteractive(e.target.checked)} />}
+              label="Interactive session (open a live chat here instead of running in the background)"
+              sx={{ display: "flex" }}
+            />
+            <fieldset>
+              <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>
+              <TextField
+                name="sandboxCpus"
+                label="vCPUs"
+                helperText="blank/0 uses the deployment default"
+                type="number"
+                inputProps={{ min: 0, step: 1 }}
+                autoComplete="off"
+                fullWidth
+                margin="normal"
+                size="small"
+              />
+              <TextField
+                name="sandboxMemoryMb"
+                label="Memory (MiB)"
+                helperText="blank/0 uses the deployment default"
+                type="number"
+                inputProps={{ min: 0, step: 1 }}
+                autoComplete="off"
+                fullWidth
+                margin="normal"
+                size="small"
+              />
+            </fieldset>
+          </AccordionDetails>
+        </Accordion>
         {interactive ? (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
             Interactive sessions always queue immediately.

@@ -39,6 +39,18 @@ import (
 // flag defaults to.
 const DefaultStateDir = "/var/lib/kontur/vms"
 
+// DefaultCPUs and DefaultMemoryMB match bwsalmon/kontur's own default VM
+// shape -- internal/staticpod.Defaults()'s own CPUs/MemoryMB, duplicated
+// here for the same "read the shape, don't import the writer" reason
+// BackendDocker and DefaultStateDir are. This is the shape `konturctl vm
+// create` gives a VM whose caller passes neither -cpus nor -memory-mb,
+// which is exactly what grain's own zero-means-unset SandboxCPUs/
+// SandboxMemoryMB (model.Config, model.Task) leaves in place.
+const (
+	DefaultCPUs     = 2
+	DefaultMemoryMB = 2048
+)
+
 // BackendDocker is the value `konturctl vm create -backend` takes to run a VM
 // directly against a local docker daemon instead of writing a static pod
 // manifest for a standalone kubelet to pick up -- bwsalmon/kontur's own
