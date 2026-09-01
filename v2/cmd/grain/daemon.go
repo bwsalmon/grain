@@ -485,9 +485,10 @@ func run(ctx context.Context, cfg config) error {
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
 // and reconcile tasks: minting per-slot sandbox tokens, the git proxy,
-// per-slot git credentials, the Gemini agent framework, orphaned-run
-// recovery, and RunCycle's own reconcile loop. run() calls it exactly
-// once, either inline (-ui-addr disabled, so there is no UI server worth
+// rebuilding every kontur-backed slot's sandbox, per-slot git
+// credentials, the Gemini agent framework, orphaned-run recovery, and
+// RunCycle's own reconcile loop. run() calls it exactly once, either
+// inline (-ui-addr disabled, so there is no UI server worth
 // keeping up on its own -- a setup failure here is still this process's
 // only job, so it is still fatal the way it always was) or in a goroutine
 // recovered from panics (-ui-addr set), so that nothing in here -- a
@@ -538,16 +539,59 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []stri
 	}
 	defer stopProxy(context.Background())
 
+	// Every kontur-backed slot's VM is rebuilt from scratch here, before
+	// anything is configured on it and long before RunCycle can dispatch
+	// onto it -- the startup half of the isolation boundary
+	// bwsalmon/agents#353 asked for between one task and the next.
+	//
+	// dispatch already recreates a slot's VM after every task it finishes
+	// (pkg/orchestrator/cycle.go's own runOne, success or failure alike),
+	// so in the ordinary case -- a clean shutdown, or a deployment with no
+	// VMs yet -- this pass finds nothing to tear down and is exactly the
+	// create the loop below would have made on its own. What it covers is
+	// the one case that path cannot: a process killed mid-run leaves that
+	// run's VM behind with its whole filesystem intact, and
+	// KonturSandboxes.ensure deliberately adopts an already-existing VM
+	// rather than rebuilding it ("the same 'reuse what's there' choice
+	// HostSandboxes.RootFor makes", its own doc comment), so without this
+	// the next task dispatched onto that slot inherits the dead one's
+	// checkout, credentials and leftover processes. RecoverOrphanedRuns
+	// (below) is the store-side half of recovering from that same death;
+	// it reconciles the rows a killed process left live, and has no
+	// sandbox to reach.
+	//
+	// Rebuilding here rather than lazily at the next dispatch is what
+	// keeps the cost off the critical path: a slot's VM boots while this
+	// process is still starting up, not while a task that was ready to
+	// run waits on it.
+	//
+	// HostSandboxes implements no Recreate at all -- the local-directory
+	// stand-in is deliberately long-lived (cycle.go's own
+	// recreatingSandboxes doc comment) -- so this pass is kontur-only, the
+	// same as the per-slot work in the loop below.
+	if konturSandboxes != nil {
+		for _, slot := range slots {
+			if err := resetSlotSandbox(ctx, slot, func() error {
+				return konturSandboxes.Recreate(ctx, slot)
+			}); err != nil {
+				return fmt.Errorf("resetting the sandbox for %s: %w", slot, err)
+			}
+		}
+	}
+
 	for _, slot := range slots {
 		// Configuring git credentials is a one-time, per-slot setup step,
 		// not a per-task one -- git-credential-store matches on
 		// protocol+host, not path, so this single line covers every repo
 		// this slot will ever be pointed at through the proxy. See
 		// mcp/git_credentials.go's own doc comment. For a kontur-backed
-		// slot this also creates that slot's VM, the same way ToolsFor's
-		// first call would have -- doing it here instead means a slot's
-		// VM is up, and reachable, before RunCycle ever tries to dispatch
-		// onto it.
+		// slot this also creates that slot's VM if nothing has yet, the
+		// same way ToolsFor's first call would have -- doing it here
+		// instead means a slot's VM is up, and reachable, before RunCycle
+		// ever tries to dispatch onto it. The reset pass above has
+		// normally already created it, so this ordinarily configures a VM
+		// that is up rather than booting one; the fallback matters for a
+		// host-backed deployment, which that pass skips entirely.
 		//
 		// configureSlotGitCredentials retries this with backoff rather
 		// than this loop returning (and runDaemon along with it) on the
@@ -661,6 +705,29 @@ var (
 func configureSlotGitCredentials(ctx context.Context, slot string, fn func() error) error {
 	return retryWithBackoff(ctx, slotProvisionRetryBaseDelay, slotProvisionRetryMaxDelay, func(attempt int, err error) {
 		log.Printf("grain daemon: configuring git credentials for %s (attempt %d): %v -- retrying", slot, attempt, err)
+	}, fn)
+}
+
+// resetSlotSandbox runs fn -- one slot's KonturSandboxes.Recreate -- until
+// it succeeds or ctx is cancelled, with the same capped exponential
+// backoff configureSlotGitCredentials above uses and for the same reason
+// (bwsalmon/agents#576): this execs a real "konturctl vm delete" and
+// "konturctl vm create" against a host that may not be ready for either
+// yet, and one transient failure must not wedge reconciliation for the
+// rest of the process's life.
+//
+// Retrying forever rather than giving up and dispatching anyway is the
+// deliberate half of that. A slot whose VM could not be rebuilt is a slot
+// that may still be holding the previous run's filesystem, and running
+// the next task in it would defeat the isolation the pass exists to
+// guarantee -- so a permanent failure here stalls that slot rather than
+// quietly downgrading to a dirty one, the same "never crash-loop systemd
+// over a one-time setup step" tradeoff bwsalmon/agents#550 made, applied
+// per slot. The only way this returns a non-nil error is ctx itself
+// ending mid-retry, which only happens as part of shutdown.
+func resetSlotSandbox(ctx context.Context, slot string, fn func() error) error {
+	return retryWithBackoff(ctx, slotProvisionRetryBaseDelay, slotProvisionRetryMaxDelay, func(attempt int, err error) {
+		log.Printf("grain daemon: resetting the sandbox for %s (attempt %d): %v -- retrying", slot, attempt, err)
 	}, fn)
 }
 

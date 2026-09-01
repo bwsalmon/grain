@@ -477,11 +477,30 @@ func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, rem
 // it to the rebuilt VM before returning -- a fresh VM has none of the
 // previous one's filesystem, credentials included, and dispatch has no
 // other opportunity to redo that setup between tasks.
+//
+// A slot with no VM at all yet is recreated as a plain create: there is
+// nothing to tear down, so the delete is skipped rather than run for its
+// own sake. That costs the per-task call site nothing (the VM it just
+// finished with always exists) and is what makes Recreate safe to call
+// before a slot has ever been used -- cmd/grain daemon's own startup
+// reset pass over every slot, which must rebuild whatever a previous
+// process left behind without turning a fresh deployment's first create
+// into a delete of something that was never there. Skipping it is not
+// merely tidier: with no saved state to read a backend off,
+// "konturctl vm delete" falls back to the static-pod backend and tries to
+// unlink a manifest path (bwsalmon/kontur's own internal/cli
+// runVMDelete), never reaching the docker backend this package builds
+// every VM under. So it accomplishes nothing here at best, and at worst
+// fails outright -- that unlink tolerates a missing file but not an
+// unwritable manifest directory, which on a real deployment is a
+// root-owned /etc/kubernetes/manifests the daemon does not run as.
 func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
 	name := k.VMNameFor(slot)
 
-	if err := kontur.Delete(ctx, k.cfg.stateDir(), name); err != nil {
-		return fmt.Errorf("orchestrator: deleting kontur VM %q to recreate it: %w", name, err)
+	if kontur.Exists(k.cfg.stateDir(), name) {
+		if err := kontur.Delete(ctx, k.cfg.stateDir(), name); err != nil {
+			return fmt.Errorf("orchestrator: deleting kontur VM %q to recreate it: %w", name, err)
+		}
 	}
 	k.mu.Lock()
 	delete(k.created, name)

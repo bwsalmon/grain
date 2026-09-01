@@ -673,6 +673,40 @@ of on a schedule. `HostSandboxes` implements no such method: the local-
 directory stand-in stays long-lived, resetting one between tasks still
 being "the caller's job" the same way it always has been.
 
+That per-task recreate covers every task that finishes, which is every
+task except the one whose process didn't. A daemon killed mid-run — OOMed,
+`SIGKILL`ed, a host that rebooted — never reaches `runOne`'s own recreate,
+so that run's VM outlives it with its whole filesystem intact, and
+`KonturSandboxes.ensure` deliberately adopts an existing VM rather than
+rebuilding it ("the same 'reuse what's there' choice
+`HostSandboxes.RootFor` makes"). The next task dispatched onto that slot
+inherited the dead run's checkout, credentials and leftover processes.
+`RecoverOrphanedRuns` was only ever the store-side half of recovering
+from that death: it finishes the rows a killed process left live, and has
+no sandbox to reach.
+
+`runDaemon` now closes that gap with a reset pass over every slot at
+startup, before per-slot git credentials are configured and long before
+`RunCycle` can dispatch: one `Recreate` per kontur-backed slot, retried
+with the same capped backoff `configureSlotGitCredentials` uses
+(`resetSlotSandbox`). A slot that cannot be rebuilt stalls rather than
+being dispatched onto dirty — the isolation is the point of the pass, so
+downgrading to a reused VM would defeat it. On a clean start there is
+nothing to tear down, and `Recreate` skips the delete for a slot with no
+saved state: the pass is then exactly the `konturctl vm create` the
+credential loop would have made on its own, which is why a fresh
+deployment's `konturctl` argv log is unchanged. That skip is load-bearing,
+not cosmetic — with no saved state to read a backend off, `konturctl vm
+delete` falls back to the static-pod backend and tries to unlink a
+manifest path it never needed to touch, which fails outright when that
+directory is a root-owned `/etc/kubernetes/manifests` and the daemon runs
+as `grain`.
+
+Rebuilding at startup rather than lazily at the next dispatch also keeps
+the VM boot off the critical path — it happens while the process is still
+coming up, not while a ready task waits on it. Host-backed deployments
+skip the pass entirely, `HostSandboxes` having no `Recreate` to call.
+
 bwsalmon/agents#466 ("Use kontur sandboxes") found and fixed three bugs
 that every other kontur test in this repo, all built against hand-written
 `kontur`/`docker`/`crictl` doubles, had no way to catch: `pkg/kontur`'s
