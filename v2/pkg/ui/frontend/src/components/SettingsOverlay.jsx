@@ -1,19 +1,30 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Button, Checkbox, Divider, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
+import LogsPage from "./LogsPage.jsx";
+import SandboxHealthPage from "./SandboxHealthPage.jsx";
 import { useThemeMode } from "../ThemeModeContext.jsx";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
 // sidebar overlays; they live here now as tabs alongside the general
 // deployment settings, since all three are the same kind of
 // operator-only, deployment-wide configuration.
+//
+// bwsalmon/agents#623: Logs, Sandbox health and the reboot control (which
+// used to be its own "danger zone" on the general tab) join them here as
+// a single Debug tab, for the same reason -- diagnosing a deployment gone
+// wrong is operator-only and deployment-wide too, not day-to-day task
+// flow.
 const TABS = [
   { id: "general", label: "General" },
+  { id: "capabilities", label: "Capabilities" },
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
+  { id: "debug", label: "Debug" },
 ];
 
 export default function SettingsOverlay({ config, onClose, showError }) {
@@ -88,6 +99,12 @@ export default function SettingsOverlay({ config, onClose, showError }) {
 
     const showClosedByDefault = form.elements.showClosedByDefault.checked;
     if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
+
+    const approvedByDefault = form.elements.approvedByDefault.checked;
+    if (approvedByDefault !== !!settings.approvedByDefault) payload.approvedByDefault = approvedByDefault;
+
+    const autoMergeByDefault = form.elements.autoMergeByDefault.checked;
+    if (autoMergeByDefault !== !!settings.autoMergeByDefault) payload.autoMergeByDefault = autoMergeByDefault;
 
     const agentFramework = form.elements.agentFramework.value;
     if (agentFramework !== (settings.agentFramework || "gemini")) payload.agentFramework = agentFramework;
@@ -236,6 +253,33 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               )}
               sx={{ display: "flex", mt: 1 }}
             />
+            <FormControlLabel
+              control={<Checkbox name="approvedByDefault" defaultChecked={!!settings.approvedByDefault} />}
+              label={(
+                <>
+                  Queue new tasks immediately by default
+                  <span className="hint">
+                    off (default): a new task's own "Queue immediately" checkbox starts unchecked, filing it as a
+                    proposal needing approval. on: it starts checked instead, filing a task ready to dispatch at
+                    once.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
+            <FormControlLabel
+              control={<Checkbox name="autoMergeByDefault" defaultChecked={!!settings.autoMergeByDefault} />}
+              label={(
+                <>
+                  Auto-merge new tasks by default
+                  <span className="hint">
+                    off (default): a new task's own "Auto-merge once checks pass" checkbox starts unchecked. on: it
+                    starts checked instead.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
 
             <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
               Target repos are managed from the Repos pane now, not here.
@@ -245,17 +289,28 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               <Button type="submit" variant="contained">Save</Button>
             </Stack>
           </form>
+        </>
+      )}
+      {tab === "capabilities" && <CapabilitiesPanel capabilities={settings.capabilities} />}
+      {tab === "secrets" && <SecretsPanel showError={showError} />}
+      {tab === "upgrade" && <UpgradePanel showError={showError} />}
+      {tab === "debug" && (
+        <>
+          <LogsPage showError={showError} />
+          <Divider sx={{ my: 3 }} />
+          <SandboxHealthPage showError={showError} />
           {config && config.rebootEnabled && (
-            <fieldset>
-              <legend>Danger zone</legend>
-              <p className="hint">Reboots the machine grain itself is running on.</p>
-              <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
-            </fieldset>
+            <>
+              <Divider sx={{ my: 3 }} />
+              <fieldset>
+                <legend>Danger zone</legend>
+                <p className="hint">Reboots the machine grain itself is running on.</p>
+                <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
+              </fieldset>
+            </>
           )}
         </>
       )}
-      {tab === "secrets" && <SecretsPanel showError={showError} />}
-      {tab === "upgrade" && <UpgradePanel showError={showError} />}
     </Overlay>
   );
 }

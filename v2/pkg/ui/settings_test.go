@@ -128,6 +128,49 @@ func TestUpdateSettingsRoundTripsShowClosedByDefault(t *testing.T) {
 	}
 }
 
+// TestUpdateSettingsRoundTripsTaskDefaults is bwsalmon/agents#612's own
+// pair of global defaults: unset, both read back false (matching grain's
+// original "start unchecked" shape for NewTaskOverlay.jsx's own "Queue
+// immediately" and "Auto-merge once checks pass" checkboxes), and setting
+// either sticks through a GetSettings read the same way
+// TestUpdateSettingsRoundTripsShowClosedByDefault already covers for
+// ShowClosedByDefault.
+func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.ApprovedByDefault {
+		t.Fatalf("ApprovedByDefault = true with nothing set, want false")
+	}
+	if read.AutoMergeByDefault {
+		t.Fatalf("AutoMergeByDefault = true with nothing set, want false")
+	}
+
+	approved, autoMerge := true, true
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		ApprovedByDefault:  &approved,
+		AutoMergeByDefault: &autoMerge,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read.ApprovedByDefault {
+		t.Fatalf("ApprovedByDefault = false after UpdateSettings, want true")
+	}
+	if !read.AutoMergeByDefault {
+		t.Fatalf("AutoMergeByDefault = false after UpdateSettings, want true")
+	}
+}
+
 // TestUpdateSettingsRoundTripsAgentFramework is bwsalmon/agents#609's own
 // setting: unset it reads back "gemini" (model.AgentFrameworkGemini, the
 // only framework any deployment has ever run), and setting it to "claude"

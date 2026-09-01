@@ -1,14 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "@mui/material";
 
-import {
-  DEFAULTS,
-  GLYPHS,
-  STATIC_SLOT,
-  createGrainMark,
-  grainSpec,
-  renderStatic,
-} from "../brand/grain-mark.js";
+import { STATIC_SLOT, createGrainMark, grainSpec } from "../brand/grain-mark.js";
+import { SHEET_FRAMES, SHEET_LOOP_MS, hasSheet, sheetHref } from "../brand/mark-sheet.js";
 
 // GrainMark is the brand mark: a Chladni glyph -- the filled regions of a
 // square-plate eigenmode, stippled into grains -- inside an invisible
@@ -27,109 +21,59 @@ import {
 //             the change reads as the mark coming to life rather than
 //             as a different image.
 //
-// The animation comes in two forms, split at 48px -- the pack's own
-// line, above which it asks for grains and below which it asks for the
-// solid fill.
+// The animation is **pre-recorded** at every size that has a sheet,
+// which is every size in the app but the hero. A sheet is one cycle of
+// the mark's own animation captured frame by frame out of a browser
+// running this same module (scripts/export-mark-sheets.mjs), so playing
+// it is not an imitation of the particle system -- it is that system,
+// recorded. What the page does per frame is move a mask offset, which
+// is compositor work and costs the same whether one mark is on screen
+// or twenty. A task list with twenty running rows used to be twenty
+// particle systems.
 //
-// Below it the mark **holds its dwell crisp**: it settles, sharpens into
-// the solid glyph, dissolves back into sand to move, and re-forms. A
-// stipple standing still at icon size is the thing that reads as mush,
-// and this is what takes that away without giving up the flight.
+// The sheet is an alpha mask rather than a picture, so `background`
+// supplies the colour: one file serves both themes and follows a theme
+// change with no reload and no second asset.
 //
-// The crisp state is a second canvas under the first, carrying the
-// module's own solid render of whichever glyph the mark last landed on.
-// It cannot be the still <img> the idle mark uses, tempting as that is:
-// that file is the rosette and only the rosette, so a mark that had just
-// flown to the diamond would sharpen into the wrong figure. On the
-// rosette the two are the same geometry either way -- one traced from
-// `fillScalar`, one supersampled from it -- so a task that stops running
-// still changes nothing about the picture, it only stops it moving.
+// Every mark also plays from the same point of the same loop, because
+// they are pinned to one shared timeline (below) -- so the sidebar and
+// every running row scatter and settle together rather than each
+// holding its own phase, which the live renderer never did.
 //
-// The fade is doing real work, not softening a seam. sampleGlyph places
-// grain *centres* inside the region, so every grain bleeds a radius past
-// its edge and the settled cloud is the solid glyph dilated by that
-// much: at 20px it carries about three quarters again as much ink, with
-// the rosette's holes nearly closed. Cutting between the two would be a
-// visible pop four times a loop. Faded, the same difference is the point
-// of the thing -- the mark reads as loose while the sand is in the air
-// and tight once it lands.
-//
-// Above 48px the mark runs the pack's own uninterrupted cycle. Not
-// because crisping would be invisible there -- the gap is a thin outline
-// at hero scale and would fade cleanly -- but because at that size the
-// stipple *is* the picture, and flattening it to a fill four times a
-// loop would throw away the texture that makes the mark worth showing
-// large.
-//
-// The still is an <img> rather than a canvas render on purpose: it is
-// the same file the favicon points at, so the mark in the tab and the
-// mark in the sidebar cannot drift apart, and it costs nothing to paint
-// on a page that is idle -- which, since "idle" is exactly when it is
-// shown, is most of the time. It is a scale-free vector, so one file is
-// sharp at every size the app asks for.
-//
-// The still is solid rather than grains at every size, including the
-// hero. The pack draws its own large stills as grains and only asks for
-// the solid fill below 32px, but a still that changed treatment partway
-// up the size range would make the sidebar mark and the loading screen
-// two different pictures of the same thing; the grain rendering of the
-// logo at hero scale is still exported, for a README or a slide, as
-// docs/brand/grain-hero-2-3minus-{light,dark}.svg.
+// The hero has no sheet and runs the live renderer. Its frames would be
+// 640px square, which is 80MB of pixels in a strip and past what a
+// browser will decode, and it is one canvas on a screen with nothing
+// else on it -- the case the pack's renderer was written for. Any size
+// without a sheet lands here too, so a new call site works before
+// anyone has recorded one for it.
 const STILL_SRC = { light: "/grain-mark-light.svg", dark: "/grain-mark-dark.svg" };
-
-// How long a small mark holds its glyph crisp between flights.
-//
-// Not the pack's 0.33s dwell, which is a beat between two grain fields
-// rather than a state: held that briefly the solid glyph would read as a
-// flicker in the flight rather than as the mark settling. At 0.9s the
-// loop is about 2.6s a glyph and 10s round -- slower than the pack's
-// 6.5s, which is the cost of the settled state being worth looking at,
-// and no loss for a signal that only has to say "something is running".
-const CRISP_MS = 900;
-
-// The cross-fades, and where in the flight the settling one starts.
-//
-// SETTLE_AT is the fix for a dead beat that was very visible. The
-// module eases the flight in and out with a cubic, so the last fifth of
-// its clock covers three percent of the distance: 260ms in which the
-// grains have visibly arrived and nothing is happening. Waiting for the
-// clock and only then fading meant the crisp glyph landed after a third
-// of a second of stillness, which reads as a snap however soft the fade
-// is. Starting at seven tenths -- 91% of the distance, still visibly
-// moving -- the fade finishes just before the flight's own clock does,
-// and the mark crystallizes as it arrives instead of after it.
-//
-// Settling is the slower fade because it is the one being watched.
-// Dissolving runs under the first stretch of a flight that is already
-// moving, and only has to not be a cut.
-const SETTLE_AT = 0.7;
-const SETTLE_MS = 280;
-const DISSOLVE_MS = 160;
-
-// The mark crisps below this and runs the pack's uninterrupted cycle at
-// or above it. The pack's own line: it asks for grains from 48px up and
-// the solid fill below 32px, and what settles that range for grain is
-// that a stipple holding still at icon size reads as mush while at hero
-// scale it *is* the picture.
-const CRISP_BELOW_PX = 48;
 
 export default function GrainMark({ size = 28, animated = false, title, className }) {
   const theme = useTheme();
   const mode = theme.palette.mode === "dark" ? "dark" : "light";
   const reducedMotion = usePrefersReducedMotion();
   const canvasRef = useRef(null);
-  const solidRef = useRef(null);
-  // Below the threshold the animation crisps between flights, which is
-  // what puts a second canvas under the grains to crisp onto.
-  const crisps = size < CRISP_BELOW_PX;
-  // A mark that cannot paint (a canvas-less environment -- jsdom under
-  // vitest, most obviously) falls back to the still rather than leaving
-  // a blank box where the brand should be.
+  const sheetRef = useRef(null);
+  const plays = hasSheet(size);
+  // A live mark that cannot paint (a canvas-less environment -- jsdom
+  // under vitest, most obviously) falls back to the still rather than
+  // leaving a blank box where the brand should be. A recorded one has
+  // no canvas to fail at.
   const [canPaint, setCanPaint] = useState(true);
-  const spinning = animated && !reducedMotion && canPaint;
+  const spinning = animated && !reducedMotion && (plays || canPaint);
+
+  // A CSS animation starts when its element is attached, so marks
+  // mounting at different moments -- a task row that started running ten
+  // seconds after the sidebar -- would each keep their own phase.
+  // Pinning every one to the document timeline's origin puts them in
+  // lockstep, and keeps them there as rows come and go.
+  useEffect(() => {
+    if (!spinning || !plays) return;
+    for (const animation of sheetRef.current?.getAnimations?.() ?? []) animation.startTime = 0;
+  }, [spinning, plays, size]);
 
   useEffect(() => {
-    if (!animated || reducedMotion) return undefined;
+    if (!animated || reducedMotion || plays) return undefined;
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     let ctx = null;
@@ -148,20 +92,11 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
     canvas.height = canvas.width;
 
     // The module picks grain count and radius off canvas.width, which on
-    // a 2x display is twice the size the mark is *seen* at: a 20px mark
-    // backing onto a 40px canvas would take four times the grains at
-    // half the size, a visibly finer stipple rather than a sharper one.
-    // Reading the spec at the CSS size instead pins the picture to what
-    // the reader sees and leaves the backing store free to be as dense
-    // as the display allows -- the radius is a fraction of canvas.width,
-    // so it already scales itself and needs no dpr correction.
-    //
-    // The count is the pack's own. An earlier pass stippled the small
-    // marks three times as thickly, to make a *settled* one read as a
-    // shape rather than as hatching; crisping made that unnecessary and
-    // then actively harmful, because the one place those grains are
-    // still seen is the flight, and at that density a 20px mark in the
-    // air is a featureless blob rather than sand.
+    // a 2x display is twice the size the mark is *seen* at. Reading the
+    // spec at the CSS size instead pins the picture to what the reader
+    // sees and leaves the backing store free to be as dense as the
+    // display allows -- the radius is a fraction of canvas.width, so it
+    // already scales itself and needs no dpr correction.
     const spec = grainSpec(size);
     const mark = createGrainMark(canvas, {
       theme: mode,
@@ -171,81 +106,22 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
       slot: STATIC_SLOT,
     });
 
-    // Above the threshold the pack drives itself: one call, and it
-    // cycles until told otherwise.
-    if (!crisps) {
-      const onVisibility = () => (document.hidden ? mark.stop() : mark.start());
-      document.addEventListener("visibilitychange", onVisibility);
-      onVisibility();
-      return () => {
-        document.removeEventListener("visibilitychange", onVisibility);
-        mark.destroy();
-      };
-    }
-
-    // Below it, grain drives the cycle a flight at a time so it knows
-    // when each one lands. `setMode` runs a single flight and then
-    // stops: the module's loop only keeps going while its auto flag is
-    // set, and `start()` is what sets it, so never calling start hands
-    // the clock over here. A parked module also stops painting, which
-    // is what lets the canvas be faded out between flights and cost
-    // nothing while it is.
-    const solid = solidRef.current;
-    solid.width = canvas.width;
-    solid.height = canvas.height;
-    let slot = STATIC_SLOT;
-    let timer = null;
-
-    const fade = (grains, ms) => {
-      for (const [el, shown] of [
-        [canvas, grains],
-        [solid, !grains],
-      ]) {
-        el.style.transition = `opacity ${ms}ms ease`;
-        el.style.opacity = shown ? "1" : "0";
-      }
-    };
-
-    const crisp = () => {
-      // Drawn per flight rather than once, because the glyph under the
-      // grains is whichever one they just landed on.
-      renderStatic(solid, { slot, style: "solid", theme: mode });
-      fade(false, SETTLE_MS);
-      timer = setTimeout(fly, SETTLE_MS + CRISP_MS);
-    };
-    const fly = () => {
-      fade(true, DISSOLVE_MS);
-      slot = (slot + 1) % GLYPHS.length;
-      mark.setMode(slot);
-      // Into the flight's own tail rather than after it: see SETTLE_AT.
-      timer = setTimeout(crisp, DEFAULTS.snapSeconds * 1000 * SETTLE_AT);
-    };
-    const halt = () => {
-      clearTimeout(timer);
-      timer = null;
-      mark.stop();
-    };
-
     // The pack's own note on this renderer is that it is a proof of
-    // concept meant for a splash or a hero, not something left running
-    // as a persistent UI element -- a fair warning for a mark that
-    // animates for as long as anything is running, which on a busy
-    // deployment is most of the day. Holding the dwell as a still is the
-    // one thing here that gives some of that back: a crisped mark paints
-    // nothing at all until its next flight. What it must still not do is
-    // spend frames on a tab nobody is looking at.
-    const onVisibility = () => (document.hidden ? halt() : timer || crisp());
+    // concept meant for a splash or a hero rather than a persistent UI
+    // element. That is now the only place it runs -- but a splash on a
+    // tab nobody is looking at is still frames spent for nothing.
+    const onVisibility = () => (document.hidden ? mark.stop() : mark.start());
     document.addEventListener("visibilitychange", onVisibility);
     onVisibility();
 
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
-      clearTimeout(timer);
       mark.destroy();
     };
-  }, [animated, reducedMotion, size, mode, crisps]);
+  }, [animated, reducedMotion, plays, size, mode]);
 
   const label = title || (spinning ? "grain — agents working" : "grain");
+  const box = { width: size, height: size, display: "block", flex: "none" };
 
   if (!spinning) {
     return (
@@ -256,28 +132,43 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
         height={size}
         alt=""
         title={label}
-        style={{ width: size, height: size, display: "block", flex: "none" }}
+        style={box}
       />
     );
   }
 
-  const layer = { position: "absolute", inset: 0, width: "100%", height: "100%" };
+  if (plays) {
+    return (
+      <span
+        className={["grain-mark-sheet", className].filter(Boolean).join(" ")}
+        ref={sheetRef}
+        role="img"
+        aria-label={label}
+        title={label}
+        style={{
+          ...box,
+          // The keyframes step the mask down one frame at a time, so
+          // they need the frame count and the height of a frame --
+          // which, with the sheet scaled to the mark's width, is the
+          // mark's own size. style.css has the rest.
+          "--mark-sheet": `url("${sheetHref(size)}")`,
+          "--mark-size": `${size}px`,
+          "--mark-frames": SHEET_FRAMES,
+          "--mark-loop": `${SHEET_LOOP_MS}ms`,
+        }}
+      />
+    );
+  }
 
   return (
-    <span
+    <canvas
       className={className}
+      ref={canvasRef}
       role="img"
       aria-label={label}
       title={label}
-      style={{ position: "relative", display: "block", width: size, height: size, flex: "none" }}
-    >
-      {/* Under the grains, and only where the mark crisps: the settled
-          glyph, solid. It starts hidden so the first thing painted is
-          the grain field the module lays out on construction, and the
-          effect fades it in once they land. */}
-      {crisps && <canvas ref={solidRef} style={{ ...layer, opacity: 0 }} />}
-      <canvas ref={canvasRef} style={layer} />
-    </span>
+      style={box}
+    />
   );
 }
 
