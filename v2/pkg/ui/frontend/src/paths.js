@@ -21,7 +21,7 @@
 // old /logs or /sandboxes still just falls back to the tasks view like
 // any other unrecognized path.
 
-const VIEWS = ["tasks", "repos", "schedules", "templates"];
+const VIEWS = ["tasks", "repos", "schedules", "templates", "suites"];
 
 // parsePath turns a URL path into the {view, taskId, showSettings,
 // showDebug} App needs in order to restore on load or on a

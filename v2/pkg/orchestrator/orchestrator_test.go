@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,9 +13,23 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+// TestMain turns off branchExistsSettled's re-check backoff for every
+// test in this package -- see orchestrator.DisableBranchExistsSleep for
+// why it is dead time here specifically. The retry behaviour itself is
+// covered by TestBranchExistsSettledReChecksANegative, which stubs the
+// same sleep itself and asserts the call count, so nothing here is left
+// untested by skipping the wall clock.
+func TestMain(m *testing.M) {
+	restore := orchestrator.DisableBranchExistsSleep()
+	code := m.Run()
+	restore()
+	os.Exit(code)
+}
 
 // openStore opens a real embedded SQLite store in a temp directory -- the
 // same discipline every other package's own tests hold to (model/

@@ -20,7 +20,7 @@ const SIDEBAR_WIDTH = 232;
 // to a "Debugging" entry of its own here, under Settings (bwsalmon/
 // agents#640) -- diagnosing a deployment gone wrong wants faster reach
 // than a tab buried inside Settings' configuration form.
-export default function Sidebar({ config, tasks, schedules = [], templates = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
+export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -112,6 +112,11 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           <span className="dot dot-all" />
           <ListItemText primary="Task templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
+        </ListItemButton>
+        <ListItemButton selected={view === "suites"} onClick={() => onSetView("suites")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="dot dot-all" />
+          <ListItemText primary="Task suites" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+          <Typography variant="caption" color="text.secondary">{suites.length}</Typography>
         </ListItemButton>
       </List>
 
