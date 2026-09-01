@@ -531,6 +531,86 @@ describe("DetailOverlay", () => {
     expect(runningItems[1].querySelector(".badge")).not.toHaveClass("badge-static");
   });
 
+  // A run that ended without an agent ever finishing still ended, and
+  // badly. Without an entry of its own, "setup-failed" rendered through
+  // the raw-string fallback as "Setup-failed" under a "queued" badge --
+  // which reads as a run that has not started, for one that started and
+  // could not be given a sandbox.
+  it("labels an attempt whose sandbox could not be built", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "setup-failed",
+              detail: "this run's sandbox could not be prepared: guest never became reachable",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const item = screen.getByText("Setup failed").closest(".timeline-item");
+    expect(item.querySelector(".badge")).toHaveClass("badge-failed");
+  });
+
+  it("labels an attempt whose process died mid-run", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "orphaned",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const item = screen.getByText("Orphaned").closest(".timeline-item");
+    expect(item.querySelector(".badge")).toHaveClass("badge-failed");
+  });
+
+  // The fallback still has to work: an outcome added on the backend
+  // before this map catches up shows up rather than disappearing.
+  it("falls back to the raw outcome for one it does not recognise", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            { number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:02:00Z", outcome: "invented" },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Invented")).toBeInTheDocument();
+  });
+
   it("shows a hint when there are no dependencies", () => {
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.getByText("No dependencies.")).toBeInTheDocument();

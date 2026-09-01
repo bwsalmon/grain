@@ -224,14 +224,39 @@ function Actions({ t, config, act }) {
 }
 
 // OUTCOME_LABELS and OUTCOME_BADGES cover model.Run's own outcome
-// vocabulary (orchestrator.outcomeOf, orchestrator.run's "cancelled"),
-// plus the empty string a run still in flight (no finishedAt yet) comes
-// back as -- the one case that isn't itself an outcome. An outcome this
-// doesn't recognise falls back to the raw string, capitalised, rather
-// than disappearing, so a value added on the backend later still shows
-// up here before this map catches up with it.
-const OUTCOME_LABELS = { "": "Running", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled" };
-const OUTCOME_BADGES = { "": "running", succeeded: "completed", failed: "failed", cancelled: "closed" };
+// vocabulary (orchestrator.outcomeOf, orchestrator.run's "cancelled",
+// orchestrator.runOne's "setup-failed", orchestrator.recoverRun's
+// "orphaned"), plus the empty string a run still in flight (no finishedAt
+// yet) comes back as -- the one case that isn't itself an outcome. An
+// outcome this doesn't recognise falls back to the raw string,
+// capitalised, and a "queued" badge, rather than disappearing, so a value
+// added on the backend later still shows up here before this map catches
+// up with it.
+//
+// Both of the non-obvious two are runs that ended without an agent ever
+// finishing: "setup-failed" is one whose sandbox could not be built (a VM
+// that never booted, a token that could not be minted -- dispatch retries
+// the task after its backoff), and "orphaned" is one whose process died
+// mid-run and which the next startup finished on its behalf
+// (RecoverOrphanedRuns). Both take the "failed" badge rather than the
+// fallback's "queued", which would read as "hasn't run yet" for a run
+// that did.
+const OUTCOME_LABELS = {
+  "": "Running",
+  succeeded: "Succeeded",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  "setup-failed": "Setup failed",
+  orphaned: "Orphaned",
+};
+const OUTCOME_BADGES = {
+  "": "running",
+  succeeded: "completed",
+  failed: "failed",
+  cancelled: "closed",
+  "setup-failed": "failed",
+  orphaned: "failed",
+};
 
 // PR_EVENT_LABELS covers ui.PullRequestEvent's own Kind vocabulary
 // (bwsalmon/agents#493) -- "closed" specifically means closed *without*
