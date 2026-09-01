@@ -273,6 +273,18 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			"-kernel", "/images/vmlinuz",
 			"-initramfs", "/images/initrd.img",
 			"-guest-port", "22",
+			// -images-hostpath is mounted read-only (it's a shared image
+			// cache, per third_party/kontur/README.md's "Operating a node"
+			// section), so without this the VM's own root filesystem is
+			// read-only too -- confirmed live: sshd (and containerd/docker)
+			// never start, because kontur-ssh-host-keys.service's freshly
+			// generated host keys never persist, and the guest is
+			// unreachable for the same reason every one of this test's
+			// runs used to fail. v2/scripts/setup.sh's own -kontur-create-arg
+			// list carries this same pair for exactly that reason
+			// (bwsalmon/agents#510) -- this test had drifted from it.
+			"-disk-readonly=false",
+			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKeyPathIn(t, imagesHostPath, sshKeyPath),
@@ -490,6 +502,12 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
+			// See the concurrent test above's own comment on these two:
+			// without them the guest's root filesystem is read-only and
+			// sshd never comes up, which this transport depends on just
+			// as much as SSH proper does (`kontur exec` dials it too).
+			"-disk-readonly=false",
+			"-disk-hostpath", t.TempDir(),
 			// No -ip/-port: this VM is built in flat mode (KonturConfig's
 			// own default since 7a58bec), where the container runtime
 			// assigns the address the guest takes over and konturctl
@@ -545,7 +563,13 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, envOut)
 	}
-	if want := "KONTUR_EXEC_ADDR=169.254.100.40:22"; !strings.Contains(string(envOut), want) {
+	// 169.254.100.2 is flat mode's fixed control-link address (see the
+	// concurrent test above's own assertion that every VM answers on it),
+	// not one this VM's -ip/-port chose -- flat mode takes neither. This
+	// used to read "169.254.100.40", a leftover from before 7a58bec made
+	// flat mode the default: that value only ever made sense for a
+	// per-slot NAT-mode address this test no longer builds.
+	if want := "KONTUR_EXEC_ADDR=169.254.100.2:22"; !strings.Contains(string(envOut), want) {
 		t.Errorf("VM container env = %q, want it to carry %q -- `kontur exec` has no other way to know where the guest is", envOut, want)
 	}
 
