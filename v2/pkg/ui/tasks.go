@@ -333,6 +333,14 @@ type configResponse struct {
 	// this the moment a list first renders, before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// ApprovedByDefault and AutoMergeByDefault mirror model.Config's own
+	// fields of the same name (bwsalmon/agents#612), the same
+	// read-straight-from-the-store-not-cached way ShowClosedByDefault
+	// does. NewTaskOverlay.jsx seeds its "Queue immediately" and
+	// "Auto-merge once checks pass" checkboxes from these the moment it
+	// first renders, before Settings has ever been opened this session.
+	ApprovedByDefault  bool `json:"approvedByDefault"`
+	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 	// ReconcilerDown mirrors Config.ReconcilerDown's own doc comment:
 	// true means this deployment's reconcile loop has died and nothing is
 	// dispatching or reconciling tasks, even though this same API is
@@ -357,6 +365,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
+		resp.ApprovedByDefault = cfg.ApprovedByDefault
+		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()

@@ -112,7 +112,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           margin="normal"
         />
         <FormControlLabel
-          control={<Checkbox name="autoMerge" />}
+          control={<Checkbox name="autoMerge" defaultChecked={!!config?.autoMergeByDefault} />}
           label="Auto-merge once checks pass"
           sx={{ display: "flex", mt: 1 }}
         />
@@ -194,7 +194,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           </Typography>
         ) : (
           <FormControlLabel
-            control={<Checkbox name="approved" />}
+            control={<Checkbox name="approved" defaultChecked={!!config?.approvedByDefault} />}
             label="Queue immediately (unchecked files it as a proposal, needing approval)"
             sx={{ display: "flex", mt: 1 }}
           />

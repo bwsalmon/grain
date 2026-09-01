@@ -102,6 +102,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigShowClosedByDefaultColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigTaskDefaultsColumns(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureScheduledTaskTemplateColumn(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
@@ -413,6 +416,30 @@ func (s *Store) ensureConfigShowClosedByDefaultColumn(ctx context.Context) error
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `show_closed_by_default` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigTaskDefaultsColumns adds grain_config.approved_by_default/
+// auto_merge_by_default (model.Config.ApprovedByDefault/AutoMergeByDefault's
+// own doc comments have the reasoning -- bwsalmon/agents#612) to a
+// database created before these columns existed, the same probe-then-ALTER
+// approach ensureConfigSandboxShapeColumns already uses for a pair of
+// columns at once. Both default to 0, matching Config's own zero value, so
+// an upgraded deployment's "Queue immediately"/"Auto-merge once checks
+// pass" checkboxes keep starting unchecked exactly as they always have,
+// until an operator opts into a different starting state through Settings.
+func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `approved_by_default`, `auto_merge_by_default` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `approved_by_default` INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `auto_merge_by_default` INTEGER NOT NULL DEFAULT 0")
 	return err
 }
 
@@ -1916,7 +1943,8 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`"
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`," +
+	"`approved_by_default`,`auto_merge_by_default`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -1924,7 +1952,8 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var targetRepos string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault); err != nil {
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
+		&c.ApprovedByDefault, &c.AutoMergeByDefault); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -1939,10 +1968,11 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault)
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
+			c.ApprovedByDefault, c.AutoMergeByDefault)
 		return err
 	})
 }

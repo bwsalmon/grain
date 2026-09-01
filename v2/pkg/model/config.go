@@ -98,4 +98,24 @@ type Config struct {
 	// like NewestFirst, nothing here forces it to stay that way, and
 	// nothing in the daemon's own dispatch loop reads it.
 	ShowClosedByDefault bool
+	// ApprovedByDefault is the deployment-wide default for whether a new
+	// task's "Queue immediately" checkbox starts checked (bwsalmon/
+	// agents#612): false, the default, matches grain's original shape --
+	// NewTaskOverlay.jsx's own checkbox starts unchecked, so a task files
+	// as a proposal needing Approve unless someone checks it. true starts
+	// it checked instead, so filing a task takes one fewer click on a
+	// deployment that approves nearly everything anyway. Like
+	// NewestFirst and ShowClosedByDefault, this only ever seeds the
+	// form's *starting* state -- whoever is filing a task can still
+	// uncheck it, and CreateTaskRequest.Approved is what actually decides
+	// each task's own Approval, not this.
+	ApprovedByDefault bool
+	// AutoMergeByDefault is ApprovedByDefault's counterpart for
+	// NewTaskOverlay.jsx's "Auto-merge once checks pass" checkbox
+	// (bwsalmon/agents#612): false, the default, keeps a new task's
+	// Task.AutoMerge off unless someone checks it. true starts it checked
+	// instead. Same "starting state only" caveat as ApprovedByDefault --
+	// CreateTaskRequest.AutoMerge, not this, is what a filed task actually
+	// gets.
+	AutoMergeByDefault bool
 }

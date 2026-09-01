@@ -72,6 +72,16 @@ type Settings struct {
 	// has it to seed that toggle with before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// ApprovedByDefault and AutoMergeByDefault are model.Config's own
+	// fields of the same name (bwsalmon/agents#612): deployment-wide
+	// defaults for whether a new task's "Queue immediately" and
+	// "Auto-merge once checks pass" checkboxes start checked in
+	// NewTaskOverlay.jsx. Also mirrored onto GET /api/config
+	// (configResponse, tasks.go) the same way ShowClosedByDefault is, so
+	// that form has them to seed its checkboxes with before Settings has
+	// ever been opened this session.
+	ApprovedByDefault  bool `json:"approvedByDefault"`
+	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -91,6 +101,8 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxCPUs:                   cfg.SandboxCPUs,
 		SandboxMemoryMB:               cfg.SandboxMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
+		ApprovedByDefault:             cfg.ApprovedByDefault,
+		AutoMergeByDefault:            cfg.AutoMergeByDefault,
 	}
 }
 
@@ -154,6 +166,8 @@ type UpdateSettingsRequest struct {
 	SandboxCPUs            *int      `json:"sandboxCpus"`
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
+	ApprovedByDefault      *bool     `json:"approvedByDefault"`
+	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -256,6 +270,12 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	}
 	if req.ShowClosedByDefault != nil {
 		cfg.ShowClosedByDefault = *req.ShowClosedByDefault
+	}
+	if req.ApprovedByDefault != nil {
+		cfg.ApprovedByDefault = *req.ApprovedByDefault
+	}
+	if req.AutoMergeByDefault != nil {
+		cfg.AutoMergeByDefault = *req.AutoMergeByDefault
 	}
 
 	if firstTime {
