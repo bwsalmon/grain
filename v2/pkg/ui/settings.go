@@ -91,6 +91,16 @@ type Settings struct {
 	// "claude" does not yet change what a run actually does -- see that
 	// field's own doc comment.
 	AgentFramework string `json:"agentFramework"`
+	// ApprovedByDefault and AutoMergeByDefault are model.Config's own
+	// fields of the same name (bwsalmon/agents#612): deployment-wide
+	// defaults for whether a new task's "Queue immediately" and
+	// "Auto-merge once checks pass" checkboxes start checked in
+	// NewTaskOverlay.jsx. Also mirrored onto GET /api/config
+	// (configResponse, tasks.go) the same way ShowClosedByDefault is, so
+	// that form has them to seed its checkboxes with before Settings has
+	// ever been opened this session.
+	ApprovedByDefault  bool `json:"approvedByDefault"`
+	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -117,6 +127,8 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		AgentFramework:                agentFramework,
+		ApprovedByDefault:             cfg.ApprovedByDefault,
+		AutoMergeByDefault:            cfg.AutoMergeByDefault,
 	}
 }
 
@@ -181,6 +193,8 @@ type UpdateSettingsRequest struct {
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
 	AgentFramework         *string   `json:"agentFramework"`
+	ApprovedByDefault      *bool     `json:"approvedByDefault"`
+	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -299,6 +313,12 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	// has ever written from before this field existed.
 	if cfg.AgentFramework == "" {
 		cfg.AgentFramework = model.AgentFrameworkGemini
+	}
+	if req.ApprovedByDefault != nil {
+		cfg.ApprovedByDefault = *req.ApprovedByDefault
+	}
+	if req.AutoMergeByDefault != nil {
+		cfg.AutoMergeByDefault = *req.AutoMergeByDefault
 	}
 
 	if firstTime {
