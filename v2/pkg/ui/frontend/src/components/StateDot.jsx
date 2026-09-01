@@ -8,10 +8,10 @@ import GrainMark from "./GrainMark.jsx";
 // work (bwsalmon/agents#586).
 //
 // 20px, well above the 11px .badge::before dot it replaces: the v2 mark
-// is a filled region stippled into grains rather than a line figure, and
-// under about 20px there are too few grains across the glyph for it to
-// be a shape rather than a shimmer. The task row is ~40px tall and its
-// text line is ~20px, so this costs the row no height.
+// is a filled region rather than a line figure, and under about 20px
+// there are not enough pixels across the glyph for the four to be
+// tellable apart. The task row is ~40px tall and its text line is
+// ~20px, so this costs the row no height.
 //
 // live=false is for a badge recording a past "running" moment rather
 // than the task's live status (Timeline's superseded entries) -- that

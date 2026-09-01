@@ -103,13 +103,16 @@ describe("GrainMark", () => {
       expect(grains.style.opacity).toBe("0");
       expect(solid.style.opacity).toBe("1");
 
-      // After the dwell it dissolves and flies.
-      vi.advanceTimersByTime(1000);
+      // After the fade and the dwell it dissolves and flies.
+      vi.advanceTimersByTime(280 + 900);
       expect(grains.style.opacity).toBe("1");
       expect(solid.style.opacity).toBe("0");
 
-      // And settles again once the flight has landed.
-      vi.advanceTimersByTime(1500);
+      // And starts settling inside the flight's own tail rather than
+      // after it -- at 0.7 of 1.3s, while the grains are still visibly
+      // arriving, so the crisp glyph lands with them instead of after a
+      // beat of stillness.
+      vi.advanceTimersByTime(1300 * 0.7);
       expect(grains.style.opacity).toBe("0");
       expect(solid.style.opacity).toBe("1");
     } finally {

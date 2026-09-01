@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "@mui/material";
 
-import { DEFAULTS, GLYPHS, STATIC_SLOT, createGrainMark, renderStatic } from "../brand/grain-mark.js";
-import { DENSE_BELOW_PX, markSpec } from "../brand/grain-density.js";
+import {
+  DEFAULTS,
+  GLYPHS,
+  STATIC_SLOT,
+  createGrainMark,
+  grainSpec,
+  renderStatic,
+} from "../brand/grain-mark.js";
 
 // GrainMark is the brand mark: a Chladni glyph -- the filled regions of a
 // square-plate eigenmode, stippled into grains -- inside an invisible
@@ -21,8 +27,9 @@ import { DENSE_BELOW_PX, markSpec } from "../brand/grain-density.js";
 //             the change reads as the mark coming to life rather than
 //             as a different image.
 //
-// The animation comes in two forms, split at the same 48px the grain
-// density is (grain-density.js).
+// The animation comes in two forms, split at 48px -- the pack's own
+// line, above which it asks for grains and below which it asks for the
+// solid fill.
 //
 // Below it the mark **holds its dwell crisp**: it settles, sharpens into
 // the solid glyph, dissolves back into sand to move, and re-forms. A
@@ -80,13 +87,31 @@ const STILL_SRC = { light: "/grain-mark-light.svg", dark: "/grain-mark-dark.svg"
 // and no loss for a signal that only has to say "something is running".
 const CRISP_MS = 900;
 
-// The cross-fades. Settling is the slower of the two because it is the
-// one being watched -- the grains have already stopped by then, so the
-// fade is the whole of the motion. Dissolving runs under the first
-// stretch of a flight that is already moving, and only has to not be a
-// cut.
-const SETTLE_MS = 240;
+// The cross-fades, and where in the flight the settling one starts.
+//
+// SETTLE_AT is the fix for a dead beat that was very visible. The
+// module eases the flight in and out with a cubic, so the last fifth of
+// its clock covers three percent of the distance: 260ms in which the
+// grains have visibly arrived and nothing is happening. Waiting for the
+// clock and only then fading meant the crisp glyph landed after a third
+// of a second of stillness, which reads as a snap however soft the fade
+// is. Starting at seven tenths -- 91% of the distance, still visibly
+// moving -- the fade finishes just before the flight's own clock does,
+// and the mark crystallizes as it arrives instead of after it.
+//
+// Settling is the slower fade because it is the one being watched.
+// Dissolving runs under the first stretch of a flight that is already
+// moving, and only has to not be a cut.
+const SETTLE_AT = 0.7;
+const SETTLE_MS = 280;
 const DISSOLVE_MS = 160;
+
+// The mark crisps below this and runs the pack's uninterrupted cycle at
+// or above it. The pack's own line: it asks for grains from 48px up and
+// the solid fill below 32px, and what settles that range for grain is
+// that a stipple holding still at icon size reads as mush while at hero
+// scale it *is* the picture.
+const CRISP_BELOW_PX = 48;
 
 export default function GrainMark({ size = 28, animated = false, title, className }) {
   const theme = useTheme();
@@ -96,7 +121,7 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
   const solidRef = useRef(null);
   // Below the threshold the animation crisps between flights, which is
   // what puts a second canvas under the grains to crisp onto.
-  const crisps = size < DENSE_BELOW_PX;
+  const crisps = size < CRISP_BELOW_PX;
   // A mark that cannot paint (a canvas-less environment -- jsdom under
   // vitest, most obviously) falls back to the still rather than leaving
   // a blank box where the brand should be.
@@ -131,10 +156,13 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
     // as the display allows -- the radius is a fraction of canvas.width,
     // so it already scales itself and needs no dpr correction.
     //
-    // markSpec, not the module's grainSpec: below 48px grain stipples
-    // the glyph more thickly than the pack does, so the small marks read
-    // as shapes rather than as hatching. See grain-density.js.
-    const spec = markSpec(size);
+    // The count is the pack's own. An earlier pass stippled the small
+    // marks three times as thickly, to make a *settled* one read as a
+    // shape rather than as hatching; crisping made that unnecessary and
+    // then actively harmful, because the one place those grains are
+    // still seen is the flight, and at that density a 20px mark in the
+    // air is a featureless blob rather than sand.
+    const spec = grainSpec(size);
     const mark = createGrainMark(canvas, {
       theme: mode,
       count: spec.count,
@@ -183,15 +211,14 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
       // grains is whichever one they just landed on.
       renderStatic(solid, { slot, style: "solid", theme: mode });
       fade(false, SETTLE_MS);
-      timer = setTimeout(fly, CRISP_MS);
+      timer = setTimeout(fly, SETTLE_MS + CRISP_MS);
     };
     const fly = () => {
       fade(true, DISSOLVE_MS);
       slot = (slot + 1) % GLYPHS.length;
       mark.setMode(slot);
-      // A beat past the flight's own length, so the grains have landed
-      // before the mark starts sharpening onto them.
-      timer = setTimeout(crisp, DEFAULTS.snapSeconds * 1000 + 60);
+      // Into the flight's own tail rather than after it: see SETTLE_AT.
+      timer = setTimeout(crisp, DEFAULTS.snapSeconds * 1000 * SETTLE_AT);
     };
     const halt = () => {
       clearTimeout(timer);
