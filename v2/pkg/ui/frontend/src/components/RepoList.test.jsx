@@ -228,4 +228,67 @@ describe("RepoList", () => {
     expect(onNewTask).toHaveBeenCalledWith("acme/gadgets");
     expect(onOpenRepo).not.toHaveBeenCalled();
   });
+
+  it("opens a row's New branch form and loads its branches, without also opening the repo", async () => {
+    api.mockResolvedValueOnce([]);
+    const onOpenRepo = vi.fn();
+    const user = userEvent.setup();
+    renderList({ onOpenRepo });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "New branch" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/branches");
+    expect(screen.getByPlaceholderText("feature/foo")).toBeInTheDocument();
+    expect(onOpenRepo).not.toHaveBeenCalled();
+  });
+
+  it("closes a row's New branch form when its button is clicked again", async () => {
+    api.mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderList();
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    const toggle = () => within(row).getByRole("button", { name: "New branch" });
+    await user.click(toggle());
+    expect(screen.getByPlaceholderText("feature/foo")).toBeInTheDocument();
+
+    await user.click(toggle());
+    expect(screen.queryByPlaceholderText("feature/foo")).not.toBeInTheDocument();
+  });
+
+  it("creates a branch and refreshes the branch list on success", async () => {
+    api.mockResolvedValueOnce([]); // the load on opening the form
+    api.mockResolvedValueOnce({ repo: "acme/gadgets", name: "myfeat", status: "pending", createdAt: "2026-01-01T00:00:00Z" });
+    api.mockResolvedValueOnce([{ repo: "acme/gadgets", name: "myfeat", status: "pending", createdAt: "2026-01-01T00:00:00Z" }]);
+    const user = userEvent.setup();
+    renderList();
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "New branch" }));
+    await user.type(screen.getByPlaceholderText("feature/foo"), "myfeat");
+    await user.click(within(row).getByRole("button", { name: "Create branch" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/branches", {
+      method: "POST", body: JSON.stringify({ name: "myfeat" }),
+    });
+    const item = await screen.findByText("myfeat");
+    expect(item.closest("li")).toHaveTextContent("myfeat -- pending");
+  });
+
+  it("reports the error when creating a branch fails, without clearing the field", async () => {
+    api.mockResolvedValueOnce([]); // the load on opening the form
+    api.mockRejectedValueOnce(new Error("invalid branch name"));
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    renderList({ showError });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "New branch" }));
+    await user.type(screen.getByPlaceholderText("feature/foo"), "bad name");
+    await user.click(within(row).getByRole("button", { name: "Create branch" }));
+
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "invalid branch name" }));
+    expect(screen.getByPlaceholderText("feature/foo")).toHaveValue("bad name");
+  });
 });

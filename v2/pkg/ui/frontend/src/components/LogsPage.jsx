@@ -3,21 +3,22 @@ import { Alert, Button, FormControl, InputLabel, MenuItem, Select, Typography } 
 import api from "../api.js";
 
 // REFRESH_MS is how often this panel re-fetches the selected source's log
-// lines while Settings' Debug tab is open -- the same order of magnitude
+// lines while the Debug overlay is open -- the same order of magnitude
 // as App.jsx's own POLL_INTERVAL_MS, so a log tailed here moves about as
 // often as the task list does.
 const REFRESH_MS = 5000;
 const LINES_TO_FETCH = 500;
 
-// LogsPage is the Logs panel of Settings' Debug tab (bwsalmon/agents#623)
-// -- it used to be a full nav entry of its own (bwsalmon/agents#457)
-// before moving in alongside Sandbox health and the reboot control, the
-// same consolidation bwsalmon/agents#456 already gave Secrets/Upgrade.
-// GET /api/logs' own "enabled" flag says whether this deployment has any
-// log sources configured at all; when it doesn't (`grain demo`'s
-// throwaway UI, or any UI not colocated with a real daemon), this shows a
-// note instead of a pane that could only ever 404, the same convention
-// SecretsPanel/UpgradePanel already use for their own optional pieces.
+// LogsPage is the Logs panel of DebugOverlay.jsx -- it used to be a full
+// nav entry of its own (bwsalmon/agents#457), then a tab inside Settings
+// alongside Sandbox health and the reboot control (bwsalmon/agents#623),
+// before settling on its own "Debugging" sidebar entry, apart from
+// Settings (bwsalmon/agents#640). GET /api/logs' own "enabled" flag says
+// whether this deployment has any log sources configured at all; when it
+// doesn't (`grain demo`'s throwaway UI, or any UI not colocated with a
+// real daemon), this shows a note instead of a pane that could only ever
+// 404, the same convention SecretsPanel/UpgradePanel already use for
+// their own optional pieces.
 export default function LogsPage({ showError }) {
   const [sources, setSources] = useState(null);
   const [source, setSource] = useState(null);
