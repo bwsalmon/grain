@@ -257,10 +257,10 @@ describe("TaskList", () => {
     expect(queuedDot).not.toHaveClass("badge-mark");
     expect(queuedDot).toBeEmptyDOMElement();
     expect(runningDot).toHaveClass("badge-mark");
-    // jsdom has no canvas (setupTests.js), so GrainMark falls back to its
-    // still <img> here rather than the canvas it paints in a browser --
-    // see GrainMark.test.jsx for the animated path itself.
-    expect(runningDot.querySelector("img")).toHaveAttribute("title", "Running");
+    // At the badge's size the mark plays a pre-recorded sheet rather
+    // than painting, so it needs no canvas and renders here the same way
+    // it does in a browser -- see GrainMark.test.jsx for the mechanics.
+    expect(runningDot.querySelector(".grain-mark-sheet")).toHaveAttribute("title", "Running");
   });
 
   describe("search (bwsalmon/agents#460)", () => {
