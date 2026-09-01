@@ -42,7 +42,16 @@ import "strconv"
 // existing database cannot simply be re-created into. Open records this
 // and refuses a database written by a newer build, rather than failing
 // later with a confusing missing column.
-const SchemaVersion = 15
+//
+// 16 is the removal of slots: task_run lost its slot column and its
+// one-open-run-per-slot index. Nothing migrates a database across that
+// -- Init's own CREATE TABLE IF NOT EXISTS never alters a table that
+// already exists, so an older store would keep a slot column still
+// declared NOT NULL with no default, which every startRun would then
+// fail to satisfy. This bump is what tells ../scripts/setup.sh to move
+// such a store aside at deploy instead (cmd/grain/schemaversion.go's own
+// doc comment).
+const SchemaVersion = 16
 
 // Tables is the DDL, in dependency order.
 var Tables = []string{

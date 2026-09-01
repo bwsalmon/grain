@@ -92,9 +92,6 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskInteractiveColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
-	if err := s.ensureTaskRunSlotColumnDropped(ctx); err != nil {
-		return fmt.Errorf("migrating task_run: %w", err)
-	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -171,41 +168,6 @@ func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `slots`")
-	return err
-}
-
-// ensureTaskRunSlotColumnDropped removes task_run's old slot column, and
-// with it the one-open-run-per-slot index that column carried, from a
-// database created while slots still existed. It is the task_run
-// counterpart to ensureConfigMaxConcurrentColumn above, which did the
-// same for grain_config's own slots column one step earlier -- and it
-// drops rather than backfills for the reason that one gives too: a
-// column still declared NOT NULL with no default breaks every later
-// startRun, which stops supplying it.
-//
-// Nothing reads a historical run's slot, so nothing is migrated out of
-// it before it goes. A finished run's slot said which of N interchangeable,
-// generated identifiers ("1", "2", ...) that run happened to be assigned;
-// its sandbox column already says the more useful half of the same thing,
-// and under a sandbox per run says it exactly.
-//
-// The index is dropped explicitly rather than left to SQLite: DROP COLUMN
-// refuses outright while an index still references the column, so the
-// order here is load-bearing. task_run_open_task (schema.go) is created
-// by the DDL pass that runs before this one, so the invariant is never
-// unindexed in between.
-func (s *Store) ensureTaskRunSlotColumnDropped(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT `slot` FROM `task_run` WHERE 1 = 0")
-	if err != nil {
-		// No slot column -- a database created after slots, or one this
-		// has already run against.
-		return nil
-	}
-	rows.Close()
-	if _, err := s.db.ExecContext(ctx, "DROP INDEX IF EXISTS `task_run_open_slot`"); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` DROP COLUMN `slot`")
 	return err
 }
 
@@ -1157,10 +1119,9 @@ var ErrAtCapacity = errors.New("model: the concurrency limit is already reached"
 // then issues a StartRun per unit of headroom it found, so nothing in Go
 // stops two overlapping Cycle calls from both seeing the same headroom
 // and both spending it. Under slots, a unique index on the slot each run
-// claimed caught that after the fact (schema.go's own task_run_open_slot,
-// bwsalmon/agents#434); with nothing left to claim, the count and the
-// insert simply happen together instead, which rules the race out rather
-// than detecting it. A maxConcurrent of 0 or less disables the check --
+// claimed caught that after the fact (bwsalmon/agents#434); with nothing
+// left to claim, the count and the insert simply happen together
+// instead, which rules the race out rather than detecting it. A maxConcurrent of 0 or less disables the check --
 // for a caller with no limit of its own to enforce, such as a test
 // starting a run directly.
 func (s *Store) StartRun(ctx context.Context, r Run, maxConcurrent int) error {
