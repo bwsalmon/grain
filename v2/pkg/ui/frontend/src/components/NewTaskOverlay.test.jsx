@@ -48,11 +48,14 @@ describe("NewTaskOverlay", () => {
   });
 
   // bwsalmon/agents#534: a per-task sandbox shape override.
+  // bwsalmon/agents#613: it now lives behind the "Advanced options" toggle
+  // alongside the interactive-session checkbox, so open that first.
   it("includes a sandbox shape override when given", async () => {
     const user = userEvent.setup();
     render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
     await user.type(screen.getByLabelText(/vCPUs/), "4");
     await user.type(screen.getByLabelText(/Memory \(MiB\)/), "8192");
     await user.click(screen.getByRole("button", { name: "Create task" }));
@@ -126,6 +129,8 @@ describe("NewTaskOverlay", () => {
   // bwsalmon/agents#539: an interactive task always queues immediately
   // (no "Queue immediately" checkbox left to check), and its creator is
   // taken straight to its chat rather than back to the task list.
+  // bwsalmon/agents#613: the interactive-session checkbox lives behind the
+  // "Advanced options" toggle, so open that first.
   it("files an interactive task as approved and opens its chat once created", async () => {
     api.mockResolvedValueOnce({ id: "42" });
     const onOpenTask = vi.fn();
@@ -135,6 +140,7 @@ describe("NewTaskOverlay", () => {
     );
 
     await user.type(screen.getByLabelText(/Title/), "Talk this through");
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
     await user.click(screen.getByLabelText(/Interactive session/));
     expect(screen.queryByLabelText(/Queue immediately/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create task" }));
