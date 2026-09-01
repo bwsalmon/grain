@@ -83,7 +83,7 @@ import (
 // on -- an env var apiece here instead of flags, since `go test` is how
 // this file is invoked either way.
 type loadConfig struct {
-	slots         int
+	slots         int // the concurrency limit; still named for the env var that sets it
 	repos         int
 	writers       int
 	initialTasks  int
@@ -162,10 +162,6 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 	}
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	slots := make([]string, cfg.slots)
-	for i := range slots {
-		slots[i] = fmt.Sprintf("sandbox-a9918c9a-load-%d", i)
-	}
 	repos := make([]model.RepoRef, cfg.repos)
 	for i := range repos {
 		repos[i] = model.RepoRef{Owner: "acme", Name: fmt.Sprintf("repo-%d", i)}
@@ -185,8 +181,8 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 		Framework: func() agent.Framework {
 			return gemini.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics))
 		},
-		Config: orchestrator.Config{Capabilities: registry},
-		Slots:  slots,
+		Config:        orchestrator.Config{Capabilities: registry},
+		MaxConcurrent: cfg.slots,
 	}
 
 	// Seed a backlog before the sustained phase starts, so every slot has
@@ -258,11 +254,11 @@ func storeIsQuiet(t *testing.T, ctx context.Context, store *model.Store) bool {
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
-		t.Fatalf("OccupiedSlots: %v", err)
+		t.Fatalf("LiveRunCount: %v", err)
 	}
-	return len(ready) == 0 && len(occupied) == 0
+	return len(ready) == 0 && occupied == 0
 }
 
 func runOneTick(t *testing.T, ctx context.Context, store *model.Store, deps orchestrator.Deps, metrics *loadMetrics) {
@@ -513,12 +509,12 @@ func loadRetryBackoff(streak int) time.Duration {
 // (dispatch.go's own doc comment) and so lists a backing-off task too.
 func assertDrainedCleanly(t *testing.T, ctx context.Context, store *model.Store) {
 	t.Helper()
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
-		t.Fatalf("OccupiedSlots: %v", err)
+		t.Fatalf("LiveRunCount: %v", err)
 	}
-	if len(occupied) != 0 {
-		t.Errorf("scheduling: %d slot(s) still occupied after draining -- a dispatched run never finished: %v", len(occupied), occupied)
+	if occupied != 0 {
+		t.Errorf("scheduling: %d slot(s) still occupied after draining -- a dispatched run never finished: %v", occupied, occupied)
 	}
 
 	ready, err := store.Ready(ctx)

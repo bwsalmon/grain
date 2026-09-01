@@ -35,8 +35,8 @@ func TestGetSandboxHealthReportsUnavailableWithNeitherConfigured(t *testing.T) {
 func TestGetSandboxHealthReportsEverySandboxAndTheHost(t *testing.T) {
 	srv, client := testServer(t)
 	client.Config.Sandboxes = fakeSandboxHealth{snapshots: []ui.SandboxSnapshot{
-		{Slot: "0", Backend: "kontur", Name: "grain-0", Ready: true, LoadAverage: "0.1 0.2 0.3", MemoryUsedMB: 100, MemoryTotalMB: 200},
-		{Slot: "1", Backend: "kontur", Name: "grain-1", Error: "unreachable"},
+		{Backend: "kontur", Name: "grain-0", Ready: true, LoadAverage: "0.1 0.2 0.3", MemoryUsedMB: 100, MemoryTotalMB: 200},
+		{Backend: "kontur", Name: "grain-1", Error: "unreachable"},
 	}}
 	client.Config.HostStats = func() (ui.HostPressure, error) {
 		return ui.HostPressure{LoadAverage1: 1.5, MemoryUsedMB: 512, MemoryTotalMB: 1024}, nil
@@ -68,7 +68,7 @@ func TestGetSandboxHealthReportsEverySandboxAndTheHost(t *testing.T) {
 
 func TestGetSandboxHealthReportsHostErrorWithoutHidingSandboxes(t *testing.T) {
 	srv, client := testServer(t)
-	client.Config.Sandboxes = fakeSandboxHealth{snapshots: []ui.SandboxSnapshot{{Slot: "0", Backend: "host", Name: "/tmp/sandbox-0", Ready: true}}}
+	client.Config.Sandboxes = fakeSandboxHealth{snapshots: []ui.SandboxSnapshot{{Backend: "host", Name: "/tmp/sandbox-0", Ready: true}}}
 	client.Config.HostStats = func() (ui.HostPressure, error) { return ui.HostPressure{}, errors.New("not on linux") }
 
 	rec := do(t, srv, http.MethodGet, "/api/sandboxes", "")

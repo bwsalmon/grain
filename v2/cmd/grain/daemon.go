@@ -21,9 +21,9 @@
 // fleet this deployment shape has nowhere to run. -kontur-vm-name-prefix
 // is the opt in to the real alternative (bwsalmon/agents#274):
 // orchestrator.KonturSandboxes, one real bwsalmon/kontur-managed VM per
-// slot, reached over SSH. -max-concurrent sizes the pool either way
-// (bwsalmon/agents#461: model.SlotNames turns the count into the
-// generated slot identifiers each backend actually keys on); nothing
+// run, reached over SSH. -max-concurrent caps how many runs are in
+// flight at once either way, and a sandbox is built for each of them and
+// destroyed with it; nothing
 // above pkg/orchestrator.Deps needs to change to serve more than one.
 //
 // graind originally drove pkg/orchestrate, a package built independently
@@ -111,7 +111,7 @@ func daemon(args []string) {
 
 	fs := flag.NewFlagSet("grain daemon", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "root directory for the store and secrets -- the state a redeploy must not lose (required)")
-	sandboxDir := fs.String("sandbox-dir", "", "root directory orchestrator.HostSandboxes creates one per-slot working directory under, for local "+
+	sandboxDir := fs.String("sandbox-dir", "", "root directory orchestrator.HostSandboxes creates one working directory per run under, for local "+
 		"(non-kontur) sandboxing -- required unless -kontur-vm-name-prefix selects orchestrator.KonturSandboxes instead. Deliberately a separate "+
 		"flag from -data-dir rather than a subdirectory of it (bwsalmon/agents#587): a task's checked-out repo and whatever it wrote into its "+
 		"sandbox are disposable, unlike the store and secrets under -data-dir, so this belongs on storage that a VM wipe or redeploy is free to "+
@@ -157,9 +157,9 @@ func daemon(args []string) {
 	// host, no isolation) exactly as it always has -- see run()'s own
 	// comment on sandboxes below. -kontur-vm-name-prefix is the opt in to
 	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
-	// managed VM per slot, reached over SSH.
+	// managed VM per run, reached over SSH.
 	konturVMNamePrefix := fs.String("kontur-vm-name-prefix", "",
-		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
+		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per run, named <prefix>+<run id>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
 		"kontur's VM state directory (only used with -kontur-vm-name-prefix)")
@@ -175,8 +175,8 @@ func daemon(args []string) {
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
 	fs.Var(&konturCreateArgs, "kontur-create-arg",
-		"one argument appended verbatim to `konturctl vm create <name> -state-dir <dir>` when a slot's VM does not "+
-			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
+		"one argument appended verbatim to the `konturctl vm create <name> -state-dir <dir>` that builds a run's "+
+			"VM -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
 			"-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images -kontur-create-arg=-disk "+
 			"-kontur-create-arg=/images/current/disk.img -kontur-create-arg=-kernel "+
@@ -187,11 +187,8 @@ func daemon(args []string) {
 			"publishing\", and v2/scripts/setup.sh's own ensure_kontur_images, which is what actually copies "+
 			"it there for terraform/gcp-v2 -- -guest-port 22 is not optional: konturctl's own default is 80, "+
 			"which silently refuses every connection to this image's actual sshd). Only used with "+
-			"-kontur-vm-name-prefix. "+
-			"Leave -ip/-port out of this list "+
-			"and set -kontur-base-ip/-kontur-base-port instead once -max-concurrent is more than 1 -- konturctl has "+
-			"no default for either and no way to vary a value shared verbatim across every slot's create call, so "+
-			"without one of those two, every slot's VM would otherwise be created with the exact same address.")
+			"-kontur-vm-name-prefix. Under -kontur-net nat, prefer -kontur-base-ip/-kontur-base-port over "+
+			"putting -ip/-port here: they are appended last, so they win over this list.")
 	konturNet := fs.String("kontur-net", kontur.NetModeFlat,
 		"how a kontur VM reaches the network: \"flat\" (the default -- the guest is spliced onto the sandbox "+
 			"container's own segment and takes over the address docker assigned it, so -kontur-base-ip/"+
@@ -200,12 +197,16 @@ func daemon(args []string) {
 			"image built from kontur's own guest overlays, for the control link \"kontur exec\" arrives on -- "+
 			"packer/kontur/build-guest.sh produces one.")
 	konturBaseIP := fs.String("kontur-base-ip", "",
-		"the -ip slot \"1\"'s kontur VM gets on netshim's bridge; every later slot's is the next IPv4 address after "+
-			"it. Leave unset for a single-slot (-max-concurrent 1) deployment content to put a literal -ip in "+
-			"-kontur-create-arg itself. Only used with -kontur-vm-name-prefix.")
+		"the -ip every kontur VM is created with under -kontur-net nat, passed verbatim. Each VM has its own "+
+			"network namespace under the docker backend (its own netns-holder container), so they do not "+
+			"collide; this used to be a base that each slot's number was added to, back when a slot's VM was "+
+			"long-lived, which was guarding against "+
+			"a shared bridge the docker backend does not have. Ignored under flat mode, and only used with "+
+			"-kontur-vm-name-prefix.")
 	konturBasePort := fs.Int("kontur-base-port", 0,
-		"the -port slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own "+
-			"number minus one, the same derivation -kontur-base-ip uses. Only used with -kontur-vm-name-prefix.")
+		"the -port every kontur VM is created with under -kontur-net nat, passed verbatim -- a DNAT target "+
+			"inside that VM's own namespace, not a port published on this host. Ignored under flat mode, and "+
+			"only used with -kontur-vm-name-prefix.")
 	konturGitProxyHost := fs.String("kontur-git-proxy-host", "",
 		"host (no port) this daemon's git proxy is reachable at from inside a kontur VM's own guest, in place "+
 			"of the loopback address the proxy binds to by default -- required with -kontur-vm-name-prefix. A "+
@@ -214,7 +215,7 @@ func daemon(args []string) {
 			"127.0.0.1 that never reaches this process's -- so a clone against the default 127.0.0.1 proxy URL "+
 			"fails the moment it leaves the guest (bwsalmon/agents#567: \"Failed to connect to 127.0.0.1 ... "+
 			"Couldn't connect to server\"). Setting this makes startGitProxy bind on every interface instead of "+
-			"just loopback, and advertise this host to every slot's sandbox in loopback's place -- typically the "+
+			"just loopback, and advertise this host to every run's sandbox in loopback's place -- typically the "+
 			"docker bridge gateway address the guest's own outbound NAT routes through to reach this host (see "+
 			"netshim's masqueradeExprs); run `docker network inspect bridge` (or whichever network the kontur VM "+
 			"containers join) and read \"Gateway\" if unsure -- commonly 172.17.0.1.")
@@ -368,7 +369,7 @@ type config struct {
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
 // under cfg.dataDir (the store, secrets) and, for local sandboxing,
-// cfg.sandboxDir (HostSandboxes' own per-slot directories -- deliberately
+// cfg.sandboxDir (HostSandboxes' own per-run directories -- deliberately
 // not under cfg.dataDir, see -sandbox-dir's own flag doc comment), and
 // starts the reconcile loop; it returns only once
 // ctx is cancelled. With -ui-addr set, a failure in the rest of the
@@ -389,16 +390,10 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("loading deployment configuration: %w", err)
 	}
-	// slots is the generated set of dispatch.Cycle slot identifiers
-	// cfg.maxConcurrent expands into (model.SlotNames' own doc comment) --
-	// every sandbox/token/git-credential/Deps wiring below that used to
-	// walk an operator-chosen cfg.slots list now walks this instead.
-	slots := model.SlotNames(cfg.maxConcurrent)
-
 	// Sandboxing defaults to orchestrator.HostSandboxes -- one local
-	// directory per slot, no isolation -- exactly as it always has;
-	// -kontur-vm-name-prefix opts into orchestrator.KonturSandboxes
-	// instead: one real bwsalmon/kontur-managed VM per slot, reached over
+	// directory per run, torn down with it; -kontur-vm-name-prefix opts
+	// into orchestrator.KonturSandboxes instead: one real
+	// bwsalmon/kontur-managed VM per run, reached over
 	// SSH (pkg/orchestrator's own doc comment: "Sandboxing defaults to
 	// 'execute on the host,' deliberately, for now, with a real host
 	// adapter available as an opt in"). Exactly one of hostSandboxes/
@@ -416,11 +411,18 @@ func run(ctx context.Context, cfg config) error {
 			SSHUser:         cfg.konturSSHUser,
 			ExecKeyPath:     cfg.konturExecKey,
 			Workspace:       cfg.konturWorkspace,
-			BaseIP:          cfg.konturBaseIP,
-			BasePort:        cfg.konturBasePort,
+			IP:              cfg.konturBaseIP,
+			Port:            cfg.konturBasePort,
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
 		})
+		// Checked once here rather than discovered one dispatch at a time:
+		// a prefix with no room for a run's own name cannot build a single
+		// VM, and every task that reaches Acquire would fail on it
+		// individually. See KonturSandboxes.CheckNamePrefix.
+		if err := konturSandboxes.CheckNamePrefix(); err != nil {
+			return err
+		}
 		sandboxes = konturSandboxes
 	} else {
 		// orchestrator.NewHostSandboxes' own doc comment says its baseDir
@@ -444,8 +446,8 @@ func run(ctx context.Context, cfg config) error {
 	// orchestrator.RunDispatch and gemini.LiveTranscriptDir each
 	// independently compute) is what lets them talk to each other without
 	// either package importing the other. It must exist before any run
-	// can write into it -- orchestrator's own HostSandboxes.RootFor makes
-	// the same "must already exist" assumption about its own baseDir.
+	// can write into it -- orchestrator's own NewHostSandboxes makes the
+	// same "must already exist" assumption about its own baseDir.
 	transcriptDir := filepath.Join(cfg.dataDir, "state", "transcripts")
 	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		return fmt.Errorf("creating transcript directory: %w", err)
@@ -453,7 +455,7 @@ func run(ctx context.Context, cfg config) error {
 
 	// The UI/API server starts here, as early as its own dependencies (the
 	// store, sandboxes, and transcriptDir above) allow -- deliberately
-	// before the git proxy, per-slot credentials, the Gemini agent
+	// before the git proxy, the Gemini agent
 	// framework, and RunCycle's own reconcile loop, none of which the UI
 	// needs a working copy of to serve the store's existing tasks, runs,
 	// and logs (bwsalmon/agents#550: "make sure ui with logs stays up even
@@ -477,7 +479,7 @@ func run(ctx context.Context, cfg config) error {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			if err := runDaemon(ctx, cfg, store, slots, sandboxes, hostSandboxes, konturSandboxes, transcriptDir); err != nil {
+			if err := runDaemon(ctx, cfg, store, sandboxes, hostSandboxes, konturSandboxes, transcriptDir); err != nil {
 				// reconcilerDown is what turns this log line into
 				// something GET /api/config (and, through it, the UI
 				// itself) can also see -- bwsalmon/agents#576: before
@@ -505,14 +507,15 @@ func run(ctx context.Context, cfg config) error {
 		return nil
 	}
 
-	return runDaemon(ctx, cfg, store, slots, sandboxes, hostSandboxes, konturSandboxes, transcriptDir)
+	return runDaemon(ctx, cfg, store, sandboxes, hostSandboxes, konturSandboxes, transcriptDir)
 }
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
-// and reconcile tasks: minting per-slot sandbox tokens, the git proxy,
-// rebuilding every kontur-backed slot's sandbox, per-slot git
-// credentials, the Gemini agent framework, orphaned-run recovery, and
-// RunCycle's own reconcile loop. run() calls it exactly once, either
+// and reconcile tasks: the git proxy, the Gemini agent framework,
+// orphaned-run and orphaned-VM recovery, and RunCycle's own reconcile
+// loop. Sandbox tokens and git credentials are not among them any more:
+// both are per run now, minted and configured as each run's sandbox is
+// built (orchestrator's runOne). run() calls it exactly once, either
 // inline (-ui-addr disabled, so there is no UI server worth
 // keeping up on its own -- a setup failure here is still this process's
 // only job, so it is still fatal the way it always was) or in a goroutine
@@ -521,131 +524,32 @@ func run(ctx context.Context, cfg config) error {
 // take the UI server run() already started down with it
 // (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
 // reconcile itself does; a non-nil error means it never got that far.
-func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []string, sandboxes orchestrator.Sandboxes, hostSandboxes *orchestrator.HostSandboxes, konturSandboxes *orchestrator.KonturSandboxes, transcriptDir string) (err error) {
+func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, hostSandboxes *orchestrator.HostSandboxes, konturSandboxes *orchestrator.KonturSandboxes, transcriptDir string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 
-	// Mint every slot's sandbox token, and only then start the git proxy
-	// -- BuildProxy's own doc comment on gitproxy.LoadSandboxTokens says
-	// the proxy "loads the map once at startup and only ever looks
-	// tokens up," never re-reading sandbox-tokens.json afterward. Doing
-	// this the other way around (as an earlier version of this function
-	// did) starts the proxy against whatever tokens already happened to
-	// be on disk -- none, on a fresh -data-dir -- so every token minted
-	// afterward is one the running proxy can never recognize, and every
-	// git push through it fails closed with 401 "authentication
-	// required" for the rest of the process's life. cmd/graind/live_test.go's
-	// TestRunLiveDispatchesAndOpensAPullRequest caught this live: a real
-	// dispatched agent's push was rejected by the proxy every time.
-	roots := map[string]string{}
-	slotTokens := map[string]string{}
+	// The git proxy is started before anything can dispatch onto it, but
+	// nothing is minted or configured here any more. A sandbox token used
+	// to be minted per slot, right here, specifically because the proxy
+	// read sandbox-tokens.json once at startup and never again -- so a
+	// token minted after it started was one it could never recognise, and
+	// every push through it failed closed with a 401 (cmd/graind/
+	// live_test.go's TestRunLiveDispatchesAndOpensAPullRequest caught
+	// exactly that, live). With a sandbox per run there is no set of
+	// sandboxes to mint for ahead of time: each run mints its own as it
+	// prepares its sandbox (orchestrator's runOne), and the proxy re-reads
+	// the file when shown a token it does not know (gitproxy.
+	// SandboxTokens' own doc comment), which is what makes that safe.
 	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(cfg.dataDir, "secrets", "sandbox-tokens.json"))
-	for _, slot := range slots {
-		if hostSandboxes != nil {
-			root, err := hostSandboxes.RootFor(slot)
-			if err != nil {
-				return fmt.Errorf("preparing sandbox for %s: %w", slot, err)
-			}
-			roots[slot] = root
-		}
-		token, err := tokens.EnsureToken(slot)
-		if err != nil {
-			return fmt.Errorf("minting sandbox token for %s: %w", slot, err)
-		}
-		slotTokens[slot] = token
-	}
 
 	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP, cfg.konturGitProxyHost)
 	if err != nil {
 		return fmt.Errorf("starting git proxy: %w", err)
 	}
 	defer stopProxy(context.Background())
-
-	// Every kontur-backed slot's VM is rebuilt from scratch here, before
-	// anything is configured on it and long before RunCycle can dispatch
-	// onto it -- the startup half of the isolation boundary
-	// bwsalmon/agents#353 asked for between one task and the next.
-	//
-	// dispatch already recreates a slot's VM after every task it finishes
-	// (pkg/orchestrator/cycle.go's own runOne, success or failure alike),
-	// so in the ordinary case -- a clean shutdown, or a deployment with no
-	// VMs yet -- this pass finds nothing to tear down and is exactly the
-	// create the loop below would have made on its own. What it covers is
-	// the one case that path cannot: a process killed mid-run leaves that
-	// run's VM behind with its whole filesystem intact, and
-	// KonturSandboxes.ensure deliberately adopts an already-existing VM
-	// rather than rebuilding it ("the same 'reuse what's there' choice
-	// HostSandboxes.RootFor makes", its own doc comment), so without this
-	// the next task dispatched onto that slot inherits the dead one's
-	// checkout, credentials and leftover processes. RecoverOrphanedRuns
-	// (below) is the store-side half of recovering from that same death;
-	// it reconciles the rows a killed process left live, and has no
-	// sandbox to reach.
-	//
-	// Rebuilding here rather than lazily at the next dispatch is what
-	// keeps the cost off the critical path: a slot's VM boots while this
-	// process is still starting up, not while a task that was ready to
-	// run waits on it.
-	//
-	// HostSandboxes implements no Recreate at all -- the local-directory
-	// stand-in is deliberately long-lived (cycle.go's own
-	// recreatingSandboxes doc comment) -- so this pass is kontur-only, the
-	// same as the per-slot work in the loop below.
-	if konturSandboxes != nil {
-		for _, slot := range slots {
-			if err := resetSlotSandbox(ctx, slot, func() error {
-				return konturSandboxes.Recreate(ctx, slot)
-			}); err != nil {
-				return fmt.Errorf("resetting the sandbox for %s: %w", slot, err)
-			}
-		}
-	}
-
-	for _, slot := range slots {
-		// Configuring git credentials is a one-time, per-slot setup step,
-		// not a per-task one -- git-credential-store matches on
-		// protocol+host, not path, so this single line covers every repo
-		// this slot will ever be pointed at through the proxy. See
-		// mcp/git_credentials.go's own doc comment. For a kontur-backed
-		// slot this also creates that slot's VM if nothing has yet, the
-		// same way ToolsFor's first call would have -- doing it here
-		// instead means a slot's VM is up, and reachable, before RunCycle
-		// ever tries to dispatch onto it. The reset pass above has
-		// normally already created it, so this ordinarily configures a VM
-		// that is up rather than booting one; the fallback matters for a
-		// host-backed deployment, which that pass skips entirely.
-		//
-		// configureSlotGitCredentials retries this with backoff rather
-		// than this loop returning (and runDaemon along with it) on the
-		// first failure -- bwsalmon/agents#576: this step used to be
-		// fatal-but-non-crashing by design (bwsalmon/agents#550, so a bad
-		// one-time setup step never crash-loops systemd), which also
-		// meant one transient failure -- a flaky first-boot VM create, the
-		// proxy not accepting connections yet -- permanently wedged
-		// reconciliation for the rest of the process's life, recoverable
-		// only by a human noticing the log line and restarting the
-		// process by hand. Retrying keeps #550's own tradeoff (never exit
-		// on this) while actually giving a transient failure a chance to
-		// clear on its own.
-		remoteURL := proxyURL + "/placeholder/placeholder.git"
-		if hostSandboxes != nil {
-			root := roots[slot]
-			if err := configureSlotGitCredentials(ctx, slot, func() error {
-				return mcp.ConfigureGitCredentials(root, remoteURL, slotTokens[slot])
-			}); err != nil {
-				return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
-			}
-			continue
-		}
-		if err := configureSlotGitCredentials(ctx, slot, func() error {
-			return konturSandboxes.ConfigureGitCredentials(ctx, slot, remoteURL, slotTokens[slot])
-		}); err != nil {
-			return fmt.Errorf("configuring git credentials for %s: %w", slot, err)
-		}
-	}
 
 	apiKey, err := readTrimmedFile(cfg.geminiAPIKeyFile)
 	if err != nil {
@@ -674,6 +578,22 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []stri
 		log.Printf("grain daemon: recovering orphaned runs: %v", err)
 	}
 
+	// The sandbox-side half of that same recovery, and at the same moment
+	// for the same reason: a run's VM is deleted when the run ends, so at
+	// startup -- before this process has dispatched anything -- any VM
+	// under this deployment's prefix belongs to a process that died before
+	// it could do that. Logged rather than fatal: a VM that cannot be
+	// reaped costs some memory on the host, where refusing to start costs
+	// the whole deployment, and every run this process dispatches builds
+	// its own VM regardless.
+	if konturSandboxes != nil {
+		if reaped, err := konturSandboxes.ReapOrphans(ctx); err != nil {
+			log.Printf("grain daemon: reaping orphaned kontur VMs: %v", err)
+		} else if reaped > 0 {
+			log.Printf("grain daemon: reaped %d kontur VM(s) left behind by a previous process", reaped)
+		}
+	}
+
 	deps := orchestrator.Deps{
 		Store: store, Client: githubClient, Sandboxes: sandboxes,
 		Framework: func() agent.Framework { return agentFramework },
@@ -689,78 +609,20 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, slots []stri
 			GitRemoteBase: proxyURL,
 			GrantTools:    grantTools(cfg.upgradeSrcDir),
 		},
-		Slots: slots,
+		MintSandboxToken:   tokens.EnsureToken,
+		RevokeSandboxToken: tokens.Revoke,
+		MaxConcurrent:      cfg.maxConcurrent,
 	}
-	log.Printf("grain daemon: reconciling every %s across %d concurrent slot(s) %v", cfg.pollInterval, cfg.maxConcurrent, slots)
+	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s)", cfg.pollInterval, cfg.maxConcurrent)
 	reconcile(ctx, deps, cfg.pollInterval)
 	return nil
-}
-
-// slotProvisionRetryBaseDelay and slotProvisionRetryMaxDelay bound
-// configureSlotGitCredentials' own backoff between attempts: the first
-// retry waits slotProvisionRetryBaseDelay, doubling on every subsequent
-// failure up to slotProvisionRetryMaxDelay, at which point it keeps
-// retrying at that same interval for as long as ctx stays alive. Neither
-// is exposed as a flag -- like reapInterval below, nothing about a
-// deployment's own -poll-interval or -max-concurrent bears on how often
-// a stuck provisioning step should be re-tried -- but both are vars
-// rather than consts so daemon_reconciler_recovery_test.go can shrink
-// them for the length of a single test rather than that test spending
-// real minutes waiting out a production backoff.
-var (
-	slotProvisionRetryBaseDelay = 5 * time.Second
-	slotProvisionRetryMaxDelay  = 5 * time.Minute
-)
-
-// configureSlotGitCredentials runs fn -- either a hostSandboxes slot's
-// mcp.ConfigureGitCredentials call or a konturSandboxes one (which also
-// creates that slot's VM) -- until it succeeds or ctx is cancelled,
-// retrying with capped exponential backoff on every failure instead of
-// the single attempt runDaemon used to make (bwsalmon/agents#576). A
-// transient failure -- the proxy not yet accepting connections, a flaky
-// first-boot VM create -- now clears on its own instead of wedging
-// reconciliation for the rest of the process's life; a permanent one (a
-// bad -kontur-create-args, say) retries forever rather than exiting,
-// which is the same "never crash-loop systemd over a bad one-time setup
-// step" tradeoff bwsalmon/agents#550 already made for this exact call
-// site, just applied per slot instead of failing runDaemon's caller
-// outright. The only way this returns a non-nil error is ctx itself
-// ending mid-retry, which only happens as part of the process already
-// shutting down.
-func configureSlotGitCredentials(ctx context.Context, slot string, fn func() error) error {
-	return retryWithBackoff(ctx, slotProvisionRetryBaseDelay, slotProvisionRetryMaxDelay, func(attempt int, err error) {
-		log.Printf("grain daemon: configuring git credentials for %s (attempt %d): %v -- retrying", slot, attempt, err)
-	}, fn)
-}
-
-// resetSlotSandbox runs fn -- one slot's KonturSandboxes.Recreate -- until
-// it succeeds or ctx is cancelled, with the same capped exponential
-// backoff configureSlotGitCredentials above uses and for the same reason
-// (bwsalmon/agents#576): this execs a real "konturctl vm delete" and
-// "konturctl vm create" against a host that may not be ready for either
-// yet, and one transient failure must not wedge reconciliation for the
-// rest of the process's life.
-//
-// Retrying forever rather than giving up and dispatching anyway is the
-// deliberate half of that. A slot whose VM could not be rebuilt is a slot
-// that may still be holding the previous run's filesystem, and running
-// the next task in it would defeat the isolation the pass exists to
-// guarantee -- so a permanent failure here stalls that slot rather than
-// quietly downgrading to a dirty one, the same "never crash-loop systemd
-// over a one-time setup step" tradeoff bwsalmon/agents#550 made, applied
-// per slot. The only way this returns a non-nil error is ctx itself
-// ending mid-retry, which only happens as part of shutdown.
-func resetSlotSandbox(ctx context.Context, slot string, fn func() error) error {
-	return retryWithBackoff(ctx, slotProvisionRetryBaseDelay, slotProvisionRetryMaxDelay, func(attempt int, err error) {
-		log.Printf("grain daemon: resetting the sandbox for %s (attempt %d): %v -- retrying", slot, attempt, err)
-	}, fn)
 }
 
 // retryWithBackoff calls fn until it returns nil or ctx is cancelled,
 // waiting baseDelay after the first failure and doubling that wait after
 // every failure thereafter, capped at maxDelay, so a caller retrying
-// forever (configureSlotGitCredentials above) settles into a steady
-// interval rather than hammering whatever fn talks to. onFailure runs
+// forever settles into a steady interval rather than hammering whatever
+// fn talks to. onFailure runs
 // between an attempt and the wait that follows it, purely to report the
 // failure -- daemon_reconciler_retry_test.go's own coverage of this
 // passes baseDelay/maxDelay small enough to run fast rather than mocking
@@ -1253,7 +1115,7 @@ func rebootHost(ctx context.Context) error {
 	return exec.CommandContext(ctx, "sudo", "systemctl", "reboot").Run()
 }
 
-// sandboxHealthAdapter adapts orchestrator's own SlotHealth (a core
+// sandboxHealthAdapter adapts orchestrator's own SandboxHealth (a core
 // dispatch type) onto ui.SandboxSnapshot (a presentation DTO) field by
 // field -- the one place both types are ever in scope together, so
 // neither package needs to import the other (see ui/sandbox_health.go's
@@ -1267,16 +1129,16 @@ type sandboxHealthAdapter struct {
 
 func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 	reporter, ok := a.inner.(interface {
-		Health(context.Context) []orchestrator.SlotHealth
+		Health(context.Context) []orchestrator.SandboxHealth
 	})
 	if !ok {
 		return nil
 	}
-	slots := reporter.Health(ctx)
-	out := make([]ui.SandboxSnapshot, len(slots))
-	for i, s := range slots {
+	sandboxes := reporter.Health(ctx)
+	out := make([]ui.SandboxSnapshot, len(sandboxes))
+	for i, s := range sandboxes {
 		out[i] = ui.SandboxSnapshot{
-			Slot:          s.Slot,
+			Sandbox:       s.Sandbox,
 			Backend:       s.Backend,
 			Name:          s.Name,
 			Ready:         s.Ready,

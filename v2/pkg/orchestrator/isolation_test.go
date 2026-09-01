@@ -19,7 +19,6 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
@@ -43,18 +42,18 @@ func (c failingClient) GetPullRequest(owner, repo string, number int) (github.Pu
 	return c.Client.GetPullRequest(owner, repo, number)
 }
 
-// failingSandboxes fails ToolsFor for one slot, so exactly one of a
-// cycle's dispatches cannot run while the others can.
+// failingSandboxes refuses to build one named sandbox, so exactly one of
+// a cycle's dispatches cannot run while the others can.
 type failingSandboxes struct {
-	inner orchestrator.Sandboxes
-	slot  string
+	inner   orchestrator.Sandboxes
+	sandbox string
 }
 
-func (s failingSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
-	if slot == s.slot {
+func (s failingSandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
+	if name == s.sandbox {
 		return nil, errInjected
 	}
-	return s.inner.ToolsFor(ctx, slot)
+	return s.inner.Acquire(ctx, name, shape)
 }
 
 // stubFramework is agent.Framework's one method returning a fixed result,
@@ -139,11 +138,11 @@ func TestRunCycleSyncsPullRequestsEvenWhenDispatchFails(t *testing.T) {
 		Store:  store,
 		Client: client,
 		Sandboxes: failingSandboxes{
-			inner: orchestrator.NewHostSandboxes(t.TempDir()),
-			slot:  "bad",
+			inner:   orchestrator.NewHostSandboxes(t.TempDir()),
+			sandbox: "t2-r1",
 		},
-		Framework: completesWithAComment(),
-		Slots:     []string{"bad"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -166,11 +165,11 @@ func TestRunCycleDispatchesEvenWhenPullRequestSyncFails(t *testing.T) {
 	queued := filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:     store,
-		Client:    failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
-		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: completesWithAComment(),
-		Slots:     []string{"good"},
+		Store:         store,
+		Client:        failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
+		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -213,11 +212,11 @@ func TestRunCycleReportsEveryFailingReconcilerNotJustTheFirst(t *testing.T) {
 		Store:  store,
 		Client: failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
 		Sandboxes: failingSandboxes{
-			inner: orchestrator.NewHostSandboxes(t.TempDir()),
-			slot:  "bad",
+			inner:   orchestrator.NewHostSandboxes(t.TempDir()),
+			sandbox: "t2-r1",
 		},
-		Framework: completesWithAComment(),
-		Slots:     []string{"bad"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -263,7 +262,7 @@ func TestSyncPullRequestsClosesOutEveryTaskWhenOneFails(t *testing.T) {
 // their dispatch: dispatch.Cycle has already durably recorded a run for
 // each, so skipping the rest would idle them for a tick over a failure
 // that is not theirs.
-func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
+func TestRunCycleRunsEveryDispatchWhenOneSandboxFails(t *testing.T) {
 	store, ctx := openStore(t)
 	_, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -275,11 +274,11 @@ func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
 		Store:  store,
 		Client: client,
 		Sandboxes: failingSandboxes{
-			inner: orchestrator.NewHostSandboxes(t.TempDir()),
-			slot:  "bad",
+			inner:   orchestrator.NewHostSandboxes(t.TempDir()),
+			sandbox: "t1-r1",
 		},
-		Framework: completesWithAComment(),
-		Slots:     []string{"bad", "good"},
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 2,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -287,9 +286,8 @@ func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
 		t.Fatalf("RunCycle error = %v, want the injected sandbox failure", err)
 	}
 
-	// Which task lands in which slot is dispatch.Cycle's business, not
-	// this test's -- what matters is that the good slot's dispatch ran
-	// rather than being abandoned along with the bad one's.
+	// t1's sandbox is the one that cannot be built; t2's dispatch must
+	// still have run rather than being abandoned along with it.
 	completed := 0
 	for _, id := range []string{first.ID, second.ID} {
 		if stateOf(t, ctx, store, id) == model.StateCompleted {
@@ -297,6 +295,6 @@ func TestRunCycleRunsEveryDispatchWhenOneSlotFails(t *testing.T) {
 		}
 	}
 	if completed != 1 {
-		t.Fatalf("completed %d of 2 dispatches, want exactly 1: the good slot's run should still have happened", completed)
+		t.Fatalf("completed %d of 2 dispatches, want exactly 1: the dispatch whose sandbox built fine should still have run", completed)
 	}
 }

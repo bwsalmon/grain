@@ -65,11 +65,11 @@ func TestRunCycleRecoversFromAPanickingReconciler(t *testing.T) {
 	queued := filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:     store,
-		Client:    panickingClient{Client: client, panicOn: pullRequestNumber(t, watched)},
-		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: completesWithAComment(),
-		Slots:     []string{"good"},
+		Store:         store,
+		Client:        panickingClient{Client: client, panicOn: pullRequestNumber(t, watched)},
+		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:     completesWithAComment(),
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -101,11 +101,11 @@ func TestRunCycleRecoversFromAPanickingDispatch(t *testing.T) {
 	filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:     store,
-		Client:    client,
-		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return panickingFramework{} },
-		Slots:     []string{"bad"},
+		Store:         store,
+		Client:        client,
+		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:     func() agent.Framework { return panickingFramework{} },
+		MaxConcurrent: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)

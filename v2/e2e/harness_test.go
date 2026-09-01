@@ -12,7 +12,7 @@
 // v2/README.md's "What this does not have yet" section is why this
 // package stops where it does: no host adapter means no real sandbox VM
 // (NewSandboxTools' root stands in, as it does everywhere else in v2 —
-// see world.roots), and this harness builds no github.Client at all, so
+// see world.sandboxRoot), and this harness builds no github.Client at all, so
 // "the PR opened" and "the issue closed" are simulated with the same
 // store.Observe calls model/simulate_test.go's GitHub-sync helpers
 // already use, rather than a real API response. A merge is simulated the
@@ -28,7 +28,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +37,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +50,7 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
@@ -67,14 +68,25 @@ type world struct {
 	ctx         context.Context
 	upstreamDir string
 	proxyURL    string
-	roots       map[string]string // slot -> its sandbox-stand-in directory
+
+	tokens *gitproxy.SandboxTokenStore
+	mu     sync.Mutex
+	roots  map[string]string // sandbox name -> its sandbox-stand-in directory
 }
 
-// newWorld builds one world with a fixed slot pool, credentialed up
-// front exactly as a long-lived sandbox's git config would be at
-// provisioning time -- see mcp/git_credentials.go's own docstring on why
-// that only needs doing once per slot, not once per task.
-func newWorld(t *testing.T, slots []string) *world {
+// newWorld builds one world with no sandboxes in it. A sandbox is built
+// when a run needs one (sandboxRoot), minting that run's own proxy token
+// as it goes -- which is what a real deployment does now that a sandbox
+// exists for exactly one run.
+//
+// It used to take a fixed slot pool and credential every slot up front,
+// because that is what a long-lived sandbox's git config genuinely was:
+// provisioning-time setup, done once per slot rather than once per task.
+// Nothing is set up ahead of time here any more, and the proxy is started
+// against an empty token file -- it re-reads on an unknown token
+// (gitproxy.SandboxTokens), which is what lets a run mint one while the
+// proxy is already serving.
+func newWorld(t *testing.T) *world {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -98,16 +110,6 @@ func newWorld(t *testing.T, slots []string) *world {
 	dataDir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dataDir, "secrets", "github", "credentials.json"), `{"*": "anonymous"}`)
 
-	tokens := map[string]string{}
-	for _, s := range slots {
-		tokens[s] = s + "-token"
-	}
-	tokensJSON, err := json.Marshal(tokens)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustWriteFile(t, filepath.Join(dataDir, "secrets", "sandbox-tokens.json"), string(tokensJSON))
-
 	proxy, err := gitproxy.BuildProxy(gitproxy.BuildConfig{
 		DataDir: dataDir, Store: store, ForwardHost: backendHost, ForwardTLS: false,
 	})
@@ -116,22 +118,55 @@ func newWorld(t *testing.T, slots []string) *world {
 	}
 	proxyURL := newTestServer(t, gitproxy.NewHandler(proxy))
 
-	w := &world{
+	return &world{
 		t: t, store: store, ctx: ctx, upstreamDir: upstreamDir,
-		proxyURL: proxyURL, roots: map[string]string{},
+		proxyURL: proxyURL,
+		tokens:   gitproxy.NewSandboxTokenStore(filepath.Join(dataDir, "secrets", "sandbox-tokens.json")),
+		roots:    map[string]string{},
 	}
-	for _, s := range slots {
-		root := t.TempDir()
-		// The path in this dummy remote is never used -- only its scheme
-		// and host are, to build the credential-store line -- so any repo
-		// name stands in here even though this slot may later run tasks
-		// against several different repos through the same proxy.
-		if err := mcp.ConfigureGitCredentials(root, proxyURL+"/placeholder/placeholder.git", tokens[s]); err != nil {
-			t.Fatalf("configuring git credentials for %s: %v", s, err)
-		}
-		w.roots[s] = root
+}
+
+// sandboxRoot is the directory standing in for sandbox's own filesystem,
+// built and credentialed on first use -- this harness's equivalent of
+// orchestrator.HostSandboxes.Acquire plus the token minting and
+// ConfigureGitCredentials call runOne makes around it.
+func (w *world) sandboxRoot(sandbox string) string {
+	w.t.Helper()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if root, ok := w.roots[sandbox]; ok {
+		return root
 	}
-	return w
+	token, err := w.tokens.EnsureToken(sandbox)
+	if err != nil {
+		w.t.Fatalf("minting a token for %s: %v", sandbox, err)
+	}
+	root := w.t.TempDir()
+	// The path in this dummy remote is never used -- only its scheme and
+	// host are, to build the credential-store line -- so any repo name
+	// stands in here even though this run may touch several different
+	// repos through the same proxy.
+	if err := mcp.ConfigureGitCredentials(root, w.proxyURL+"/placeholder/placeholder.git", token); err != nil {
+		w.t.Fatalf("configuring git credentials for %s: %v", sandbox, err)
+	}
+	w.roots[sandbox] = root
+	return root
+}
+
+// prepareSandbox builds d's own sandbox directory and records its name on
+// the run, which is what orchestrator.runOne does once it has acquired
+// one. The record is load-bearing, not bookkeeping: the git proxy
+// resolves the token a sandbox authenticates with back to the task whose
+// repos it may touch by looking up the live run on that sandbox name
+// (Store.GitScope), so without it every clone through the proxy comes
+// back 403 "not in scope for this sandbox".
+func (w *world) prepareSandbox(d dispatch.Dispatch) string {
+	w.t.Helper()
+	root := w.sandboxRoot(d.RunID)
+	if err := w.store.SetRunSandbox(w.ctx, d.RunID, d.RunID); err != nil {
+		w.t.Fatalf("recording run %s's sandbox: %v", d.RunID, err)
+	}
+	return root
 }
 
 // newRepo creates a bare repo at upstream/owner/name.git seeded with one
@@ -170,18 +205,15 @@ func (w *world) remote(owner, name string) string {
 	return w.proxyURL + "/" + owner + "/" + name + ".git"
 }
 
-// runDispatch drives one dispatch.Cycle Dispatch to completion in its slot's
-// sandbox-stand-in directory, through a scripted (not live) gemini
+// runDispatch drives one dispatch.Cycle Dispatch to completion in its own
+// run's sandbox-stand-in directory, through a scripted (not live) gemini
 // agent, and calls FinishRun once the agent's turn ends. It does not
 // touch task_observation -- that is the GitHub-sync stand-in's job,
 // applied by the caller from the returned result, the same separation
 // model/simulate_test.go's components hold to.
 func (w *world) runDispatch(d dispatch.Dispatch, script []*genai.GenerateContentResponse, at time.Time) *agent.Result {
 	w.t.Helper()
-	root := w.roots[d.Slot]
-	if root == "" {
-		w.t.Fatalf("dispatch landed on slot %q, which this world never credentialed", d.Slot)
-	}
+	root := w.prepareSandbox(d)
 	fw := gemini.NewForTest(&scriptedGenerator{responses: script})
 	result, err := fw.Run(w.ctx, agent.RunConfig{Prompt: "work the task", SandboxRoot: root})
 	if err != nil {
@@ -319,6 +351,31 @@ func pushScript(remote, branch, taskID string) []*genai.GenerateContentResponse 
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
+		"git push origin " + branch
+	return []*genai.GenerateContentResponse{
+		toolCall("run_command", map[string]any{"command": cmd}),
+		finalText("pushed " + branch),
+	}
+}
+
+// pushScriptOwnFile is pushScript with one difference: the agent writes a
+// file named for its own task rather than appending to a shared NOTES.md.
+//
+// That matters wherever several independent tasks' branches are all
+// merged into one default branch, because appending to the same file from
+// two branches conflicts on merge -- which says nothing about the task
+// model and everything about the scripted content. It surfaced when
+// sandboxes became per-run: before that, a second dispatch inherited the
+// previous run's directory, `git clone work` failed against the one
+// already sitting there, and the run failed before it could ever push.
+// The happy path a simulation is meant to exercise was being skipped, so
+// the conflict never arose. (A merge conflict on purpose is
+// mergequeue_conflict_test.go's own subject.)
+func pushScriptOwnFile(remote, branch, taskID string) []*genai.GenerateContentResponse {
+	cmd := "git clone " + remote + " work && cd work && " +
+		"git checkout -b " + branch + " && " +
+		"echo 'change for " + taskID + "' > NOTES-" + taskID + ".md && " +
+		"git add NOTES-" + taskID + ".md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
 	return []*genai.GenerateContentResponse{
 		toolCall("run_command", map[string]any{"command": cmd}),
@@ -468,5 +525,107 @@ func gitHTTPBackend(projectRoot string) http.HandlerFunc {
 		}
 		w.WriteHeader(status)
 		w.Write(respBody)
+	}
+}
+
+// credentialedSandboxes wraps a Sandboxes backend so every sandbox a
+// dispatch builds gets a git identity pointed at remote, at the moment a
+// real deployment gives it one -- as part of preparing the run, not
+// before the cycle. Without it `git commit` fails outright in a fresh
+// sandbox (mcp.ConfigureGitCredentials' own doc comment).
+//
+// These tests used to do it by hand, once per slot, up front: a slot's
+// directory outlived every run dispatched into it, so provisioning-time
+// setup was exactly what it was. A sandbox does not exist until its
+// dispatch builds it now, so this is the only place left to do it.
+//
+// It also keeps each sandbox's directory alive past Release, and records
+// where it was, so a test can read back what a run actually left on disk
+// (rootOf). A real Release deletes the directory -- that is the whole
+// point of it, and orchestrator's own lifecycle_test.go is where it is
+// asserted -- but a test asserting on a placement the run wrote has to be
+// able to look after the cycle has finished. The directories are under
+// t.TempDir() either way, so nothing outlives the test.
+type credentialedSandboxes struct {
+	inner  orchestrator.Sandboxes
+	remote string
+	t      *testing.T
+
+	mu    sync.Mutex
+	roots map[string]string
+}
+
+func (s *credentialedSandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
+	sb, err := s.inner.Acquire(ctx, name, shape)
+	if err != nil {
+		return nil, err
+	}
+	// Returned, never t.Fatalf'd: reconcileDispatch calls Acquire on its
+	// own goroutine, one per dispatch, and t.Fatalf outside the test
+	// goroutine calls runtime.Goexit on the wrong one -- the test does not
+	// stop where it says it did, and the failure surfaces somewhere less
+	// useful. runOne already turns this error into a failed dispatch.
+	if err := sb.ConfigureGitCredentials(ctx, s.remote, "unused"); err != nil {
+		return nil, fmt.Errorf("configuring git credentials on %s: %w", name, err)
+	}
+	rooted, ok := sb.(interface{ Root() (string, error) })
+	if !ok {
+		// Only HostSandboxes is wired up here, and a sandbox with no local
+		// directory would silently give runOne an empty sandboxRoot to
+		// place capabilities into -- see keptSandbox.
+		return nil, fmt.Errorf("e2e: sandbox %s has no local directory; this harness only wraps HostSandboxes", name)
+	}
+	root, err := rooted.Root()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.roots[name] = root
+	s.mu.Unlock()
+	return keptSandbox{Sandbox: sb, root: root}, nil
+}
+
+// rootOf is the directory the named sandbox was given, for a test reading
+// back what its run wrote.
+func (s *credentialedSandboxes) rootOf(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	root, ok := s.roots[name]
+	if !ok {
+		s.t.Fatalf("no sandbox named %q was ever acquired (acquired: %v)", name, s.roots)
+	}
+	return root
+}
+
+// keptSandbox is a Sandbox whose Release does nothing -- see
+// credentialedSandboxes' own doc comment on why these tests keep the
+// directory around.
+//
+// Root is forwarded explicitly rather than left to the embedded Sandbox:
+// rootedSandbox is an optional interface runOne type-asserts for, and an
+// embedded interface value does not carry methods outside its own method
+// set, so wrapping a host sandbox without this makes a task with
+// capabilities fail with "no local directory to place them in".
+type keptSandbox struct {
+	orchestrator.Sandbox
+	root string
+}
+
+// Root is unconditional, which is only safe because Acquire above refuses
+// a sandbox that has no local directory of its own. rootedSandbox is an
+// optional interface runOne type-asserts for, so a wrapper that always
+// implements it turns "this backend has no directory to place
+// capabilities in" from a refused dispatch into a placement written to
+// "".
+func (s keptSandbox) Root() (string, error) { return s.root, nil }
+
+func (keptSandbox) Release(ctx context.Context) error { return nil }
+
+// credentialed is credentialedSandboxes over a fresh HostSandboxes -- the
+// two lines almost every dispatch-driving test here needs.
+func credentialed(t *testing.T, remote string) *credentialedSandboxes {
+	return &credentialedSandboxes{
+		inner: orchestrator.NewHostSandboxes(t.TempDir()), remote: remote, t: t,
+		roots: map[string]string{},
 	}
 }

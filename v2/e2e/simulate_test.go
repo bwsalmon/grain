@@ -51,8 +51,8 @@ type simTask struct {
 }
 
 func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
-	slots := []string{"sandbox-bd453be9-sim-1", "sandbox-bd453be9-sim-2", "sandbox-bd453be9-sim-3"}
-	w := newWorld(t, slots)
+	const maxConcurrent = 3
+	w := newWorld(t)
 
 	repos := []model.RepoRef{
 		{Owner: "acme", Name: "widgets"},
@@ -95,7 +95,7 @@ func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
 		// itself excludes anything already running, so a task with an
 		// unresolved live run from an earlier round is never redispatched
 		// out from under itself.
-		dispatches, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
+		dispatches, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
 		if err != nil {
 			t.Fatalf("round %d: Cycle: %v", round, err)
 		}
@@ -151,7 +151,7 @@ func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
 			}
 		}
 
-		checkSimInvariants(t, w, round, tasks, order, slots)
+		checkSimInvariants(t, w, round, tasks, order, maxConcurrent)
 	}
 
 	// The run must actually have exercised every path it set out to --
@@ -191,7 +191,7 @@ func resolveLiveRun(t *testing.T, w *world, round int, id string, st *simTask, r
 	var script []*genai.GenerateContentResponse
 	switch r := rng.Float64(); {
 	case r < 0.55:
-		script = pushScript(w.remote(st.repo.Owner, st.repo.Name), st.branch, id)
+		script = pushScriptOwnFile(w.remote(st.repo.Owner, st.repo.Name), st.branch, id)
 	case r < 0.8:
 		script = failScript("simulated failure")
 	default:
@@ -243,7 +243,7 @@ func pickRandom(rng *rand.Rand, order []string, ok func(string) bool) (string, b
 // checkSimInvariants is the property this test exists to guarantee,
 // checked after every round rather than once at the end so a failure
 // points at the round that broke it.
-func checkSimInvariants(t *testing.T, w *world, round int, tasks map[string]*simTask, order []string, slots []string) {
+func checkSimInvariants(t *testing.T, w *world, round int, tasks map[string]*simTask, order []string, maxConcurrent int) {
 	t.Helper()
 
 	wantOccupied := 0
@@ -312,14 +312,14 @@ func checkSimInvariants(t *testing.T, w *world, round int, tasks map[string]*sim
 		}
 	}
 
-	occ, err := w.store.OccupiedSlots(w.ctx)
+	occ, err := w.store.LiveRunCount(w.ctx)
 	if err != nil {
-		t.Fatalf("round %d: OccupiedSlots: %v", round, err)
+		t.Fatalf("round %d: LiveRunCount: %v", round, err)
 	}
-	if len(occ) != wantOccupied {
-		t.Fatalf("round %d: store reports %d occupied slots, sim expects %d: %v", round, len(occ), wantOccupied, occ)
+	if occ != wantOccupied {
+		t.Fatalf("round %d: store reports %d live runs, sim expects %d", round, occ, wantOccupied)
 	}
-	if len(occ) > len(slots) {
-		t.Fatalf("round %d: %d slots occupied, only %d exist", round, len(occ), len(slots))
+	if occ > maxConcurrent {
+		t.Fatalf("round %d: %d runs live, over the limit of %d", round, occ, maxConcurrent)
 	}
 }

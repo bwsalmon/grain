@@ -20,9 +20,9 @@ func TestGetAttemptTranscriptReturnsWhatWasRecorded(t *testing.T) {
 	task := create(t, client, ctx)
 
 	if err := client.Store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Slot: "s1", Sandbox: "s1",
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}); err != nil {
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Store.FinishRun(ctx, "r1", baseTime.Add(time.Minute), "succeeded", ""); err != nil {

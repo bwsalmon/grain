@@ -59,9 +59,8 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 	ctx := context.Background()
 
 	task := dispatchTask(t, ctx, store1, "t1")
-	slots := []string{"slot-1"}
 
-	dispatches, err := dispatch.Cycle(ctx, store1, slots, baseTime)
+	dispatches, err := dispatch.Cycle(ctx, store1, 1, baseTime)
 	if err != nil {
 		t.Fatalf("Cycle: %v", err)
 	}
@@ -86,7 +85,7 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 	// still excludes t1 -- this must hold across the restart exactly as
 	// it holds within one process (dispatch_test.go's own
 	// TestCycleLeavesAnAlreadyRunningTaskAlone).
-	again, err := dispatch.Cycle(ctx, store2, slots, baseTime.Add(time.Minute))
+	again, err := dispatch.Cycle(ctx, store2, 1, baseTime.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Cycle after restart: %v", err)
 	}
@@ -101,12 +100,12 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 	if n, err := store2.Attempts(ctx, task.ID); err != nil || n != 1 {
 		t.Fatalf("Attempts after restart = %d (%v), want exactly 1: the crashed run must not have vanished", n, err)
 	}
-	occupied, err := store2.OccupiedSlots(ctx)
+	occupied, err := store2.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 1 || occupied[0] != "slot-1" {
-		t.Fatalf("occupied slots after restart = %v, want exactly [slot-1], still held by the crashed run", occupied)
+	if occupied != 1 {
+		t.Fatalf("live runs after restart = %d, want exactly 1, still held by the crashed run", occupied)
 	}
 	if st, err := store2.State(ctx, task.ID); err != nil || st != model.StateRunning {
 		t.Fatalf("state after restart = %q (%v), want %q: neither finished nor forgotten", st, err, model.StateRunning)
@@ -181,7 +180,7 @@ func TestCrashAfterMaterializingACapabilityDoesNotLeakItPastReapsWindow(t *testi
 	ctx := context.Background()
 
 	dispatchTask(t, ctx, store1, "t1", model.Grant{Capability: "gcp-key", Via: model.GrantByLabel})
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store1, d, baseTime)
 	task, err := store1.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -232,12 +231,12 @@ func TestCrashAfterMaterializingACapabilityDoesNotLeakItPastReapsWindow(t *testi
 	defer db2.Close()
 
 	// The run is still marked live; it is not lost by the crash.
-	occupied, err := store2.OccupiedSlots(ctx)
+	occupied, err := store2.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 1 {
-		t.Fatalf("occupied slots after restart = %v, want exactly one: the crashed run must not be lost", occupied)
+	if occupied != 1 {
+		t.Fatalf("live runs after restart = %v, want exactly one: the crashed run must not be lost", occupied)
 	}
 
 	// A reap comfortably inside the 24h default window must leave the

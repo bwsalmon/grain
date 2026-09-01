@@ -165,8 +165,8 @@ func TestAgentSessionLeasesAreRevokedWhenARunFinishes(t *testing.T) {
 			MintedBy: model.CredentialRef{Name: "gcp-host-service-account"}, IssuedAt: now},
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: 1, StartedAt: now, Leases: leases,
-	}); err != nil {
+		ID: "r1", TaskID: "a1b2", Sandbox: "s1", Attempt: 1, StartedAt: now, Leases: leases,
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if live, err := store.LiveLeases(ctx, ""); err != nil || len(live) != 2 {
@@ -242,12 +242,12 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 		}
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "t0-r1", TaskID: "t0", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now,
-	}); err != nil {
+		ID: "t0-r1", TaskID: "t0", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now,
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if occ, _ := store.OccupiedSlots(ctx); len(occ) != 1 || occ[0] != "sandbox-1" {
-		t.Fatalf("occupied = %v, want [sandbox-1]", occ)
+	if occ, _ := store.LiveRunCount(ctx); occ != 1 {
+		t.Fatalf("live runs = %d, want 1", occ)
 	}
 
 	// A sandbox is long-lived and recreated on demand, not per task: what
@@ -255,16 +255,16 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 	if err := store.FinishRun(ctx, "t0-r1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	if occ, _ := store.OccupiedSlots(ctx); len(occ) != 0 {
+	if occ, _ := store.LiveRunCount(ctx); occ != 0 {
 		t.Fatalf("occupied after finish = %v, want none", occ)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "t1-r1", TaskID: "t1", Slot: "sandbox-1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour),
-	}); err != nil {
+		ID: "t1-r1", TaskID: "t1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour),
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if occ, _ := store.OccupiedSlots(ctx); len(occ) != 1 || occ[0] != "sandbox-1" {
-		t.Fatalf("occupied after reassignment = %v, want [sandbox-1] again", occ)
+	if occ, _ := store.LiveRunCount(ctx); occ != 1 {
+		t.Fatalf("live runs after reassignment = %d, want 1 again", occ)
 	}
 }
 
@@ -285,8 +285,8 @@ func TestClosingATaskWhileItsRunIsStillLiveOutranksRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: "a1b2", Slot: "s1", Sandbox: "s1", Attempt: 1, StartedAt: now,
-	}); err != nil {
+		ID: "r1", TaskID: "a1b2", Sandbox: "s1", Attempt: 1, StartedAt: now,
+	}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := store.State(ctx, "a1b2"); st != model.StateRunning {
@@ -298,8 +298,8 @@ func TestClosingATaskWhileItsRunIsStillLiveOutranksRunning(t *testing.T) {
 	if st, _ := store.State(ctx, "a1b2"); st != model.StateClosed {
 		t.Errorf("state after closing = %q, want closed even though the run never finished", st)
 	}
-	if occ, _ := store.OccupiedSlots(ctx); len(occ) != 1 {
-		t.Errorf("occupied slots = %v, want the slot still held: closing does not itself free it", occ)
+	if occ, _ := store.LiveRunCount(ctx); occ != 1 {
+		t.Errorf("live runs = %d, want the run still live: closing does not itself finish it", occ)
 	}
 }
 
@@ -311,10 +311,10 @@ func TestClosingATaskWhileItsRunIsStillLiveOutranksRunning(t *testing.T) {
 // below compare two independent records of the same history rather than
 // reading the store back to check itself.
 type taskState struct {
-	liveRunID string
-	liveSlot  string
-	leases    []leaseInfo
-	attempts  int
+	liveRunID   string
+	liveSandbox string
+	leases      []leaseInfo
+	attempts    int
 }
 
 type leaseInfo struct {
@@ -324,7 +324,7 @@ type leaseInfo struct {
 func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 	store, ctx := open(t)
 	rng := rand.New(rand.NewPCG(1, 220))
-	slots := []string{"sandbox-875b71e5-1", "sandbox-875b71e5-2", "sandbox-875b71e5-3"}
+	const maxConcurrent = 3
 	leaseCaps := []string{"gemini-key", "gcp-key", "github-app-token"}
 	const maxTasks = 14
 
@@ -351,7 +351,7 @@ func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 		}
 
 		// Dispatcher / sandbox: hand every ready task a free slot.
-		dispatchReadyTasks(t, store, ctx, rng, world, slots, clock, leaseCaps)
+		dispatchReadyTasks(t, store, ctx, rng, world, maxConcurrent, clock, leaseCaps)
 
 		// Agent session: for a live run, ask a question or finish.
 		for _, id := range order {
@@ -386,7 +386,7 @@ func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 			reapARandomLease(t, store, ctx, rng, world, order)
 		}
 
-		checkModelInvariants(t, store, ctx, round, world, order, slots)
+		checkModelInvariants(t, store, ctx, round, world, order)
 	}
 }
 
@@ -444,23 +444,14 @@ func approveARandomProposedTask(t *testing.T, store *model.Store, ctx context.Co
 }
 
 func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, rng *rand.Rand,
-	world map[string]*taskState, slots []string, clock time.Time, leaseCaps []string) {
+	world map[string]*taskState, maxConcurrent int, clock time.Time, leaseCaps []string) {
 	t.Helper()
-	occupied, err := store.OccupiedSlots(ctx)
+	live, err := store.LiveRunCount(ctx)
 	if err != nil {
-		t.Fatalf("OccupiedSlots: %v", err)
+		t.Fatalf("LiveRunCount: %v", err)
 	}
-	busy := map[string]bool{}
-	for _, s := range occupied {
-		busy[s] = true
-	}
-	var free []string
-	for _, s := range slots {
-		if !busy[s] {
-			free = append(free, s)
-		}
-	}
-	if len(free) == 0 {
+	free := maxConcurrent - live
+	if free <= 0 {
 		return
 	}
 
@@ -483,8 +474,7 @@ func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, r
 		}
 	}
 
-	rng.Shuffle(len(free), func(i, j int) { free[i], free[j] = free[j], free[i] })
-	for i, slot := range free {
+	for i := 0; i < free; i++ {
 		if i >= len(ready) {
 			break
 		}
@@ -499,7 +489,10 @@ func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, r
 
 		attempt := ts.attempts + 1
 		runID := fmt.Sprintf("%s-r%d", id, attempt)
-		run := model.Run{ID: runID, TaskID: id, Slot: slot, Sandbox: slot, Attempt: attempt, StartedAt: clock}
+		// The sandbox is the run's own, named after it -- what
+		// orchestrator.runOne records via SetRunSandbox once it has
+		// acquired one.
+		run := model.Run{ID: runID, TaskID: id, Sandbox: runID, Attempt: attempt, StartedAt: clock}
 		var leases []leaseInfo
 		for n := rng.IntN(3); n > 0; n-- {
 			capability := leaseCaps[rng.IntN(len(leaseCaps))]
@@ -515,10 +508,10 @@ func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, r
 			run.Leases = append(run.Leases, l)
 			leases = append(leases, leaseInfo{runID: runID, capability: capability, resource: resource})
 		}
-		if err := store.StartRun(ctx, run); err != nil {
+		if err := store.StartRun(ctx, run, 0); err != nil {
 			t.Fatalf("StartRun(%s): %v", id, err)
 		}
-		ts.liveRunID, ts.liveSlot, ts.leases, ts.attempts = runID, slot, leases, attempt
+		ts.liveRunID, ts.liveSandbox, ts.leases, ts.attempts = runID, runID, leases, attempt
 	}
 }
 
@@ -558,7 +551,7 @@ func finishRun(t *testing.T, store *model.Store, ctx context.Context, ts *taskSt
 			t.Fatalf("DropLease(%s,%s,%s): %v", l.runID, l.capability, l.resource, err)
 		}
 	}
-	ts.liveRunID, ts.liveSlot, ts.leases = "", "", nil
+	ts.liveRunID, ts.liveSandbox, ts.leases = "", "", nil
 }
 
 func observeCompleted(t *testing.T, store *model.Store, ctx context.Context, id string, clock time.Time) {
@@ -616,29 +609,29 @@ func reapARandomLease(t *testing.T, store *model.Store, ctx context.Context, rng
 // and the pure Go derivation agree on every task's state; a task's
 // attempt count is exactly how many times it has been dispatched; every
 // live lease the store reports is one a component believes it still
-// holds and no more; and no slot is ever double-booked.
+// holds and no more; and no sandbox is ever shared by two live runs.
 func checkModelInvariants(t *testing.T, store *model.Store, ctx context.Context, round int,
-	world map[string]*taskState, order []string, slots []string) {
+	world map[string]*taskState, order []string) {
 	t.Helper()
 
-	occupiedByOracle := map[string]bool{}
+	sandboxes := map[string]bool{}
 	for _, id := range order {
 		ts := world[id]
 		if ts.liveRunID == "" {
 			continue
 		}
-		if occupiedByOracle[ts.liveSlot] {
-			t.Fatalf("round %d: slot %s double-booked in the oracle itself", round, ts.liveSlot)
+		if sandboxes[ts.liveSandbox] {
+			t.Fatalf("round %d: sandbox %s held by two live runs in the oracle itself", round, ts.liveSandbox)
 		}
-		occupiedByOracle[ts.liveSlot] = true
+		sandboxes[ts.liveSandbox] = true
 	}
-	occ, err := store.OccupiedSlots(ctx)
+	occ, err := store.LiveRunCount(ctx)
 	if err != nil {
-		t.Fatalf("round %d: OccupiedSlots: %v", round, err)
+		t.Fatalf("round %d: LiveRunCount: %v", round, err)
 	}
-	if len(occ) != len(occupiedByOracle) {
-		t.Fatalf("round %d: store reports %d occupied slots, components expect %d: %v",
-			round, len(occ), len(occupiedByOracle), occ)
+	if occ != len(sandboxes) {
+		t.Fatalf("round %d: store reports %d live runs, components expect %d",
+			round, occ, len(sandboxes))
 	}
 
 	wantLive := map[string]bool{}

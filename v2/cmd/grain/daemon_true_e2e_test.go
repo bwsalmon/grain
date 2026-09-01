@@ -137,8 +137,8 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	}
 
 	const owner, repoName = "acme", "gizmos"
-	// One slot, maxConcurrent 1: model.SlotNames(1) is "1".
-	const slot = "1"
+	// maxConcurrent 1, so the seeded task's first attempt is the only
+	// run this drives, and its sandbox is named after it.
 
 	// A real bare repo standing in for the GitHub-hosted one, seeded
 	// with one commit on main -- githubsim.Sim.BranchExists shells out
@@ -177,7 +177,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	// to stand in for a real VM/sshd. Unlike either of those, this test's
 	// dispatched agent runs its real tool calls (run_command/write_file)
 	// through it, not just ConfigureGitCredentials, so
-	// KonturSandboxes.ToolsFor's own code path -- the whole reason a
+	// KonturSandboxes' own Acquire/Tools code path -- the whole reason a
 	// deployment opts into kontur at all -- runs for real too, ending in
 	// a real `git push` executed by the real Gemini-driven agent.
 	konturStateDir := t.TempDir()

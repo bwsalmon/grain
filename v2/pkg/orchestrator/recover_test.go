@@ -23,7 +23,7 @@ func TestRecoverOrphanedRunsReturnsATaskToQueued(t *testing.T) {
 	_, client := newSim(t, "acme", "widgets", "main")
 	task := filedTask(t, ctx, store, "t1", model.RepoRef{Owner: "acme", Name: "widgets"})
 
-	d := dispatch.Dispatch{TaskID: task.ID, Slot: "slot-1", RunID: "t1-r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: task.ID, RunID: "t1-r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 
 	if st, err := store.State(ctx, task.ID); err != nil || st != model.StateRunning {
@@ -42,11 +42,11 @@ func TestRecoverOrphanedRunsReturnsATaskToQueued(t *testing.T) {
 		t.Fatalf("state after recovery = %q, want queued: an orphaned run must free the task", st)
 	}
 
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 0 {
+	if occupied != 0 {
 		t.Fatalf("occupied slots after recovery = %v, want none: the orphaned run must be finished", occupied)
 	}
 }
@@ -63,7 +63,7 @@ func TestRecoverOrphanedRunsOpensAPullRequestForAnAlreadyPushedBranch(t *testing
 	task := filedTask(t, ctx, store, "t1", model.RepoRef{Owner: "acme", Name: "widgets"})
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	d := dispatch.Dispatch{TaskID: task.ID, Slot: "slot-1", RunID: "t1-r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: task.ID, RunID: "t1-r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 
 	if err := orchestrator.RecoverOrphanedRuns(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
@@ -98,7 +98,7 @@ func TestRecoverOrphanedRunsLeavesAClosedTasksBranchUnopened(t *testing.T) {
 	task := filedTask(t, ctx, store, "t1", model.RepoRef{Owner: "acme", Name: "widgets"})
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	d := dispatch.Dispatch{TaskID: task.ID, Slot: "slot-1", RunID: "t1-r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: task.ID, RunID: "t1-r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 
 	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, ClosedAt: &baseTime}); err != nil {

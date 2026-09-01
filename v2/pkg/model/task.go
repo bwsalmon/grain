@@ -385,12 +385,13 @@ type Task struct {
 	//
 	// Applied by orchestrator.runOne, once per dispatch, immediately
 	// before the sandbox is handed to the run: a slot's sandbox is
-	// otherwise sized once, at VM-create time, from
-	// orchestrator.KonturConfig's own deployment-wide default and never
-	// revisited, so a task asking for a different shape needs its own
-	// hook rather than reusing that one-time creation path. Only
-	// orchestrator.KonturSandboxes can honour it (see that package's
-	// shapedSandboxes interface) -- a task with either field set,
+	// otherwise sized from orchestrator.KonturConfig's own
+	// deployment-wide default, so a task asking for a different shape
+	// overrides that default for its own sandbox -- per dimension, at the
+	// moment the sandbox is created, which is the only moment its size is
+	// decided now that one is built per run (orchestrator.Shape, passed to
+	// Sandboxes.Acquire). Only orchestrator.KonturSandboxes can honour it
+	// -- a task with either field set,
 	// dispatched onto the default orchestrator.HostSandboxes backend
 	// (no VM to resize), fails that dispatch outright rather than
 	// silently running at whatever shape the host itself happens to be,
@@ -471,9 +472,20 @@ type Observation struct {
 type Run struct {
 	ID     string
 	TaskID string
-	// The concurrency unit and the VM instance. Equal while sandboxes are
-	// long-lived; distinct once one is created per task.
-	Slot       string
+	// Sandbox is the sandbox this run was given -- the kontur VM name, or
+	// the host directory's own name. It used to sit alongside a Slot, the
+	// concurrency unit a long-lived sandbox was reused under, the two
+	// being equal in practice and distinct only in principle. A sandbox
+	// created and destroyed with the run has no such unit to belong to,
+	// so only this half is left, and it names something that exists for
+	// exactly as long as the run does.
+	//
+	// It is written after the row is: dispatch records a run before any
+	// sandbox exists for it, and orchestrator fills this in via
+	// SetRunSandbox once one has actually been acquired. A live run with
+	// an empty Sandbox is one whose sandbox is still being built -- which
+	// gitproxy reads, correctly, as a sandbox identity that authorizes
+	// nothing (Store.GitScope).
 	Sandbox    string
 	Unit       string
 	Attempt    int

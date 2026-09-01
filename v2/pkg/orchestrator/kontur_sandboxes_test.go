@@ -23,9 +23,9 @@ import (
 // -state-dir <dir> ..." by writing <dir>/<name>.json with the given port
 // (kontur's own real behavior, which is what Port later reads back) and
 // "vm delete <name> -state-dir <dir>" by removing that same file (kontur's
-// own staticpod.Delete, mirrored here so a Recreate test's second "vm
-// create" sees a VM that genuinely doesn't exist yet rather than reusing
-// stale state) -- logs every invocation's argv (one line per call) to
+// own staticpod.Delete, mirrored here so a test that rebuilds under a
+// name sees, on its second "vm create", a VM that genuinely doesn't exist
+// yet rather than reusing stale state) -- logs every invocation's argv (one line per call) to
 // argvLog, and otherwise succeeds silently.
 func writeFakeKontur(t *testing.T, argvLog string, port int) {
 	t.Helper()
@@ -67,14 +67,18 @@ func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "grain-test-",
+		NamePrefix:  "g-",
 		StateDir:    stateDir,
 		SSHUser:     "debian",
 		ExecKeyPath: "/images/key",
 		Workspace:   "/workspace",
 	})
 
-	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
+	sb, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sb.ConfigureGitCredentials(context.Background(), "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,22 +94,22 @@ func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T
 	}
 
 	// A second call for the same slot must not create a second VM --
-	// ConfigureGitCredentials shares ensure()/resolveEndpoint() with
-	// ToolsFor, so it gets that reuse for free; this just confirms it
+	// ConfigureGitCredentials runs over the runner Acquire already
+	// resolved, so it needs no setup of its own; this just confirms it
 	// actually took effect end to end.
-	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "second-token"); err != nil {
+	if err := sb.ConfigureGitCredentials(context.Background(), "http://10.100.0.1:8080/owner/repo.git", "second-token"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestKonturSandboxesRecreateDeletesAndRecreatesTheVM(t *testing.T) {
+func TestKonturSandboxesAcquireCreatesAVMAndReleaseDeletesIt(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -113,99 +117,21 @@ func TestKonturSandboxesRecreateDeletesAndRecreatesTheVM(t *testing.T) {
 		ReadyPollInterval: time.Millisecond,
 	})
 
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
-		t.Fatal(err)
-	}
-	if err := k.Recreate(context.Background(), "slot-0"); err != nil {
-		t.Fatalf("Recreate: %v", err)
-	}
-	// The slot's sandbox must still work after being recreated -- a
-	// second create, not a reuse of whatever ensure() thinks it already
-	// knows about the now-deleted VM.
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
-		t.Fatalf("ToolsFor after Recreate: %v", err)
-	}
-
-	data, err := os.ReadFile(argvLog)
+	sb, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{
-		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat",
-		"vm delete grain-test-slot-0 -state-dir " + stateDir,
-		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat",
-	}
-	got := splitNonEmptyLines(string(data))
-	if len(got) != len(want) {
-		t.Fatalf("kontur invocations = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-func TestKonturSandboxesRecreateReappliesGitCredentials(t *testing.T) {
-	stateDir := t.TempDir()
-	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-	home := t.TempDir()
-	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
-		StateDir:          stateDir,
-		SSHUser:           "debian",
-		ExecKeyPath:       "/images/key",
-		Workspace:         "/workspace",
-		ReadyPollInterval: time.Millisecond,
-	})
-
-	if err := k.ConfigureGitCredentials(context.Background(), "slot-0", "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate what a real Recreate's fresh VM actually looks like: no
-	// filesystem carried over from the one just torn down, credentials
-	// included.
-	if err := os.Remove(filepath.Join(home, ".git-credentials")); err != nil {
-		t.Fatal(err)
+	if sb.Name() != "t1-r1" {
+		t.Errorf("Name() = %q, want the sandbox's own name", sb.Name())
 	}
 
-	if err := k.Recreate(context.Background(), "slot-0"); err != nil {
-		t.Fatalf("Recreate: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(home, ".git-credentials"))
-	if err != nil {
-		t.Fatalf("Recreate did not reapply git credentials to the rebuilt VM: %v", err)
-	}
-	if want := "http://sandbox:secret-token@10.100.0.1:8080\n"; string(data) != want {
-		t.Errorf(".git-credentials = %q, want %q", data, want)
-	}
-}
-
-func TestKonturSandboxesCreatesVMOnFirstUseAndReusesAfter(t *testing.T) {
-	stateDir := t.TempDir()
-	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
-	writeFakeKontur(t, argvLog, 30080)
-	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
-		StateDir:          stateDir,
-		SSHUser:           "debian",
-		ExecKeyPath:       "/images/key",
-		Workspace:         "/workspace",
-		ReadyPollInterval: time.Millisecond,
-	})
-
-	tools, err := k.ToolsFor(context.Background(), "slot-0")
+	tools, err := sb.Tools(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantNames := map[string]bool{"run_command": true, "read_file": true, "write_file": true, "edit_file": true}
 	if len(tools) != len(wantNames) {
-		t.Fatalf("ToolsFor() returned %d tools, want %d", len(tools), len(wantNames))
+		t.Fatalf("Tools() returned %d tools, want %d", len(tools), len(wantNames))
 	}
 	for _, tool := range tools {
 		if !wantNames[tool.Name] {
@@ -213,28 +139,42 @@ func TestKonturSandboxesCreatesVMOnFirstUseAndReusesAfter(t *testing.T) {
 		}
 	}
 
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
-		t.Fatal(err)
+	if err := sb.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
 	}
 
 	data, err := os.ReadFile(argvLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	createCalls := 0
-	for _, line := range splitNonEmptyLines(string(data)) {
-		if line == "vm create grain-test-slot-0 -state-dir "+stateDir+" -backend docker -net flat" {
-			createCalls++
+	lines := splitNonEmptyLines(string(data))
+	wantCreate := "vm create g-t1-r1 -state-dir " + stateDir + " -backend docker -net flat"
+	wantDelete := "vm delete g-t1-r1 -state-dir " + stateDir
+	var creates, deletes int
+	for _, line := range lines {
+		switch line {
+		case wantCreate:
+			creates++
+		case wantDelete:
+			deletes++
 		}
 	}
-	if createCalls != 1 {
-		t.Errorf("konturctl vm create was invoked %d times across two ToolsFor calls for the same slot, want 1: log = %q", createCalls, data)
+	if creates != 1 || deletes != 1 {
+		t.Errorf("konturctl calls = %q, want exactly one create and one delete", lines)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "g-t1-r1.json")); err == nil {
+		t.Error("VM state still exists after Release, want it deleted")
 	}
 }
 
-func TestKonturSandboxesReusesAnAlreadyExistingVMWithoutCreating(t *testing.T) {
+// A VM already sitting under the name a run is about to use is deleted
+// and rebuilt, not adopted. Adopting one was right while a name meant a
+// slot -- "reuse what's there" -- but a name means a run now, so anything
+// already wearing it is a leftover whose filesystem this run must not
+// start from.
+func TestKonturSandboxesAcquireRebuildsAVMLeftUnderTheSameName(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(stateDir, "g-t1-r1.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
@@ -242,20 +182,63 @@ func TestKonturSandboxesReusesAnAlreadyExistingVMWithoutCreating(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "grain-test-",
-		StateDir:    stateDir,
-		SSHUser:     "debian",
-		ExecKeyPath: "/images/key",
-		Workspace:   "/workspace",
+		NamePrefix:        "g-",
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
 	})
 
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
 
 	data, err := os.ReadFile(argvLog)
-	if err == nil && len(data) != 0 {
-		t.Errorf("kontur was invoked for a VM whose state already existed: %q", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitNonEmptyLines(string(data))
+	if len(lines) < 2 || lines[0] != "vm delete g-t1-r1 -state-dir "+stateDir {
+		t.Fatalf("konturctl calls = %q, want the stale VM deleted before anything else", lines)
+	}
+	if lines[1] != "vm create g-t1-r1 -state-dir "+stateDir+" -backend docker -net flat" {
+		t.Errorf("konturctl calls = %q, want a create straight after the delete", lines)
+	}
+}
+
+// ReapOrphans is the startup half of the same rule: at startup no VM can
+// belong to this process, so every one under this deployment's prefix is
+// a leftover. VMs under another prefix are left alone.
+func TestKonturSandboxesReapOrphansDeletesOnlyItsOwnPrefix(t *testing.T) {
+	stateDir := t.TempDir()
+	for _, name := range []string{"g-t1-r1", "g-t2-r1", "other-vm"} {
+		if err := os.WriteFile(filepath.Join(stateDir, name+".json"), []byte(`{"port": 30080}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		NamePrefix: "g-", StateDir: stateDir, SSHUser: "debian",
+		ExecKeyPath: "/images/key", Workspace: "/workspace",
+	})
+
+	reaped, err := k.ReapOrphans(context.Background())
+	if err != nil {
+		t.Fatalf("ReapOrphans: %v", err)
+	}
+	if reaped != 2 {
+		t.Errorf("reaped = %d, want 2", reaped)
+	}
+	for _, name := range []string{"g-t1-r1", "g-t2-r1"} {
+		if _, err := os.Stat(filepath.Join(stateDir, name+".json")); err == nil {
+			t.Errorf("%s survived the reap", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "other-vm.json")); err != nil {
+		t.Error("a VM under another prefix was reaped, want it left alone")
 	}
 }
 
@@ -265,7 +248,7 @@ func TestKonturSandboxesWaitsForVMToBecomeReady(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 3, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -274,8 +257,8 @@ func TestKonturSandboxesWaitsForVMToBecomeReady(t *testing.T) {
 		ReadyTimeout:      time.Second,
 	})
 
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
-		t.Fatalf("ToolsFor() did not wait out the VM's slow start: %v", err)
+	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
+		t.Fatalf("Acquire() did not wait out the VM's slow start: %v", err)
 	}
 }
 
@@ -285,7 +268,7 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 1000, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -294,8 +277,8 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 		ReadyTimeout:      10 * time.Millisecond,
 	})
 
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err == nil {
-		t.Fatal("ToolsFor() on a VM that never becomes ready: got nil error, want one")
+	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err == nil {
+		t.Fatal("Acquire() on a VM that never becomes ready: got nil error, want one")
 	}
 }
 
@@ -307,14 +290,14 @@ func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 // -- like any "docker run -d" -- reports success the instant the
 // container starts, not once cloud-hypervisor inside it has actually
 // proven itself alive. A guest that fails before finishing boot exits
-// within seconds of that "success", and without this check ToolsFor would
+// within seconds of that "success", and without this check Acquire would
 // have no way to tell that apart from "still booting," so it would poll a
 // dead port for the entire ReadyTimeout before finally giving up with a
-// generic connection-refused error. This drives ToolsFor against a fake
+// generic connection-refused error. This drives Acquire against a fake
 // docker whose VM container is already "exited" from the first inspect
 // call, with a ReadyTimeout generous enough that a timing-based pass would
 // be meaningless (a slow CI host might legitimately not fail by then) and
-// asserts instead that ToolsFor returns quickly, well under that timeout,
+// asserts instead that Acquire returns quickly, well under that timeout,
 // and that the error names the container and mentions its exited status
 // rather than just "connection refused."
 func TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
@@ -327,7 +310,7 @@ func TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
 		`echo "Error response from daemon: container is not running" >&2; exit 1`)
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -337,50 +320,50 @@ func TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
 	})
 
 	started := time.Now()
-	_, err := k.ToolsFor(context.Background(), "slot-0")
+	_, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{})
 	elapsed := time.Since(started)
 
 	if err == nil {
-		t.Fatal("ToolsFor() against a VM container that already exited: got nil error, want one")
+		t.Fatal("Acquire() against a VM container that already exited: got nil error, want one")
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("ToolsFor() took %s to fail, want well under the 10s ReadyTimeout -- it should fast-fail on the dead container instead of polling out the full deadline", elapsed)
+		t.Errorf("Acquire() took %s to fail, want well under the 10s ReadyTimeout -- it should fast-fail on the dead container instead of polling out the full deadline", elapsed)
 	}
 	if !strings.Contains(err.Error(), "exited") {
 		t.Errorf("error = %q, want it to mention the container's \"exited\" status", err)
 	}
-	if !strings.Contains(err.Error(), "kontur-vm-grain-test-slot-0") {
-		t.Errorf("error = %q, want it to name the container kontur-vm-grain-test-slot-0", err)
+	if !strings.Contains(err.Error(), "kontur-vm-g-t1-r1") {
+		t.Errorf("error = %q, want it to name the container kontur-vm-g-t1-r1", err)
 	}
 }
 
-func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
+// Under NAT mode every VM is created with the same -ip/-port, passed
+// verbatim. These used to be a *base* that each slot's own number was
+// added to, on the reasoning that concurrent VMs shared one bridge; under
+// the docker backend each VM has its own network namespace (its own
+// netns-holder container), so they share no bridge and cannot collide.
+func TestKonturSandboxesPassesIPAndPortVerbatimUnderNAT(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
 		NetMode:           kontur.NetModeNAT,
-		BaseIP:            "169.254.100.2",
-		BasePort:          30080,
+		IP:                "169.254.100.2",
+		Port:              30080,
 		ReadyPollInterval: time.Millisecond,
 	})
 
-	// Two different slots must land two different VMs, each with its own
-	// -ip/-port derived from BaseIP/BasePort and the slot's own number --
-	// the whole point being that a deployment with more than one slot
-	// (-max-concurrent > 1) does not ask konturctl to give every VM after
-	// the first the exact same address on the one bridge they all share.
-	if _, err := k.ToolsFor(context.Background(), "1"); err != nil {
+	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.ToolsFor(context.Background(), "2"); err != nil {
+	if _, err := k.Acquire(context.Background(), "t2-r1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -389,8 +372,8 @@ func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create grain1 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.2 -port 30080",
-		"vm create grain2 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.3 -port 30081",
+		"vm create g-t1-r1 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.2 -port 30080",
+		"vm create g-t2-r1 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.2 -port 30080",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {
@@ -409,8 +392,8 @@ func TestKonturSandboxesDerivesPerSlotIPAndPortFromBase(t *testing.T) {
 // operator's own -kontur-create-arg=-cpus (if not set here too) is never
 // silently overridden by leaving DefaultCPUs at its zero "unset" value,
 // but the deployment-wide setting wins when both are configured, the
-// same "last one wins" precedent BaseIP/BasePort already set for this
-// same argument list.
+// same "last one wins" precedent IP/Port already set for this same
+// argument list. A run's own Shape overrides them per dimension.
 func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
@@ -418,7 +401,7 @@ func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
@@ -429,7 +412,7 @@ func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 		ReadyPollInterval: time.Millisecond,
 	})
 
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
+	if _, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -437,204 +420,10 @@ func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192"
+	want := "vm create g-t1-r1 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192"
 	got := splitNonEmptyLines(string(data))
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("kontur invocations = %v, want [%q]", got, want)
-	}
-}
-
-// TestKonturSandboxesReshapeUpdatesAnExistingVM confirms Reshape
-// (bwsalmon/agents#534) runs "konturctl vm update" with -cpus/-memory-mb
-// against a slot's already-created VM, leaving whatever flags Reshape
-// was not asked to change (disk, network, ...) untouched -- vm update's
-// own partial-update contract, exercised here only by checking that
-// Reshape's own invocation carries exactly the two flags it was given,
-// nothing else.
-func TestKonturSandboxesReshapeUpdatesAnExistingVM(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
-	writeFakeKontur(t, argvLog, 30080)
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "grain-test-",
-		StateDir:    stateDir,
-		SSHUser:     "debian",
-		ExecKeyPath: "/images/key",
-		Workspace:   "/workspace",
-	})
-
-	if err := k.Reshape(context.Background(), "slot-0", 4, 8192); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(argvLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "vm update grain-test-slot-0 -state-dir " + stateDir + " -cpus 4 -memory-mb 8192"
-	got := splitNonEmptyLines(string(data))
-	if len(got) != 1 || got[0] != want {
-		t.Errorf("kontur invocations = %v, want [%q]", got, want)
-	}
-}
-
-// TestKonturSandboxesReshapeOmitsUnsetDimension confirms Reshape passes
-// only the one flag whose value is non-zero -- a task overriding just
-// SandboxCPUs, say, must not also force -memory-mb 0 onto a VM that
-// staticpod.VMSpec.Validate would refuse outright ("memory-mb must be at
-// least 128").
-func TestKonturSandboxesReshapeOmitsUnsetDimension(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
-	writeFakeKontur(t, argvLog, 30080)
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "grain-test-",
-		StateDir:    stateDir,
-		SSHUser:     "debian",
-		ExecKeyPath: "/images/key",
-		Workspace:   "/workspace",
-	})
-
-	if err := k.Reshape(context.Background(), "slot-0", 4, 0); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(argvLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "vm update grain-test-slot-0 -state-dir " + stateDir + " -cpus 4"
-	got := splitNonEmptyLines(string(data))
-	if len(got) != 1 || got[0] != want {
-		t.Errorf("kontur invocations = %v, want [%q]", got, want)
-	}
-}
-
-// TestKonturSandboxesReshapeNoOpWhenNeitherDimensionSet confirms Reshape
-// never invokes konturctl at all when both cpus and memoryMB are zero --
-// runOne only calls Reshape when a task set at least one of
-// SandboxCPUs/SandboxMemoryMB, but Reshape itself stays a safe no-op
-// either way rather than running a pointless "vm update" with no flags.
-func TestKonturSandboxesReshapeNoOpWhenNeitherDimensionSet(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
-	writeFakeKontur(t, argvLog, 30080)
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "grain-test-",
-		StateDir:    stateDir,
-		SSHUser:     "debian",
-		ExecKeyPath: "/images/key",
-		Workspace:   "/workspace",
-	})
-
-	if err := k.Reshape(context.Background(), "slot-0", 0, 0); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(argvLog)
-	if err == nil && len(data) != 0 {
-		t.Errorf("kontur was invoked by a no-op Reshape: %q", data)
-	}
-}
-
-func TestKonturSandboxesRejectsNonNumericSlotWithBaseIPSet(t *testing.T) {
-	stateDir := t.TempDir()
-	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:  "grain-test-",
-		StateDir:    stateDir,
-		SSHUser:     "debian",
-		ExecKeyPath: "/images/key",
-		Workspace:   "/workspace",
-		BaseIP:      "169.254.100.2",
-	})
-
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err == nil {
-		t.Fatal("ToolsFor() with a non-numeric slot and BaseIP set: got nil error, want one")
-	}
-}
-
-// TestKonturSandboxesSelfHealsAVMContainerFoundDeadAfterReboot guards
-// against bwsalmon/agents#591: after a host reboot, a VM's on-disk kontur
-// state survives (kontur.Exists, what ensure() checks -- state files live
-// under /var/lib/kontur/vms, untouched by a reboot), but its docker
-// containers do not, because internal/dockervm.Create starts them with a
-// plain "docker run -d" and no restart policy, so docker never brings
-// them back the way a --restart=always container would. Before this
-// fix, ensure() treated that surviving state file alone as proof the VM
-// was already usable and never looked at the container's real docker
-// status; waitForGuestExec then correctly fast-failed on the dead
-// container (TestKonturSandboxesFastFailsWhenTheVMContainerExitsEarly
-// above), but nothing ever rebuilt it afterwards -- ensure() has no
-// reason to look past its own k.created cache once true, so every later
-// ToolsFor call for the same slot hit the exact same dead container and
-// failed identically forever, hanging that slot until an operator
-// intervened by hand.
-//
-// This drives ToolsFor against a slot whose kontur state file already
-// exists (simulating a state directory that survived a reboot) but whose
-// VM container reports "exited" and refuses `docker exec` until a real
-// "vm create" actually runs again (simulating the container itself not
-// surviving that reboot), and asserts ToolsFor recovers on its own --
-// deleting and recreating the VM -- without any caller having to notice
-// the dead container and call Recreate itself.
-func TestKonturSandboxesSelfHealsAVMContainerFoundDeadAfterReboot(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stateDir, "grain-test-slot-0.json"), []byte(`{"port": 30080}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
-	aliveMarker := filepath.Join(t.TempDir(), "container-alive")
-	writeFakeKonturTouchingMarkerOnCreate(t, argvLog, 30080, aliveMarker)
-	writeFakeDockerDeadUntilMarker(t, filepath.Join(t.TempDir(), "docker-argv.log"), aliveMarker)
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
-		StateDir:          stateDir,
-		SSHUser:           "debian",
-		ExecKeyPath:       "/images/key",
-		Workspace:         "/workspace",
-		ReadyPollInterval: time.Millisecond,
-		ReadyTimeout:      time.Second,
-	})
-
-	tools, err := k.ToolsFor(context.Background(), "slot-0")
-	if err != nil {
-		t.Fatalf("ToolsFor() did not self-heal a VM container found dead: %v", err)
-	}
-	if len(tools) == 0 {
-		t.Fatal("ToolsFor() returned no tools after recovering")
-	}
-
-	data, err := os.ReadFile(argvLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"vm delete grain-test-slot-0 -state-dir " + stateDir,
-		"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat",
-	}
-	got := splitNonEmptyLines(string(data))
-	if len(got) != len(want) {
-		t.Fatalf("kontur invocations = %v, want %v (ToolsFor should delete then recreate the dead VM, not reuse the stale state file forever)", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
-		}
 	}
 }
 
@@ -722,9 +511,31 @@ esac
 }
 
 func TestKonturSandboxesVMNameForUsesPrefix(t *testing.T) {
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "grain-agent-77-"})
-	if got, want := k.VMNameFor("slot-0"), "grain-agent-77-slot-0"; got != want {
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "g-"})
+	got, err := k.VMNameFor("t1-r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "g-t1-r1"; got != want {
 		t.Errorf("VMNameFor() = %q, want %q", got, want)
+	}
+}
+
+// The whole VM name has to fit 11 bytes: netshim derives "tap-<name>" and
+// "ctl-<name>" from it, and Linux caps an interface name at 15. Catching
+// it here says what the budget is and what is spending it, rather than
+// letting `konturctl vm create` refuse a tap device name several layers
+// down.
+func TestKonturSandboxesVMNameForRejectsAnOverLongName(t *testing.T) {
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "grain-agent-"})
+	if _, err := k.VMNameFor("t1-r1"); err == nil {
+		t.Fatal("expected VMNameFor to refuse a name over the tap-device budget")
+	}
+
+	// Exactly at the budget is fine.
+	k = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "g-"})
+	if _, err := k.VMNameFor("t1234-r12"); err != nil {
+		t.Errorf("VMNameFor on an 11-byte name: %v", err)
 	}
 }
 
@@ -825,7 +636,7 @@ func writeFakeDockerGuest(t *testing.T, argvLog, counterFile string, readyAfter 
 
 func konturTestConfig(stateDir string) orchestrator.KonturConfig {
 	return orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/kontur_id_ed25519",
@@ -835,7 +646,7 @@ func konturTestConfig(stateDir string) orchestrator.KonturConfig {
 	}
 }
 
-// Under DockerExec, ToolsFor has to reach the guest without resolving any
+// Under DockerExec, Acquire has to reach the guest without resolving any
 // address for it at all: no external port out of kontur's state file, no
 // container IP out of `docker inspect`, and no TCP dial to confirm a port
 // is answering. The fake docker here cannot answer an address lookup and
@@ -849,12 +660,16 @@ func TestKonturSandboxesDockerExecReachesTheGuestWithoutResolvingAnAddress(t *te
 
 	k := orchestrator.NewKonturSandboxes(konturTestConfig(stateDir))
 
-	tools, err := k.ToolsFor(context.Background(), "slot-0")
+	sb, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := sb.Tools(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(tools) != 4 {
-		t.Fatalf("ToolsFor() returned %d tools, want the same 4 the SSH path returns", len(tools))
+		t.Fatalf("Tools() returned %d tools, want the same 4 the SSH path returns", len(tools))
 	}
 
 	argv, err := os.ReadFile(dockerLog)
@@ -883,7 +698,11 @@ func TestKonturSandboxesDockerExecRunsToolCallsThroughTheVMContainer(t *testing.
 	writeFakeDocker(t, dockerLog, "running", `echo "hello from the guest"`)
 
 	k := orchestrator.NewKonturSandboxes(konturTestConfig(stateDir))
-	tools, err := k.ToolsFor(context.Background(), "slot-0")
+	sb, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := sb.Tools(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +714,7 @@ func TestKonturSandboxesDockerExecRunsToolCallsThroughTheVMContainer(t *testing.
 		}
 	}
 	if runCommand == nil {
-		t.Fatal("ToolsFor() returned no run_command tool")
+		t.Fatal("Tools() returned no run_command tool")
 	}
 	result := runCommand.Handler(context.Background(), map[string]any{"command": "echo hi"})
 	if result.IsError {
@@ -918,7 +737,7 @@ func TestKonturSandboxesDockerExecRunsToolCallsThroughTheVMContainer(t *testing.
 	for _, want := range []string{
 		"KONTUR_EXEC_USER=debian",
 		"KONTUR_EXEC_KEY=/images/kontur_id_ed25519",
-		"kontur-vm-grain-test-slot-0 kontur exec --",
+		"kontur-vm-g-t1-r1 kontur exec --",
 	} {
 		if !strings.Contains(execLine, want) {
 			t.Errorf("docker exec line = %q, want it to carry %q", execLine, want)
@@ -942,19 +761,19 @@ func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testi
 	k := orchestrator.NewKonturSandboxes(cfg)
 
 	started := time.Now()
-	_, err := k.ToolsFor(context.Background(), "slot-0")
+	_, err := k.Acquire(context.Background(), "t1-r1", orchestrator.Shape{})
 	elapsed := time.Since(started)
 
 	if err == nil {
-		t.Fatal("ToolsFor() against a VM container that already exited: got nil error, want one")
+		t.Fatal("Acquire() against a VM container that already exited: got nil error, want one")
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("ToolsFor() took %s to fail, want well under the 10s ReadyTimeout", elapsed)
+		t.Errorf("Acquire() took %s to fail, want well under the 10s ReadyTimeout", elapsed)
 	}
 	if !strings.Contains(err.Error(), "exited") {
 		t.Errorf("error = %q, want it to mention the container's \"exited\" status", err)
 	}
-	if !strings.Contains(err.Error(), "kontur-vm-grain-test-slot-0") {
+	if !strings.Contains(err.Error(), "kontur-vm-g-t1-r1") {
 		t.Errorf("error = %q, want it to name the container", err)
 	}
 }
@@ -972,18 +791,18 @@ func TestKonturSandboxesFlatModeOmitsAddressing(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
-		BaseIP:            "169.254.100.2",
-		BasePort:          30080,
+		IP:                "169.254.100.2",
+		Port:              30080,
 		ReadyPollInterval: time.Millisecond,
 	})
 
-	for _, slot := range []string{"1", "2"} {
-		if _, err := k.ToolsFor(context.Background(), slot); err != nil {
+	for _, sandbox := range []string{"t1-r1", "t2-r1"} {
+		if _, err := k.Acquire(context.Background(), sandbox, orchestrator.Shape{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -993,8 +812,8 @@ func TestKonturSandboxesFlatModeOmitsAddressing(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create grain1 -state-dir " + stateDir + " -backend docker -net flat",
-		"vm create grain2 -state-dir " + stateDir + " -backend docker -net flat",
+		"vm create g-t1-r1 -state-dir " + stateDir + " -backend docker -net flat",
+		"vm create g-t2-r1 -state-dir " + stateDir + " -backend docker -net flat",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {
@@ -1017,14 +836,14 @@ func TestKonturSandboxesFlatModeIsTheDefault(t *testing.T) {
 	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
 
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain",
+		NamePrefix:        "g-",
 		StateDir:          stateDir,
 		SSHUser:           "debian",
 		ExecKeyPath:       "/images/key",
 		Workspace:         "/workspace",
 		ReadyPollInterval: time.Millisecond,
 	})
-	if _, err := k.ToolsFor(context.Background(), "1"); err != nil {
+	if _, err := k.Acquire(context.Background(), "1", orchestrator.Shape{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1037,47 +856,34 @@ func TestKonturSandboxesFlatModeIsTheDefault(t *testing.T) {
 	}
 }
 
-// TestKonturSandboxesRecreateWithNoExistingVMOnlyCreates covers the case
-// cmd/grain daemon's own startup reset pass introduces: Recreate called
-// for a slot that has never had a VM. There is nothing to tear down, so
-// it must be a plain create -- not a `konturctl vm delete` for a name
-// kontur has no saved state for, which only ever reaches the static-pod
-// backend this package never builds VMs under (Recreate's own doc
-// comment). The per-task call site is unaffected either way: the VM it
-// just finished with always exists, which
-// TestKonturSandboxesRecreateDeletesAndRecreatesTheVM above still proves
-// deletes first.
-func TestKonturSandboxesRecreateWithNoExistingVMOnlyCreates(t *testing.T) {
-	stateDir := t.TempDir()
-	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
-	writeFakeKontur(t, argvLog, 30080)
-	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
-
-	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
-		NamePrefix:        "grain-test-",
-		StateDir:          stateDir,
-		SSHUser:           "debian",
-		ExecKeyPath:       "/images/key",
-		Workspace:         "/workspace",
-		ReadyPollInterval: time.Millisecond,
-	})
-
-	if err := k.Recreate(context.Background(), "slot-0"); err != nil {
-		t.Fatalf("Recreate on a slot with no VM: %v", err)
+// A prefix that leaves no room for a run's own name is refused once, at
+// startup, rather than failing every dispatch that reaches Acquire. The
+// pressure is real rather than hypothetical: a sandbox used to be named
+// after a slot ("<prefix>1"), so a prefix that fit comfortably then can be
+// one this build cannot build a single VM under.
+func TestKonturSandboxesCheckNamePrefixRejectsAPrefixWithNoRoomForARunName(t *testing.T) {
+	// "grain-" left 5 bytes, which was plenty for a slot named "1" and is
+	// not enough for any run id at all.
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "grain-"})
+	err := k.CheckNamePrefix()
+	if err == nil {
+		t.Fatal("expected a 6-byte prefix to be refused")
 	}
-	// The slot has to be usable afterwards: this is the only thing that
-	// creates its VM when the reset pass runs before anything else does.
-	if _, err := k.ToolsFor(context.Background(), "slot-0"); err != nil {
-		t.Fatalf("ToolsFor after Recreate: %v", err)
+	for _, want := range []string{"grain-", "-kontur-vm-name-prefix"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
 	}
+}
 
-	data, err := os.ReadFile(argvLog)
-	if err != nil {
-		t.Fatal(err)
+func TestKonturSandboxesCheckNamePrefixAcceptsAPrefixThatFits(t *testing.T) {
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{NamePrefix: "g-"})
+	if err := k.CheckNamePrefix(); err != nil {
+		t.Fatalf("CheckNamePrefix for a two-byte prefix: %v", err)
 	}
-	want := []string{"vm create grain-test-slot-0 -state-dir " + stateDir + " -backend docker -net flat"}
-	got := splitNonEmptyLines(string(data))
-	if len(got) != len(want) || got[0] != want[0] {
-		t.Fatalf("kontur invocations = %v, want %v", got, want)
+	// And the budget it promises is real: a five-digit task id on its
+	// tenth attempt still resolves to a name.
+	if _, err := k.VMNameFor("99999-r10"); err != nil {
+		t.Errorf("VMNameFor at the budget CheckNamePrefix guarantees: %v", err)
 	}
 }

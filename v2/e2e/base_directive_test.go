@@ -26,7 +26,6 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
@@ -141,21 +140,13 @@ func TestCLICreateWithBaseOpensPullRequestAgainstThatBranch(t *testing.T) {
 	// Step 2: a scripted agent builds its change on top of release, not
 	// on top of whatever the clone checks out by default, and grain opens
 	// the PR.
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	const slot = "base-directive-e2e-1"
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
 	remote := "http://" + githubHost + "/" + owner + "/" + repoName + ".git"
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
-		t.Fatal(err)
-	}
+	sandboxes := credentialed(t, remote)
 
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: scriptedFramework(releaseBranchPushScript(remote, branch, task.ID)),
 	}
 

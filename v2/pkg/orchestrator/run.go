@@ -237,27 +237,16 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 	}
 }
 
-// rootedSandboxes is implemented by a Sandboxes backend that also hands
-// out a plain local directory for a slot -- HostSandboxes' own RootFor.
-// RunDispatch needs one of these to write a capability's SideSandbox
-// placements directly to disk; KonturSandboxes (SSH-backed, with no local
-// directory of its own) does not implement it, so a caller dispatching a
-// task with Grants against it must resolve that itself before calling
-// RunDispatch -- see runOne.
-type rootedSandboxes interface {
-	RootFor(slot string) (string, error)
-}
-
 // RunDispatch drives one dispatch.Dispatch to completion: resolve and
 // materialize its task's capabilities (writing any SideSandbox placements
 // into sandboxRoot, which may be empty when the task has none to place),
-// run the agent against tools (whatever Deps.Sandboxes.ToolsFor produced
-// for d.Slot -- see the package doc comment on the local-directory-vs-
+// run the agent against tools (whatever this run's own Sandbox.Tools
+// produced -- see the package doc comment on the local-directory-vs-
 // real-VM choice that makes), revoke whatever was materialized, and
 // record the run's outcome. Every path here finishes the run, even a
 // failing one -- ported from pkg/orchestrate's own runDispatch
 // (bwsalmon/agents#254) when that package merged into this one: an
-// unfinished run would hold its slot forever. It does not touch
+// unfinished run would hold its share of the concurrency limit forever. It does not touch
 // task_observation or GitHub at all -- see ProcessResult for that half,
 // kept separate the same way v2/e2e's own runDispatch and its caller are,
 // since deciding what a run produced is a different question from
@@ -275,7 +264,7 @@ type rootedSandboxes interface {
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
 	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot string, at time.Time) (*agent.Result, error) {
 
-	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Slot: d.Slot, Sandbox: d.Slot, Attempt: d.Attempt, StartedAt: at}
+	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Sandbox: d.RunID, Attempt: d.Attempt, StartedAt: at}
 	cc := model.CapabilityContext{Task: task, Run: run, Now: at, Workdir: sandboxRoot, Credentials: cfg.Credentials}
 
 	comments, err := store.Comments(ctx, task.ID)

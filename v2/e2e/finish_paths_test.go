@@ -49,8 +49,7 @@ func commentOnlyScript(comment string) []*genai.GenerateContentResponse {
 }
 
 func TestAgentCompletesByCommentingWithNoPushOpensNoPullRequest(t *testing.T) {
-	const slot = "sandbox-337-finish-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "gadgets"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -61,7 +60,7 @@ func TestAgentCompletesByCommentingWithNoPushOpensNoPullRequest(t *testing.T) {
 
 	const comment = "looked into it -- the behavior described is already correct, no change needed"
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 		Framework: scriptedFramework(commentOnlyScript(comment)),
 	}
 
@@ -111,8 +110,7 @@ func TestAgentCompletesByCommentingWithNoPushOpensNoPullRequest(t *testing.T) {
 }
 
 func TestSyncPullRequestsClosesATaskWhosePullRequestWasClosedWithoutMerging(t *testing.T) {
-	const slot = "sandbox-337-finish-2"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "gizmos"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -123,7 +121,7 @@ func TestSyncPullRequestsClosesATaskWhosePullRequestWasClosedWithoutMerging(t *t
 
 	branch := model.BranchName("t-declined")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-declined")),
 	}
 

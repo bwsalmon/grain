@@ -1,6 +1,6 @@
 package main
 
-// TestRunConfiguresAKonturBackedSlotUsingCreateArgs is the daemon-level
+// TestRunBuildsAKonturVMForADispatchUsingCreateArgs is the daemon-level
 // counterpart to pkg/orchestrator/kontur_sandboxes_test.go's own coverage
 // of KonturSandboxes.ConfigureGitCredentials: that file proves the method
 // itself does the right thing over SSH; this proves run() -- the exact
@@ -15,16 +15,21 @@ package main
 // confirms against bwsalmon/kontur's own `-h` output, rather than a guess
 // baked in here.
 //
+// The setup it waits on used to be run()'s own: a slot's VM was created
+// and credentialed at startup, before reconcile was ever entered. There
+// is no such step now -- a VM is built for a run -- so this seeds one
+// approved task and waits on the first reconcile tick's dispatch to build
+// it, which is the path a real deployment takes too.
+//
 // It fakes `konturctl` (the operator-facing binary Create/Delete actually
 // exec -- not the distinct, container-facing "kontur" binary bwsalmon/
 // kontur's own cmd/kontur is, per pkg/kontur's package doc comment),
 // `crictl` and `ssh` on PATH (the same style kontur_sandboxes_test.go's
 // own writeFakeKontur/writeFakeCrictl use, plus an ssh double), so it runs
 // fast and needs neither a real kontur VM nor a real GitHub/Gemini
-// endpoint: run() only needs to get through its own setup (git proxy,
-// per-slot sandbox token, git credential configuration) before this test
-// cancels its context, since that setup -- not a completed dispatch cycle
-// -- is where -kontur-create-arg's plumbing actually happens.
+// endpoint: the dispatch this drives will fail once it tries to reach
+// GitHub, long after `konturctl vm create` has already been invoked --
+// which is the only thing under test here.
 
 import (
 	"context"
@@ -32,16 +37,20 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
 // writeFakeKonturBinary installs a fake "konturctl" that answers "vm
 // create" by writing the state file kontur.Exists reads back and "vm
 // delete" by removing it (kontur's own staticpod.Save/Delete), logging
 // every invocation's argv to argvLog. Handling delete is what lets a test
-// observe runDaemon's own startup reset pass, which deletes and rebuilds
-// a VM a previous process left behind -- see daemon_sandbox_reset_test.go.
+// observe a sandbox's Release, and the startup reap pass
+// (KonturSandboxes.ReapOrphans) that deletes a VM a previous process left
+// behind.
 func writeFakeKonturBinary(t *testing.T, argvLog string, port int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -111,11 +120,11 @@ func install(t *testing.T, dir, name, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
-	// One slot, maxConcurrent 1: model.SlotNames(1) is "1", so that is the
-	// slot name this test's own expectations (the VM name, its .git-
-	// credentials file) key off below.
-	const slot = "1"
+func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
+	// A sandbox is named after its run, so the VM name this test expects
+	// is the prefix plus the seeded task's own first-attempt run id.
+	const taskID = "kw"
+	const sandbox = taskID + "-r1"
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKonturBinary(t, argvLog, 30080)
 	vmHome := t.TempDir()
@@ -133,12 +142,34 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// One approved task, ready to dispatch on reconcile's first tick --
+	// which is what builds the VM now.
+	store, db, err := openStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := model.Task{
+		ID:     taskID,
+		Intent: model.IntentImplement,
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalHuman, ID: "tester"}},
+			Reason:      model.ReasonDirect,
+		},
+		Binding: model.BindingDirective,
+		Target:  &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	task.Approval = &model.Attribution{Actor: task.Origin.Attribution.Actor}
+	if err := store.PutTask(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
 	cfg := config{
 		dataDir: dataDir, maxConcurrent: 1, pollInterval: time.Hour,
 		geminiAPIKeyFile: geminiKeyFile,
 		githubHost:       "127.0.0.1:0", githubInsecureHTTP: true,
 
-		konturVMNamePrefix: "grain-graind-test-",
+		konturVMNamePrefix: "g-",
 		konturStateDir:     t.TempDir(),
 		konturSSHUser:      "debian",
 		konturExecKey:      "/images/key",
@@ -146,29 +177,26 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 		konturCreateArgs:   []string{"-image", "gs://bucket/kontur-guest-deadbeef.qcow2"},
 	}
 
-	// run() only returns once ctx is cancelled (it then drives
-	// pkg/orchestrator's reconcile loop forever, cfg.pollInterval apart),
-	// but everything this test cares about -- creating the slot's VM and
-	// configuring its git credentials over SSH -- happens synchronously
-	// in run()'s own setup, before reconcile() is ever entered. So rather
-	// than race a fixed sleep against that setup (flaky under real disk/
-	// CPU contention, e.g. a slow embedded-SQLite open), this polls for the
-	// setup's own last side effect -- the VM's .git-credentials file --
-	// and only cancels ctx (letting run() return) once that has actually
-	// happened.
+	// run() only returns once ctx is cancelled (it drives reconcile
+	// forever, cfg.pollInterval apart), and the dispatch this test wants
+	// happens on that loop's first tick. Rather than race a fixed sleep
+	// against it (flaky under real disk/CPU contention, e.g. a slow
+	// embedded-SQLite open), poll for the dispatch's own side effect --
+	// the VM's .git-credentials file, written once the run has acquired
+	// its sandbox -- and only then cancel.
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(ctx, cfg) }()
 
 	credentialsPath := filepath.Join(vmHome, ".git-credentials")
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if info, err := os.Stat(credentialsPath); err == nil && info.Size() > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
 			cancel()
-			t.Fatalf("run() never configured the kontur VM's git credentials within the timeout (%s never appeared)", credentialsPath)
+			t.Fatalf("run() never built and credentialed a kontur VM for the seeded task within the timeout (%s never appeared)", credentialsPath)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -181,9 +209,9 @@ func TestRunConfiguresAKonturBackedSlotUsingCreateArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kontur was never invoked: %v", err)
 	}
-	want := "vm create " + cfg.konturVMNamePrefix + slot + " -state-dir " + cfg.konturStateDir + " -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2\n"
-	if string(data) != want {
-		t.Errorf("kontur invoked as %q, want %q", data, want)
+	want := "vm create " + cfg.konturVMNamePrefix + sandbox + " -state-dir " + cfg.konturStateDir + " -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2"
+	if !strings.Contains(string(data), want) {
+		t.Errorf("kontur invoked as %q, want a %q among the calls", data, want)
 	}
 
 	credentials, err := os.ReadFile(filepath.Join(vmHome, ".git-credentials"))

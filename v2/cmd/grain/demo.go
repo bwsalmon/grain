@@ -129,11 +129,10 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	if err := store.StartRun(ctx, model.Run{
 		ID:        "demo-run-" + running.ID,
 		TaskID:    running.ID,
-		Slot:      "demo-slot",
 		Sandbox:   "demo-sandbox",
 		Attempt:   1,
 		StartedAt: ago(6 * time.Minute),
-	}); err != nil {
+	}, 0); err != nil {
 		return fmt.Errorf("seeding a running task: %w", err)
 	}
 

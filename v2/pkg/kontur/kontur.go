@@ -96,6 +96,34 @@ func Exists(stateDir, name string) bool {
 	return err == nil
 }
 
+// List is every VM name kontur has state for under stateDir, in
+// whatever order the directory yields. It reads the same "<name>.json"
+// files Exists probes for one at a time -- kontur's own staticpod.Save
+// writes one per VM and removes it on delete -- so this is the same
+// signal a `konturctl vm list` would report, without this package having
+// to agree with kontur on anything inside them.
+//
+// A missing state directory is not an error: a deployment that has never
+// created a VM has no directory yet, and "no VMs" is the right answer
+// rather than a failure a caller has to special-case.
+func List(stateDir string) ([]string, error) {
+	entries, err := os.ReadDir(stateDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("kontur: reading VM state directory %s: %w", stateDir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(e.Name(), ".json"))
+	}
+	return names, nil
+}
+
 // dockerInspect runs `docker inspect -f format name` and returns its
 // trimmed stdout, folding stderr into the returned error the same way
 // crictl above does.
@@ -164,13 +192,10 @@ func Delete(ctx context.Context, stateDir, name string) error {
 	return vm(ctx, "delete", stateDir, name)
 }
 
-// Update runs "konturctl vm update" against an already-created name,
-// changing only whatever flags extraArgs passes -- bwsalmon/kontur's own
-// registerVMFlags doc comment: "makes 'konturctl vm update' a partial
-// update instead of requiring every flag to be repeated." Used by
-// orchestrator.KonturSandboxes.Reshape (bwsalmon/agents#534) to resize an
-// existing VM's -cpus/-memory-mb for one task's own run without touching
-// its disk, network, or anything else update was not asked to change.
-func Update(ctx context.Context, stateDir, name string, extraArgs ...string) error {
-	return vm(ctx, "update", stateDir, name, extraArgs...)
-}
+// There is no Update. "konturctl vm update" had exactly one caller,
+// orchestrator.KonturSandboxes.Reshape, which resized a slot's
+// already-created VM to one task's own -cpus/-memory-mb (bwsalmon/
+// agents#534) -- a partial update that existed only because the VM
+// outlived the task that wanted it a different size. A sandbox is built
+// for one run now, so its size is decided once, at create time
+// (KonturConfig.createArgs), and there is nothing left to update.

@@ -105,8 +105,8 @@ func dispatchTask(t *testing.T, ctx context.Context, store *model.Store, id stri
 func startRun(t *testing.T, ctx context.Context, store *model.Store, d dispatch.Dispatch, at time.Time) {
 	t.Helper()
 	if err := store.StartRun(ctx, model.Run{
-		ID: d.RunID, TaskID: d.TaskID, Slot: d.Slot, Sandbox: d.Slot, Attempt: d.Attempt, StartedAt: at,
-	}); err != nil {
+		ID: d.RunID, TaskID: d.TaskID, Sandbox: d.RunID, Attempt: d.Attempt, StartedAt: at,
+	}, 0); err != nil {
 		t.Fatalf("starting run %s: %v", d.RunID, err)
 	}
 }
@@ -167,7 +167,7 @@ func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 func TestRunDispatchMaterializesAppliesPromptsAndRevokesACapability(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "keyed", Via: model.GrantByLabel})
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -232,7 +232,7 @@ func TestRunDispatchPlacesAttachmentsAndMentionsThemInThePrompt(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("adding attachment: %v", err)
 	}
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -270,7 +270,7 @@ func TestRunDispatchPlacesAttachmentsAndMentionsThemInThePrompt(t *testing.T) {
 func TestRunDispatchRecordsTheAgentsTranscript(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -302,7 +302,7 @@ func TestRunDispatchRecordsTheAgentsTranscript(t *testing.T) {
 func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "locked", Via: model.GrantByLabel})
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -328,11 +328,11 @@ func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T)
 	// slot forever -- and returns the task straight to queued, for a
 	// retry, the same semantics e2e's TestFailedRunReturnsTaskToQueueForRetry
 	// exercises one layer up through a real push denial instead.
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 0 {
+	if occupied != 0 {
 		t.Errorf("occupied slots after a refused capability = %v, want none", occupied)
 	}
 	state, err := store.State(ctx, "t1")
@@ -347,7 +347,7 @@ func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T)
 func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -366,11 +366,11 @@ func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 		t.Fatalf("result = %+v, want the agent's own (tool-call-less) result back", result)
 	}
 
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 0 {
+	if occupied != 0 {
 		t.Errorf("occupied slots after a tool-call-less run = %v, want none", occupied)
 	}
 	state, err := store.State(ctx, "t1")
@@ -403,7 +403,7 @@ func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
 		t.Fatalf("re-filing task with a real target: %v", err)
 	}
 
-	d1 := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d1 := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d1, baseTime)
 
 	const question = "should the new field be snake_case or camelCase?"
@@ -434,7 +434,7 @@ func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
 		t.Fatalf("answering the question: %v", err)
 	}
 
-	d2 := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r2", Attempt: 2}
+	d2 := dispatch.Dispatch{TaskID: "t1", RunID: "r2", Attempt: 2}
 	startRun(t, ctx, store, d2, baseTime.Add(2*time.Minute))
 	got2, err := store.GetTask(ctx, "t1")
 	if err != nil || got2 == nil {
@@ -465,7 +465,7 @@ func TestRunDispatchIncludesTheCommentThreadOnARedispatch(t *testing.T) {
 func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -494,7 +494,7 @@ func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 func TestRunDispatchLetsAFrameworkPollForACommentAddedMidRun(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -549,7 +549,7 @@ func TestRunDispatchSeedsTheAddendaCursorPastCommentsAlreadyInThePrompt(t *testi
 		t.Fatalf("adding a comment before dispatch: %v", err)
 	}
 
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -597,7 +597,7 @@ func closeTask(t *testing.T, ctx context.Context, store *model.Store, id string,
 func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -637,11 +637,11 @@ func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
 		t.Fatal("RunDispatch did not return after its task was closed mid-flight -- the agent's ctx was never cancelled")
 	}
 
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 0 {
+	if occupied != 0 {
 		t.Errorf("occupied slots after a cancelled run = %v, want none: FinishRun still frees the slot", occupied)
 	}
 }
@@ -659,7 +659,7 @@ func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
 func TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -698,11 +698,11 @@ func TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime(t *testing.T) {
 		t.Fatal("RunDispatch did not return after MaxRunRuntime elapsed -- the agent's ctx was never cancelled")
 	}
 
-	occupied, err := store.OccupiedSlots(ctx)
+	occupied, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occupied) != 0 {
+	if occupied != 0 {
 		t.Errorf("occupied slots after a MaxRunRuntime-cancelled run = %v, want none: FinishRun still frees the slot", occupied)
 	}
 
@@ -736,7 +736,7 @@ func TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime(t *testing.T) {
 func TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -782,7 +782,7 @@ func TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall(t *testing.T)
 func TestRunDispatchGivesTheFrameworkATranscriptPathAndCleansItUp(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {
@@ -820,7 +820,7 @@ func TestRunDispatchGivesTheFrameworkATranscriptPathAndCleansItUp(t *testing.T) 
 func TestRunDispatchLeavesTranscriptPathEmptyWithoutATranscriptDir(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
-	d := dispatch.Dispatch{TaskID: "t1", Slot: "local", RunID: "r1", Attempt: 1}
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
 	startRun(t, ctx, store, d, baseTime)
 	task, err := store.GetTask(ctx, "t1")
 	if err != nil || task == nil {

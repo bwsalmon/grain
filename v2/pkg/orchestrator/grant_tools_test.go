@@ -4,7 +4,7 @@
 // prove SourceTools/HostCommandTools work in isolation; this proves
 // RunCycle wires them in (or doesn't) the way that field's own doc
 // comment promises, the same "prove the wiring, not the backend again"
-// split shape_test.go already draws for Reshape.
+// split lifecycle_test.go already draws for Acquire and Release.
 package orchestrator_test
 
 import (
@@ -79,9 +79,9 @@ func TestRunCycleAddsGrantToolsForAnInteractiveTasksGrant(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return framework },
-		Config:    grantToolsConfig(),
-		Slots:     []string{"slot-0"},
+		Framework:     func() agent.Framework { return framework },
+		Config:        grantToolsConfig(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -106,9 +106,9 @@ func TestRunCycleDoesNotAddGrantToolsForANonInteractiveTask(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return framework },
-		Config:    grantToolsConfig(),
-		Slots:     []string{"slot-0"},
+		Framework:     func() agent.Framework { return framework },
+		Config:        grantToolsConfig(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -134,9 +134,9 @@ func TestRunCycleAddsNoGrantToolsForAGrantWithNoEntry(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework: func() agent.Framework { return framework },
-		Config:    grantToolsConfig(),
-		Slots:     []string{"slot-0"},
+		Framework:     func() agent.Framework { return framework },
+		Config:        grantToolsConfig(),
+		MaxConcurrent: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {

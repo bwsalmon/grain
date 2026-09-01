@@ -20,7 +20,7 @@ describe("SandboxHealthPage", () => {
     expect(screen.getByRole("progressbar")).toBeInTheDocument();
 
     resolve({ enabled: true, sandboxes: [], host: null });
-    expect(await screen.findByText("No sandboxes tracked yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No runs in flight, so no sandboxes exist.")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
@@ -48,24 +48,33 @@ describe("SandboxHealthPage", () => {
     api.mockResolvedValueOnce({
       enabled: true,
       sandboxes: [
-        { slot: "0", backend: "kontur", name: "grain-0", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 },
-        { slot: "1", backend: "kontur", name: "grain-1", ready: false, error: "connection refused" },
+        { sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 },
+        { sandbox: "t2-r1", backend: "kontur", name: "g-t2-r1", ready: false, error: "connection refused" },
       ],
       host: null,
     });
     render(<SandboxHealthPage showError={() => {}} />);
 
-    expect(await screen.findByText("grain-0")).toBeInTheDocument();
+    expect(await screen.findByText("g-t1-r1")).toBeInTheDocument();
     expect(screen.getByText("ready")).toBeInTheDocument();
     expect(screen.getByText("connection refused")).toBeInTheDocument();
     expect(screen.getByText("0.1 0.2 0.3")).toBeInTheDocument();
     expect(screen.getByText("100 / 200 MB")).toBeInTheDocument();
+
+    // Every row belongs to a run, and says which -- the substance of what
+    // changed here, not just a renamed field. The table used to lead with
+    // a slot number that meant nothing outside the dispatch loop; it
+    // leads with the run id now, which is also what model.Run.Sandbox
+    // records, so a row joins straight onto the run it belongs to.
+    expect(screen.getByRole("columnheader", { name: "Run" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "t1-r1" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "t2-r1" })).toBeInTheDocument();
   });
 
   it("shows a host error without hiding the sandbox list", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
-      sandboxes: [{ slot: "0", backend: "host", name: "/tmp/sandbox-0", ready: true }],
+      sandboxes: [{ sandbox: "t1-r1", backend: "host", name: "/tmp/sandbox-0", ready: true }],
       hostError: "not on linux",
     });
     render(<SandboxHealthPage showError={() => {}} />);
@@ -77,11 +86,11 @@ describe("SandboxHealthPage", () => {
   it("re-fetches when Refresh is clicked", async () => {
     api
       .mockResolvedValueOnce({ enabled: true, sandboxes: [], host: null })
-      .mockResolvedValueOnce({ enabled: true, sandboxes: [{ slot: "0", backend: "host", name: "/tmp/s0", ready: true }], host: null });
+      .mockResolvedValueOnce({ enabled: true, sandboxes: [{ sandbox: "t1-r1", backend: "host", name: "/tmp/s0", ready: true }], host: null });
     const user = userEvent.setup();
     render(<SandboxHealthPage showError={() => {}} />);
 
-    expect(await screen.findByText("No sandboxes tracked yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No runs in flight, so no sandboxes exist.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Refresh" }));
 
     expect(await screen.findByText("/tmp/s0")).toBeInTheDocument();
@@ -90,7 +99,7 @@ describe("SandboxHealthPage", () => {
   it("labels the host and per-sandbox trend charts", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
-      sandboxes: [{ slot: "0", backend: "kontur", name: "grain-0", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 }],
+      sandboxes: [{ sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 }],
       host: { loadAverage1: 0.5, loadAverage5: 0.4, loadAverage15: 0.3, memoryUsedMB: 512, memoryTotalMB: 1024 },
     });
     render(<SandboxHealthPage showError={() => {}} />);
@@ -120,6 +129,22 @@ describe("SandboxHealthPage", () => {
 describe("appendHistory", () => {
   const empty = { host: { cpu: [], mem: [] }, sandboxes: {} };
 
+  // Keyed by the sandbox's own name, which is the run's id -- not by a
+  // slot number, and not by array position. Two sandboxes in one poll
+  // therefore get a series each, which is what makes a per-sandbox trend
+  // chart follow the right sandbox across polls as runs come and go.
+  it("keeps a separate series per sandbox, keyed by name", () => {
+    const result = appendHistory(empty, {
+      sandboxes: [
+        { sandbox: "t1-r1", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40 },
+        { sandbox: "t2-r1", ready: true, loadAverage: "1.5 1.0 0.5", memoryUsedMB: 90 },
+      ],
+    });
+    expect(Object.keys(result.sandboxes).sort()).toEqual(["t1-r1", "t2-r1"]);
+    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40] });
+    expect(result.sandboxes["t2-r1"]).toEqual({ cpu: [1.5], mem: [90] });
+  });
+
   it("skips a poll with no host stats", () => {
     expect(appendHistory(empty, { enabled: true, sandboxes: [] })).toEqual(empty);
   });
@@ -130,15 +155,15 @@ describe("appendHistory", () => {
   });
 
   it("skips a sandbox that is not ready", () => {
-    const result = appendHistory(empty, { sandboxes: [{ slot: "0", ready: false, error: "boom" }] });
-    expect(result.sandboxes["0"]).toEqual({ cpu: [], mem: [] });
+    const result = appendHistory(empty, { sandboxes: [{ sandbox: "t1-r1", ready: false, error: "boom" }] });
+    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [], mem: [] });
   });
 
   it("appends a ready sandbox's load average and memory", () => {
     const result = appendHistory(empty, {
-      sandboxes: [{ slot: "0", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40, memoryTotalMB: 100 }],
+      sandboxes: [{ sandbox: "t1-r1", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40, memoryTotalMB: 100 }],
     });
-    expect(result.sandboxes["0"]).toEqual({ cpu: [0.25], mem: [40] });
+    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40] });
   });
 
   it("caps each series at 60 samples", () => {

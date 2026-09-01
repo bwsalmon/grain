@@ -30,14 +30,13 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		t.Skip("GEMINI_API_KEY not set; skipping live Gemini integration test")
 	}
 
-	const slot = "sandbox-bd453be9-live-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "live")
 
 	clock := baseTime
 	fileIssue(w, "iss-live", human("tester"), model.RepoRef{Owner: "acme", Name: "live"})
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil || len(dispatches) != 1 {
 		t.Fatalf("Cycle: %v, %+v", err, dispatches)
 	}
@@ -62,7 +61,7 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		"5. Push the " + branch + " branch to the origin remote (not main).\n" +
 		"Reply with a short confirmation once the push has succeeded."
 
-	result, err := fw.Run(ctx, agent.RunConfig{Prompt: prompt, SandboxRoot: w.roots[slot], MaxTurns: 15})
+	result, err := fw.Run(ctx, agent.RunConfig{Prompt: prompt, SandboxRoot: w.prepareSandbox(dispatches[0]), MaxTurns: 15})
 	if err != nil {
 		t.Fatalf("agent run failed: %v", err)
 	}

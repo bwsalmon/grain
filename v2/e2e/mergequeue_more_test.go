@@ -108,8 +108,7 @@ func fixDoesNotResolveScript(remote, baseBranch, fixBranch string) []*genai.Gene
 }
 
 func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *testing.T) {
-	const slot = "sandbox-337-mq-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "widgets"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -117,7 +116,7 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
 	sim := githubsim.New(owner, repoName, bare, "main")
 	client := github.NewClient(sim, nil)
-	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot}}
+	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1}
 
 	task1 := model.Task{
 		ID: "t1", Intent: model.IntentImplement, Title: "task1",
@@ -280,8 +279,7 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 }
 
 func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *testing.T) {
-	const slot = "sandbox-337-mq-2"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "checks"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -289,7 +287,7 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
 	sim := githubsim.New(owner, repoName, bare, "main")
 	client := github.NewClient(sim, nil)
-	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot}}
+	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1}
 
 	task1 := model.Task{
 		ID: "t1", Intent: model.IntentImplement, Title: "task1",
@@ -394,8 +392,7 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 }
 
 func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *testing.T) {
-	const slot = "sandbox-337-mq-3"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "declined"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -416,7 +413,7 @@ func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *tes
 
 	branch := model.BranchName("t-closed-early")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-closed-early")),
 	}
 	clock := baseTime
@@ -459,8 +456,7 @@ func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *tes
 }
 
 func TestAutoMergeLeavesAPullRequestOfUnknownMergeabilityAloneUntilItResolves(t *testing.T) {
-	const slot = "sandbox-337-mq-4"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	const owner, repoName = "acme", "pending"
 	w.newRepo(owner, repoName)
 	repo := model.RepoRef{Owner: owner, Name: repoName}
@@ -481,7 +477,7 @@ func TestAutoMergeLeavesAPullRequestOfUnknownMergeabilityAloneUntilItResolves(t 
 
 	branch := model.BranchName("t-pending")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, Slots: []string{slot},
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-pending")),
 	}
 	clock := baseTime

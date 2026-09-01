@@ -79,19 +79,19 @@ func TestCycleDispatchesReadyTasksInOrderAndNoFurther(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true), task("t2", true))
 
-	got, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
+	got, err := dispatch.Cycle(ctx, store, 2, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("dispatched %d tasks, want 2 (one per free slot): %+v", len(got), got)
+		t.Fatalf("dispatched %d tasks, want 2 (the whole concurrency limit): %+v", len(got), got)
 	}
 
 	dispatched := map[string]bool{}
-	slots := map[string]bool{}
+	runs := map[string]bool{}
 	for _, d := range got {
 		dispatched[d.TaskID] = true
-		slots[d.Slot] = true
+		runs[d.RunID] = true
 		if d.Attempt != 1 {
 			t.Errorf("%s dispatched with attempt %d, want 1", d.TaskID, d.Attempt)
 		}
@@ -99,8 +99,8 @@ func TestCycleDispatchesReadyTasksInOrderAndNoFurther(t *testing.T) {
 	if !dispatched["t0"] || !dispatched["t1"] {
 		t.Errorf("expected t0 and t1 dispatched (task_ready's own order), got %+v", got)
 	}
-	if len(slots) != 2 {
-		t.Errorf("two dispatches landed on %d distinct slots, want 2: %+v", len(slots), got)
+	if len(runs) != 2 {
+		t.Errorf("two dispatches produced %d distinct run ids, want 2: %+v", len(runs), got)
 	}
 
 	for _, id := range []string{"t0", "t1"} {
@@ -109,7 +109,7 @@ func TestCycleDispatchesReadyTasksInOrderAndNoFurther(t *testing.T) {
 		}
 	}
 	if st, _ := store.State(ctx, "t2"); st != model.StateQueued {
-		t.Errorf("t2 state = %q, want queued (no free slot left for it)", st)
+		t.Errorf("t2 state = %q, want queued (no capacity left for it)", st)
 	}
 }
 
@@ -117,7 +117,7 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
 
-	first, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
+	first, err := dispatch.Cycle(ctx, store, 2, now)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -125,7 +125,7 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	// Two slots, still only one task in the world, and it is already
 	// running — task_ready excludes it, so a second cycle must dispatch
 	// nothing even though slot-2 has never been used.
-	second, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, 2, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,47 +134,47 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	}
 }
 
-func TestCycleRespectsTheSlotCount(t *testing.T) {
+func TestCycleRespectsTheConcurrencyLimit(t *testing.T) {
 	store, ctx := open(t)
 	ids := []string{"t0", "t1", "t2", "t3", "t4"}
 	for _, id := range ids {
 		putTasks(t, store, ctx, task(id, true))
 	}
-	slots := []string{"slot-1", "slot-2"}
+	const maxConcurrent = 2
 
-	first, err := dispatch.Cycle(ctx, store, slots, now)
+	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
 	if err != nil || len(first) != 2 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
-	occupied, err := store.OccupiedSlots(ctx)
-	if err != nil || len(occupied) != 2 {
-		t.Fatalf("occupied slots after first cycle: %v, %+v", err, occupied)
+	live, err := store.LiveRunCount(ctx)
+	if err != nil || live != 2 {
+		t.Fatalf("live runs after first cycle: %v, %d", err, live)
 	}
 
-	// No free slot: nothing more may be dispatched no matter how many
+	// No headroom: nothing more may be dispatched no matter how many
 	// tasks are ready.
-	second, err := dispatch.Cycle(ctx, store, slots, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(second) != 0 {
-		t.Fatalf("cycle with no free slot dispatched %+v", second)
+		t.Fatalf("cycle at the concurrency limit dispatched %+v", second)
 	}
 
-	// Finishing one run frees exactly one slot, so exactly one more task
-	// starts, in the freed slot.
+	// Finishing one run frees exactly one unit of capacity, so exactly
+	// one more task starts.
 	if err := store.FinishRun(ctx, first[0].RunID, now.Add(2*time.Minute), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	third, err := dispatch.Cycle(ctx, store, slots, now.Add(3*time.Minute))
+	third, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(3*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(third) != 1 {
 		t.Fatalf("cycle after one finish dispatched %+v, want exactly 1", third)
 	}
-	if third[0].Slot != first[0].Slot {
-		t.Errorf("dispatch landed on slot %q, want the freed slot %q", third[0].Slot, first[0].Slot)
+	if live, err := store.LiveRunCount(ctx); err != nil || live != 2 {
+		t.Errorf("live runs after the freed capacity was refilled = %d (%v), want 2", live, err)
 	}
 }
 
@@ -185,7 +185,7 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 		task("blocked", true, model.Link{Kind: model.LinkDependsOn, Target: "blocker"}),
 	)
 
-	got, err := dispatch.Cycle(ctx, store, []string{"slot-1", "slot-2"}, now)
+	got, err := dispatch.Cycle(ctx, store, 2, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,9 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 	if err := store.Observe(ctx, model.Observation{TaskID: "blocker", ClosedAt: &now}); err != nil {
 		t.Fatal(err)
 	}
-	got, err = dispatch.Cycle(ctx, store, []string{"slot-2"}, now.Add(time.Minute))
+	// Still a limit of 2, and the blocker's own run is still live, so
+	// exactly one unit of capacity is free for the unblocked task.
+	got, err = dispatch.Cycle(ctx, store, 2, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +226,7 @@ func TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("a-new-work", true), fixTask("z-fix"))
 
-	got, err := dispatch.Cycle(ctx, store, []string{"slot-1"}, now)
+	got, err := dispatch.Cycle(ctx, store, 1, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,9 +238,9 @@ func TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks(t *testing.T) {
 func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
-	slots := []string{"slot-1"}
+	const maxConcurrent = 1
 
-	first, err := dispatch.Cycle(ctx, store, slots, now)
+	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
 	if err != nil || len(first) != 1 || first[0].Attempt != 1 {
 		t.Fatalf("first dispatch: %v, %+v", err, first)
 	}
@@ -248,7 +250,7 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "requeued", ""); err != nil {
 		t.Fatal(err)
 	}
-	second, err := dispatch.Cycle(ctx, store, slots, now.Add(2*time.Minute))
+	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(2*time.Minute))
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("second dispatch: %v, %+v", err, second)
 	}
@@ -268,9 +270,9 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true))
-	slots := []string{"slot-1"}
+	const maxConcurrent = 1
 
-	first, err := dispatch.Cycle(ctx, store, slots, now)
+	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
 	if err != nil || len(first) != 1 || first[0].TaskID != "t0" {
 		t.Fatalf("first dispatch: %v, %+v", err, first)
 	}
@@ -281,7 +283,7 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 	// t0 just failed and has not backed off yet, but t1 has never run at
 	// all -- it must be offered the only free slot instead of the cycle
 	// giving up because task_ready's first entry (t0) is not eligible.
-	second, err := dispatch.Cycle(ctx, store, slots, now.Add(2*time.Second))
+	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +303,7 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 
 	// Still too soon after t0's own failure: nothing to dispatch even
 	// though the slot is free again.
-	third, err := dispatch.Cycle(ctx, store, slots, now.Add(4*time.Second))
+	third, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(4*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +312,7 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 	}
 
 	// Comfortably past baseRetryBackoff (30s): t0 is eligible again.
-	fourth, err := dispatch.Cycle(ctx, store, slots, now.Add(time.Minute))
+	fourth, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,14 +329,14 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
-	slots := []string{"slot-1"}
+	const maxConcurrent = 1
 
 	clock := now
 	for i := 0; i < model.MaxConsecutiveFailures; i++ {
 		// Advance well past any backoff window so the cap itself, not a
 		// still-pending backoff, is what this test exercises.
 		clock = clock.Add(time.Hour)
-		got, err := dispatch.Cycle(ctx, store, slots, clock)
+		got, err := dispatch.Cycle(ctx, store, maxConcurrent, clock)
 		if err != nil {
 			t.Fatalf("attempt %d: Cycle: %v", i+1, err)
 		}
@@ -356,7 +358,7 @@ func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
 	}
 
 	clock = clock.Add(24 * time.Hour)
-	got, err := dispatch.Cycle(ctx, store, slots, clock)
+	got, err := dispatch.Cycle(ctx, store, maxConcurrent, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +378,7 @@ func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
 		t.Fatalf("state after a retry request = %q (%v), want queued", st, err)
 	}
 	clock = clock.Add(time.Minute)
-	got, err = dispatch.Cycle(ctx, store, slots, clock)
+	got, err = dispatch.Cycle(ctx, store, maxConcurrent, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,11 +414,11 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 		putTasks(t, store, ctx, task(ids[i], true, links...))
 	}
 
-	slots := []string{"slot-1", "slot-2", "slot-3"}
+	const maxConcurrent = 3
 	closed := map[string]bool{}
-	liveRunID := map[string]string{}  // task -> its current run, while live
-	liveSlot := map[string]string{}   // task -> the slot it occupies, while live
-	occupiedBy := map[string]string{} // slot -> task, while occupied
+	liveRunID := map[string]string{}   // task -> its current run, while live
+	liveSandbox := map[string]string{} // task -> the sandbox its live run was given
+	sandboxOf := map[string]string{}   // sandbox -> task, while that run is live
 	attemptsSoFar := map[string]int{}
 	clock := now
 
@@ -427,7 +429,7 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 
 	for cycle := 0; cycle < 60; cycle++ {
 		clock = clock.Add(time.Minute)
-		dispatches, err := dispatch.Cycle(ctx, store, slots, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, maxConcurrent, clock)
 		if err != nil {
 			t.Fatalf("cycle %d: %v", cycle, err)
 		}
@@ -436,9 +438,9 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 			if _, already := liveRunID[d.TaskID]; already {
 				t.Fatalf("cycle %d: %s dispatched while already running", cycle, d.TaskID)
 			}
-			if occupant, taken := occupiedBy[d.Slot]; taken {
-				t.Fatalf("cycle %d: slot %s given to %s while still holding %s",
-					cycle, d.Slot, d.TaskID, occupant)
+			if holder, taken := sandboxOf[d.RunID]; taken {
+				t.Fatalf("cycle %d: run id %s handed to %s while still held by %s",
+					cycle, d.RunID, d.TaskID, holder)
 			}
 			if closed[d.TaskID] {
 				t.Fatalf("cycle %d: closed task %s was dispatched", cycle, d.TaskID)
@@ -451,19 +453,22 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 					cycle, d.TaskID, d.Attempt, want)
 			}
 			liveRunID[d.TaskID] = d.RunID
-			liveSlot[d.TaskID] = d.Slot
-			occupiedBy[d.Slot] = d.TaskID
+			// A run's sandbox is named after the run itself, which is
+			// what orchestrator.runOne records; dispatch never invents
+			// one, so the mirror derives it the same way.
+			liveSandbox[d.TaskID] = d.RunID
+			sandboxOf[d.RunID] = d.TaskID
 			attemptsSoFar[d.TaskID]++
 		}
 
-		if len(occupiedBy) > len(slots) {
-			t.Fatalf("cycle %d: %d slots occupied, only %d exist", cycle, len(occupiedBy), len(slots))
+		if len(sandboxOf) > maxConcurrent {
+			t.Fatalf("cycle %d: %d runs live, limit is %d", cycle, len(sandboxOf), maxConcurrent)
 		}
-		if occ, err := store.OccupiedSlots(ctx); err != nil {
-			t.Fatalf("cycle %d: OccupiedSlots: %v", cycle, err)
-		} else if len(occ) != len(occupiedBy) {
-			t.Fatalf("cycle %d: store reports %d occupied slots, mirror expects %d: %v",
-				cycle, len(occ), len(occupiedBy), occ)
+		if occ, err := store.LiveRunCount(ctx); err != nil {
+			t.Fatalf("cycle %d: LiveRunCount: %v", cycle, err)
+		} else if occ != len(sandboxOf) {
+			t.Fatalf("cycle %d: store reports %d live runs, mirror expects %d",
+				cycle, occ, len(sandboxOf))
 		}
 
 		// Feed back outcomes for a random subset of live runs — exactly
@@ -478,9 +483,9 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 			if err := store.FinishRun(ctx, runID, clock, "outcome", ""); err != nil {
 				t.Fatalf("cycle %d: finishing %s: %v", cycle, runID, err)
 			}
-			delete(occupiedBy, liveSlot[id])
+			delete(sandboxOf, liveSandbox[id])
 			delete(liveRunID, id)
-			delete(liveSlot, id)
+			delete(liveSandbox, id)
 
 			switch r := rng.Float64(); {
 			case r < 0.5:

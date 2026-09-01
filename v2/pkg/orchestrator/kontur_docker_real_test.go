@@ -1,6 +1,6 @@
 package orchestrator_test
 
-// TestKonturSandboxesToolsForAgainstARealDockerBackedVM is the one place
+// TestKonturSandboxesAgainstARealDockerBackedVM is the one place
 // in this repo that drives orchestrator.KonturSandboxes against the real
 // `konturctl` and `docker` binaries and a real cloud-hypervisor VM under
 // real KVM, instead of the hand-written shell-script doubles every other
@@ -46,7 +46,7 @@ package orchestrator_test
 // own stock kernel already has everything a cloud-hypervisor direct-
 // kernel-boot guest needs, nothing built from source), so this test now
 // builds that real guest image and asserts a real dispatched tool call
-// actually runs inside it over SSH, not just that ToolsFor resolves an
+// actually runs inside it over SSH, not just that Acquire resolves an
 // address.
 
 import (
@@ -229,9 +229,9 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 	return "/images/" + filepath.Base(sshKeyPath)
 }
 
-// TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently is the
-// concurrency counterpart to TestKonturSandboxesToolsForAgainstARealDockerBackedVM
-// above: that test proves ToolsFor works against one real cloud-hypervisor
+// TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently is the
+// concurrency counterpart to TestKonturSandboxesAgainstARealDockerBackedVM
+// above: that test proves Acquire works against one real cloud-hypervisor
 // VM under KVM, this one proves two slots' worth of real VMs actually come
 // up side by side under real docker/netshim/cloud-hypervisor, driven the
 // same way reconcileDispatch's own goroutine-per-dispatch loop
@@ -248,14 +248,13 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 // happened to start first, silently undoing the concurrency
 // reconcileDispatch's own doc comment promises. That bug was caught and
 // fixed against a fake (sandboxes_concurrency_test.go's
-// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially,
-// which can assert wall-clock overlap precisely because its fake
-// konturctl sleeps a known amount); this test is the same claim proven
-// against the real thing, where "does it still work" -- two independent
-// netshim network namespaces, two independent cloud-hypervisor guests,
-// two independently-derived -ip/-port pairs (KonturConfig.BaseIP/
-// BasePort) -- matters more than exact timing.
-func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
+// TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially, which can
+// assert wall-clock overlap precisely because its fake konturctl sleeps a
+// known amount); this test is the same claim proven against the real
+// thing, where "does it still work" -- two independent netshim network
+// namespaces, two independent cloud-hypervisor guests -- matters more
+// than exact timing.
+func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
@@ -285,18 +284,22 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,
-		// Distinct from TestKonturSandboxesToolsForAgainstARealDockerBackedVM's
-		// own hardcoded -ip/-port (169.254.100.2:31080) so the two tests
-		// never fight over the same address if run back to back without a
-		// clean teardown in between.
-		BaseIP:   "169.254.100.20",
-		BasePort: 31090,
+		// No IP/Port: this runs in flat mode (the default), where
+		// createArgs drops both because the container runtime assigns the
+		// address. They were set here to keep this test's VMs off the
+		// other real test's addresses, which flat mode makes moot -- and
+		// leaving them set implied this test exercises addressing, which
+		// it does not.
 	})
 
 	slots := []string{"1", "2"}
 	names := make([]string, len(slots))
 	for i, slot := range slots {
-		names[i] = k.VMNameFor(slot)
+		name, err := k.VMNameFor(slot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[i] = name
 	}
 	t.Cleanup(func() {
 		for _, name := range names {
@@ -317,27 +320,51 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		wg.Add(1)
 		go func(slot string) {
 			defer wg.Done()
-			tools, err := k.ToolsFor(context.Background(), slot)
+			sb, err := k.Acquire(context.Background(), slot, orchestrator.Shape{})
+			if err != nil {
+				results <- outcome{slot: slot, err: err}
+				return
+			}
+			t.Cleanup(func() { _ = sb.Release(context.Background()) })
+			tools, err := sb.Tools(context.Background())
 			results <- outcome{slot: slot, tools: tools, err: err}
 		}(slot)
 	}
 	wg.Wait()
 	close(results)
 
+	// Every outcome is reported before failing, rather than t.Fatalf on
+	// whichever error came off the channel first. Which VMs failed is the
+	// whole diagnosis here: one failing where the other came up is a
+	// concurrency problem in this package, while both failing is the
+	// guest image's own flat-mode control link never coming up, which is
+	// nothing to do with how the VMs were created.
 	toolsBySlot := map[string][]mcp.Tool{}
+	var failures []string
 	for r := range results {
 		if r.err != nil {
-			t.Fatalf("ToolsFor(%s) against real konturctl/docker/cloud-hypervisor: %v", r.slot, r.err)
+			failures = append(failures, fmt.Sprintf("%s: %v", r.slot, r.err))
+			continue
 		}
 		toolsBySlot[r.slot] = r.tools
 	}
+	if len(failures) > 0 {
+		t.Fatalf("%d of %d VMs failed against real konturctl/docker/cloud-hypervisor:\n  %s",
+			len(failures), len(slots), strings.Join(failures, "\n  "))
+	}
 
-	// Each VM got its own independently-derived guest address -- confirms
-	// BaseIP/BasePort's arithmetic actually reached real konturctl for
-	// both slots, not just the first. The address is what matters now
-	// rather than the forwarded port: it is what each VM's guest
-	// configures from its own kernel cmdline, and what `kontur exec`
-	// connects to (KONTUR_EXEC_ADDR).
+	// Both VMs are reached at the *same* guest address, and that is the
+	// point rather than a defect: under flat mode (the default) netshim
+	// gives each VM its own network namespace, so each guest takes the
+	// same control-link address inside its own, and `kontur exec` reaches
+	// it by exec'ing into that VM's own container (KONTUR_EXEC_ADDR).
+	//
+	// This assertion used to be the opposite -- that the two addresses
+	// differed, "want BaseIP-derived distinct ones" -- which was true
+	// while KonturConfig derived an -ip per slot. It would now fail on a
+	// perfectly healthy pair of VMs, and it is worth more inverted than
+	// deleted: two guests answering independently on one address is the
+	// evidence for the claim that removing that derivation is safe.
 	addrs := map[string]string{}
 	for _, name := range names {
 		out, err := exec.Command("docker", "inspect", "-f",
@@ -354,8 +381,9 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 			t.Fatalf("%s: no KONTUR_EXEC_ADDR in the VM container's env:\n%s", name, out)
 		}
 	}
-	if addrs[names[0]] == addrs[names[1]] {
-		t.Errorf("both slots' VMs got the same guest address %q, want BaseIP-derived distinct ones", addrs[names[0]])
+	if addrs[names[0]] != addrs[names[1]] {
+		t.Errorf("VMs got different guest addresses %q and %q, want the same one: under flat mode each VM has its own network namespace, so nothing derives a per-VM address",
+			addrs[names[0]], addrs[names[1]])
 	}
 
 	// Each guest actually runs and answers a distinct command, for two
@@ -391,7 +419,7 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 
 // TestKonturSandboxesAgainstARealDockerBackedVM is the
 // docker-exec transport's (KonturConfig.DockerExec) counterpart to
-// TestKonturSandboxesToolsForAgainstARealDockerBackedVM above: the same
+// TestKonturSandboxesAgainstARealDockerBackedVM above: the same
 // real konturctl, real docker, real cloud-hypervisor guest under real
 // KVM, reached through `docker exec <vm container> kontur exec` instead
 // of SSH to netshim's externally forwarded port.
@@ -468,11 +496,16 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
-			// Distinct from the concurrent test above
-			// (169.254.100.20+:31090+) so the two never fight over an
-			// address if run back to back without a clean teardown.
-			"-ip", "169.254.100.40",
-			"-port", "31110",
+			// No -ip/-port: this VM is built in flat mode (KonturConfig's
+			// own default since 7a58bec), where the container runtime
+			// assigns the address the guest takes over and konturctl
+			// rejects -ip outright -- "ip must not be set in \"flat\" net
+			// mode". These were left behind when the default changed, and
+			// failed every run of this test since. There is also nothing
+			// left for them to collide with: each VM gets its own network
+			// namespace under the docker backend, so the "distinct from
+			// the concurrent test above" they used to carry was guarding
+			// a collision that shape makes impossible.
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKey,
@@ -481,16 +514,23 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		ReadyPollInterval: time.Second,
 	})
 
-	name := k.VMNameFor("1")
+	name, err := k.VMNameFor("1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		if err := kontur.Delete(context.Background(), stateDir, name); err != nil {
 			t.Logf("cleaning up real kontur VM %q: %v", name, err)
 		}
 	})
 
-	tools, err := k.ToolsFor(context.Background(), "1")
+	sb, err := k.Acquire(context.Background(), "1", orchestrator.Shape{})
 	if err != nil {
-		t.Fatalf("ToolsFor over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
+		t.Fatalf("Acquire over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
+	}
+	tools, err := sb.Tools(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
 	byName := map[string]*mcp.Tool{}
 	for i := range tools {
@@ -498,7 +538,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 	for _, want := range []string{"run_command", "read_file", "write_file", "edit_file"} {
 		if byName[want] == nil {
-			t.Fatalf("ToolsFor() returned no %s tool (got %d tools)", want, len(tools))
+			t.Fatalf("Tools() returned no %s tool (got %d tools)", want, len(tools))
 		}
 	}
 
@@ -519,7 +559,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	// first tool call. resolveEndpoint's readiness wait can only watch a
 	// TCP port start answering, which happens before the guest has
 	// finished booting to a usable sshd; waitForGuestExec's probe is a
-	// whole command *running in the guest*, so ToolsFor returning here
+	// whole command *running in the guest*, so Acquire returning here
 	// already means the guest ran one. Asserting that directly, rather
 	// than retrying and hiding it, is what would catch that guarantee
 	// regressing.
@@ -527,7 +567,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		"command": "echo grain-kontur-dockerexec-marker; id -un; uname -s",
 	})
 	if result.IsError {
-		t.Fatalf("run_command over docker exec failed on the first attempt, though ToolsFor had already run a command in this guest to decide it was ready: %s", result.Text)
+		t.Fatalf("run_command over docker exec failed on the first attempt, though Acquire had already run a command in this guest to decide it was ready: %s", result.Text)
 	}
 	for _, want := range []string{"grain-kontur-dockerexec-marker", "debian", "Linux"} {
 		if !strings.Contains(result.Text, want) {

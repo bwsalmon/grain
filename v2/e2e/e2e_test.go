@@ -93,15 +93,14 @@ func assertState(w *world, id string, want model.State, active bool) {
 }
 
 func TestIssueCompletesEndToEnd(t *testing.T) {
-	const slot = "sandbox-bd453be9-1"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
 	clock := baseTime
 	fileIssue(w, "iss-1", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	assertState(w, "iss-1", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +122,7 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	// way pkg/orchestrator/finish.go's ProcessResult does for real,
 	// against a real github.Client, in pkg/orchestrator/live_test.go.
 	assertState(w, "iss-1", model.StateQueued, false)
-	if occ, _ := w.store.OccupiedSlots(w.ctx); len(occ) != 0 {
+	if occ, _ := w.store.LiveRunCount(w.ctx); occ != 0 {
 		t.Fatalf("occupied slots after finish = %v, want none", occ)
 	}
 
@@ -157,17 +156,15 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	assertState(w, "iss-1", model.StateClosed, false)
 }
 
-// TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos proves the
-// same decision pkg/dispatch/dispatch_test.go's
-// TestCycleRespectsTheSlotCount pins down at the store level -- one
-// Cycle call filling two free slots at once -- all the way through two
-// real pushes, each in its own sandbox-stand-in directory, against two
-// different repos, and checks that running both dispatches within the
-// same cycle left neither slot's bookkeeping corrupted.
-func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
-	const slotA = "sandbox-bd453be9-a"
-	const slotB = "sandbox-bd453be9-b"
-	w := newWorld(t, []string{slotA, slotB})
+// TestCycleDispatchesTwoRunsAtOnceAgainstDifferentRepos proves the same
+// decision pkg/dispatch/dispatch_test.go's
+// TestCycleRespectsTheConcurrencyLimit pins down at the store level --
+// one Cycle call starting two runs at once -- all the way through two
+// real pushes, each in its own sandbox, against two different repos, and
+// checks that running both dispatches within the same cycle left
+// neither run's bookkeeping corrupted.
+func TestCycleDispatchesTwoRunsAtOnceAgainstDifferentRepos(t *testing.T) {
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "gadgets")
 
@@ -177,7 +174,7 @@ func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
 	assertState(w, "iss-a", model.StateQueued, false)
 	assertState(w, "iss-b", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,8 +193,8 @@ func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
 	if !ok {
 		t.Fatalf("Cycle did not dispatch iss-b: %+v", dispatches)
 	}
-	if dA.Slot == dB.Slot {
-		t.Fatalf("both dispatches landed on slot %q, want distinct slots", dA.Slot)
+	if dA.RunID == dB.RunID {
+		t.Fatalf("both dispatches got run id %q, want distinct runs", dA.RunID)
 	}
 	assertState(w, "iss-a", model.StateRunning, true)
 	assertState(w, "iss-b", model.StateRunning, true)
@@ -229,7 +226,7 @@ func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
 
 	assertState(w, "iss-a", model.StateQueued, false)
 	assertState(w, "iss-b", model.StateQueued, false)
-	if occ, _ := w.store.OccupiedSlots(w.ctx); len(occ) != 0 {
+	if occ, _ := w.store.LiveRunCount(w.ctx); occ != 0 {
 		t.Fatalf("occupied slots after both finish = %v, want none", occ)
 	}
 	if n, err := w.store.Attempts(w.ctx, "iss-a"); err != nil || n != 1 {
@@ -251,14 +248,13 @@ func TestCycleDispatchesTwoSlotsAtOnceAgainstDifferentRepos(t *testing.T) {
 }
 
 func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
-	const slot = "sandbox-bd453be9-2"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "gadgets")
 
 	clock := baseTime
 	fileIssue(w, "iss-2", human("bob"), model.RepoRef{Owner: "acme", Name: "gadgets"})
 
-	first, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first Cycle: %v, %+v", err, first)
 	}
@@ -281,7 +277,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 
 	// Parked means not dispatchable, even with a free slot sitting right
 	// there.
-	stillParked, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	stillParked, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +295,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	}
 	assertState(w, "iss-2", model.StateQueued, false)
 
-	second, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("second Cycle: %v, %+v, want attempt 2", err, second)
 	}
@@ -356,8 +352,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	// clones into a fixed "work" directory under its slot's sandbox root,
 	// so reusing slotA or slotB for the parent after a child already
 	// cloned there would collide with that leftover directory.
-	const slotA, slotB, slotC = "sandbox-bd453be9-4a", "sandbox-bd453be9-4b", "sandbox-bd453be9-4c"
-	w := newWorld(t, []string{slotA, slotB, slotC})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "other")
 	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -375,7 +370,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	)
 	assertState(w, "par", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +406,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	// Completed is not closed -- task_blocked reads closed_at, not
 	// completed_at, so the parent must still be excluded from every
 	// cycle with both children merely completed.
-	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +423,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	}
 	assertState(w, "kid-a", model.StateClosed, false)
 
-	oneOpen, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	oneOpen, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +444,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	// offered here: slotA and slotB each already hold a child's cloned
 	// "work" directory from pushScript above, and the parent's own push
 	// below needs a clean slot to clone into.
-	freed, err := dispatch.Cycle(w.ctx, w.store, []string{slotC}, clock)
+	freed, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,8 +478,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 }
 
 func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
-	const slot = "sandbox-bd453be9-3"
-	w := newWorld(t, []string{slot})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "other")
 
@@ -492,7 +486,7 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	fileIssue(w, "iss-3", human("carol"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	branch := model.BranchName("iss-3")
 
-	first, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first Cycle: %v, %+v", err, first)
 	}
@@ -516,7 +510,7 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	// eventually succeeding once it targets the right repo, not about how
 	// soon after a failure that retry is allowed to happen.
 	clock = clock.Add(time.Minute)
-	second, err := dispatch.Cycle(w.ctx, w.store, []string{slot}, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)
 	}
@@ -547,12 +541,12 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 // push/complete/merge/close pipeline TestIssueCompletesEndToEnd drives by
 // hand, rather than through simulated Observations alone: task B depends
 // on task A (model.LinkDependsOn, one of the two kinds LinkKind.Blocks()
-// names), so B must sit out every Cycle -- even with its slot idle -- for
+// names), so B must sit out every Cycle -- even with capacity free -- for
 // as long as A is merely running or completed, and only becomes
 // dispatchable the moment A reads closed.
 func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) {
-	slots := []string{"sandbox-fd357cb3-1", "sandbox-fd357cb3-2"}
-	w := newWorld(t, slots)
+	const maxConcurrent = 2
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
 	clock := baseTime
@@ -562,9 +556,9 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 	assertState(w, "iss-a", model.StateQueued, false)
 	assertState(w, "iss-b", model.StateQueued, false)
 
-	// B stays out of the dispatch even though its own slot sits idle
-	// right alongside A's.
-	first, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
+	// B stays out of the dispatch even though there is capacity for it
+	// right alongside A.
+	first, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +590,7 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 	// clears once the dependency's own row reads closed, so B must still
 	// sit out this cycle, even with both slots free now that A's run has
 	// finished.
-	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, slots, clock)
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,13 +609,11 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 	}
 	assertState(w, "iss-a", model.StateClosed, false)
 
-	// Only now, with iss-a closed, does iss-b become dispatchable. Restrict
-	// this cycle to the second slot -- the same narrowing
-	// TestCycleSkipsBlockedTasksUntilTheirDependencyCloses uses -- so B
-	// lands on a sandbox root that has never cloned "work" before, rather
-	// than colliding with the one A's own successful push already left
-	// behind on the first slot.
-	second, err := dispatch.Cycle(w.ctx, w.store, slots[1:], clock)
+	// Only now, with iss-a closed, does iss-b become dispatchable. No
+	// narrowing needed: B gets its own sandbox, so it cannot collide with
+	// the "work" clone A's own successful push left behind. This used to
+	// have to restrict the cycle to a second slot for exactly that reason.
+	second, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,9 +655,7 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 // authorizes per-run/per-slot rather than "any repo any live run
 // happens to target."
 func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T) {
-	const slotA = "sandbox-bd453be9-4"
-	const slotB = "sandbox-bd453be9-5"
-	w := newWorld(t, []string{slotA, slotB})
+	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 	w.newRepo("acme", "gadgets")
 
@@ -673,7 +663,7 @@ func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T)
 	fileIssue(w, "iss-4a", human("dave"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	fileIssue(w, "iss-4b", human("erin"), model.RepoRef{Owner: "acme", Name: "gadgets"})
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, []string{slotA, slotB}, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,8 +679,8 @@ func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T)
 			dB = d
 		}
 	}
-	if dA.Slot != slotA || dB.Slot != slotB {
-		t.Fatalf("expected iss-4a on %s and iss-4b on %s, got %+v", slotA, slotB, dispatches)
+	if dA.RunID != "iss-4a-r1" || dB.RunID != "iss-4b-r1" {
+		t.Fatalf("expected first attempts for iss-4a and iss-4b, got %+v", dispatches)
 	}
 	assertState(w, "iss-4a", model.StateRunning, true)
 	assertState(w, "iss-4b", model.StateRunning, true)

@@ -34,7 +34,6 @@ import (
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
-	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
@@ -62,24 +61,6 @@ func newPRReuseSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *g
 	return sim, github.NewClient(sim, nil)
 }
 
-// credentialSlot gives slot's own sandbox directory a git identity --
-// duplicated from pkg/orchestrator/live_test.go's own helper of the same
-// name, for the same reason: a fresh sandbox has none configured anywhere,
-// which makes `git commit` fail outright. This test clones straight off a
-// bare repo path rather than through a real gitproxy, so the placeholder
-// remote's scheme and host (never its path) are the only part of this
-// call that matters here.
-func credentialSlot(t *testing.T, sandboxes *orchestrator.HostSandboxes, slot string) {
-	t.Helper()
-	root, err := sandboxes.RootFor(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := mcp.ConfigureGitCredentials(root, "http://placeholder.example/x/y.git", "unused"); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // pushMoreScript is pushScript's second-attempt counterpart: it checks out
 // branch as it already exists on the remote (no -b) rather than creating
 // it fresh, and pushes one more commit onto its tip. Proving PR reuse
@@ -87,11 +68,12 @@ func credentialSlot(t *testing.T, sandboxes *orchestrator.HostSandboxes, slot st
 // already pushed -- pushScript alone can't do that, since it always
 // creates a fresh branch off the clone's default branch.
 //
-// It also removes any leftover "work" directory before cloning: an
-// attempt's slot directory (HostSandboxes.RootFor) is the same one the
-// previous attempt used, exactly as a real sandbox persisting across
-// retries of the same task would be, so the first attempt's own clone is
-// still sitting there.
+// It also removes any leftover "work" directory before cloning. That is
+// belt-and-braces now rather than load-bearing: each attempt gets a
+// sandbox of its own, built for that run and destroyed with it, so there
+// is no previous attempt's clone left to trip over. It was load-bearing
+// while a sandbox was a slot's and outlived every attempt dispatched onto
+// it.
 func pushMoreScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout " + branch + " && " +
@@ -123,7 +105,6 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 		t.Skip("git not installed")
 	}
 
-	const slot = "sandbox-c16814cc-1"
 	const owner, repoName = "acme", "widgets"
 	repo := model.RepoRef{Owner: owner, Name: repoName}
 
@@ -140,8 +121,7 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 
 	sim, client := newPRReuseSim(t, owner, repoName, "main")
 
-	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
-	credentialSlot(t, sandboxes, slot)
+	sandboxes := credentialed(t, "http://placeholder.example/x/y.git")
 
 	actor := human("dana")
 	task := model.Task{
@@ -161,7 +141,7 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 	branch := model.BranchName(task.ID)
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, Slots: []string{slot},
+		Store: store, Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
 		Framework: scriptedFramework(pushScript(sim.BareRepo, branch, task.ID)),
 	}
 
