@@ -109,18 +109,25 @@ type Reconciler struct {
 // fresh row in the store, not an outside event to poll for, the same
 // "the store is the record" shape everything else here already holds to.
 //
-// "qualifications" (bwsalmon/agents#518) is the newest, and runs right
-// after "releases" on purpose: a candidate "releases" has just advanced
-// to CandidateActive this same cycle gets its qualification run
-// instantiated the same tick rather than waiting a cycle to be noticed,
-// and a run whose last task "sync" observed completing earlier this same
-// cycle is promoted (when its plan's AutoPromote asks for it) without a
-// tick's delay either.
+// "qualifications" (bwsalmon/agents#518) runs right after "releases" on
+// purpose: a candidate "releases" has just advanced to CandidateActive
+// this same cycle gets its qualification run instantiated the same tick
+// rather than waiting a cycle to be noticed, and a run whose last task
+// "sync" observed completing earlier this same cycle is promoted (when
+// its plan's AutoPromote asks for it) without a tick's delay either.
+//
+// "branches" (bwsalmon/agents#638) is the newest: it creates whatever
+// branch a human just requested from the repo page still declares but has
+// not yet had created on GitHub -- the same "a fresh row in the store,
+// not an outside event to poll for" shape "releases" already holds to,
+// just without a candidate or qualification sequence of its own to chain
+// off of, so its place in the order carries no latency preference the way
+// "releases" before "qualifications" does.
 //
 // The order among the rest is a latency preference, not a dependency:
 // syncing pull requests last lets a merge this very cycle just performed
-// be picked up without a tick's delay. All five read their own inputs
-// from the store, so a different order produces the same state one cycle
+// be picked up without a tick's delay. All six read their own inputs from
+// the store, so a different order produces the same state one cycle
 // later — which is exactly why one failing does not invalidate another.
 func Reconcilers() []Reconciler {
 	return []Reconciler{
@@ -128,6 +135,7 @@ func Reconcilers() []Reconciler {
 		{Name: "dispatch", Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
 		{Name: "releases", Reconcile: reconcileReleases},
+		{Name: "branches", Reconcile: reconcileBranches},
 		{Name: "qualifications", Reconcile: reconcileQualifications},
 	}
 }
@@ -195,6 +203,13 @@ func reconcileSync(ctx context.Context, deps Deps, now time.Time) error {
 // performed -- cutting its own branch, or promoting it.
 func reconcileReleases(ctx context.Context, deps Deps, now time.Time) error {
 	return SyncReleases(ctx, deps.Store, deps.Client, now)
+}
+
+// reconcileBranches carries out whatever GitHub-side create a requested
+// branch (bwsalmon/agents#638) still declares but has not yet had
+// performed.
+func reconcileBranches(ctx context.Context, deps Deps, now time.Time) error {
+	return SyncBranches(ctx, deps.Store, deps.Client, now)
 }
 
 // reconcileQualifications schedules and, once successful, auto-promotes

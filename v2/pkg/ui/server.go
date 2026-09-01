@@ -72,6 +72,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases/{release}/candidates", s.handleCutCandidate)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote", s.handlePromoteCandidate)
 
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/branches", s.handleListBranches)
+	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/branches", s.handleCreateBranch)
+
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/qualification-plan", s.handleGetQualificationPlan)
 	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/qualification-plan", s.handlePutQualificationPlan)
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/candidates/{id}/qualification", s.handleGetCandidateQualification)

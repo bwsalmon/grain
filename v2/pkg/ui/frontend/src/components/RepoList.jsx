@@ -2,7 +2,7 @@ import { useState } from "react";
 import AddIcon from "@mui/icons-material/Add";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import { Button, Chip, IconButton, Stack, TextField, Typography } from "@mui/material";
+import { Box, Button, Chip, IconButton, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { TaskRow } from "./TaskList.jsx";
@@ -18,13 +18,17 @@ import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimi
 // The chevron (bwsalmon/agents#474) is a second way into the same
 // tasks: it folds them out right here, for a quick look that doesn't
 // leave the repo page, without replacing the deeper task-list view the
-// row itself still opens. The Releases and "+" buttons are further
-// entry points into the same row (hence stopPropagation on both, so
-// neither also fires onOpenRepo or the chevron toggle): release
-// management is a property of the repo (bwsalmon/agents#459), and
-// filing a task against it is the repo page's own shortcut for not
-// retyping the repo you're already looking at, so both live here
-// rather than behind a sidebar button reachable from anywhere.
+// row itself still opens. The New branch, Releases and "+" buttons are
+// further entry points into the same row (hence stopPropagation on all
+// three, so none of them also fires onOpenRepo or the chevron toggle):
+// release management is a property of the repo (bwsalmon/agents#459),
+// creating a branch outright is too (bwsalmon/agents#638, for whatever
+// doesn't fit release management's own latest/rc/prod shape), and filing
+// a task against it is the repo page's own shortcut for not retyping the
+// repo you're already looking at, so all three live here rather than
+// behind a sidebar button reachable from anywhere. New branch's own form
+// folds out below the row the same way the chevron's tasks do, rather
+// than a modal, since it only ever needs the one field.
 //
 // Adding and removing a target repo (bwsalmon/agents#473) lives here
 // too, replacing the "Target repos" list Settings used to bury this
@@ -49,6 +53,12 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
   const [search, setSearch] = useState("");
   const repos = repoRows(config, tasks);
   const [expanded, setExpanded] = useState(() => new Set());
+  // branchRepo is the one repo, if any, whose "New branch" form and
+  // recent-branches list is open -- a single slot rather than a Set the
+  // way `expanded` is, since only one repo's own branches are ever being
+  // read from the API at a time (branches holds that one repo's list).
+  const [branchRepo, setBranchRepo] = useState(null);
+  const [branches, setBranches] = useState([]);
 
   const q = search.trim().toLowerCase();
   const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
@@ -81,6 +91,46 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
       const [owner, name] = repo.split("/");
       await api(`/api/repos/${owner}/${name}`, { method: "DELETE" });
       await onRefreshConfig();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const loadBranches = async (repo) => {
+    try {
+      const [owner, name] = repo.split("/");
+      setBranches(await api(`/api/repos/${owner}/${name}/branches`));
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const toggleBranchForm = (evt, repo) => {
+    evt.stopPropagation();
+    if (branchRepo === repo) {
+      setBranchRepo(null);
+      return;
+    }
+    setBranchRepo(repo);
+    setBranches([]);
+    loadBranches(repo);
+  };
+
+  // createBranch only ever records the request -- the branches reconciler
+  // (pkg/orchestrator.SyncBranches) is what actually creates it on GitHub,
+  // typically within one cycle, so a freshly submitted name reappears
+  // below still "pending" until the next loadBranches picks up "created"
+  // or, if GitHub refused it, an error.
+  const createBranch = async (evt, repo) => {
+    evt.preventDefault();
+    const form = evt.target;
+    const name = form.elements.branchName.value.trim();
+    if (name === "") return;
+    try {
+      const [owner, repoName] = repo.split("/");
+      await api(`/api/repos/${owner}/${repoName}/branches`, { method: "POST", body: JSON.stringify({ name }) });
+      form.reset();
+      await loadBranches(repo);
     } catch (err) {
       showError(err);
     }
@@ -149,6 +199,13 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                 <Button
                   size="small"
                   variant="outlined"
+                  onClick={(evt) => toggleBranchForm(evt, r.repo)}
+                >
+                  New branch
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
                   onClick={(evt) => { evt.stopPropagation(); onOpenReleases(r.repo); }}
                 >
                   Releases
@@ -159,6 +216,28 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                   </Button>
                 )}
               </div>
+              {branchRepo === r.repo && (
+                <Box sx={{ px: "1.75rem", py: 1.25, borderTop: "1px solid", borderColor: "divider" }}>
+                  <Stack component="form" direction="row" spacing={1} alignItems="flex-start" onSubmit={(evt) => createBranch(evt, r.repo)}>
+                    <TextField
+                      name="branchName" label="New branch name" placeholder="feature/foo"
+                      helperText="Created from the repo's current default branch"
+                      autoComplete="off" required InputLabelProps={{ required: false }} size="small"
+                    />
+                    <Button type="submit" variant="contained" size="small">Create branch</Button>
+                  </Stack>
+                  {branches.length > 0 && (
+                    <ul className="candidate-history" style={{ marginTop: "0.75rem" }}>
+                      {branches.map((b) => (
+                        <li key={`${b.name}-${b.createdAt}`}>
+                          <strong>{b.name}</strong> -- {b.status}
+                          {b.error && <span className="candidate-error"> ({b.error})</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Box>
+              )}
               {isOpen && (
                 <ul className="task-sublist">
                   {tasks.filter((t) => t.repo === r.repo).map((t) => (
