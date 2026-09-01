@@ -34,6 +34,10 @@ test("files a new task through the New task overlay", async ({ page }) => {
   await page.getByRole("button", { name: "+ New task" }).click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
   await page.getByLabel("Title").fill(title);
+  // No repo is picked from this top-level "+ New task" button, so
+  // "No repo" has to be checked before Create task will even enable
+  // (bwsalmon/agents#614).
+  await page.getByLabel(/No repo/).check();
   // "Queue immediately" is left unchecked, so this files as a proposal
   // rather than a queued task -- the next test approves one of those.
   await page.getByRole("button", { name: "Create task" }).click();
@@ -50,6 +54,7 @@ test("approves a proposed task from its detail view", async ({ page }) => {
 
   await page.getByRole("button", { name: "+ New task" }).click();
   await page.getByLabel("Title").fill(title);
+  await page.getByLabel(/No repo/).check();
   await page.getByRole("button", { name: "Create task" }).click();
 
   await page.locator(".task-row", { hasText: title }).click();
