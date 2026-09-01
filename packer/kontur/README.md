@@ -111,7 +111,7 @@ The hook was written and reviewed, and landed upstream, without ever
 being built: no image registry is reachable from where it was written
 (the egress policy denies Docker's blob CDN, so `docker build` cannot
 resolve a single base image), and there is no `/dev/kvm` to boot the
-result under. What needs checking on a machine that can:
+result under. What needed checking on a machine that can:
 
 1. **Device nodes survive the copy.** `COPY --from=guest-rootfs /rootfs/ /`
    has to carry debootstrap's `/dev` entries through BuildKit. If it
@@ -126,6 +126,22 @@ result under. What needs checking on a machine that can:
 4. **`update-initramfs` inside the RUN** produces an initramfs the guest
    actually boots from -- the step `guest-setup.sh` depends on for its
    `eth0`/`ip=` units to stick.
+
+**Verified live (bwsalmon/agents#577), for the Debian path.** A fresh
+n2-standard-4 GCE VM with nested virtualization, running nothing but
+`v2/scripts/setup.sh GRAIN_KONTUR_ENABLE=1`, built this image
+(`docker build --target guest-artifacts`) end to end with no patching,
+`konturctl vm create` booted it under real `cloud-hypervisor`/KVM, and a
+real `grain daemon` dispatch reached it through the full production path
+(`pkg/mcp/docker_exec_runner.go`'s `docker exec <container> kontur exec --
+whoami`, over the guest's own sshd) and got back `debian`. All four items
+above check out: the device nodes, the `RUN` stage, and the regenerated
+initramfs all worked without local changes. Only item 3 (the Alpine
+variant) remains unverified -- this run only ever exercised Debian, same
+as every other deployment. `v2/scripts/kontur-diag.sh` needed a real fix
+first (it predated `-net flat` becoming the default and misdiagnosed a
+healthy flat-mode guest as broken); see that script's own header for
+what changed.
 
 ### Two things measured while porting, both load-bearing
 
@@ -195,8 +211,8 @@ do *not* fall out of this change for free, the way this section
 previously assumed -- retiring them needs the exec key authorized for
 `debian` too, or the sandbox account moved to root.
 
-The four checks below still have not been run: the build has never been
-executed anywhere, here or upstream.
+See "Verified live (bwsalmon/agents#577)" above -- the build has now been
+run and the result booted, for the Debian path.
 
 
 ## Why no custom kernel
