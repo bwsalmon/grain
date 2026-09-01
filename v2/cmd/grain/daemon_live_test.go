@@ -51,12 +51,13 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
-// syncedSim serializes every call into a *githubsim.Sim: the real Sim
-// carries no lock of its own, which is fine for every other test in this
-// codebase (one goroutine driving it directly), but this test drives it
-// from an httptest.Server's own request-handling goroutines -- the
-// running daemon's REST calls, plus this test's own polling reads --
-// concurrently.
+// syncedSim serializes this test's own reads of a *githubsim.Sim's
+// fields against the daemon's concurrent requests into it. Sim.Request
+// takes the Sim's own lock now that a run outlives the cycle that
+// started it (orchestrator.InFlight) and several runs really do reach
+// one client at once; what that lock does not cover is a test reading
+// sim.PullRequests directly while an httptest.Server's request-handling
+// goroutines are inside Request, which is what this wrapper is for.
 type syncedSim struct {
 	mu  sync.Mutex
 	sim *githubsim.Sim

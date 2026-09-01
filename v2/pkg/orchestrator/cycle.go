@@ -57,6 +57,24 @@ type Deps struct {
 	// resolving a sandbox through the live run on it.
 	RevokeSandboxToken func(sandbox string) error
 	MaxConcurrent      int
+	// Runs, when non-nil, is where a cycle parks the runs it starts:
+	// reconcileDispatch gives each dispatch a goroutine tracked there and
+	// returns without waiting for it, so the cycle -- and the tick after
+	// it -- is over in the time the dispatch *decisions* take rather than
+	// in the time the agents take. That is what makes MaxConcurrent
+	// reachable by a deployment whose tasks arrive one at a time: see
+	// InFlight's own doc comment for what waiting used to cost, and
+	// cmd/grain's drainInFlight for the other half, draining it at
+	// shutdown so a run still gets to release its sandbox.
+	//
+	// Nil means a cycle waits for every run it started before returning,
+	// and joins their errors into its own. That is the shape this package
+	// had before there was an InFlight at all, and it is the right one for
+	// a caller that has no loop to tick again -- a test that dispatches
+	// and then asserts on what the run did, or a one-shot cycle -- since
+	// such a caller has nothing to hold the process open while a detached
+	// goroutine works. A deployment always sets one.
+	Runs *InFlight
 }
 
 // runCleanupTimeout bounds each of the two things runOne does after a run
@@ -220,7 +238,9 @@ func reconcileQualifications(ctx context.Context, deps Deps, now time.Time) erro
 }
 
 // reconcileDispatch lets dispatch.Cycle decide what runs, then runs every
-// dispatch it decided on concurrently, one goroutine per dispatch.
+// dispatch it decided on concurrently, one goroutine per dispatch --
+// handed to deps.Runs, and so outliving this cycle, wherever a caller has
+// given it somewhere to park them (Deps.Runs).
 //
 // This is what actually makes -max-concurrent/GRAIN_MAX_CONCURRENT a
 // concurrency knob rather than just a scheduling one (bwsalmon/
@@ -249,9 +269,47 @@ func reconcileQualifications(ctx context.Context, deps Deps, now time.Time) erro
 // is no separate ctx.Err() check to make before launching them the way
 // the old sequential loop needed one before each iteration.
 func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
-	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.MaxConcurrent, now)
+	// dispatch.Busy is what keeps a task this process is still finishing
+	// with out of this cycle's reach: a run's row is finished before
+	// runOne has turned its result into the effects it implies, and a
+	// tick landing in that window would otherwise dispatch the same task
+	// again. There is no such window without deps.Runs -- a cycle that
+	// waits for its own runs has no next tick to fall into it -- which is
+	// why the option goes with it.
+	var opts []dispatch.Option
+	if deps.Runs != nil {
+		opts = append(opts, dispatch.Busy(deps.Runs.Busy))
+	}
+	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.MaxConcurrent, now, opts...)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
+	}
+
+	// With somewhere to park them, a run outlives the cycle that started
+	// it: the goroutines below are handed to deps.Runs and this function
+	// returns as soon as they are launched. See Deps.Runs and InFlight
+	// for why -- in short, waiting here made a cycle as slow as its
+	// slowest agent, and cmd/grain's reconcile loop does not tick again
+	// until a cycle returns, so a single running task stopped every other
+	// task from starting however much of MaxConcurrent was free.
+	//
+	// An error has nowhere to be returned to once that happens -- the
+	// cycle it belonged to is long over -- so it is logged, the same way
+	// cmd/grain's own loop logs whatever a cycle returns. Nothing else is
+	// lost by that: the run's own outcome and diagnosis are already in
+	// the store (RunDispatch finishes the row on every path it takes,
+	// and runOne's setup guard finishes one whose sandbox never came up),
+	// which is where a UI or a retry reads them from rather than from a
+	// cycle's error.
+	if deps.Runs != nil {
+		for _, d := range dispatches {
+			deps.Runs.Go(d.RunID, d.TaskID, func() {
+				if err := recoverRunOne(ctx, deps, d, now); err != nil {
+					log.Printf("orchestrator: run %s (task %s): %v", d.RunID, d.TaskID, err)
+				}
+			})
+		}
+		return nil
 	}
 
 	var errsMu sync.Mutex

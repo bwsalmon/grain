@@ -1668,6 +1668,40 @@ inside `StartRun`'s own transaction, which rules that race out rather
 than detecting it after the fact; the index that remains says a task has
 at most one run in flight, which is what `task_state` already assumed.
 
+**A run outlives the cycle that started it.** `reconcileDispatch` used
+to wait for every run it dispatched, and `cmd/grain`'s reconcile loop
+waits for a cycle before it ticks again — so one long run held the whole
+controller. Nothing else was dispatched however much of `max_concurrent`
+was free, no pull request was synced, no schedule came due, until that
+agent finished. A deployment configured for several concurrent runs only
+ever reached that number when a single tick happened to find several
+tasks ready at once; a task filed a second after a run started waited out
+the whole run. `orchestrator.InFlight` is where the goroutines go
+instead: `RunCycle` returns once the dispatch *decisions* are made, and
+the next tick dispatches into whatever headroom is free then.
+
+The limit is still a count in the store, not a count here —
+`LiveRunCount`, re-checked inside `StartRun`'s transaction — which stays
+accurate across ticks precisely because a run's row stays live until the
+goroutine that outlived the cycle finishes it. What `InFlight` is for is
+waiting: `drainInFlight` gives a cancelled run its chance to release its
+sandbox before the process exits, and a test that dispatches
+asynchronously needs to know when the work is done. A `Deps` with no
+`InFlight` keeps the old shape, waiting for its own runs and joining
+their errors — which is what every one-shot caller (a test, a single
+cycle) wants, having no next tick to do the waiting for it.
+
+Ticking while a run is live opened one window that could not exist
+before. A run's row is finished (`FinishRun`, inside `RunDispatch`) a
+moment before `runOne` has turned its result into the effects it implies
+— the observation that says the task completed, the pull request it
+opened — and in between `task_state` sees no live run and no completion,
+so the task reads `queued` again. A tick landing there dispatched the
+same task a second time. `dispatch.Busy` closes it: the process still
+holding that result tells `Cycle` to pass over the task, without
+spending capacity on it, exactly the way a task still backing off after
+a failure is passed over.
+
 **A sandbox is named after its run.** Nothing else is in a position to
 name it — it is built for that run and destroyed with it — and a run ID
 is already unique, already durable, and already what a log line or a

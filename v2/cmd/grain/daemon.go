@@ -630,6 +630,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 		}
 	}
 
+	inFlight := &orchestrator.InFlight{}
 	deps := orchestrator.Deps{
 		Store: store, Client: githubClient, Sandboxes: sandboxes,
 		Framework: func() agent.Framework { return agentFramework },
@@ -648,10 +649,55 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
 		MaxConcurrent:      cfg.maxConcurrent,
+		// A run outlives the cycle that started it (orchestrator.Deps.Runs):
+		// without this the loop below could not tick again -- and so could
+		// not dispatch into the rest of -max-concurrent, nor sync a single
+		// pull request -- until every agent a cycle started had finished.
+		Runs: inFlight,
 	}
 	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s)", cfg.pollInterval, cfg.maxConcurrent)
 	reconcile(ctx, deps, cfg.pollInterval)
+	// reconcile only returns once ctx is done, which is also what tells
+	// every live run to wind up -- so this is the shutdown drain, not a
+	// wait for work still to be done.
+	drainInFlight(inFlight)
 	return nil
+}
+
+// shutdownDrain bounds how long the daemon waits, after its reconcile
+// loop has stopped, for the runs still in flight to unwind.
+//
+// It is worth waiting at all because unwinding is not nothing: a
+// cancelled run still finishes its own row and still releases its
+// sandbox, both on contexts deliberately detached from the cancellation
+// (orchestrator.runCleanupTimeout, which bounds each of those two at 2
+// minutes). Exiting the instant the loop stops would leave a kontur VM
+// running and a run row live for the next process to recover.
+//
+// It is bounded because a shutdown that never ends is worse than one
+// that leaves something behind: a VM this gives up on is reaped at the
+// next startup (KonturSandboxes.ReapOrphans), and a run row is recovered
+// there too (orchestrator.RecoverOrphanedRuns). Generous enough for both
+// cleanup steps of a single run, and no more.
+const shutdownDrain = 4*time.Minute + 30*time.Second
+
+// drainInFlight waits for runs to finish unwinding, logging what it is
+// waiting on and what it gave up on -- the two things an operator
+// watching a slow SIGINT wants to know.
+func drainInFlight(runs *orchestrator.InFlight) {
+	if runs.Len() == 0 {
+		return
+	}
+	log.Printf("grain daemon: shutting down; waiting up to %s for %d run(s) to release their sandboxes: %v",
+		shutdownDrain, runs.Len(), runs.Runs())
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrain)
+	defer cancel()
+	if err := runs.Wait(ctx); err != nil {
+		log.Printf("grain daemon: gave up waiting on %d run(s) still in flight (%v); "+
+			"the next start recovers their rows and reaps their VMs", runs.Len(), runs.Runs())
+		return
+	}
+	log.Printf("grain daemon: every run in flight at shutdown has finished")
 }
 
 // buildAgentFramework constructs the one agent.Framework this deployment
@@ -780,9 +826,14 @@ func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, c
 // the whole daemon down, since the next tick gets another chance at
 // whatever failed. RunCycle ticks are not overlapped: reconcile waits for
 // one to return before the next interval starts, so a slow GitHub poll
-// simply delays the next dispatch rather than racing it; a reap running
-// concurrently with a RunCycle tick is fine either way; the two touch
-// disjoint state (a reap only ever deletes a resource no live Lease
+// simply delays the next dispatch rather than racing it. What a tick no
+// longer waits for is the runs it starts: deps.Runs (set in runDaemon)
+// makes RunCycle hand each dispatch to a goroutine and return, so a tick
+// takes as long as the cycle's decisions rather than as long as its
+// agents -- see orchestrator.InFlight for what the old wait cost, which
+// was every other task's dispatch for as long as any one run lasted. A
+// reap running concurrently with a RunCycle tick is fine either way; the
+// two touch disjoint state (a reap only ever deletes a resource no live Lease
 // still names an outstanding run against). Ported from pkg/orchestrate's
 // own Reconciler.Run (bwsalmon/agents#254) when that package merged into
 // pkg/orchestrator, which -- being "a library, not a binary" (its own
