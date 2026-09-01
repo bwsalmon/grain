@@ -1,27 +1,26 @@
 // node scripts/export-brand-assets.mjs
 //
 // Regenerates the checked-in brand assets from src/brand/grain-mark.js,
-// which is the one definition of the mark. The fixed figure is 2·3 (+),
-// and the pack renders it differently per size tier -- so the three
-// assets below are the same eigenmode, not three different marks:
+// which is the one definition of the mark. The static logo is the 2·3 (−)
+// rosette (the pack's STATIC_SLOT), and the assets below are that one
+// glyph in the two treatments the pack asks for -- solid where the mark
+// is small, grains where it has room:
 //
-//   public/grain-mark-<theme>.svg   the tiny-tier glyph (the "plus":
-//                                   2·3 (+) at the pack's 1.5x tiny zoom,
-//                                   as stroke vectors). Scale-free, which
-//                                   is what the pack asks a static
-//                                   favicon to be -- it is sharp at the
-//                                   16px tab slot and the 180px installed
-//                                   one alike. Also the still the sidebar
-//                                   shows while nothing is running.
-//   public/grain-mark-<theme>.png   the same glyph rasterized at 128px,
+//   public/grain-mark-<theme>.svg   the rosette as a solid filled path.
+//                                   Scale-free, so one file is sharp in
+//                                   the 16px tab slot and the 180px
+//                                   installed one alike. It is both the
+//                                   favicon and the still GrainMark.jsx
+//                                   shows whenever it is not animating.
+//   public/grain-mark-<theme>.png   the same fill rasterized at 128px,
 //                                   the favicon fallback for browsers
 //                                   with no SVG-favicon support (Safari
 //                                   before 16.4). Same geometry, so the
 //                                   two cannot show different marks.
-//   docs/brand/grain-hero-2-3plus-<theme>.svg
-//                                   the full-tier figure at hero scale as
-//                                   grains, for anywhere a large still is
-//                                   wanted (README, slides, print).
+//   docs/brand/grain-hero-2-3minus-<theme>.svg
+//                                   the rosette at hero scale as grains,
+//                                   for anywhere a large still is wanted
+//                                   (README, slides, print).
 //
 // All three are committed: `npm run build` copies public/ verbatim and
 // the docs are read straight out of the repo, so neither has a build
@@ -31,38 +30,48 @@
 // Rendering here re-implements the module's draw calls rather than
 // calling into them, because those paint through a canvas 2D context and
 // node has none. The geometry comes from the module -- same frame, same
-// field, same chains -- so what this writes is what the browser paints.
+// field, same sampling -- so what this writes is what the browser paints.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
-import { THEMES, figurePoints, makeFrame, modeZoom, tierFor } from "../src/brand/grain-mark.js";
+import {
+  GLYPHS,
+  STATIC_SLOT,
+  THEMES,
+  fillScalar,
+  glyphZoom,
+  grainSpec,
+  sampleGlyph,
+} from "../src/brand/grain-mark.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontend = join(here, "..");
 const repoRoot = join(frontend, "..", "..", "..", "..");
 
-// The fixed mark: MODES[1] and TINY_MODES[3] are the same figure, which
-// is why one mode number covers every size. Below 40px the pack zooms it
-// 1.5x and keeps only the chains inside 0.97 R -- the plus and its centre
-// ring, with the outer square cropped away.
-const FIXED_MODE = [2, 3, 1];
+// The static logo: 2·3 (−), pulled out to 0.78 of the frame so the
+// rosette sits inside the circle rather than running off it.
+const LOGO = GLYPHS[STATIC_SLOT];
 
-// The design size the tiny glyph is defined at. The pack exports its
-// glyphs here and they are scale-free vectors; the PNG below is this
-// same geometry rasterized larger, not a separate drawing.
-const GLYPH_PX = 24;
+// The box the vector is authored in. Arbitrary -- the SVG is scale-free
+// and carries no pixel commitment -- but it fixes the coordinate
+// precision below, and 128 is round enough to read in a diff.
+const VECTOR_PX = 128;
 // 128px, not 32: the favicon is scaled down to whatever slot asks for it
 // (16px tab, 32px bookmark, larger for an installed shortcut), and one
 // oversized source scales down cleanly where a 32px one cannot scale up.
 const ICON_PX = 128;
+// The hero export's size, and the pack's own: `node export-svg.mjs` in
+// the pack writes svg/grain-logo-{light,dark}.svg at exactly this size
+// and seed, and this file reproduces those two byte for byte. That is
+// what pins the vendoring -- if the module drifts from the pack, the
+// hero assets stop matching and `npm run brand` shows it.
 const HERO_PX = 440;
 
-// Math.random is what figurePoints jitters with, and what the pack seeds
-// its own exports with; seeding it the same way makes these exports
-// reproducible and byte-identical to the pack's, so a re-run leaves the
-// committed files alone unless the mark itself changed.
+// sampleGlyph darts at Math.random, and the pack seeds it this way for
+// its own exports; seeding it identically makes these reproducible, so a
+// re-run leaves the committed files alone unless the mark itself changed.
 function seedRandom(seed) {
   let s = seed;
   Math.random = () => {
@@ -71,65 +80,208 @@ function seedRandom(seed) {
   };
 }
 
-/** The tiny glyph's polylines, in a W-sized box. Geometry is the 24px design at any W. */
-function glyphChains(W) {
+// ---------- the solid fill, as geometry ----------
+
+/**
+ * The scalar the solid mark fills the positive region of, in pixels of a
+ * W-sized box, forced negative outside the frame.
+ *
+ * Clamping to just outside the frame radius is what lets the contour
+ * tracer below assume every contour closes inside the box: the glyph's
+ * filled regions run past the circle and would otherwise have to be
+ * closed along the box edge. The clip path in the SVG (and the frame
+ * test in the PNG) then trims the 2% collar this leaves behind, so
+ * nothing of it survives into the asset.
+ */
+function fillAt(W, x, y) {
+  const c = W / 2;
   const R = W * 0.44;
-  const frame = makeFrame(W / 2, W / 2, R, "circle");
-  seedRandom(7);
-  const pts = figurePoints(
-    frame,
-    R * modeZoom(...FIXED_MODE, GLYPH_PX),
-    FIXED_MODE,
-    90,
-    64,
-    0,
-    GLYPH_PX * 0.44,
-  );
-  return pts.chains;
+  const [n, m, sg] = LOGO;
+  const Rf = R * glyphZoom(n, m, sg);
+  if (Math.hypot(x - c, y - c) > R * 1.02) return -1;
+  return fillScalar(n, m, sg, (x - c) / Rf, (y - c) / Rf);
 }
 
-// ---------- glyph SVG (the pack's own favicon export) ----------
+/**
+ * Marching squares over `fillAt`, as closed loops in the W box.
+ *
+ * The standard 16-case table, with the two saddles (5 and 10) resolved
+ * by the cell's mean value so a saddle is cut the way the field actually
+ * runs through it rather than always the same way -- which on this glyph
+ * is the difference between the rosette's arms meeting at the centre and
+ * pinching off into separate blobs. Segments are collected first and
+ * then chained end to end; the grid is fine enough that endpoints shared
+ * between neighbouring cells are bit-identical, so the chaining is an
+ * exact key lookup rather than a nearest-point search.
+ */
+function contours(W, res) {
+  const step = W / res;
+  const v = new Float64Array((res + 1) * (res + 1));
+  for (let j = 0; j <= res; j++) {
+    for (let i = 0; i <= res; i++) v[j * (res + 1) + i] = fillAt(W, i * step, j * step);
+  }
+  const at = (i, j) => v[j * (res + 1) + i];
+  // Zero crossing along a cell edge, linearly interpolated.
+  const cut = (a, b, va, vb) => {
+    const t = va / (va - vb);
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  };
 
-function renderGlyphSVG(theme) {
-  const W = GLYPH_PX;
-  const R = W * 0.44;
-  const d = glyphChains(W)
-    .map((c) => "M " + c.chain.map((p) => `${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" L "))
+  const segs = [];
+  for (let j = 0; j < res; j++) {
+    for (let i = 0; i < res; i++) {
+      const v00 = at(i, j);
+      const v10 = at(i + 1, j);
+      const v11 = at(i + 1, j + 1);
+      const v01 = at(i, j + 1);
+      const code = (v00 > 0 ? 1 : 0) | (v10 > 0 ? 2 : 0) | (v11 > 0 ? 4 : 0) | (v01 > 0 ? 8 : 0);
+      if (code === 0 || code === 15) continue;
+      const p00 = [i * step, j * step];
+      const p10 = [(i + 1) * step, j * step];
+      const p11 = [(i + 1) * step, (j + 1) * step];
+      const p01 = [i * step, (j + 1) * step];
+      const top = () => cut(p00, p10, v00, v10);
+      const right = () => cut(p10, p11, v10, v11);
+      const bottom = () => cut(p01, p11, v01, v11);
+      const left = () => cut(p00, p01, v00, v01);
+      // Which edges the contour crosses. Orientation is not tracked:
+      // the loops are chained from either end below and filled with
+      // evenodd, neither of which depends on a winding direction.
+      switch (code) {
+        case 1: case 14: segs.push([left(), top()]); break;
+        case 2: case 13: segs.push([top(), right()]); break;
+        case 3: case 12: segs.push([left(), right()]); break;
+        case 4: case 11: segs.push([right(), bottom()]); break;
+        case 6: case 9: segs.push([top(), bottom()]); break;
+        case 7: case 8: segs.push([bottom(), left()]); break;
+        case 5:
+        case 10: {
+          const mid = (v00 + v10 + v11 + v01) / 4;
+          const joined = code === 5 ? mid > 0 : mid <= 0;
+          if (joined) {
+            segs.push([left(), top()], [right(), bottom()]);
+          } else {
+            segs.push([left(), bottom()], [right(), top()]);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // Chain the segments into loops. A cut point is computed from the same
+  // two corner values in both cells that share the edge, so the doubled
+  // endpoints are bit-identical and neighbours can be found by exact key
+  // rather than by proximity. Each segment is walked from whichever end
+  // the chain arrives at, which is what lets the case table above stay
+  // orientation-free.
+  const key = (p) => `${p[0]},${p[1]}`;
+  const touching = new Map();
+  segs.forEach((s, i) => {
+    for (const end of s) {
+      const k = key(end);
+      if (!touching.has(k)) touching.set(k, []);
+      touching.get(k).push(i);
+    }
+  });
+  const loops = [];
+  const used = new Uint8Array(segs.length);
+  for (let start = 0; start < segs.length; start++) {
+    if (used[start]) continue;
+    used[start] = 1;
+    const loop = [segs[start][0], segs[start][1]];
+    for (;;) {
+      const head = loop[loop.length - 1];
+      const next = (touching.get(key(head)) || []).find((i) => !used[i]);
+      if (next === undefined) break;
+      used[next] = 1;
+      const [a, b] = segs[next];
+      loop.push(key(a) === key(head) ? b : a);
+    }
+    if (loop.length > 3) loops.push(loop);
+  }
+  return loops;
+}
+
+/** Douglas-Peucker: drop the points a straight run does not need. */
+function simplify(points, tol) {
+  if (points.length < 3) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack = [[0, points.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const [ax, ay] = points[a];
+    const [bx, by] = points[b];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const l2 = dx * dx + dy * dy;
+    let far = -1;
+    let fd = tol;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = points[i];
+      const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+      const d = Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+      if (d > fd) {
+        fd = d;
+        far = i;
+      }
+    }
+    if (far > 0) {
+      keep[far] = 1;
+      stack.push([a, far], [far, b]);
+    }
+  }
+  return points.filter((_, i) => keep[i]);
+}
+
+/**
+ * The solid mark as one SVG path.
+ *
+ * Traced at 512 and then simplified to a fifth of a pixel of the
+ * authoring box: fine enough that the curve is smooth at any size the
+ * favicon is asked for, coarse enough that the file stays a few KB
+ * rather than the sixty a raw trace would be. `evenodd` is what makes
+ * the rosette's holes holes without depending on the winding coming out
+ * of the tracer.
+ */
+function logoPath() {
+  const W = VECTOR_PX;
+  return contours(W, 512)
+    .map((loop) => simplify(loop, W / 640))
+    .filter((loop) => loop.length > 3)
+    .map((loop) => `M ${loop.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(" L ")} Z`)
     .join(" ");
+}
+
+function renderLogoSVG(theme, d) {
+  const W = VECTOR_PX;
+  const R = W * 0.44;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${W}">
   <defs><clipPath id="f"><circle cx="${W / 2}" cy="${W / 2}" r="${R}"/></clipPath></defs>
-  <path clip-path="url(#f)" d="${d}" fill="none" stroke="${theme.grain}" stroke-width="${(W * 0.028).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="${W / 2}" cy="${W / 2}" r="${R}" fill="none" stroke="${theme.grain}" stroke-opacity="0.9" stroke-width="${(W * 0.05).toFixed(2)}"/>
+  <path clip-path="url(#f)" fill="${theme.grain}" fill-rule="evenodd" d="${d}"/>
 </svg>
 `;
 }
 
-// ---------- hero SVG (grains, the pack's own export) ----------
+// ---------- hero SVG (grains -- the pack's own export, reproduced) ----------
 
 function renderHeroSVG(theme) {
   const W = HERO_PX;
-  const R = W * 0.44;
-  const frame = makeFrame(W / 2, W / 2, R, "circle");
-  const tier = tierFor(W);
+  const frame = { W, H: W, cx: W / 2, cy: W / 2, R: W * 0.44 };
+  const spec = grainSpec(W);
   seedRandom(42);
-  const pts = figurePoints(
-    frame,
-    R * modeZoom(...FIXED_MODE, W),
-    FIXED_MODE,
-    tier.count,
-    64,
-    tier.jitter,
-  );
-  const r = (W * tier.radius).toFixed(2);
+  const pts = sampleGlyph(frame, LOGO, spec.count);
+  const r = (W * spec.radius).toFixed(2);
   const circles = pts
     .map((p) => `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r}"/>`)
     .join("\n    ");
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${W}">
-  <defs><clipPath id="f"><circle cx="${W / 2}" cy="${W / 2}" r="${R}"/></clipPath></defs>
+  <defs><clipPath id="f"><circle cx="${W / 2}" cy="${W / 2}" r="${W * 0.44}"/></clipPath></defs>
   <g clip-path="url(#f)" fill="${theme.grain}">
     ${circles}
   </g>
-  <circle cx="${W / 2}" cy="${W / 2}" r="${R}" fill="none" stroke="${theme.grain}" stroke-opacity="0.9" stroke-width="${(W * 0.012).toFixed(2)}"/>
 </svg>
 `;
 }
@@ -184,91 +336,32 @@ function encodePNG(width, height, rgba) {
   ]);
 }
 
-/** Squared distance from a point to a segment. */
-function distSqToSeg(px, py, ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const l2 = dx * dx + dy * dy;
-  const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
-  const qx = ax + dx * t;
-  const qy = ay + dy * t;
-  return (px - qx) ** 2 + (py - qy) ** 2;
-}
-
 /**
- * The glyph as pixels: the stroked chains plus the ring, supersampled.
- *
- * Stroking through a distance field rather than a polygon sweep is what
- * gives the round caps and joins the SVG asks for -- a point is inside
- * the stroke exactly when it is within half a stroke width of some
- * segment, which is the definition of a round-capped line.
+ * The solid mark as pixels: the module's own `style:'solid'` render,
+ * which is the filled region supersampled 3x3 and clipped to the frame.
  */
-function renderGlyphPNG(size, theme) {
-  const chains = glyphChains(size);
+function renderLogoPNG(size, theme) {
   const c = size / 2;
   const R = size * 0.44;
-  const halfStroke = (size * 0.028) / 2;
-  const halfRing = (size * 0.05) / 2;
   const SS = 3;
   const rgb = theme.grainRGB;
   const out = Buffer.alloc(size * size * 4);
-
-  // Only pixels within a stroke width of some segment can be covered;
-  // a per-segment bounding box keeps this a few million tests instead of
-  // every pixel against every segment.
-  const cover = new Float32Array(size * size);
-  const pad = halfStroke + 1;
-  for (const { chain } of chains) {
-    for (let i = 1; i < chain.length; i++) {
-      const a = chain[i - 1];
-      const b = chain[i];
-      const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x) - pad));
-      const x1 = Math.min(size - 1, Math.ceil(Math.max(a.x, b.x) + pad));
-      const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y) - pad));
-      const y1 = Math.min(size - 1, Math.ceil(Math.max(a.y, b.y) + pad));
-      for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-          let hits = 0;
-          for (let sy = 0; sy < SS; sy++) {
-            for (let sx = 0; sx < SS; sx++) {
-              const px = x + (sx + 0.5) / SS;
-              const py = y + (sy + 0.5) / SS;
-              if (distSqToSeg(px, py, a.x, a.y, b.x, b.y) <= halfStroke * halfStroke) hits++;
-            }
-          }
-          if (hits) {
-            const i2 = y * size + x;
-            const f = hits / (SS * SS);
-            if (f > cover[i2]) cover[i2] = f;
-          }
-        }
-      }
-    }
-  }
-
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      let edge = 0;
-      let inFrame = 0;
+      let cover = 0;
       for (let sy = 0; sy < SS; sy++) {
         for (let sx = 0; sx < SS; sx++) {
           const px = x + (sx + 0.5) / SS;
           const py = y + (sy + 0.5) / SS;
-          const d = Math.hypot(px - c, py - c);
-          if (Math.abs(d - R) <= halfRing) edge++;
-          if (d <= R) inFrame++;
+          if (Math.hypot(px - c, py - c) > R) continue;
+          if (fillAt(size, px, py) > 0) cover++;
         }
       }
-      // The figure is clipped to the frame, the ring is drawn over it at
-      // the module's own 0.9 opacity.
-      const f = cover[y * size + x] * (inFrame / (SS * SS));
-      const e = (edge / (SS * SS)) * 0.9;
-      const a = f + e * (1 - f);
       const i = (y * size + x) * 4;
       out[i] = rgb[0];
       out[i + 1] = rgb[1];
       out[i + 2] = rgb[2];
-      out[i + 3] = Math.round(a * 255);
+      out[i + 3] = Math.round((cover / (SS * SS)) * 255);
     }
   }
   return encodePNG(size, size, out);
@@ -279,16 +372,20 @@ function renderGlyphPNG(size, theme) {
 mkdirSync(join(frontend, "public"), { recursive: true });
 mkdirSync(join(repoRoot, "docs", "brand"), { recursive: true });
 
+// One trace, both themes: the two files differ only in the fill colour,
+// and tracing once is what guarantees it.
+const d = logoPath();
+
 for (const [name, theme] of Object.entries(THEMES)) {
   const svg = join(frontend, "public", `grain-mark-${name}.svg`);
-  writeFileSync(svg, renderGlyphSVG(theme));
+  writeFileSync(svg, renderLogoSVG(theme, d));
   console.log("wrote", svg);
 
   const png = join(frontend, "public", `grain-mark-${name}.png`);
-  writeFileSync(png, renderGlyphPNG(ICON_PX, theme));
+  writeFileSync(png, renderLogoPNG(ICON_PX, theme));
   console.log("wrote", png);
 
-  const hero = join(repoRoot, "docs", "brand", `grain-hero-2-3plus-${name}.svg`);
+  const hero = join(repoRoot, "docs", "brand", `grain-hero-2-3minus-${name}.svg`);
   writeFileSync(hero, renderHeroSVG(theme));
   console.log("wrote", hero);
 }

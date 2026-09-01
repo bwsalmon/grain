@@ -75,7 +75,7 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           says whether the machine is busy without reading the counts
           below it. See docs/brand.md. */}
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.9, px: 0.5 }}>
-        <GrainMark size={24} animated={(counts.running || 0) > 0} />
+        <GrainMark size={32} animated={(counts.running || 0) > 0} />
         <Typography variant="subtitle1" fontWeight={600} letterSpacing="-0.01em" component="h1" sx={{ m: 0 }}>
           grain
         </Typography>
