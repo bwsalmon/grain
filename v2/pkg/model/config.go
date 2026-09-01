@@ -44,12 +44,12 @@ type Config struct {
 	// what every deployment has always run before this existed as a
 	// choice at all (bwsalmon/agents#609).
 	//
-	// Nothing dispatches against this yet: cmd/grain/daemon.go's
-	// runDaemon still unconditionally builds a gemini.Framework the same
-	// way it always has, so setting this to AgentFrameworkClaude changes
-	// nothing about what a run actually does until that wiring exists --
-	// see agent.go's own doc comment on agent/claude not being wired into
-	// any real deployment yet. TEXT rather than a constrained type,
+	// It is the deployment-wide default, not the last word: a task
+	// carries its own Task.AgentFramework, and a non-empty one overrides
+	// this for that task's dispatch alone. cmd/grain/daemon.go's
+	// agentFrameworks re-reads this row on every dispatch, so a change
+	// made here takes effect on the next run rather than at the next
+	// restart. TEXT rather than a constrained type,
 	// enum-vocabulary-in-Go rather than in the schema (schema.go's own
 	// doc comment on why), validated by ui.UpdateSettings instead.
 	AgentFramework string

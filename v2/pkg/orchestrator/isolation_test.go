@@ -69,12 +69,12 @@ func (f stubFramework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Res
 // pushing: ProcessResult observes CompletedAt for it (see finish.go)
 // without any branch having to exist, so a test can tell a dispatch that
 // ran from one that did not.
-func completesWithAComment() func() agent.Framework {
+func completesWithAComment() func(context.Context, string) (agent.Framework, error) {
 	result := toolResult(agent.ToolCall{
 		Name:      "comment_on_issue",
 		Arguments: map[string]any{"comment": "done"},
 	})
-	return func() agent.Framework { return stubFramework{result: result} }
+	return orchestrator.StaticFramework(stubFramework{result: result})
 }
 
 // mergedPullRequestTask files a task whose run has finished and whose

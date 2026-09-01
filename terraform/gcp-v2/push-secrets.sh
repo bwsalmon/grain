@@ -46,6 +46,16 @@
 #                                      itself from the minter credential pushed below --
 #                                      see this directory's README, "The daemon's own
 #                                      Gemini key". Set it only to use a key of your own.
+#   GRAIN_CLAUDE_CODE_OAUTH_TOKEN      the Claude Code OAuth token agent/claude
+#                                      authenticates as, for a deployment whose agent
+#                                      framework is (or may be set to) "claude" -- the
+#                                      counterpart of GRAIN_GEMINI_API_KEY above. Optional,
+#                                      and so is that one: both credentials can be pasted
+#                                      into the UI instead (Settings -> Agent frameworks),
+#                                      which stores them in the host's own secrets database
+#                                      and takes precedence over whatever is pushed here.
+#                                      Push one to have a deployment come up already able to
+#                                      dispatch, without anyone opening the UI first
 #   GRAIN_KONTUR_SSH_KEY                the private half of the SSH keypair
 #                                      orchestrator.KonturSandboxes authenticates to each
 #                                      kontur VM's guest with (staged into the images
@@ -94,6 +104,7 @@ push_secret "grain-github-app-id" "${GRAIN_GITHUB_APP_ID:-}"
 push_secret "grain-github-app-installation-id" "${GRAIN_GITHUB_APP_INSTALLATION_ID:-}"
 push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
+push_secret "grain-claude-oauth-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 push_secret "grain-kontur-ssh-key" "${GRAIN_KONTUR_SSH_KEY:-}"
 
 # The credential pkg/capability/gcpkey authenticates as to mint (and

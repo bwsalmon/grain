@@ -145,6 +145,18 @@ GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
 GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 
+# The Claude Code OAuth token agent/claude authenticates as, for a
+# deployment whose agent-framework setting is (or may be set to)
+# "claude" -- the exact counterpart of GRAIN_GEMINI_API_KEY above, seeded
+# the same seed-once way into the same secrets directory. Both are
+# optional now: whichever is missing can be pasted into the UI instead
+# (Settings -> Agent frameworks), which is the only way to set one on a
+# host an operator cannot get a shell on.
+GRAIN_CLAUDE_CODE_OAUTH_TOKEN="${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
+# Path to the claude CLI agent/claude runs as a subprocess. Empty
+# resolves "claude" against the daemon's own $PATH.
+GRAIN_CLAUDE_PATH="${GRAIN_CLAUDE_PATH:-}"
+
 GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="${GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE:-}"
@@ -271,13 +283,29 @@ Recognized variables:
                              GRAIN_GITHUB_CREDENTIAL_NAME already has a
                              credential of either kind on disk
 
-  GRAIN_GEMINI_API_KEY      Gemini API key to seed, once. Required for
-                             grain-daemon.service to actually start, but
-                             optional when GRAIN_GCP_PROJECT is set and a
-                             minter credential is available (seeded from
-                             GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE below): the
-                             minter then mints the daemon's own key here --
-                             see mint_gemini_operating_key
+  GRAIN_GEMINI_API_KEY      Gemini API key to seed, once. Not required:
+                             grain-daemon.service starts either way, and a
+                             deployment with no key set anywhere serves the
+                             UI so one can be pasted in there (Settings ->
+                             Agent frameworks) -- only a *dispatch* needs
+                             one, and a run whose framework has none fails
+                             as setup-failed saying so. A deployment with
+                             GRAIN_GCP_PROJECT set and a minter credential
+                             available (seeded from
+                             GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE below) mints
+                             its own here instead -- see
+                             mint_gemini_operating_key
+  GRAIN_CLAUDE_CODE_OAUTH_TOKEN  Claude Code OAuth token to seed, once --
+                             GRAIN_GEMINI_API_KEY's counterpart for the
+                             "claude" agent framework, and equally optional
+                             for the same reasons. Which framework a run is
+                             actually driven by is a store-backed setting
+                             (the UI's own Agent framework choice, seeded by
+                             -agent-framework), overridable per task, so a
+                             deployment that might use either wants both
+                             credentials
+  GRAIN_CLAUDE_PATH         path to the claude CLI (default: resolve
+                             "claude" on the daemon's own PATH)
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
@@ -1344,6 +1372,7 @@ setup_data_dir() {
   # Order matters below: the minter key has to be in the secrets
   # database before mint_gemini_operating_key can authenticate with it.
   seed_secret "$GRAIN_DATA_DIR/secrets/gemini-api-key" "$GRAIN_GEMINI_API_KEY"
+  seed_secret "$GRAIN_DATA_DIR/secrets/claude-oauth-token" "$GRAIN_CLAUDE_CODE_OAUTH_TOKEN"
 
   seed_gcp_minter_key
 
@@ -1386,13 +1415,14 @@ seed_gcp_minter_key() {
 #
 # A deployment that grants its minter roles/serviceusage.apiKeysAdmin
 # (terraform/gcp-v2's enable_gemini_key, on by default there) already has
-# every permission this needs, on this host -- so an operator does not
-# also have to paste a Gemini key in by hand before grain-daemon.service
-# will start. Where that grant is absent the mint simply fails, and this
-# stays exactly the "install but stay stopped" state the deploy path
-# already handles: it must never fail the whole converge, since the
-# GitHub side of a deployment is useful without it and a half-applied
-# setup.sh is worse than a stopped daemon.
+# every permission this needs, on this host -- so nobody has to paste a
+# Gemini key in by hand before this deployment can dispatch anything.
+# Where that grant is absent the mint simply fails, and the deployment is
+# left exactly where a deployment with no agent credential now sits: the
+# daemon runs, the UI serves, and a key can be pasted into Settings
+# instead. It must never fail the whole converge, since the GitHub side
+# of a deployment is useful without it and a half-applied setup.sh is
+# worse than a deployment that cannot yet dispatch.
 #
 # Seed-once, like everything else here: `grain secrets mint-gemini-key`
 # leaves an existing non-empty key file untouched, so config-sync
@@ -1421,9 +1451,10 @@ mint_gemini_operating_key() {
      mint-gemini-key -project "$GRAIN_GCP_PROJECT"; then
     chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   else
-    log "  could not mint a Gemini API key -- the daemon will install but stay stopped."
-    log "  Check the minter credential holds roles/serviceusage.apiKeysAdmin, or set"
-    log "  GRAIN_GEMINI_API_KEY and re-run."
+    log "  could not mint a Gemini API key -- the daemon still runs, but a gemini-framework"
+    log "  run cannot dispatch until one exists. Paste one into the UI (Settings -> Agent"
+    log "  frameworks), check the minter credential holds roles/serviceusage.apiKeysAdmin,"
+    log "  or set GRAIN_GEMINI_API_KEY and re-run."
   fi
 }
 
@@ -1534,6 +1565,7 @@ write_systemd_units() {
     -max-concurrent "$GRAIN_MAX_CONCURRENT"
     -poll-interval "$GRAIN_POLL_INTERVAL"
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
+    -claude-oauth-token-file "$GRAIN_DATA_DIR/secrets/claude-oauth-token"
     -github-host "$GRAIN_GITHUB_HOST"
     -ui-addr "$GRAIN_UI_ADDR"
   )
@@ -1555,6 +1587,7 @@ write_systemd_units() {
     )
   fi
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
+  [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
   [ -n "$GRAIN_MAX_AGENT_TURNS" ] && daemon_args+=(-max-agent-turns "$GRAIN_MAX_AGENT_TURNS")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
@@ -1650,14 +1683,23 @@ enable_services() {
   # an already-running unit is always safe, and starting a stopped one is
   # exactly what --now would have done anyway.
   systemctl enable grain-daemon.service >/dev/null
-  if [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ]; then
-    systemctl restart grain-daemon.service
-  else
-    log "grain-daemon.service is enabled but not started -- it needs a Gemini API key first."
-    log "  Set GRAIN_GEMINI_API_KEY and re-run this script, or place one at"
-    log "  $GRAIN_DATA_DIR/secrets/gemini-api-key and run: systemctl restart grain-daemon.service"
-    log "  A deployment whose minter holds roles/serviceusage.apiKeysAdmin can mint one"
-    log "  instead: set GRAIN_GCP_PROJECT and GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE and re-run."
+  # Started unconditionally, even with no agent credential anywhere. It
+  # used to be held back until a Gemini key existed, because the daemon
+  # built its one agent framework at startup and could not run without
+  # one -- but a credential is set from the UI now, and a UI that is not
+  # running is a credential that can never be set. The daemon builds a
+  # framework per dispatch instead (cmd/grain's agentFrameworks), so a
+  # deployment with no key serves the UI, says which keys are missing,
+  # and fails any run that needs one with a message naming the pane to
+  # fix it in.
+  systemctl restart grain-daemon.service
+  if [ ! -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] \
+     && [ ! -s "$GRAIN_DATA_DIR/secrets/claude-oauth-token" ]; then
+    log "grain-daemon.service is running, but no agent credential is configured -- no task can"
+    log "  be dispatched until one is. Set it in the UI (Settings -> Agent frameworks), or set"
+    log "  GRAIN_GEMINI_API_KEY / GRAIN_CLAUDE_CODE_OAUTH_TOKEN and re-run this script."
+    log "  A deployment whose minter holds roles/serviceusage.apiKeysAdmin can mint the Gemini"
+    log "  one instead: set GRAIN_GCP_PROJECT and GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE and re-run."
   fi
 }
 
@@ -1676,13 +1718,24 @@ enable_services() {
 # Presence only, never values -- the same restriction `grain secrets
 # list` holds to.
 report_readiness() {
-  local github="MISSING" gemini="MISSING" minter="MISSING" daemon ready=1
+  local github="MISSING" gemini="MISSING" claude="MISSING" minter="MISSING" daemon ready=1
 
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
     github="present as '${GRAIN_GITHUB_CREDENTIAL_NAME}'"
   fi
   [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] && gemini="present"
+  [ -s "$GRAIN_DATA_DIR/secrets/claude-oauth-token" ] && claude="present"
+  # A key set through the UI lands in the secrets database, not in either
+  # file above, so presence has to be asked of both places -- otherwise a
+  # deployment configured entirely from the UI reports every credential
+  # missing while running perfectly well.
+  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^gemini-api-key:'; then
+    gemini="present"
+  fi
+  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^claude-oauth-token:'; then
+    claude="present"
+  fi
   if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null \
      | grep -q '^gcp-key-minter:'; then
     minter="present"
@@ -1694,6 +1747,7 @@ report_readiness() {
   echo "    daemon:            $daemon"
   echo "    GitHub credential: $github"
   echo "    Gemini key:        $gemini"
+  echo "    Claude token:      $claude"
   echo "    GCP minter key:    $minter"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
@@ -1709,10 +1763,11 @@ report_readiness() {
     echo "    !! With no GitHub credential the git proxy cannot clone. A dispatched run"
     echo "       finds an empty sandbox and ends without pushing or asking anything."
   fi
-  if [ "$gemini" = "MISSING" ]; then
+  if [ "$gemini" = "MISSING" ] && [ "$claude" = "MISSING" ]; then
     ready=0
-    echo "    !! With no Gemini key grain-daemon.service will not start, so nothing is"
-    echo "       served on ${GRAIN_UI_ADDR} and no task is ever dispatched."
+    echo "    !! With neither agent credential set, the daemon runs and serves ${GRAIN_UI_ADDR},"
+    echo "       but every dispatched run fails at setup. Set one in the UI (Settings ->"
+    echo "       Agent frameworks) or re-run with GRAIN_GEMINI_API_KEY/GRAIN_CLAUDE_CODE_OAUTH_TOKEN."
   fi
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then
     ready=0

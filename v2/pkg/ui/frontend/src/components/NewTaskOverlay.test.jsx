@@ -37,6 +37,7 @@ describe("NewTaskOverlay", () => {
         autoMerge: false,
         sandboxCpus: 0,
         sandboxMemoryMb: 0,
+        agentFramework: "",
         capabilities: [],
         dependsOn: [],
         reads: [],
@@ -210,6 +211,44 @@ describe("NewTaskOverlay", () => {
     expect(payload.interactive).toBe(true);
     expect(payload.approved).toBe(true);
     expect(onOpenTask).toHaveBeenCalledWith("42");
+  });
+
+  // A task can be driven by a framework other than the deployment's own
+  // (model.Task.AgentFramework) -- the picker for that sits with the
+  // other per-task overrides, behind "Advanced options".
+  it("files a task with its own agent framework when one is picked", async () => {
+    api.mockResolvedValueOnce({ id: "42" });
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay config={{ agentFramework: "gemini" }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Port the parser");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    await user.click(screen.getByLabelText("Agent framework"));
+    await user.click(screen.getByRole("option", { name: "Claude" }));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).agentFramework).toBe("claude");
+  });
+
+  // Leaving the picker alone must send "" and not the deployment's
+  // current framework: an empty override follows the deployment if its
+  // default changes later, a pinned one does not.
+  it("names the deployment default in the picker without pinning the task to it", async () => {
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay config={{ agentFramework: "claude" }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    expect(screen.getByText("Deployment default (Claude)")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).agentFramework).toBe("");
   });
 
   it("reports the error and leaves the overlay open when the request fails", async () => {

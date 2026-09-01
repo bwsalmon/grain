@@ -221,10 +221,10 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	var genMu sync.Mutex
 	deps := orchestrator.Deps{
 		Client: client, Sandboxes: sandboxes, MaxConcurrent: maxConcurrent,
-		Framework: func() agent.Framework {
+		Framework: func(context.Context, string) (agent.Framework, error) {
 			return gemini.NewForTest(&randomGenerator{
 				mu: &genMu, rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,
-			})
+			}), nil
 		},
 	}
 

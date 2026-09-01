@@ -33,6 +33,32 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
 
+// The well-known names an agent framework's own credential is stored
+// under -- the two secrets cmd/grain's daemon resolves before every
+// dispatch and pkg/ui's Settings pane writes (its "Agent frameworks"
+// section) and reports the presence of. Named here, in the one package
+// both sides already depend on, so neither has to repeat a string the
+// other has to match exactly for a key pasted into the UI to be the key
+// a run authenticates with.
+//
+// Each holds a single key, AgentCredentialKey, so a caller resolving one
+// can name the bare secret ("gemini-api-key") and let Resolve's
+// sole-key form find it.
+const (
+	// GeminiAPIKeySecret holds the Gemini API key agent/gemini's own
+	// client is built with -- the daemon's operating key, distinct from
+	// the short-lived keys the gemini-key capability mints per task.
+	GeminiAPIKeySecret = "gemini-api-key"
+	// ClaudeOAuthTokenSecret holds the Claude Code OAuth token
+	// agent/claude passes its subprocess as CLAUDE_CODE_OAUTH_TOKEN.
+	ClaudeOAuthTokenSecret = "claude-oauth-token"
+	// AgentCredentialKey is the one key each of the two secrets above
+	// holds. "value" rather than a per-secret name ("api-key", "token")
+	// so nothing has to remember which is which: the secret's own name
+	// already says what the value is.
+	AgentCredentialKey = "value"
+)
+
 // Store resolves a name to secret material held in a SQLite database
 // under dir. The zero value is not useful; build one with New.
 type Store struct {
