@@ -1,4 +1,4 @@
-// paths.js maps App.jsx's own navigation state -- which of the six
+// paths.js maps App.jsx's own navigation state -- which of the four
 // sidebar destinations is showing, whether a task's detail overlay is
 // open, whether the settings overlay is open -- onto real URL paths and
 // back, so each is directly loadable/bookmarkable/shareable instead of
@@ -9,8 +9,15 @@
 // App's own effects -- mount, a state change, a popstate event -- can
 // call straight into them without a router component owning the page
 // tree the way the rest of App already does by hand.
+//
+// Logs and Sandbox health used to be sidebar destinations of their own
+// (bwsalmon/agents#457, bwsalmon/agents#536) and so had entries here;
+// they moved into Settings' own Debug tab (bwsalmon/agents#623), the
+// same way Secrets and Upgrade already live there without ever having
+// had a path of their own -- a stale bookmark to /logs or /sandboxes now
+// just falls back to the tasks view like any other unrecognized path.
 
-const VIEWS = ["tasks", "repos", "schedules", "templates", "logs", "sandboxes"];
+const VIEWS = ["tasks", "repos", "schedules", "templates"];
 
 // parsePath turns a URL path into the {view, taskId, showSettings} App
 // needs in order to restore on load or on a back/forward navigation.
