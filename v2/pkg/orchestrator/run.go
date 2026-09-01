@@ -237,17 +237,6 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 	}
 }
 
-// rootedSandboxes is implemented by a Sandboxes backend that also hands
-// out a plain local directory for a slot -- HostSandboxes' own RootFor.
-// RunDispatch needs one of these to write a capability's SideSandbox
-// placements directly to disk; KonturSandboxes (SSH-backed, with no local
-// directory of its own) does not implement it, so a caller dispatching a
-// task with Grants against it must resolve that itself before calling
-// RunDispatch -- see runOne.
-type rootedSandboxes interface {
-	RootFor(sandbox string) (string, error)
-}
-
 // RunDispatch drives one dispatch.Dispatch to completion: resolve and
 // materialize its task's capabilities (writing any SideSandbox placements
 // into sandboxRoot, which may be empty when the task has none to place),

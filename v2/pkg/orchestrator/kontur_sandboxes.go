@@ -2,10 +2,8 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,28 +14,29 @@ import (
 )
 
 // KonturConfig is what KonturSandboxes needs to create and reach one
-// bwsalmon/kontur-managed VM per dispatch slot. StateDir and
-// RuntimeEndpoint default to kontur.DefaultStateDir and
-// kontur.DefaultRuntimeEndpoint (the same defaults cmd/mcpserver's own
-// -kontur-state-dir/-cri-runtime-endpoint flags use) when left zero.
+// bwsalmon/kontur-managed VM per run. StateDir defaults to
+// kontur.DefaultStateDir when left zero.
 type KonturConfig struct {
-	// NamePrefix names each slot's VM as NamePrefix+slot, so a fixed set
-	// of slots (Deps.Slots) maps onto a fixed, predictable set of VM
-	// names -- the same relationship HostSandboxes has between a slot and
-	// its directory. Under Backend/kontur.BackendDocker, keep
-	// NamePrefix+the longest slot name to 11 bytes or fewer: netshim
-	// names each VM's tap device "tap-"+name (internal/netshim's own
-	// config.go), and Linux caps interface names at 15 bytes (IFNAMSIZ-1)
-	// -- confirmed by hand, the failure mode a longer prefix hits is
-	// `konturctl vm create` itself failing with "tap device name ...
-	// exceeds 15 characters", not anything this package can validate
-	// ahead of time without duplicating netshim's own naming.
+	// NamePrefix is prepended to a sandbox's own name to make its VM
+	// name, so every VM a deployment owns is identifiable as its own --
+	// which is what the startup sweep (ReapOrphans) matches on to find
+	// VMs a previous process left behind.
+	//
+	// Keep it short. Under BackendDocker the whole VM name must fit 11
+	// bytes: netshim names each VM's tap device "tap-"+name (and its
+	// flat-mode control link "ctl-"+name), and Linux caps interface names
+	// at 15 bytes (IFNAMSIZ-1) -- internal/staticpod.VMSpec.Validate
+	// refuses a longer one at "vm create" time. A sandbox is named after
+	// its run ("<task>-r<attempt>", dispatch.RunID), so a two-byte prefix
+	// leaves nine, which covers five-digit task ids with double-digit
+	// attempts. VMNameFor is where that budget is actually checked, per
+	// sandbox, since only there is the run's own name known.
 	NamePrefix string
 	// StateDir is kontur's VM state directory (kontur.DefaultStateDir if
-	// empty), used to look up a slot's VM's external port.
+	// empty), where kontur records one "<name>.json" per VM.
 	StateDir string
 	// CreateArgs is appended to "konturctl vm create <name> -state-dir
-	// <dir>" verbatim when a slot's VM does not exist yet -- guest image,
+	// <dir>" verbatim -- guest image,
 	// guest SSH port, resource sizing, and anything else a deployment's
 	// own "konturctl vm create" needs beyond a name, since this package has
 	// no way to know those on its own (see package kontur's doc comment).
@@ -62,13 +61,13 @@ type KonturConfig struct {
 	// Workspace is the working directory run_command/read_file/edit_file/
 	// write_file operate in on each VM.
 	Workspace string
-	// ReadyTimeout bounds how long ToolsFor waits for a freshly created
-	// VM's pod to reach Ready and get a network IP before giving up
-	// (2 minutes if zero). It has no effect on a slot whose VM already
-	// existed when ToolsFor was first called for it.
+	// ReadyTimeout bounds how long Acquire waits for a freshly created
+	// VM's guest to become reachable before giving up (2 minutes if
+	// zero). Every VM is freshly created now, so unlike before this
+	// applies to every Acquire rather than only the first for a slot.
 	ReadyTimeout time.Duration
-	// ReadyPollInterval is how often ToolsFor retries PodIP while waiting
-	// out ReadyTimeout (2 seconds if zero).
+	// ReadyPollInterval is how often Acquire re-probes the guest while
+	// waiting out ReadyTimeout (2 seconds if zero).
 	ReadyPollInterval time.Duration
 	// NetMode selects how a VM reaches the network: kontur.NetModeFlat
 	// (the default, and what an empty value means) or kontur.NetModeNAT.
@@ -76,13 +75,13 @@ type KonturConfig struct {
 	// Flat mode is the default because it is the one that matches what
 	// this package actually needs. NAT mode's whole apparatus -- a
 	// private subnet, an address per VM, an external port per VM, and
-	// the BaseIP/BasePort derivation below that exists solely to assign
-	// them -- serves callers reaching a guest from *outside* its network
+	// the IP/Port below that exist solely to assign them -- serves
+	// callers reaching a guest from *outside* its network
 	// namespace, which this package deliberately does not do: its
 	// transport execs into the VM's own container (mcp.DockerExecRunner)
 	// and the SSH-to-a-forwarded-port transport that needed any of it was
-	// removed. Under flat mode docker assigns the address and BaseIP/
-	// BasePort are ignored entirely.
+	// removed. Under flat mode docker assigns the address and IP/Port are
+	// ignored entirely.
 	//
 	// Flat mode needs a guest image built from kontur's own guest
 	// overlays, for the control link "kontur exec" arrives on -- see
@@ -92,29 +91,39 @@ type KonturConfig struct {
 	// before switching, or every sandbox becomes unreachable.
 	NetMode string
 
-	// BaseIP, if set, is the "-ip" ensure passes `konturctl vm create` for
-	// slot "1" (model.SlotNames' own 1-based, all-numeric contract); every
-	// other slot gets the next IPv4 address after it, offset by its own
-	// number minus one. konturctl has no way to do this derivation
-	// itself -- internal/staticpod.VMSpec.Validate requires "-ip"
-	// literally, with no default -- and CreateArgs is one fixed list
-	// shared verbatim across every slot's create call, so without this, a
-	// deployment with more than one slot (-max-concurrent > 1) would ask
-	// konturctl to give every VM after the first the exact same address
-	// on the one bridge they all share. Leave unset for a single-slot
-	// deployment content to put a literal "-ip" in CreateArgs itself.
-	BaseIP string
-	// BasePort, if set, is the "-port" ensure passes for slot "1", the
-	// same derivation and for the same reason BaseIP is: every other
-	// slot's is BasePort plus its own number minus one.
-	BasePort int
+	// IP and Port, if set, are the "-ip" and "-port" every VM is created
+	// with under NAT mode. konturctl requires "-ip" literally, with no
+	// default (internal/staticpod.VMSpec.Validate), and CreateArgs is one
+	// fixed list shared across every create call, so a deployment running
+	// NAT mode needs somewhere to say them.
+	//
+	// They are passed verbatim, the same value to every VM. They used to
+	// be a *base* that each slot's own number was added to, on the
+	// reasoning that concurrent VMs shared one bridge and so needed
+	// distinct addresses. Under the docker backend -- the only one this
+	// package builds VMs under -- they do not share anything: internal/
+	// dockervm.Create gives every VM its own netns-holder container that
+	// the VM joins with "--network container:", so each has its own
+	// bridge and its own private subnet, and Port only ever reaches
+	// NETSHIM_VMS inside that namespace rather than being published on
+	// the host. The derivation was guarding a collision that shape makes
+	// impossible; it dates from the static-pod backend, where a pod's
+	// containers genuinely did share a namespace.
+	//
+	// Worth confirming against a real NAT-mode host before leaning on it:
+	// the reasoning above is from kontur's own source, not from two VMs
+	// observed coming up on the same address. Flat mode, the default,
+	// ignores both fields entirely.
+	IP   string
+	Port int
 	// DefaultCPUs and DefaultMemoryMB (bwsalmon/agents#534), if set, are
 	// appended to createArgs' own result as "-cpus"/"-memory-mb" -- the
 	// deployment-wide default VM shape (model.Config.SandboxCPUs/
 	// SandboxMemoryMB), applied last so it wins out over anything
-	// CreateArgs also happens to set, the same reasoning BaseIP/BasePort's
-	// own doc comment gives for appending those last too. Zero, the
-	// default for both, omits the corresponding flag entirely and leaves
+	// CreateArgs also happens to set. They are the fallback for a run
+	// that requested no shape of its own; a run that did overrides them
+	// per dimension (createArgs). Zero, the default for both, omits the
+	// corresponding flag entirely and leaves
 	// bwsalmon/kontur's own `konturctl vm create` default in place.
 	DefaultCPUs     int
 	DefaultMemoryMB int
@@ -150,387 +159,263 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 	return 2 * time.Second
 }
 
-// createArgs returns the full argument list ensure passes to kontur.Create
-// for slot's VM beyond a name and -state-dir: -backend docker first, the
-// only backend this package supports (its transport reaches a guest by
-// exec'ing into that VM's docker container, which no other backend gives
-// it), so a caller's own CreateArgs never needs to repeat it, then "-net"
-// (see NetMode; under the default, flat, the -ip/-port pair below is
-// skipped entirely because the container runtime assigns the address),
-// then
-// cfg.CreateArgs verbatim, then DefaultCPUs/DefaultMemoryMB (if set) as
-// "-cpus"/"-memory-mb", then a "-ip"/"-port" pair derived from
-// BaseIP/BasePort and slot's own number last -- each later group winning
-// out over anything CreateArgs also happens to set, on the theory that a
+// createArgs returns the full argument list Acquire passes to
+// kontur.Create for a sandbox's VM beyond a name and -state-dir:
+// -backend docker first, the only backend this package supports (its
+// transport reaches a guest by exec'ing into that VM's docker container,
+// which no other backend gives it), so a caller's own CreateArgs never
+// needs to repeat it, then "-net" (see NetMode; under the default, flat,
+// the -ip/-port pair below is skipped entirely because the container
+// runtime assigns the address), then cfg.CreateArgs verbatim, then the
+// VM's size, then -ip/-port last -- each later group winning out over
+// anything CreateArgs also happens to set, on the theory that a
 // deployment configuring one of these more specific knobs at all wants it
-// applied consistently, not overridden per slot by a CreateArgs list that
-// is otherwise identical across every slot's call.
-func (c KonturConfig) createArgs(slot string) ([]string, error) {
+// applied consistently rather than overridden by a CreateArgs list that
+// is otherwise identical across every create call.
+//
+// shape is the run's own requested size (model.Task's SandboxCPUs/
+// SandboxMemoryMB), falling back per-dimension to the deployment default
+// in cfg. This is where a per-task override takes effect now: a sandbox
+// is built for one run, so the moment it is created is the one moment its
+// size is decided. It used to be applied afterwards, by a `konturctl vm
+// update` against a slot's already-created VM, and undone by the recreate
+// that followed the run -- both of which existed only because the VM
+// outlived the task.
+func (c KonturConfig) createArgs(shape Shape) []string {
 	args := append([]string{"-backend", kontur.BackendDocker, "-net", c.netMode()}, c.CreateArgs...)
-	if c.DefaultCPUs != 0 {
-		args = append(args, "-cpus", strconv.Itoa(c.DefaultCPUs))
+	cpus, memoryMB := shape.CPUs, shape.MemoryMB
+	if cpus == 0 {
+		cpus = c.DefaultCPUs
 	}
-	if c.DefaultMemoryMB != 0 {
-		args = append(args, "-memory-mb", strconv.Itoa(c.DefaultMemoryMB))
+	if memoryMB == 0 {
+		memoryMB = c.DefaultMemoryMB
 	}
-	// Flat mode takes its address from the container runtime, and
-	// konturctl rejects "-ip" outright under it rather than ignoring it.
-	// BaseIP/BasePort are dropped here rather than treated as a
-	// misconfiguration because a deployment's own systemd unit may still
-	// carry them from before the switch, and failing every create over a
-	// pair of now-meaningless flags would be worse than ignoring them.
-	if c.netMode() == kontur.NetModeFlat {
-		return args, nil
-	}
-	if c.BaseIP == "" && c.BasePort == 0 {
-		return args, nil
-	}
-	offset, err := slotOffset(slot)
-	if err != nil {
-		return nil, err
-	}
-	if c.BaseIP != "" {
-		ip, err := addToIPv4(c.BaseIP, offset)
-		if err != nil {
-			return nil, fmt.Errorf("kontur: KonturConfig.BaseIP: %w", err)
-		}
-		args = append(args, "-ip", ip)
-	}
-	if c.BasePort != 0 {
-		args = append(args, "-port", strconv.Itoa(c.BasePort+offset))
-	}
-	return args, nil
-}
-
-// slotOffset parses slot as model.SlotNames does -- a decimal string
-// counting up from "1" -- and returns it minus one, the 0-based offset
-// BaseIP/BasePort above add to derive slot's own address from the first
-// slot's.
-func slotOffset(slot string) (int, error) {
-	n, err := strconv.Atoi(slot)
-	if err != nil {
-		return 0, fmt.Errorf("kontur: slot %q is not numeric, required to derive its own -ip/-port from KonturConfig.BaseIP/BasePort (see model.SlotNames): %w", slot, err)
-	}
-	if n < 1 {
-		return 0, fmt.Errorf("kontur: slot %q must be 1 or greater to derive its own -ip/-port from KonturConfig.BaseIP/BasePort (see model.SlotNames)", slot)
-	}
-	return n - 1, nil
-}
-
-// addToIPv4 adds offset to base, the arithmetic BaseIP needs to hand
-// slot's own number-minus-one out as the next address after the first
-// slot's.
-func addToIPv4(base string, offset int) (string, error) {
-	ip := net.ParseIP(base).To4()
-	if ip == nil {
-		return "", fmt.Errorf("invalid IPv4 address %q", base)
-	}
-	sum := binary.BigEndian.Uint32(ip) + uint32(offset)
-	var out [4]byte
-	binary.BigEndian.PutUint32(out[:], sum)
-	return net.IP(out[:]).String(), nil
-}
-
-// KonturSandboxes hands out mcp tools that run over SSH against a real
-// bwsalmon/kontur-managed VM, one per slot, created on first use and
-// reused across cycles after that -- matching HostSandboxes' own
-// contract, that a slot's sandbox persists across cycles and resetting
-// one between tasks is the caller's job, not this type's. Nothing here
-// ever deletes a VM; a deployment that wants slots torn down (e.g. at
-// shutdown) calls kontur.Delete itself, the same way nothing tears down a
-// HostSandboxes directory either.
-type KonturSandboxes struct {
-	cfg KonturConfig
-
-	mu       sync.Mutex
-	created  map[string]bool
-	gitCreds map[string]gitCredentials
-	// nameLocks holds one *sync.Mutex per VM name, taken around the
-	// kontur.Create call inside ensure -- see ensure's own doc comment for
-	// why a single KonturSandboxes-wide lock cannot guard that call the
-	// way mu guards created/gitCreds.
-	nameLocks map[string]*sync.Mutex
-}
-
-// gitCredentials is what ConfigureGitCredentials remembers per slot, so
-// Recreate can reapply it to the fresh VM it just built without its own
-// caller (which only knows about slots, not credentials -- see cycle.go's
-// recreatingSandboxes) having to carry it around.
-type gitCredentials struct {
-	remoteURL, token string
-}
-
-// NewKonturSandboxes returns a KonturSandboxes configured by cfg.
-func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
-	return &KonturSandboxes{
-		cfg:       cfg,
-		created:   map[string]bool{},
-		gitCreds:  map[string]gitCredentials{},
-		nameLocks: map[string]*sync.Mutex{},
-	}
-}
-
-// VMNameFor returns the kontur VM name ToolsFor uses for slot, so
-// something outside this package (an operator provisioning a VM's guest
-// image ahead of time, say) can predict it without calling ToolsFor
-// itself.
-func (k *KonturSandboxes) VMNameFor(slot string) string {
-	return k.cfg.NamePrefix + slot
-}
-
-// ToolsFor implements Sandboxes: it ensures slot's VM exists (creating it
-// via kontur.Create on first use for that slot, within this
-// KonturSandboxes' own lifetime -- see the type doc comment on why that is
-// not the same as "exists," and why that distinction does not matter
-// here), resolves its SSH endpoint via pkg/kontur, and returns
-// mcp.NewSSHSandboxTools against it.
-//
-// If the VM's container turns out to be dead -- most notably, one left
-// behind "exited" by a host reboot (see recoverableRunnerFor) -- ToolsFor
-// rebuilds it once via Recreate before giving up, rather than surfacing
-// that failure to a caller with no way to fix it themselves.
-func (k *KonturSandboxes) ToolsFor(ctx context.Context, slot string) ([]mcp.Tool, error) {
-	name := k.VMNameFor(slot)
-	if err := k.ensure(ctx, name, slot); err != nil {
-		return nil, err
-	}
-
-	runner, err := k.recoverableRunnerFor(ctx, name, slot)
-	if err != nil {
-		return nil, err
-	}
-	return mcp.NewSSHSandboxTools(runner, k.cfg.Workspace), nil
-}
-
-// Reshape resizes slot's VM to cpus vCPUs and/or memoryMB MiB of memory
-// via "konturctl vm update" -- the per-task shape override
-// bwsalmon/agents#534 asked for, called by orchestrator.runOne ahead of a
-// task whose own model.Task.SandboxCPUs/SandboxMemoryMB differ from the
-// deployment default cfg.DefaultCPUs/DefaultMemoryMB already baked into
-// this slot's VM at create time. A zero cpus or memoryMB leaves that
-// dimension alone, the same "unset means keep whatever konturctl vm
-// update was last told" partial-update contract bwsalmon/kontur's own
-// registerVMFlags gives every flag it does not receive -- so a task
-// overriding only one of the two never has to know or repeat the other's
-// current value.
-//
-// Unlike ensure/Recreate's own "always leaves a fresh VM behind," a
-// Reshape is not undone until the next Recreate rebuilds the VM from
-// cfg.createArgs (the deployment default) -- exactly once, right after
-// this task's own run, the same boundary every other task's isolation
-// already goes through. A task that never sets either field never calls
-// this at all (see runOne), so a deployment using no per-task overrides
-// sees no behavior change here whatsoever.
-//
-// Reshape creates slot's VM first (via ensure) if it does not exist yet,
-// the same "first ToolsFor call for a slot creates its VM" contract every
-// other exported method on this type already gives, and takes the same
-// per-name lock ensure's own kontur.Create call does, for the same
-// reason: konturctl vm update execs a real, potentially slow subprocess,
-// and guarding it with anything wider than a per-name lock would
-// serialize unrelated slots' VM operations against each other.
-func (k *KonturSandboxes) Reshape(ctx context.Context, slot string, cpus, memoryMB int) error {
-	name := k.VMNameFor(slot)
-	if err := k.ensure(ctx, name, slot); err != nil {
-		return err
-	}
-	var args []string
 	if cpus != 0 {
 		args = append(args, "-cpus", strconv.Itoa(cpus))
 	}
 	if memoryMB != 0 {
 		args = append(args, "-memory-mb", strconv.Itoa(memoryMB))
 	}
-	if len(args) == 0 {
-		return nil
+	// Flat mode takes its address from the container runtime, and
+	// konturctl rejects "-ip" outright under it rather than ignoring it.
+	// IP/Port are dropped here rather than treated as a misconfiguration
+	// because a deployment's own systemd unit may still carry them from
+	// before the switch, and failing every create over a pair of
+	// now-meaningless flags would be worse than ignoring them.
+	if c.netMode() == kontur.NetModeFlat {
+		return args
 	}
-
-	lock := k.lockFor(name)
-	lock.Lock()
-	defer lock.Unlock()
-
-	if err := kontur.Update(ctx, k.cfg.stateDir(), name, args...); err != nil {
-		return fmt.Errorf("orchestrator: reshaping kontur VM %q: %w", name, err)
+	if c.IP != "" {
+		args = append(args, "-ip", c.IP)
 	}
-	return nil
+	if c.Port != 0 {
+		args = append(args, "-port", strconv.Itoa(c.Port))
+	}
+	return args
 }
 
-// ensure creates name's VM if this KonturSandboxes has not already created
-// or observed one for it. A VM whose state kontur.Port can already read
-// -- because a previous process's KonturSandboxes created it, or an
-// operator ran "konturctl vm create" by hand ahead of time -- counts as
-// already existing and is left alone, the same "reuse what's there" choice
-// HostSandboxes.RootFor makes for a directory that already exists on disk.
+// KonturSandboxes builds one bwsalmon/kontur-managed VM per run, reached
+// by exec'ing into that VM's own docker container, and deletes it when
+// the run is done.
 //
-// The actual kontur.Create call runs under a lock scoped to name alone
-// (lockFor), not k.mu: k.mu only ever guards fast, in-memory map
-// operations elsewhere in this package, but kontur.Create execs a real
-// "konturctl vm create" subprocess that can run for a long time (a VM
-// genuinely booting under KVM, not a fake standing in for one). Guarding
-// that call with k.mu itself -- as an earlier version of this method did
-// -- would serialize VM creation across every slot in this
-// KonturSandboxes, not just repeat calls for the same one, silently
-// undoing the concurrency reconcileDispatch's own doc comment promises
-// ("HostSandboxes and KonturSandboxes both guard their own per-slot state
-// with a mutex keyed by slot") every time more than one slot's VM needs
-// creating at once -- confirmed by hand with a fake konturctl slow enough
-// to make two concurrent ToolsFor calls for distinct slots visibly wait on
-// each other before this change existed (sandboxes_concurrency_test.go's
-// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially).
-func (k *KonturSandboxes) ensure(ctx context.Context, name, slot string) error {
-	if k.alreadyCreated(name) {
-		return nil
-	}
+// It used to hold one VM per slot, created on first use and reused across
+// every task dispatched onto that slot -- which meant isolating one task
+// from the next had to be added on top, as a delete-and-recreate after
+// each run plus a startup pass to rebuild whatever a crashed process left
+// behind. Neither exists now: a VM is created for a run and destroyed
+// with it, so a task cannot inherit anything from the one before it
+// because there is nothing left to inherit. What remains of the startup
+// pass is ReapOrphans, which deletes VMs rather than rebuilding them.
+type KonturSandboxes struct {
+	cfg KonturConfig
 
-	lock := k.lockFor(name)
-	lock.Lock()
-	defer lock.Unlock()
-
-	// Re-check now that this name's lock is held exclusively: a concurrent
-	// call for the same name may have finished creating it between the
-	// fast-path check above and acquiring this lock.
-	if k.alreadyCreated(name) {
-		return nil
-	}
-	if kontur.Exists(k.cfg.stateDir(), name) {
-		k.markCreated(name)
-		return nil
-	}
-	args, err := k.cfg.createArgs(slot)
-	if err != nil {
-		return fmt.Errorf("orchestrator: creating kontur VM %q for sandbox: %w", name, err)
-	}
-	if err := kontur.Create(ctx, k.cfg.stateDir(), name, args...); err != nil {
-		return fmt.Errorf("orchestrator: creating kontur VM %q for sandbox: %w", name, err)
-	}
-	k.markCreated(name)
-	return nil
+	mu   sync.Mutex
+	live map[string]*konturSandbox
 }
 
-// lockFor returns the *sync.Mutex ensure takes around kontur.Create for
-// name, creating one under k.mu on first use -- k.mu itself is held only
-// long enough to look up or insert into nameLocks, never across the
-// subprocess call the returned lock actually guards.
-func (k *KonturSandboxes) lockFor(name string) *sync.Mutex {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	lock, ok := k.nameLocks[name]
-	if !ok {
-		lock = &sync.Mutex{}
-		k.nameLocks[name] = lock
+// NewKonturSandboxes returns a KonturSandboxes configured by cfg.
+func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
+	return &KonturSandboxes{cfg: cfg, live: map[string]*konturSandbox{}}
+}
+
+// maxVMNameLen is how long a kontur VM name may be under the docker
+// backend: netshim derives "tap-<name>" and "ctl-<name>" from it, and
+// Linux caps an interface name at 15 bytes (IFNAMSIZ-1). Checked here so
+// an over-long name fails with something that says what the budget is and
+// what is spending it, rather than as `konturctl vm create` refusing a
+// tap device name several layers down.
+const maxVMNameLen = 11
+
+// VMNameFor returns the kontur VM name for a sandbox, so something
+// outside this package can predict it without calling Acquire.
+func (k *KonturSandboxes) VMNameFor(sandbox string) (string, error) {
+	name := k.cfg.NamePrefix + sandbox
+	if len(name) > maxVMNameLen {
+		return "", fmt.Errorf("orchestrator: kontur VM name %q is %d bytes, over the %d-byte limit netshim's tap device naming imposes -- shorten -kontur-vm-name-prefix (%q)",
+			name, len(name), maxVMNameLen, k.cfg.NamePrefix)
 	}
-	return lock
+	return name, nil
 }
 
-func (k *KonturSandboxes) alreadyCreated(name string) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return k.created[name]
-}
-
-func (k *KonturSandboxes) markCreated(name string) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.created[name] = true
-}
-
-// ConfigureGitCredentials ensures slot's VM exists and points its git at
-// remoteURL via token, the same one-time, per-slot setup a deployment
-// does for a HostSandboxes slot directly via mcp.ConfigureGitCredentials
-// (root/.gitconfig -- see that func's own doc comment) -- SSH, over the
-// same endpoint ToolsFor resolves, is KonturSandboxes' only path to a
-// slot's VM filesystem, so this is that setup's equivalent for this
-// backend. Safe to call before any ToolsFor call for slot: like ToolsFor,
-// it creates the VM on first use and waits out cfg.readyTimeout for it to
-// become reachable.
+// Acquire implements Sandboxes: create this run's VM, wait for its guest
+// to answer, and hand back a handle that deletes it on Release.
 //
-// remoteURL and token are also remembered for slot, so a later Recreate
-// call can reapply them to the fresh VM it just built without its own
-// caller (dispatch, which knows only about slots, not credentials) having
-// to carry them.
-func (k *KonturSandboxes) ConfigureGitCredentials(ctx context.Context, slot, remoteURL, token string) error {
-	name := k.VMNameFor(slot)
-	if err := k.ensure(ctx, name, slot); err != nil {
-		return err
-	}
-	runner, err := k.recoverableRunnerFor(ctx, name, slot)
+// A VM that already exists under this name is deleted first rather than
+// adopted. Adopting one was the old behaviour and the right one while a
+// name meant a slot -- "reuse what's there," the same choice a directory
+// that already existed got -- but a name means a run now, so anything
+// already carrying it is either a previous process's leftover or a
+// half-built VM from a failed Acquire. Either way its filesystem is not
+// something this run should start from.
+func (k *KonturSandboxes) Acquire(ctx context.Context, sandbox string, shape Shape) (Sandbox, error) {
+	name, err := k.VMNameFor(sandbox)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := mcp.ConfigureGitCredentialsOverSSH(runner, remoteURL, token); err != nil {
-		return fmt.Errorf("orchestrator: configuring git credentials on kontur VM %q: %w", name, err)
+	if err := k.create(ctx, name, shape); err != nil {
+		return nil, err
 	}
+
+	// A container found already dead is the one failure worth one retry:
+	// internal/dockervm.Create starts a VM's containers with a plain
+	// "docker run -d" and no restart policy, so a host that rebooted
+	// mid-create leaves one behind that will never answer. Rebuilding
+	// costs a boot; not rebuilding costs the run.
+	runner, err := k.runnerFor(ctx, name)
+	if err != nil {
+		var deadErr *guestContainerDeadError
+		if !errors.As(err, &deadErr) {
+			k.deleteQuietly(ctx, name)
+			return nil, err
+		}
+		if err := k.create(ctx, name, shape); err != nil {
+			return nil, fmt.Errorf("orchestrator: kontur VM %q's container was found dead, rebuilding it: %w", name, err)
+		}
+		if runner, err = k.runnerFor(ctx, name); err != nil {
+			k.deleteQuietly(ctx, name)
+			return nil, err
+		}
+	}
+
+	sb := &konturSandbox{owner: k, name: sandbox, vmName: name, runner: runner}
 	k.mu.Lock()
-	k.gitCreds[slot] = gitCredentials{remoteURL: remoteURL, token: token}
+	k.live[sandbox] = sb
 	k.mu.Unlock()
-	return nil
+	return sb, nil
 }
 
-// Recreate tears slot's VM down and rebuilds it from scratch -- the
-// isolation boundary bwsalmon/agents#353 asked for between one dispatched
-// task and the next, the same "destroy then create" shape v1's own
-// HostAdapter.recreate() gives a sandbox (grain/adapter/base.py), applied
-// here per task rather than on v1's own weekly-or-wedged schedule. It is
-// deliberately delete-then-create, the same two primitives ensure already
-// calls, rather than `konturctl vm update` (which happens to do the same
-// thing for -backend docker, per bwsalmon/kontur's own internal/cli
-// doc comment, but only there): that keeps this package's only path to
-// building a VM in one place, cfg.createArgs(), instead of leaning on a
-// kontur subcommand whose "recreate" behavior is backend-specific and not
-// this package's to depend on.
-//
-// If ConfigureGitCredentials was ever called for slot, Recreate reapplies
-// it to the rebuilt VM before returning -- a fresh VM has none of the
-// previous one's filesystem, credentials included, and dispatch has no
-// other opportunity to redo that setup between tasks.
-//
-// A slot with no VM at all yet is recreated as a plain create: there is
-// nothing to tear down, so the delete is skipped rather than run for its
-// own sake. That costs the per-task call site nothing (the VM it just
-// finished with always exists) and is what makes Recreate safe to call
-// before a slot has ever been used -- cmd/grain daemon's own startup
-// reset pass over every slot, which must rebuild whatever a previous
-// process left behind without turning a fresh deployment's first create
-// into a delete of something that was never there. Skipping it is not
-// merely tidier: with no saved state to read a backend off,
-// "konturctl vm delete" falls back to the static-pod backend and tries to
-// unlink a manifest path (bwsalmon/kontur's own internal/cli
-// runVMDelete), never reaching the docker backend this package builds
-// every VM under. So it accomplishes nothing here at best, and at worst
-// fails outright -- that unlink tolerates a missing file but not an
-// unwritable manifest directory, which on a real deployment is a
-// root-owned /etc/kubernetes/manifests the daemon does not run as.
-func (k *KonturSandboxes) Recreate(ctx context.Context, slot string) error {
-	name := k.VMNameFor(slot)
-
+// create deletes whatever is under name and builds it again. The delete
+// is skipped when kontur has no state for the name at all: with no saved
+// state to read a backend off, "konturctl vm delete" falls back to the
+// static-pod backend and tries to unlink a manifest path (bwsalmon/
+// kontur's own internal/cli runVMDelete), never reaching the docker
+// backend this package builds every VM under -- so it accomplishes
+// nothing at best, and at worst fails against a root-owned
+// /etc/kubernetes/manifests the daemon does not run as.
+func (k *KonturSandboxes) create(ctx context.Context, name string, shape Shape) error {
 	if kontur.Exists(k.cfg.stateDir(), name) {
 		if err := kontur.Delete(ctx, k.cfg.stateDir(), name); err != nil {
-			return fmt.Errorf("orchestrator: deleting kontur VM %q to recreate it: %w", name, err)
+			return fmt.Errorf("orchestrator: deleting stale kontur VM %q before rebuilding it: %w", name, err)
 		}
 	}
-	k.mu.Lock()
-	delete(k.created, name)
-	k.mu.Unlock()
-
-	if err := k.ensure(ctx, name, slot); err != nil {
-		return fmt.Errorf("orchestrator: recreating kontur VM %q: %w", name, err)
-	}
-	if _, err := k.runnerFor(ctx, name); err != nil {
-		return fmt.Errorf("orchestrator: waiting for recreated kontur VM %q to become ready: %w", name, err)
-	}
-
-	k.mu.Lock()
-	creds, ok := k.gitCreds[slot]
-	k.mu.Unlock()
-	if ok {
-		if err := k.ConfigureGitCredentials(ctx, slot, creds.remoteURL, creds.token); err != nil {
-			return fmt.Errorf("orchestrator: reconfiguring git credentials on recreated kontur VM %q: %w", name, err)
-		}
+	if err := kontur.Create(ctx, k.cfg.stateDir(), name, k.cfg.createArgs(shape)...); err != nil {
+		return fmt.Errorf("orchestrator: creating kontur VM %q: %w", name, err)
 	}
 	return nil
 }
 
-// sandboxRunner is the transport a slot's four sandbox tools run over:
+// deleteQuietly tears down a VM that never became usable, so a failed
+// Acquire does not leave one running with no handle to release it. The
+// error is dropped deliberately: the caller is already failing for a
+// reason it can act on, and "the cleanup after that also failed" would
+// replace it with a less useful one. ReapOrphans catches whatever this
+// misses at the next startup.
+func (k *KonturSandboxes) deleteQuietly(ctx context.Context, name string) {
+	if kontur.Exists(k.cfg.stateDir(), name) {
+		_ = kontur.Delete(ctx, k.cfg.stateDir(), name)
+	}
+}
+
+// ReapOrphans deletes every VM under this deployment's own NamePrefix,
+// and reports how many it removed. A daemon calls it once, at startup,
+// before anything can dispatch -- the same moment, and for the same
+// reason, orchestrator.RecoverOrphanedRuns reconciles the run rows a dead
+// process left behind: at that instant no VM can belong to this process,
+// so any that exists is a leftover.
+//
+// This is what is left of the startup pass that used to rebuild every
+// slot's VM. That pass existed because a slot's VM was meant to outlive
+// the process and had to be made clean again; these are meant to have
+// been deleted already, and the only question is whether something died
+// before that could happen.
+func (k *KonturSandboxes) ReapOrphans(ctx context.Context) (int, error) {
+	if k.cfg.NamePrefix == "" {
+		return 0, nil
+	}
+	names, err := kontur.List(k.cfg.stateDir())
+	if err != nil {
+		return 0, fmt.Errorf("orchestrator: listing kontur VMs to reap: %w", err)
+	}
+	var reaped int
+	var errs []error
+	for _, name := range names {
+		if !strings.HasPrefix(name, k.cfg.NamePrefix) {
+			continue
+		}
+		if err := kontur.Delete(ctx, k.cfg.stateDir(), name); err != nil {
+			errs = append(errs, fmt.Errorf("deleting orphaned kontur VM %q: %w", name, err))
+			continue
+		}
+		reaped++
+	}
+	return reaped, errors.Join(errs...)
+}
+
+// konturSandbox is one run's VM.
+type konturSandbox struct {
+	owner  *KonturSandboxes
+	name   string
+	vmName string
+	runner sandboxRunner
+}
+
+func (s *konturSandbox) Name() string { return s.name }
+
+// Tools implements Sandbox. The runner was resolved by Acquire, which
+// does not return until the guest has answered a command, so there is no
+// boot left to wait out here.
+func (s *konturSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
+	return mcp.NewSSHSandboxTools(s.runner, s.owner.cfg.Workspace), nil
+}
+
+// ConfigureGitCredentials points this VM's guest at the proxy over the
+// same transport every tool call uses -- what mcp.ConfigureGitCredentials
+// does with a plain file write for a host directory.
+func (s *konturSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
+	if err := mcp.ConfigureGitCredentialsOverSSH(s.runner, remoteURL, token); err != nil {
+		return fmt.Errorf("orchestrator: configuring git credentials on kontur VM %q: %w", s.vmName, err)
+	}
+	return nil
+}
+
+// Release deletes the VM. This is the isolation boundary itself, not a
+// tidy-up after one: what makes the next run unable to see this one's
+// checkout, credentials or leftover processes is that none of it exists
+// any more.
+func (s *konturSandbox) Release(ctx context.Context) error {
+	s.owner.mu.Lock()
+	delete(s.owner.live, s.name)
+	s.owner.mu.Unlock()
+	if !kontur.Exists(s.owner.cfg.stateDir(), s.vmName) {
+		return nil
+	}
+	if err := kontur.Delete(ctx, s.owner.cfg.stateDir(), s.vmName); err != nil {
+		return fmt.Errorf("orchestrator: deleting kontur VM %q: %w", s.vmName, err)
+	}
+	return nil
+}
+
+// sandboxRunner is the transport a sandbox's four tools run over:
 // the method set mcp.NewSSHSandboxTools and mcp.ConfigureGitCredentialsOverSSH
 // both take, satisfied by mcp.SSHRunner and mcp.DockerExecRunner alike.
 // Declared here rather than imported because mcp's own equivalent
@@ -553,43 +438,6 @@ func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRu
 		return nil, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest to become reachable: %w", name, err)
 	}
 	return k.execRunner(name), nil
-}
-
-// recoverableRunnerFor is runnerFor with one difference: a container found
-// dead (guestContainerDeadError) is not handed back to the caller as-is.
-// ensure's kontur.Exists check (and the in-memory k.created cache it feeds)
-// only prove that "konturctl vm create" once succeeded for name -- neither
-// one notices if the container that created has since gone away, which a
-// host reboot always does under BackendDocker: internal/dockervm.Create
-// starts a VM's containers with a plain "docker run -d" and no restart
-// policy, so docker never brings them back up on its own the way it would
-// under --restart=always. Without this, that first post-reboot ToolsFor
-// call would fail exactly once appropriately (waitForGuestExec's own
-// fast-fail below) and then keep failing identically forever after: ensure
-// never looks past k.created being true to notice anything is wrong, and
-// nothing else on this path ever calls Recreate to fix it -- runOne only
-// does that after a *successful* ToolsFor.
-//
-// So on that one error, and only that one, this rebuilds name's VM via
-// Recreate (the same delete-then-create runOne already runs between every
-// two tasks) and retries once. Recreate discards the runner it fetches
-// while confirming the fresh VM is reachable, hence the second runnerFor
-// call here rather than reusing that one -- a small redundant wait, not a
-// second failure mode, since Recreate having already succeeded means this
-// retry is against a VM already known to answer.
-func (k *KonturSandboxes) recoverableRunnerFor(ctx context.Context, name, slot string) (sandboxRunner, error) {
-	runner, err := k.runnerFor(ctx, name)
-	if err == nil {
-		return runner, nil
-	}
-	var deadErr *guestContainerDeadError
-	if !errors.As(err, &deadErr) {
-		return nil, err
-	}
-	if err := k.Recreate(ctx, slot); err != nil {
-		return nil, fmt.Errorf("orchestrator: kontur VM %q's container was found dead (likely left behind by a host reboot -- see internal/dockervm.Create's doc comment on restart policy), recreating it: %w", name, err)
-	}
-	return k.runnerFor(ctx, name)
 }
 
 // dockerExecRunner builds the docker-exec transport for name's VM. Its

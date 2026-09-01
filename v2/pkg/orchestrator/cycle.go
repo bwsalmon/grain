@@ -249,28 +249,7 @@ func recoverRunOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time
 	return runOne(ctx, deps, d, now)
 }
 
-// recreatingSandboxes is implemented by a Sandboxes backend that supports
-// resetting a slot's sandbox to a clean state between tasks --
-// KonturSandboxes' own Recreate. HostSandboxes does not implement it: the
-// local-directory stand-in is deliberately left long-lived, resetting one
-// between tasks being "the caller's job" per its own doc comment, the same
-// as it always has been; only a real sandbox backend gains the recreate-
-// after-each-task boundary bwsalmon/agents#353 asked for.
-type recreatingSandboxes interface {
-	Recreate(ctx context.Context, slot string) error
-}
-
-// shapedSandboxes is implemented by a Sandboxes backend that supports
-// resizing a slot's sandbox to a task-specific CPU/memory shape ahead of
-// that task's own run -- KonturSandboxes' own Reshape (bwsalmon/
-// agents#534), via "konturctl vm update". HostSandboxes does not
-// implement it: the local-directory stand-in has no VM to size in the
-// first place, the same reason it has no Recreate either.
-type shapedSandboxes interface {
-	Reshape(ctx context.Context, slot string, cpus, memoryMB int) error
-}
-
-func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) error {
+func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) (err error) {
 	task, err := deps.Store.GetTask(ctx, d.TaskID)
 	if err != nil {
 		return fmt.Errorf("orchestrator: reading task %s: %w", d.TaskID, err)
@@ -291,10 +270,45 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// happen before anything inside the sandbox can reach the proxy --
 	// which the ordering here gives: the checkout RunDispatch performs is
 	// the run's own first use of it.
-	sandbox := d.RunID
-	if err := deps.Store.SetRunSandbox(ctx, d.RunID, sandbox); err != nil {
+	sandboxName := d.RunID
+	if err := deps.Store.SetRunSandbox(ctx, d.RunID, sandboxName); err != nil {
 		return fmt.Errorf("orchestrator: recording run %s's sandbox: %w", d.RunID, err)
 	}
+
+	// A task's own SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534) is a
+	// create-time argument now rather than something applied to an
+	// already-built sandbox: this one is built for this run, so its size
+	// is decided once, here, and goes away with it.
+	shape := Shape{CPUs: task.SandboxCPUs, MemoryMB: task.SandboxMemoryMB}
+	sandbox, err := deps.Sandboxes.Acquire(ctx, sandboxName, shape)
+	if err != nil {
+		return fmt.Errorf("orchestrator: acquiring a sandbox for run %s: %w", d.RunID, err)
+	}
+
+	// The sandbox is released once this dispatch is done with it, whether
+	// or not the run succeeded -- a failed or cancelled run is exactly the
+	// kind that should leave nothing behind. Deferred rather than run at
+	// the end of the happy path: every early return below is a run that
+	// has already got a sandbox, and leaking one would hold real resources
+	// (a kontur VM, its containers) for the life of the process.
+	//
+	// A release failure is joined onto whatever else went wrong rather
+	// than replacing it, and never skips the rest of this function: what a
+	// successful run's result implies for GitHub does not depend on
+	// whether cleaning up after it also succeeded. That is also why this
+	// needs the named return -- an error produced in a deferred call has
+	// nowhere else to go.
+	//
+	// The release runs on a context detached from ctx's cancellation
+	// (though not its values): ctx is cancelled when the daemon is
+	// shutting down or the task was closed mid-run, which are exactly the
+	// cases where a VM would otherwise be left running with nothing left
+	// to release it.
+	defer func() {
+		if rerr := sandbox.Release(context.WithoutCancel(ctx)); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("orchestrator: releasing run %s's sandbox: %w", d.RunID, rerr))
+		}
+	}()
 
 	// Mint this sandbox's own proxy token and point its git at the proxy,
 	// before the checkout RunDispatch performs needs either. Both used to
@@ -302,32 +316,20 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// which is where they belonged while a slot's sandbox was long-lived
 	// and shared across every run that landed on it. Neither is a
 	// deployment-wide setup step any more: there is nothing to configure
-	// until a run has a sandbox, and what is configured is thrown away
-	// with it.
+	// until a run has a sandbox, and what is configured is destroyed with
+	// it.
 	if deps.MintSandboxToken != nil {
-		token, err := deps.MintSandboxToken(sandbox)
+		token, err := deps.MintSandboxToken(sandboxName)
 		if err != nil {
 			return fmt.Errorf("orchestrator: minting run %s's sandbox token: %w", d.RunID, err)
 		}
-		if err := deps.Sandboxes.ConfigureGitCredentials(ctx, sandbox,
+		if err := sandbox.ConfigureGitCredentials(ctx,
 			deps.Config.GitRemoteBase+"/placeholder/placeholder.git", token); err != nil {
 			return fmt.Errorf("orchestrator: configuring git credentials for run %s: %w", d.RunID, err)
 		}
 	}
 
-	// A task's own SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534)
-	// resizes this run's sandbox before it is handed to the run below.
-	if task.SandboxCPUs != 0 || task.SandboxMemoryMB != 0 {
-		reshaper, ok := deps.Sandboxes.(shapedSandboxes)
-		if !ok {
-			return fmt.Errorf("orchestrator: task %s overrides its sandbox shape but the sandbox backend does not support resizing", task.ID)
-		}
-		if err := reshaper.Reshape(ctx, sandbox, task.SandboxCPUs, task.SandboxMemoryMB); err != nil {
-			return fmt.Errorf("orchestrator: applying task %s's sandbox shape override: %w", task.ID, err)
-		}
-	}
-
-	tools, err := deps.Sandboxes.ToolsFor(ctx, sandbox)
+	tools, err := sandbox.Tools(ctx)
 	if err != nil {
 		return err
 	}
@@ -348,32 +350,17 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 
 	var sandboxRoot string
 	if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
-		rooted, ok := deps.Sandboxes.(rootedSandboxes)
+		rooted, ok := sandbox.(rootedSandbox)
 		if !ok {
 			return fmt.Errorf("orchestrator: task %s requests capabilities but its sandbox has no local directory to place them in", task.ID)
 		}
-		sandboxRoot, err = rooted.RootFor(sandbox)
+		sandboxRoot, err = rooted.Root()
 		if err != nil {
 			return err
 		}
 	}
 
 	result, runErr := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, now)
-
-	// The sandbox is recreated once this dispatch is done with it,
-	// whether or not it succeeded -- a failed or cancelled run is exactly
-	// the kind of run that should not leave anything behind for the next
-	// one dispatched onto this slot. A recreate failure is reported
-	// alongside whatever else went wrong, but it never itself skips
-	// ProcessResult below: what a successful run's result implies for
-	// GitHub does not depend on whether cleaning up after it also
-	// succeeded.
-	var recreateErr error
-	if recreater, ok := deps.Sandboxes.(recreatingSandboxes); ok {
-		if err := recreater.Recreate(ctx, sandbox); err != nil {
-			recreateErr = fmt.Errorf("orchestrator: recreating sandbox %s after task %s: %w", sandbox, task.ID, err)
-		}
-	}
 
 	if runErr != nil {
 		// A failed run is not necessarily an empty one. The framework
@@ -399,7 +386,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 				salvageErr = err
 			}
 		}
-		return errors.Join(runErr, salvageErr, recreateErr)
+		return errors.Join(runErr, salvageErr)
 	}
-	return errors.Join(ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now), recreateErr)
+	return ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now)
 }

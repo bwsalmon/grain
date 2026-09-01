@@ -22,7 +22,7 @@ const AttachmentsDir = "attachments"
 // HostSandboxes directory and a KonturSandboxes VM reached over SSH
 // (mcp.NewSandboxTools and mcp.NewSSHSandboxTools both expose it under
 // this name). A capability's own SideSandbox placement (applyPlacements)
-// has no such reach: it only ever lands where a rootedSandboxes backend
+// has no such reach: it only ever lands where a rootedSandbox
 // hands out a local directory to write into directly (cycle.go's own
 // runOne refuses a task's capability grants against anything else). An
 // attachment inherits no such restriction, which is the whole reason to

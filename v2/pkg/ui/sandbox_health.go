@@ -5,15 +5,16 @@ import (
 	"net/http"
 )
 
-// SandboxSnapshot is one dispatch slot's live sandbox status, as GET
-// /api/sandboxes reports it. Deliberately its own type rather than
-// orchestrator.SlotHealth itself: this package does not import
+// SandboxSnapshot is one live sandbox's status, as GET /api/sandboxes
+// reports it -- one per run currently in flight, so an idle deployment
+// reports none rather than a row of idle slots. Deliberately its own type
+// rather than orchestrator.SandboxHealth itself: this package does not import
 // pkg/orchestrator (a presentation-layer package importing core dispatch
 // logic runs the wrong way), so cmd/grain/daemon.go's own
 // sandboxHealthAdapter is the one place both types are ever in scope,
 // converting one into the other field for field.
 type SandboxSnapshot struct {
-	Slot          string `json:"slot"`
+	Sandbox       string `json:"sandbox"`
 	Backend       string `json:"backend"`
 	Name          string `json:"name"`
 	Ready         bool   `json:"ready"`
@@ -23,8 +24,8 @@ type SandboxSnapshot struct {
 	MemoryTotalMB int    `json:"memoryTotalMB,omitempty"`
 }
 
-// SandboxHealth is implemented by whatever can report every dispatch
-// slot's current sandbox status -- cmd/grain/daemon.go's own
+// SandboxHealth is implemented by whatever can report every live
+// sandbox's current status -- cmd/grain/daemon.go's own
 // sandboxHealthAdapter over orchestrator.KonturSandboxes/HostSandboxes'
 // own Health methods, in a real deployment. See Config.Sandboxes' own
 // doc comment for the nil-means-unavailable contract this interface's

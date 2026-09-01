@@ -43,20 +43,74 @@ import (
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
-// Sandboxes hands out the MCP tools one dispatch slot's agent run should
-// have its tool calls confined to. HostSandboxes and KonturSandboxes both
-// implement it; RunCycle only ever calls ToolsFor, never anything backend-
-// specific, so swapping Deps.Sandboxes between them is the whole change a
-// deployment needs to make to move a slot from the local stand-in to a
-// real VM.
+// Sandboxes builds the sandbox one run's agent is confined to, and
+// destroys it when that run is done. HostSandboxes and KonturSandboxes
+// both implement it; RunCycle only ever calls Acquire and then the
+// returned Sandbox's own methods, never anything backend-specific, so
+// swapping Deps.Sandboxes between them is the whole change a deployment
+// needs to make to move from the local stand-in to a real VM.
+//
+// It used to hand out tools for a named slot, and a slot's sandbox
+// outlived every run dispatched onto it -- which is why isolating one
+// task from the next had to be bolted on afterwards, as a recreate
+// between runs plus a reset pass at startup to cover the runs a crash
+// interrupted. A sandbox that is created for a run and destroyed with it
+// gets that for free: there is no previous task's filesystem to inherit
+// because there is no previous task.
 type Sandboxes interface {
-	ToolsFor(ctx context.Context, sandbox string) ([]mcp.Tool, error)
-	// ConfigureGitCredentials points sandbox's git at the proxy, using
-	// the bearer token minted for that sandbox. Every backend implements
-	// it: a sandbox now exists for exactly one run, so pointing it at the
-	// proxy is part of preparing that run rather than a one-time setup
-	// step a daemon performs per slot at startup.
-	ConfigureGitCredentials(ctx context.Context, sandbox, remoteURL, token string) error
+	// Acquire builds a sandbox called name, sized to shape, ready for use
+	// by the time it returns. A caller that gets a nil error owns the
+	// returned Sandbox and must Release it.
+	Acquire(ctx context.Context, name string, shape Shape) (Sandbox, error)
+}
+
+// Shape is how big a sandbox a run asked for -- model.Task's own
+// SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534), or the zero value
+// for a run content with the deployment default.
+//
+// It is passed to Acquire rather than applied afterwards because a
+// sandbox is now built per run: the one moment its size is decided is
+// when it is created, so there is nothing to resize. KonturSandboxes
+// used to expose a Reshape for exactly that gap -- a `konturctl vm
+// update` against a long-lived slot VM already sized from the deployment
+// default at create time, undone by the next recreate -- and it is gone
+// with the gap.
+type Shape struct {
+	CPUs, MemoryMB int
+}
+
+// IsZero reports whether a shape asks for nothing in particular, which is
+// what a task with neither override set produces.
+func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 }
+
+// Sandbox is one run's own sandbox: a local directory, or a
+// bwsalmon/kontur-managed VM. It lives exactly as long as the run does.
+type Sandbox interface {
+	// Name is what this sandbox is called -- the string recorded as the
+	// run's model.Run.Sandbox, and the identity the git proxy resolves
+	// back to that run's task.
+	Name() string
+	// Tools are the MCP tools the run's agent has its tool calls confined
+	// to.
+	Tools(ctx context.Context) ([]mcp.Tool, error)
+	// ConfigureGitCredentials points this sandbox's git at the proxy,
+	// using the bearer token minted for it.
+	ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error
+	// Release destroys the sandbox. It is called once the run is done,
+	// success or failure alike, and is what makes the isolation between
+	// one task and the next a property of the lifecycle rather than
+	// something a caller has to remember to do.
+	Release(ctx context.Context) error
+}
+
+// rootedSandbox is implemented by a Sandbox with a local directory on the
+// host this process runs on -- HostSandboxes' own. It is what a task with
+// capabilities to place needs (orchestrator.placeAttachments writes into
+// it directly), and what a kontur VM deliberately does not have: its
+// filesystem is inside a guest this process can only reach by exec'ing
+// into it.
+type rootedSandbox interface {
+	Root() (string, error)
 }
 
 // Config is what one deployment's orchestrator needs to know: which repo
@@ -191,65 +245,94 @@ func (c Config) maxRunRuntime() time.Duration {
 	return defaultMaxRunRuntime
 }
 
-// HostSandboxes hands out one directory per slot, on the host this
-// process itself runs on — see the package doc comment on why that is the
-// whole sandbox for now. Directories persist across cycles for the same
-// slot, matching v1's own long-lived-sandbox shape (docs/next-session.md:
-// "sequential tasks share a long-lived sandbox"); nothing here resets one
-// between tasks, which is the caller's job the same way v1's
-// ensure_workspace is.
+// HostSandboxes hands out one directory per run, on the host this process
+// itself runs on — see the package doc comment on why that is the whole
+// sandbox for now. A directory is created by Acquire and removed by
+// Release, so nothing of one task's run survives into the next.
+//
+// That is a change of substance for this backend, not just of shape. A
+// HostSandboxes directory used to be per *slot* and deliberately
+// long-lived, resetting one between tasks being "the caller's job" -- and
+// since no caller did, sequential tasks on one slot genuinely shared a
+// filesystem. They no longer can.
 type HostSandboxes struct {
 	baseDir string
 
-	mu    sync.Mutex
-	roots map[string]string
+	mu   sync.Mutex
+	live map[string]*hostSandbox
 }
 
 // NewHostSandboxes returns a HostSandboxes rooted at baseDir, which must
 // already exist.
 func NewHostSandboxes(baseDir string) *HostSandboxes {
-	return &HostSandboxes{baseDir: baseDir, roots: map[string]string{}}
+	return &HostSandboxes{baseDir: baseDir, live: map[string]*hostSandbox{}}
 }
 
-// RootFor returns sandbox's own directory, creating it on first use.
-func (h *HostSandboxes) RootFor(sandbox string) (string, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if root, ok := h.roots[sandbox]; ok {
-		return root, nil
-	}
-	root := filepath.Join(h.baseDir, sandbox)
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", fmt.Errorf("orchestrator: creating sandbox directory for %q: %w", sandbox, err)
-	}
-	h.roots[sandbox] = root
-	return root, nil
-}
-
-// ToolsFor implements Sandboxes: mcp.NewSandboxTools confined to
-// RootFor(sandbox).
-func (h *HostSandboxes) ToolsFor(ctx context.Context, sandbox string) ([]mcp.Tool, error) {
-	root, err := h.RootFor(sandbox)
-	if err != nil {
-		return nil, err
-	}
-	return mcp.NewSandboxTools(root), nil
-}
-
-// ConfigureGitCredentials points sandbox's git at the proxy, the
-// local-directory counterpart to KonturSandboxes' own method of the same
-// name -- an ordinary file write under RootFor(sandbox), where that one
-// has to reach into a VM's guest to do the same thing.
+// Acquire implements Sandboxes: a fresh directory under baseDir, named
+// for the run.
 //
-// This used to be done once per slot, at daemon startup, because a slot's
-// sandbox outlived every run dispatched onto it. A sandbox that exists
-// for one run is configured as part of preparing that run instead (see
-// cycle.go's runOne), which is why both backends now expose it under one
-// interface rather than the daemon calling each concretely.
-func (h *HostSandboxes) ConfigureGitCredentials(ctx context.Context, sandbox, remoteURL, token string) error {
-	root, err := h.RootFor(sandbox)
-	if err != nil {
-		return err
+// A non-zero shape is refused rather than ignored. A local directory has
+// no CPU or memory of its own to size, so a task that asked for a
+// specific one would silently get the host's instead -- the same refusal
+// this backend gave before, when a shape override went looking for a
+// Reshape it does not implement.
+func (h *HostSandboxes) Acquire(ctx context.Context, name string, shape Shape) (Sandbox, error) {
+	if !shape.IsZero() {
+		return nil, fmt.Errorf("orchestrator: sandbox %q asks for %d vCPU/%d MiB but a host-directory sandbox has no shape of its own", name, shape.CPUs, shape.MemoryMB)
 	}
-	return mcp.ConfigureGitCredentials(root, remoteURL, token)
+	root := filepath.Join(h.baseDir, name)
+	// A directory left behind by a previous process using this same
+	// -sandbox-dir would otherwise be inherited wholesale, which is the
+	// one thing a sandbox per run exists to rule out.
+	if err := os.RemoveAll(root); err != nil {
+		return nil, fmt.Errorf("orchestrator: clearing sandbox directory %q: %w", root, err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("orchestrator: creating sandbox directory %q: %w", root, err)
+	}
+	sb := &hostSandbox{owner: h, name: name, root: root}
+	h.mu.Lock()
+	h.live[name] = sb
+	h.mu.Unlock()
+	return sb, nil
+}
+
+// hostSandbox is one run's directory.
+type hostSandbox struct {
+	owner *HostSandboxes
+	name  string
+	root  string
+}
+
+func (s *hostSandbox) Name() string { return s.name }
+
+// Root implements rootedSandbox: the directory itself, which is what a
+// task with capabilities to place needs.
+func (s *hostSandbox) Root() (string, error) { return s.root, nil }
+
+// Tools implements Sandbox: mcp.NewSandboxTools confined to this run's
+// own directory.
+func (s *hostSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
+	return mcp.NewSandboxTools(s.root), nil
+}
+
+// ConfigureGitCredentials points this run's git at the proxy -- an
+// ordinary file write under its directory, where KonturSandboxes' own
+// method of the same name has to reach into a VM's guest to do it.
+func (s *hostSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
+	return mcp.ConfigureGitCredentials(s.root, remoteURL, token)
+}
+
+// Release removes the directory. Unlike a kontur VM's own Release there
+// is no isolation boundary to enforce here -- a host directory never had
+// one from the host daemon it sits beside -- but leaving one behind would
+// accumulate a checkout per run for the life of the deployment.
+func (s *hostSandbox) Release(ctx context.Context) error {
+	s.owner.mu.Lock()
+	delete(s.owner.live, s.name)
+	s.owner.mu.Unlock()
+	if err := os.RemoveAll(s.root); err != nil {
+		return fmt.Errorf("orchestrator: removing sandbox directory %q: %w", s.root, err)
+	}
+	return nil
 }

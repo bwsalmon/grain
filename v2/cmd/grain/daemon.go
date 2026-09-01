@@ -159,7 +159,7 @@ func daemon(args []string) {
 	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
 	// managed VM per slot, reached over SSH.
 	konturVMNamePrefix := fs.String("kontur-vm-name-prefix", "",
-		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per slot, named <prefix>+<slot>) over SSH, "+
+		"if set, dispatch onto real bwsalmon/kontur-managed VMs (one per run, named <prefix>+<run id>) over SSH, "+
 			"instead of local host directories -- see orchestrator.KonturConfig.NamePrefix")
 	konturStateDir := fs.String("kontur-state-dir", kontur.DefaultStateDir,
 		"kontur's VM state directory (only used with -kontur-vm-name-prefix)")
@@ -175,7 +175,7 @@ func daemon(args []string) {
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-vm-name-prefix)")
 	var konturCreateArgs stringSliceFlag
 	fs.Var(&konturCreateArgs, "kontur-create-arg",
-		"one argument appended verbatim to `konturctl vm create <name> -state-dir <dir>` when a slot's VM does not "+
+		"one argument appended verbatim to `konturctl vm create <name> -state-dir <dir>` when a run's VM is "+
 			"exist yet -- repeat for every flag and value bwsalmon/kontur's own `konturctl vm create -h` calls for "+
 			"beyond a name and -state-dir (guest image, guest SSH port, resource sizing, ...), e.g. "+
 			"-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images -kontur-create-arg=-disk "+
@@ -187,11 +187,8 @@ func daemon(args []string) {
 			"publishing\", and v2/scripts/setup.sh's own ensure_kontur_images, which is what actually copies "+
 			"it there for terraform/gcp-v2 -- -guest-port 22 is not optional: konturctl's own default is 80, "+
 			"which silently refuses every connection to this image's actual sshd). Only used with "+
-			"-kontur-vm-name-prefix. "+
-			"Leave -ip/-port out of this list "+
-			"and set -kontur-base-ip/-kontur-base-port instead once -max-concurrent is more than 1 -- konturctl has "+
-			"no default for either and no way to vary a value shared verbatim across every slot's create call, so "+
-			"without one of those two, every slot's VM would otherwise be created with the exact same address.")
+			"-kontur-vm-name-prefix. Under -kontur-net nat, prefer -kontur-base-ip/-kontur-base-port over "+
+			"putting -ip/-port here: they are appended last, so they win over this list.")
 	konturNet := fs.String("kontur-net", kontur.NetModeFlat,
 		"how a kontur VM reaches the network: \"flat\" (the default -- the guest is spliced onto the sandbox "+
 			"container's own segment and takes over the address docker assigned it, so -kontur-base-ip/"+
@@ -200,12 +197,15 @@ func daemon(args []string) {
 			"image built from kontur's own guest overlays, for the control link \"kontur exec\" arrives on -- "+
 			"packer/kontur/build-guest.sh produces one.")
 	konturBaseIP := fs.String("kontur-base-ip", "",
-		"the -ip slot \"1\"'s kontur VM gets on netshim's bridge; every later slot's is the next IPv4 address after "+
-			"it. Leave unset for a single-slot (-max-concurrent 1) deployment content to put a literal -ip in "+
-			"-kontur-create-arg itself. Only used with -kontur-vm-name-prefix.")
+		"the -ip every kontur VM is created with under -kontur-net nat, passed verbatim. Each VM has its own "+
+			"network namespace under the docker backend (its own netns-holder container), so they do not "+
+			"collide; this used to be a base that each slot's number was added to, which was guarding against "+
+			"a shared bridge the docker backend does not have. Ignored under flat mode, and only used with "+
+			"-kontur-vm-name-prefix.")
 	konturBasePort := fs.Int("kontur-base-port", 0,
-		"the -port slot \"1\"'s kontur VM forwards to on the pod IP; every later slot's is this plus its own "+
-			"number minus one, the same derivation -kontur-base-ip uses. Only used with -kontur-vm-name-prefix.")
+		"the -port every kontur VM is created with under -kontur-net nat, passed verbatim -- a DNAT target "+
+			"inside that VM's own namespace, not a port published on this host. Ignored under flat mode, and "+
+			"only used with -kontur-vm-name-prefix.")
 	konturGitProxyHost := fs.String("kontur-git-proxy-host", "",
 		"host (no port) this daemon's git proxy is reachable at from inside a kontur VM's own guest, in place "+
 			"of the loopback address the proxy binds to by default -- required with -kontur-vm-name-prefix. A "+
@@ -410,8 +410,8 @@ func run(ctx context.Context, cfg config) error {
 			SSHUser:         cfg.konturSSHUser,
 			ExecKeyPath:     cfg.konturExecKey,
 			Workspace:       cfg.konturWorkspace,
-			BaseIP:          cfg.konturBaseIP,
-			BasePort:        cfg.konturBasePort,
+			IP:              cfg.konturBaseIP,
+			Port:            cfg.konturBasePort,
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
 		})
@@ -567,6 +567,22 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	// startup pass rather than something reconcile also runs on a timer.
 	if err := orchestrator.RecoverOrphanedRuns(ctx, store, githubClient, time.Now().UTC()); err != nil {
 		log.Printf("grain daemon: recovering orphaned runs: %v", err)
+	}
+
+	// The sandbox-side half of that same recovery, and at the same moment
+	// for the same reason: a run's VM is deleted when the run ends, so at
+	// startup -- before this process has dispatched anything -- any VM
+	// under this deployment's prefix belongs to a process that died before
+	// it could do that. Logged rather than fatal: a VM that cannot be
+	// reaped costs some memory on the host, where refusing to start costs
+	// the whole deployment, and every run this process dispatches builds
+	// its own VM regardless.
+	if konturSandboxes != nil {
+		if reaped, err := konturSandboxes.ReapOrphans(ctx); err != nil {
+			log.Printf("grain daemon: reaping orphaned kontur VMs: %v", err)
+		} else if reaped > 0 {
+			log.Printf("grain daemon: reaped %d kontur VM(s) left behind by a previous process", reaped)
+		}
 	}
 
 	deps := orchestrator.Deps{
@@ -1103,16 +1119,16 @@ type sandboxHealthAdapter struct {
 
 func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 	reporter, ok := a.inner.(interface {
-		Health(context.Context) []orchestrator.SlotHealth
+		Health(context.Context) []orchestrator.SandboxHealth
 	})
 	if !ok {
 		return nil
 	}
-	slots := reporter.Health(ctx)
-	out := make([]ui.SandboxSnapshot, len(slots))
-	for i, s := range slots {
+	sandboxes := reporter.Health(ctx)
+	out := make([]ui.SandboxSnapshot, len(sandboxes))
+	for i, s := range sandboxes {
 		out[i] = ui.SandboxSnapshot{
-			Slot:          s.Slot,
+			Sandbox:       s.Sandbox,
 			Backend:       s.Backend,
 			Name:          s.Name,
 			Ready:         s.Ready,
