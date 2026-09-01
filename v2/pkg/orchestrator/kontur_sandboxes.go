@@ -51,7 +51,7 @@ type KonturConfig struct {
 	// on the host. Required: left empty, `kontur exec` falls back to the
 	// dedicated key bwsalmon/kontur's own Dockerfile bakes into the image
 	// and authorizes on the guest rootfs that same Dockerfile builds --
-	// which a deployment pointing -disk at packer/kontur/build.sh's
+	// which a deployment pointing -disk at packer/kontur/build-guest.sh's
 	// output is not booting.
 	//
 	// The images directory internal/dockervm already mounts read-only at

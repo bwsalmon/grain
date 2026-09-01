@@ -301,8 +301,8 @@ working deployment -- but it no longer needs anything built or published
 by hand first (bwsalmon/agents#531): `v2/scripts/setup.sh`'s own
 `ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_konturctl`/
 `ensure_kontur_kvm_access` generate an SSH keypair, build the guest image
-(`packer/kontur/build.sh` -- `debootstrap`+`chroot`, no VM boot, several
-minutes against a real Debian mirror) and the OCI image
+(`packer/kontur/build-guest.sh` -- one `docker build`, no VM boot and no
+root, several minutes against a real Debian mirror) and the OCI image
 (`build-oci-image.sh` -- a plain `docker build`, no push), build and
 install `konturctl` itself onto the host's `PATH` (`grain-daemon` execs
 it directly to manage each slot's VM -- see
@@ -315,12 +315,12 @@ generation, not just the first, but `ensure_kontur_images`'s own
 guest image is provisioned from), `third_party/kontur`'s own vendored git
 tree (the kontur version baked into the OCI image), and the SSH public
 key in play -- names and caches the result, so a re-run with nothing
-changed rebuilds neither image; only a `provision.sh` edit, a
+changed rebuilds neither image; only a `guest-setup.sh` edit, a
 `third_party/kontur` vendor bump, or a rotated keypair does. See
 `packer/kontur/README.md` for what the guest-image build actually does
 and why.
 
-Any one of those steps failing (debootstrap unable to reach a Debian
+Any one of those steps failing (the guest build unable to reach a Debian
 mirror, say) leaves `enable_kontur_sandboxes`'s intent unmet *for that run
 only*: the host still comes up dispatching into host directories, with a
 line in `journalctl -u grain-daemon -f`'s own deploy log and `setup.sh`'s
@@ -333,15 +333,15 @@ centrally, and share the result across many hosts than pay that build
 cost on each of them still can, the way every deployment before
 bwsalmon/agents#531 had to:
 
-1. **Build and publish the guest image.** Needs root (`debootstrap`,
-   bind-mounts, `mke2fs`) and an SSH keypair:
+1. **Build and publish the guest image.** Needs docker (the rootfs is
+   built inside the build, so no root and nothing to install here) and an
+   SSH keypair:
 
    ```sh
-   sudo apt-get install -y debootstrap e2fsprogs
    ssh-keygen -t ed25519 -N '' -f kontur_key   # -> kontur_key, kontur_key.pub
    export OPERATOR_SSH_PUBLIC_KEY="$(cat kontur_key.pub)"
    export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
-   sudo -E ../../packer/kontur/build.sh
+   ../../packer/kontur/build-guest.sh
    ```
 
    Set `kontur_image_bucket` to the same bucket name, and push the

@@ -1,7 +1,7 @@
 # The toolchain the Makefile's `container-build` target links in, so that
 # what produces bin/grain is Debian 12 -- the release every machine this
-# project deploys to runs (packer/kontur/build.sh's own bookworm
-# debootstrap target, terraform/gcp/variables.tf's debian-cloud/debian-12)
+# project deploys to runs (the bookworm guest packer/kontur/build-guest.sh
+# builds, terraform/gcp/variables.tf's debian-cloud/debian-12)
 # -- whatever the
 # machine driving the build happens to be. grain is pure Go (the
 # Makefile's own "Containerised build" comment), so there is no C

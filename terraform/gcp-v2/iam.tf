@@ -42,7 +42,7 @@ resource "google_project_iam_member" "host" {
 }
 
 # setup.sh's own ensure_kontur_images (v2/scripts/setup.sh) syncs the
-# guest image (packer/kontur/build.sh's published output) from
+# guest image (packer/kontur/build-guest.sh's published output) from
 # kontur_image_bucket and pulls the OCI image (third_party/kontur's own
 # Dockerfile) from kontur_oci_image -- both need the host's own service
 # account to actually read them, since instance.tf's own scopes =

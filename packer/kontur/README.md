@@ -87,9 +87,10 @@ it means `chroot`, and a useful chroot needs `/proc` and `/dev`
 bind-mounted -- which needs `CAP_SYS_ADMIN`, which an ordinary
 `docker build` does not have. Without them, apt postinsts,
 `systemctl enable` and `update-initramfs` variously misbehave or fail.
-This is precisely why `build.sh` needs root today, and it would have
-undone the "no extra privileges beyond an ordinary docker build" property
-kontur's own `guest-image` stage calls out for `mke2fs -d`.
+This is precisely why `build.sh` needed root while it existed, and why
+keeping that build would have undone the "no extra privileges beyond an
+ordinary docker build" property kontur's own `guest-image` stage calls out
+for `mke2fs -d`.
 
 It sidesteps that rather than paying it: a `guest-customized` stage
 promotes the rootfs to an image of its own
@@ -216,8 +217,10 @@ a real cloud-hypervisor binary:
   above lacks, and the reason that kernel panics on this VMM specifically.
 
 So the "kernel" this image ships is just `/boot/vmlinuz-*` and
-`/boot/initrd.img-*` out of a normal `apt-get install linux-image-amd64`,
-copied out of the built rootfs as `vmlinuz`/`initrd.img` by `build.sh`.
+`/boot/initrd.img-*` out of a normal `apt-get install linux-image-amd64`
+(`guest-setup.sh` runs that install), copied out of the built rootfs as
+`vmlinuz`/`initrd.img` by kontur's own `guest-image` stage and exported by
+its `guest-artifacts` target.
 There is no from-source kernel build anywhere in this pipeline, and no
 firmware/GRUB/UEFI boot path either (cloud-hypervisor's other option,
 `CHV_FIRMWARE` -- see below for why that path was ruled out, not just left
@@ -233,19 +236,27 @@ done:
   `eth0` hard-coded -- but systemd's predictable-naming policy renames a
   virtio-net device to something like `ens2` by default, and the rename
   happens inside the *initramfs* (its own bundled, and by default stale,
-  copy of `/etc/udev`), not just the final root. `provision.sh` pins the
-  name with an explicit `.link` file (`00-eth0.link`) and re-runs
-  `update-initramfs -u` after adding it, so the initramfs's own udev
-  snapshot has it too -- skipping that second step was confirmed by hand
-  to leave the guest unreachable even with the `.link` file in place.
+  copy of `/etc/udev`), not just the final root. `guest-setup.sh` turns
+  predictable naming off wholesale -- masking the default `.link` file
+  with `ln -sf /dev/null /etc/systemd/network/99-default.link` -- and
+  re-runs `update-initramfs -u` afterwards, so the initramfs's own udev
+  snapshot has it too; skipping that second step was confirmed by hand to
+  leave the guest unreachable regardless. Masking beat the earlier
+  `00-eth0.link`, which forced `Name=eth0` on `Type=ether`: that matches
+  every NIC and can only win once, so kontur's flat mode -- which gives
+  this guest two, the spliced NIC plus the control link -- left the second
+  unnamed and the control link unconfigured. Masking leaves the kernel's
+  own `eth0`/`eth1` in PCI probe order, and a single-NIC NAT-mode guest
+  still gets exactly `eth0`. See `guest-setup.sh`'s own "Networking"
+  comment.
 - **Static addressing itself needs a small userspace helper.** Debian's
   kernel does not set `CONFIG_IP_PNP`, so nothing in the kernel itself
   acts on `ip=` the way a kernel built with in-kernel IP-config would.
   klibc's `ipconfig(8)` (pulled in transitively by `initramfs-tools`, via
   `klibc-utils`) implements the same static-addressing syntax, but --
   unlike the in-kernel code -- does not read `/proc/cmdline` itself; it
-  only takes the spec as an explicit argument. `provision.sh` installs a
-  small wrapper (`kontur-configure-net`) plus a `systemd` oneshot unit
+  only takes the spec as an explicit argument. `guest-setup.sh` installs
+  a small wrapper (`kontur-configure-net`) plus a `systemd` oneshot unit
   that extracts `ip=`'s value from `/proc/cmdline` and hands it to
   `ipconfig` directly. Also needed, and easy to miss: `virtio_net` has to
   be `modprobe`d explicitly (nothing auto-loads it early enough on its
@@ -272,7 +283,7 @@ is the only path that is already wired all the way through.
 
 ## What's in the image, and why
 
-`provision.sh` mirrors `provision/sandbox.sh` package-for-package: git,
+`guest-setup.sh` mirrors `provision/sandbox.sh` package-for-package: git,
 build tooling, Docker + kind (the node image is not pre-pulled -- see
 "Why no VM boot to build this" below for why), and `gcloud`/`terraform`
 for tasks whose deployment mints a per-task GCP key. bwsalmon/agents#267's
@@ -286,7 +297,7 @@ the "actually I needed X" discovery from this decision to some later
 task's failed dispatch, for an image that is not cheap to iterate on the
 way a Python provisioning script is (see "One image, uniform" below).
 
-Two things `provision.sh` does that `provision/sandbox.sh` doesn't, both
+Two things `guest-setup.sh` does that `provision/sandbox.sh` doesn't, both
 because a kontur VM has no per-VM provisioning hook analogous to
 `LibvirtAdapter.render_domain_xml`/cloud-init NoCloud user-data (kontur
 manages a VM's lifecycle as a static pod under a standalone kubelet --
@@ -305,7 +316,7 @@ service a NoCloud datasource would ride on):
   runs (that script's own comment: "The default cloud-init user"). This
   image has no cloud-init and no cloud image underneath it at all (see
   "Why no VM boot to build this"), so nothing creates that account except
-  `provision.sh` itself -- same name, so every downstream assumption (the
+  `guest-setup.sh` itself -- same name, so every downstream assumption (the
   authorized key above, `grain/adapter/libvirt.py`'s v1 convention, the
   docker-group grant) keeps holding, with the same passwordless-sudo grant
   a cloud image's own `default_user` normally carries.
@@ -329,34 +340,42 @@ in the first place.
 
 ## Running a custom setup script
 
-To customize the image beyond `provision.sh`'s own fixed package list --
+To customize the image beyond `guest-setup.sh`'s own fixed package list --
 installing extra packages, dropping in config files, enabling services,
 etc -- without forking this directory, set `SANDBOX_SETUP_SCRIPT` to a
-script's contents (not a path) before running `build.sh`:
+script's contents (not a path) before running `build-guest.sh`:
 
 ```sh
+export OPERATOR_SSH_PUBLIC_KEY="$(cat /path/to/operator_key.pub)"
 export SANDBOX_SETUP_SCRIPT="$(cat my-setup.sh)"
-sudo -E ./build.sh
+./build-guest.sh
 ```
 
-`provision.sh` runs it, as root, once the built-in provisioning above has
-finished but before the operator-key finalization below -- see that
-script's own comment on the section for exactly where and why. This is
-bwsalmon/kontur's own `GUEST_SETUP_SCRIPT` build arg's idiom
+`guest-setup.sh` runs it, as root, once the built-in provisioning above
+has finished but before the operator-key finalization below -- see that
+script's own comment on the section for exactly where and why.
+`build-guest.sh` carries it in by splicing it into the text of
+`guest-setup.sh` it hands kontur, since kontur's hook execs that script
+with only its own build stage's environment; nothing about that is visible
+to the script being customized.
+
+This is bwsalmon/kontur's own `GUEST_SETUP_SCRIPT` build arg's idiom
 (`third_party/kontur/deploy/guest-image/README.md`, "Running a custom
-setup script"), applied to this directory's own build instead: same
-"an env var holds the script's contents, not a path" shape, so it needs
-no extra context-wrangling either way. The two mechanisms also turn out
-to offer the same environment, which is what makes the migration in
-"Wiring, still to do" above a straight swap rather than a rewrite: this
-script's chroot has a real, bind-mounted `/proc`/`/sys`/`/dev` and network
-access (build.sh sets that up for `provision.sh` itself to use), and
-kontur's `guest-customized` stage gets the same from running the script
-as an ordinary `RUN` rather than under chroot. `apt-get install`,
-`systemctl enable` and the like work normally either way; neither one has
-a *running* service manager, so neither can `systemctl start`. Leave
+setup script") -- and since the convergence above it sits directly on top
+of that hook rather than beside it: `GUEST_SETUP_SCRIPT` is how
+`build-guest.sh` gets `guest-setup.sh` into the build at all, and
+`SANDBOX_SETUP_SCRIPT` is this directory's own pass-through for a caller
+who wants to add to that script without editing it. Both keep the same
+"an env var holds the script's contents, not a path" shape, so neither
+needs any extra context-wrangling.
+
+The environment a custom script gets is whatever kontur's
+`guest-customized` stage gives an ordinary `RUN`: the guest rootfs as `/`,
+a real `/proc` and `/dev`, and working network access. `apt-get install`,
+`systemctl enable` and the like work normally; there is no *running*
+service manager, so `systemctl start` does not. Leave
 `SANDBOX_SETUP_SCRIPT` unset (the default) to build exactly what
-`provision.sh` already bakes in on its own.
+`guest-setup.sh` already bakes in on its own.
 
 Like everything else in this image, the rule from "What's in the image,
 and why" above still applies: no secret belongs in a script baked in at
@@ -380,35 +399,47 @@ shape a direct-kernel-booting guest actually needs (a stock Debian cloud
 image only ever ships as one bootloader-dependent, GRUB/UEFI qcow2, not a
 separate kernel/initramfs/disk triple).
 
-`debootstrap` plus `chroot` needs neither: `debootstrap --variant=minbase`
-builds a Debian rootfs directly on the build host's own filesystem, with
-no VM involved, and `chroot` (unlike a fresh container, and exactly like
-`third_party/kontur`'s own Dockerfile `guest-image` stage) shares the
-build host's network namespace, so `apt-get`/`curl` inside the chroot just
-work with no extra networking setup. The only things that still need
-privilege are `debootstrap` itself, the bind-mounts (`/dev`, `/dev/pts`,
-`/proc`, `/sys`) `provision.sh` needs for `update-initramfs`/`systemctl`
-to behave normally, and `mke2fs -d`, which packs the finished rootfs
-directly into an ext4 image with no loop-mount at all -- `build.sh` has to
-run as root (`sudo -E ./build.sh`) for exactly these three things, nothing
-more.
+A `docker build` needs neither. `third_party/kontur`'s own Dockerfile
+already assembles the whole triple without booting anything: its
+`guest-rootfs-debian` stage debootstraps a `--variant=minbase` rootfs, its
+`guest-customized` stage runs `guest-setup.sh` in it as an ordinary `RUN`
+(so `apt-get`/`curl` just work, and `update-initramfs`/`systemctl enable`
+behave normally, with no chroot and so no `CAP_SYS_ADMIN`), and its
+`guest-image` stage packs the result with `mke2fs -d` -- straight into an
+ext4 image with no loop-mount at all -- and copies `/boot/vmlinuz-*` and
+`/boot/initrd.img-*` out beside it. `build-guest.sh` drives exactly that,
+so nothing in this directory needs root, `debootstrap` or `mke2fs` any
+more; docker is the whole prerequisite list.
+
+This is the same reasoning that ruled the Packer builder out, applied one
+step further: the earlier `build.sh`/`provision.sh` pipeline reached the
+right file shape without a VM boot, but paid root for `debootstrap`, for
+the `/dev`/`/dev/pts`/`/proc`/`/sys` bind-mounts a useful `chroot` needs,
+and for `mke2fs -d` -- all three to redo work kontur's Dockerfile was
+already doing unprivileged. See "Converged on kontur's own guest build"
+above.
 
 ### Building and publishing
 
 ```sh
-sudo apt-get install -y debootstrap e2fsprogs
 export OPERATOR_SSH_PUBLIC_KEY="$(cat /path/to/operator_key.pub)"
 export KONTUR_IMAGE_BUCKET="<a GCS bucket this deployment's operator controls>"
-sudo -E ./build.sh
+./build-guest.sh
 ```
 
-`build.sh` debootstraps a fresh rootfs, runs `provision.sh` against it via
-chroot, copies out `/boot/vmlinuz-*`/`/boot/initrd.img-*` as `vmlinuz`/
-`initrd.img`, packs the rootfs into `disk.img` (`mke2fs -d`, sized to the
-rootfs plus 20% headroom and a 64MiB floor -- the same formula
-`third_party/kontur`'s own guest-image Dockerfile stage uses, for the same
-reason), and writes all three under
-`output/kontur-guest-<git-sha>-<UTC timestamp>/`. If `KONTUR_IMAGE_BUCKET`
+`build-guest.sh` runs one `docker build` against `third_party/kontur`,
+with `guest-setup.sh` handed to its `GUEST_SETUP_SCRIPT` build arg and
+`--target guest-artifacts --output type=local` exporting the result: a
+`disk.img` packed by kontur's own `guest-image` stage (`mke2fs -d`, sized
+to the rootfs plus 20% headroom and a 64MiB floor) and the `vmlinuz`/
+`initrd.img` that stage copies out of `/boot` alongside it. It writes all
+three under `output/kontur-guest-<git-sha>-<UTC timestamp>/`, or straight
+into `$OUTPUT_DIR` when that is set -- which is how a caller that already
+knows where it wants them (`v2/scripts/setup.sh`'s own
+`ensure_kontur_images`) skips parsing this script's output to find them.
+It needs docker and nothing else; in particular not root, and not
+`debootstrap` or `mke2fs` on the build host, both of which now only ever
+run inside the build. If `KONTUR_IMAGE_BUCKET`
 is set, `gsutil cp`s all three to both
 `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/<same name>/` (a permanent,
 versioned copy) and `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/latest/` (a
@@ -454,12 +485,12 @@ and `-initramfs` (`internal/cli/vm.go`: paths "as seen inside the
 container") are paths inside a host directory `-images-hostpath` (default
 `/var/lib/vm-images`, `internal/staticpod/spec.go`'s own default) mounts
 read-only at `/images` in the VM's container. So a deployment publishing
-this directory's `build.sh` output has to land all three files on the
+this directory's `build-guest.sh` output has to land all three files on the
 kontur host's own local disk under that directory -- `v2/scripts/
 setup.sh`'s own `ensure_kontur_images` is that provisioning step
 (bwsalmon/agents#504: nothing downstream of `konturctl vm create` fetches
 them there on its own), always landing them at a fixed `<hostpath>/current/`
-regardless of the version string `build.sh` gave them in GCS, so
+regardless of the version string `build-guest.sh` gave them in GCS, so
 `write_systemd_units`'s own `-kontur-create-arg` construction never has to
 discover or hardcode one either:
 
@@ -516,7 +547,7 @@ disagree.
 ## Networking
 
 Covered above under "Why no custom kernel" (the `eth0`-naming and
-`ip=`-handling gaps and how `provision.sh` closes them) since both are
+`ip=`-handling gaps and how `guest-setup.sh` closes them) since both are
 consequences of the kernel decision, not independent choices.
 
 ## One image, uniform

@@ -177,7 +177,7 @@ func daemon(args []string) {
 			"-kontur-create-arg=/images/current/disk.img -kontur-create-arg=-kernel "+
 			"-kontur-create-arg=/images/current/vmlinuz -kontur-create-arg=-initramfs "+
 			"-kontur-create-arg=/images/current/initrd.img -kontur-create-arg=-guest-port "+
-			"-kontur-create-arg=22 to point at packer/kontur/build.sh's published output, already copied onto "+
+			"-kontur-create-arg=22 to point at packer/kontur/build-guest.sh's published output, already copied onto "+
 			"this host under -images-hostpath's directory (see packer/kontur/README.md, \"Building and "+
 			"publishing\", and v2/scripts/setup.sh's own ensure_kontur_images, which is what actually copies "+
 			"it there for terraform/gcp-v2 -- -guest-port 22 is not optional: konturctl's own default is 80, "+

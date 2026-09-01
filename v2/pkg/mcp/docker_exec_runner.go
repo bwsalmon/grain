@@ -38,7 +38,7 @@ import (
 // Auth is unchanged from SSHRunner's: the guest's sshd, the same account,
 // and the same keypair a deployment already baked into its guest image
 // (v2/scripts/setup.sh's ensure_kontur_ssh_key, whose public half
-// packer/kontur/provision.sh installs as the "debian" account's only
+// packer/kontur/guest-setup.sh installs as the "debian" account's only
 // authorized_keys entry). Only the transport differs -- which is why User
 // here is the same value KonturConfig.SSHUser carries for SSHRunner.
 type DockerExecRunner struct {
@@ -55,7 +55,7 @@ type DockerExecRunner struct {
 	// KONTUR_EXEC_USER. Empty leaves guestexec's own default ("root",
 	// the only account kontur's *reference* guest image creates) in
 	// place -- which is not what a grain guest image wants, since
-	// packer/kontur/provision.sh creates and authorizes "debian"
+	// packer/kontur/guest-setup.sh creates and authorizes "debian"
 	// instead.
 	User string
 
