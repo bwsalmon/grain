@@ -7,6 +7,7 @@ import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
 import Overlay from "./Overlay.jsx";
+import StateDot, { isLiveRunning } from "./StateDot.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
 // The panel splits like Plane's own issue peek: title, description and
@@ -61,7 +62,10 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
 
         <div className="detail-side">
           <div className="detail-state">
-            <span className={`badge badge-${t.state}`}>{STATE_LABELS[t.state] || t.state}</span>
+            <span className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}>
+              <StateDot state={t.state} title={STATE_LABELS[t.state] || t.state} />
+              {STATE_LABELS[t.state] || t.state}
+            </span>
             {/* Both chips read as annotations beside the state dot, not a
                 replacement for it -- a blocked task is still queued
                 (docs/data-model.md), and a completed task's PR phase is
@@ -544,7 +548,13 @@ function Timeline({ t, act, showError }) {
               })}
             >
               <div className="timeline-marker">
-                <span className={`badge badge-${e.badge}${e.badge === "running" && !e.current ? " badge-static" : ""}`} />
+                <span
+                  className={`badge badge-${e.badge}${
+                    e.badge === "running" ? (e.current ? " badge-mark" : " badge-static") : ""
+                  }`}
+                >
+                  <StateDot state={e.badge} live={e.current} title={STATE_LABELS[e.badge] || e.badge} />
+                </span>
               </div>
               <div className="timeline-body">
                 {e.at && <div className="timeline-when">{e.at.toLocaleString()}</div>}

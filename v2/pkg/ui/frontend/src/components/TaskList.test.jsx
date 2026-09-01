@@ -248,6 +248,21 @@ describe("TaskList", () => {
     expect(screen.queryAllByTitle("a live chat, not a background task")).toHaveLength(1);
   });
 
+  // bwsalmon/agents#586
+  it("gives a running task's state dot the grain mark instead of the plain CSS spinner", () => {
+    renderList();
+    const queuedDot = rowFor("Fix the thing").querySelector(".badge");
+    const runningDot = rowFor("Ship the other thing").querySelector(".badge");
+
+    expect(queuedDot).not.toHaveClass("badge-mark");
+    expect(queuedDot).toBeEmptyDOMElement();
+    expect(runningDot).toHaveClass("badge-mark");
+    // jsdom has no canvas (setupTests.js), so GrainMark falls back to its
+    // still <img> here rather than the canvas it paints in a browser --
+    // see GrainMark.test.jsx for the animated path itself.
+    expect(runningDot.querySelector("img")).toHaveAttribute("title", "Running");
+  });
+
   describe("search (bwsalmon/agents#460)", () => {
     it("filters down to tasks whose title matches the search text", async () => {
       const user = userEvent.setup();

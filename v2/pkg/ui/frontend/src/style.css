@@ -313,12 +313,21 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   background: var(--state-running);
 }
 
-/* .badge-running still drives the plain CSS status dot (TaskList,
-   DetailOverlay) rather than an MUI primitive, so it keeps its own spin
-   animation. Blocked/dependency/task-picker chips and inputs were
-   converted to MUI Chip/TaskPicker components instead, so their CSS
-   (dependency-chip, chip-remove, chip-read, badge-blocked, task-picker*)
-   is gone rather than merged back in. */
+/* .badge-mark is for a "running" badge showing a task's live status
+   (bwsalmon/agents#586): StateDot renders the grain mark's animated
+   cycle -- the same "agents are working" figure the sidebar shows -- as
+   a real child instead of the spinning-border dot, so the dot the
+   ::before rule above draws is suppressed here rather than doubled up
+   underneath it. */
+.badge-mark::before { content: none; }
+
+/* .badge-running's own spin animation still drives RepoList's chip
+   (bwsalmon/agents#546), which badges a repo's *count* of running tasks
+   rather than one task's live status, so there is no single task for a
+   grain mark to represent there. Blocked/dependency/task-picker chips
+   and inputs were converted to MUI Chip/TaskPicker components instead,
+   so their CSS (dependency-chip, chip-remove, chip-read, badge-blocked,
+   task-picker*) is gone rather than merged back in. */
 @keyframes badge-spin {
   to { transform: rotate(360deg); }
 }
