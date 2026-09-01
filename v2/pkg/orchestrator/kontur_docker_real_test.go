@@ -248,13 +248,12 @@ func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
 // happened to start first, silently undoing the concurrency
 // reconcileDispatch's own doc comment promises. That bug was caught and
 // fixed against a fake (sandboxes_concurrency_test.go's
-// TestKonturSandboxesCreatesDistinctSlotsVMsConcurrentlyNotSerially,
-// which can assert wall-clock overlap precisely because its fake
-// konturctl sleeps a known amount); this test is the same claim proven
-// against the real thing, where "does it still work" -- two independent
-// netshim network namespaces, two independent cloud-hypervisor guests,
-// two independently-derived -ip/-port pairs (KonturConfig.BaseIP/
-// BasePort) -- matters more than exact timing.
+// TestKonturSandboxesCreatesDistinctVMsConcurrentlyNotSerially, which can
+// assert wall-clock overlap precisely because its fake konturctl sleeps a
+// known amount); this test is the same claim proven against the real
+// thing, where "does it still work" -- two independent netshim network
+// namespaces, two independent cloud-hypervisor guests -- matters more
+// than exact timing.
 func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
@@ -285,12 +284,12 @@ func TestKonturSandboxesToolsForCreatesTwoRealVMsConcurrently(t *testing.T) {
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,
-		// Distinct from TestKonturSandboxesToolsForAgainstARealDockerBackedVM's
-		// own hardcoded -ip/-port (169.254.100.2:31080) so the two tests
-		// never fight over the same address if run back to back without a
-		// clean teardown in between.
-		IP:   "169.254.100.20",
-		Port: 31090,
+		// No IP/Port: this runs in flat mode (the default), where
+		// createArgs drops both because the container runtime assigns the
+		// address. They were set here to keep this test's VMs off the
+		// other real test's addresses, which flat mode makes moot -- and
+		// leaving them set implied this test exercises addressing, which
+		// it does not.
 	})
 
 	slots := []string{"1", "2"}
@@ -478,11 +477,16 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
-			// Distinct from the concurrent test above
-			// (169.254.100.20+:31090+) so the two never fight over an
-			// address if run back to back without a clean teardown.
-			"-ip", "169.254.100.40",
-			"-port", "31110",
+			// No -ip/-port: this VM is built in flat mode (KonturConfig's
+			// own default since 7a58bec), where the container runtime
+			// assigns the address the guest takes over and konturctl
+			// rejects -ip outright -- "ip must not be set in \"flat\" net
+			// mode". These were left behind when the default changed, and
+			// failed every run of this test since. There is also nothing
+			// left for them to collide with: each VM gets its own network
+			// namespace under the docker backend, so the "distinct from
+			// the concurrent test above" they used to carry was guarding
+			// a collision that shape makes impossible.
 		},
 		SSHUser:           "debian",
 		ExecKeyPath:       execKey,
