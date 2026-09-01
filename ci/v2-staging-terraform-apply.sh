@@ -54,6 +54,25 @@ terraform validate -no-color
 # rollout. Any other failure still fails immediately: retrying a bad
 # config or a real quota limit only burns the backoff budget. Same
 # reasoning, and the same patterns, as ci/terraform-apply.sh.
+#
+# google_compute_instance.host's own metadata update (grain-deploy-generation,
+# every apply that changes anything in grain_config -- see instance.tf) is a
+# second source of a transient, retry-worthy failure, and not a GCP stock-out
+# at all: the google provider retries that update itself, to absorb a 412
+# where another update raced it for the instance's metadata fingerprint, but
+# hardcodes the *whole* retry -- GET the instance, POST the new metadata, wait
+# for the resulting operation to finish -- to a one-minute budget it never
+# derives from this resource's own `timeouts` (confirmed in the pinned
+# hashicorp/google ~> 6.8 provider's resourceComputeInstanceUpdate, which
+# calls transport_tpg.Retry with no Timeout set, so transport_tpg.Retry's own
+# default of 1*time.Minute applies regardless of how long a real update is
+# allowed to take). Ordinary GCP latency can eat that minute with no fault of
+# ours, and the provider then reports exactly "Error: timeout while waiting
+# for state to become 'success' (timeout: 1m0s)" and abandons an update that
+# was very likely about to succeed. A plain retry of the whole `terraform
+# apply` is safe here the same way it is for a stock-out: this resource's
+# state was never advanced, so the next attempt just retries the same
+# SetMetadata call. See bwsalmon/agents#636.
 apply() {
   terraform apply -input=false -auto-approve -no-color \
     -var-file="$config_dir/$tfvars_file" \
@@ -68,7 +87,7 @@ while true; do
     exit 0
   fi
   if [ "$attempt" -ge "$max_attempts" ] \
-     || ! grep -qiE 'RESOURCE_POOL_EXHAUSTED|does not have enough resources available' "$out"; then
+     || ! grep -qiE "RESOURCE_POOL_EXHAUSTED|does not have enough resources available|timeout while waiting for state to become 'success' \\(timeout: 1m0s\\)" "$out"; then
     # Name only what a reader could not diagnose from the Terraform error
     # itself, and match on something that cannot appear in a *successful*
     # run's noise. An earlier version of this grepped for "iap_brand",
@@ -89,7 +108,7 @@ while true; do
     fi
     exit 1
   fi
-  echo "::warning::terraform apply hit a stock-out (attempt $attempt/$max_attempts); retrying in ${delay}s"
+  echo "::warning::terraform apply hit a transient failure (a stock-out, or the provider's own one-minute metadata-update timeout; attempt $attempt/$max_attempts); retrying in ${delay}s"
   sleep "$delay"
   attempt=$((attempt + 1))
   delay=$((delay * 2))
