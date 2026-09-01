@@ -74,17 +74,17 @@ export default function SettingsOverlay({ config, onClose, showError }) {
     const newestFirst = form.elements.newestFirst.checked;
     if (newestFirst !== !!settings.newestFirst) payload.newestFirst = newestFirst;
 
+    // An empty box is a deliberate "go back to the default" (bwsalmon/agents#610),
+    // not "leave it alone" -- unlike every other field on this form, this one
+    // pre-fills that default in faintly, so an operator who never touched it
+    // and one who cleared it back to blank on purpose type the same thing here.
     const sandboxCpusRaw = form.elements.sandboxCpus.value.trim();
-    if (sandboxCpusRaw !== "") {
-      const sandboxCpus = parseInt(sandboxCpusRaw, 10);
-      if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
-    }
+    const sandboxCpus = sandboxCpusRaw === "" ? 0 : parseInt(sandboxCpusRaw, 10);
+    if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
 
     const sandboxMemoryMbRaw = form.elements.sandboxMemoryMb.value.trim();
-    if (sandboxMemoryMbRaw !== "") {
-      const sandboxMemoryMb = parseInt(sandboxMemoryMbRaw, 10);
-      if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
-    }
+    const sandboxMemoryMb = sandboxMemoryMbRaw === "" ? 0 : parseInt(sandboxMemoryMbRaw, 10);
+    if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
 
     const showClosedByDefault = form.elements.showClosedByDefault.checked;
     if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
@@ -181,23 +181,33 @@ export default function SettingsOverlay({ config, onClose, showError }) {
               )}
               sx={{ display: "flex", mt: 1 }}
             />
+            {/* bwsalmon/agents#610: an unset override (0, stored) is left blank here
+                rather than shown as a literal 0 -- 0 vCPUs/0 MiB is not what a
+                sandbox actually gets. The shape it does get, kontur's own default,
+                sits in the box as a placeholder instead, so it reads as the faint,
+                inherited value it is rather than something deliberately chosen.
+                Clearing a real override back to blank is itself the way to return
+                to that default (submit()'s own sandboxCpusRaw/sandboxMemoryMbRaw
+                handling). */}
             <TextField
               name="sandboxCpus"
               label="Sandbox vCPUs"
-              helperText="default vCPU count for a kontur-managed sandbox VM; 0 or blank leaves kontur's own default in place. Overridable per task."
+              helperText="default vCPU count for a kontur-managed sandbox VM. Overridable per task."
               type="number"
               inputProps={{ min: 0, step: 1 }}
-              defaultValue={String(settings.sandboxCpus || 0)}
+              defaultValue={settings.sandboxCpus ? String(settings.sandboxCpus) : ""}
+              placeholder={settings.sandboxCpusDefault ? String(settings.sandboxCpusDefault) : undefined}
               fullWidth
               margin="normal"
             />
             <TextField
               name="sandboxMemoryMb"
               label="Sandbox memory (MiB)"
-              helperText="default guest memory, in MiB, for a kontur-managed sandbox VM; 0 or blank leaves kontur's own default in place. Overridable per task."
+              helperText="default guest memory, in MiB, for a kontur-managed sandbox VM. Overridable per task."
               type="number"
               inputProps={{ min: 0, step: 1 }}
-              defaultValue={String(settings.sandboxMemoryMb || 0)}
+              defaultValue={settings.sandboxMemoryMb ? String(settings.sandboxMemoryMb) : ""}
+              placeholder={settings.sandboxMemoryMbDefault ? String(settings.sandboxMemoryMbDefault) : undefined}
               fullWidth
               margin="normal"
             />

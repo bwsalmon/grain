@@ -18,6 +18,8 @@ const settings = {
   gcpProject: "",
   gcpServiceAccountEmail: "",
   targetRepos: ["acme/widgets"],
+  sandboxCpusDefault: 2,
+  sandboxMemoryMbDefault: 2048,
 };
 
 describe("SettingsOverlay", () => {
@@ -144,6 +146,42 @@ describe("SettingsOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+  });
+
+  // bwsalmon/agents#610: an unset override shows kontur's own default as a
+  // placeholder -- fainter than a real value -- rather than a literal 0 that
+  // reads as a deliberately zeroed-out sandbox.
+  it("shows kontur's default shape as a placeholder, not a literal 0, when unset", async () => {
+    api.mockResolvedValueOnce(settings);
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
+    const memoryInput = screen.getByLabelText(/Sandbox memory/);
+    expect(cpusInput).toHaveValue(null);
+    expect(cpusInput).toHaveAttribute("placeholder", "2");
+    expect(memoryInput).toHaveValue(null);
+    expect(memoryInput).toHaveAttribute("placeholder", "2048");
+  });
+
+  // bwsalmon/agents#610: clearing a real override back to blank is how an
+  // operator returns to the default, so it has to send an explicit 0 rather
+  // than being silently skipped as "left alone" the way every other field's
+  // empty box is.
+  it("sends an explicit 0 when a sandbox shape override is cleared back to blank", async () => {
+    api.mockResolvedValueOnce({ ...settings, sandboxCpus: 4, sandboxMemoryMb: 8192 }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay config={null} onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.clear(screen.getByLabelText(/Sandbox vCPUs/));
+    await user.clear(screen.getByLabelText(/Sandbox memory/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxCpus: 0, sandboxMemoryMb: 0 }),
+    });
   });
 
   // bwsalmon/agents#537: the global "hide closed tasks by default" switch.
