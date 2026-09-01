@@ -45,6 +45,11 @@ type Task struct {
 	// frontend to open its chat view straight after creating it and to
 	// label its Timeline as a conversation rather than a task history.
 	Interactive bool `json:"interactive"`
+	// Configuration mirrors model.Task's own field of the same name
+	// (bwsalmon/agents#621) -- true for the configuration agent, so the
+	// frontend can label its chat distinctly from an ordinary interactive
+	// task's.
+	Configuration bool `json:"configuration,omitempty"`
 	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override the
 	// deployment's default sandbox shape for this task's own dispatch
 	// alone -- model.Task's own fields of the same name. Zero (the
@@ -225,6 +230,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Base:                t.Base,
 		AutoMerge:           t.AutoMerge,
 		Interactive:         t.Interactive,
+		Configuration:       t.Configuration,
 		SandboxCPUs:         t.SandboxCPUs,
 		SandboxMemoryMB:     t.SandboxMemoryMB,
 		Capabilities:        []string{},

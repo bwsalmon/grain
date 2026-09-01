@@ -523,6 +523,14 @@ type CreateTaskRequest struct {
 	// an unapproved proposal or waiting behind everything already
 	// queued, has nothing to show for itself.
 	Interactive bool `json:"interactive"`
+	// Configuration files this task as grain's own "configuration agent"
+	// (bwsalmon/agents#621, model.Task.Configuration's own doc comment) --
+	// CreateTask resolves it into the full bundle that name implies
+	// (Interactive forced true, configurationCapabilities merged in, a
+	// default Title/Description) rather than a caller assembling that by
+	// hand, and dispatch.Cycle lets a task carrying it start even with
+	// the deployment already at MaxConcurrent.
+	Configuration bool `json:"configuration"`
 	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) set model.Task's
 	// own fields of the same name -- a per-task override of the
 	// deployment's default sandbox shape. 0 (the default for both) means
@@ -563,6 +571,49 @@ type CreateTaskRequest struct {
 	NoRepo bool `json:"noRepo"`
 }
 
+// configurationCapabilities are the grants every configuration-agent
+// task (CreateTaskRequest.Configuration, bwsalmon/agents#621) carries --
+// selfdebug.CapabilityName and selfrepair.CapabilityName's own string
+// values, named here rather than imported so this package stays free of
+// every capability provider it merely knows the id of, the same distance
+// DefaultCapabilities (labels.go) already keeps.
+var configurationCapabilities = []string{"self-debug", "self-repair"}
+
+// configurationPrompt seeds a configuration-agent task's own Body when
+// the caller supplies none of its own -- bwsalmon/agents#621's "a prompt
+// that prepares it to help the user either with a problem, question or
+// configuration," so opening the configuration agent from its overlay
+// takes one click rather than a human writing out what it is for every
+// time. A caller that does supply its own Description keeps it verbatim
+// instead (CreateTask below) -- this is a default, not something every
+// configuration task is stuck carrying.
+const configurationPrompt = "You are grain's own configuration agent, opened for a live conversation " +
+	"with whoever is looking at this deployment's UI right now. Help with whatever they bring: a " +
+	"question about how grain or this deployment works, a problem to debug, or a change to make to " +
+	"grain's own configuration or the host it runs on. You hold the self-debug and self-repair grants: " +
+	"read grain's own source to explain or debug its behavior, and run commands directly on the host it " +
+	"runs on (each one needs a live human reply in this chat, approve or deny, before it runs). Start by " +
+	"asking what they need."
+
+// mergeCapabilities returns ids with each of extra appended, skipping any
+// already present -- CreateTask's own way of adding the configuration
+// agent's grants (configurationCapabilities) on top of whatever a caller
+// already asked for, without attaching either one twice.
+func mergeCapabilities(ids, extra []string) []string {
+	have := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		have[id] = true
+	}
+	out := append([]string{}, ids...)
+	for _, id := range extra {
+		if !have[id] {
+			out = append(out, id)
+			have[id] = true
+		}
+	}
+	return out
+}
+
 // CreateTask files a task straight into the store.
 //
 // No GitHub issue is created, and none is needed: Store.NewTaskID
@@ -570,7 +621,26 @@ type CreateTaskRequest struct {
 // the whole inversion in one method -- this used to open an issue and let
 // a poll notice it, which meant a task could not be created without
 // GitHub reachable, and could not be dispatched until the next tick.
+//
+// req.Configuration (bwsalmon/agents#621) is resolved into its full
+// bundle here, once, rather than trusting every caller -- the frontend's
+// overlay, a future CLI flag, anything else that ever files one -- to
+// assemble Interactive, Capabilities and a Description by hand the same
+// way each time: Interactive is forced true regardless of what the
+// request itself set there, configurationCapabilities is merged into
+// whatever Capabilities the request already named, and an empty Title/
+// Description defaults to "Configuration agent"/configurationPrompt.
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
+	if req.Configuration {
+		req.Interactive = true
+		req.Capabilities = mergeCapabilities(req.Capabilities, configurationCapabilities)
+		if strings.TrimSpace(req.Title) == "" {
+			req.Title = "Configuration agent"
+		}
+		if strings.TrimSpace(req.Description) == "" {
+			req.Description = configurationPrompt
+		}
+	}
 	if strings.TrimSpace(req.Title) == "" {
 		return Task{}, validationErrorf("title is required")
 	}
@@ -654,6 +724,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Base:            req.Base,
 		AutoMerge:       req.AutoMerge,
 		Interactive:     req.Interactive,
+		Configuration:   req.Configuration,
 		SandboxCPUs:     req.SandboxCPUs,
 		SandboxMemoryMB: req.SandboxMemoryMB,
 		Grants:          grants,

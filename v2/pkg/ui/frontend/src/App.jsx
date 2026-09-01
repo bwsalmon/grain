@@ -11,6 +11,7 @@ import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
+import ConfigurationAgentButton from "./components/ConfigurationAgentButton.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
@@ -392,6 +393,9 @@ export default function App() {
             </div>
           )}
         </>
+      )}
+      {config !== null && (
+        <ConfigurationAgentButton defaultRepo={repoFilter} onOpenTask={openTask} showError={showError} />
       )}
       {config?.reconcilerDown && <ReconcilerDownBanner />}
       {error !== null && <ErrorBanner message={error} />}

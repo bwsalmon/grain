@@ -120,6 +120,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskInteractiveColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureTaskConfigurationColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -403,6 +406,24 @@ func (s *Store) ensureTaskInteractiveColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskConfigurationColumn adds task.configuration (schema.go's own
+// DDL comment on the table, and Task.Configuration's own doc comment,
+// have the reasoning -- bwsalmon/agents#621) to a database created
+// before this column existed, the same probe-then-ALTER approach every
+// other ensure*Column migration here uses. It defaults to 0,
+// Task.Configuration's own zero value, so a database migrated from
+// before this field existed reads back as though no task in it had ever
+// been the configuration agent.
+func (s *Store) ensureTaskConfigurationColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `configuration` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `configuration` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
 // ensureConfigShowClosedByDefaultColumn adds
 // grain_config.show_closed_by_default (model.Config.ShowClosedByDefault's
 // own doc comment has the reasoning) to a database created before
@@ -589,13 +610,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive,
+		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive, t.Configuration,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -870,7 +891,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`"
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -886,7 +907,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive); err != nil {
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration); err != nil {
 		return Task{}, err
 	}
 
@@ -1511,6 +1532,36 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
 			"ORDER BY (`t`.`origin_reason` = ?) DESC, `t`.`order_key`, `r`.`task_id`",
 		[]any{string(ReasonFix)},
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out = append(out, id)
+			return nil
+		})
+	return out, err
+}
+
+// ReadyConfiguration is Ready narrowed to the configuration agent
+// (Task.Configuration, bwsalmon/agents#621): every such task
+// dispatchable right now, in the same backlog order Ready itself uses
+// (ascending OrderKey, task ID the tiebreak) -- there is no fix-task
+// carve-out to make here, since a configuration task is never one.
+//
+// dispatch.Cycle calls this before it ever looks at MaxConcurrent, and
+// starts every task it returns unconditionally: the configuration agent
+// exists precisely for a person to reach for when something -- possibly
+// the deployment's own concurrency limit having no headroom left -- is
+// already wrong, so it cannot itself wait on that headroom.
+func (s *Store) ReadyConfiguration(ctx context.Context) ([]string, error) {
+	var out []string
+	err := each(ctx, s.db,
+		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
+			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"WHERE `t`.`configuration` = 1 "+
+			"ORDER BY `t`.`order_key`, `r`.`task_id`",
+		nil,
 		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
