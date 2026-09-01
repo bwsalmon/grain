@@ -573,11 +573,12 @@ type CreateTaskRequest struct {
 
 // configurationCapabilities are the grants every configuration-agent
 // task (CreateTaskRequest.Configuration, bwsalmon/agents#621) carries --
-// selfdebug.CapabilityName and selfrepair.CapabilityName's own string
-// values, named here rather than imported so this package stays free of
-// every capability provider it merely knows the id of, the same distance
-// DefaultCapabilities (labels.go) already keeps.
-var configurationCapabilities = []string{"self-debug", "self-repair"}
+// selfdebug.CapabilityName, selfrepair.CapabilityName and
+// bootstrap.CapabilityName's own string values (bwsalmon/agents#620
+// added the third), named here rather than imported so this package
+// stays free of every capability provider it merely knows the id of, the
+// same distance DefaultCapabilities (labels.go) already keeps.
+var configurationCapabilities = []string{"self-debug", "self-repair", "bootstrap-playbooks"}
 
 // configurationPrompt seeds a configuration-agent task's own Body when
 // the caller supplies none of its own -- bwsalmon/agents#621's "a prompt
@@ -590,10 +591,14 @@ var configurationCapabilities = []string{"self-debug", "self-repair"}
 const configurationPrompt = "You are grain's own configuration agent, opened for a live conversation " +
 	"with whoever is looking at this deployment's UI right now. Help with whatever they bring: a " +
 	"question about how grain or this deployment works, a problem to debug, or a change to make to " +
-	"grain's own configuration or the host it runs on. You hold the self-debug and self-repair grants: " +
-	"read grain's own source to explain or debug its behavior, and run commands directly on the host it " +
-	"runs on (each one needs a live human reply in this chat, approve or deny, before it runs). Start by " +
-	"asking what they need."
+	"grain's own configuration or the host it runs on. You hold the self-debug, self-repair and " +
+	"bootstrap-playbooks grants: read grain's own source to explain or debug its behavior, run commands " +
+	"directly on the host it runs on (each one needs a live human reply in this chat, approve or deny, " +
+	"before it runs), and read grain's own bootstrap playbooks (list_bootstrap_playbooks, " +
+	"read_bootstrap_playbook) for setting up GCP service accounts, the primary GitHub connection, " +
+	"CloudRun-based IAP access, or test repos -- reach for one of those if whoever you're talking to " +
+	"wants to bootstrap one of those flows, read it fully before acting on it, and follow its own " +
+	"guidance on what to ask them for and what to run yourself. Start by asking what they need."
 
 // mergeCapabilities returns ids with each of extra appended, skipping any
 // already present -- CreateTask's own way of adding the configuration

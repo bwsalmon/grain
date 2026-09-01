@@ -26,9 +26,8 @@ import (
 
 const (
 	// DefaultModel is the current, non-retired Gemini model this package
-	// was verified against; gemini-2.5-flash, the previous default, has
-	// been retired to new callers.
-	DefaultModel    = "gemini-3.6-flash"
+	// was verified against.
+	DefaultModel    = "gemini-3.1-pro"
 	defaultMaxTurns = 20
 )
 

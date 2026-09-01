@@ -5,9 +5,9 @@ package ui_test
 // missing" for every capability grain ships a provider for -- not just
 // the ones DefaultCapabilities offers a human to attach to a task. These
 // tests cover GetSettings' new Capabilities field end to end: ready
-// without any secrets store colocated (self-debug/self-repair, which
-// need none), gated on GCP config (gcp-key/gemini-key), and gated on
-// secrets once one is (github-sandbox).
+// without any secrets store colocated (self-debug/self-repair/
+// bootstrap-playbooks, which need none), gated on GCP config
+// (gcp-key/gemini-key), and gated on secrets once one is (github-sandbox).
 
 import (
 	"reflect"
@@ -42,7 +42,7 @@ func TestCapabilitiesListsEveryKnownCapabilityOnAFreshStore(t *testing.T) {
 		ids = append(ids, s.ID)
 	}
 	sort.Strings(ids)
-	want := []string{"gcp-key", "gemini-key", "github-sandbox", "self-debug", "self-repair"}
+	want := []string{"bootstrap-playbooks", "gcp-key", "gemini-key", "github-sandbox", "self-debug", "self-repair"}
 	if !reflect.DeepEqual(ids, want) {
 		t.Fatalf("capability ids = %v, want %v", ids, want)
 	}
@@ -54,7 +54,7 @@ func TestCapabilitiesSelfDebugAndSelfRepairAreAlwaysReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"self-debug", "self-repair"} {
+	for _, id := range []string{"self-debug", "self-repair", "bootstrap-playbooks"} {
 		status := capabilityStatus(t, got.Capabilities, id)
 		if !status.Ready {
 			t.Fatalf("%s: Ready = false, want true (status: %+v)", id, status)

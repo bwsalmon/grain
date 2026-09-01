@@ -480,14 +480,20 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// place, since Root()/VMName() are always available where they exist
 	// at all and cost nothing to read -- a claude-selected run needs one
 	// of them regardless of whether this task granted anything.
+	//
+	// Whether a missing sandboxRoot actually matters is decided later, by
+	// applyPlacements: not every grant materializes a SideSandbox
+	// placement (self-debug and self-repair, the Configuration agent's
+	// own grants, materialize none at all -- they only add tools), so
+	// erroring here on len(task.Grants) > 0 alone used to fail every
+	// Configuration agent task dispatched onto a non-rooted sandbox
+	// (bwsalmon/agents#643), whether or not it had anything to place.
 	var sandboxRoot, konturVM string
 	if rooted, ok := sandbox.(rootedSandbox); ok {
 		sandboxRoot, err = rooted.Root()
 		if err != nil {
 			return err
 		}
-	} else if deps.Config.Capabilities != nil && len(task.Grants) > 0 {
-		return fmt.Errorf("orchestrator: task %s requests capabilities but its sandbox has no local directory to place them in", task.ID)
 	}
 	if named, ok := sandbox.(vmNamedSandbox); ok {
 		konturVM = named.VMName()
