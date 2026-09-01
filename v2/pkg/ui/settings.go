@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/grain/v2/pkg/kontur"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
 
@@ -65,6 +66,14 @@ type Settings struct {
 	// stored either way, the same as every other kontur* setting here.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`
+	// SandboxCPUsDefault and SandboxMemoryMBDefault are bwsalmon/kontur's
+	// own default VM shape (kontur.DefaultCPUs/DefaultMemoryMB) -- the
+	// shape actually in effect whenever SandboxCPUs/SandboxMemoryMB above
+	// is 0, surfaced so a caller can show that real current shape instead
+	// of a bare, misleadingly literal 0 (bwsalmon/agents#610). Constant,
+	// never read from or written to the store.
+	SandboxCPUsDefault     int `json:"sandboxCpusDefault"`
+	SandboxMemoryMBDefault int `json:"sandboxMemoryMbDefault"`
 	// ShowClosedByDefault is model.Config's own field of the same name
 	// (bwsalmon/agents#537): the deployment-wide default for whether a
 	// task list's own "Show closed tasks" toggle starts checked. Also
@@ -104,6 +113,8 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		NewestFirst:                   cfg.NewestFirst,
 		SandboxCPUs:                   cfg.SandboxCPUs,
 		SandboxMemoryMB:               cfg.SandboxMemoryMB,
+		SandboxCPUsDefault:            kontur.DefaultCPUs,
+		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		AgentFramework:                agentFramework,
 	}
@@ -141,7 +152,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{}, err
 	}
 	if cfg == nil {
-		return Settings{}, nil
+		return Settings{SandboxCPUsDefault: kontur.DefaultCPUs, SandboxMemoryMBDefault: kontur.DefaultMemoryMB}, nil
 	}
 	return c.settingsFrom(*cfg), nil
 }
