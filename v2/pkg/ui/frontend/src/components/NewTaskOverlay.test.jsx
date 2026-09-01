@@ -147,6 +147,45 @@ describe("NewTaskOverlay", () => {
     expect(payload.repo).toBe("acme/other");
   });
 
+  // bwsalmon/agents#641: picking a repo prefills Base branch from
+  // whatever base that repo's own most recent task used, so a repo
+  // whose work lives off a release branch doesn't make every new task
+  // against it retype that branch name by hand.
+  it("prefills Base branch from the picked repo's most recent task", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Old task", repo: "acme/widgets", base: "main", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "Newer task", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-06-01T00:00:00Z" },
+      { id: "3", title: "Other repo task", repo: "acme/other", base: "main", createdAt: "2026-08-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("release/2.0");
+  });
+
+  it("leaves a manually-typed Base branch alone when the picked repo has no task history", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/fresh"] };
+    const tasks = [
+      { id: "1", title: "Old task", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-01-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.type(screen.getByLabelText(/Base branch/), "my-custom-branch");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/fresh");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("my-custom-branch");
+  });
+
   // bwsalmon/agents#539: an interactive task always queues immediately
   // (no "Queue immediately" checkbox left to check), and its creator is
   // taken straight to its chat rather than back to the task list.

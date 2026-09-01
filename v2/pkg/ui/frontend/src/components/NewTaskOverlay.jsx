@@ -3,7 +3,7 @@ import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, C
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { knownRepos } from "../state.js";
+import { knownRepos, lastBaseForRepo } from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
@@ -27,6 +27,11 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // back "" the same way an unset field always has, with noRepo now
   // saying why.
   const [noRepo, setNoRepo] = useState(false);
+  // base tracks Base branch as state, unlike most text fields on this
+  // form, so picking a repo (below) can prefill it from
+  // lastBaseForRepo without fighting an uncontrolled <input>'s own
+  // defaultValue (bwsalmon/agents#641).
+  const [base, setBase] = useState(() => lastBaseForRepo(tasks, defaultRepo || ""));
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
@@ -41,6 +46,16 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // queues at once, so that checkbox would just be a second control for
   // the same fact).
   const [interactive, setInteractive] = useState(false);
+
+  // handleRepoChange prefills Base branch from whatever the newly-picked
+  // repo's own last task used (bwsalmon/agents#641), rather than
+  // clobbering something the human already typed when the repo they
+  // picked has no history to prefill from.
+  const handleRepoChange = (r) => {
+    setRepo(r);
+    const suggestion = lastBaseForRepo(tasks, r);
+    if (suggestion) setBase(suggestion);
+  };
 
   const addDependency = (t) => {
     setDependsOn((prev) => (prev.some((p) => p.id === t.id) ? prev : [...prev, t]));
@@ -81,6 +96,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       setTitle("");
       setRepo(defaultRepo || "");
       setNoRepo(false);
+      setBase(lastBaseForRepo(tasks, defaultRepo || ""));
       setDependsOn([]);
       setCapabilities([]);
       setAttachments([]);
@@ -128,7 +144,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
                 checked, so its <select>/<input> never submits a stray
                 value alongside noRepo. */}
             {!noRepo && (
-              <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} onChange={setRepo} />
+              <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} onChange={handleRepoChange} />
             )}
           </Box>
           <FormControlLabel
@@ -142,7 +158,17 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             sx={{ display: "flex" }}
           />
         </Box>
-        <TextField name="base" label="Base branch" helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
+        <TextField
+          name="base"
+          label="Base branch"
+          helperText="optional"
+          placeholder="main"
+          autoComplete="off"
+          fullWidth
+          margin="normal"
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+        />
         <TextField
           name="reads"
           label="Read-only repos"
