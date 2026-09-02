@@ -77,7 +77,7 @@
 #   8. writes and enables grain-daemon.service, so it comes back on
 #      reboot, and restarts it (not just "enable --now") so a second
 #      run's new binary actually takes effect -- see
-#      docs/next-session.md item 3's "Update" for why
+#      v1's own notes on the same failure for why
 #      enable-without-restart was already a bug once in v1's own proxy
 #      service
 #
@@ -2140,7 +2140,7 @@ enable_services() {
   # from a previous run of this script needs restarting to pick up a
   # newly pulled image or a config change; --now would leave an already-
   # running one exactly as it was. v1 hit precisely this bug for its own
-  # git-proxy service (docs/next-session.md item 3's "Update"): restarting
+  # git-proxy service (found live on v1, same failure): restarting
   # an already-running unit is always safe, and starting a stopped one is
   # exactly what --now would have done anyway.
   systemctl enable grain-daemon.service >/dev/null

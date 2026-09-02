@@ -5,7 +5,7 @@
 kontur-managed VM's guest image already carries the operator's SSH key and
 a running sshd (and, per `README.md`, git) before this repo ever tries
 to reach it. Nothing in this repo built that image -- v1 has an equivalent
-job for its own libvirt-managed sandboxes (`provision/sandbox.sh`, run as
+job for its own libvirt-managed sandboxes (v1's own sandbox provisioning script, run as
 cloud-init user-data against a shared base image on every VM's first boot);
 v2 had no successor, kontur-backed or otherwise. This directory is that
 successor: `build-guest.sh` drives `third_party/kontur`'s own guest build
@@ -298,7 +298,7 @@ way through.
 
 ## What's in the image, and why
 
-`guest-setup.sh` mirrors `provision/sandbox.sh` package-for-package: git,
+`guest-setup.sh` mirrors v1's sandbox provisioning package-for-package: git,
 build tooling, Docker + kind (the node image is not pre-pulled -- see
 "Why no VM boot to build this" below for why), and `gcloud`/`terraform`
 for tasks whose deployment mints a per-task GCP key. bwsalmon/agents#267's
@@ -312,7 +312,7 @@ the "actually I needed X" discovery from this decision to some later
 task's failed dispatch, for an image that is not cheap to iterate on the
 way a Python provisioning script is (see "One image, uniform" below).
 
-Two things `guest-setup.sh` does that `provision/sandbox.sh` doesn't, both
+Two things `guest-setup.sh` does that v1's sandbox script didn't, both
 because a kontur VM has no per-VM provisioning hook analogous to
 `LibvirtAdapter.render_domain_xml`/cloud-init NoCloud user-data (kontur
 manages a VM's lifecycle as a static pod under a standalone kubelet --
@@ -327,28 +327,28 @@ service a NoCloud datasource would ride on):
   `LibvirtAdapter.create()` injects a sandbox's authorized key today.
 - **The `debian` account itself is created here.** On v1's own sandbox
   base (a stock Debian cloud image), `debian` is cloud-init's
-  `default_user`, already present before `provision/sandbox.sh` ever
+  `default_user`, already present before v1's sandbox script ever
   runs (that script's own comment: "The default cloud-init user"). This
   image has no cloud-init and no cloud image underneath it at all (see
   "Why no VM boot to build this"), so nothing creates that account except
   `guest-setup.sh` itself -- same name, so every downstream assumption (the
-  authorized key above, `grain/adapter/libvirt.py`'s v1 convention, the
+  authorized key above, v1's own libvirt-driver convention, the
   docker-group grant) keeps holding, with the same passwordless-sudo grant
   a cloud image's own `default_user` normally carries.
 
-**Not** baked in, on purpose, matching `provision/controller.sh`'s own
+**Not** baked in, on purpose, matching v1's controller provisioning's own
 rule ("no secret is ever baked into an image or a provisioning script",
 `docs/design.md`, "Secrets on /data"): no GitHub token, no GCP key, no git
 identity/credential helper. Per-dispatch git configuration (`credential.
 helper = store`, the `grain agent` identity, the proxy token) is set at
 runtime against a live sandbox the same way v1's `configure_git_credentials`
-(`grain/automation/dispatch.py`) and v2's `mcp.ConfigureGitCredentials`
+(v1's Python dispatch) and `mcp.ConfigureGitCredentials`
 already do it -- "arrives with git already configured" (`README.md`)
 turns out to mean only "the `git` binary is on `PATH`", confirmed against
 both functions: neither one assumes any baked-in `.gitconfig`.
 
 Claude Code itself stays off the guest, for the same reason
-`provision/sandbox.sh`'s own comment gives for v1: it runs against this
+v1's sandbox script gave for itself: it runs against this
 VM's SSH-exposed sandbox tools from the controller/orchestrator side, not
 on the guest, so there is nothing here worth a credential leak protecting
 in the first place.

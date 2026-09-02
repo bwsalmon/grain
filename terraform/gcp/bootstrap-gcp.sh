@@ -47,8 +47,9 @@ Options:
   --bucket     NAME           Terraform state bucket. default: PROJECT-PREFIX-tfstate
   --pool       ID             workload identity pool id. default: PREFIX. Prefixed
                               rather than "github" so bootstrapping this in a
-                              project that already runs v1 never rewrites v1's own
-                              provider -- see the comment on POOL_ID
+                              project that already runs a grain deployment never
+                              rewrites that one's provider -- see the comment on
+                              POOL_ID
   --provider   ID             workload identity provider id. default: PREFIX
 USAGE
 }

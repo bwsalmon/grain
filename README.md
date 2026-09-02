@@ -9,6 +9,11 @@ This is the Go rewrite that replaced v1's Python (a controller VM plus a
 pool of libvirt sandbox guests). v1's code is gone; `docs/design.md` is
 kept as the design several packages here still implement and cite.
 
+Paths like `grain/automation/mcp_server.py` and `provision/sandbox.sh` in
+the notes below name v1's own files, for provenance -- what a package was
+ported from and what it deliberately changed. They are not in this
+repository; read them as history, not as somewhere to look.
+
 The map below is the whole of it, package by package.
 
 ```
@@ -90,7 +95,7 @@ pkg/gitproxy/   a port of grain/proxy: the only path from a sandbox to
                 file-based ladders grain/proxy uses. live_test.go proves
                 the whole thing end to end against a local git server —
                 see "What this actually verifies" below.
-pkg/github/     a port of grain/automation/github.go: the GitHub REST
+pkg/github/     a port of grain/automation/github.py: the GitHub REST
                 calls a deployment needs (list/label issues, branches,
                 pull requests, review comments, draft reviews) behind a
                 Transport seam, the one layer up from gitproxy's own git
@@ -538,7 +543,7 @@ keeping:
   a failure leaves the issue exactly as it was found — labelled, and
   retried next tick. Isolating *within* an issue would mean removing the
   label for work that did not land, which is the
-  persistence-before-irreversible-effect ordering `docs/next-session.md`
+  persistence-before-irreversible-effect ordering v1's own notes
   records finding a real bug from getting backwards once already.
 - **`SyncPullRequests`' gather loop still returns early on a store
   error.** `queueHeads` decides which task is at the front of each repo's
