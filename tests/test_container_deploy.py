@@ -39,7 +39,7 @@ def setup_text() -> str:
 
 def job_body(workflow: str, job: str) -> str:
     """One job out of the workflow, up to wherever the next one starts."""
-    jobs = ("binaries:", "sandbox-container:", "grain-container:")
+    jobs = ("sandbox-container:", "grain-container:")
     start = workflow.index("\n  " + job) + 1
     ends = [workflow.index("\n  " + j) for j in jobs
             if j != job and workflow.index("\n  " + j) > start]
@@ -396,22 +396,50 @@ def test_the_image_is_driven_before_it_is_published():
 
 
 def test_the_shared_names_stay_on_main():
-    """A branch push must not move build-latest's assets or any `latest`.
+    """A branch push must not move any `latest`.
 
-    Those are single names every deployment resolves. The binaries job is
-    main's outright; the two image jobs publish per-commit and per-branch
-    tags on every branch (a branch with no image is a branch nobody can
-    deploy or upgrade onto) and gate only the `latest` push.
+    `latest` is the one name every deployment resolves. Both image jobs
+    publish per-commit and per-branch tags on every branch -- a branch
+    with no image is a branch nobody can deploy or upgrade onto -- and
+    gate only the `latest` push.
     """
     text = WORKFLOW.read_text()
-    binaries = text[text.index("binaries:"):]
-    assert "if: github.ref == 'refs/heads/main'" in binaries[:binaries.index("steps:")]
 
     for job in ("sandbox-container:", "grain-container:"):
         body = job_body(text, job)
         latest = body.index(':latest"')
         guard = body.rindex('if [ "$GITHUB_REF" = "refs/heads/main" ]', 0, latest)
         assert guard < latest, f"{job} moves :latest without gating on main"
+
+
+def test_the_images_are_the_only_published_release():
+    """No bare binaries alongside the images.
+
+    This workflow used to publish `grain` and the three kontur binaries
+    as assets on a rolling `build-latest` GitHub Release. Nothing ever
+    consumed them: setup.sh pulls the image and installs wrappers that
+    exec into it (konturctl included), and the kontur binaries a sandbox
+    needs live inside the sandbox image. A second, unversioned answer to
+    "what is the release" could only drift from the image everything
+    actually runs, so the images are it.
+
+    Asserted on the workflow rather than left to a comment, because the
+    failure mode is additive -- someone reintroducing a convenient
+    `gh release upload` would not break anything that runs, and nothing
+    else would notice.
+    """
+    text = WORKFLOW.read_text()
+    code = "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+    for forbidden in ("gh release", "build-latest", "softprops/action-gh-release"):
+        assert forbidden not in code, \
+            f"{forbidden!r} is back: the images are the release, not a binaries drop"
+
+    # contents:write is what publishing a release would need, and nothing
+    # left here does. Keeping it absent is the enforcement, not the intent.
+    assert "contents: write" not in code
+    assert "packages: write" in code, "the image jobs still need to push"
 
 
 def test_the_sandbox_reference_is_stamped_into_the_grain_image():

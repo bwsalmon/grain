@@ -1884,9 +1884,14 @@ tag may not contain one — is what a deployment tracking a branch follows,
 and what the Upgrade button resolves; `latest` is `main`'s, under the
 name a human types. The image job runs on every branch, not just `main`,
 precisely because of the middle one: a branch with no image published for
-it is a branch nobody can upgrade onto. The two jobs that publish a
-*shared* name (the `build-latest` release, `kontur-sandbox:latest`) stay
-pinned to `main`.
+it is a branch nobody can upgrade onto. Only the step that moves a
+*shared* name -- `latest`, for either image -- is pinned to `main`.
+
+There is no release of bare binaries. `grain` and the kontur binaries
+were once published as assets on a rolling `build-latest` GitHub
+Release; nothing ever fetched them, since a deployment pulls the image
+and `konturctl` is a wrapper that execs into it, so the images are the
+release and the only one.
 
 `grain-daemon.service` is a `docker run` of that image. The unit itself
 runs as root, because a docker client has to reach a root-owned socket to
