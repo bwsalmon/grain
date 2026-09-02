@@ -49,7 +49,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).parent.parent
-SETUP = ROOT / "v2" / "scripts" / "setup.sh"
+SETUP = ROOT / "scripts" / "setup.sh"
 IMAGE = os.environ.get("GRAIN_TEST_IMAGE", "")
 
 
@@ -214,7 +214,7 @@ def deployment(tmp_path_factory):
     try:
         result = sudo(
             "env", *(f"{k}={v}" for k, v in env.items()),
-            "bash", str(src / "v2" / "scripts" / "setup.sh"),
+            "bash", str(src / "scripts" / "setup.sh"),
             check=False, timeout=900,
         )
         yield {

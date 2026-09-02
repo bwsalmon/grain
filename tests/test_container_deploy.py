@@ -288,6 +288,47 @@ def test_every_build_path_agrees_the_module_root_is_the_repository_root():
     assert "WORKDIR /src\n" in (ROOT / "Dockerfile.build").read_text()
 
 
+def test_no_source_file_still_refers_to_the_v2_subdirectory():
+    """The generalized form of the test above.
+
+    v1's removal moved the Go tree from v2/ to the repository root, and a
+    `v2` path segment left anywhere behind is a file-not-found at run
+    time, never a compile error. Three separate ones shipped before this
+    check existed -- in the Dockerfile, in pkg/orchestrator's real-VM
+    suite, and in test_installer_e2e.py -- and each was invisible to
+    every other test: the first is not read by Go, the second gates on
+    /dev/kvm, the third on GRAIN_INSTALLER_E2E. A suite that skips is
+    indistinguishable from one that passes.
+
+    So this reads the tree directly rather than trusting any of them to
+    run. Two spellings are legitimate and excluded: the Docker registry
+    HTTP API (`/v2/`, which test_container_e2e.py polls) and Go module
+    paths whose major version really is 2 (`gax-go/v2`).
+    """
+    suffixes = {".go", ".py", ".sh", ".js", ".jsx", ".mjs"}
+    skip = {".git", "node_modules", "third_party", "static", ".pytest_cache"}
+    offenders = []
+
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or set(path.relative_to(ROOT).parts) & skip:
+            continue
+        if path.suffix not in suffixes:
+            continue
+        for number, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+            stripped = line.strip()
+            # Prose keeps its historical references; only code is checked.
+            if stripped.startswith(("#", "//", "*")):
+                continue
+            # The registry API endpoint, not a directory.
+            if "127.0.0.1" in line or "localhost" in line:
+                continue
+            # A "v2" path segment: as its own string, or inside one.
+            if re.search(r"""(["'])v2\1""", line) or re.search(r"v2/(?=[A-Za-z_])", line):
+                offenders.append(f"{path.relative_to(ROOT)}:{number}: {stripped}")
+
+    assert not offenders, "v2 path segments survive the promotion:\n" + "\n".join(offenders)
+
+
 def test_the_workflow_publishes_the_image_on_every_branch():
     """The UI's Upgrade button targets a branch by name, which in a
     container deployment means pulling that branch's tag -- so a branch
