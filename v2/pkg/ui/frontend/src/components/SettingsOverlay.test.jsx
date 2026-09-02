@@ -12,6 +12,7 @@ const settings = {
   pollInterval: "30s",
   maxConcurrent: 2,
   geminiModel: "gemini-2.5-pro",
+  claudeModel: "claude-sonnet-5",
   maxAgentTurns: 40,
   githubHost: "github.com",
   githubInsecureHttp: false,
@@ -44,6 +45,7 @@ describe("SettingsOverlay", () => {
     await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("claude-sonnet-5")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
   });
 

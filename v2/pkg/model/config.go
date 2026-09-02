@@ -61,12 +61,18 @@ type Config struct {
 	// enum-vocabulary-in-Go rather than in the schema (schema.go's own
 	// doc comment on why), validated by ui.UpdateSettings instead.
 	AgentFramework string
-	// GeminiModel is the model the agent framework calls -- named for
-	// the Gemini family agent/antigravity's own agy still runs, and kept
-	// under this name because it is a persisted column (schema.go's
-	// grain_config.gemini_model) that renaming would cost a migration
-	// for nothing.
+	// GeminiModel is the model agent/antigravity's own agy is asked for --
+	// named for the Gemini family it still runs, and kept under this name
+	// because it is a persisted column (schema.go's grain_config.
+	// gemini_model) that renaming would cost a migration for nothing.
 	GeminiModel string
+	// ClaudeModel is agent/claude's own counterpart to GeminiModel: the
+	// model the real `claude` CLI is asked for, required the same way and
+	// for the same reason (ui.UpdateSettings). Read by whichever
+	// framework a run is actually dispatched onto
+	// (cmd/grain/daemon.go's agentFrameworks); a deployment that never
+	// runs agent/claude simply leaves this unread.
+	ClaudeModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
 	// agent framework's own default in place.
 	MaxAgentTurns int
