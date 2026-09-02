@@ -32,6 +32,11 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // lastBaseForRepo without fighting an uncontrolled <input>'s own
   // defaultValue (bwsalmon/agents#641).
   const [base, setBase] = useState(() => lastBaseForRepo(tasks, defaultRepo || ""));
+  // baseEdited tracks whether the human has typed into Base branch
+  // themselves, so handleRepoChange's prefill (below) never clobbers a
+  // value they already chose -- only ever a prefill from a previous repo
+  // pick, or the field's own initial empty state.
+  const baseEdited = useRef(false);
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
@@ -53,6 +58,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // picked has no history to prefill from.
   const handleRepoChange = (r) => {
     setRepo(r);
+    if (baseEdited.current) return;
     const suggestion = lastBaseForRepo(tasks, r);
     if (suggestion) setBase(suggestion);
   };
@@ -171,7 +177,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           fullWidth
           margin="normal"
           value={base}
-          onChange={(e) => setBase(e.target.value)}
+          onChange={(e) => { baseEdited.current = true; setBase(e.target.value); }}
         />
         <TextField
           name="reads"
