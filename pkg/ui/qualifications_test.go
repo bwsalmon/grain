@@ -12,10 +12,10 @@ import (
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
-func putTestTemplate(t *testing.T, store *model.Store, ctx context.Context, id string, repo model.RepoRef) {
+func putTestTemplate(t *testing.T, store *model.Store, ctx context.Context, id string) {
 	t.Helper()
 	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
-		ID: id, Name: "Smoke test", Title: "Smoke test", Body: "run it", Target: repo,
+		ID: id, Name: "Smoke test", Title: "Smoke test", Body: "run it",
 	}); err != nil {
 		t.Fatalf("put template %s: %v", id, err)
 	}
@@ -42,21 +42,10 @@ func TestPutQualificationPlanRejectsAnUnknownTemplate(t *testing.T) {
 	}
 }
 
-func TestPutQualificationPlanRejectsATemplateTargetingAnotherRepo(t *testing.T) {
-	client, store, ctx := testClient(t)
-	putTestTemplate(t, store, ctx, "template-1", model.RepoRef{Owner: "acme", Name: "other"})
-	_, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
-		Items: []ui.QualificationItem{{TemplateID: "template-1", Repeat: 1}},
-	})
-	if _, ok := err.(*ui.ValidationError); !ok {
-		t.Fatalf("got %v (%T), want a ValidationError", err, err)
-	}
-}
-
 func TestPutQualificationPlanRejectsADependencyCycle(t *testing.T) {
 	client, store, ctx := testClient(t)
-	putTestTemplate(t, store, ctx, "template-a", widgets)
-	putTestTemplate(t, store, ctx, "template-b", widgets)
+	putTestTemplate(t, store, ctx, "template-a")
+	putTestTemplate(t, store, ctx, "template-b")
 	_, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
 		Items: []ui.QualificationItem{
 			{TemplateID: "template-a", Repeat: 1, DependsOn: []string{"template-b"}},
@@ -70,7 +59,7 @@ func TestPutQualificationPlanRejectsADependencyCycle(t *testing.T) {
 
 func TestPutThenGetQualificationPlanRoundTripsWithTemplateNameFilledIn(t *testing.T) {
 	client, store, ctx := testClient(t)
-	putTestTemplate(t, store, ctx, "template-1", widgets)
+	putTestTemplate(t, store, ctx, "template-1")
 	saved, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
 		RequireApproval: true, AutoPromote: true,
 		Items: []ui.QualificationItem{{TemplateID: "template-1", Repeat: 2}},
@@ -105,7 +94,7 @@ func TestGetCandidateQualificationReturnsNilBeforeARunExists(t *testing.T) {
 
 func TestApproveQualificationRunApprovesEveryTaskAndOrdersFailuresFirst(t *testing.T) {
 	client, store, ctx := testClient(t)
-	putTestTemplate(t, store, ctx, "template-1", widgets)
+	putTestTemplate(t, store, ctx, "template-1")
 	if err := store.PutQualificationPlan(ctx, model.QualificationPlan{
 		Repo: widgets, RequireApproval: true,
 		Items: []model.QualificationItem{{TemplateID: "template-1", Repeat: 2}},
@@ -164,7 +153,7 @@ func TestApproveQualificationRunOnAnUnknownCandidateIs404(t *testing.T) {
 // like the candidate does not exist, never leak the other repo's run.
 func TestGetCandidateQualificationIsScopedToItsOwnRepo(t *testing.T) {
 	client, store, ctx := testClient(t)
-	putTestTemplate(t, store, ctx, "template-1", widgets)
+	putTestTemplate(t, store, ctx, "template-1")
 	if err := store.PutQualificationPlan(ctx, model.QualificationPlan{
 		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-1", Repeat: 1}},
 	}); err != nil {
@@ -202,7 +191,7 @@ func TestGetCandidateQualificationIsScopedToItsOwnRepo(t *testing.T) {
 // own "repeat must be at least 1" check.
 func TestPutQualificationPlanDefaultsANonPositiveRepeatToOne(t *testing.T) {
 	client, store, ctx := testClient(t)
-	putTestTemplate(t, store, ctx, "template-1", widgets)
+	putTestTemplate(t, store, ctx, "template-1")
 	saved, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
 		Items: []ui.QualificationItem{{TemplateID: "template-1", Repeat: 0}},
 	})

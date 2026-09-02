@@ -13,7 +13,7 @@ import (
 func TestCreateSuiteFilesASuite(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
-		Name: "Find bugs", Title: "Find and fix a bug", Repo: "acme/widgets",
+		Name: "Find bugs", Title: "Find and fix a bug",
 	})
 	if err != nil {
 		t.Fatalf("creating a template: %v", err)
@@ -75,7 +75,7 @@ func TestCreateSuiteRejectsAnUnknownTemplate(t *testing.T) {
 
 func TestCreateSuiteRejectsCountModeWithNoCount(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
 	if err != nil {
 		t.Fatalf("creating a template: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestCreateSuiteRejectsCountModeWithNoCount(t *testing.T) {
 
 func TestDeleteTemplateRefusesWhileASuiteStillUsesIt(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
 	if err != nil {
 		t.Fatalf("creating a template: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestDeleteTemplateRefusesWhileASuiteStillUsesIt(t *testing.T) {
 
 func TestCreateSuiteRunStartsARunAgainstARepoAndBranch(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "Do the thing", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "Do the thing"})
 	if err != nil {
 		t.Fatalf("creating a template: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestCreateSuiteRunStartsARunAgainstARepoAndBranch(t *testing.T) {
 
 func TestCreateSuiteRunRejectsAMissingBase(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
 	if err != nil {
 		t.Fatalf("creating a template: %v", err)
 	}

@@ -17,18 +17,18 @@ type templateNotFoundError struct{ ID string }
 func (e *templateNotFoundError) Error() string { return "no task template " + e.ID }
 
 // Template is a task template's JSON shape (bwsalmon/agents#516) --
-// Schedule's own content fields (Title/Description/Repo/Base/AutoMerge/
-// Reads/Capabilities), the subset a schedule's ScheduleOverlay.jsx
-// already collects, minus everything about firing on a cadence: a template is
-// never itself something that fires, only something a schedule (or a
-// future caller) fires from.
+// Schedule's own content fields (Title/Description/AutoMerge/Reads/
+// Capabilities), the subset a schedule's ScheduleOverlay.jsx already
+// collects, minus everything about firing on a cadence and minus Repo/
+// Base: a template is never itself something that fires, only something
+// a schedule (or a future caller) fires from, and which repo and branch
+// a firing targets is a property of that caller, not of the template
+// (model.TaskTemplate's own doc comment on why).
 type Template struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
 	Title        string    `json:"title"`
 	Description  string    `json:"description"`
-	Repo         string    `json:"repo"`
-	Base         string    `json:"base,omitempty"`
 	AutoMerge    bool      `json:"autoMerge"`
 	Reads        []string  `json:"reads,omitempty"`
 	Capabilities []string  `json:"capabilities"`
@@ -41,8 +41,6 @@ func templateFrom(t model.TaskTemplate) Template {
 		Name:         t.Name,
 		Title:        t.Title,
 		Description:  t.Body,
-		Repo:         t.Target.String(),
-		Base:         t.Base,
 		AutoMerge:    t.AutoMerge,
 		Capabilities: []string{},
 		CreatedAt:    t.CreatedAt,
@@ -70,14 +68,13 @@ func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
 }
 
 // CreateTemplateRequest is a new template's fields -- CreateScheduleRequest's
-// own content subset, Recurrence/Enabled left out for the same reason
-// Template itself leaves them out.
+// own content subset, minus Repo/Base (a template carries no target of
+// its own, model.TaskTemplate's own doc comment on why) and minus
+// Recurrence/Enabled for the same reason Template itself leaves them out.
 type CreateTemplateRequest struct {
 	Name         string   `json:"name"`
 	Title        string   `json:"title"`
 	Description  string   `json:"description"`
-	Repo         string   `json:"repo"`
-	Base         string   `json:"base"`
 	AutoMerge    bool     `json:"autoMerge"`
 	Capabilities []string `json:"capabilities"`
 	Reads        []string `json:"reads"`
@@ -90,13 +87,6 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 	}
 	if strings.TrimSpace(req.Title) == "" {
 		return Template{}, validationErrorf("title is required")
-	}
-	if strings.TrimSpace(req.Repo) == "" {
-		return Template{}, validationErrorf("repo is required")
-	}
-	target, err := model.ParseRepo(req.Repo)
-	if err != nil {
-		return Template{}, &ValidationError{err: err}
 	}
 	grants, err := c.grantsFor(req.Capabilities)
 	if err != nil {
@@ -116,8 +106,6 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 		Name:      req.Name,
 		Title:     req.Title,
 		Body:      req.Description,
-		Target:    target,
-		Base:      req.Base,
 		AutoMerge: req.AutoMerge,
 		Reads:     reads,
 		Grants:    grants,
@@ -139,8 +127,6 @@ type UpdateTemplateRequest struct {
 	Name         *string   `json:"name,omitempty"`
 	Title        *string   `json:"title,omitempty"`
 	Description  *string   `json:"description,omitempty"`
-	Repo         *string   `json:"repo,omitempty"`
-	Base         *string   `json:"base,omitempty"`
 	AutoMerge    *bool     `json:"autoMerge,omitempty"`
 	Capabilities *[]string `json:"capabilities,omitempty"`
 	Reads        *[]string `json:"reads,omitempty"`
@@ -148,17 +134,6 @@ type UpdateTemplateRequest struct {
 
 // UpdateTemplate edits a template's fields in place.
 func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTemplateRequest) (Template, error) {
-	var target *model.RepoRef
-	if req.Repo != nil {
-		if strings.TrimSpace(*req.Repo) == "" {
-			return Template{}, validationErrorf("repo cannot be empty: a template with no target repo cannot be used")
-		}
-		parsed, err := model.ParseRepo(*req.Repo)
-		if err != nil {
-			return Template{}, &ValidationError{err: err}
-		}
-		target = &parsed
-	}
 	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
 		return Template{}, validationErrorf("name cannot be empty")
 	}
@@ -199,12 +174,6 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 		}
 		if req.Description != nil {
 			t.Body = *req.Description
-		}
-		if target != nil {
-			t.Target = *target
-		}
-		if req.Base != nil {
-			t.Base = *req.Base
 		}
 		if req.AutoMerge != nil {
 			t.AutoMerge = *req.AutoMerge

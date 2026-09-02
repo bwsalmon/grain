@@ -129,6 +129,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigClaudeModelColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureTaskTemplateNoTargetColumns(ctx); err != nil {
+		return fmt.Errorf("migrating task_template: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -532,6 +535,36 @@ func (s *Store) ensureConfigClaudeModelColumn(ctx context.Context) error {
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `claude_model` TEXT NOT NULL DEFAULT ''")
 	return err
+}
+
+// ensureTaskTemplateNoTargetColumns drops task_template's old target_owner/
+// target_name/base columns (schema.go's own DDL comment on the table has
+// the reasoning: which repo and branch a firing targets is a property of
+// the caller using a template, not of the template itself) from a
+// database created before that split. Unlike every ensure*Column
+// migration above, which probes for a column's absence and adds it, this
+// probes for the old columns' presence and removes them -- the same
+// direction ensureConfigMaxConcurrentColumn's own slots removal and
+// ensureScheduledTaskRecurrenceColumns' own interval_ms removal already
+// go, since target_owner and target_name are NOT NULL and Init's own
+// CREATE TABLE IF NOT EXISTS never alters a table that already exists:
+// left in place, they would fail every PutTaskTemplate, which stops
+// supplying them.
+func (s *Store) ensureTaskTemplateNoTargetColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `target_owner` FROM `task_template` WHERE 1 = 0")
+	if err != nil {
+		// Already gone -- either a fresh database (Statements() above
+		// never created it) or one already migrated past this point.
+		return nil
+	}
+	rows.Close()
+	for _, col := range []string{"target_owner", "target_name", "base"} {
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE `task_template` DROP COLUMN `"+col+"`"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ErrConflict reports that an operation could not get a write in even
@@ -2461,17 +2494,13 @@ func newTaskTemplateID(ctx context.Context, tx *sql.Tx) (string, error) {
 	return "template-" + strconv.FormatInt(n, 10), nil
 }
 
-const taskTemplateColumns = "`id`,`name`,`title`,`body`,`target_owner`,`target_name`,`base`," +
-	"`auto_merge`,`created_at`"
+const taskTemplateColumns = "`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"
 
 func scanTaskTemplate(scan func(...any) error) (TaskTemplate, error) {
 	var t TaskTemplate
-	var base sql.NullString
-	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body, &t.Target.Owner, &t.Target.Name, &base,
-		&t.AutoMerge, &t.CreatedAt); err != nil {
+	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body, &t.AutoMerge, &t.CreatedAt); err != nil {
 		return TaskTemplate{}, err
 	}
-	t.Base = base.String
 	return t, nil
 }
 
@@ -2484,10 +2513,9 @@ func (s *Store) PutTaskTemplate(ctx context.Context, t TaskTemplate) error {
 
 func putTaskTemplate(ctx context.Context, tx *sql.Tx, t TaskTemplate) error {
 	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`task_template`"+` (
-  `+"`id`,`name`,`title`,`body`,`target_owner`,`target_name`,`base`,`auto_merge`,`created_at`"+`
-) VALUES (?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.Name, t.Title, t.Body, t.Target.Owner, t.Target.Name, nullable(t.Base),
-		t.AutoMerge, t.CreatedAt.UTC())
+  `+"`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"+`
+) VALUES (?,?,?,?,?,?)`,
+		t.ID, t.Name, t.Title, t.Body, t.AutoMerge, t.CreatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("writing task template %s: %w", t.ID, err)
 	}

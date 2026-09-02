@@ -85,7 +85,7 @@ export default function SuiteOverlay({ suite, templates = [], config, onClose, o
             {templates.map((t) => (
               <MenuItem key={t.id} value={t.id}>
                 <Checkbox checked={templateIds.includes(t.id)} size="small" />
-                <ListItemText primary={t.name} secondary={t.repo} />
+                <ListItemText primary={t.name} secondary={t.title} />
               </MenuItem>
             ))}
           </Select>

@@ -401,3 +401,50 @@ pause/resume/delete/cancel through it the same way
 `App.test.jsx`'s own schedules-pane tests are updated to open the
 overlay (a row click, or "+ New schedule") rather than an inline "Edit"
 button.
+
+## Update: templates carry no target repo or branch (bwsalmon/agents#516 revisited)
+
+`TaskTemplate` (`pkg/model/template.go`) originally carried Target and
+Base alongside Title/Body/AutoMerge/Reads/Grants -- the earlier "Update:
+task templates" section above documents `ui.CreateScheduleRequest`/
+`UpdateScheduleRequest` treating a `templateId` as taking over Repo/Base
+along with everything else. That was wrong for the same reason a
+qualification plan and a task suite were already built the other way:
+`QualificationPlan.Repo` and `TaskSuiteRun.Target`/`Base` decide what
+those two mechanisms target, never a template's own fields -- a template
+is reusable content, and which repo and branch a firing targets is a
+property of *how* it is used, not of the reusable content itself.
+Schedules were the one caller that had a template override it anyway,
+and it never generalized: `CreateQualificationRun` always targeted
+`candidate.Repo`/`candidate.Branch`, whatever `tmpl.Target` said, and
+only failed a run outright if the two happened to disagree.
+
+`task_template` drops `target_owner`/`target_name`/`base`
+(`ensureTaskTemplateNoTargetColumns`, the same probe-then-`ALTER TABLE`
+approach every other migration in `store.go` uses, in the direction
+`ensureConfigMaxConcurrentColumn`'s own `slots` removal already goes:
+probe for the old columns' presence, then drop them, since they are
+`NOT NULL` and `PutTaskTemplate` stops supplying them). `ui.Template`/
+`CreateTemplateRequest`/`UpdateTemplateRequest` drop `Repo`/`Base` to
+match.
+
+`ui.CreateScheduleRequest`/`UpdateScheduleRequest` now take Repo and
+Base as their own fields unconditionally, `templateId` or not --
+`templateId` still takes over Title/Description/AutoMerge/Reads/
+Capabilities entirely, the same "no mixing a template with per-field
+overrides" rule as before, just five fields instead of seven.
+`orchestrator.fireScheduledTask` no longer reads Target/Base off a
+resolved template; a schedule's own Target/Base are what every firing
+targets, template-backed or not. `ui.PutQualificationPlan` and
+`model.CreateQualificationRun` drop their "template must target this
+same repo" check along with it -- there is no longer a template-side
+Target to check against.
+
+No change to suites: `TaskSuite`/`TaskSuiteRun`/`fireSuitePass` never
+read a template's Target or Base to begin with (`model.TaskSuiteItem`'s
+own doc comment already says a suite resolves each item's template
+content only), so `SuiteOverlay.jsx`/`SuiteRunOverlay.jsx` needed no
+behavioural change -- only the template picker's secondary text
+(`t.repo`) and `RepoReleases.jsx`'s "templates already declared for this
+repo" filter, both of which assumed a field that no longer exists, come
+out.

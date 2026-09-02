@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { knownRepos } from "../state.js";
 import Overlay from "./Overlay.jsx";
-import RepoField from "./RepoField.jsx";
 
 // TemplateOverlay is the templates page's own sub page (bwsalmon/
 // agents#545): the "+" on TemplatesList opens this blank, and clicking
@@ -13,9 +11,13 @@ import RepoField from "./RepoField.jsx";
 // living behind a click rather than crowding the list -- so templates
 // stop being the one list on this page that also carries an always-open
 // form of its own.
+//
+// No target repo or branch here: a template carries no target of its
+// own (model.TaskTemplate's own doc comment on why) -- whatever fires
+// from this template (ScheduleOverlay.jsx, SuiteRunOverlay.jsx) asks for
+// a repo and branch of its own at the point of use instead.
 export default function TemplateOverlay({ template, config, onClose, onSaved, showError }) {
   const isNew = !template;
-  const repoOptions = knownRepos(config, []);
   const [capabilities, setCapabilities] = useState(template?.capabilities || []);
 
   const submit = async (evt) => {
@@ -28,8 +30,6 @@ export default function TemplateOverlay({ template, config, onClose, onSaved, sh
       name: data.get("name"),
       title: data.get("title"),
       description: data.get("description") || "",
-      repo: data.get("repo") || "",
-      base: data.get("base") || "",
       autoMerge: form.elements.autoMerge.checked,
       reads,
       capabilities,
@@ -63,13 +63,6 @@ export default function TemplateOverlay({ template, config, onClose, onSaved, sh
         <TextField name="name" label="Name" defaultValue={template?.name} required InputLabelProps={{ required: false }} helperText="shown wherever a template is picked" autoComplete="off" fullWidth margin="normal" />
         <TextField name="title" label="Task title" defaultValue={template?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" defaultValue={template?.description} multiline rows={4} fullWidth margin="normal" />
-        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-            Target repo <span className="hint">owner/name</span>
-          </Typography>
-          <RepoField name="repo" options={repoOptions} defaultValue={template?.repo || ""} required />
-        </Box>
-        <TextField name="base" label="Base branch" defaultValue={template?.base} helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
         <TextField
           name="reads"
           label="Read-only repos"

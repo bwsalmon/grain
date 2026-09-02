@@ -86,9 +86,13 @@ type PutQualificationPlanRequest struct {
 }
 
 // PutQualificationPlan validates req -- every item naming a template that
-// actually exists and targets this same repo, a positive repeat count,
-// and a dependency graph with no cycle (model.QualificationPlan.Validate)
-// -- before replacing repo's plan wholesale.
+// actually exists, a positive repeat count, and a dependency graph with
+// no cycle (model.QualificationPlan.Validate) -- before replacing repo's
+// plan wholesale. It does not check a template against repo: a template
+// carries no target of its own (model.TaskTemplate's own doc comment on
+// why), so any template may schedule against any repo's plan --
+// CreateQualificationRun always targets repo and the candidate's own
+// branch, whatever the template itself says.
 func (c *Client) PutQualificationPlan(ctx context.Context, repo model.RepoRef, req PutQualificationPlanRequest) (QualificationPlan, error) {
 	items := make([]model.QualificationItem, 0, len(req.Items))
 	for _, it := range req.Items {
@@ -101,10 +105,6 @@ func (c *Client) PutQualificationPlan(ctx context.Context, repo model.RepoRef, r
 		}
 		if tmpl == nil {
 			return QualificationPlan{}, validationErrorf("unknown task template %s", it.TemplateID)
-		}
-		if tmpl.Target != repo {
-			return QualificationPlan{}, validationErrorf(
-				"template %q targets %s, not %s", tmpl.Name, tmpl.Target, repo)
 		}
 		repeat := it.Repeat
 		if repeat < 1 {

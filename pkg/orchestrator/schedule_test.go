@@ -192,8 +192,10 @@ func TestReconcileScheduleWaitsForThePreviousFiringToFinish(t *testing.T) {
 // template-backed schedule's content off the template at firing time, not
 // off whatever the schedule's own row last cached, so a template edited
 // between two firings changes what the second one files -- and the
-// schedule's own display cache (Title/Body/Target/...) is kept in sync
-// with it too.
+// schedule's own display cache (Title/Body/...) is kept in sync with it
+// too. The schedule's own Target is never touched: a template carries no
+// target of its own (model.TaskTemplate's own doc comment on why), so it
+// is the schedule's own standing repo that every firing targets.
 func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	store, ctx := openStore(t)
 	tmpl := model.TaskTemplate{
@@ -201,7 +203,6 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 		Name:   "Dependency bump",
 		Title:  "Bump dependencies",
 		Body:   "Bump every dependency to its latest patch release.",
-		Target: model.RepoRef{Owner: "acme", Name: "widgets"},
 		Reads:  []model.RepoRef{{Owner: "acme", Name: "shared-lib"}},
 		Grants: []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}},
 	}
@@ -212,6 +213,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	sched := model.ScheduledTask{
 		ID:         "sched-1",
 		TemplateID: &templateID,
+		Target:     model.RepoRef{Owner: "acme", Name: "widgets"},
 		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
 		Enabled:    true,
 		NextRunAt:  baseTime.Add(-time.Minute),
@@ -230,6 +232,9 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	}
 	if first[0].Title != tmpl.Title || first[0].Body != tmpl.Body {
 		t.Errorf("first firing title/body = %q/%q, want the template's own", first[0].Title, first[0].Body)
+	}
+	if first[0].Target == nil || *first[0].Target != sched.Target {
+		t.Errorf("first firing target = %+v, want the schedule's own %+v", first[0].Target, sched.Target)
 	}
 	if len(first[0].Reads) != 1 || first[0].Reads[0] != tmpl.Reads[0] {
 		t.Errorf("first firing reads = %+v, want %+v", first[0].Reads, tmpl.Reads)

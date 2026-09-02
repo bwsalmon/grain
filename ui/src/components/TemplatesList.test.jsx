@@ -11,8 +11,6 @@ const template = {
   name: "Dependency bump",
   title: "Bump dependencies",
   description: "",
-  repo: "acme/widgets",
-  base: "",
   autoMerge: false,
   reads: [],
   capabilities: [],
@@ -24,8 +22,6 @@ const otherTemplate = {
   name: "Security patch",
   title: "Apply security patches",
   description: "",
-  repo: "acme/other",
-  base: "",
   autoMerge: false,
   reads: [],
   capabilities: [],
@@ -43,11 +39,10 @@ describe("TemplatesList", () => {
     render(<TemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("Dependency bump")).toBeInTheDocument();
-    expect(screen.getByText("acme/widgets")).toBeInTheDocument();
     expect(screen.getByText("Bump dependencies")).toBeInTheDocument();
     // No form fields on the main list any more -- editing lives behind
     // clicking a row instead.
-    expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Name/)).not.toBeInTheDocument();
   });
 
   it("shows an empty message when there are none", () => {
@@ -58,7 +53,7 @@ describe("TemplatesList", () => {
     expect(screen.queryByPlaceholderText("Search templates…")).not.toBeInTheDocument();
   });
 
-  it("filters the list by name, title, or repo", async () => {
+  it("filters the list by name or title", async () => {
     const user = userEvent.setup();
     render(<TemplatesList templates={[template, otherTemplate]} onRefresh={noop} showError={noop} />);
 
@@ -88,7 +83,6 @@ describe("TemplatesList", () => {
 
     await user.type(screen.getByLabelText(/Name/), "Dependency bump");
     await user.type(screen.getByLabelText(/Task title/), "Bump dependencies");
-    await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add template" }));
 
     expect(api).toHaveBeenCalledWith("/api/templates", {
@@ -97,8 +91,6 @@ describe("TemplatesList", () => {
         name: "Dependency bump",
         title: "Bump dependencies",
         description: "",
-        repo: "acme/widgets",
-        base: "",
         autoMerge: false,
         reads: [],
         capabilities: [],
@@ -130,8 +122,6 @@ describe("TemplatesList", () => {
         name: "Dependency bump (patch only)",
         title: "Bump dependencies",
         description: "",
-        repo: "acme/widgets",
-        base: "",
         autoMerge: false,
         reads: [],
         capabilities: [],
@@ -178,7 +168,6 @@ describe("TemplatesList", () => {
     await user.click(screen.getByRole("button", { name: "+ New template" }));
     await user.type(screen.getByLabelText(/Name/), "x");
     await user.type(screen.getByLabelText(/Task title/), "x");
-    await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add template" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "unknown capability not-a-real-capability" }));

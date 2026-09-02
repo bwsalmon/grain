@@ -16,7 +16,7 @@ func TestTemplatesCreateListUpdateDelete(t *testing.T) {
 	srv, _ := testServer(t)
 
 	rec := do(t, srv, http.MethodPost, "/api/templates",
-		`{"name":"Dependency bump","title":"Bump dependencies","repo":"acme/widgets"}`)
+		`{"name":"Dependency bump","title":"Bump dependencies"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201: %s", rec.Code, rec.Body)
 	}
@@ -57,7 +57,7 @@ func TestTemplatesCreateListUpdateDelete(t *testing.T) {
 
 func TestTemplatesCreateRejectsAMissingNameWith400(t *testing.T) {
 	srv, _ := testServer(t)
-	rec := do(t, srv, http.MethodPost, "/api/templates", `{"title":"x","repo":"acme/widgets"}`)
+	rec := do(t, srv, http.MethodPost, "/api/templates", `{"title":"x"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
 	}
@@ -83,18 +83,20 @@ func TestTemplatesDeleteOnAnUnknownIDIs404(t *testing.T) {
 // that the /api/schedules and /api/templates surfaces compose: a
 // schedule created over HTTP naming templateId comes back carrying that
 // template's content, the same as ui.Client.CreateSchedule already
-// checks directly (schedules_test.go).
+// checks directly (schedules_test.go). Repo is never among that content
+// (model.TaskTemplate's own doc comment on why a template carries no
+// target of its own), so the schedule request supplies it directly.
 func TestScheduleCreatedFromATemplateOverHTTP(t *testing.T) {
 	srv, _ := testServer(t)
 	rec := do(t, srv, http.MethodPost, "/api/templates",
-		`{"name":"Dependency bump","title":"Bump dependencies","repo":"acme/widgets"}`)
+		`{"name":"Dependency bump","title":"Bump dependencies"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create template status = %d, want 201: %s", rec.Code, rec.Body)
 	}
 	tmpl := decode[ui.Template](t, rec)
 
 	rec = do(t, srv, http.MethodPost, "/api/schedules",
-		`{"templateId":"`+tmpl.ID+`","recurrence":{"kind":"everyNHours","everyNHours":24}}`)
+		`{"templateId":"`+tmpl.ID+`","repo":"acme/widgets","recurrence":{"kind":"everyNHours","everyNHours":24}}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create schedule status = %d, want 201: %s", rec.Code, rec.Body)
 	}
@@ -102,7 +104,10 @@ func TestScheduleCreatedFromATemplateOverHTTP(t *testing.T) {
 	if sched.TemplateID != tmpl.ID {
 		t.Errorf("templateId = %q, want %q", sched.TemplateID, tmpl.ID)
 	}
-	if sched.Title != "Bump dependencies" || sched.Repo != "acme/widgets" {
-		t.Errorf("title/repo = %q/%q, want the template's own", sched.Title, sched.Repo)
+	if sched.Title != "Bump dependencies" {
+		t.Errorf("title = %q, want the template's own", sched.Title)
+	}
+	if sched.Repo != "acme/widgets" {
+		t.Errorf("repo = %q, want the schedule request's own", sched.Repo)
 	}
 }

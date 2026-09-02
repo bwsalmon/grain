@@ -58,10 +58,10 @@ func currentCandidate(t *testing.T, ctx context.Context, store *model.Store, rep
 	return *c
 }
 
-func smokeTestTemplate(repo model.RepoRef) model.TaskTemplate {
+func smokeTestTemplate() model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: "template-smoke", Name: "Smoke test", Title: "Smoke test", Body: "run the smoke suite",
-		Target: repo, CreatedAt: baseTime,
+		CreatedAt: baseTime,
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSyncQualificationsCreatesARunForAFreshlyActiveCandidate(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, smokeTestTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	candidate := cutFirstCandidate(t, ctx, store, repo)
@@ -116,7 +116,7 @@ func TestSyncQualificationsAutoPromotesOnceEveryTaskCompletes(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, smokeTestTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	candidate := cutFirstCandidate(t, ctx, store, repo)
@@ -187,7 +187,7 @@ func TestSyncQualificationsRetriesRunCreationAfterAMissingTemplateIsAdded(t *tes
 		t.Fatalf("got (%+v, %v) after a failed attempt, want (nil, nil)", run, err)
 	}
 
-	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, smokeTestTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	if err := orchestrator.SyncQualifications(ctx, store, baseTime); err != nil {
@@ -210,7 +210,7 @@ func TestSyncQualificationsNeverAutoPromotesARunWithAClosedTask(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, smokeTestTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	candidate := cutFirstCandidate(t, ctx, store, repo)
@@ -261,7 +261,7 @@ func TestSyncQualificationsHandlesASecondCandidateAfterTheFirstIsPromoted(t *tes
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, smokeTestTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	plan := onePassingItem()
@@ -322,7 +322,7 @@ func TestSyncQualificationsDoesNotAutoPromoteWhenThePlanDoesNotAskForIt(t *testi
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	if err := store.PutTaskTemplate(ctx, smokeTestTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, smokeTestTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	candidate := cutFirstCandidate(t, ctx, store, repo)

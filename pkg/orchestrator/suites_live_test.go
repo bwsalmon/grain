@@ -143,7 +143,6 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 		Name:      "Bug finder",
 		Title:     "Find and fix a bug in this repository",
 		Body:      body,
-		Target:    repoRef,
 		AutoMerge: true,
 		CreatedAt: baseTime,
 	}); err != nil {

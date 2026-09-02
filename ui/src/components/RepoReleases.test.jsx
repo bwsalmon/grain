@@ -10,8 +10,8 @@ const unconfiguredQualificationPlan = {
   configured: false, repo: "acme/widgets", requireApproval: false, autoPromote: false, items: [],
 };
 
-const smokeTemplate = { id: "template-1", name: "Smoke test", title: "Smoke test", repo: "acme/widgets", autoMerge: false, capabilities: [] };
-const otherRepoTemplate = { id: "template-2", name: "Unrelated", title: "Unrelated", repo: "acme/other", autoMerge: false, capabilities: [] };
+const smokeTemplate = { id: "template-1", name: "Smoke test", title: "Smoke test", autoMerge: false, capabilities: [] };
+const unrelatedTemplate = { id: "template-2", name: "Unrelated", title: "Unrelated", autoMerge: false, capabilities: [] };
 
 const activeRelease = {
   repo: "acme/widgets", name: "myfeat", latestBranch: "myfeat.latest", prodBranch: "myfeat", status: "active",
@@ -247,18 +247,18 @@ describe("RepoReleases", () => {
     expect(screen.getByText("(1/2)")).toBeInTheDocument();
   });
 
-  it("only offers templates that target this repo, and saves a new qualification item", async () => {
+  it("offers every template, and saves a new qualification item", async () => {
     setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     const user = userEvent.setup();
     render(
-      <RepoReleases repo="acme/widgets" templates={[smokeTemplate, otherRepoTemplate]} onBack={() => {}} showError={() => {}} />
+      <RepoReleases repo="acme/widgets" templates={[smokeTemplate, unrelatedTemplate]} onBack={() => {}} showError={() => {}} />
     );
     await screen.findByRole("button", { name: "Add item" });
 
     await user.click(screen.getByRole("button", { name: "Add item" }));
     await user.click(screen.getByLabelText("Template"));
     expect(screen.getByRole("option", { name: "Smoke test" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Unrelated" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Unrelated" })).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name: "Smoke test" }));
     await user.click(screen.getByRole("button", { name: "Save qualification plan" }));
 

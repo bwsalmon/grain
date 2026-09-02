@@ -104,12 +104,14 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 // indefinitely, and a firing always lands already approved by design.
 //
 // templateId (bwsalmon/agents#516) is its own bit of state, not a plain
-// form field, because it decides whether the title/description/repo/
-// base/reads/capabilities fields below even render: picking a template
-// hands that content over entirely (ui.CreateScheduleRequest's own doc
-// comment on why a template and per-field overrides do not mix), so this
-// form hides them rather than showing fields the request would silently
-// ignore.
+// form field, because it decides whether the title/description/reads/
+// capabilities fields below even render: picking a template hands that
+// content over entirely (ui.CreateScheduleRequest's own doc comment on
+// why a template and per-field overrides do not mix), so this form hides
+// them rather than showing fields the request would silently ignore.
+// Repo and base branch are never among them -- a template carries no
+// target of its own (model.TaskTemplate's own doc comment on why) -- so
+// those two always render, template selected or not.
 export default function ScheduleOverlay({ schedule, repoOptions, templates = [], config, onClose, onSaved, showError }) {
   const isNew = !schedule;
   const [capabilities, setCapabilities] = useState(schedule?.capabilities || []);
@@ -135,15 +137,19 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
     // "" as "no template"; UpdateScheduleRequest reads a given-at-all
     // templateId (its own doc comment) the same way, "" meaning detach
     // rather than leave alone, which is exactly what re-submitting this
-    // form with "None" selected should do.
-    const payload = { templateId, recurrence };
+    // form with "None" selected should do. repo/base are always sent too
+    // -- a template carries no target of its own, so they are this
+    // schedule's own fields regardless of templateId.
+    const payload = {
+      templateId, recurrence,
+      repo: data.get("repo") || "",
+      base: data.get("base") || "",
+    };
     if (templateId === "") {
       const reads = (data.get("reads") || "")
         .split(",").map((r) => r.trim()).filter((r) => r !== "");
       payload.title = data.get("title");
       payload.description = data.get("description") || "";
-      payload.repo = data.get("repo") || "";
-      payload.base = data.get("base") || "";
       payload.autoMerge = form.elements.autoMerge.checked;
       payload.reads = reads;
       payload.capabilities = capabilities;
@@ -204,22 +210,22 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
             ))}
           </Select>
         </FormControl>
+        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+            Target repo <span className="hint">owner/name</span>
+          </Typography>
+          <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
+        </Box>
+        <TextField name="base" label="Base branch" defaultValue={schedule?.base} helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
         {templateId !== "" ? (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
-            Title, description, repo, base branch, reads, capabilities and auto-merge
-            all come from the selected template, and stay in sync with it.
+            Title, description, reads, capabilities and auto-merge all come from
+            the selected template, and stay in sync with it.
           </Typography>
         ) : (
           <>
             <TextField name="title" label="Title" defaultValue={schedule?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
             <TextField name="description" label="Description" defaultValue={schedule?.description} multiline rows={4} fullWidth margin="normal" />
-            <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-                Target repo <span className="hint">owner/name</span>
-              </Typography>
-              <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
-            </Box>
-            <TextField name="base" label="Base branch" defaultValue={schedule?.base} helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
             <TextField
               name="reads"
               label="Read-only repos"

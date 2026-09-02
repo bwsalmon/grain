@@ -332,18 +332,18 @@ var Tables = []string{
 
 	// One row per template (bwsalmon/agents#516) -- task_sequence's own
 	// "identity allocated here, not borrowed" reasoning applies again:
-	// name/title/body/target/base/auto_merge are exactly the fields a
-	// schedule already carried inline, now given a row of their own so
+	// name/title/body/auto_merge are exactly the reusable-content fields
+	// a schedule already carried inline, now given a row of their own so
 	// more than one schedule (scheduled_task.template_id) can point at
-	// the same one instead of repeating it.
+	// the same one instead of repeating it. Deliberately no target_owner/
+	// target_name/base here (model.TaskTemplate's own doc comment on
+	// why): which repo and branch a firing targets is a property of the
+	// caller using this template, not of the template itself.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_template`" + ` (
   ` + "`id`" + `           TEXT     NOT NULL,
   ` + "`name`" + `         TEXT     NOT NULL,
   ` + "`title`" + `        TEXT     NOT NULL,
   ` + "`body`" + `         TEXT     NOT NULL,
-  ` + "`target_owner`" + ` TEXT     NOT NULL,
-  ` + "`target_name`" + `  TEXT     NOT NULL,
-  ` + "`base`" + `         TEXT     NULL,
   ` + "`auto_merge`" + `   INTEGER  NOT NULL,
   ` + "`created_at`" + `   DATETIME NOT NULL,
   PRIMARY KEY (` + "`id`" + `)

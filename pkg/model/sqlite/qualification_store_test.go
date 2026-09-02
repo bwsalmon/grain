@@ -17,7 +17,7 @@ import (
 func buildTemplate(id string) model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: id, Name: "Build", Title: "Build", Body: "go build ./...",
-		Target: widgets, Reads: []model.RepoRef{gadgets},
+		Reads:  []model.RepoRef{gadgets},
 		Grants: []model.Grant{{Capability: "run-tests", Via: model.GrantByLabel}}, CreatedAt: now,
 	}
 }
@@ -25,7 +25,7 @@ func buildTemplate(id string) model.TaskTemplate {
 func unitTestTemplate(id string) model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: id, Name: "Unit tests", Title: "Unit tests", Body: "go test ./...",
-		Target: widgets, CreatedAt: now,
+		CreatedAt: now,
 	}
 }
 
@@ -317,22 +317,6 @@ func TestCreateQualificationRunFailsWhenATemplateIsMissing(t *testing.T) {
 	}
 	if _, err := store.CreateQualificationRun(ctx, candidate, plan, now); err == nil {
 		t.Fatal("want an error when a plan's template no longer exists")
-	}
-}
-
-func TestCreateQualificationRunFailsWhenATemplateTargetsADifferentRepo(t *testing.T) {
-	store, _, ctx := openStore(t)
-	mismatched := buildTemplate("template-build")
-	mismatched.Target = gadgets
-	if err := store.PutTaskTemplate(ctx, mismatched); err != nil {
-		t.Fatalf("put template: %v", err)
-	}
-	candidate := cutTestCandidate(t, ctx, store)
-	plan := model.QualificationPlan{
-		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-build", Repeat: 1}},
-	}
-	if _, err := store.CreateQualificationRun(ctx, candidate, plan, now); err == nil {
-		t.Fatal("want an error when a plan's template targets a different repo")
 	}
 }
 

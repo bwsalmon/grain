@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Chip } from "@mui/material";
+import { Button } from "@mui/material";
 import TemplateOverlay from "./TemplateOverlay.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 
@@ -15,13 +15,14 @@ const SORTS = {
 };
 
 // TemplatesList is the templates page's main pane (bwsalmon/agents#545):
-// a flat list of every template's key details -- name, target repo,
-// task title -- with its own search/sort toolbar, TaskList's own shape.
-// Nothing about any one template (description, base branch, reads,
-// capabilities, editing, deleting) lives here any more; all of that
-// moved into TemplateOverlay, opened either by the "+ New template"
-// button or by clicking a row, so this list stays a list instead of
-// also being a form.
+// a flat list of every template's key details -- name and task title,
+// no target repo (a template carries no target of its own,
+// model.TaskTemplate's own doc comment on why) -- with its own
+// search/sort toolbar, TaskList's own shape. Nothing about any one
+// template (description, reads, capabilities, editing, deleting) lives
+// here any more; all of that moved into TemplateOverlay, opened either
+// by the "+ New template" button or by clicking a row, so this list
+// stays a list instead of also being a form.
 export default function TemplatesList({ templates, config, onRefresh, showError }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("name");
@@ -30,7 +31,7 @@ export default function TemplatesList({ templates, config, onRefresh, showError 
 
   const q = search.trim().toLowerCase();
   const matches = (t) =>
-    q === "" || t.name.toLowerCase().includes(q) || t.title.toLowerCase().includes(q) || t.repo.toLowerCase().includes(q);
+    q === "" || t.name.toLowerCase().includes(q) || t.title.toLowerCase().includes(q);
 
   const visible = templates.filter(matches).sort(SORTS[sortBy].cmp);
 
@@ -51,7 +52,6 @@ export default function TemplatesList({ templates, config, onRefresh, showError 
         {visible.map((tmpl) => (
           <li className="template-row" key={tmpl.id} onClick={() => setEditing(tmpl)}>
             <span className="template-name">{tmpl.name}</span>
-            <Chip size="small" label={tmpl.repo} />
             <span className="template-title hint">{tmpl.title}</span>
           </li>
         ))}

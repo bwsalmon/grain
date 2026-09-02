@@ -313,19 +313,23 @@ func TestDeleteScheduleOnAnUnknownIDIsNotFound(t *testing.T) {
 }
 
 // TestCreateScheduleFromATemplateCopiesItsContent is bwsalmon/agents#516's
-// whole point: a schedule created with TemplateID needs no Title or Repo
-// of its own, and reads them off the template instead.
+// whole point: a schedule created with TemplateID needs no Title of its
+// own, and reads it off the template instead. Repo and Base are never
+// among the fields a template supplies (model.TaskTemplate's own doc
+// comment on why), so they always come from this same request.
 func TestCreateScheduleFromATemplateCopiesItsContent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
 		Name: "Dependency bump", Title: "Bump dependencies", Description: "Bump every dependency.",
-		Repo: "acme/widgets", Base: "main", AutoMerge: true,
+		AutoMerge:    true,
 		Capabilities: []string{"gemini-key"}, Reads: []string{"acme/shared-lib"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: tmpl.ID, Recurrence: everyDay})
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		TemplateID: tmpl.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
 	if err != nil {
 		t.Fatalf("creating a template-backed schedule: %v", err)
 	}
@@ -338,8 +342,11 @@ func TestCreateScheduleFromATemplateCopiesItsContent(t *testing.T) {
 	if sched.Title != "Bump dependencies" || sched.Description != "Bump every dependency." {
 		t.Errorf("title/description = %q/%q, want the template's own", sched.Title, sched.Description)
 	}
-	if sched.Repo != "acme/widgets" || sched.Base != "main" || !sched.AutoMerge {
-		t.Errorf("repo/base/autoMerge = %q/%q/%v, want the template's own", sched.Repo, sched.Base, sched.AutoMerge)
+	if !sched.AutoMerge {
+		t.Errorf("autoMerge = %v, want the template's own", sched.AutoMerge)
+	}
+	if sched.Repo != "acme/widgets" || sched.Base != "main" {
+		t.Errorf("repo/base = %q/%q, want this request's own", sched.Repo, sched.Base)
 	}
 	if len(sched.Capabilities) != 1 || sched.Capabilities[0] != "gemini-key" {
 		t.Errorf("capabilities = %v, want [gemini-key]", sched.Capabilities)
@@ -351,7 +358,7 @@ func TestCreateScheduleFromATemplateCopiesItsContent(t *testing.T) {
 
 func TestCreateScheduleRejectsAnUnknownTemplate(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: "nope", Recurrence: everyDay})
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: "nope", Repo: "acme/widgets", Recurrence: everyDay})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
@@ -364,7 +371,9 @@ func TestCreateScheduleRejectsAnUnknownTemplate(t *testing.T) {
 // that template outright, ignoring any other content field on the same
 // request (CreateScheduleRequest's own doc comment explains why -- a
 // template and per-field overrides is a combination this API does not
-// support).
+// support) -- except Repo and Base, which a template never carries and
+// so are always left exactly as they already are unless this same
+// request also gives a new one.
 func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
@@ -374,7 +383,7 @@ func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
-		Name: "Dependency bump", Title: "Bump dependencies", Repo: "acme/other-widgets",
+		Name: "Dependency bump", Title: "Bump dependencies",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -392,8 +401,8 @@ func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
 	if updated.Title != "Bump dependencies" {
 		t.Errorf("title = %q, want the template's own, not %q", updated.Title, ignoredTitle)
 	}
-	if updated.Repo != "acme/other-widgets" {
-		t.Errorf("repo = %q, want the template's own", updated.Repo)
+	if updated.Repo != "acme/widgets" {
+		t.Errorf("repo = %q, want it left alone (a template carries no target)", updated.Repo)
 	}
 }
 
@@ -405,12 +414,14 @@ func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
 func TestUpdateScheduleDetachFromATemplateKeepsCurrentContent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
-		Name: "Dependency bump", Title: "Bump dependencies", Repo: "acme/widgets",
+		Name: "Dependency bump", Title: "Bump dependencies",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: tmpl.ID, Recurrence: everyDay})
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		TemplateID: tmpl.ID, Repo: "acme/widgets", Recurrence: everyDay,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
