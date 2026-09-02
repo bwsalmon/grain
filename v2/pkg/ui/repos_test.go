@@ -102,7 +102,7 @@ func TestAddTargetRepoIsVisibleThroughConfigInTheSameProcess(t *testing.T) {
 	srv, _ := testServer(t)
 
 	rec := do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"30s","maxConcurrent":1,"geminiModel":"gemini-2.5-pro","githubHost":"github.com"}`)
+		`{"pollInterval":"30s","maxConcurrent":1,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first-time settings save status = %d, want 200: %s", rec.Code, rec.Body)
 	}
@@ -123,7 +123,7 @@ func TestAddTargetRepoIsVisibleThroughConfigInTheSameProcess(t *testing.T) {
 func TestReposCreateThenDelete(t *testing.T) {
 	srv, _ := testServer(t)
 	rec := do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"30s","maxConcurrent":1,"geminiModel":"gemini-2.5-pro","githubHost":"github.com"}`)
+		`{"pollInterval":"30s","maxConcurrent":1,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first-time settings save status = %d, want 200: %s", rec.Code, rec.Body)
 	}
@@ -150,7 +150,7 @@ func TestReposCreateThenDelete(t *testing.T) {
 func TestAddRepoRejectsAMalformedRepoWith400(t *testing.T) {
 	srv, _ := testServer(t)
 	do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"30s","maxConcurrent":1,"geminiModel":"gemini-2.5-pro","githubHost":"github.com"}`)
+		`{"pollInterval":"30s","maxConcurrent":1,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 
 	rec := do(t, srv, http.MethodPost, "/api/repos", `{"repo":"not-a-repo"}`)
 	if rec.Code != http.StatusBadRequest {

@@ -135,6 +135,7 @@ UI_PORT="$(cfg ui_port)"
 SLOTS="$(cfg slots)"
 POLL_INTERVAL="$(cfg poll_interval)"
 GEMINI_MODEL="$(cfg gemini_model)"
+CLAUDE_MODEL="$(cfg claude_model)"
 # Where the Antigravity CLI lives, if not on $PATH -- see setup.sh's own
 # GRAIN_AGY_PATH and verify_agent_cli.
 AGY_PATH="$(cfg agy_path)"
@@ -269,6 +270,7 @@ env \
   GRAIN_AGY_PATH="$AGY_PATH" \
   GRAIN_CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_OAUTH_TOKEN" \
   GRAIN_GEMINI_MODEL="$GEMINI_MODEL" \
+  GRAIN_CLAUDE_MODEL="$CLAUDE_MODEL" \
   GRAIN_MAX_AGENT_TURNS="$MAX_AGENT_TURNS" \
   GRAIN_GCP_PROJECT="$GCP_PROJECT" \
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="$GCP_AGENT_SERVICE_ACCOUNT" \

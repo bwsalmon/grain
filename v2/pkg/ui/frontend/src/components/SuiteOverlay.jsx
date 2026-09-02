@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Box, Button, Checkbox, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
+import TemplateOverlay from "./TemplateOverlay.jsx";
 
 // SuiteOverlay is the task suites page's own sub page (bwsalmon/
 // agents#642), TemplateOverlay's own "+ on the list opens this blank,
@@ -10,10 +11,23 @@ import Overlay from "./Overlay.jsx";
 // times, or run them until a pass produces no pull request and no
 // follow-up task), created here and then run against any repo and
 // branch from SuiteRunOverlay.
-export default function SuiteOverlay({ suite, templates = [], onClose, onSaved, showError }) {
+//
+// A suite is useless with no templates, so building one from scratch
+// would otherwise mean leaving this overlay for the templates page and
+// back -- "+ New template" opens TemplateOverlay right on top of this
+// one instead, and the template it saves is both added to the picker
+// and preselected, config/onTemplatesChanged existing only to make that
+// nested overlay work.
+export default function SuiteOverlay({ suite, templates = [], config, onClose, onSaved, onTemplatesChanged, showError }) {
   const isNew = !suite;
   const [templateIds, setTemplateIds] = useState((suite?.items || []).map((it) => it.templateId));
   const [mode, setMode] = useState(suite?.mode || "until_clean");
+  const [showNewTemplate, setShowNewTemplate] = useState(false);
+
+  const templateCreated = async (tmpl) => {
+    await onTemplatesChanged();
+    setTemplateIds((prev) => [...prev, tmpl.id]);
+  };
 
   const submit = async (evt) => {
     evt.preventDefault();
@@ -76,6 +90,7 @@ export default function SuiteOverlay({ suite, templates = [], onClose, onSaved, 
             ))}
           </Select>
         </FormControl>
+        <Button size="small" onClick={() => setShowNewTemplate(true)} sx={{ mt: -1, mb: 1 }}>+ New template</Button>
 
         <FormControl fullWidth margin="normal" size="small">
           <InputLabel id="suite-mode-label">Run mode</InputLabel>
@@ -123,6 +138,9 @@ export default function SuiteOverlay({ suite, templates = [], onClose, onSaved, 
           </Stack>
         </Stack>
       </form>
+      {showNewTemplate && (
+        <TemplateOverlay config={config} onClose={() => setShowNewTemplate(false)} onSaved={templateCreated} showError={showError} />
+      )}
     </Overlay>
   );
 }

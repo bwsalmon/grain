@@ -228,6 +228,9 @@ GRAIN_CLAUDE_CODE_OAUTH_TOKEN="${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 # reason it is a *mount* rather than a $PATH entry: a path that resolves
 # out here has to resolve identically in there.
 GRAIN_CLAUDE_PATH="${GRAIN_CLAUDE_PATH:-}"
+# Override the daemon's default Claude model -- the exact counterpart of
+# GRAIN_GEMINI_MODEL above.
+GRAIN_CLAUDE_MODEL="${GRAIN_CLAUDE_MODEL:-}"
 
 GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
@@ -422,6 +425,8 @@ Recognized variables:
                              framework. Bind-mounted the same way (default:
                              empty, use the image's)
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
+  GRAIN_CLAUDE_MODEL        override the daemon's default Claude model. Seeded once,
+                             the exact counterpart of GRAIN_GEMINI_MODEL above
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
                              can exhaust: reading a few files, writing one, running
@@ -1997,6 +2002,7 @@ write_systemd_units() {
   [ -n "$GRAIN_AGY_PATH" ] && daemon_args+=(-agy-path "$GRAIN_AGY_PATH")
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
+  [ -n "$GRAIN_CLAUDE_MODEL" ] && daemon_args+=(-claude-model "$GRAIN_CLAUDE_MODEL")
   [ -n "$GRAIN_MAX_AGENT_TURNS" ] && daemon_args+=(-max-agent-turns "$GRAIN_MAX_AGENT_TURNS")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")

@@ -35,7 +35,7 @@
 // v2/README.md for what that merge kept and dropped.
 //
 // Most of this file's own flags (-max-concurrent, -poll-interval, -agent-framework,
-// -gemini-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
+// -gemini-model, -claude-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
 // -gcp-agent-service-account, -target-repos) are store-backed now
 // (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
@@ -145,7 +145,8 @@ func daemon(args []string) {
 		"\""+secrets.GeminiAPIKeySecret+"\" secret): a key set there wins, and this file is what a deployment "+
 		"seeded one with before that existed. With neither, a run driven by the gemini framework fails as "+
 		"setup-failed saying so, rather than the daemon refusing to start")
-	geminiModel := fs.String("gemini-model", antigravity.DefaultModel, "model the agent framework calls"+seedOnly)
+	geminiModel := fs.String("gemini-model", antigravity.DefaultModel, "model the antigravity agent framework calls"+seedOnly)
+	claudeModel := fs.String("claude-model", claude.DefaultModel, "model the claude agent framework calls"+seedOnly)
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)"+seedOnly)
 
 	// claudePath and claudeOAuthTokenFile are only consulted when a run
@@ -368,7 +369,7 @@ func daemon(args []string) {
 		agentFramework:   *agentFramework,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		agyPath:    *agyPath,
-		claudePath: *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile,
+		claudePath: *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile, claudeModel: *claudeModel,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
@@ -435,6 +436,10 @@ type config struct {
 	// flag doc comments for why neither is store-backed.
 	claudePath           string
 	claudeOAuthTokenFile string
+	// claudeModel is store-backed (model.Config.ClaudeModel), the exact
+	// counterpart of geminiModel above: -claude-model only seeds it the
+	// first time a deployment's store has none.
+	claudeModel string
 
 	githubHost         string
 	githubInsecureHTTP bool
@@ -907,6 +912,7 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 		claude.WithOAuthTokenFunc(func(ctx context.Context) (string, error) {
 			return agentCredential(ctx, secretStore, secrets.ClaudeOAuthTokenSecret, cfg.claudeOAuthTokenFile)
 		}),
+		claude.WithModel(cfg.claudeModel),
 	}
 	if cfg.konturSandboxes {
 		// Only meaningful with -kontur-sandboxes: a run dispatched
@@ -1111,6 +1117,7 @@ func (c config) logStoreOverrides(mc model.Config) {
 	warn("max-concurrent", c.maxConcurrent, mc.MaxConcurrent)
 	warn("agent-framework", c.agentFramework, mc.AgentFramework)
 	warn("gemini-model", c.geminiModel, mc.GeminiModel)
+	warn("claude-model", c.claudeModel, mc.ClaudeModel)
 	warn("max-agent-turns", c.maxAgentTurns, mc.MaxAgentTurns)
 	warn("github-host", c.githubHost, mc.GitHubHost)
 	warn("github-insecure-http", c.githubInsecureHTTP, mc.GitHubInsecureHTTP)
@@ -1128,7 +1135,7 @@ func (c config) toModelConfig() model.Config {
 	return model.Config{
 		PollInterval: c.pollInterval, MaxConcurrent: c.maxConcurrent,
 		AgentFramework: c.agentFramework,
-		GeminiModel:    c.geminiModel, MaxAgentTurns: c.maxAgentTurns,
+		GeminiModel:    c.geminiModel, ClaudeModel: c.claudeModel, MaxAgentTurns: c.maxAgentTurns,
 		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
 		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
 		TargetRepos: c.targetRepos,
@@ -1144,6 +1151,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.maxConcurrent = mc.MaxConcurrent
 	c.agentFramework = mc.AgentFramework
 	c.geminiModel = mc.GeminiModel
+	c.claudeModel = mc.ClaudeModel
 	c.maxAgentTurns = mc.MaxAgentTurns
 	c.githubHost = mc.GitHubHost
 	c.githubInsecureHTTP = mc.GitHubInsecureHTTP
