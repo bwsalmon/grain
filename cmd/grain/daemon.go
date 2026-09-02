@@ -520,15 +520,15 @@ func run(ctx context.Context, cfg config) error {
 	// bwsalmon/kontur-managed VM per run, reached over
 	// SSH (pkg/orchestrator's own doc comment: "Sandboxing defaults to
 	// 'execute on the host,' deliberately, for now, with a real host
-	// adapter available as an opt in"). sandboxes is Deps.Sandboxes either
-	// way; konturSandboxes is kept as its concrete self alongside it
-	// purely for the one thing only that backend has -- ReapOrphans, in
-	// runDaemon -- and stays nil for a host-backed deployment, which is
-	// how that is skipped.
+	// adapter available as an opt in"). Either way the result is just
+	// Deps.Sandboxes: the one thing runDaemon wants beyond that
+	// interface -- the startup sweep for whatever a previous process
+	// left behind -- both backends now implement, so it asks for it by
+	// interface (orphanReaper) rather than by carrying a concrete
+	// KonturSandboxes alongside.
 	var sandboxes orchestrator.Sandboxes
-	var konturSandboxes *orchestrator.KonturSandboxes
 	if cfg.konturSandboxes {
-		konturSandboxes = orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		konturSandboxes := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 			StateDir:        cfg.konturStateDir,
 			CreateArgs:      cfg.konturCreateArgs,
 			NetMode:         cfg.konturNet,
@@ -594,7 +594,7 @@ func run(ctx context.Context, cfg config) error {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			if err := runDaemon(ctx, cfg, store, sandboxes, konturSandboxes, transcriptDir); err != nil {
+			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir); err != nil {
 				// reconcilerDown is what turns this log line into
 				// something GET /api/config (and, through it, the UI
 				// itself) can also see -- bwsalmon/agents#576: before
@@ -622,12 +622,25 @@ func run(ctx context.Context, cfg config) error {
 		return nil
 	}
 
-	return runDaemon(ctx, cfg, store, sandboxes, konturSandboxes, transcriptDir)
+	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir)
+}
+
+// orphanReaper is the startup sweep both sandbox backends implement:
+// destroy whatever sandboxes a previous process of this deployment left
+// behind (orchestrator.KonturSandboxes.ReapOrphans deletes VMs,
+// orchestrator.HostSandboxes.ReapOrphans removes directories) and say
+// how many. Declared here, where it is consumed, rather than in
+// pkg/orchestrator: nothing in the orchestrator itself calls it -- a
+// sweep is only ever correct at startup, before any run is live -- so it
+// is this binary's requirement of a backend, not part of the Sandboxes
+// contract RunCycle works through.
+type orphanReaper interface {
+	ReapOrphans(ctx context.Context) (int, error)
 }
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
 // and reconcile tasks: the git proxy, the per-dispatch agent framework
-// factory (agentFrameworks), orphaned-run and orphaned-VM recovery, and
+// factory (agentFrameworks), orphaned-run and orphaned-sandbox recovery, and
 // RunCycle's own reconcile loop. Sandbox tokens and git credentials are
 // not among them any more:
 // both are per run now, minted and configured as each run's sandbox is
@@ -640,7 +653,7 @@ func run(ctx context.Context, cfg config) error {
 // take the UI server run() already started down with it
 // (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
 // reconcile itself does; a non-nil error means it never got that far.
-func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, konturSandboxes *orchestrator.KonturSandboxes, transcriptDir string) (err error) {
+func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
@@ -705,18 +718,24 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	}
 
 	// The sandbox-side half of that same recovery, and at the same moment
-	// for the same reason: a run's VM is deleted when the run ends, so at
-	// startup -- before this process has dispatched anything -- any VM
-	// under this deployment's prefix belongs to a process that died before
-	// it could do that. Logged rather than fatal: a VM that cannot be
-	// reaped costs some memory on the host, where refusing to start costs
-	// the whole deployment, and every run this process dispatches builds
-	// its own VM regardless.
-	if konturSandboxes != nil {
-		if reaped, err := konturSandboxes.ReapOrphans(ctx); err != nil {
-			log.Printf("grain daemon: reaping orphaned kontur VMs: %v", err)
+	// for the same reason: a run's sandbox is destroyed when the run ends,
+	// so at startup -- before this process has dispatched anything --
+	// every sandbox this deployment owns belongs to a process that died
+	// before it could do that. A kontur VM left running costs memory; a
+	// host directory left behind costs a whole checkout of disk, and
+	// enough of them fill the filesystem the next run's own sandbox has
+	// to be created on (orchestrator.HostSandboxes.ReapOrphans). Both
+	// backends implement the sweep, so this reaps whichever one is
+	// configured.
+	//
+	// Logged rather than fatal: what cannot be reaped costs resources,
+	// where refusing to start costs the whole deployment, and every run
+	// this process dispatches builds its own sandbox regardless.
+	if reaper, ok := sandboxes.(orphanReaper); ok {
+		if reaped, err := reaper.ReapOrphans(ctx); err != nil {
+			log.Printf("grain daemon: reaping orphaned sandboxes: %v", err)
 		} else if reaped > 0 {
-			log.Printf("grain daemon: reaped %d kontur VM(s) left behind by a previous process", reaped)
+			log.Printf("grain daemon: reaped %d sandbox(es) left behind by a previous process", reaped)
 		}
 	}
 

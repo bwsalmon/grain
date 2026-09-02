@@ -1509,6 +1509,20 @@ seed_github_app_credential() {
 setup_sandbox_dir() {
   log "Laying out $GRAIN_SANDBOX_DIR"
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_SANDBOX_DIR"
+  # An override that puts the sandbox root inside $GRAIN_DATA_DIR undoes
+  # the split this function exists for, and does it quietly: a run's
+  # checkout then shares a filesystem with the SQLite store and the
+  # secrets database, so the disk a few large checkouts fill is the disk
+  # everything else needs to write to. Warned rather than refused --
+  # a deployment with one big disk and nothing else to point at is a
+  # legitimate choice, and it is only worth knowing what it costs.
+  case "$GRAIN_SANDBOX_DIR/" in
+    "$GRAIN_DATA_DIR"/*)
+      log "WARNING: $GRAIN_SANDBOX_DIR is inside \$GRAIN_DATA_DIR ($GRAIN_DATA_DIR), so a task's checkout"
+      log "WARNING: shares a filesystem with the store and secrets; a full sandbox disk takes those down"
+      log "WARNING: with it. Point GRAIN_SANDBOX_DIR at a disk of its own (default: /var/lib/grain-sandbox)."
+      ;;
+  esac
 }
 
 setup_data_dir() {

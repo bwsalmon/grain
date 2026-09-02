@@ -33,10 +33,12 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
@@ -357,6 +359,19 @@ func (h *HostSandboxes) Acquire(ctx context.Context, name string, shape Shape) (
 		return nil, fmt.Errorf("orchestrator: clearing sandbox directory %q: %w", root, err)
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
+		// A full filesystem is the one failure here that says nothing
+		// about this run and everything about the deployment: every
+		// task fails identically at setup until somebody reclaims
+		// space, so the error a task's own timeline shows is the only
+		// place an operator is likely to read about it. Say where the
+		// space went and what recovers it, rather than leaving them
+		// "no space left on device" against a path.
+		if errors.Is(err, syscall.ENOSPC) {
+			return nil, fmt.Errorf("orchestrator: creating sandbox directory %q: the filesystem holding %q is full "+
+				"(it holds one checkout per run); restarting the daemon reaps the directories runs killed mid-flight "+
+				"left behind (HostSandboxes.ReapOrphans), and a disk that is full of live runs needs to grow: %w",
+				root, h.baseDir, err)
+		}
 		return nil, fmt.Errorf("orchestrator: creating sandbox directory %q: %w", root, err)
 	}
 	sb := &hostSandbox{owner: h, name: name, root: root}
@@ -364,6 +379,70 @@ func (h *HostSandboxes) Acquire(ctx context.Context, name string, shape Shape) (
 	h.live[name] = sb
 	h.mu.Unlock()
 	return sb, nil
+}
+
+// ReapOrphans removes every directory under baseDir that this process is
+// not itself holding, and reports how many it removed.
+//
+// The host-directory half of KonturSandboxes.ReapOrphans, and here for
+// the same reason: a directory is created for a run and removed with it
+// (Acquire and Release above), so one still on disk while nothing holds
+// it belongs to a process that died before its Release could run. Being
+// killed mid-run is not exotic for this daemon --
+// grain-daemon.service stops its container with `docker stop --time 30`
+// while a run's own unwinding is allowed minutes (cmd/grain's
+// shutdownDrain), so an upgrade or a restart that lands on a run in
+// flight leaves that run behind by design.
+//
+// What it leaves behind is a whole checkout of the task's repository,
+// plus whatever the agent downloaded into it, and until now nothing ever
+// removed one: a deployment that restarts often enough accumulates one
+// per killed run until the filesystem holding baseDir is full -- at
+// which point every later Acquire fails at mkdir with ENOSPC and no task
+// can run at all. Reaping at startup is what makes that a restart rather
+// than a permanently wedged deployment.
+//
+// Everything under baseDir is fair game because baseDir is this type's
+// alone -- -sandbox-dir's own flag doc calls it "the root directory
+// HostSandboxes creates one working directory per run under" -- and
+// because the live check above is what keeps a running deployment's own
+// sandboxes out of it, should a caller ever run this off startup.
+//
+// A removal that fails is joined onto the others rather than ending the
+// sweep: the directory that cannot be removed is exactly the one worth
+// naming, and it is no reason to leave the rest of the disk spent.
+func (h *HostSandboxes) ReapOrphans(ctx context.Context) (int, error) {
+	entries, err := os.ReadDir(h.baseDir)
+	if err != nil {
+		// Nothing to reap from a directory that does not exist yet --
+		// the ordinary state of a deployment's first start, and not
+		// something to report as a failure of the sweep.
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("orchestrator: listing sandbox directories to reap under %q: %w", h.baseDir, err)
+	}
+	h.mu.Lock()
+	live := make(map[string]bool, len(h.live))
+	for name := range h.live {
+		live[name] = true
+	}
+	h.mu.Unlock()
+
+	var reaped int
+	var errs []error
+	for _, entry := range entries {
+		if live[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(h.baseDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, fmt.Errorf("removing orphaned sandbox directory %q: %w", path, err))
+			continue
+		}
+		reaped++
+	}
+	return reaped, errors.Join(errs...)
 }
 
 // hostSandbox is one run's directory.
