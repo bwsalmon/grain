@@ -237,7 +237,8 @@ type CreateScheduleRequest struct {
 // schedule's own NextRunAt instead of a task's state.
 //
 // A template-backed schedule (req.TemplateID set) needs no Title or Repo
-// of its own: templateContent below reads them off the template instead,
+// of its own: scheduleContentFromTemplate below reads them off the
+// template instead,
 // the same fields fireScheduledTask itself re-reads from the template on
 // every firing rather than trusting whatever this call snapshots.
 func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) (Schedule, error) {

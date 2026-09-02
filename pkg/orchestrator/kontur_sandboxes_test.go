@@ -544,17 +544,17 @@ func splitNonEmptyLines(s string) []string {
 	return lines
 }
 
-// writeFakeDockerExecBackend installs a shell script named "docker" on
-// PATH for the cfg.DockerExec path: it answers `docker exec` by running
-// execBody, answers kontur.DockerContainerStatus's own
+// writeFakeDocker installs a shell script named "docker" on PATH for the
+// docker-exec transport: it answers `docker exec` by running execBody,
+// answers kontur.DockerContainerStatus's own
 // "docker inspect -f {{.State.Status}}" with status, and *fails* every
-// other inspect -- notably DockerPodIP's own (its format string mentions
-// NetworkSettings).
+// other inspect -- notably any asking for NetworkSettings, which is how a
+// container address lookup is spelled.
 //
-// That last part is the point: under DockerExec nothing should ever look
-// a VM's container address up, so a test whose fake cannot answer that
-// lookup proves the lookup never happened rather than merely asserting
-// its absence from a log. The same goes for the guest's sshd -- these
+// That last part is the point: nothing should ever look a VM's container
+// address up, so a test whose fake cannot answer that lookup proves the
+// lookup never happened rather than merely asserting its absence from a
+// log. The same goes for the guest's sshd -- these
 // tests deliberately never listenTCP, since there is no port for anything
 // out here to dial.
 func writeFakeDocker(t *testing.T, argvLog, status, execBody string) {
@@ -735,10 +735,10 @@ func TestKonturSandboxesDockerExecRunsToolCallsThroughTheVMContainer(t *testing.
 	}
 }
 
-// The dead-VM-container fast fail waitForSSHPort gives the SSH path has
-// to hold for the docker-exec path too: exec'ing into a container that
-// has already exited will never start answering, so waiting out the full
-// ReadyTimeout finding that out is just a slower way to fail.
+// Acquire has to fast-fail on a dead VM container rather than wait:
+// exec'ing into a container that has already exited will never start
+// answering, so waiting out the full ReadyTimeout finding that out is
+// just a slower way to fail.
 func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30092)
@@ -771,7 +771,7 @@ func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testi
 // TestKonturSandboxesFlatModeOmitsAddressing covers the default mode:
 // docker assigns the guest's address, so no -ip is derived or passed --
 // konturctl rejects one outright under flat mode -- and no -port either,
-// since nothing forwards one. BaseIP/BasePort are set here anyway, as a
+// since nothing forwards one. IP/Port are set here anyway, as a
 // deployment's own systemd unit may still carry them from before the
 // switch, to confirm they are ignored rather than fatal.
 func TestKonturSandboxesFlatModeOmitsAddressing(t *testing.T) {

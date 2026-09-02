@@ -8,10 +8,11 @@ import (
 )
 
 // remoteRunner is the interface NewSSHSandboxTools' handlers need out of
-// SSHRunner -- kept separate from that concrete type so a test can supply
-// an in-process double instead of shelling out to a real ssh binary (see
-// ssh_tools_test.go); ssh_runner_test.go is what actually exercises
-// SSHRunner's own command construction.
+// their transport -- kept separate from the concrete type that supplies it
+// (DockerExecRunner) so a test can supply an in-process double instead of
+// exec'ing into a real container (ssh_tools_test.go's localExecRunner);
+// docker_exec_runner_test.go is what actually exercises DockerExecRunner's
+// own command construction.
 type remoteRunner interface {
 	Run(ctx context.Context, argv []string, stdin string) (stdout, stderr string, exitCode int)
 }

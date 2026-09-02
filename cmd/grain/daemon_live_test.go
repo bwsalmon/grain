@@ -296,7 +296,8 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	}
 
 	// openPullRequest runs synchronously right after a successful push,
-	// in the same tick (orchestrate.go's runDispatch), so give it a
+	// in the same tick (cycle.go's runOne, through finish.go's
+	// ProcessResult), so give it a
 	// short grace window rather than assuming it already happened the
 	// instant the branch appeared.
 	prOpened := false

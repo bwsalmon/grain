@@ -41,9 +41,10 @@ func cutFirstCandidate(t *testing.T, ctx context.Context, store *model.Store, re
 }
 
 // currentCandidate returns repo's release named "myfeat"'s own current
-// candidate -- store.CurrentCandidate's own repo-scoped convenience,
-// applied here since every test in this file only ever has the one
-// release in play.
+// candidate -- a repo-scoped convenience over
+// store.CurrentCandidateForRelease, which takes a release ID, applied
+// here since every test in this file only ever has the one release in
+// play.
 func currentCandidate(t *testing.T, ctx context.Context, store *model.Store, repo model.RepoRef) model.Candidate {
 	t.Helper()
 	release, err := store.GetRelease(ctx, repo, "myfeat")

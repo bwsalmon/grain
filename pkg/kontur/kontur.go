@@ -152,8 +152,8 @@ func dockerInspect(ctx context.Context, format, name string) (string, error) {
 
 // DockerContainerStatus returns the docker State.Status (e.g. "running",
 // "exited", "created", "dead") of vmName's own VM container under
-// BackendDocker -- kontur.PodName(vmName), not the "-netns" holder
-// DockerPodIP resolves. "konturctl vm create" under this backend starts
+// BackendDocker -- kontur.PodName(vmName), not the "-netns" holder that
+// merely owns the network namespace. "konturctl vm create" under this backend starts
 // that container with a plain "docker run -d" (bwsalmon/kontur's own
 // internal/dockervm), which -- like any "docker run -d" -- reports
 // success the moment the container starts, not once whatever it execs

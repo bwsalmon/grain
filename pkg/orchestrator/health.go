@@ -30,9 +30,9 @@ type SandboxHealth struct {
 	Sandbox string
 	// Backend names which Sandboxes implementation produced this entry --
 	// "host" for HostSandboxes, "kontur" for KonturSandboxes -- since a
-	// deployment only ever runs one of the two (run()'s own doc comment:
-	// "Exactly one of hostSandboxes/konturSandboxes is non-nil"), but the
-	// pane showing this has no other way to know which.
+	// deployment only ever runs one of the two (`grain daemon`'s own
+	// -kontur-sandboxes flag picks between them), but the pane showing
+	// this has no other way to know which.
 	Backend string
 	// Name is the sandbox's own identity within Backend -- the directory
 	// on disk, or the kontur VM name.

@@ -199,7 +199,7 @@ func withStore(t *testing.T, dir string, fn func(*model.Store, context.Context))
 // scriptedFramework turns a scripted step sequence into the factory
 // orchestrator.Deps.Framework wants, one fresh antigravity.NewForTest per
 // dispatch -- duplicated from pkg/orchestrator's own live_test.go helper
-// of the same name for the same reason openCLIStore is. The framework
+// of the same name for the same reason withStore is. The framework
 // name a real deployment would switch on is ignored: there is one
 // scripted framework here, and every task in these tests takes it.
 func scriptedFramework(script []antigravity.Step) func(context.Context, string) (agent.Framework, error) {

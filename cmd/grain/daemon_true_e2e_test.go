@@ -286,7 +286,8 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	}
 
 	// openPullRequest runs synchronously right after a successful push,
-	// in the same tick (orchestrate.go's runDispatch); poll the task back
+	// in the same tick (cycle.go's runOne, through finish.go's
+	// ProcessResult); poll the task back
 	// through the REST API -- not sim directly -- for its PullRequest
 	// field to confirm both that a PR was opened against githubsim *and*
 	// that the daemon's own REST API surfaces it, closing the loop this

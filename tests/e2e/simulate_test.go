@@ -74,8 +74,8 @@ func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
 
 		// A user files an issue -- sometimes depending on one filed
 		// earlier, never later, so no cycle is constructible (the same
-		// discipline model/simulate_test.go's fileTask and loop_test.go's
-		// random DAG generation both use).
+		// discipline model/simulate_test.go's fileTask and its own
+		// TestModelInvariantsHoldUnderRandomComponentActions both use).
 		if len(order) < maxTasks && rng.Float64() < 0.6 {
 			id := fmt.Sprintf("iss%02d", len(order))
 			repo := repos[rng.IntN(len(repos))]
@@ -114,7 +114,8 @@ func TestMultipleUsersFilingIssuesSimulationEndToEnd(t *testing.T) {
 		// new dispatches and any still unresolved from an earlier one --
 		// resolve most of them now and leave the rest live, so slots
 		// really do stay occupied across a round boundary sometimes,
-		// exactly the case loop_test.go's own random test exercises
+		// exactly the case model/simulate_test.go's
+		// TestModelInvariantsHoldUnderRandomComponentActions exercises
 		// against the pure model.
 		for _, id := range order {
 			st := tasks[id]

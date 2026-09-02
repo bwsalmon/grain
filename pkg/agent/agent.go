@@ -4,8 +4,9 @@
 // -- there is no equivalent interface there to reuse. This is that
 // interface's first appearance. Both implementations today
 // (pkg/agent/antigravity, pkg/agent/claude) drive a real CLI as a
-// subprocess; cmd/grain/daemon.go's buildAgentFramework is what chooses
-// between them, from the deployment's own agent-framework setting.
+// subprocess; cmd/grain/daemon.go's agentFrameworks is what chooses
+// between them, per run, from the task's own agent-framework setting or
+// the deployment-wide default.
 package agent
 
 import (

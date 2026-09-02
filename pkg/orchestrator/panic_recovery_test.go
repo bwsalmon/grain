@@ -8,7 +8,7 @@
 // bwsalmon/agents#363 folded them into one process) rather than merely
 // failing the one thing that panicked. The two tests below each panic
 // somewhere RunCycle reaches and prove the process survives to report a
-// normal error instead -- and, following isolationTest's own pattern,
+// normal error instead -- and, following isolation_test.go's own pattern,
 // that unrelated work in the same cycle still lands.
 package orchestrator_test
 

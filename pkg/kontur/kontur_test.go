@@ -35,7 +35,7 @@ func TestPodName(t *testing.T) {
 }
 
 // writeFakeKonturctl installs a shell script named "konturctl" on PATH
-// (same technique as writeFakeCrictl above) -- the operator-facing binary
+// -- the operator-facing binary
 // vm's Create/Delete actually exec, not the container-facing "kontur"
 // binary bwsalmon/kontur's own cmd/kontur is a different program entirely
 // (see the package doc comment) -- which appends every invocation's argv

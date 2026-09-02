@@ -15,8 +15,7 @@ import (
 // temp directory prepended ahead of the real PATH, restored on cleanup)
 // that records each of its own arguments on its own line and then behaves
 // as the script body given -- enough to prove DockerExecRunner's own
-// invocation and exit-code handling without a docker daemon anywhere, the
-// same way writeFakeSSH (ssh_runner_test.go) does for SSHRunner.
+// invocation and exit-code handling without a docker daemon anywhere.
 func writeFakeDockerExec(t *testing.T, body string) (argsFile string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -49,9 +48,10 @@ func readArgs(t *testing.T, argsFile string) []string {
 }
 
 // The guest command has to arrive as a real argv after "kontur exec --",
-// not shell-quoted into one string the way SSHRunner has to quote it:
-// "kontur exec" does that join itself (see Run's own doc comment), so
-// quoting here too would double-quote every argument that needed it.
+// not shell-quoted into one string the way an `ssh host <command>` call
+// would have to quote it: "kontur exec" does that join itself (see Run's
+// own doc comment), so quoting here too would double-quote every argument
+// that needed it.
 func TestDockerExecRunnerPassesArgvThroughUnquoted(t *testing.T) {
 	argsFile := writeFakeDockerExec(t, "exit 0")
 
@@ -154,8 +154,8 @@ func TestDockerExecRunnerReportsTheGuestCommandsOwnExitCode(t *testing.T) {
 
 // The two failures that happen before the guest command ever runs both
 // exit 1, so only their stderr tells them apart from a guest command that
-// exited 1 on its own -- and both have to come back as -1, the same "the
-// command never ran" report SSHRunner gives for an unreachable sandbox.
+// exited 1 on its own -- and both have to come back as -1, the report Run
+// documents for a guest command that never ran at all.
 func TestDockerExecRunnerReportsMinusOneWhenTheGuestCommandNeverRan(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -190,8 +190,8 @@ func TestDockerExecRunnerReportsMinusOneWhenTheGuestCommandNeverRan(t *testing.T
 }
 
 // DockerExecRunner has to satisfy the same interface NewSSHSandboxTools
-// and ConfigureGitCredentialsOverSSH take, since standing in for
-// SSHRunner at exactly those two call sites is the whole point of it.
+// and ConfigureGitCredentialsOverSSH take, since serving those two call
+// sites is the whole point of it.
 func TestDockerExecRunnerIsARemoteRunner(t *testing.T) {
 	var _ remoteRunner = &DockerExecRunner{}
 }
