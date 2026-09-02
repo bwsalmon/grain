@@ -477,6 +477,19 @@ func requireSystemd(t *testing.T) {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		t.Skip("no systemctl, so there is no .path unit to install")
 	}
+	// Installing a unit needs root, and this package promises to skip
+	// rather than fail when it cannot do what a test asks. Without this a
+	// Linux laptop with docker and systemd but no passwordless sudo -- an
+	// ordinary machine, not a broken one -- would sit on a password prompt
+	// instead.
+	if os.Geteuid() != 0 {
+		if _, err := exec.LookPath("sudo"); err != nil {
+			t.Skip("not root and no sudo, so no unit can be installed")
+		}
+		if err := exec.Command("sudo", "-n", "true").Run(); err != nil {
+			t.Skip("not root and sudo needs a password, so no unit can be installed")
+		}
+	}
 	// The state word rather than the exit code: `is-system-running` exits 1
 	// for "degraded" -- an ordinary state for a CI runner, and still a
 	// systemd that runs units -- but also for "offline", which is what a
