@@ -126,6 +126,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskAgentFrameworkColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureConfigClaudeModelColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -509,6 +512,24 @@ func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `auto_merge_by_default` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigClaudeModelColumn adds grain_config.claude_model
+// (model.Config.ClaudeModel's own doc comment has the reasoning) to a
+// database created before this column existed, the same probe-then-ALTER
+// approach ensureConfigAgentFrameworkColumn already uses. It defaults to
+// '' -- a database upgraded across this migration reads back an empty
+// ClaudeModel until an operator sets one through Settings, the same gap
+// ui.UpdateSettings' own "required the first time settings are saved"
+// check exists to prevent for a deployment configured from scratch.
+func (s *Store) ensureConfigClaudeModelColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `claude_model` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `claude_model` TEXT NOT NULL DEFAULT ''")
 	return err
 }
 
@@ -2046,7 +2067,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`,`agent_framework`," +
-	"`approved_by_default`,`auto_merge_by_default`"
+	"`approved_by_default`,`auto_merge_by_default`,`claude_model`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -2055,7 +2076,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
-		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault); err != nil {
+		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -2075,11 +2096,11 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
-			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault)
+			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel)
 		return err
 	})
 }

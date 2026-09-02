@@ -19,8 +19,16 @@ import { useThemeMode } from "../ThemeModeContext.jsx";
 // diagnostics for a deployment gone wrong turned out to want quicker
 // reach than a tab buried inside Settings, unlike the configuration the
 // tabs below actually are.
+//
+// Agents groups every setting about how a run is driven -- which
+// framework, which model, its credentials and the deployment-wide
+// defaults a new task's dispatch starts from -- apart from General's own
+// unrelated deployment plumbing (poll interval, GitHub/GCP access, task
+// list display). Each tab is its own <form> with its own Save button, so
+// saving one never touches the other's fields.
 const TABS = [
   { id: "general", label: "General" },
+  { id: "agents", label: "Agents" },
   { id: "capabilities", label: "Capabilities" },
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
@@ -41,12 +49,23 @@ export default function SettingsOverlay({ onClose, showError }) {
     })();
   }, [showError]);
 
-  // submitSettings only puts a field in the request when it differs from
-  // what was last loaded, so an operator changing one field never
-  // overwrites the rest -- the same nil-means-unchanged contract
-  // UpdateSettingsRequest's pointer fields already give a PUT that
-  // leaves a key out entirely.
-  const submit = async (evt) => {
+  // Shared by both forms below: only ever called with the subset of
+  // fields that form owns, already diffed against what was last loaded
+  // (the same nil-means-unchanged contract UpdateSettingsRequest's
+  // pointer fields give a PUT that leaves a key out entirely), so saving
+  // one tab never overwrites the other's.
+  const saveSettings = async (payload) => {
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+      onClose();
+    } catch (err) {
+      // Same banner task creation's own validation errors surface
+      // through.
+      showError(err);
+    }
+  };
+
+  const submitGeneral = async (evt) => {
     evt.preventDefault();
     const form = evt.target;
     const payload = {};
@@ -58,15 +77,6 @@ export default function SettingsOverlay({ onClose, showError }) {
     if (maxConcurrentRaw !== "") {
       const maxConcurrent = parseInt(maxConcurrentRaw, 10);
       if (maxConcurrent !== (settings.maxConcurrent || 0)) payload.maxConcurrent = maxConcurrent;
-    }
-
-    const geminiModel = form.elements.geminiModel.value.trim();
-    if (geminiModel !== (settings.geminiModel || "")) payload.geminiModel = geminiModel;
-
-    const maxAgentTurnsRaw = form.elements.maxAgentTurns.value.trim();
-    if (maxAgentTurnsRaw !== "") {
-      const maxAgentTurns = parseInt(maxAgentTurnsRaw, 10);
-      if (maxAgentTurns !== (settings.maxAgentTurns || 0)) payload.maxAgentTurns = maxAgentTurns;
     }
 
     const githubHost = form.elements.githubHost.value.trim();
@@ -84,6 +94,32 @@ export default function SettingsOverlay({ onClose, showError }) {
     const newestFirst = form.elements.newestFirst.checked;
     if (newestFirst !== !!settings.newestFirst) payload.newestFirst = newestFirst;
 
+    const showClosedByDefault = form.elements.showClosedByDefault.checked;
+    if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
+
+    await saveSettings(payload);
+  };
+
+  const submitAgents = async (evt) => {
+    evt.preventDefault();
+    const form = evt.target;
+    const payload = {};
+
+    const agentFramework = form.elements.agentFramework.value;
+    if (agentFramework !== (settings.agentFramework || "antigravity")) payload.agentFramework = agentFramework;
+
+    const geminiModel = form.elements.geminiModel.value.trim();
+    if (geminiModel !== (settings.geminiModel || "")) payload.geminiModel = geminiModel;
+
+    const claudeModel = form.elements.claudeModel.value.trim();
+    if (claudeModel !== (settings.claudeModel || "")) payload.claudeModel = claudeModel;
+
+    const maxAgentTurnsRaw = form.elements.maxAgentTurns.value.trim();
+    if (maxAgentTurnsRaw !== "") {
+      const maxAgentTurns = parseInt(maxAgentTurnsRaw, 10);
+      if (maxAgentTurns !== (settings.maxAgentTurns || 0)) payload.maxAgentTurns = maxAgentTurns;
+    }
+
     // An empty box is a deliberate "go back to the default" (bwsalmon/agents#610),
     // not "leave it alone" -- unlike every other field on this form, this one
     // pre-fills that default in faintly, so an operator who never touched it
@@ -96,26 +132,13 @@ export default function SettingsOverlay({ onClose, showError }) {
     const sandboxMemoryMb = sandboxMemoryMbRaw === "" ? 0 : parseInt(sandboxMemoryMbRaw, 10);
     if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
 
-    const showClosedByDefault = form.elements.showClosedByDefault.checked;
-    if (showClosedByDefault !== !!settings.showClosedByDefault) payload.showClosedByDefault = showClosedByDefault;
-
     const approvedByDefault = form.elements.approvedByDefault.checked;
     if (approvedByDefault !== !!settings.approvedByDefault) payload.approvedByDefault = approvedByDefault;
 
     const autoMergeByDefault = form.elements.autoMergeByDefault.checked;
     if (autoMergeByDefault !== !!settings.autoMergeByDefault) payload.autoMergeByDefault = autoMergeByDefault;
 
-    const agentFramework = form.elements.agentFramework.value;
-    if (agentFramework !== (settings.agentFramework || "antigravity")) payload.agentFramework = agentFramework;
-
-    try {
-      await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
-      onClose();
-    } catch (err) {
-      // Same banner task creation's own validation errors surface
-      // through.
-      showError(err);
-    }
+    await saveSettings(payload);
   };
 
   if (settings === null) return null;
@@ -144,26 +167,13 @@ export default function SettingsOverlay({ onClose, showError }) {
           </RadioGroup>
           {!settings.configured && (
             <Alert severity="info" sx={{ mb: 2 }}>
-              Not configured yet -- nothing has been saved for this deployment. Poll interval, max concurrent, Gemini
-              model and GitHub host are required the first time.
+              Not configured yet -- nothing has been saved for this deployment. Poll interval, max concurrent and
+              GitHub host here, and Gemini model and Claude model on the Agents tab, are required the first time.
             </Alert>
           )}
-          <form onSubmit={submit}>
+          <form onSubmit={submitGeneral}>
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
-            <Typography variant="subtitle2" sx={{ mt: 2 }}>Agent frameworks</Typography>
-            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
-              <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
-              <FormControlLabel value="claude" control={<Radio />} label="Claude" />
-            </RadioGroup>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Which agent drives a run by default &mdash; the Antigravity CLI (agy) or the Claude CLI, each run as a
-              subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
-              Advanced options), so both frameworks want a credential below.
-            </Typography>
-            <AgentKeysSection settings={settings} showError={showError} />
-            <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
             <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />
             <FormControlLabel
               control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
@@ -185,13 +195,60 @@ export default function SettingsOverlay({ onClose, showError }) {
               )}
               sx={{ display: "flex", mt: 1 }}
             />
+            <FormControlLabel
+              control={<Checkbox name="showClosedByDefault" defaultChecked={!!settings.showClosedByDefault} />}
+              label={(
+                <>
+                  Show closed tasks by default
+                  <span className="hint">
+                    off (default): a task list's own "Show closed tasks" checkbox starts unchecked, hiding closed
+                    tasks until turned on. on: it starts checked instead, showing them from the start.
+                  </span>
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
+
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              Target repos are managed from the Repos pane now, not here.
+            </Typography>
+
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button type="submit" variant="contained">Save</Button>
+            </Stack>
+          </form>
+        </>
+      )}
+      {tab === "agents" && (
+        <>
+          {!settings.configured && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Gemini model and Claude model here, and poll interval, max concurrent and GitHub host on the General
+              tab, are required the first time settings are saved.
+            </Alert>
+          )}
+          <form onSubmit={submitAgents}>
+            <Typography variant="subtitle2">Agent frameworks</Typography>
+            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
+              <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
+              <FormControlLabel value="claude" control={<Radio />} label="Claude" />
+            </RadioGroup>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Which agent drives a run by default &mdash; the Antigravity CLI (agy) or the Claude CLI, each run as a
+              subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
+              Advanced options), so both frameworks want a credential below.
+            </Typography>
+            <AgentKeysSection settings={settings} showError={showError} />
+            <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
             {/* bwsalmon/agents#610: an unset override (0, stored) is left blank here
                 rather than shown as a literal 0 -- 0 vCPUs/0 MiB is not what a
                 sandbox actually gets. The shape it does get, kontur's own default,
                 sits in the box as a placeholder instead, so it reads as the faint,
                 inherited value it is rather than something deliberately chosen.
                 Clearing a real override back to blank is itself the way to return
-                to that default (submit()'s own sandboxCpusRaw/sandboxMemoryMbRaw
+                to that default (submitAgents's own sandboxCpusRaw/sandboxMemoryMbRaw
                 handling). */}
             <TextField
               name="sandboxCpus"
@@ -214,19 +271,6 @@ export default function SettingsOverlay({ onClose, showError }) {
               placeholder={settings.sandboxMemoryMbDefault ? String(settings.sandboxMemoryMbDefault) : undefined}
               fullWidth
               margin="normal"
-            />
-            <FormControlLabel
-              control={<Checkbox name="showClosedByDefault" defaultChecked={!!settings.showClosedByDefault} />}
-              label={(
-                <>
-                  Show closed tasks by default
-                  <span className="hint">
-                    off (default): a task list's own "Show closed tasks" checkbox starts unchecked, hiding closed
-                    tasks until turned on. on: it starts checked instead, showing them from the start.
-                  </span>
-                </>
-              )}
-              sx={{ display: "flex", mt: 1 }}
             />
             <FormControlLabel
               control={<Checkbox name="approvedByDefault" defaultChecked={!!settings.approvedByDefault} />}
@@ -255,10 +299,6 @@ export default function SettingsOverlay({ onClose, showError }) {
               )}
               sx={{ display: "flex", mt: 1 }}
             />
-
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-              Target repos are managed from the Repos pane now, not here.
-            </Typography>
 
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
               <Button type="submit" variant="contained">Save</Button>

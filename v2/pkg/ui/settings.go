@@ -29,6 +29,7 @@ type Settings struct {
 	PollInterval           string `json:"pollInterval"`
 	MaxConcurrent          int    `json:"maxConcurrent"`
 	GeminiModel            string `json:"geminiModel"`
+	ClaudeModel            string `json:"claudeModel"`
 	MaxAgentTurns          int    `json:"maxAgentTurns"`
 	GitHubHost             string `json:"githubHost"`
 	GitHubInsecureHTTP     bool   `json:"githubInsecureHttp"`
@@ -139,6 +140,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		PollInterval:                  cfg.PollInterval.String(),
 		MaxConcurrent:                 cfg.MaxConcurrent,
 		GeminiModel:                   cfg.GeminiModel,
+		ClaudeModel:                   cfg.ClaudeModel,
 		MaxAgentTurns:                 cfg.MaxAgentTurns,
 		GitHubHost:                    cfg.GitHubHost,
 		GitHubInsecureHTTP:            cfg.GitHubInsecureHTTP,
@@ -224,6 +226,7 @@ type UpdateSettingsRequest struct {
 	PollInterval           *string   `json:"pollInterval"`
 	MaxConcurrent          *int      `json:"maxConcurrent"`
 	GeminiModel            *string   `json:"geminiModel"`
+	ClaudeModel            *string   `json:"claudeModel"`
 	MaxAgentTurns          *int      `json:"maxAgentTurns"`
 	GitHubHost             *string   `json:"githubHost"`
 	GitHubInsecureHTTP     *bool     `json:"githubInsecureHttp"`
@@ -244,12 +247,12 @@ type UpdateSettingsRequest struct {
 // wholesale.
 //
 // The first time settings are ever saved, PollInterval, MaxConcurrent,
-// GeminiModel and GitHubHost are required: leaving one of them out would
-// otherwise write a zero value that reads back later as a deliberate
-// setting rather than as "never configured" -- Configured already tells
-// a caller that much on the way in, so writing a config that could not
-// be told apart from one somebody actually chose is worse than asking
-// for the field up front. MaxAgentTurns, GitHubInsecureHTTP,
+// GeminiModel, ClaudeModel and GitHubHost are required: leaving one of
+// them out would otherwise write a zero value that reads back later as a
+// deliberate setting rather than as "never configured" -- Configured
+// already tells a caller that much on the way in, so writing a config
+// that could not be told apart from one somebody actually chose is worse
+// than asking for the field up front. MaxAgentTurns, GitHubInsecureHTTP,
 // GCPProject, GCPServiceAccountEmail and TargetRepos have real,
 // meaningful zero values (the framework's own default, HTTPS, "no GCP
 // capability configured", and "unrestricted" respectively -- daemon.go's
@@ -286,6 +289,12 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			return Settings{}, validationErrorf("geminiModel cannot be empty")
 		}
 		cfg.GeminiModel = *req.GeminiModel
+	}
+	if req.ClaudeModel != nil {
+		if strings.TrimSpace(*req.ClaudeModel) == "" {
+			return Settings{}, validationErrorf("claudeModel cannot be empty")
+		}
+		cfg.ClaudeModel = *req.ClaudeModel
 	}
 	if req.MaxAgentTurns != nil {
 		if *req.MaxAgentTurns < 0 {
@@ -375,6 +384,9 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		}
 		if strings.TrimSpace(cfg.GeminiModel) == "" {
 			return Settings{}, validationErrorf("geminiModel is required the first time settings are saved")
+		}
+		if strings.TrimSpace(cfg.ClaudeModel) == "" {
+			return Settings{}, validationErrorf("claudeModel is required the first time settings are saved")
 		}
 		if strings.TrimSpace(cfg.GitHubHost) == "" {
 			return Settings{}, validationErrorf("githubHost is required the first time settings are saved")
