@@ -328,7 +328,7 @@ function QualificationSummary({ run, onApprove }) {
         {run.tasks.map((t) => (
           <li key={t.taskId}>
             <span
-              className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
+              className={`badge badge-icon badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
               title={STATE_LABELS[t.state] || t.state}
             >
               <StateDot state={t.state} title={STATE_LABELS[t.state] || t.state} />
