@@ -8,6 +8,10 @@
 # deployment, which is why TFVARS_FILE has no default -- a wrong one
 # would apply another deployment's configuration to this one's state.
 #
+# Creates the Terraform state bucket if it is missing, so a deployment's
+# first apply does not fail on a bucket nobody has made yet -- see "the
+# state bucket" below for what it will and will not create.
+#
 # Called from a config repo's deploy workflow, out of the grain checkout
 # it makes -- so a config repo never encodes grain's layout and cannot
 # drift from it. See terraform/gcp/README.md.
@@ -39,6 +43,79 @@ done
 # names grain's internal layout and a move here breaks nothing downstream.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root/terraform/gcp"
+
+# --- the state bucket --------------------------------------------------
+#
+# `terraform init` against a bucket that does not exist fails with
+# "Failed to get existing workspaces: querying Cloud Storage failed:
+# storage: bucket doesn't exist", which says nothing about what to do.
+# A first deploy of a new deployment hits it every time: bootstrap-gcp.sh
+# creates the bucket, and until someone has run it there is nothing to
+# init against.
+#
+# So create it here when it is missing, with the same three protections
+# bootstrap-gcp.sh applies -- uniform bucket-level access, versioning,
+# public access prevention. Versioning is the one that matters most: it
+# is what makes a corrupted or truncated state file recoverable, and a
+# bucket created without it cannot be fixed retroactively for the state
+# it has already lost.
+#
+# This needs storage.buckets.create on the project, which the deployer
+# holds via roles/storage.admin (bootstrap-gcp.sh grants it). Its other
+# storage grants are scoped to the bucket itself and so cannot help
+# create one.
+#
+# Only ever creates the name this deployment's own config already
+# derives -- see the guard below on why it will not create an arbitrary
+# one.
+bucket="$(sed -n 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$config_dir/backend.hcl" | head -1)"
+[ -n "$bucket" ] || {
+  echo "::error::$config_dir/backend.hcl names no bucket" >&2
+  exit 1
+}
+
+if ! gcloud storage buckets describe "gs://$bucket" >/dev/null 2>&1; then
+  # A typo in backend.hcl would otherwise be answered by creating a
+  # *fresh, empty* bucket: init would succeed against no state at all and
+  # the apply would set about building a second copy of the deployment
+  # alongside the real one. Before this step existed, the same typo
+  # simply failed init and someone noticed.
+  #
+  # So only the name bootstrap-gcp.sh itself would have chosen is created
+  # here -- "<project_id>-<name_prefix>-tfstate", both read from this
+  # deployment's own tfvars. Anything else is a name a human chose
+  # deliberately (bootstrap's own --bucket), and creating it is theirs to
+  # do rather than a typo this script should act on.
+  tfvar() {
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+      "$config_dir/$tfvars_file" | head -1
+  }
+  project="$(tfvar project_id)"
+  region="$(tfvar region)"
+  prefix="$(tfvar name_prefix)"
+  : "${region:=us-central1}"
+  : "${prefix:=grain}"
+
+  expected="${project}-${prefix}-tfstate"
+  if [ -z "$project" ] || [ "$bucket" != "$expected" ]; then
+    echo "::error::state bucket gs://$bucket does not exist, and is not the name this config implies (gs://$expected)." >&2
+    echo "Refusing to create it: a mistyped bucket name would otherwise start a deployment over against empty state." >&2
+    echo "Create it deliberately, from a grain checkout:" >&2
+    echo "  ./terraform/gcp/bootstrap-gcp.sh --project ${project:-PROJECT} --prefix ${prefix} --bucket $bucket" >&2
+    exit 1
+  fi
+
+  echo "--- creating the state bucket gs://$bucket (it does not exist yet)"
+  gcloud storage buckets create "gs://$bucket" \
+    --project="$project" --location="$region" --uniform-bucket-level-access
+fi
+
+# Outside the `if`, deliberately: a bucket created by an older run of
+# this script, or by hand without them, converges on the protections
+# rather than keeping whatever it was made with. Idempotent.
+gcloud storage buckets update "gs://$bucket" \
+  --versioning --public-access-prevention >/dev/null
 
 echo "--- terraform init"
 terraform init -input=false -backend-config="$config_dir/backend.hcl"

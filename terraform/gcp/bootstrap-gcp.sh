@@ -124,6 +124,22 @@ say "Granting the deployer what Terraform needs"
 # (iap.tf) and the roles/iap.httpsResourceAccessor bindings apply at
 # all. resourcemanager.projectIamAdmin is what lets iam.tf's own
 # google_project_iam_member resources grant roles in the first place.
+#
+# storage.admin is project-level, unlike the two bucket-scoped storage
+# roles below, and is there for exactly one thing: ci/terraform-apply.sh
+# creating the state bucket when it does not exist yet. A bucket-scoped
+# grant cannot do that -- it is made *on* a bucket, so the bucket has to
+# exist for the grant to be made at all, which is the chicken-and-egg
+# that made a first deploy fail on "storage: bucket doesn't exist".
+#
+# It is a real widening: the deployer can read, write and delete every
+# bucket in the project, not just its own state. Two things bound what
+# that costs. It is CI's identity, reachable only through the workload
+# identity provider below, whose attribute condition pins it to one
+# repository. And the deployer already holds
+# resourcemanager.projectIamAdmin above, so it could always have granted
+# itself this and more -- naming the role here makes an existing
+# capability legible rather than adding a new one.
 for role in \
   roles/compute.admin \
   roles/dns.admin \
@@ -132,7 +148,8 @@ for role in \
   roles/iap.admin \
   roles/resourcemanager.projectIamAdmin \
   roles/serviceusage.serviceUsageAdmin \
-  roles/serviceusage.serviceUsageConsumer
+  roles/serviceusage.serviceUsageConsumer \
+  roles/storage.admin
 do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${DEPLOYER_EMAIL}" --role="$role" \
@@ -140,6 +157,10 @@ do
   echo "  $role"
 done
 
+# Still granted on the bucket itself as well as project-wide above: the
+# bucket-scoped pair is what a deployer needs in the ordinary case, and
+# keeping them means revoking storage.admin later leaves a working
+# deployment rather than one that cannot read its own state.
 for role in roles/storage.objectAdmin roles/storage.legacyBucketReader; do
   gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --project="$PROJECT_ID" \
     --member="serviceAccount:${DEPLOYER_EMAIL}" --role="$role" >/dev/null
