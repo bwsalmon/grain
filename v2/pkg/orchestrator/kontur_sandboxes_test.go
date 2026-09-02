@@ -102,6 +102,85 @@ func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T
 	}
 }
 
+// The capability half of the same story: a kontur VM's only route for a
+// gcp-key/gemini-key/github-sandbox placement is its own runner, and
+// before konturSandbox implemented orchestrator.SandboxPlacer there was
+// no route at all -- a task granting any of them failed during
+// preparation on every -kontur-sandboxes deployment. The mode matters as
+// much as the content: what lands here is a live service-account key.
+func TestKonturSandboxesPlaceFileWritesACredentialToTheVMOverSSH(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30081)
+	home := t.TempDir()
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
+
+	k := orchestrator.NewKonturSandboxes(konturTestConfig(stateDir))
+	sb, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The interface assertion is the point: runOne finds this route by
+	// type-asserting the Sandbox it was handed, so a konturSandbox that
+	// stopped satisfying it would silently go back to placing nothing.
+	placer, ok := sb.(orchestrator.SandboxPlacer)
+	if !ok {
+		t.Fatal("a kontur sandbox does not implement orchestrator.SandboxPlacer, so its placements have nowhere to land")
+	}
+
+	// An absolute path under the fake guest's own home, standing in for
+	// gcpkey.SandboxKeyPath's /home/debian/.gcp-service-account.json --
+	// the real one would write outside this test's temp directories.
+	target := filepath.Join(home, ".gcp-service-account.json")
+	const key = `{"type":"service_account","project_id":"grain"}`
+	if err := placer.PlaceFile(context.Background(), target, key, "600"); err != nil {
+		t.Fatalf("PlaceFile: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the key never reached the VM: %v", err)
+	}
+	if string(got) != key {
+		t.Errorf("key on the VM = %q, want %q", got, key)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("key mode on the VM = %04o, want 0600 -- \"readable only by you\" is what the prompt tells the agent", perm)
+	}
+}
+
+// A failure to place has to name the VM, not just the path: an operator
+// reading a failed run's reason is looking at one slot out of a fleet.
+func TestKonturSandboxesPlaceFileReportsFailureAgainstTheVMName(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30082)
+	home := t.TempDir()
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, home)
+
+	k := orchestrator.NewKonturSandboxes(konturTestConfig(stateDir))
+	sb, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placer := sb.(orchestrator.SandboxPlacer)
+
+	occupied := filepath.Join(home, "occupied")
+	if err := os.Mkdir(occupied, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = placer.PlaceFile(context.Background(), occupied, "material", "600")
+	if err == nil {
+		t.Fatal("PlaceFile reported success for a placement that cannot have landed")
+	}
+	if vm := sb.(interface{ VMName() string }).VMName(); !strings.Contains(err.Error(), vm) {
+		t.Errorf("error = %v, want it to name the VM %q", err, vm)
+	}
+}
+
 func TestKonturSandboxesAcquireCreatesAVMAndReleaseDeletesIt(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")

@@ -77,7 +77,7 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 	cfg := orchestrator.Config{GitRemoteBase: w.proxyURL}
 	fw := antigravity.NewForTest(antigravity.Steps(preClonedPushScript(branch, task.ID)...))
 	result, err := orchestrator.RunDispatch(w.ctx, w.store, fw, cfg, *full, d,
-		mcp.NewSandboxTools(root), root, "", baseTime.Add(time.Minute))
+		mcp.NewSandboxTools(root), root, "", nil, baseTime.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestDispatchDoesNotCloneForATaskClosedBeforeItRan(t *testing.T) {
 	cfg := orchestrator.Config{GitRemoteBase: w.proxyURL}
 	fw := antigravity.NewForTest(antigravity.Steps(preClonedPushScript(model.BranchName(task.ID), task.ID)...))
 	if _, err := orchestrator.RunDispatch(w.ctx, w.store, fw, cfg, *full, dispatches[0],
-		mcp.NewSandboxTools(root), root, "", baseTime.Add(time.Minute)); err == nil {
+		mcp.NewSandboxTools(root), root, "", nil, baseTime.Add(time.Minute)); err == nil {
 		t.Fatal("RunDispatch reported success for a task closed before its run started")
 	}
 	if _, err := os.Stat(filepath.Join(root, orchestrator.CheckoutDir)); !os.IsNotExist(err) {

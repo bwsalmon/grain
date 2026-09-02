@@ -113,6 +113,32 @@ type rootedSandbox interface {
 	Root() (string, error)
 }
 
+// SandboxPlacer is implemented by a Sandbox that can write a file into
+// its own filesystem over whatever transport it already has --
+// konturSandbox's own, over the same runner every tool call and
+// ConfigureGitCredentials use. It is rootedSandbox's counterpart for
+// capability placements (orchestrator.applyPlacements): a rooted sandbox
+// is written into with plain os.WriteFile under its directory, and a
+// sandbox that has no directory on this host needs a route of its own or
+// its placements have nowhere to land at all (bwsalmon/agents#643 left
+// exactly that gap: every deployment running -kontur-sandboxes failed
+// any task granting gcp-key/gemini-key/github-sandbox during
+// preparation, before the agent's first turn).
+//
+// Exported, unlike rootedSandbox and vmNamedSandbox, because RunDispatch
+// takes one: a Sandboxes implementation outside this package can supply
+// the route, and a Sandbox that wraps another (e2e's own) must forward
+// this method explicitly for it to be seen -- an embedded interface value
+// carries no methods outside its own method set.
+type SandboxPlacer interface {
+	// PlaceFile writes content to path -- always the absolute path the
+	// placement means inside the sandbox -- with mode, an octal string
+	// (model.Placement.EffectiveMode's own shape). It creates path's
+	// parent directory, and must not widen mode at any point, since
+	// everything placed this way is credential material.
+	PlaceFile(ctx context.Context, path, content, mode string) error
+}
+
 // vmNamedSandbox is implemented by a Sandbox reachable only as a named
 // bwsalmon/kontur-managed VM rather than a local directory --
 // konturSandbox's own, and rootedSandbox's counterpart. It is what
