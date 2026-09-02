@@ -581,12 +581,12 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		t.Errorf("VM container env = %q, want it to carry %q -- `kontur exec` has no other way to know where the guest is", envOut, want)
 	}
 
-	// Unlike the SSH test above, this needs no retry loop around the
-	// first tool call. resolveEndpoint's readiness wait can only watch a
-	// TCP port start answering, which happens before the guest has
-	// finished booting to a usable sshd; waitForGuestExec's probe is a
-	// whole command *running in the guest*, so Acquire returning here
-	// already means the guest ran one. Asserting that directly, rather
+	// This needs no retry loop around the first tool call. A readiness
+	// wait that only watched a TCP port start answering -- what reaching
+	// the guest over a forwarded port used to do -- would clear before
+	// the guest had finished booting to a usable sshd; waitForGuestExec's
+	// probe is a whole command *running in the guest*, so Acquire
+	// returning here already means the guest ran one. Asserting that directly, rather
 	// than retrying and hiding it, is what would catch that guarantee
 	// regressing.
 	result := byName["run_command"].Handler(context.Background(), map[string]any{

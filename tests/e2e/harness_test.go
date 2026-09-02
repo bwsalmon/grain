@@ -27,7 +27,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,7 +53,6 @@ import (
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 
 func human(id string) model.Principal { return model.Principal{Kind: model.PrincipalHuman, ID: id} }
-func bot(id string) model.Principal   { return model.Principal{Kind: model.PrincipalAutomation, ID: id} }
 
 // world is everything one test needs standing in for the outside world: a
 // real store, a real "upstream" (the GitHub stand-in, one directory of
@@ -414,10 +412,6 @@ func mustWriteFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func basicAuth(token string) string {
-	return base64.StdEncoding.EncodeToString([]byte("x:" + token))
 }
 
 // newTestServer starts h on an httptest server, registers its own

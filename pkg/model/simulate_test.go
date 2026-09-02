@@ -338,8 +338,8 @@ func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 
 		// User update: a human or automation files a new task, sometimes
 		// depending on one filed earlier -- never later, so no cycle is
-		// constructible (the same discipline loop_test.go's random DAG
-		// generation uses).
+		// constructible (the same discipline tests/e2e/simulate_test.go's
+		// own random DAG generation uses).
 		if len(order) < maxTasks && rng.Float64() < 0.5 {
 			id := fmt.Sprintf("tk%02d", len(order))
 			fileTask(t, store, ctx, rng, world, &order, id)
@@ -605,7 +605,8 @@ func reapARandomLease(t *testing.T, store *model.Store, ctx context.Context, rng
 // checkModelInvariants is the property this test exists to guarantee,
 // checked after every round rather than once at the end so a failure
 // points at the round that broke it. Four things are asserted, none of
-// them duplicating loop_test.go's dispatch-ordering checks: the SQL view
+// them duplicating tests/e2e/simulate_test.go's dispatch-ordering
+// checks: the SQL view
 // and the pure Go derivation agree on every task's state; a task's
 // attempt count is exactly how many times it has been dispatched; every
 // live lease the store reports is one a component believes it still

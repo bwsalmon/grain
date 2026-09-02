@@ -27,8 +27,8 @@ import "strconv"
 // On types: enums are TEXT rather than a constrained type. Keeping the
 // vocabulary in task.go rather than the schema is what lets a new
 // LinkKind ship without a migration; the cost is that the database will
-// not reject an unknown value, which the Valid methods and schema_test.go
-// cover instead. Timestamps keep DATETIME rather than MySQL's DATETIME(6):
+// not reject an unknown value, which the Valid methods and their own
+// tests cover instead. Timestamps keep DATETIME rather than MySQL's DATETIME(6):
 // SQLite has no timestamp storage class of its own, and this is what
 // tells modernc.org/sqlite (the driver pkg/model/sqlite opens) to hand a
 // column back as a time.Time rather than the TEXT it stores under the
@@ -36,7 +36,7 @@ import "strconv"
 // otherwise unchanged from what they were against Dolt. Booleans are
 // INTEGER (0/1) -- SQLite has no separate boolean storage class either,
 // and database/sql converts either direction without help from this
-// package (pinned by schema_test.go).
+// package (pinned by pkg/model/sqlite's own store tests).
 
 // SchemaVersion is bumped whenever Tables or Views change in a way an
 // existing database cannot simply be re-created into. Open records this

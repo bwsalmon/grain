@@ -10,11 +10,10 @@ import (
 )
 
 // DockerExecRunner runs argv inside a kontur-managed VM's guest through
-// `docker exec <container> kontur exec` -- the same remoteRunner contract
-// SSHRunner satisfies (NewSSHSandboxTools and ConfigureGitCredentialsOverSSH
-// take either), reaching the guest from *inside* its own VM container
-// rather than over a TCP connection to netshim's externally forwarded
-// port.
+// `docker exec <container> kontur exec` -- the remoteRunner contract
+// NewSSHSandboxTools and ConfigureGitCredentialsOverSSH take, reaching the
+// guest from *inside* its own VM container rather than over a TCP
+// connection to netshim's externally forwarded port.
 //
 // bwsalmon/kontur already ships the guest-side half of this: its
 // internal/guestexec ("kontur exec", one of the modes cmd/kontur
@@ -31,16 +30,18 @@ import (
 // container has to be able to reach the guest, so none of the machinery
 // that makes such a connection possible has to exist or be discovered:
 // netshim's inbound DNAT rules, the external port kontur assigns per VM
-// (kontur.Port, read out of kontur's state file), and the container
-// address that port answers on (kontur.DockerPodIP, a `docker inspect`
-// away) are all only there to serve a caller connecting from outside.
+// (read out of kontur's state file), and the container address that port
+// answers on (a `docker inspect` away) are all only there to serve a
+// caller connecting from outside -- which is why pkg/kontur carries none
+// of the three any more.
 //
-// Auth is unchanged from SSHRunner's: the guest's sshd, the same account,
-// and the same keypair a deployment already baked into its guest image
-// (scripts/setup.sh's ensure_kontur_ssh_key, whose public half
-// scripts/kontur/guest-setup.sh installs as the "debian" account's only
-// authorized_keys entry). Only the transport differs -- which is why User
-// here is the same value KonturConfig.SSHUser carries for SSHRunner.
+// Auth is still the guest's own sshd -- "kontur exec" SSHes the last hop
+// -- with the same account and the same keypair a deployment already baked
+// into its guest image (scripts/setup.sh's ensure_kontur_ssh_key, whose
+// public half scripts/kontur/guest-setup.sh installs as the "debian"
+// account's only authorized_keys entry). Only how that hop is reached
+// differs, which is why User here is the value KonturConfig.SSHUser
+// carries.
 type DockerExecRunner struct {
 	// Container is the docker container to exec into: a VM's own
 	// container, not the "-netns" holder that merely owns the network
@@ -82,17 +83,16 @@ type DockerExecRunner struct {
 }
 
 // Run executes argv inside the guest, piping stdin to it verbatim if
-// non-empty, and satisfies the same remoteRunner contract SSHRunner.Run
-// does.
+// non-empty, and is what satisfies the remoteRunner contract.
 //
-// Unlike SSHRunner.Run, argv is passed through as a real argv rather than
-// shell-quoted into one string first: "kontur exec --" takes its trailing
+// Unlike an `ssh host <command>` call, argv is passed through as a real
+// argv rather than shell-quoted into one string first: "kontur exec --" takes its trailing
 // arguments as a slice and does that join itself (guestexec.Run, which
 // shellJoins into the single command string SSH's exec request actually
 // carries). Quoting here as well would double-quote every argument.
 //
-// exitCode follows SSHRunner's convention: the guest command's own status
-// when it ran, and -1 when it never did. `docker exec` propagates the
+// exitCode follows remoteRunner's convention: the guest command's own
+// status when it ran, and -1 when it never did. `docker exec` propagates the
 // exit status of the process it started, and "kontur exec" exits with the
 // guest command's own (cmd/kontur's runGuestSession ends in os.Exit(code)),
 // so a real remote status arrives here intact. A failure *before* the
@@ -127,10 +127,10 @@ func (r *DockerExecRunner) Run(ctx context.Context, argv []string, stdin string)
 
 // execFailedBeforeGuest reports whether stderr looks like it came from
 // something that failed before the guest command ever ran, rather than
-// from the guest command itself -- the distinction SSHRunner gets for free
-// from ssh's own reserved exit status but `docker exec` cannot provide,
-// since it reports the exit status of whatever it started and both
-// failures below exit 1.
+// from the guest command itself -- the distinction ssh's own reserved exit
+// status would give for free but `docker exec` cannot provide, since it
+// reports the exit status of whatever it started and both failures below
+// exit 1.
 //
 // Both are recognized by a prefix on the *first* line of stderr:
 //
@@ -145,9 +145,8 @@ func (r *DockerExecRunner) Run(ctx context.Context, argv []string, stdin string)
 // A guest command's own stderr is the only other thing on this stream,
 // and would have to open with one of those two prefixes on its first line
 // to be misread. The cost of that misreading is a -1 where a 1 belonged:
-// the same "the command did not run" report SSHRunner already gives for
-// an unreachable sandbox, which is the safer of the two directions to err
-// in.
+// the same "the command did not run" report an unreachable sandbox
+// already gets, which is the safer of the two directions to err in.
 func execFailedBeforeGuest(stderr string) bool {
 	line := stderr
 	if i := strings.IndexByte(line, '\n'); i >= 0 {

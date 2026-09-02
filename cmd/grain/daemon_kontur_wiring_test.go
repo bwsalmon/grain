@@ -24,8 +24,8 @@ package main
 // It fakes `konturctl` (the operator-facing binary Create/Delete actually
 // exec -- not the distinct, container-facing "kontur" binary bwsalmon/
 // kontur's own cmd/kontur is, per pkg/kontur's package doc comment),
-// `crictl` and `ssh` on PATH (the same style kontur_sandboxes_test.go's
-// own writeFakeKontur/writeFakeCrictl use, plus an ssh double), so it runs
+// and `docker` on PATH (the same style kontur_sandboxes_test.go's own
+// writeFakeKontur/writeFakeDocker use), so it runs
 // fast and needs neither a real kontur VM nor a real GitHub/Gemini
 // endpoint: the dispatch this drives will fail once it tries to reach
 // GitHub, long after `konturctl vm create` has already been invoked --
@@ -168,7 +168,7 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 	cfg := config{
 		dataDir: dataDir, maxConcurrent: 1, pollInterval: time.Hour,
 		geminiAPIKeyFile: geminiKeyFile,
-		// agent/antigravity runs a real binary, so buildAgentFramework
+		// agent/antigravity runs a real binary, so agentFrameworks
 		// resolves one before anything dispatches -- unlike the
 		// in-process Gemini runtime it replaced, which needed only the
 		// key file above. This test never lets a run get as far as

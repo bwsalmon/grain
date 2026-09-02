@@ -76,7 +76,7 @@ func New(dir string) *Store {
 		// New has always been infallible -- every caller in this repo
 		// constructs a Store at startup, before a context or an error
 		// path to report through exists yet (cmd/grain's daemon.go,
-		// ui.go and secrets.go all call it inline while building a
+		// secrets.go and controller.go all call it inline while building a
 		// config struct). init deliberately does the same: the schema is
 		// two small tables, and a directory New can create but cannot
 		// then open into a working database is the same class of

@@ -36,11 +36,6 @@ type RealForwarder struct {
 	Client *http.Client
 }
 
-// NewRealForwarder returns a forwarder aimed at host over HTTPS.
-func NewRealForwarder(host string) *RealForwarder {
-	return &RealForwarder{Host: host, UseTLS: true}
-}
-
 func (f *RealForwarder) Forward(method, path, query string, headers map[string]string, body []byte, token *string) (UpstreamResponse, error) {
 	scheme := "https"
 	if !f.UseTLS {

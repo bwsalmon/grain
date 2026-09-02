@@ -2,9 +2,9 @@ package orchestrator_test
 
 // bwsalmon/agents#536: the sandbox health pane's own backend. These cover
 // HostSandboxes.Health directly and reuse kontur_sandboxes_test.go's own
-// writeFakeKontur/writeFakeCrictl/writeFakeSSH helpers -- the same real
-// *mcp.SSHRunner path Acquire and ConfigureGitCredentials already
-// exercise against a fake sshd, rather than a mock of KonturSandboxes
+// writeFakeKontur/writeFakeDockerGuest helpers -- the same real
+// *mcp.DockerExecRunner path Acquire and ConfigureGitCredentials already
+// exercise against a fake docker, rather than a mock of KonturSandboxes
 // itself -- for KonturSandboxes.Health.
 
 import (
@@ -101,8 +101,8 @@ func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
 	if !h.Ready {
 		t.Error("Ready = false, want true")
 	}
-	// The fake ssh script (writeFakeSSH) really execs the given command
-	// locally, so this is genuinely this test process's own
+	// The fake docker script (writeFakeDockerGuest) really execs the given
+	// command locally, so this is genuinely this test process's own
 	// /proc/loadavg and /proc/meminfo, not a canned value.
 	if h.LoadAverage == "" {
 		t.Error("LoadAverage is empty, want a real /proc/loadavg reading")

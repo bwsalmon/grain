@@ -18,8 +18,8 @@ func (e *templateNotFoundError) Error() string { return "no task template " + e.
 
 // Template is a task template's JSON shape (bwsalmon/agents#516) --
 // Schedule's own content fields (Title/Description/Repo/Base/AutoMerge/
-// Reads/Capabilities), the subset a schedule's ScheduleForm already
-// collects, minus everything about firing on a cadence: a template is
+// Reads/Capabilities), the subset a schedule's ScheduleOverlay.jsx
+// already collects, minus everything about firing on a cadence: a template is
 // never itself something that fires, only something a schedule (or a
 // future caller) fires from.
 type Template struct {

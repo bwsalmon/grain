@@ -499,89 +499,6 @@ func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 	}
 }
 
-// writeFakeKonturTouchingMarkerOnCreate is writeFakeKontur plus one thing:
-// a successful "vm create" also touches marker, standing in for a docker
-// container actually coming up alongside konturctl's own state file --
-// the coupling writeFakeDockerDeadUntilMarker's fake docker watches for to
-// know a real recreate happened, not just that the state file changed.
-func writeFakeKonturTouchingMarkerOnCreate(t *testing.T, argvLog string, port int, marker string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake konturctl script is POSIX shell only")
-	}
-	dir := t.TempDir()
-	script := fmt.Sprintf(`#!/bin/sh
-echo "$*" >> %q
-if [ "$1" = "vm" ] && { [ "$2" = "create" ] || [ "$2" = "delete" ]; }; then
-  action="$2"
-  name="$3"
-  statedir=""
-  shift 3
-  while [ $# -gt 0 ]; do
-    if [ "$1" = "-state-dir" ]; then
-      statedir="$2"
-    fi
-    shift
-  done
-  if [ "$action" = "create" ]; then
-    echo "{\"port\": %d}" > "$statedir/$name.json"
-    touch %q
-  else
-    rm -f "$statedir/$name.json"
-  fi
-fi
-`, argvLog, port, marker)
-	path := filepath.Join(dir, "konturctl")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-// writeFakeDockerDeadUntilMarker installs a fake "docker" that answers
-// both `docker inspect -f {{.State.Status}}` and `docker exec` as if the
-// VM container has already exited -- inspect reports "exited", exec fails
-// the way docker actually does against a stopped container -- until
-// marker exists, standing in for the container a fresh
-// "konturctl vm create" would actually start. Once marker exists, both
-// answer as a healthy running container and guest would.
-func writeFakeDockerDeadUntilMarker(t *testing.T, argvLog, marker string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake docker script is POSIX shell only")
-	}
-	dir := t.TempDir()
-	script := fmt.Sprintf(`#!/bin/sh
-echo "$*" >> %q
-case "$1" in
-exec)
-  if [ ! -f %q ]; then
-    echo "Error response from daemon: Container is not running" >&2
-    exit 1
-  fi
-  exit 0
-  ;;
-inspect)
-  case "$*" in
-  *State.Status*)
-    if [ -f %q ]; then echo running; else echo exited; fi
-    ;;
-  *) echo "fake docker: unexpected inspect: $*" >&2; exit 1 ;;
-  esac
-  ;;
-*)
-  echo "fake docker: unexpected subcommand: $*" >&2
-  exit 1
-  ;;
-esac
-`, argvLog, marker, marker)
-	path := filepath.Join(dir, "docker")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 func TestKonturSandboxesVMNameForUsesPrefix(t *testing.T) {
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{})
 	got, err := k.VMNameFor("t1-1")
@@ -627,17 +544,17 @@ func splitNonEmptyLines(s string) []string {
 	return lines
 }
 
-// writeFakeDockerExecBackend installs a shell script named "docker" on
-// PATH for the cfg.DockerExec path: it answers `docker exec` by running
-// execBody, answers kontur.DockerContainerStatus's own
+// writeFakeDocker installs a shell script named "docker" on PATH for the
+// docker-exec transport: it answers `docker exec` by running execBody,
+// answers kontur.DockerContainerStatus's own
 // "docker inspect -f {{.State.Status}}" with status, and *fails* every
-// other inspect -- notably DockerPodIP's own (its format string mentions
-// NetworkSettings).
+// other inspect -- notably any asking for NetworkSettings, which is how a
+// container address lookup is spelled.
 //
-// That last part is the point: under DockerExec nothing should ever look
-// a VM's container address up, so a test whose fake cannot answer that
-// lookup proves the lookup never happened rather than merely asserting
-// its absence from a log. The same goes for the guest's sshd -- these
+// That last part is the point: nothing should ever look a VM's container
+// address up, so a test whose fake cannot answer that lookup proves the
+// lookup never happened rather than merely asserting its absence from a
+// log. The same goes for the guest's sshd -- these
 // tests deliberately never listenTCP, since there is no port for anything
 // out here to dial.
 func writeFakeDocker(t *testing.T, argvLog, status, execBody string) {
@@ -818,10 +735,10 @@ func TestKonturSandboxesDockerExecRunsToolCallsThroughTheVMContainer(t *testing.
 	}
 }
 
-// The dead-VM-container fast fail waitForSSHPort gives the SSH path has
-// to hold for the docker-exec path too: exec'ing into a container that
-// has already exited will never start answering, so waiting out the full
-// ReadyTimeout finding that out is just a slower way to fail.
+// Acquire has to fast-fail on a dead VM container rather than wait:
+// exec'ing into a container that has already exited will never start
+// answering, so waiting out the full ReadyTimeout finding that out is
+// just a slower way to fail.
 func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30092)
@@ -854,7 +771,7 @@ func TestKonturSandboxesDockerExecFastFailsWhenTheVMContainerExitsEarly(t *testi
 // TestKonturSandboxesFlatModeOmitsAddressing covers the default mode:
 // docker assigns the guest's address, so no -ip is derived or passed --
 // konturctl rejects one outright under flat mode -- and no -port either,
-// since nothing forwards one. BaseIP/BasePort are set here anyway, as a
+// since nothing forwards one. IP/Port are set here anyway, as a
 // deployment's own systemd unit may still carry them from before the
 // switch, to confirm they are ignored rather than fatal.
 func TestKonturSandboxesFlatModeOmitsAddressing(t *testing.T) {

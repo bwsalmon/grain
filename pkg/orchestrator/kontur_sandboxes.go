@@ -491,7 +491,7 @@ func (s *konturSandbox) Release(ctx context.Context) error {
 
 // sandboxRunner is the transport a sandbox's four tools run over:
 // the method set mcp.NewSSHSandboxTools and mcp.ConfigureGitCredentialsOverSSH
-// both take, satisfied by mcp.SSHRunner and mcp.DockerExecRunner alike.
+// both take, satisfied by mcp.DockerExecRunner.
 // Declared here rather than imported because mcp's own equivalent
 // (remoteRunner) is unexported -- deliberately, so that package's tests
 // can double it -- and runnerFor needs a name for what it returns.
@@ -514,13 +514,12 @@ func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRu
 	return k.execRunner(name), nil
 }
 
-// dockerExecRunner builds the docker-exec transport for name's VM. Its
+// execRunner builds the docker-exec transport for name's VM. Its
 // ConnectTimeout is left at guestexec's own default rather than tied to
 // cfg.readyTimeout: by the time a caller has a runner back, runnerFor has
 // already waited out the boot this config's timeouts describe, and what
 // is left for this to ride out is only the ordinary case of a guest that
-// blinks mid-task -- the same thing SSHRunner covers with its own fixed
-// ConnectTimeout=10 rather than anything derived from cfg.
+// blinks mid-task.
 func (k *KonturSandboxes) execRunner(name string) *mcp.DockerExecRunner {
 	return &mcp.DockerExecRunner{
 		Container: kontur.PodName(name),

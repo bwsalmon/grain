@@ -11,11 +11,12 @@ import (
 )
 
 // localExecRunner implements remoteRunner by running argv on this machine
-// instead of over SSH -- exactly the same coreutils (cat/dd/mkdir/bash)
-// ssh_tools.go's handlers send a real SSHRunner, just executed locally
-// against a temp directory standing in for "the remote host's
-// filesystem". SSHRunner's own command construction (flags, quoting,
-// stdin plumbing) is covered separately in ssh_runner_test.go; this is
+// instead of inside a sandbox guest -- exactly the same coreutils
+// (cat/dd/mkdir/bash) ssh_tools.go's handlers send a real
+// DockerExecRunner, just executed locally against a temp directory
+// standing in for "the remote host's filesystem". DockerExecRunner's own
+// command construction (flags, quoting, stdin plumbing) is covered
+// separately in docker_exec_runner_test.go; this is
 // what proves NewSSHSandboxTools sends the *right* remote commands to
 // implement run_command/read_file/edit_file/write_file, the same
 // coverage newTestClient's local NewSandboxTools gets in server_test.go.

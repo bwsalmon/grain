@@ -47,7 +47,7 @@ type Directives struct {
 // ones — matching v1's own "a maintainer can repair a task by replying
 // with a corrected directive" rule, applied here to a single body rather
 // than body-plus-trusted-replies, since this package does not read issue
-// comments at all yet (see poll.go). /reads is repeatable instead: each
+// comments at all yet. /reads is repeatable instead: each
 // line names one more repo to add to Task.Reads, never a replacement.
 func ParseDirectives(body string) (Directives, error) {
 	var d Directives
