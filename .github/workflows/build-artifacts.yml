@@ -296,6 +296,24 @@ jobs:
           GRAIN_TEST_IMAGE: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
         run: python -m pytest tests/test_v2_container_e2e.py -v
 
+      # tests/test_v2_installer_e2e.py runs v2/scripts/setup.sh itself,
+      # as root, against this runner: a real system user, real units in
+      # /etc/systemd/system, a real service. That is destructive, which
+      # is why it takes an explicit GRAIN_INSTALLER_E2E=1 and skips
+      # everywhere else -- and it is the point, because the failure it
+      # exists for (a deploy dying between pulling the image and writing
+      # the unit) is invisible to anything that only drives the image.
+      #
+      # Last, and separate from the suite above: it takes over
+      # /usr/local/bin/grain and the daemon unit for the length of the
+      # run, so nothing after it on this runner should expect either to
+      # be untouched.
+      - name: Run the installer e2e suite
+        env:
+          GRAIN_TEST_IMAGE: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
+          GRAIN_INSTALLER_E2E: "1"
+        run: python -m pytest tests/test_v2_installer_e2e.py -v
+
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
