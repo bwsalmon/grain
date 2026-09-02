@@ -230,6 +230,25 @@ func TestTheUpgradeButtonIsWiredToTheImagePath(t *testing.T) {
 	absent(t, setupCode(t), "-upgrade-install-path")
 }
 
+// -upgrade-src-dir looks like the pair of the flag above, and is not.
+//
+// pkg/upgrade ignores SrcDir once Image is set -- its own Config comment
+// says as much -- so reading only that, this flag is dead weight next to
+// the -upgrade-install-path deliberately absent above, and deleting it is
+// the obvious tidy-up. It is not: cmd/grain/daemon.go passes this same
+// flag to grantTools, which hands the checkout it names to the self-debug
+// capability and returns no tools at all when it is empty. Removing it
+// would cost the agent read_grain_source and list_grain_source with
+// nothing failing to say so.
+//
+// Pinned here because the two halves are in different packages and
+// neither one's tests can see the other: pkg/upgrade's say SrcDir is
+// unused, cmd/grain's never run against this script, and only the flag
+// list in setup.sh joins them up.
+func TestTheSourceCheckoutIsStillHandedToTheDaemonForSelfDebug(t *testing.T) {
+	contains(t, setupCode(t), `-upgrade-src-dir "$GRAIN_SRC_DIR"`)
+}
+
 func TestTheDockerfileCarriesEveryBinaryGrainShellsOutTo(t *testing.T) {
 	text := read(t, "Dockerfile")
 	for _, pkg := range []string{"git", "openssh-client", "ca-certificates", "systemd"} {

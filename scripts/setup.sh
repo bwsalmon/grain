@@ -1897,6 +1897,15 @@ write_systemd_units() {
     daemon_args+=(
       -upgrade-image "$GRAIN_IMAGE"
       -upgrade-image-ref-file "$IMAGE_REF_FILE"
+      # Not for upgrading -- pkg/upgrade ignores SrcDir entirely once
+      # Image is set (upgrade.go's own Config comment says so), and no
+      # -upgrade-install-path is passed for exactly that reason. It is
+      # here because cmd/grain/daemon.go reads this same flag for a
+      # second, unrelated purpose: grantTools hands the checkout it names
+      # to the self-debug capability, whose read_grain_source and
+      # list_grain_source tools are the agent's view of grain's own
+      # source. grantTools returns no tools at all when it is empty, so
+      # dropping this as dead weight costs the capability silently.
       -upgrade-src-dir "$GRAIN_SRC_DIR"
       -upgrade-restart-cmd touch -upgrade-restart-cmd "$CONTROL_DIR/restart"
     )
