@@ -1868,6 +1868,30 @@ build the service is running rather than a host copy that can drift from
 it. `setup.sh` uses the `grain` one itself, for `grain schema-version`
 and `grain secrets`.
 
+A kontur deployment runs *two* images, and only one of them is grain.
+The other is the sandbox container each task's VM runs inside
+(`packer/kontur/build-oci-image.sh`'s output, published as
+`kontur-sandbox`), and it used to be built on every host from that
+host's own checkout — which is precisely how a deployment could end up
+running grain from one commit and a sandbox from another. It is pulled
+now, and which one is not something a deployment is told: CI publishes a
+sandbox per commit, and the grain image built from that same commit
+carries its reference, stamped in at link time
+(`cmd/grain/sandboximage.go`, the Dockerfile's `SANDBOX_IMAGE` build
+arg). `grain sandbox-image` prints it; `setup.sh` pulls whatever it
+prints; and `pkg/upgrade`'s image path asks a *newly pulled* grain the
+same question and pulls its sandbox before cutting over, so the two
+halves move together or not at all. The stamp names the immutable
+`sha-` tag rather than a branch, which is what makes a rollback ask for
+its own older sandbox rather than whatever that branch points at today.
+
+The guest *disk* is the one thing a deployment still builds, and that is
+not an oversight: `packer/kontur/guest-setup.sh` bakes the deployment's
+own SSH public key into the image's `authorized_keys`, so a generically
+published disk would either carry a keypair everyone has or admit nobody
+at all. `kontur_image_bucket` still fetches one built centrally, for a
+fleet sharing a keypair.
+
 What stayed on the host, deliberately: the git checkout. It is no longer
 what grain is built from, but it is still where `setup.sh` itself comes
 from (and re-execs from, mid-run), where `packer/kontur`'s guest and OCI

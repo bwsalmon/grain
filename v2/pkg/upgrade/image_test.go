@@ -70,6 +70,130 @@ func TestUpgraderImagePullsHealthChecksRecordsAndRestarts(t *testing.T) {
 	waitForFile(t, restartMarker)
 }
 
+// TestUpgraderImagePullsTheSandboxImageTheNewBuildExpects covers the
+// second half of a kontur deployment's upgrade (bwsalmon/agents#645):
+// grain and the sandbox container each task's VM runs inside are built
+// from one commit, so upgrading one without the other would leave the
+// next dispatched task reaching for an image nothing fetched. The new
+// image is asked which sandbox it expects, and that is pulled before
+// anything cuts over.
+func TestUpgraderImagePullsTheSandboxImageTheNewBuildExpects(t *testing.T) {
+	dir := t.TempDir()
+	pulled := filepath.Join(dir, "pulled")
+	refFile := filepath.Join(dir, "image.env")
+
+	u := New(Config{
+		Image: &ImageConfig{
+			Repository: "ghcr.io/bwsalmon/grain/grain",
+			RefFile:    refFile,
+			// Appends each pull to one file, so the test reads back both
+			// pulls and the order they happened in.
+			PullCmd: []string{"sh", "-c", `printf '%s\n' "$*" >> ` + pulled + `; exit 0`, "sh"},
+			// Stands in for the image: `schema-version` (the health
+			// check) prints a version, `sandbox-image` prints the
+			// sandbox ref it was built against.
+			RunCmd: []string{"sh", "-c",
+				`case "$2" in sandbox-image) echo ghcr.io/bwsalmon/grain/kontur-sandbox:sha-abc1234;; *) echo 7;; esac`,
+				"sh"},
+			SandboxImageArgs: []string{"sandbox-image"},
+		},
+		HealthCheckArgs: []string{"schema-version"},
+		StatusFile:      filepath.Join(dir, "upgrade-status.json"),
+	})
+
+	if err := u.Start("main"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	status := waitForPhase(t, u, PhaseOK)
+
+	want := "ghcr.io/bwsalmon/grain/grain:main\nghcr.io/bwsalmon/grain/kontur-sandbox:sha-abc1234\n"
+	if got := readFile(t, pulled); got != want {
+		t.Errorf("pulled %q, want %q", got, want)
+	}
+	if !strings.Contains(status.Detail, "kontur-sandbox:sha-abc1234") {
+		t.Errorf("status detail = %q, want it to name the sandbox image too", status.Detail)
+	}
+}
+
+// TestUpgraderImageStopsWhenTheSandboxImageCannotBePulled: a sandbox
+// image that cannot be fetched leaves the deployment where it was, the
+// same as a failed health check. Cutting over anyway would produce a
+// deployment that serves its UI perfectly well and fails every task it
+// dispatches, which is a worse outcome than not upgrading.
+func TestUpgraderImageStopsWhenTheSandboxImageCannotBePulled(t *testing.T) {
+	dir := t.TempDir()
+	refFile := filepath.Join(dir, "image.env")
+	restartMarker := filepath.Join(dir, "restarted")
+
+	const previous = "GRAIN_IMAGE=ghcr.io/bwsalmon/grain/grain:main\n"
+	if err := os.WriteFile(refFile, []byte(previous), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	u := New(Config{
+		Image: &ImageConfig{
+			Repository: "ghcr.io/bwsalmon/grain/grain",
+			RefFile:    refFile,
+			// The grain image pulls; the sandbox image does not.
+			PullCmd: []string{"sh", "-c",
+				`case "$1" in *kontur-sandbox*) echo 'manifest unknown' >&2; exit 1;; esac`, "sh"},
+			RunCmd: []string{"sh", "-c",
+				`case "$2" in sandbox-image) echo ghcr.io/bwsalmon/grain/kontur-sandbox:sha-abc1234;; *) echo 7;; esac`,
+				"sh"},
+			SandboxImageArgs: []string{"sandbox-image"},
+		},
+		HealthCheckArgs: []string{"schema-version"},
+		RestartCmd:      []string{"sh", "-c", "touch " + restartMarker},
+		StatusFile:      filepath.Join(dir, "upgrade-status.json"),
+	})
+
+	if err := u.Start("feature"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	status := waitForPhase(t, u, PhaseFailed)
+	if !strings.Contains(status.Detail, "sandbox image") {
+		t.Errorf("status detail = %q, want it to name the sandbox image", status.Detail)
+	}
+	if got := readFile(t, refFile); got != previous {
+		t.Errorf("ref file = %q, want it untouched at %q", got, previous)
+	}
+	if _, err := os.Stat(restartMarker); err == nil {
+		t.Error("restart command ran despite the sandbox image never arriving")
+	}
+}
+
+// TestUpgraderImageToleratesAnImageWithNoSandboxAnswer: an older grain,
+// pulled by a rollback, predates the sandbox-image subcommand and answers
+// with a usage error rather than a ref. That is "nothing to pull", not a
+// reason to fail a rollback that is otherwise fine.
+func TestUpgraderImageToleratesAnImageWithNoSandboxAnswer(t *testing.T) {
+	dir := t.TempDir()
+	refFile := filepath.Join(dir, "image.env")
+
+	u := New(Config{
+		Image: &ImageConfig{
+			Repository: "ghcr.io/bwsalmon/grain/grain",
+			RefFile:    refFile,
+			PullCmd:    []string{"true"},
+			RunCmd: []string{"sh", "-c",
+				`case "$2" in sandbox-image) echo 'flag provided but not defined' >&2; exit 2;; *) echo 7;; esac`,
+				"sh"},
+			SandboxImageArgs: []string{"sandbox-image"},
+		},
+		HealthCheckArgs: []string{"schema-version"},
+		StatusFile:      filepath.Join(dir, "upgrade-status.json"),
+	})
+
+	if err := u.Start("v-old"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForPhase(t, u, PhaseOK)
+	if got, want := readFile(t, refFile),
+		"GRAIN_IMAGE=ghcr.io/bwsalmon/grain/grain:v-old\n"; got != want {
+		t.Errorf("ref file = %q, want %q", got, want)
+	}
+}
+
 // TestUpgraderImageLeavesRefFileAloneWhenHealthCheckFails is the
 // image path's answer to TestUpgraderRollsBackWhenHealthCheckFails: it
 // has no rollback because it never cuts over in the first place. A

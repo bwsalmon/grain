@@ -61,6 +61,24 @@ type ImageConfig struct {
 	// exactly the same subcommand the binary path's health check runs,
 	// against the image about to be cut over to.
 	RunCmd []string
+	// SandboxImageArgs, when non-empty, asks the newly pulled image
+	// which *sandbox* container it expects -- {"sandbox-image"} on a
+	// real deployment, cmd/grain/sandboximage.go's own subcommand -- and
+	// pulls that too, before anything cuts over.
+	//
+	// A kontur deployment runs two images from the same commit: grain,
+	// and the sandbox container each task's VM runs inside. Upgrading
+	// one without the other would leave a deployment whose next
+	// dispatched task reaches for an image nothing ever fetched, so the
+	// two move together or not at all -- a failure here stops the
+	// upgrade with the ref file untouched, exactly like a failed health
+	// check.
+	//
+	// Left nil by a deployment that dispatches into host directories:
+	// there is no sandbox container in that shape to keep in step, and
+	// pulling one it will never run would be a slow no-op with a real
+	// failure mode of its own.
+	SandboxImageArgs []string
 }
 
 // imageRefEnvKey is the variable name written into ImageConfig.RefFile,
@@ -139,6 +157,32 @@ func (u *Upgrader) healthCheckImage(ctx context.Context, ref string) error {
 		return fmt.Errorf("%s: %w: %s", strings.Join(argv, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// sandboxImage asks a pulled image which sandbox container it expects,
+// by running the subcommand SandboxImageArgs names inside it. An image
+// that prints nothing is treated as having no sandbox to keep in step,
+// not as an error: an older grain, pulled by a rollback, predates the
+// subcommand and answers with a usage error on stderr rather than a ref
+// -- which is exactly the "nothing to pull" case, and not worth failing
+// an otherwise good rollback over.
+func (u *Upgrader) sandboxImage(ctx context.Context, ref string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, imageHealthCheckTimeout)
+	defer cancel()
+	argv := u.cfg.Image.RunCmd
+	if len(argv) == 0 {
+		argv = []string{"docker", "run", "--rm"}
+	}
+	argv = append(append([]string{}, argv...), ref)
+	argv = append(argv, u.cfg.Image.SandboxImageArgs...)
+	cmd := newCommand(ctx, "", argv[0], argv[1:]...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", nil
+	}
+	// One line, whatever else it printed: the subcommand prints exactly
+	// the ref, and a stray trailing newline is not part of it.
+	return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0]), nil
 }
 
 // writeImageRef points the deployment at ref. Atomic for the same reason

@@ -37,6 +37,15 @@ def setup_text() -> str:
     return SETUP.read_text()
 
 
+def job_body(workflow: str, job: str) -> str:
+    """One job out of the workflow, up to wherever the next one starts."""
+    jobs = ("binaries:", "sandbox-container:", "grain-container:")
+    start = workflow.index("\n  " + job) + 1
+    ends = [workflow.index("\n  " + j) for j in jobs
+            if j != job and workflow.index("\n  " + j) > start]
+    return workflow[start:min(ends)] if ends else workflow[start:]
+
+
 def setup_code() -> str:
     """setup.sh with its comment lines dropped.
 
@@ -210,14 +219,68 @@ def test_the_image_is_driven_before_it_is_published():
     assert "GRAIN_TEST_IMAGE" in job
 
 
-def test_the_two_jobs_publishing_a_shared_name_stay_on_main():
-    """A branch push must not move build-latest's assets or
-    kontur-sandbox:latest, both of which are single, shared names."""
+def test_the_shared_names_stay_on_main():
+    """A branch push must not move build-latest's assets or any `latest`.
+
+    Those are single names every deployment resolves. The binaries job is
+    main's outright; the two image jobs publish per-commit and per-branch
+    tags on every branch (a branch with no image is a branch nobody can
+    deploy or upgrade onto) and gate only the `latest` push.
+    """
     text = WORKFLOW.read_text()
-    for job in ("binaries:", "sandbox-container:"):
-        body = text[text.index(job):]
-        body = body[:body.index("steps:")]
-        assert "if: github.ref == 'refs/heads/main'" in body, f"{job} is not pinned to main"
+    binaries = text[text.index("binaries:"):]
+    assert "if: github.ref == 'refs/heads/main'" in binaries[:binaries.index("steps:")]
+
+    for job in ("sandbox-container:", "grain-container:"):
+        body = job_body(text, job)
+        latest = body.index(':latest"')
+        guard = body.rindex('if [ "$GITHUB_REF" = "refs/heads/main" ]', 0, latest)
+        assert guard < latest, f"{job} moves :latest without gating on main"
+
+
+def test_the_sandbox_reference_is_stamped_into_the_grain_image():
+    """A deployment is told nothing about its sandbox container.
+
+    The grain image carries the reference of the sandbox built from its
+    own commit, so `grain sandbox-image` answers it -- which is what
+    v2/scripts/setup.sh pulls and what an upgrade pulls alongside the new
+    grain. It has to be the immutable sha- tag, not the branch tag: a
+    rollback to an older grain must ask for its *own* older sandbox
+    rather than whatever that branch points at now.
+    """
+    text = WORKFLOW.read_text()
+    job = text[text.index("grain-container:"):]
+    assert 'sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${GITHUB_SHA:0:7}"' in job
+    assert 'SANDBOX_IMAGE="$sandbox"' in job
+    # And the sandbox has to exist before the grain naming it is pushed.
+    assert "needs: sandbox-container" in job[:job.index("steps:")]
+
+    # The Makefile turns it into a linker stamp, and the Dockerfile
+    # forwards the build arg into that.
+    makefile = (ROOT / "v2" / "Makefile").read_text()
+    assert "-X main.defaultSandboxImage=$(SANDBOX_IMAGE)" in makefile
+    assert "SANDBOX_IMAGE=${SANDBOX_IMAGE}" in DOCKERFILE.read_text()
+
+
+def test_the_sandbox_container_is_pulled_and_never_built():
+    """bwsalmon/agents#645: a deployment stopped building its sandbox.
+
+    It used to run packer/kontur/build-oci-image.sh on every host, which
+    is how a deployment could end up running grain from one commit and a
+    sandbox from another. What is left building locally is the guest
+    *disk*, which bakes in this deployment's own SSH key and so cannot be
+    published generically -- see ensure_kontur_images' own comment.
+    """
+    code = setup_code()
+    assert "ensure_kontur_oci_image" in code
+    assert "build-oci-image.sh" not in code, "the sandbox container is still built here"
+    assert "grain sandbox-image" in code, "nothing resolves the stamped-in default"
+    # Named explicitly to konturctl rather than relying on a local retag
+    # of its default image, which is what the local build used to do.
+    assert "-kontur-create-arg -kontur-image" in code
+    assert "localhost:5000/kontur:latest" not in code
+    # The guest disk build stays.
+    assert "build-guest.sh" in code
 
 
 def test_terraform_deploy_no_longer_installs_a_toolchain():

@@ -1478,6 +1478,14 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 			Image: &upgrade.ImageConfig{
 				Repository: cfg.upgradeImage,
 				RefFile:    cfg.upgradeImageRefFile,
+				// Only for a deployment that actually runs sandbox
+				// containers: it asks the newly pulled image which one
+				// it expects (sandboximage.go) and pulls that too, so
+				// the two halves of a kontur deployment upgrade
+				// together. A host-directory deployment has no second
+				// image to keep in step -- see SandboxImageArgs's own
+				// doc comment.
+				SandboxImageArgs: sandboxImageArgs(cfg.konturSandboxes),
 			},
 			HealthCheckArgs: []string{"schema-version"},
 			RestartCmd:      cfg.upgradeRestartCmd,
@@ -1517,6 +1525,17 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		}
 	}()
 	return httpSrv.Shutdown, nil
+}
+
+// sandboxImageArgs is upgrade.ImageConfig.SandboxImageArgs: the
+// subcommand an upgrade runs inside a newly pulled image to learn which
+// sandbox container to pull alongside it, or nil for a deployment with
+// no sandbox container to keep in step.
+func sandboxImageArgs(konturSandboxes bool) []string {
+	if !konturSandboxes {
+		return nil
+	}
+	return []string{"sandbox-image"}
 }
 
 // defaultRebootCmd is what the UI's reboot-host button runs absent a

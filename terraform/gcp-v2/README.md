@@ -420,25 +420,24 @@ bwsalmon/agents#531 had to:
    Never regenerate this keypair without also rebuilding the guest image
    -- both halves have to match, and nothing checks that they still do.
 
-2. **Build and push the OCI image** (the `kontur` binary and the pinned
-   cloud-hypervisor release, from `third_party/kontur`'s own Dockerfile --
-   a plain `docker build`/`docker push`, no root needed):
+2. **Nothing, for the sandbox container.** It is pulled, and which one
+   is not a decision this deployment makes: CI publishes a sandbox image
+   per commit, and the grain image a host runs carries the reference of
+   the one built from its own commit (`grain sandbox-image`), so the two
+   halves are always one commit's worth of each other -- including after
+   a rollback, which asks for its own older sandbox rather than whatever
+   is newest (bwsalmon/agents#645).
 
-   ```sh
-   export KONTUR_OCI_IMAGE="us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest"
-   ../../packer/kontur/build-oci-image.sh
-   ```
+   `kontur_oci_image` overrides that with a reference of your own -- a
+   mirror, a private copy, or a sandbox pinned apart from grain's. It is
+   pulled either way, and built on the host in no case. (Pointing it at
+   an Artifact Registry repository in this project works; create the
+   repository yourself first.)
 
-   (Create the Artifact Registry repository yourself first, and
-   authenticate docker to it -- e.g. `gcloud auth configure-docker
-   <region>-docker.pkg.dev` -- this script does neither for you.) Set
-   `kontur_oci_image` to the same reference.
-
-`kontur_image_bucket` and `kontur_oci_image` are both-or-neither: set
-together, `ensure_kontur_images` fetches this bucket's `latest` alias and
-pulls this OCI image on every run instead of building either itself; left
-at their empty defaults (the common case now), it builds both locally
-instead, as described above.
+The two variables are independent, and each is optional on its own:
+`kontur_oci_image` names the sandbox *container*, `kontur_image_bucket`
+fetches a pre-built guest *disk*. Left at their empty defaults -- the
+common case -- the container is pulled and the disk is built here.
 
 Set `enable_kontur_sandboxes = false` to keep a deployment on
 host-directory sandboxing indefinitely -- nothing above is required then,

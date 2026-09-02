@@ -104,7 +104,13 @@ COPY . .
 # --build-arg BUILDVCS=false instead of failing on `go build`'s "error
 # obtaining VCS status" -- see the Makefile's own BUILDVCS comment.
 ARG BUILDVCS=auto
-RUN make -C v2 build BUILDVCS=${BUILDVCS}
+# SANDBOX_IMAGE stamps in the sandbox container this build goes with
+# (cmd/grain/sandboximage.go). Empty -- a bare `docker build` -- leaves
+# the source default, the tag CI keeps pointed at main; CI passes the
+# exact sha- tag of the sandbox image built from this same commit, so the
+# two halves of a kontur deployment can never be two different commits.
+ARG SANDBOX_IMAGE=
+RUN make -C v2 build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE}
 
 # konturctl only -- not `kontur` or `kontur-mem-agent`, which run inside
 # each sandbox VM's own container (the image

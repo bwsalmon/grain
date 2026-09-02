@@ -3,9 +3,11 @@
 # known-good build without having to check out the repo and run a
 # toolchain locally -- bwsalmon/agents#622, #645.
 #
-# Three of the four are built on main only, matching the three build
-# outputs packer/kontur/README.md already documents as "what a deployment
-# needs published":
+# Two of the four -- the binaries release and, inside its own job, the
+# kontur-sandbox `latest` tag -- are main's alone, since each publishes a
+# single shared name. The three artifacts themselves match what
+# packer/kontur/README.md already documents as "what a deployment needs
+# published":
 #   - the grain binary itself (v2/Makefile's `build`)
 #   - the kontur binaries (`kontur`, `konturctl`, `kontur-mem-agent`) that
 #     manage kontur-backed sandbox VMs
@@ -13,7 +15,10 @@
 #     (packer/kontur/build-oci-image.sh) a kontur-backed deployment runs
 #     to get those binaries and a pinned cloud-hypervisor release, built
 #     with no guest-specific customization -- see that script's own
-#     comment ("The image this produces is deliberately generic").
+#     comment ("The image this produces is deliberately generic"). Its
+#     per-commit tag is stamped into the grain image built from that same
+#     commit, which is how a deployment knows which sandbox goes with the
+#     grain it is running without being told (bwsalmon/agents#645).
 #
 # Deliberately not a fourth artifact here: the guest VM disk
 # (packer/kontur/build-guest.sh's disk.img/vmlinuz/initrd.img) is a
@@ -59,10 +64,12 @@
 # pull_request-vs-push warns against for a job that holds a credential.
 # A `push` event only ever fires for a branch in this repository, which
 # takes write access to create -- a fork's PR branch never triggers one --
-# so extending the image job to every branch does not widen who can make
-# a credentialed job run. The two jobs that publish a *shared* name
-# (build-latest's release assets, kontur-sandbox:latest) stay pinned to
-# main with an `if` of their own, so a branch push cannot move either.
+# so extending the image jobs to every branch does not widen who can make
+# a credentialed job run. The two *shared* names (build-latest's release
+# assets, kontur-sandbox:latest) stay main's: the first by an `if` on its
+# whole job, the second by a condition on the one step that moves it, so
+# a branch push publishes its own tags and moves nothing anyone else
+# resolves.
 name: build-artifacts
 
 on:
@@ -172,9 +179,6 @@ jobs:
 
   sandbox-container:
     name: sandbox container (kontur OCI image)
-    # main only, for the same reason as `binaries` above: this job moves
-    # kontur-sandbox:latest, which every kontur deployment resolves.
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -190,8 +194,16 @@ jobs:
       # their own registry would run (KONTUR_OCI_SKIP_PUSH unset here, so
       # it pushes); this just points KONTUR_OCI_IMAGE at GHCR instead of
       # a project's Artifact Registry. Tagged with the commit's short SHA
-      # first, then re-tagged `latest` below from the already-built local
-      # image, rather than building twice.
+      # first, then re-tagged below from the already-built local image,
+      # rather than building twice.
+      #
+      # Every branch, not main only, since bwsalmon/agents#645: the grain
+      # image built from this same commit has *this* reference stamped
+      # into it (grain-container below passes it as --build-arg
+      # SANDBOX_IMAGE), and a deployment running that grain resolves the
+      # sandbox by that exact tag. A sandbox published on main alone
+      # would leave every branch build naming an image that does not
+      # exist.
       - name: Build and push (commit tag)
         id: build
         run: |
@@ -201,15 +213,30 @@ jobs:
           KONTUR_OCI_IMAGE="$image" ./packer/kontur/build-oci-image.sh
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      - name: Tag and push :latest
+      # The branch tag, and -- on main alone -- `latest`. Same split, and
+      # the same reasoning, as grain-container's own three names: a
+      # shared name that every kontur deployment resolves is main's to
+      # move, and nobody else's.
+      - name: Tag and push
         run: |
           set -euo pipefail
-          latest="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:latest"
-          docker tag "${{ steps.build.outputs.image }}" "$latest"
-          docker push "$latest"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox"
+          branch_tag="${GITHUB_REF_NAME//\//-}"
+          docker tag "${{ steps.build.outputs.image }}" "${image}:${branch_tag}"
+          docker push "${image}:${branch_tag}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${{ steps.build.outputs.image }}" "${image}:latest"
+            docker push "${image}:latest"
+          fi
 
   grain-container:
     name: grain container
+    # The sandbox container this image will name has to exist before this
+    # one is published: `grain sandbox-image` out of the published image
+    # is what v2/scripts/setup.sh pulls and what an upgrade pulls
+    # alongside it, so publishing a grain that names a tag no job ever
+    # pushed would be publishing a deployment that cannot dispatch.
+    needs: sandbox-container
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -225,14 +252,23 @@ jobs:
       # same target a laptop runs (see that Makefile's own `image`
       # comment), so what CI publishes and what a developer builds come
       # from one copy of the build rules -- no marketplace build action.
+      #
+      # SANDBOX_IMAGE stamps the sandbox container built from this same
+      # commit into the binary (cmd/grain/sandboximage.go), which is what
+      # lets a deployment need no configuration for it at all -- and what
+      # makes a rollback to an older grain ask for its own older sandbox
+      # rather than today's. It names the immutable sha- tag, never the
+      # branch tag, for exactly that reason.
       - name: Build the image
         id: build
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
-          make -C v2 image IMAGE="${image}:sha-${GITHUB_SHA:0:7}"
+          sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${GITHUB_SHA:0:7}"
+          make -C v2 image IMAGE="${image}:sha-${GITHUB_SHA:0:7}" SANDBOX_IMAGE="$sandbox"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:

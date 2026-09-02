@@ -244,15 +244,29 @@ GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 # own section of the same name. GRAIN_KONTUR_ENABLE=1 (off by default here
 # -- terraform/gcp-v2's own enable_kontur_sandboxes variable is what
 # actually turns this on for that deployment shape) needs no manual
-# build-and-publish step first (bwsalmon/agents#531): with
-# GRAIN_KONTUR_IMAGE_BUCKET/
-# GRAIN_KONTUR_OCI_IMAGE left empty (the default), this script builds its
-# own guest image and OCI image, and generates its own SSH keypair for
-# the former if none is already provided or seeded. Set both of those two
-# together instead to fetch a guest/OCI image pair built and published
-# centrally, elsewhere, the way every deployment before bwsalmon/agents#531
-# required; GRAIN_KONTUR_SSH_KEY_FILE similarly overrides the generated
-# keypair with a specific one of an operator's own choosing.
+# build-and-publish step first (bwsalmon/agents#531), and needs nothing
+# configured for its sandbox container either (bwsalmon/agents#645).
+#
+# The two artifacts a kontur deployment runs are reached differently, and
+# ensure_kontur_images says why:
+#
+#   the sandbox container   always pulled. GRAIN_KONTUR_OCI_IMAGE
+#                           overrides which one; left empty (the default)
+#                           it is whatever `grain sandbox-image` reports,
+#                           the reference stamped into the grain image
+#                           this host runs at the time it was built --
+#                           so the two are always from one commit.
+#   the guest disk          fetched from GRAIN_KONTUR_IMAGE_BUCKET when
+#                           that names one, and otherwise built here,
+#                           with a generated SSH keypair baked into it if
+#                           none is provided or seeded. It cannot be
+#                           published generically, because that key is
+#                           per-deployment.
+#
+# GRAIN_KONTUR_SSH_KEY_FILE overrides the generated keypair with a
+# specific one of an operator's own choosing -- required alongside
+# GRAIN_KONTUR_IMAGE_BUCKET, whose guest disk already has some other
+# key baked in.
 GRAIN_KONTUR_ENABLE="${GRAIN_KONTUR_ENABLE:-0}"
 # Remembers what was actually asked for, since ensure_kontur_images/
 # ensure_kontur_kvm_access/seed_kontur_ssh_key overwrite GRAIN_KONTUR_ENABLE
@@ -261,6 +275,10 @@ GRAIN_KONTUR_ENABLE="${GRAIN_KONTUR_ENABLE:-0}"
 # requested but a prerequisite wasn't ready this run".
 GRAIN_KONTUR_REQUESTED="$GRAIN_KONTUR_ENABLE"
 GRAIN_KONTUR_IMAGE_BUCKET="${GRAIN_KONTUR_IMAGE_BUCKET:-}"
+# Empty resolves to the sandbox container this build of grain was built
+# against (ensure_kontur_oci_image, and cmd/grain/sandboximage.go for the
+# stamp itself). Set it to run a different one -- a mirror, a private
+# copy, or a sandbox image pinned apart from grain's own.
 GRAIN_KONTUR_OCI_IMAGE="${GRAIN_KONTUR_OCI_IMAGE:-}"
 GRAIN_KONTUR_IMAGES_HOSTPATH="${GRAIN_KONTUR_IMAGES_HOSTPATH:-/var/lib/vm-images}"
 # Filename the kontur SSH private key is staged under inside
@@ -439,27 +457,30 @@ Recognized variables:
 
   GRAIN_KONTUR_ENABLE        1 to dispatch onto real bwsalmon/kontur-managed
                              VMs over SSH (orchestrator.KonturSandboxes)
-                             instead of host directories (default: 0). Builds
-                             its own guest image and OCI image right here on
+                             instead of host directories (default: 0). Pulls
+                             the sandbox container this build of grain expects
+                             and, unless GRAIN_KONTUR_IMAGE_BUCKET names a
+                             pre-built one, builds its own guest disk here on
                              first use (ensure_kontur_images, below -- see
-                             packer/kontur/README.md for what that actually
-                             runs) unless GRAIN_KONTUR_IMAGE_BUCKET/
-                             GRAIN_KONTUR_OCI_IMAGE are both set, and needs
-                             /dev/kvm on this host (nested virtualization)
-                             either way. Left off (with a logged reason) if
-                             any prerequisite below is missing, rather than
-                             failing the whole run.
-  GRAIN_KONTUR_IMAGE_BUCKET  set together with GRAIN_KONTUR_OCI_IMAGE below to
-                             fetch a guest/OCI image pair someone already built
-                             and published centrally (packer/kontur/build-guest.sh's
-                             own KONTUR_IMAGE_BUCKET; this script fetches its
-                             "latest" alias) instead of building one locally.
-                             Leave both empty (the default) to build locally.
-  GRAIN_KONTUR_OCI_IMAGE     the other half of GRAIN_KONTUR_IMAGE_BUCKET above:
-                             full reference of a pre-built kontur OCI image
-                             (third_party/kontur's own Dockerfile), pulled and
-                             retagged to konturctl's own default image. Leave
-                             empty (the default) to build one locally instead.
+                             packer/kontur/README.md for what that runs).
+                             Needs /dev/kvm on this host (nested
+                             virtualization) either way. Left off (with a
+                             logged reason) if any prerequisite below is
+                             missing, rather than failing the whole run.
+  GRAIN_KONTUR_OCI_IMAGE     the sandbox container each task's VM runs inside.
+                             Empty (the default) is the one stamped into this
+                             grain build at build time -- `grain sandbox-image`
+                             -- so grain and its sandbox always come from one
+                             commit and nothing has to be configured. Set it to
+                             run a different one; it is pulled either way, and
+                             never built here.
+  GRAIN_KONTUR_IMAGE_BUCKET  fetch the guest DISK (not the container above)
+                             from a bucket someone already published one to
+                             (packer/kontur/build-guest.sh's own
+                             KONTUR_IMAGE_BUCKET; this script fetches its
+                             "latest" alias) instead of building one here.
+                             Needs GRAIN_KONTUR_SSH_KEY_FILE too: that disk
+                             has some specific key baked into it already.
   GRAIN_KONTUR_IMAGES_HOSTPATH  where the guest image (fetched, or built
                              locally and cached by a hash of what defines its
                              contents -- see kontur_image_tag) lands, bind-
@@ -603,7 +624,7 @@ sync_repo() {
   # /dev/null and falls back to the literal string "unknown", which
   # silently breaks the content-hash caching that tag exists for: a
   # packer/kontur edit or third_party/kontur vendor bump would stop
-  # changing the tag at all, so ensure_kontur_images_build
+  # changing the tag at all, so ensure_kontur_guest_build
   # would keep reusing whatever it built the first time, forever. The
   # same failure hits this function's own git calls below whenever the
   # checkout is owned by anyone but root. Exempting it here,
@@ -1039,11 +1060,11 @@ grant_docker_group() {
 # kontur_gcp_access_token fetches a short-lived OAuth2 access token for
 # this host's own attached service account from the metadata server --
 # enough to read the guest image out of GCS (gcs_fetch) and to
-# authenticate docker to Artifact Registry (ensure_kontur_images_fetch)
+# authenticate docker to Artifact Registry (ensure_kontur_guest_fetch)
 # without installing the whole gcloud SDK just for those two things.
 # iam.tf's own host_reads_kontur_images/host_reads_kontur_registry are
 # what make the token itself actually able to do either. Only used by
-# ensure_kontur_images_fetch -- the local build path needs no GCP
+# ensure_kontur_guest_fetch -- the local build path needs no GCP
 # credential of its own at all.
 kontur_gcp_access_token() {
   curl -fsS -H "Metadata-Flavor: Google" \
@@ -1134,18 +1155,23 @@ ensure_kontur_ssh_key() {
     fi
   fi
 
-  # A guest image built and published elsewhere (GRAIN_KONTUR_IMAGE_BUCKET/
-  # GRAIN_KONTUR_OCI_IMAGE both set -- ensure_kontur_images_fetch, not
-  # _build, is what this run will actually take) already has some specific
-  # public key baked into its authorized_keys. Generating a fresh one here
-  # would not match it -- every kontur VM would then fail to SSH in with
-  # no clue why, since nothing checks the two still agree (this file's own
-  # header on that, and push-secrets.sh's). Only safe to generate one when
-  # this run is about to build its own guest image right alongside it
-  # (ensure_kontur_images_build, below), which bakes in whatever key this
+  # A guest image built and published elsewhere (GRAIN_KONTUR_IMAGE_BUCKET
+  # set -- ensure_kontur_guest_fetch, not _build, is what this run will
+  # actually take) already has some specific public key baked into its
+  # authorized_keys. Generating a fresh one here would not match it --
+  # every kontur VM would then fail to SSH in with no clue why, since
+  # nothing checks the two still agree (this file's own header on that,
+  # and push-secrets.sh's). Only safe to generate one when this run is
+  # about to build its own guest image right alongside it
+  # (ensure_kontur_guest_build, below), which bakes in whatever key this
   # function hands it.
-  if [ -n "$GRAIN_KONTUR_IMAGE_BUCKET" ] || [ -n "$GRAIN_KONTUR_OCI_IMAGE" ]; then
-    log "GRAIN_KONTUR_ENABLE=1 but no kontur SSH key is available -- set GRAIN_KONTUR_SSH_KEY_FILE, or push-secrets.sh's own GRAIN_KONTUR_SSH_KEY, to the private half of whatever keypair the guest image at GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE already has baked in; leaving kontur sandboxing off this run"
+  #
+  # The bucket alone, not GRAIN_KONTUR_OCI_IMAGE too: the sandbox
+  # container carries no SSH key and is pulled either way now
+  # (bwsalmon/agents#645), so which one a deployment runs has nothing to
+  # say about whether a keypair can be generated here.
+  if [ -n "$GRAIN_KONTUR_IMAGE_BUCKET" ]; then
+    log "GRAIN_KONTUR_ENABLE=1 but no kontur SSH key is available -- set GRAIN_KONTUR_SSH_KEY_FILE, or push-secrets.sh's own GRAIN_KONTUR_SSH_KEY, to the private half of whatever keypair the guest image at GRAIN_KONTUR_IMAGE_BUCKET already has baked in; leaving kontur sandboxing off this run"
     GRAIN_KONTUR_ENABLE=0
     return
   fi
@@ -1159,8 +1185,8 @@ ensure_kontur_ssh_key() {
   rm -rf "$tmp"
 }
 
-# kontur_image_tag names the guest/OCI image pair ensure_kontur_images_build
-# builds and caches by hashing exactly what defines their contents:
+# kontur_image_tag names the guest image ensure_kontur_guest_build
+# builds and caches by hashing exactly what defines its contents:
 # packer/kontur's own git tree (guest-setup.sh and build-guest.sh -- the "startup
 # script" a guest image is provisioned from) and third_party/kontur's own
 # vendored git tree (the kontur binary and cloud-hypervisor version the
@@ -1168,7 +1194,7 @@ ensure_kontur_ssh_key() {
 # SSH public key (a different keypair means a different authorized_keys
 # baked into the guest disk). Any one of those changing -- a provision.sh
 # edit, a third_party/kontur vendor bump, a rotated keypair -- changes
-# this tag, which is exactly what tells ensure_kontur_images_build it has
+# this tag, which is exactly what tells ensure_kontur_guest_build it has
 # to rebuild rather than reuse what is already on disk (bwsalmon/agents#531:
 # "name the image based on the hash of the startup script and kontur
 # version so it knows when it needs to re-generate it"). Nothing here
@@ -1183,29 +1209,18 @@ kontur_image_tag() {
   printf '%s\n' "${packer_tree}:${tp_tree}:${KONTUR_SSH_PUBLIC_KEY}" | sha256sum | awk '{print $1}' | cut -c1-16
 }
 
-# ensure_kontur_images makes sure a guest image and an OCI image exist
-# before write_systemd_units can wire up -kontur-create-arg with anything
-# real for `konturctl vm create` to find.
+# ensure_kontur_images makes sure both artifacts a kontur VM needs are on
+# this host before write_systemd_units can wire up -kontur-create-arg with
+# anything real for `konturctl vm create` to find: the sandbox container
+# the VM runs inside, and the guest disk it boots.
 #
-# Default path (GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE both
-# empty, now that neither is required by terraform/gcp-v2's own
-# instance.tf precondition -- bwsalmon/agents#531): builds both itself,
-# right here, caching each by kontur_image_tag so a re-run with nothing
-# changed -- the overwhelmingly common case, since this runs on every
-# deploy generation -- pays neither cost again. A first deploy pays it
-# once, itself, instead of failing outright for want of a guest image
-# nobody built yet; a later provision.sh edit or third_party/kontur vendor
-# bump pays it again, automatically, the next time this script runs --
-# neither needs an operator to notice and re-run a separate build step by
-# hand.
-#
-# GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE, when both set instead,
-# keep the pre-bwsalmon/agents#531 path: fetch a guest/OCI image pair
-# someone already built and published centrally (terraform/gcp-v2/
-# README.md, "Kontur sandboxing"), for an operator who would rather build
-# once and share the result across many hosts than pay debootstrap's cost
-# -- several minutes, against a real Debian mirror -- on every one of
-# them.
+# It used to build both, from this checkout, on every host
+# (bwsalmon/agents#531 made that the default so a first deploy did not
+# fail for want of images nobody had published). bwsalmon/agents#645 split
+# them: the container is pulled, the disk is still built. The function
+# itself now just says which is which -- the two ensure_ functions below
+# carry the reasoning.
+
 # ensure_kontur_exec_key copies the deployment's kontur SSH private key
 # into GRAIN_KONTUR_IMAGES_HOSTPATH, which konturctl mounts read-only at
 # /images inside every VM container it starts. That is where `kontur exec`
@@ -1237,26 +1252,94 @@ ensure_kontur_images() {
     return
   fi
 
-  if [ -n "$GRAIN_KONTUR_IMAGE_BUCKET" ] || [ -n "$GRAIN_KONTUR_OCI_IMAGE" ]; then
-    if [ -z "$GRAIN_KONTUR_IMAGE_BUCKET" ] || [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
-      log "GRAIN_KONTUR_ENABLE=1 and one of GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE is set but not the other -- both or neither; leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
-      return
-    fi
-    ensure_kontur_images_fetch
+  # Two artifacts, and they stopped being one decision (bwsalmon/agents#645).
+  #
+  # The sandbox *container* is pulled, always: CI publishes one per
+  # commit and the grain image this host is running names the exact tag
+  # it was built against, so there is nothing here to build and nothing
+  # for an operator to configure. It used to be built on every host, from
+  # this checkout, which is how a deployment could end up running grain
+  # from one commit and a sandbox from another.
+  #
+  # The guest *disk* is still built here when no bucket names a
+  # pre-built one, and that is not an oversight: packer/kontur/
+  # guest-setup.sh bakes this deployment's own SSH public key into the
+  # image's authorized_keys, so there is no such thing as a generic
+  # published guest disk to pull -- one would either carry a private key
+  # everybody has or reach nobody at all. GRAIN_KONTUR_IMAGE_BUCKET is
+  # for an operator who builds it once, centrally, and shares it across a
+  # fleet that all use one keypair.
+  ensure_kontur_oci_image
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     return
   fi
 
-  ensure_kontur_images_build
+  if [ -n "$GRAIN_KONTUR_IMAGE_BUCKET" ]; then
+    ensure_kontur_guest_fetch
+  else
+    ensure_kontur_guest_build
+  fi
 }
 
-# ensure_kontur_images_fetch is the pre-bwsalmon/agents#531 behavior,
-# unchanged: always (re-)fetches the bucket's "latest" alias and pulls the
-# OCI image, on every run, rather than caching by kontur_image_tag -- an
-# operator choosing this path already owns when "latest" changes (their
-# own build-guest.sh/build-oci-image.sh invocation, run separately), so there is
-# no local staleness for this script to detect on its own.
-ensure_kontur_images_fetch() {
+# ensure_kontur_oci_image resolves and pulls the sandbox container.
+#
+# Unset (the default), GRAIN_KONTUR_OCI_IMAGE comes from the grain image
+# itself: `grain sandbox-image` prints the reference stamped into this
+# build at build time (cmd/grain/sandboximage.go), which is the sandbox
+# built from the very same commit. That is what makes the two halves of a
+# kontur deployment impossible to get out of step -- including on a
+# rollback, where an older grain names its own older sandbox rather than
+# whatever is newest.
+#
+# A pull that fails is not fatal to the whole install, the same trade
+# every other kontur step here makes: kontur sandboxing goes off for this
+# run, with a reason logged, and the deployment comes up dispatching into
+# host directories instead of failing to deploy at all.
+ensure_kontur_oci_image() {
+  if [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
+    GRAIN_KONTUR_OCI_IMAGE="$(/usr/local/bin/grain sandbox-image 2>/dev/null | tr -d '\r' | head -n1)"
+    if [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
+      log "could not ask $GRAIN_IMAGE_REF which sandbox image it expects, and GRAIN_KONTUR_OCI_IMAGE names none -- leaving kontur sandboxing off this run"
+      GRAIN_KONTUR_ENABLE=0
+      return
+    fi
+    log "sandbox container: $GRAIN_KONTUR_OCI_IMAGE (stamped into $GRAIN_IMAGE_REF at build time)"
+  else
+    log "sandbox container: $GRAIN_KONTUR_OCI_IMAGE (GRAIN_KONTUR_OCI_IMAGE overrides the built-in default)"
+  fi
+
+  # An Artifact Registry in this host's own project needs the metadata
+  # server's token; GHCR's public package needs nothing. Attempted only
+  # for the former, and never fatal on its own -- the pull below is what
+  # actually decides.
+  case "$GRAIN_KONTUR_OCI_IMAGE" in
+    *-docker.pkg.dev/*|gcr.io/*)
+      local registry_host="${GRAIN_KONTUR_OCI_IMAGE%%/*}"
+      if ! docker login -u oauth2accesstoken -p "$(kontur_gcp_access_token)" "https://${registry_host}" >/dev/null 2>&1; then
+        log "  could not authenticate docker to ${registry_host}; trying the pull anyway"
+      fi
+      ;;
+  esac
+
+  log "Pulling the sandbox container $GRAIN_KONTUR_OCI_IMAGE"
+  if ! docker pull "$GRAIN_KONTUR_OCI_IMAGE"; then
+    if docker image inspect "$GRAIN_KONTUR_OCI_IMAGE" >/dev/null 2>&1; then
+      log "  pull failed, but this host already has it locally -- using that"
+    else
+      log "  could not pull $GRAIN_KONTUR_OCI_IMAGE and this host has no local copy -- leaving kontur sandboxing off this run"
+      GRAIN_KONTUR_ENABLE=0
+      return
+    fi
+  fi
+}
+
+# ensure_kontur_guest_fetch fetches a guest disk somebody else built:
+# always (re-)fetching the bucket's "latest" alias, on every run, rather
+# than caching by kontur_image_tag -- an operator choosing this path
+# already owns when "latest" changes (their own build-guest.sh
+# invocation, run separately), so there is no local staleness for this
+# script to detect on its own.
+ensure_kontur_guest_fetch() {
   log "Fetching kontur guest image from gs://${GRAIN_KONTUR_IMAGE_BUCKET}/kontur-guest/latest"
   local img_dir="${GRAIN_KONTUR_IMAGES_HOSTPATH}/current" tmp_dir f
   tmp_dir="$(mktemp -d)"
@@ -1269,7 +1352,7 @@ ensure_kontur_images_fetch() {
     fi
   done
   # rm -rf, not rmdir/install -d alone: a previous run of this same script
-  # against the same host may have taken ensure_kontur_images_build's own
+  # against the same host may have taken ensure_kontur_guest_build's own
   # path instead (or vice versa, on a later config change), which leaves
   # "current" a symlink rather than a real directory -- this needs to work
   # either way.
@@ -1277,36 +1360,23 @@ ensure_kontur_images_fetch() {
   install -d -m0755 "$img_dir"
   mv -f "$tmp_dir"/vmlinuz "$tmp_dir"/initrd.img "$tmp_dir"/disk.img "$img_dir/"
   rmdir "$tmp_dir"
-
-  log "Pulling kontur OCI image $GRAIN_KONTUR_OCI_IMAGE"
-  local registry_host="${GRAIN_KONTUR_OCI_IMAGE%%/*}"
-  if ! docker login -u oauth2accesstoken -p "$(kontur_gcp_access_token)" "https://${registry_host}" >/dev/null 2>&1; then
-    log "  could not authenticate docker to ${registry_host} -- leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
-    return
-  fi
-  if ! docker pull "$GRAIN_KONTUR_OCI_IMAGE"; then
-    log "  could not pull $GRAIN_KONTUR_OCI_IMAGE -- leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
-    return
-  fi
-  # konturctl's own default -kontur-image is localhost:5000/kontur:latest
-  # (bwsalmon/kontur's own internal/staticpod/spec.go) -- retagging here
-  # means write_systemd_units needs no -kontur-create-arg=-kontur-image of
-  # its own, and no registry actually has to run at :5000 for it: docker
-  # only resolves a tag's registry host when it has to push or pull that
-  # exact tag, never for a local retag of an image already present.
-  docker tag "$GRAIN_KONTUR_OCI_IMAGE" localhost:5000/kontur:latest
 }
 
-# ensure_kontur_images_build is the default path (bwsalmon/agents#531):
-# builds the guest image (packer/kontur/build-guest.sh -- kontur's own
-# guest build, a plain `docker build` needing neither root nor a VM boot)
-# and the OCI image (build-oci-image.sh -- likewise a plain `docker
-# build`, KONTUR_OCI_SKIP_PUSH=1 so no registry is ever touched) itself,
-# right here, skipping either step entirely once kontur_image_tag shows
-# a matching one already exists on disk.
-ensure_kontur_images_build() {
+# ensure_kontur_guest_build is the default path (bwsalmon/agents#531):
+# with no GRAIN_KONTUR_IMAGE_BUCKET naming a pre-built guest disk, this
+# host builds its own, here, caching it by kontur_image_tag so a re-run
+# with nothing changed -- the overwhelmingly common case, since this runs
+# on every deploy generation -- pays neither debootstrap nor a docker
+# build again.
+#
+# This is the one thing a deployment still builds rather than pulls, and
+# it is not for want of publishing it: packer/kontur/guest-setup.sh bakes
+# this deployment's own SSH public key into the image's authorized_keys,
+# so a generically published guest disk would either carry a keypair
+# everybody has or admit nobody at all. See ensure_kontur_images' own
+# comment on why the sandbox container, which carries no such thing,
+# moved to a pull and this did not.
+ensure_kontur_guest_build() {
   local tag current img_dir
   tag="$(kontur_image_tag)"
   current="${GRAIN_KONTUR_IMAGES_HOSTPATH}/current"
@@ -1334,27 +1404,13 @@ ensure_kontur_images_build() {
     rm -rf "$tmp_out"
   fi
 
-  if docker image inspect "localhost:5000/kontur:${tag}" >/dev/null 2>&1; then
-    log "kontur OCI image ${tag} already built -- reusing it"
-  else
-    log "Building kontur OCI image ${tag} (build-oci-image.sh -- docker build only, no push)"
-    if ! env \
-        KONTUR_OCI_IMAGE="localhost:5000/kontur:${tag}" \
-        KONTUR_OCI_SKIP_PUSH=1 \
-        "$GRAIN_SRC_DIR/packer/kontur/build-oci-image.sh"; then
-      log "  packer/kontur/build-oci-image.sh failed -- leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
-      return
-    fi
-  fi
-  # konturctl's own default -kontur-image is localhost:5000/kontur:latest
-  # (bwsalmon/kontur's own internal/staticpod/spec.go) -- retagging here
-  # means write_systemd_units needs no -kontur-create-arg=-kontur-image of
-  # its own.
-  docker tag "localhost:5000/kontur:${tag}" localhost:5000/kontur:latest
+  # The sandbox container used to be built right here too, from this same
+  # checkout, and is pulled by ensure_kontur_oci_image instead now
+  # (bwsalmon/agents#645) -- see ensure_kontur_images' own comment on why
+  # only one of the two artifacts moved.
 
   # "current" is a symlink here, not a real directory the way
-  # ensure_kontur_images_fetch's own is -- img_dir itself is already named
+  # ensure_kontur_guest_fetch's own is -- img_dir itself is already named
   # for kontur_image_tag and left in place (never overwritten) so a rollback
   # to a previous tag, or a rebuild racing a still-running VM against the
   # old one, never has to reconstruct it from scratch.
@@ -1916,9 +1972,14 @@ write_systemd_units() {
   # GRAIN_KONTUR_ENABLE to 0 on its own failure), so a host that cannot
   # yet dispatch onto a real VM keeps dispatching into host directories
   # instead of installing a daemon that would fail every task. -backend
-  # docker matches ensure_kontur_images' own retag (localhost:5000/
-  # kontur:latest) and needs no konturctl setup/containerd/CNI/kubelet on
-  # this host (bwsalmon/agents#353). -disk/-kernel/-initramfs are
+  # docker needs no konturctl setup/containerd/CNI/kubelet on this host
+  # (bwsalmon/agents#353). -kontur-image names the sandbox container
+  # ensure_kontur_oci_image just pulled, rather than leaving konturctl to
+  # its own localhost:5000/kontur:latest default, which is what a locally
+  # built image used to be retagged to (bwsalmon/agents#645: there is no
+  # local build to retag any more, and naming the pulled reference says
+  # out loud which sandbox this deployment runs).
+  # -disk/-kernel/-initramfs are
   # container-internal paths, resolved against -images-hostpath mounted
   # read-only at /images -- "current" is ensure_kontur_images' own fixed
   # destination path (a real directory when it fetched a pre-built image,
@@ -1941,6 +2002,7 @@ write_systemd_units() {
       -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
       -kontur-net "$GRAIN_KONTUR_NET"
       -kontur-git-proxy-host "$GRAIN_KONTUR_GIT_PROXY_HOST"
+      -kontur-create-arg -kontur-image -kontur-create-arg "$GRAIN_KONTUR_OCI_IMAGE"
       -kontur-create-arg -images-hostpath -kontur-create-arg "$GRAIN_KONTUR_IMAGES_HOSTPATH"
       -kontur-create-arg -disk -kontur-create-arg /images/current/disk.img
       -kontur-create-arg -kernel -kontur-create-arg /images/current/vmlinuz

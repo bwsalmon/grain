@@ -368,10 +368,27 @@ func (u *Upgrader) stageImage(ctx context.Context, branch string) (string, error
 			return "", fmt.Errorf("health check failed on the pulled image, leaving this deployment on the image it already runs: %w", err)
 		}
 	}
+	detail := "pulled " + ref
+	// The sandbox container that goes with it, before the cut-over
+	// rather than after, for the same reason the health check comes
+	// first: everything this deployment will need has to be on the host
+	// already by the time the ref file names the new image.
+	if len(u.cfg.Image.SandboxImageArgs) > 0 {
+		sandbox, err := u.sandboxImage(ctx, ref)
+		if err != nil {
+			return "", fmt.Errorf("asking %s which sandbox image it expects: %w", ref, err)
+		}
+		if sandbox != "" {
+			if err := u.pullImage(ctx, sandbox); err != nil {
+				return "", fmt.Errorf("pulling the sandbox image %s that %s expects: %w", sandbox, ref, err)
+			}
+			detail += " and its sandbox image " + sandbox
+		}
+	}
 	if err := u.writeImageRef(ref); err != nil {
 		return "", fmt.Errorf("recording %s: %w", u.cfg.Image.RefFile, err)
 	}
-	return "pulled " + ref, nil
+	return detail, nil
 }
 
 // stageBinary is the original path: fetch the branch into a checkout on

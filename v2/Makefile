@@ -7,6 +7,20 @@ CMDS := grain
 
 BUILDVCS ?= auto
 
+# The sandbox container this build of grain goes with -- stamped into the
+# binary, so a deployment needs to be told nothing and a rollback to an
+# older tag asks for its *own* older sandbox rather than today's. See
+# cmd/grain/sandboximage.go for what reads it and why it is a build-time
+# value at all.
+#
+# Empty here on purpose: the source default in that file (the tag CI
+# keeps pointed at main) is what an unstamped `make build` should get,
+# and stamping an empty string over it would replace a real answer with
+# no answer. ../.github/workflows/build-artifacts.yml passes the exact
+# sha- tag of the sandbox image built from this same commit.
+SANDBOX_IMAGE ?=
+LDFLAGS := $(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),)
+
 # --- Containerised build ----------------------------------------------
 #
 # grain is pure Go (bwsalmon/agents#366 removed the one dependency that
@@ -123,7 +137,7 @@ frontend:
 # CGO_ENABLED alone: `go test -race` requires it (the race detector is a
 # cgo library), and nothing about testing this module ships anywhere.
 $(CMDS):
-	CGO_ENABLED=0 go build -buildvcs=$(BUILDVCS) -o $(BIN)/$@ ./cmd/$@
+	CGO_ENABLED=0 go build -buildvcs=$(BUILDVCS) -ldflags "$(LDFLAGS)" -o $(BIN)/$@ ./cmd/$@
 
 builder:
 	$(CONTAINER_ENGINE) build \
@@ -207,4 +221,5 @@ image:
 		--build-arg GO_IMAGE=$(GO_IMAGE) \
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg BUILDVCS=$(BUILDVCS) \
+		$(if $(SANDBOX_IMAGE),--build-arg SANDBOX_IMAGE=$(SANDBOX_IMAGE),) \
 		-t $(IMAGE) -f Dockerfile ..

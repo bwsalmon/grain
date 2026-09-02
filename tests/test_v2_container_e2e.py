@@ -188,6 +188,12 @@ class Daemon:
             # a task reaching a real agent run would need a credential
             # and a repo neither of which exists here.
             "-poll-interval", "1h",
+            # A task has to name a repo or fall back to the deployment's
+            # default; a deployment with neither rejects every create.
+            # Nothing here ever reaches this repo -- no task is approved,
+            # so none dispatches -- it just has to be a well-formed
+            # owner/name the way a real deployment's own is.
+            "-default-target-repo", "grain-e2e/tasks",
             *self.flags,
         )
         return self
@@ -286,6 +292,28 @@ def test_the_image_carries_every_binary_the_daemon_shells_out_to():
     out = docker("run", "--rm", "--entrypoint", "sh", IMAGE, "-c", script,
                  timeout=120)
     assert "all-present" in out, out
+
+
+def test_the_image_names_the_sandbox_container_it_expects():
+    """A kontur deployment runs two images, and is told about neither.
+
+    `grain sandbox-image` prints the sandbox container reference stamped
+    into this build at build time (cmd/grain/sandboximage.go). That is
+    what v2/scripts/setup.sh pulls when GRAIN_KONTUR_OCI_IMAGE names
+    nothing, and what an upgrade asks a newly pulled grain for so it can
+    pull the matching sandbox alongside it -- so an image that cannot
+    answer is a deployment that has to be configured by hand, and one
+    that answers with the wrong thing is a deployment running two
+    commits' worth of itself.
+    """
+    out = docker("run", "--rm", IMAGE, "sandbox-image", timeout=120).strip()
+    assert "/kontur-sandbox:" in out, f"sandbox-image printed {out!r}"
+    # A bare `make image` leaves the source default (the tag CI keeps
+    # pointed at main); CI stamps the immutable tag of the sandbox built
+    # from the same commit. Either is a real reference -- what must never
+    # happen is an empty or malformed one.
+    assert not out.endswith(":"), out
+    assert " " not in out, out
 
 
 def test_the_image_runs_as_an_unprivileged_uid():
