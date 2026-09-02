@@ -70,6 +70,15 @@ func TestConfigureGitCredentialsOverSSHSurfacesARemoteWriteFailure(t *testing.T)
 	// into -- exercises the exitCode != 0 path a real SSH session would
 	// hit if e.g. the VM's disk were full or its home directory somehow
 	// unwritable.
+	if os.Geteuid() == 0 {
+		// A 0500 directory stops every user but root, which is who a
+		// container-based CI job or a `sudo make test` runs as -- there
+		// is no permission left to deny, so the write this test wants to
+		// see fail would succeed. Skipped rather than left to fail
+		// confusingly, the same reason the missing-credential test stopped
+		// depending on $PATH.
+		t.Skip("root ignores directory permissions; nothing here can make the write fail")
+	}
 	home := t.TempDir()
 	if err := os.Chmod(home, 0o500); err != nil {
 		t.Fatal(err)

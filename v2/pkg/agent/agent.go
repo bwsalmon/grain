@@ -2,10 +2,10 @@
 // process actually drives a coding agent. v1 has exactly one implementation
 // of this shape, Claude, hardcoded throughout grain/automation/dispatch.py
 // -- there is no equivalent interface there to reuse. This is that
-// interface's first appearance, with one implementation so far
-// (v2/agent/gemini); nothing in v2 constructs a Framework yet, since
-// v2/pkg/dispatch has nowhere to run one (no host adapter, no GitHub
-// client -- see v2/README.md).
+// interface's first appearance. Both implementations today
+// (v2/pkg/agent/antigravity, v2/pkg/agent/claude) drive a real CLI as a
+// subprocess; cmd/grain/daemon.go's buildAgentFramework is what chooses
+// between them, from the deployment's own agent-framework setting.
 package agent
 
 import (
@@ -15,20 +15,21 @@ import (
 )
 
 // RunConfig is what one agent run needs to start: a prompt and where its
-// sandbox tools should reach. A Framework that loops its own tool calls
-// in-process (agent/gemini) wants Tools, or failing that SandboxRoot, and
-// ignores KonturVM entirely -- see gemini.Framework.Run's own doc
-// comment. A Framework that instead forks a real MCP client as a
-// subprocess and lets it manage its own connection (agent/claude) cannot
-// consume Tools at all -- there is no in-process registry to hand a
-// forked process -- so it reads SandboxRoot or KonturVM instead, whichever
-// is set, and builds the arguments its own forked "mcpserver" subcommand
-// needs to reach the same sandbox: -sandbox-root for a local directory, or
-// -kontur-vm for a named orchestrator.KonturSandboxes VM. Tools and
-// SandboxRoot/KonturVM are not alternatives to choose between so much as
-// two different Frameworks' own ways of reaching the one sandbox a
-// caller's RunDispatch resolved; RunDispatch populates all it can and
-// leaves it to whichever Framework it calls to read what it understands.
+// sandbox tools should reach. A Framework that forks a real MCP client
+// as a subprocess and lets it manage its own connection -- which both
+// agent/antigravity and agent/claude do -- cannot consume Tools at all,
+// there being no in-process registry to hand a forked process, so it
+// reads SandboxRoot or KonturVM instead, whichever is set, and builds the
+// arguments its own forked "mcpserver" subcommand needs to reach that
+// sandbox: -sandbox-root for a local directory, or -kontur-vm for a named
+// orchestrator.KonturSandboxes VM.
+//
+// Tools therefore has no consumer at present. It was read by the
+// in-process Gemini runtime agent/antigravity replaced, and RunDispatch
+// still populates it from orchestrator.Config.GrantTools (whose own doc
+// comment, and selfrepair.Confirm's, say what that costs); it is kept
+// here rather than deleted because it belongs to the interface, not to
+// this moment's two implementations.
 type RunConfig struct {
 	Prompt      string
 	SandboxRoot string
@@ -36,7 +37,8 @@ type RunConfig struct {
 	// VM (orchestrator.KonturSandboxes.VMNameFor's own result, not the
 	// sandbox/run's own name) a Framework with no in-process route to a
 	// sandbox can point its own forked "mcpserver -kontur-vm" subprocess
-	// at instead of a local directory -- see agent/claude's Framework.Run.
+	// at instead of a local directory -- see agent/antigravity's and
+	// agent/claude's Framework.Run.
 	KonturVM string
 	Tools    []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
@@ -49,19 +51,16 @@ type RunConfig struct {
 	// handing one back in Result.Transcript once Run returns -- what
 	// lets a caller with filesystem access to that path show a
 	// still-running run's output, not just a finished one's
-	// (bwsalmon/agents#467, extended to agent/gemini by bwsalmon/
-	// agents#513). "" means no caller wants this. The exact file format
-	// is a Framework's own business -- pkg/agent/claude and pkg/agent/
-	// gemini's own doc comments on Framework.Run say what each writes
-	// there and how a reader gets a still-in-progress run's transcript
-	// back out of it; the two formats differ (claude mirrors its
-	// subprocess's raw stream-json, gemini writes the same
-	// already-human-readable narrative it builds Result.Transcript
-	// from), so each package also owns its own reader rather than
-	// sharing one.
+	// (bwsalmon/agents#467). "" means no caller wants this. The exact
+	// file format is a Framework's own business -- pkg/agent/claude and
+	// pkg/agent/antigravity's own doc comments on Framework.Run say what
+	// each writes there and how a reader gets a still-in-progress run's
+	// transcript back out of it. Both mirror their subprocess's raw
+	// stream-json, but the two event vocabularies differ, so each
+	// package owns its own reader rather than sharing one.
 	TranscriptPath string
 	// Addenda, if set, is polled by a Framework whose own loop has a
-	// "between turns" to poll at (agent/gemini's Run) for anything a
+	// "between turns" to poll at, for anything a
 	// human has added to the task's conversation since the last poll --
 	// a comment posted while this very run is still in flight, not just
 	// the ones already folded into Prompt at dispatch. It returns new
@@ -70,12 +69,14 @@ type RunConfig struct {
 	// same way a redispatch already folds the whole thread in up front
 	// (orchestrator.commentThreadSection).
 	//
-	// claude.Framework.Run never calls this: `claude -p` is one blocking
-	// subprocess call with its whole prompt written to stdin before the
+	// Neither Framework calls this today: both run one blocking
+	// subprocess with the whole prompt written to stdin before the
 	// process starts, so there is no turn boundary here to poll at. A
-	// comment posted while a claude run is in flight waits for the
-	// task's next dispatch instead, exactly as it always has -- see that
-	// package's own Run doc comment.
+	// comment posted while a run is in flight waits for the task's next
+	// dispatch instead -- see each package's own Run doc comment. It was
+	// polled by the in-process Gemini runtime agent/antigravity
+	// replaced, which owned its own turn loop and so had a "between
+	// turns" to poll at.
 	Addenda func(ctx context.Context) ([]string, error)
 }
 
@@ -112,9 +113,11 @@ type Result struct {
 // caller must read both: an error means the run did not finish, not that
 // it did nothing. A run that edits files, commits, pushes and only then
 // exhausts MaxTurns has already changed the world, and a caller that
-// treats the error as "no result" strands that work -- see
-// gemini.Framework.Run's own comment for the failure that taught this.
-// A nil Result with an error means the run never started.
+// treats the error as "no result" strands that work.
+// A nil Result with an error means the run never started -- a line
+// orchestrator.RunDispatch reads literally, so a Framework must not
+// manufacture an empty Result for a run that produced nothing (see
+// antigravity.partialResult).
 type Framework interface {
 	Run(ctx context.Context, cfg RunConfig) (*Result, error)
 }

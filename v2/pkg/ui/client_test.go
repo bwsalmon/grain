@@ -1292,7 +1292,7 @@ func TestAttemptTranscriptFallsBackToTheStoreOnceALiveRunFinishes(t *testing.T) 
 
 // TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet covers a
 // still-running attempt whose framework has not written anything to its
-// live transcript file yet (or was never given one -- agent/gemini, for
+// live transcript file yet (or was never given one -- a Framework, for
 // now): AttemptTranscript should fall back to Store.RunTranscript (empty,
 // but not an error) rather than surface that as a failure.
 func TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet(t *testing.T) {

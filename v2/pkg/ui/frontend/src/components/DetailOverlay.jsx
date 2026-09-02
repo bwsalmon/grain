@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, completionPhase } from "../state.js";
+import { STATE_LABELS, completionPhase, frameworkLabel } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -146,6 +146,9 @@ function Declared({ t }) {
   // the JSON response at all (Task's own omitempty).
   if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
   if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
+  // Same treatment for a per-task agent framework: shown only when this
+  // task overrides the deployment's own, which most do not.
+  if (t.agentFramework) rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
   // Most tasks are not interactive, so this row only shows up for the
   // ones that are -- the same "shown only when set" treatment the
   // sandbox override rows above already get. Configuration is always

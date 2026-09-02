@@ -220,7 +220,12 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 
 	flagCfg := config{
 		maxConcurrent: 2, pollInterval: time.Minute,
-		geminiModel: "gemini-2.5-pro", maxAgentTurns: 10,
+		// agentFramework is named rather than left zero because it is
+		// the one field that never round-trips verbatim: the store
+		// normalizes it on read (model.NormalizeAgentFramework), so an
+		// empty flag comes back as AgentFrameworkAntigravity.
+		agentFramework: model.AgentFrameworkAntigravity,
+		geminiModel:    "gemini-2.5-pro", maxAgentTurns: 10,
 		githubHost: "github.example.com", githubInsecureHTTP: true,
 		gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com",
 	}
@@ -255,7 +260,11 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 
 	stored := model.Config{
 		MaxConcurrent: 1, PollInterval: 5 * time.Second,
-		GeminiModel: "gemini-2.5-flash", MaxAgentTurns: 99,
+		// Named for the same reason as in the test above: GetConfig
+		// normalizes this field, so a stored "" reads back as
+		// AgentFrameworkAntigravity and would not compare equal.
+		AgentFramework: model.AgentFrameworkAntigravity,
+		GeminiModel:    "gemini-2.5-flash", MaxAgentTurns: 99,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "stored-proj", GCPServiceAccountEmail: "stored@stored-proj.iam.gserviceaccount.com",
 	}
@@ -301,7 +310,11 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 
 	stored := model.Config{
 		MaxConcurrent: 1, PollInterval: 5 * time.Second,
-		GeminiModel: "gemini-2.5-flash", MaxAgentTurns: 99,
+		// Named for the same reason as in the test above: GetConfig
+		// normalizes this field, so a stored "" reads back as
+		// AgentFrameworkAntigravity and would not compare equal.
+		AgentFramework: model.AgentFrameworkAntigravity,
+		GeminiModel:    "gemini-2.5-flash", MaxAgentTurns: 99,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "stored-proj", GCPServiceAccountEmail: "stored@stored-proj.iam.gserviceaccount.com",
 		TargetRepos: []string{"owner/repo"},

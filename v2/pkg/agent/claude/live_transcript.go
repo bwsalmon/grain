@@ -22,8 +22,8 @@ type LiveTranscriptDir struct {
 // transcript is in it so far. ok is false when that file does not exist
 // yet -- a run whose Framework has not opened RunConfig.TranscriptPath
 // yet, was never given one at all, or is running a Framework other than
-// this package's own (agent/gemini writes a different format and reads
-// it back with its own gemini.LiveTranscriptDir instead, since a
+// this package's own (agent/antigravity writes a different event
+// vocabulary and reads it back with its own LiveTranscriptDir, since a
 // deployment only ever wires one Framework's reader into
 // ui.Config.LiveTranscripts at a time) -- which a caller should read the
 // same way a LiveTranscript-less deployment would: fall back to whatever

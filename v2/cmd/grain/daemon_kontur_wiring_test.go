@@ -168,7 +168,16 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 	cfg := config{
 		dataDir: dataDir, maxConcurrent: 1, pollInterval: time.Hour,
 		geminiAPIKeyFile: geminiKeyFile,
-		githubHost:       "127.0.0.1:0", githubInsecureHTTP: true,
+		// agent/antigravity runs a real binary, so buildAgentFramework
+		// resolves one before anything dispatches -- unlike the
+		// in-process Gemini runtime it replaced, which needed only the
+		// key file above. This test never lets a run get as far as
+		// exec'ing it (it asserts on the VM being built and
+		// credentialed), so naming a path is enough; leaving it empty
+		// would fail the whole daemon on a machine with no agy
+		// installed, which is every CI machine.
+		agyPath:    filepath.Join(t.TempDir(), "agy"),
+		githubHost: "127.0.0.1:0", githubInsecureHTTP: true,
 
 		konturSandboxes:  true,
 		konturStateDir:   t.TempDir(),

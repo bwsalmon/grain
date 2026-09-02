@@ -140,10 +140,16 @@ func TestConfirmIgnoresNonHumanCommentsAndItsOwnQuestion(t *testing.T) {
 	store, ctx := openStore(t)
 	taskID := putTask(t, store, ctx)
 
+	// The timeout is generous, unlike TestConfirmDeniesOnTimeoutWithNoReply's
+	// own: what this test asserts is that Confirm keeps waiting through a
+	// non-human comment, so a deadline anywhere near the ~170ms of sleeps
+	// below would make a loaded machine (`go test -race ./...` runs this
+	// package alongside every other) report a timeout as a missed
+	// approval.
 	done := make(chan struct{})
 	var approved bool
 	go func() {
-		approved, _, _ = Confirm(ctx, store, taskID, "run something?", 10*time.Millisecond, 300*time.Millisecond)
+		approved, _, _ = Confirm(ctx, store, taskID, "run something?", 10*time.Millisecond, 30*time.Second)
 		close(done)
 	}()
 
@@ -167,7 +173,11 @@ func TestConfirmIgnoresNonHumanCommentsAndItsOwnQuestion(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 	humanReply(t, store, ctx, taskID, "approve")
-	<-done
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Confirm did not return after the human's own approve")
+	}
 	if !approved {
 		t.Fatal("approved = false after the human's own approve, want true")
 	}

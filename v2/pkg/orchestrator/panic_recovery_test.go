@@ -104,7 +104,7 @@ func TestRunCycleRecoversFromAPanickingDispatch(t *testing.T) {
 		Store:         store,
 		Client:        client,
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     func() agent.Framework { return panickingFramework{} },
+		Framework:     orchestrator.StaticFramework(panickingFramework{}),
 		MaxConcurrent: 1,
 	}
 

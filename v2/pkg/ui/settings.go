@@ -101,22 +101,39 @@ type Settings struct {
 	ApprovedByDefault  bool `json:"approvedByDefault"`
 	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 	// AgentFramework is model.Config's own field of the same name
-	// (bwsalmon/agents#609): "gemini" or "claude"
-	// (model.AgentFrameworkGemini/AgentFrameworkClaude), which
+	// (bwsalmon/agents#609): "antigravity" or "claude"
+	// (model.AgentFrameworkAntigravity/AgentFrameworkClaude), which
 	// agent.Framework implementation a run is meant to be driven by.
 	// Never empty coming out of here -- GetSettings/UpdateSettings both
-	// default it to "gemini" the same way Config.AgentFramework's own doc
-	// comment says an empty stored value reads back. Setting this to
-	// "claude" does not yet change what a run actually does -- see that
-	// field's own doc comment.
+	// default it to "antigravity" the same way Config.AgentFramework's
+	// own doc comment says an empty stored value reads back. The legacy
+	// "gemini" spelling is accepted on the way in and normalized to
+	// "antigravity"; it is never written back out. It is the
+	// deployment-wide default only: a task's own agentFramework
+	// overrides it for that task's dispatch, and the two credentials
+	// below are what either one actually needs to run.
 	AgentFramework string `json:"agentFramework"`
+	// AgentKeysEnabled mirrors secretsResponse's own Enabled: whether
+	// this UI has a secrets store to write an agent credential into at
+	// all. False (a UI with no colocated store) is what tells the pane
+	// to explain that rather than offer two fields whose every use
+	// would 404.
+	AgentKeysEnabled bool `json:"agentKeysEnabled"`
+	// GeminiAPIKeySet and ClaudeOAuthTokenSet report whether each
+	// framework's own credential is actually in this deployment's
+	// secrets database -- agent_keys.go's own agentKeysSet, mirrored
+	// onto Settings so the pane that picks a framework can say, in the
+	// same view, whether the one being picked can run at all. Presence
+	// only, never the value; both false for a UI with no secrets store
+	// (Config.Secrets nil), the same nil-means-unavailable reading every
+	// other check built on it takes.
+	GeminiAPIKeySet     bool `json:"geminiApiKeySet"`
+	ClaudeOAuthTokenSet bool `json:"claudeOAuthTokenSet"`
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
-	agentFramework := cfg.AgentFramework
-	if agentFramework == "" {
-		agentFramework = model.AgentFrameworkGemini
-	}
+	agentFramework := model.NormalizeAgentFramework(cfg.AgentFramework)
+	geminiKeySet, claudeTokenSet := c.agentKeysSet()
 	return Settings{
 		Configured:                    true,
 		PollInterval:                  cfg.PollInterval.String(),
@@ -139,6 +156,9 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		ApprovedByDefault:             cfg.ApprovedByDefault,
 		AutoMergeByDefault:            cfg.AutoMergeByDefault,
 		AgentFramework:                agentFramework,
+		AgentKeysEnabled:              c.Config.Secrets != nil,
+		GeminiAPIKeySet:               geminiKeySet,
+		ClaudeOAuthTokenSet:           claudeTokenSet,
 	}
 }
 
@@ -174,10 +194,18 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{}, err
 	}
 	if cfg == nil {
+		// Key presence is reported here too, not only once something has
+		// been saved: pasting the two credentials in is exactly what an
+		// operator does on a deployment that has never had its settings
+		// saved at all.
+		geminiKeySet, claudeTokenSet := c.agentKeysSet()
 		return Settings{
 			SandboxCPUsDefault:     kontur.DefaultCPUs,
 			SandboxMemoryMBDefault: kontur.DefaultMemoryMB,
 			Capabilities:           c.capabilityStatuses(model.Config{}),
+			AgentKeysEnabled:       c.Config.Secrets != nil,
+			GeminiAPIKeySet:        geminiKeySet,
+			ClaudeOAuthTokenSet:    claudeTokenSet,
 		}, nil
 	}
 	return c.settingsFrom(*cfg), nil
@@ -319,21 +347,24 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		cfg.AutoMergeByDefault = *req.AutoMergeByDefault
 	}
 	if req.AgentFramework != nil {
-		switch *req.AgentFramework {
-		case model.AgentFrameworkGemini, model.AgentFrameworkClaude:
-			cfg.AgentFramework = *req.AgentFramework
+		// NormalizeAgentFramework first, so the legacy "gemini" spelling
+		// a stored row or an older client may still send is stored as
+		// the framework it now means rather than rejected as a word with
+		// no implementation behind it.
+		switch normalized := model.NormalizeAgentFramework(*req.AgentFramework); normalized {
+		case model.AgentFrameworkAntigravity, model.AgentFrameworkClaude:
+			cfg.AgentFramework = normalized
 		default:
-			return Settings{}, validationErrorf("agentFramework must be %q or %q", model.AgentFrameworkGemini, model.AgentFrameworkClaude)
+			return Settings{}, validationErrorf("agentFramework must be %q or %q",
+				model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
 		}
 	}
-	// AgentFramework's own meaningful zero value is "gemini", not "" --
-	// model.Config.AgentFramework's own doc comment -- so a first save
-	// that never mentions it still stores something every agent.Framework
-	// switch can match on, the same as every settings row Store.PutConfig
-	// has ever written from before this field existed.
-	if cfg.AgentFramework == "" {
-		cfg.AgentFramework = model.AgentFrameworkGemini
-	}
+	// AgentFramework's own meaningful zero value is "antigravity", not
+	// "" -- model.Config.AgentFramework's own doc comment -- so a first
+	// save that never mentions it still stores something every
+	// agent.Framework switch can match on, the same as every settings row
+	// Store.PutConfig has ever written from before this field existed.
+	cfg.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
 
 	if firstTime {
 		if cfg.PollInterval <= 0 {

@@ -23,23 +23,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
-	"google.golang.org/genai"
 )
 
 // preClonedPushScript is pushScript with the clone removed -- the whole
 // point: an agent that assumes the checkout is already there, on the
 // branch it was told to push, with a remote it never had to be told.
-func preClonedPushScript(branch, taskID string) []*genai.GenerateContentResponse {
+func preClonedPushScript(branch, taskID string) []antigravity.Step {
 	cmd := "cd " + orchestrator.CheckoutDir + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
@@ -76,7 +75,7 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 	// checkout; without it, the sandbox stays as empty as it ever was,
 	// which is what every other test in this package still gets.
 	cfg := orchestrator.Config{GitRemoteBase: w.proxyURL}
-	fw := gemini.NewForTest(&scriptedGenerator{responses: preClonedPushScript(branch, task.ID)})
+	fw := antigravity.NewForTest(antigravity.Steps(preClonedPushScript(branch, task.ID)...))
 	result, err := orchestrator.RunDispatch(w.ctx, w.store, fw, cfg, *full, d,
 		mcp.NewSandboxTools(root), root, "", baseTime.Add(time.Minute))
 	if err != nil {
@@ -134,7 +133,7 @@ func TestDispatchDoesNotCloneForATaskClosedBeforeItRan(t *testing.T) {
 
 	root := w.prepareSandbox(dispatches[0])
 	cfg := orchestrator.Config{GitRemoteBase: w.proxyURL}
-	fw := gemini.NewForTest(&scriptedGenerator{responses: preClonedPushScript(model.BranchName(task.ID), task.ID)})
+	fw := antigravity.NewForTest(antigravity.Steps(preClonedPushScript(model.BranchName(task.ID), task.ID)...))
 	if _, err := orchestrator.RunDispatch(w.ctx, w.store, fw, cfg, *full, dispatches[0],
 		mcp.NewSandboxTools(root), root, "", baseTime.Add(time.Minute)); err == nil {
 		t.Fatal("RunDispatch reported success for a task closed before its run started")

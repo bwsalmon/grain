@@ -9,7 +9,7 @@
 // cron/timer loop calls once per tick, the same shape v1's `automation
 // run-once` command wraps around core.py's Orchestrator.run_once.
 // cmd/graind is that timer loop, calling RunCycle against a real embedded
-// SQLite store, a real github.RESTClient, and a real agent/gemini.Framework
+// SQLite store, a real github.RESTClient, and a real agent.Framework
 // (bwsalmon/agents#263, reconciling this package with the parallel
 // pkg/orchestrate/cmd/graind bwsalmon/agents#254 built independently of
 // it — see v2/README.md's "What this does not have yet" for what that
@@ -233,6 +233,13 @@ type Config struct {
 	// Confirm) within its timeout, which is not a safe assumption for an
 	// unattended dispatch. nil, or a capability with no entry, adds no
 	// tools.
+	//
+	// These tools reach no agent at present. They travel as
+	// agent.RunConfig.Tools, whose only consumer was the in-process
+	// Gemini runtime agent/antigravity replaced; every Framework left
+	// forks a CLI that manages its own MCP connection and cannot be
+	// handed an in-process registry. See selfrepair.Confirm's own doc
+	// comment for what closing that gap would take.
 	GrantTools map[string]func(store *model.Store, taskID string) []mcp.Tool
 }
 

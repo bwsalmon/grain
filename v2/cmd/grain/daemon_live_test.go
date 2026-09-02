@@ -45,7 +45,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -273,7 +273,7 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	go func() {
 		done <- run(ctx, config{
 			dataDir: dataDir, sandboxDir: t.TempDir(), maxConcurrent: 1, pollInterval: 5 * time.Second,
-			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: gemini.DefaultModel, maxAgentTurns: 15,
+			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
 			githubHost: githubHost, githubInsecureHTTP: true,
 		})
 	}()

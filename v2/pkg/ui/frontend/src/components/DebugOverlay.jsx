@@ -1,15 +1,25 @@
-import { Button, Divider, Typography } from "@mui/material";
+import { useState } from "react";
+import { Alert, Button, Tab, Tabs, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import LogsPage from "./LogsPage.jsx";
 import SandboxHealthPage from "./SandboxHealthPage.jsx";
+
+const TABS = [
+  { id: "logs", label: "Logs" },
+  { id: "sandboxHealth", label: "Sandbox health" },
+  { id: "restart", label: "Restart" },
+];
 
 // DebugOverlay is Logs, Sandbox health and the reboot control's own
 // sidebar destination (bwsalmon/agents#640) -- operator-only,
 // deployment-wide diagnostics, but distinct enough from Settings' own
 // configuration that it warranted a nav entry of its own again rather
 // than staying folded into Settings' Debug tab (bwsalmon/agents#623).
+// Each gets its own tab, the same layout SettingsOverlay.jsx already
+// uses for its own General/Capabilities/Secrets/Upgrade split.
 export default function DebugOverlay({ config, onClose, showError }) {
+  const [tab, setTab] = useState("logs");
   // rebootHost is deliberately its own confirm/try, separate from any
   // settings-form save flow: it is not a settings field, and unlike a
   // failed save there is no "current" state to fall back on showing
@@ -39,18 +49,23 @@ export default function DebugOverlay({ config, onClose, showError }) {
   return (
     <Overlay onClose={onClose}>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Debug</Typography>
-      <LogsPage showError={showError} />
-      <Divider sx={{ my: 3 }} />
-      <SandboxHealthPage showError={showError} />
-      {config && config.rebootEnabled && (
-        <>
-          <Divider sx={{ my: 3 }} />
+      <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
+        {TABS.map((t) => (
+          <Tab key={t.id} value={t.id} label={t.label} />
+        ))}
+      </Tabs>
+      {tab === "logs" && <LogsPage showError={showError} />}
+      {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
+      {tab === "restart" && (
+        config && config.rebootEnabled ? (
           <fieldset>
             <legend>Danger zone</legend>
             <p className="hint">Reboots the machine grain itself is running on.</p>
             <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
           </fieldset>
-        </>
+        ) : (
+          <Alert severity="info">Not available: rebooting the host is not enabled for this deployment.</Alert>
+        )
       )}
     </Overlay>
   );

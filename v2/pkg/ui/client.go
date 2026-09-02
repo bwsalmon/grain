@@ -536,9 +536,19 @@ type CreateTaskRequest struct {
 	// deployment's default sandbox shape. 0 (the default for both) means
 	// no override: the task dispatches at whatever shape the deployment
 	// otherwise configures.
-	SandboxCPUs     int      `json:"sandboxCpus"`
-	SandboxMemoryMB int      `json:"sandboxMemoryMb"`
-	Capabilities    []string `json:"capabilities"`
+	SandboxCPUs     int `json:"sandboxCpus"`
+	SandboxMemoryMB int `json:"sandboxMemoryMb"`
+	// AgentFramework sets model.Task's own field of the same name -- a
+	// per-task override of the deployment's default agent framework
+	// (Settings' own "Agent framework"). "" (the default) means no
+	// override: the task is driven by whichever framework the deployment
+	// is set to when it dispatches. Anything but "" must be one of
+	// model.AgentFrameworkAntigravity/AgentFrameworkClaude (the legacy
+	// "gemini" spelling is accepted and normalized to the former),
+	// validated the same way UpdateSettings validates the
+	// deployment-wide setting.
+	AgentFramework string   `json:"agentFramework"`
+	Capabilities   []string `json:"capabilities"`
 	// DependsOn is a set of task IDs this task cannot dispatch ahead of --
 	// model.LinkDependsOn links, filed at creation the same way
 	// Capabilities is. SetDependency is the picker's attach/detach
@@ -673,6 +683,9 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err := validateSandboxShape(req.SandboxCPUs, req.SandboxMemoryMB); err != nil {
 		return Task{}, err
 	}
+	if err := validateAgentFramework(req.AgentFramework); err != nil {
+		return Task{}, err
+	}
 	grants, err := c.grantsFor(req.Capabilities)
 	if err != nil {
 		return Task{}, err
@@ -732,6 +745,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Configuration:   req.Configuration,
 		SandboxCPUs:     req.SandboxCPUs,
 		SandboxMemoryMB: req.SandboxMemoryMB,
+		AgentFramework:  req.AgentFramework,
 		Grants:          grants,
 		Links:           links,
 		Reads:           reads,
@@ -757,6 +771,25 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		}
 	}
 	return c.Task(ctx, id)
+}
+
+// validateAgentFramework checks a task's own AgentFramework override.
+// "" is the common case and always valid -- it is what "use the
+// deployment's own framework" is spelled as (model.Task.AgentFramework's
+// own doc comment) -- so unlike UpdateSettings' check of the
+// deployment-wide setting, which has no such reading, empty is accepted
+// here rather than rejected as unset.
+func validateAgentFramework(framework string) error {
+	// NormalizeAgentFrameworkName, not NormalizeAgentFramework: "" must
+	// stay "" here, since for a task it means "no override" rather than
+	// naming a framework (model.Task.AgentFramework's own doc comment).
+	switch model.NormalizeAgentFrameworkName(framework) {
+	case "", model.AgentFrameworkAntigravity, model.AgentFrameworkClaude:
+		return nil
+	default:
+		return validationErrorf("agentFramework must be %q, %q, or empty for this deployment's default",
+			model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
+	}
 }
 
 // validateSandboxShape checks a task's own SandboxCPUs/SandboxMemoryMB
@@ -915,6 +948,13 @@ type UpdateTaskRequest struct {
 	// is -- only the request field itself being nil means "leave alone".
 	SandboxCPUs     *int `json:"sandboxCpus,omitempty"`
 	SandboxMemoryMB *int `json:"sandboxMemoryMb,omitempty"`
+	// AgentFramework edits the same per-task override
+	// CreateTaskRequest.AgentFramework sets, and an empty string is a
+	// meaningful edit here for the same reason a 0 is above: it clears
+	// the override back to "use the deployment's framework". A task
+	// already dispatched keeps whichever framework its live run started
+	// with -- Deps.Framework is asked once, when the run begins.
+	AgentFramework *string `json:"agentFramework,omitempty"`
 	// Reads, given, replaces the whole set of read-only repos rather than
 	// adding to it -- there is no per-entry attach/detach endpoint for
 	// Reads the way SetCapability and SetDependency give Grants and
@@ -958,6 +998,11 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 			return Task{}, err
 		}
 	}
+	if req.AgentFramework != nil {
+		if err := validateAgentFramework(*req.AgentFramework); err != nil {
+			return Task{}, err
+		}
+	}
 	var reads []model.RepoRef
 	if req.Reads != nil {
 		var err error
@@ -996,6 +1041,9 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 		if req.SandboxMemoryMB != nil {
 			task.SandboxMemoryMB = *req.SandboxMemoryMB
+		}
+		if req.AgentFramework != nil {
+			task.AgentFramework = *req.AgentFramework
 		}
 		if req.Reads != nil {
 			task.Reads = reads

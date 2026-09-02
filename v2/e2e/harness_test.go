@@ -1,6 +1,6 @@
 // Package e2e ties every layer v2 owns today into one pipeline: a task
 // filed the way a human would, dispatch.Cycle deciding when it runs, an agent
-// (agent/gemini) actually driving it, and gitproxy actually authorizing
+// (agent/antigravity) actually driving it, and gitproxy actually authorizing
 // and forwarding the git push that results -- against a real embedded
 // SQLite store and a real (local, git http-backend) stand-in for GitHub.
 // That is the same discipline gitproxy/live_test.go already holds to one
@@ -41,10 +41,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
@@ -211,10 +209,10 @@ func (w *world) remote(owner, name string) string {
 // touch task_observation -- that is the GitHub-sync stand-in's job,
 // applied by the caller from the returned result, the same separation
 // model/simulate_test.go's components hold to.
-func (w *world) runDispatch(d dispatch.Dispatch, script []*genai.GenerateContentResponse, at time.Time) *agent.Result {
+func (w *world) runDispatch(d dispatch.Dispatch, script []antigravity.Step, at time.Time) *agent.Result {
 	w.t.Helper()
 	root := w.prepareSandbox(d)
-	fw := gemini.NewForTest(&scriptedGenerator{responses: script})
+	fw := antigravity.NewForTest(antigravity.Steps(script...))
 	result, err := fw.Run(w.ctx, agent.RunConfig{Prompt: "work the task", SandboxRoot: root})
 	if err != nil {
 		w.t.Fatalf("agent run for %s failed outright: %v", d.RunID, err)
@@ -233,7 +231,7 @@ func (w *world) runDispatch(d dispatch.Dispatch, script []*genai.GenerateContent
 
 // askedQuestion returns the question argument of the first ask_question
 // call in result, if any -- the harness's only way to see what the
-// mocked escape-hatch tool recorded, since gemini.Framework.Run's own
+// mocked escape-hatch tool recorded, since antigravity.Framework.Run's own
 // MockSink is internal and discarded when Run returns (mcp/mock_tools.go);
 // result.ToolCalls is the seam v2 leaves for exactly this.
 func askedQuestion(result *agent.Result) (string, bool) {
@@ -314,31 +312,10 @@ func (w *world) log1(owner, name, ref, format string) string {
 // gitproxy/live_test.go's own (package-private, deliberately
 // duplicated -- see that file's comment on why) ---------------------
 
-type scriptedGenerator struct {
-	responses []*genai.GenerateContentResponse
-	calls     int
-}
+func finalText(text string) antigravity.Step { return antigravity.TextStep(text) }
 
-func (g *scriptedGenerator) GenerateContent(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-	if g.calls >= len(g.responses) {
-		g.calls++
-		return nil, nil
-	}
-	resp := g.responses[g.calls]
-	g.calls++
-	return resp, nil
-}
-
-func finalText(text string) *genai.GenerateContentResponse {
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{Content: genai.NewContentFromText(text, genai.RoleModel)}},
-	}
-}
-
-func toolCall(name string, args map[string]any) *genai.GenerateContentResponse {
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{Content: genai.NewContentFromFunctionCall(name, args, genai.RoleModel)}},
-	}
+func toolCall(name string, args map[string]any) antigravity.Step {
+	return antigravity.ToolStep(name, args)
 }
 
 // pushScript is the scripted turn a "succeeding" agent run takes: clone
@@ -346,13 +323,13 @@ func toolCall(name string, args map[string]any) *genai.GenerateContentResponse {
 // taskID, and push it to a fresh branch -- never main, matching
 // model.BranchName's own contract that a task's work lands on its own
 // branch.
-func pushScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
+func pushScript(remote, branch, taskID string) []antigravity.Step {
 	cmd := "git clone " + remote + " work && cd work && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
@@ -371,13 +348,13 @@ func pushScript(remote, branch, taskID string) []*genai.GenerateContentResponse 
 // The happy path a simulation is meant to exercise was being skipped, so
 // the conflict never arose. (A merge conflict on purpose is
 // mergequeue_conflict_test.go's own subject.)
-func pushScriptOwnFile(remote, branch, taskID string) []*genai.GenerateContentResponse {
+func pushScriptOwnFile(remote, branch, taskID string) []antigravity.Step {
 	cmd := "git clone " + remote + " work && cd work && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' > NOTES-" + taskID + ".md && " +
 		"git add NOTES-" + taskID + ".md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
@@ -385,8 +362,8 @@ func pushScriptOwnFile(remote, branch, taskID string) []*genai.GenerateContentRe
 
 // failScript is a run that never touches git at all, so a retry after it
 // never risks colliding with a branch a real push would have made.
-func failScript(reason string) []*genai.GenerateContentResponse {
-	return []*genai.GenerateContentResponse{
+func failScript(reason string) []antigravity.Step {
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": "echo '" + reason + "' >&2; exit 1"}),
 		finalText("could not complete the task: " + reason),
 	}
@@ -397,8 +374,8 @@ func failScript(reason string) []*genai.GenerateContentResponse {
 // turn ... do not take any further actions," which this script honors by
 // following it with nothing but a short close-out turn, matching how a
 // human reading the tool's own contract would expect it to behave.
-func askScript(question string) []*genai.GenerateContentResponse {
-	return []*genai.GenerateContentResponse{
+func askScript(question string) []antigravity.Step {
+	return []antigravity.Step{
 		toolCall("ask_question", map[string]any{"question": question}),
 		finalText("waiting on a reply"),
 	}

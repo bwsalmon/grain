@@ -157,14 +157,21 @@ func runHostCommandTool(store *model.Store, taskID string, pollInterval, timeout
 // there is a turn boundary worth waiting across here that an unattended
 // run would not have. It only works at all because the caller already
 // holds *model.Store directly and is running in the same OS process as
-// the reply it is waiting for -- true today because gemini.Framework.Run
-// registers a run's tools in-process (gemini.go's own NewInProcess
-// call); it would need a different transport (the store is not
-// reachable from a spawned subprocess) to work under
-// claude.Framework.Run, which today ignores agent.RunConfig.Tools
-// entirely and is not wired into any real deployment (cmd/grain/
-// daemon.go only ever builds a gemini.Framework) -- see that framework's
-// own doc comment.
+// the reply it is waiting for.
+//
+// Nothing satisfies that today. It was true while the default framework
+// was a home-grown in-process Gemini API loop that registered a run's
+// tools in-process and so could call straight into this function; both
+// frameworks that remain (agent/antigravity and agent/claude) drive a
+// real CLI as a subprocess and ignore agent.RunConfig.Tools entirely,
+// because there is no in-process registry to hand a forked process. So
+// orchestrator.Config.GrantTools still assembles these tools and
+// RunDispatch still passes them, but no Framework consumes them: an
+// Interactive task's confirmation prompt is not reachable by a running
+// agent until the "mcpserver" subcommand grows a route back to the store
+// (it takes only a sandbox root or a kontur VM today -- see
+// cmd/grain/mcpserver.go). This function itself is unchanged and still
+// correct for any caller that does hold the store in-process.
 //
 // approved is false, with reply explaining why, whenever a human
 // answers no, the wait times out, or ctx is cancelled (the task closed,

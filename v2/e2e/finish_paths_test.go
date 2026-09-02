@@ -29,8 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -41,8 +40,8 @@ import (
 // one comment_on_issue call standing in for an agent that investigated
 // and decided nothing needs changing, the mcp contract's own third
 // escape hatch alongside ask_question and propose_task.
-func commentOnlyScript(comment string) []*genai.GenerateContentResponse {
-	return []*genai.GenerateContentResponse{
+func commentOnlyScript(comment string) []antigravity.Step {
+	return []antigravity.Step{
 		toolCall("comment_on_issue", map[string]any{"comment": comment}),
 		finalText("nothing to change: " + comment),
 	}

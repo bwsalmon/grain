@@ -7,6 +7,7 @@ import TaskList from "./components/TaskList.jsx";
 import RepoList from "./components/RepoList.jsx";
 import SchedulesList from "./components/SchedulesList.jsx";
 import TemplatesList from "./components/TemplatesList.jsx";
+import SuitesList from "./components/SuitesList.jsx";
 import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
@@ -32,6 +33,8 @@ export default function App() {
   const [tasks, setTasks] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [templates, setTemplates] = useState([]);
+  const [suites, setSuites] = useState([]);
+  const [suiteRuns, setSuiteRuns] = useState([]);
   const [stateFilter, setStateFilter] = useState("all");
   // view switches the main pane between the flat task list, the repo
   // page, and the schedules page; repoFilter is orthogonal to
@@ -91,6 +94,14 @@ export default function App() {
 
   const refreshTemplates = useCallback(async () => {
     setTemplates(await api("/api/templates"));
+  }, []);
+
+  const refreshSuites = useCallback(async () => {
+    setSuites(await api("/api/suites"));
+  }, []);
+
+  const refreshSuiteRuns = useCallback(async () => {
+    setSuiteRuns(await api("/api/suite-runs"));
   }, []);
 
   // refreshConfig re-fetches /api/config -- needed after adding or
@@ -224,12 +235,12 @@ export default function App() {
       try {
         const cfg = await api("/api/config");
         setConfig(cfg);
-        await Promise.all([refreshList(), refreshSchedules(), refreshTemplates()]);
+        await Promise.all([refreshList(), refreshSchedules(), refreshTemplates(), refreshSuites()]);
       } catch (err) {
         showError(err);
       }
     })();
-  }, [refreshList, refreshSchedules, refreshTemplates, showError]);
+  }, [refreshList, refreshSchedules, refreshTemplates, refreshSuites, showError]);
 
   useEffect(() => {
     async function poll() {
@@ -253,6 +264,10 @@ export default function App() {
           await Promise.all([refreshSchedules(), refreshTemplates()]);
         } else if (view === "templates") {
           await refreshTemplates();
+        } else if (view === "suites") {
+          // Templates too: SuiteOverlay's own template picker needs an
+          // up-to-date list, ScheduleOverlay's own reasoning applied here.
+          await Promise.all([refreshSuites(), refreshTemplates(), refreshSuiteRuns()]);
         }
       } catch (err) {
         // Deliberately quiet -- see app.js's own poll for why.
@@ -270,7 +285,7 @@ export default function App() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [openTaskId, refreshConfig, refreshList, refreshSchedules, refreshTemplates, view]);
+  }, [openTaskId, refreshConfig, refreshList, refreshSchedules, refreshTemplates, refreshSuites, refreshSuiteRuns, view]);
 
   // Opens whatever task /tasks/:id in the URL the page loaded with names
   // -- the view/showSettings equivalent of this runs synchronously in
@@ -342,6 +357,7 @@ export default function App() {
             tasks={tasks}
             schedules={schedules}
             templates={templates}
+            suites={suites}
             stateFilter={stateFilter}
             onSetFilter={setStateFilter}
             onOpenSettings={() => setShowSettings(true)}
@@ -372,6 +388,18 @@ export default function App() {
             />
           ) : view === "templates" ? (
             <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
+          ) : view === "suites" ? (
+            <SuitesList
+              suites={suites}
+              suiteRuns={suiteRuns}
+              templates={templates}
+              config={config}
+              tasks={tasks}
+              onRefresh={refreshSuites}
+              onRefreshRuns={refreshSuiteRuns}
+              onRefreshTemplates={refreshTemplates}
+              showError={showError}
+            />
           ) : (
             <div className="main-column">
               {repoFilter !== null && (

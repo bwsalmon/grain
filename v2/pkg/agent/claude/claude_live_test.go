@@ -13,8 +13,8 @@ import (
 )
 
 // TestLiveRunEndToEnd exercises the real claude binary and a real grain
-// binary's "mcpserver" subcommand, the same way agent/gemini's own
-// TestLiveRunEndToEnd gates on a credential and skips otherwise -- this
+// binary's "mcpserver" subcommand, gating on a credential and skipping
+// otherwise -- this
 // runs in CI (where CLAUDE_CODE_OAUTH_TOKEN is unset, and no claude binary
 // is installed) without failing, but can be run for real wherever both are
 // available:
