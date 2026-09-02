@@ -161,6 +161,25 @@ def test_the_cli_wrappers_replace_a_symlink_rather_than_writing_through_it():
     assert text.index("rm -f /usr/local/bin/grain") < text.index("cat > /usr/local/bin/grain")
 
 
+def test_the_data_directory_is_laid_out_before_the_cli_is_used():
+    """The `grain` CLI is a `docker run` with the data dir bind-mounted.
+
+    Docker creates a missing bind-mount source itself, as root and with a
+    mode nothing asked for -- so anything invoking that CLI before
+    setup_data_dir has run would hand the deployment a data directory
+    docker invented rather than one this script laid out.
+    """
+    code = setup_code()
+    main = code[code.index("main() {"):]
+    assert main.index("setup_data_dir") < main.index("ensure_kontur_images")
+    # ensure_kontur_images is the first step that runs the CLI (for
+    # `grain sandbox-image`); reformat_store_if_schema_changed and
+    # report_readiness follow it.
+    assert main.index("setup_data_dir") < main.index("reformat_store_if_schema_changed")
+    # And the key it seeds has to be found or generated before that.
+    assert main.index("ensure_kontur_ssh_key") < main.index("setup_data_dir")
+
+
 def test_the_upgrade_button_is_wired_to_the_image_path():
     text = setup_text()
     assert '-upgrade-image "$GRAIN_IMAGE"' in text

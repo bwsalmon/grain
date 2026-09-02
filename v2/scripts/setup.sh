@@ -1309,9 +1309,12 @@ ensure_kontur_oci_image() {
   fi
 
   # An Artifact Registry in this host's own project needs the metadata
-  # server's token; GHCR's public package needs nothing. Attempted only
-  # for the former, and never fatal on its own -- the pull below is what
-  # actually decides.
+  # server's token; GHCR's public package needs nothing, and a *private*
+  # one is already covered -- pull_image's own registry_login ran earlier
+  # against the same ghcr.io host with GRAIN_IMAGE_PULL_TOKEN, and docker
+  # keeps that session for every later pull from it. So this is attempted
+  # only for Artifact Registry, and is never fatal on its own: the pull
+  # below is what actually decides.
   case "$GRAIN_KONTUR_OCI_IMAGE" in
     *-docker.pkg.dev/*|gcr.io/*)
       local registry_host="${GRAIN_KONTUR_OCI_IMAGE%%/*}"
@@ -2361,16 +2364,26 @@ main() {
   ensure_src_dir_readable
   grant_docker_group
   pull_image
-  # After ensure_user (the wrappers run the image as that account) and
-  # before setup_data_dir, which is the first thing here to actually use
-  # the `grain` CLI they install.
+  # After ensure_user: the wrappers run the image as that account, so it
+  # has to exist to have a uid to run as.
   install_cli_wrappers
+  # Before setup_data_dir, which seeds the key it finds or generates into
+  # the secrets directory (seed_kontur_ssh_key), and before
+  # ensure_kontur_images, whose guest build bakes its public half in.
+  # Reads and writes no store of its own -- ssh-keygen and a file, so it
+  # needs nothing that comes after it.
   ensure_kontur_ssh_key
+  setup_sandbox_dir
+  # Ahead of every step below that runs the `grain` CLI: that CLI is a
+  # `docker run` with $GRAIN_DATA_DIR bind-mounted (install_cli_wrappers),
+  # and docker creates a missing bind-mount source itself -- as root,
+  # with a mode nothing here asked for. Laying the directory out first
+  # means the first CLI invocation mounts a directory this script already
+  # owns rather than one docker invented.
+  setup_data_dir
   ensure_kontur_images
   ensure_kontur_kvm_access
   ensure_kontur_git_proxy_host
-  setup_sandbox_dir
-  setup_data_dir
   # After setup_data_dir: seed_kontur_ssh_key, which it calls, is what
   # actually writes $GRAIN_DATA_DIR/secrets/kontur-ssh-key -- the key this
   # then stages into the images directory for `kontur exec` to read from
