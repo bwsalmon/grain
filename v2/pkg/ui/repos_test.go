@@ -62,6 +62,39 @@ func TestAddTargetRepoRejectsAMalformedRepo(t *testing.T) {
 	}
 }
 
+// AddTargetRepo/RemoveTargetRepo are a read-modify-write against whatever
+// UpdateSettings already has stored (repos.go's own doc comment), so a
+// deployment that has never saved settings at all gets UpdateSettings'
+// own "poll interval etc. are required the first time" refusal here too,
+// rather than silently seeding a Config no daemon could start against.
+func TestAddTargetRepoRefusesOnAnUnconfiguredDeployment(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	_, err := c.AddTargetRepo(ctx, "acme/widgets")
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("AddTargetRepo on an unconfigured deployment: err = %v, want a ValidationError", err)
+	}
+}
+
+// RemoveTargetRepo never reaches UpdateSettings at all here: an
+// unconfigured deployment's TargetRepos is empty, so removing anything
+// from it is the same no-op RemoveTargetRepoRemovesAndIsIdempotentWhenAbsent
+// already covers for a configured one -- unlike AddTargetRepo above,
+// there is no way for a repo to be present to remove before settings
+// have ever been saved.
+func TestRemoveTargetRepoIsANoOpOnAnUnconfiguredDeployment(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	got, err := c.RemoveTargetRepo(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatalf("RemoveTargetRepo on an unconfigured deployment: %v", err)
+	}
+	if got.Configured {
+		t.Fatalf("settings = %+v, want still Configured false", got)
+	}
+}
+
 func TestRemoveTargetRepoRemovesAndIsIdempotentWhenAbsent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	repos := []string{"acme/widgets", "acme/gadgets"}
