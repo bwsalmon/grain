@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 // rawEvent is one `--output-format stream-json` line. agy's stream is
@@ -273,6 +274,13 @@ func (p *parsedEvents) applyStep(s *rawStep) {
 // tool_info (where agy puts them) and falling back to the step's own
 // tool_name so a build that reports only the flat field still names the
 // call correctly.
+//
+// The name comes back bare rather than as agy reported it: agy names
+// every tool it loaded from its MCP settings "mcp__grain-sandbox__<tool>"
+// (this package's own allowedTools writes that prefix), and
+// agent.ToolCall.Name is the tool's identity rather than one CLI's
+// spelling of it. mcp.BareToolName's own doc comment has what recording
+// the prefixed name cost.
 func (s *rawStep) toolCall() (string, map[string]any) {
 	name := s.ToolName
 	var args map[string]any
@@ -282,7 +290,7 @@ func (s *rawStep) toolCall() (string, map[string]any) {
 		}
 		args = s.ToolInfo.Parameters
 	}
-	return name, args
+	return mcp.BareToolName(name), args
 }
 
 // toolResult reads what a terminal tool step returned. agy nests both

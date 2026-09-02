@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 // rawEvent is one --output-format stream-json line -- the same event shape
@@ -125,9 +126,18 @@ func parseEvents(stdout string) *parsedEvents {
 						fmt.Fprintf(&p.transcript, "%s\n\n", b.Text)
 					}
 				case "tool_use":
-					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
+					// Bare, not as claude reported it: claude names every
+					// tool it loaded from --mcp-config
+					// "mcp__grain-sandbox__<tool>" (this package's own
+					// allowedTools writes that prefix), and
+					// agent.ToolCall.Name is the tool's identity rather
+					// than one CLI's spelling of it. mcp.BareToolName's
+					// own doc comment has what recording the prefixed
+					// name cost.
+					name := mcp.BareToolName(b.Name)
+					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: name, Arguments: b.Input})
 					p.pending[b.ID] = len(p.result.ToolCalls) - 1
-					fmt.Fprintf(&p.transcript, "> %s(%s)\n", b.Name, inputSummary(b.Input))
+					fmt.Fprintf(&p.transcript, "> %s(%s)\n", name, inputSummary(b.Input))
 				case "tool_result":
 					if idx, ok := p.pending[b.ToolUseID]; ok {
 						text := toolResultText(b.Content)
