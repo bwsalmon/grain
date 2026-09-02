@@ -58,10 +58,21 @@ export default function SettingsOverlay({ onClose, showError }) {
   // overwrites a field that lives on another -- the same nil-means-
   // unchanged contract UpdateSettingsRequest's pointer fields already
   // give a PUT that leaves a key out entirely.
+  //
+  // It stays open on success rather than closing the way it did before
+  // this pane had more than one tab: each tab is now its own Save
+  // button, and closing the whole overlay after one of them would force
+  // a reopen to then save a second tab -- neither AgentKeysSection nor
+  // SecretsPanel, saved from tabs right alongside these, close it
+  // either. The response replaces whatever it overlaps of the loaded
+  // settings, so a tab switched to afterwards reflects what was just
+  // saved; merged rather than assigned outright since a test's mocked
+  // response is typically a bare {}, which a plain assignment would
+  // otherwise wipe every other field's value with.
   const save = async (payload) => {
     try {
-      await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
-      onClose();
+      const updated = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+      setSettings((prev) => ({ ...prev, ...updated }));
     } catch (err) {
       // Same banner task creation's own validation errors surface
       // through.

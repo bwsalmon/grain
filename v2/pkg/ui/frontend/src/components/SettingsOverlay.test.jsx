@@ -109,7 +109,24 @@ describe("SettingsOverlay", () => {
       method: "PUT",
       body: JSON.stringify({ pollInterval: "60s" }),
     });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // A tab's own Save button used to close the whole pane -- fine while
+  // General held every field, wrong once saving one tab left every
+  // other tab's own unsaved changes to redo after a reopen.
+  it("stays open and keeps other tabs usable after a successful save", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={onClose} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
+    expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
   });
 
   it("sends an empty payload when nothing changed", async () => {
