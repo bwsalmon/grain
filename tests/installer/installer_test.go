@@ -29,7 +29,6 @@ type deployment struct {
 	user    string
 	port    int
 	image   string
-	branch  string
 }
 
 var deployOnce struct {
@@ -59,10 +58,6 @@ func install() (*deployment, error) {
 		return nil, err
 	}
 
-	suffix, err := randomHex(8)
-	if err != nil {
-		return nil, err
-	}
 	port, err := freePort()
 	if err != nil {
 		return nil, err
@@ -76,7 +71,6 @@ func install() (*deployment, error) {
 		user:    "grain-e2e",
 		port:    port,
 		image:   image,
-		branch:  "installer-e2e-" + suffix,
 	}
 
 	checkout, err := repoRootFromCaller()
@@ -84,20 +78,22 @@ func install() (*deployment, error) {
 		return nil, err
 	}
 
-	// setup.sh's own sync_repo updates $GRAIN_SRC_DIR from a remote at a
-	// ref. Pointing that at this working tree, on a branch pinned to
-	// whatever is checked out, is what makes the script under test the one
-	// in this checkout rather than whatever main happens to be -- and still
-	// exercises sync_repo for real rather than stubbing it.
-	if got := run("git", "-C", checkout, "branch", "--force", d.branch, "HEAD"); got.exitCode != 0 {
-		return nil, fmt.Errorf("%v", got)
+	// The script under test, put on this host the way a deploy puts it
+	// there -- and nothing else, because nothing else is read from
+	// beside it any more. setup.sh keeps no checkout of its own: it
+	// needs nothing on a host but docker and systemd, and the source
+	// its kontur step wants comes out of the deployment image. A copy
+	// rather than a clone for the same reason: there is no repository
+	// here for it to be part of.
+	script, err := os.ReadFile(filepath.Join(checkout, "scripts", "setup.sh"))
+	if err != nil {
+		return nil, err
 	}
-	// Cloned here rather than left to sync_repo's own clone branch,
-	// mirroring terraform/gcp/files/deploy.sh: the script has to already be
-	// on disk to be run at all, so a real deploy always takes sync_repo's
-	// *update* path. That is the one worth testing.
-	if got := run("git", "clone", "--quiet", "--branch", d.branch, checkout, d.src); got.exitCode != 0 {
-		return nil, fmt.Errorf("%v", got)
+	if err := os.MkdirAll(filepath.Join(d.src, "scripts"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(d.src, "scripts", "setup.sh"), script, 0o755); err != nil {
+		return nil, err
 	}
 
 	// A stand-in for the GCP minter credential push-secrets.sh pushes. Its
@@ -116,9 +112,6 @@ func install() (*deployment, error) {
 	}
 
 	env := [][2]string{
-		{"GRAIN_REPO_URL", checkout},
-		{"GRAIN_REF", d.branch},
-		{"GRAIN_SRC_DIR", d.src},
 		{"GRAIN_DATA_DIR", d.data},
 		{"GRAIN_SANDBOX_DIR", d.sandbox},
 		{"GRAIN_USER", d.user},
@@ -137,7 +130,8 @@ func install() (*deployment, error) {
 		{"GRAIN_GCP_PROJECT", ""},
 		{"GRAIN_GITHUB_TOKEN", "ghp_fake_token_for_the_installer_e2e"},
 		// Empty: format_target_repo_if_empty would otherwise `git
-		// ls-remote` against GitHub with that fake token.
+		// ls-remote` (in the deployment image, but against the real
+		// GitHub) with that fake token.
 		{"GRAIN_TARGET_REPO", ""},
 		{"PATH", pathOrDefault()},
 	}
@@ -153,9 +147,8 @@ func install() (*deployment, error) {
 }
 
 // teardown puts the host back: every unit this deploy installed, the
-// container it started, the wrappers it wrote, the account it created, and
-// the branch it was pinned to.
-func (d *deployment) teardown(checkout string) {
+// container it started, the wrappers it wrote, and the account it created.
+func (d *deployment) teardown() {
 	for _, unit := range []string{
 		"grain-daemon.service", "grain-reboot.path", "grain-restart.path",
 		"grain-reboot.service", "grain-restart.service",
@@ -169,16 +162,12 @@ func (d *deployment) teardown(checkout string) {
 		"/usr/local/bin/konturctl", "/etc/profile.d/grain.sh")
 	sudo("userdel", d.user)
 	sudo("rm", "-rf", d.root)
-	if checkout != "" {
-		run("git", "-C", checkout, "branch", "--delete", "--force", d.branch)
-	}
 }
 
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if deployOnce.d != nil {
-		checkout, _ := repoRootFromCaller()
-		deployOnce.d.teardown(checkout)
+		deployOnce.d.teardown()
 	}
 	os.Exit(code)
 }

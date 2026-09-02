@@ -38,8 +38,6 @@ package installer
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -189,8 +187,8 @@ func sudoRead(path string) string { return sudo("cat", path).stdout }
 
 // repoRootFromCaller is the checkout this test binary was compiled from,
 // found by walking up from this file's own path rather than from the
-// working directory. It is what setup.sh is handed as its GRAIN_REPO_URL,
-// so the script under test is the one in this checkout.
+// working directory. It is where the script under test is copied from,
+// so a run tests this checkout's setup.sh rather than a deployed host's.
 func repoRootFromCaller() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -210,14 +208,6 @@ func freePort() (int, error) {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port, nil
-}
-
-func randomHex(n int) (string, error) {
-	b := make([]byte, (n+1)/2)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b)[:n], nil
 }
 
 // waitFor polls until check returns nil, or fails saying what never

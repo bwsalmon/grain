@@ -96,11 +96,13 @@ build: frontend $(CMDS)
 #
 # placeholder.html is exempt because it is *tracked*, unlike everything
 # else this deletes. Removing it left the checkout permanently dirty,
-# and scripts/setup.sh's own sync_repo refuses to update a dirty
-# checkout rather than clobber what might be an operator's edit -- so on
-# a host that builds in place from a git clone, which is exactly what
-# terraform/gcp deploys, the first successful build broke every
-# deploy after it.
+# which used to break every deploy after the first successful build on a
+# host that built in place from a git clone: the installer refused to
+# update a dirty checkout rather than clobber what might be an
+# operator's edit. Nothing builds on a deployed host any more
+# (bwsalmon/agents#645) and scripts/setup.sh keeps no checkout at all,
+# so that particular failure is gone -- but a build that dirties the
+# tree it was run in is still worth not doing.
 #
 # Keeping it cannot ship a placeholder in place of a real UI, which is
 # what deleting it was guarding against: server.go serves this directory

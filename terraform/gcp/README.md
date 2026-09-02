@@ -156,11 +156,13 @@ built (bwsalmon/agents#645): grain plus every binary it shells out to,
 published to GHCR by `.github/workflows/build-artifacts.yml` on every
 commit to grain (`Dockerfile`). Three variables decide which one:
 
-- **`grain_ref`** names the branch. It is still what the on-host
-  checkout tracks -- `files/deploy.sh` clones it, and that checkout is
-  where `scripts/setup.sh` itself and `scripts/kontur`'s guest/OCI
-  image builds come from -- and, by default, also which image tag runs:
-  that branch's name with `/` replaced by `-`, which is how CI tags it.
+- **`grain_ref`** names the branch. It is what the on-host checkout
+  tracks -- `files/deploy.sh` clones and updates it, and that checkout
+  is where this deploy finds `scripts/setup.sh` -- and, by default, also
+  which image tag runs: that branch's name with `/` replaced by `-`,
+  which is how CI tags it. Nothing else on the host reads that checkout:
+  `setup.sh` keeps none of its own, and `scripts/kontur`'s guest build
+  runs out of the source unpacked from the deployment image.
 - **`grain_image_tag`** overrides that. Set it to `sha-<short sha>` --
   published for every commit -- to pin this deployment to one immutable
   build. A rollback is that variable plus a `terraform apply`: no
@@ -395,12 +397,12 @@ grant `$GRAIN_USER` `/dev/kvm` and `docker` group access, and seed the
 generated SSH key, all before `write_systemd_units` wires up
 `grain daemon`'s own `-kontur-*` flags. This runs every deploy
 generation, not just the first, but `ensure_kontur_images`'s own
-`kontur_image_tag` -- a hash of `scripts/kontur`'s own git tree (what the
-guest image is provisioned from), `third_party/kontur`'s own vendored git
-tree (the kontur version baked into the OCI image), and the SSH public
-key in play -- names and caches the result, so a re-run with nothing
-changed rebuilds neither image; only a `guest-setup.sh` edit, a
-`third_party/kontur` vendor bump, or a rotated keypair does. See
+`kontur_image_tag` -- a content hash of `scripts/kontur` (what the guest
+image is provisioned from) and `third_party/kontur` (the kontur version
+baked into the OCI image), computed inside the deployment image that
+carries both -- names and caches the result, so a re-run with nothing
+changed rebuilds neither image; only a `guest-setup.sh` edit or a
+`third_party/kontur` vendor bump does. See
 `scripts/kontur/README.md` for what the guest-image build actually does
 and why.
 

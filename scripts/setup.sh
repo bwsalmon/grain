@@ -17,39 +17,27 @@
 #
 # What this script does, every time it runs (safe to re-run -- this is
 # the installer AND the updater):
-#   1. clones or updates this repo under $GRAIN_SRC_DIR -- and, if that
-#      update replaced this script itself, re-runs the new copy in place
-#      of this one (reexec_if_updated), so a run always deploys with the
-#      code it just pulled rather than the code it started with. The
-#      checkout is no longer what grain is built from (see 2), nor what
-#      the self-debug capability reads -- the image carries its own copy
-#      of the source it was built from, so the agent's view of the code
-#      cannot drift from the binary running it -- but it is still what
-#      this script re-execs out of and what scripts/kontur's own guest
-#      image builds come from
-#   2. pulls the deployment image -- $GRAIN_IMAGE:$GRAIN_IMAGE_TAG,
+#   1. pulls the deployment image -- $GRAIN_IMAGE:$GRAIN_IMAGE_TAG,
 #      published to GHCR by ../.github/workflows/build-artifacts.yml
 #      on every commit -- instead of building a binary here
 #      (bwsalmon/agents#645). That image carries grain *and* every binary
-#      it shells out to: git, the docker CLI, konturctl, and both agent
-#      CLIs -- claude and agy (Dockerfile). What this host has to have
-#      shrinks to `git`
-#      and `docker`, which this script still installs itself if a vanilla
-#      Debian VM doesn't have them (ensure_git, ensure_docker;
-#      bwsalmon/agents#617) -- no `make`, no Go or Node toolchain, no
-#      per-host claude install, and no minutes-long build on every deploy
-#   3. installs /usr/local/bin/grain and /usr/local/bin/konturctl as thin
+#      it shells out to: git, curl, the docker CLI, konturctl, and both
+#      agent CLIs -- claude and agy (Dockerfile) -- plus a copy of the
+#      source it was built from. So it is also where the handful of
+#      steps here that want more than a shell go looking, rather than at
+#      this host: see "What this host has to have" below
+#   2. installs /usr/local/bin/grain and /usr/local/bin/konturctl as thin
 #      wrappers that run that same image (install_cli_wrappers), so an
 #      operator's own shell -- and the rest of this script, which uses
 #      `grain schema-version` and `grain secrets` -- reaches the exact
 #      build the service runs, with nothing installed on the host to
 #      drift out of step with it
-#   4. creates an unprivileged system user to run the container as, and
-#      installs the two systemd path units that let it act on the host it
-#      cannot reach from inside a container: the UI's reboot-host button
-#      (bwsalmon/agents#395) and the restart its Upgrade button needs
-#      (bwsalmon/agents#396) each become a touch of a file under
-#      $GRAIN_DATA_DIR/control, watched by a unit out here
+#   3. creates an unprivileged system user to run the container as
+#   4. installs the two systemd path units that let that account act on
+#      the host it cannot reach from inside a container: the UI's
+#      reboot-host button (bwsalmon/agents#395) and the restart its
+#      Upgrade button needs (bwsalmon/agents#396) each become a touch of
+#      a file under $GRAIN_DATA_DIR/control, watched by a unit out here
 #      (write_control_units). That replaces the two NOPASSWD sudoers
 #      drop-ins this used to install, and grants strictly less: the
 #      daemon can restart its own service and reboot this machine, and
@@ -84,10 +72,43 @@
 #      enable-without-restart was already a bug once in v1's own proxy
 #      service
 #
+# What this host has to have: docker and systemd. That is the whole
+# list. Everything else this script runs is either a shell builtin or
+# part of a base system install -- coreutils, and the `useradd` every
+# distribution ships -- so there is no package a minimal cloud image
+# lacks standing between an operator and a deployment.
+#
+# It needed `git` and `jq` until recently, and installed both itself on
+# any host without them. Both are gone, and so is the checkout git was
+# there to maintain:
+#
+#   * the source is *in* the image (Dockerfile's own
+#     /usr/local/share/grain/src), so the one thing out here that still
+#     reads it -- scripts/kontur's guest image build -- unpacks it from
+#     the image this run is installing (unpack_image_source) instead of
+#     from a checkout tracking a branch. That closes the same drift the
+#     self-debug capability was moved into the image to close: a
+#     checkout follows a branch and an image tag never moves, so the two
+#     disagree on every upgrade and every rollback
+#   * the two steps that want a real git -- the `git ls-remote` against
+#     GRAIN_TARGET_REPO and the empty commit pushed to it -- run git
+#     *inside* that image (image_run), which carries one
+#   * so do the two that wanted curl and jq: the GCP metadata token and
+#     the GCS object fetch behind GRAIN_KONTUR_IMAGE_BUCKET
+#
+# One consequence worth naming: this script no longer replaces itself
+# mid-run. It used to (sync_repo pulled a new copy over the file this
+# process was reading, and reexec_if_updated handed over to it), which
+# is only a problem worth solving for a script that updates its own
+# source. Nothing rewrites this file underneath it now, so the copy an
+# operator ran is the copy that finishes. Keeping that copy current is
+# the job of whatever put it there: terraform/gcp/files/deploy.sh on the
+# GCP path, a `git pull` in your own checkout by hand.
+#
 # Every setting is an environment variable, not a flag, so the common
 # case is `sudo GRAIN_GITHUB_TOKEN=... GRAIN_GEMINI_API_KEY=... ./setup.sh`
-# and a re-run to pick up a repo update is `sudo ./setup.sh` with no
-# arguments at all. Run with -h/--help for the full list.
+# and a re-run to pick up a newly published image is `sudo ./setup.sh`
+# with no arguments at all. Run with -h/--help for the full list.
 #
 # Most daemon settings below (everything except GRAIN_UI_ADDR,
 # GRAIN_TARGET_REPO/GRAIN_TARGET_BRANCH and GRAIN_ENABLE_UI_UPGRADE) are
@@ -136,9 +157,10 @@ set -euo pipefail
 
 # --- configuration (every value overridable via environment) ----------
 
-GRAIN_REPO_URL="${GRAIN_REPO_URL:-https://github.com/bwsalmon/grain.git}"
+# The branch this deployment tracks. It names no checkout -- nothing
+# here keeps one (see "What this host has to have", above) -- only which
+# published image to run, through GRAIN_IMAGE_TAG below.
 GRAIN_REF="${GRAIN_REF:-main}"
-GRAIN_SRC_DIR="${GRAIN_SRC_DIR:-/opt/grain}"
 GRAIN_DATA_DIR="${GRAIN_DATA_DIR:-/var/lib/grain}"
 # Root for HostSandboxes' per-slot working directories -- only used
 # without kontur sandboxing (GRAIN_KONTUR_ENABLE=0). Deliberately not
@@ -345,11 +367,8 @@ happens. Change an already-seeded value with `grain settings` (run as
 GRAIN_USER) or the UI's Settings pane instead.
 Recognized variables:
 
-  GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
-  GRAIN_REF                branch to deploy (default: main) -- names both the
-                             checkout this script keeps and, via GRAIN_IMAGE_TAG,
-                             which published image it runs
-  GRAIN_SRC_DIR             where the checkout lives (default: /opt/grain)
+  GRAIN_REF                branch to deploy (default: main) -- names which
+                             published image runs, via GRAIN_IMAGE_TAG below
   GRAIN_DATA_DIR            secrets/store root -- state that must survive a redeploy
                              (default: /var/lib/grain)
   GRAIN_SANDBOX_DIR         HostSandboxes' per-slot working directory root, only used
@@ -521,7 +540,8 @@ Recognized variables:
                              (bwsalmon/agents#567). Defaults to docker's own
                              "bridge" network gateway address, detected via
                              `docker network inspect bridge` or, failing
-                             that, the bridge device's own address; set
+                             that, the default route a container on that
+                             network has; set
                              explicitly if this host's kontur VM containers
                              join a different docker network.
 EOF
@@ -541,12 +561,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# Taken here, before sync_repo below can replace the file underneath this
-# running process -- see reexec_if_updated for what it is compared
-# against and why.
-SELF_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-SELF_SUM_BEFORE="$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}' || true)"
-
+# The base-system commands every step below assumes: systemd's own
+# systemctl, and two that any distribution's base install carries.
+# Checked rather than installed -- a host missing one of these is not a
+# host this script can repair -- and deliberately a short list: see this
+# file's own header, "What this host has to have".
 for cmd in systemctl install useradd; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
@@ -554,60 +573,24 @@ for cmd in systemctl install useradd; do
   fi
 done
 
-# git and docker are installed rather than only reported missing --
-# bwsalmon/agents#617. Until then both were only ever guaranteed by terraform/gcp/files/deploy.sh's own
-# install_prerequisites, which runs *before* this script but is no help
-# to anyone who reaches this script the way its own header comment says
-# it should be reachable: cloning this repo onto a bare Debian VM and
-# running it directly, no Terraform or GCP metadata involved. A vanilla
-# Debian cloud image carries neither.
-ensure_git() {
-  command -v git >/dev/null 2>&1 && return 0
-  if command -v apt-get >/dev/null 2>&1; then
-    log "installing git (needed to clone/update $GRAIN_SRC_DIR)"
-    apt-get update -qq || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates || true
-  fi
-  if ! command -v git >/dev/null 2>&1; then
-    echo "setup.sh: required command not found: git, and it could not be installed automatically -- install it (e.g. 'apt-get install git') and re-run" >&2
-    exit 1
-  fi
-}
-ensure_git
-
-# Same shape as ensure_git, and added with the python3 it replaced.
+# docker is installed rather than only reported missing
+# (bwsalmon/agents#617): it is the one package this script needs that a
+# vanilla Debian cloud image does not carry, and until #617 it was only
+# ever guaranteed by terraform/gcp/files/deploy.sh's own
+# install_prerequisites -- which runs *before* this script but is no
+# help to anyone reaching it the way this file's header says it should
+# be reachable: put setup.sh on a bare VM and run it. git and jq had
+# helpers of exactly this shape here too, and are gone -- nothing on
+# this host needs either any more (see the header, "What this host has
+# to have").
 #
-# python3 needed no such helper: every Debian cloud image carries one, so
-# the three one-liners that used it were safe to assume. jq is not on that
-# list. A host reaching this script through terraform/gcp/files/deploy.sh
-# already has jq -- deploy.sh's own `cfg` needs it before this script
-# starts, and its install_prerequisites is what puts it there -- but the
-# standalone path this file's header describes (clone onto a bare Debian
-# VM, run it) would otherwise reach gcs_fetch and die with a bare 127,
-# which is exactly the unreadable failure deploy.sh's own comment on
-# install_prerequisites' ordering complains about.
-ensure_jq() {
-  command -v jq >/dev/null 2>&1 && return 0
-  if command -v apt-get >/dev/null 2>&1; then
-    log "installing jq (this script reads JSON from the GCP metadata server with it)"
-    apt-get update -qq || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq || true
-  fi
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "setup.sh: required command not found: jq, and it could not be installed automatically -- install it (e.g. 'apt-get install jq') and re-run" >&2
-    exit 1
-  fi
-}
-ensure_jq
-
-# Installs the docker.io package if the CLI is missing, then makes sure
-# the daemon is actually up -- a fresh install's postinst usually starts
-# it already, but this does not rely on that. The `docker info` check a
-# few lines down is what actually gates the rest of the script; this is
-# just the one attempt to make that check pass on its own rather than
-# hand the operator a cryptic failure for a one-line fix.
+# The install is one attempt to make the `docker info` check a few lines
+# down pass on its own rather than hand the operator a cryptic failure
+# for a one-line fix; that check, not this, is what gates the rest of
+# the script. It also enables the daemon, since a fresh install's
+# postinst usually starts it but this does not rely on that.
 #
-# docker is now what grain *runs in*, not merely what it was once built
+# docker is what grain *runs in* now, not merely what it was once built
 # in (bwsalmon/agents#645): grain-daemon.service is a `docker run` of the
 # deployment image, so this is a hard runtime dependency of the service
 # and not just of this script.
@@ -637,81 +620,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- 1. clone or update the checkout -----------------------------------
-
-sync_repo() {
-  # git 2.35.2+ refuses to operate on a repository it does not own
-  # ("detected dubious ownership in repository at ..."), which this
-  # checkout can easily be: it is root-owned here, and a previous
-  # deployment's chown may have left it owned by $GRAIN_USER instead. A
-  # git command that fails closed is worse than it sounds --
-  # kontur_image_tag, later in main(), redirects git's stderr to
-  # /dev/null and falls back to the literal string "unknown", which
-  # silently breaks the content-hash caching that tag exists for: a
-  # scripts/kontur edit or third_party/kontur vendor bump would stop
-  # changing the tag at all, so ensure_kontur_guest_build
-  # would keep reusing whatever it built the first time, forever. The
-  # same failure hits this function's own git calls below whenever the
-  # checkout is owned by anyone but root. Exempting it here,
-  # before anything else touches the checkout, covers every git
-  # invocation for the rest of this run and every run after it -- a
-  # global config entry, so guarded against piling up duplicates across
-  # re-runs.
-  git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GRAIN_SRC_DIR" \
-    || git config --global --add safe.directory "$GRAIN_SRC_DIR"
-
-  if [ -d "$GRAIN_SRC_DIR/.git" ]; then
-    log "Updating checkout at $GRAIN_SRC_DIR ($GRAIN_REF)"
-    if ! git -C "$GRAIN_SRC_DIR" diff --quiet || ! git -C "$GRAIN_SRC_DIR" diff --cached --quiet; then
-      echo "setup.sh: $GRAIN_SRC_DIR has uncommitted changes -- refusing to overwrite them. Commit, stash, or remove them and re-run." >&2
-      exit 1
-    fi
-    git -C "$GRAIN_SRC_DIR" fetch --quiet origin "$GRAIN_REF"
-    git -C "$GRAIN_SRC_DIR" checkout --quiet "$GRAIN_REF"
-    git -C "$GRAIN_SRC_DIR" reset --quiet --hard "origin/$GRAIN_REF"
-  else
-    log "Cloning $GRAIN_REPO_URL ($GRAIN_REF) into $GRAIN_SRC_DIR"
-    # mkdir -p, not `install -d`: the parent (e.g. /opt) usually already
-    # exists, and `install -d` unconditionally applies its -m mode even
-    # to a directory that was already there -- found live, against /tmp,
-    # while testing this script: it silently stripped /tmp's sticky bit.
-    # mkdir -p never touches a directory that already exists.
-    mkdir -p "$(dirname "$GRAIN_SRC_DIR")"
-    git clone --quiet --branch "$GRAIN_REF" "$GRAIN_REPO_URL" "$GRAIN_SRC_DIR"
-  fi
-}
-
-# sync_repo updates the checkout this script itself lives in, and git
-# swaps the file for a new one rather than rewriting it in place -- so
-# this process goes on reading the copy it started with. Every step below
-# is therefore the *old* script's version of that step, and a fix to this
-# file only takes effect on the run after the one that pulled it.
-#
-# That is not hypothetical: it is how the deploy that pulled ff6e818
-# ("Install make on the host, and check for it") still died on a bare
-# `make: command not found`, with the check that exists to name that
-# failure sitting unread on disk a few inches away.
-#
-# So: if the file at $0 is not the one this process is running, hand over
-# to it. Only ever once -- $GRAIN_SETUP_REEXECED is exported across the
-# exec, so the new copy runs its own sync_repo (a no-op by then, the
-# checkout is already at $GRAIN_REF) and carries on rather than looking
-# for a third. A setup.sh run from a copy outside the checkout is
-# untouched by sync_repo, so its checksum does not change and this does
-# nothing at all.
-reexec_if_updated() {
-  [ -z "${GRAIN_SETUP_REEXECED:-}" ] || return 0
-  [ -n "$SELF_SUM_BEFORE" ] || return 0
-  local now=""
-  now="$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}' || true)"
-  [ -n "$now" ] || return 0
-  [ "$now" != "$SELF_SUM_BEFORE" ] || return 0
-  log "$SELF_PATH changed in the update just pulled; re-running it"
-  export GRAIN_SETUP_REEXECED=1
-  exec "$SELF_PATH" "$@"
-}
-
-# --- 2/3. pull the deployment image, and install the CLI wrappers -------
+# --- 1/2. pull the deployment image, and install the CLI wrappers -------
 #
 # This is where a v2 deploy used to spend its minutes: `make -C v2
 # container-build`, a pinned Go toolchain image, a cold module cache, a
@@ -727,6 +636,36 @@ reexec_if_updated() {
 # pkg/upgrade/image.go).
 GRAIN_IMAGE_REF="${GRAIN_IMAGE}:${GRAIN_IMAGE_TAG}"
 IMAGE_REF_FILE="$GRAIN_DATA_DIR/image.env"
+
+# image_run runs one command inside the deployment image: docker
+# arguments before "--", the command line for the image after it --
+#
+#   image_run --network host --entrypoint curl -- -fsS "$url"
+#
+# This is how every step below that needs more than a shell gets it, and
+# it is why this host needs nothing but docker (see this file's header,
+# "What this host has to have"). The image already carries git, curl and
+# grain's own source, and this host is already pulling and running it --
+# so borrowing a tool out of it costs a deployment nothing, while
+# requiring the same tool out here would add a package every host must
+# have before it can deploy at all.
+#
+# --entrypoint is not optional in any call: this image's own entrypoint
+# is `grain` (Dockerfile), so a caller that forgets it runs a grain
+# subcommand instead of the command it named.
+#
+# Deliberately no --network host by default: only the callers that must
+# reach an address on this host itself -- the metadata server, a
+# GRAIN_GITHUB_HOST that is a mock on loopback -- ask for it.
+image_run() {
+  local docker_args=()
+  while [ "$#" -gt 0 ]; do
+    [ "$1" = "--" ] && { shift; break; }
+    docker_args+=("$1")
+    shift
+  done
+  docker run --rm "${docker_args[@]}" "$GRAIN_IMAGE_REF" "$@"
+}
 
 # registry_login authenticates to the image's registry, if this
 # deployment was given a credential for it. Nothing to do in the ordinary
@@ -936,7 +875,7 @@ PROFILE
   log "  grain CLI on this host defaults to http://127.0.0.1:${port} (/etc/profile.d/grain.sh)"
 }
 
-# --- 4. the unprivileged account grain runs as --------------------------
+# --- 3. the unprivileged account grain runs as --------------------------
 
 # ensure_user creates $GRAIN_USER.
 #
@@ -959,7 +898,7 @@ ensure_user() {
   fi
 }
 
-# --- 5. the control channel: acting on the host from inside the container -
+# --- 4. the control channel: acting on the host from inside the container -
 #
 # Two UI buttons ask grain to do something to the machine it runs on:
 # "reboot host" (pkg/ui/host.go, bwsalmon/agents#395) and the restart
@@ -1082,55 +1021,122 @@ grant_docker_group() {
 # ensure_kontur_guest_fetch -- the local build path needs no GCP
 # credential of its own at all.
 #
-# `jq -e` rather than a bare filter: a metadata response without the key
-# is a credential this host does not have, and `// empty` plus -e turns
-# that into no output and a non-zero exit rather than the string "null"
-# travelling on into an Authorization header.
+# curl and the JSON parse were both host tools until recently -- curl,
+# and a jq this script installed for these two lines and nothing else.
+# curl runs inside the deployment image now (image_run), and the one
+# field wanted out of the response is read with bash's own regex match.
+# That match is also what keeps a response *without* the field from
+# travelling on as the literal string "null" in an Authorization header:
+# no match is a non-zero return, exactly as `jq -er '.access_token //
+# empty'` was.
+#
+# The metadata server is addressed by IP rather than as
+# metadata.google.internal: that name resolves on a GCE host through an
+# /etc/hosts entry, and a container gets docker's own /etc/hosts even
+# under --network host, so the name is not reliably there. The address
+# is the documented one that entry points at.
 kontur_gcp_access_token() {
-  curl -fsS -H "Metadata-Flavor: Google" \
-    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
-    | jq -er '.access_token // empty'
+  local json
+  json="$(image_run --network host --entrypoint curl -- \
+    -fsS -H "Metadata-Flavor: Google" \
+    "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" \
+    2>/dev/null)" || return 1
+  [[ "$json" =~ \"access_token\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# urlencode percent-escapes everything outside the unreserved set
+# (A-Za-z0-9-_.~), "/" included -- what `jq -rn '$o|@uri'` used to do
+# here, and needed for the same reason: an object name is one path
+# *segment* of the GCS API URL, not a path. ASCII only, which every
+# caller is -- the object names below are this script's own literals
+# under a bucket an operator named.
+urlencode() {
+  local s="$1" out="" c i
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~-]) out+="$c" ;;
+      *) out+="$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
 }
 
 # gcs_fetch downloads gs://$1/$2 to file $3 using kontur_gcp_access_token,
 # the GCS JSON API's own object-download endpoint (the "alt=media" query
 # parameter) rather than gsutil -- see kontur_gcp_access_token's own
 # comment on why.
+#
+# The destination *directory* is mounted into the container and curl
+# writes into it there, rather than the download being piped back out
+# through docker's stdout: what comes through here is a guest disk image,
+# and this path exists precisely for an operator who did not want to
+# build one on every host. The token goes in as an environment variable
+# rather than on the command line, where every process on this host
+# could read it out of `ps`.
 gcs_fetch() {
-  local bucket="$1" object="$2" dest="$3" encoded_object
-  # @uri escapes everything outside the unreserved set (A-Za-z0-9-_.~),
-  # "/" included -- an object name is one path segment of the API URL, not
-  # a path.
-  encoded_object="$(jq -rn --arg o "$object" '$o|@uri')"
-  curl -fsS -H "Authorization: Bearer $(kontur_gcp_access_token)" \
-    "https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encoded_object}?alt=media" \
-    -o "$dest"
+  local bucket="$1" object="$2" dest="$3" token
+  token="$(kontur_gcp_access_token)" || return 1
+  image_run --network host \
+    --env "GRAIN_GCS_TOKEN=$token" \
+    --volume "${dest%/*}:/out" \
+    --entrypoint sh -- \
+    -c 'curl -fsS -H "Authorization: Bearer $GRAIN_GCS_TOKEN" "$1" -o "/out/$2"' \
+    gcs_fetch \
+    "https://storage.googleapis.com/storage/v1/b/${bucket}/o/$(urlencode "$object")?alt=media" \
+    "${dest##*/}"
 }
 
 # kontur_image_tag names the guest image ensure_kontur_guest_build
 # builds and caches by hashing exactly what defines its contents:
-# scripts/kontur's own git tree (guest-setup.sh and build-guest.sh -- the "startup
-# script" a guest image is provisioned from) and third_party/kontur's own
-# vendored git tree (the kontur binary and cloud-hypervisor version the
-# OCI image actually bakes in -- the "kontur version"). The operator SSH
-# public key used to be hashed in here too, since it decided the guest's
-# authorized_keys; nothing about a key reaches the disk any more (kontur
-# generates one per boot -- see scripts/kontur/guest-setup.sh's "No SSH key
-# is baked in"), so rotating one no longer forces a rebuild. Either tree
-# changing -- a guest-setup.sh edit, a third_party/kontur vendor bump -- changes
+# scripts/kontur (guest-setup.sh and build-guest.sh -- the "startup
+# script" a guest image is provisioned from) and third_party/kontur (the
+# kontur binary and cloud-hypervisor version the OCI image actually
+# bakes in -- the "kontur version"). The operator SSH public key used to
+# be hashed in here too, since it decided the guest's authorized_keys;
+# nothing about a key reaches the disk any more (kontur generates one
+# per boot -- see scripts/kontur/guest-setup.sh's "No SSH key is baked
+# in"), so rotating one no longer forces a rebuild. Either tree changing
+# -- a guest-setup.sh edit, a third_party/kontur vendor bump -- changes
 # this tag, which is exactly what tells ensure_kontur_guest_build it has
 # to rebuild rather than reuse what is already on disk (bwsalmon/agents#531:
 # "name the image based on the hash of the startup script and kontur
-# version so it knows when it needs to re-generate it"). Nothing here
-# hashes file *contents* by hand the way, say, Terraform's own filesha256
-# would: scripts/kontur and third_party/kontur already live inside
-# GRAIN_SRC_DIR's own git checkout, so their tree object IDs already are
-# exactly that, for free.
+# version so it knows when it needs to re-generate it").
+#
+# It used to be the two git tree object ids, read out of a checkout on
+# this host: a content hash of each directory that git had already
+# computed, for free. There is no checkout any more, and no git out here
+# to ask (this file's header, "What this host has to have") -- so the
+# same hash is computed directly, over the same two directories, inside
+# the image that carries them. LC_ALL=C so the ordering does not depend
+# on a locale, and each file's *path* is hashed along with its contents
+# (that is what sha256sum's own output lines carry), so a rename changes
+# the tag the way a tree object id would.
 kontur_image_tag() {
-  local kontur_tree tp_tree
-  kontur_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:scripts/kontur" 2>/dev/null || echo unknown)"
-  tp_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:third_party/kontur" 2>/dev/null || echo unknown)"
-  printf '%s\n' "${kontur_tree}:${tp_tree}" | sha256sum | awk '{print $1}' | cut -c1-16
+  local sum
+  sum="$(image_run --entrypoint sh -- -c '
+      cd /usr/local/share/grain/src || exit 1
+      find scripts/kontur third_party/kontur -type f -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum \
+        | sha256sum' 2>/dev/null || true)"
+  sum="${sum%% *}"
+  if [ -z "$sum" ]; then
+    # The image's own id, rather than a fixed string like the "unknown"
+    # the git version fell back to per tree: a constant here would pin
+    # every future run to the first directory this ever cached, and a
+    # guest image would stop being rebuilt at all. An id at least moves
+    # whenever the image does.
+    local id
+    id="$(docker image inspect -f '{{.Id}}' "$GRAIN_IMAGE_REF" 2>/dev/null || true)"
+    sum="${id##*:}"
+  fi
+  # Never empty: the caller builds a directory path out of this and
+  # removes it before writing, so an empty tag would aim that rm at
+  # GRAIN_KONTUR_IMAGES_HOSTPATH itself.
+  sum="${sum:-unknown}"
+  printf '%s\n' "${sum:0:16}"
 }
 
 ensure_kontur_images() {
@@ -1255,6 +1261,41 @@ ensure_kontur_guest_fetch() {
   rmdir "$tmp_dir"
 }
 
+# KONTUR_SRC_DIR is where the source the guest build reads gets
+# unpacked. Under GRAIN_KONTUR_IMAGES_HOSTPATH rather than
+# $GRAIN_DATA_DIR on purpose: it is a build input, reconstructed from
+# the image on every run that needs one, so it belongs with the rest of
+# the kontur artefacts a redeploy is free to discard rather than in the
+# one directory meant to survive a redeploy.
+KONTUR_SRC_DIR="${GRAIN_KONTUR_IMAGES_HOSTPATH}/src"
+
+# unpack_image_source copies /usr/local/share/grain/src -- the checkout
+# the deployment image was built from (Dockerfile) -- out of that image.
+# `docker create` plus `docker cp`, so nothing has to run inside the
+# container to do it and nothing out here has to be able to fetch the
+# source itself.
+#
+# This is what replaced a `git clone`/`git fetch` of GRAIN_REF, and it
+# buys more than one fewer package on this host: the guest image a
+# deployment builds is now built from exactly the source its own binary
+# was built from. A checkout tracking a branch could not promise that on
+# any run where the branch had moved past the image, or where a rollback
+# had moved the image back past the branch -- the same drift that put
+# the self-debug capability's copy of the source inside the image.
+unpack_image_source() {
+  local cid=""
+  rm -rf "$KONTUR_SRC_DIR"
+  install -d -m0755 "$KONTUR_SRC_DIR"
+  cid="$(docker create "$GRAIN_IMAGE_REF" 2>/dev/null)" || return 1
+  # "<dir>/." copies the directory's *contents* into an existing
+  # destination, rather than nesting a "src" inside it.
+  if ! docker cp "$cid:/usr/local/share/grain/src/." "$KONTUR_SRC_DIR" >/dev/null 2>&1; then
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  docker rm -f "$cid" >/dev/null 2>&1 || true
+}
+
 # ensure_kontur_guest_build is the default path (bwsalmon/agents#531):
 # with no GRAIN_KONTUR_IMAGE_BUCKET naming a pre-built guest disk, this
 # host builds its own, here, caching it by kontur_image_tag so a re-run
@@ -1279,12 +1320,17 @@ ensure_kontur_guest_build() {
     log "kontur guest image ${tag} already built -- reusing it"
   else
     log "Building kontur guest image ${tag} (scripts/kontur/build-guest.sh -- one docker build, no VM boot; this can take several minutes)"
+    if ! unpack_image_source; then
+      log "  could not unpack the source out of $GRAIN_IMAGE_REF -- leaving kontur sandboxing off this run"
+      GRAIN_KONTUR_ENABLE=0
+      return
+    fi
     local tmp_out
     tmp_out="$(mktemp -d)"
     if ! env \
         SANDBOX_SETUP_SCRIPT="" \
         OUTPUT_DIR="$tmp_out" \
-        "$GRAIN_SRC_DIR/scripts/kontur/build-guest.sh"; then
+        "$KONTUR_SRC_DIR/scripts/kontur/build-guest.sh"; then
       log "  scripts/kontur/build-guest.sh failed -- leaving kontur sandboxing off this run"
       rm -rf "$tmp_out"
       GRAIN_KONTUR_ENABLE=0
@@ -1296,8 +1342,8 @@ ensure_kontur_guest_build() {
     rm -rf "$tmp_out"
   fi
 
-  # The sandbox container used to be built right here too, from this same
-  # checkout, and is pulled by ensure_kontur_oci_image instead now
+  # The sandbox container used to be built right here too, from the same
+  # source, and is pulled by ensure_kontur_oci_image instead now
   # (bwsalmon/agents#645) -- see ensure_kontur_images' own comment on why
   # only one of the two artifacts moved.
 
@@ -1391,11 +1437,30 @@ ensure_kontur_kvm_access() {
 # in for the default bridge network's own auto-allocated pool, even
 # after a container has actually attached to it, so `gw` here came back
 # empty on every real install and permanently disabled kontur sandboxing.
-# The address containers on that network actually get routed through is
-# simpler ground truth: whatever IPv4 address the bridge device itself
-# (by default docker0, but overridable via `docker network create -o
-# com.docker.network.bridge.name`, hence reading it from the network's
-# own Options rather than hardcoding it) carries on this host.
+#
+# The fallback asks a container on that network what its own default
+# route is, which *is* the address containers reach this host through --
+# the thing being looked for, rather than a proxy for it. It used to
+# read the bridge device's address with `ip` out here instead; a host
+# without iproute2 is not one this script is willing to fail on any more
+# (this file's header, "What this host has to have"), and the image
+# carries no iproute2 either, hence /proc/net/route rather than `ip
+# route` inside it. That file's gateway column is a little-endian hex
+# word, which is why it is reassembled backwards below.
+bridge_gateway() {
+  local route dest gateway hex=""
+  route="$(image_run --network bridge --entrypoint sh -- -c 'cat /proc/net/route' 2>/dev/null || true)"
+  [ -n "$route" ] || return 0
+  while read -r _ dest gateway _; do
+    if [ "$dest" = "00000000" ] && [ -n "$gateway" ]; then
+      hex="$gateway"
+      break
+    fi
+  done <<< "$route"
+  [ -n "$hex" ] || return 0
+  printf '%d.%d.%d.%d\n' "0x${hex:6:2}" "0x${hex:4:2}" "0x${hex:2:2}" "0x${hex:0:2}"
+}
+
 ensure_kontur_git_proxy_host() {
   if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     return
@@ -1403,12 +1468,10 @@ ensure_kontur_git_proxy_host() {
   if [ -n "$GRAIN_KONTUR_GIT_PROXY_HOST" ]; then
     return
   fi
-  local gw iface
+  local gw
   gw="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)"
   if [ -z "$gw" ]; then
-    iface="$(docker network inspect bridge -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)"
-    iface="${iface:-docker0}"
-    gw="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    gw="$(bridge_gateway)"
   fi
   if [ -z "$gw" ]; then
     log "GRAIN_KONTUR_ENABLE=1 but GRAIN_KONTUR_GIT_PROXY_HOST is unset and docker's own \"bridge\" network has no gateway address to default it to -- set GRAIN_KONTUR_GIT_PROXY_HOST explicitly (see this script's own -h); leaving kontur sandboxing off this run"
@@ -1419,7 +1482,7 @@ ensure_kontur_git_proxy_host() {
   log "kontur git proxy host defaulted to docker bridge gateway $GRAIN_KONTUR_GIT_PROXY_HOST"
 }
 
-# --- 6. data directory and secrets --------------------------------------
+# --- 5. data directory and secrets --------------------------------------
 
 seed_secret() {
   # Writes $2 to file $1 only if it is missing or empty, and only if a
@@ -1533,9 +1596,10 @@ setup_data_dir() {
   # the same reason $GRAIN_DATA_DIR itself is: a deployment upgraded
   # across bwsalmon/agents#645 already has one, with a previous release's
   # binary in it, and an operator who put something of their own there
-  # should find it where they left it. install -d re-applies -o/-g even
-  # against a directory that already exists (this file's own comment on
-  # sync_repo's mkdir-vs-install-d distinction).
+  # should find it where they left it. install -d re-applies -o/-g (and
+  # its -m mode) even against a directory that already exists, which is
+  # exactly what is wanted here and exactly why it is never used on a
+  # directory this script does not own.
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/bin"
   # A real, writable HOME for the daemon, exported by grain-daemon.service
   # (write_systemd_units). $GRAIN_USER is created --no-create-home, so the
@@ -1754,6 +1818,20 @@ reformat_store_if_schema_changed() {
 # nothing to branch from. Detected with `git ls-remote`, which returns no
 # output at all against a repo with zero refs -- no clone needed just to
 # find that out.
+#
+# Both git calls run inside the deployment image (image_run), which
+# carries git because the orchestrator clones every task's repo with it
+# (Dockerfile). They are the only two steps here that want a real git,
+# and running them in there is what lets this host have none at all --
+# see this file's header, "What this host has to have". --network host
+# so a GRAIN_GITHUB_HOST on this host's own loopback (a mock server,
+# under GRAIN_GITHUB_INSECURE_HTTP) is reachable from in there too, and
+# the URL travels as an environment variable rather than an argument,
+# since it carries a token and a command line is world-readable in `ps`.
+#
+# The scratch repository is made *inside* the container as well: it
+# exists for one empty commit and is thrown away with the container, so
+# there is nothing to mount and nothing on this host to clean up.
 
 format_target_repo_if_empty() {
   if [ -z "$GRAIN_TARGET_REPO" ]; then
@@ -1773,18 +1851,21 @@ format_target_repo_if_empty() {
   local url="${proto}://x-access-token:${token}@${GRAIN_GITHUB_HOST}/${GRAIN_TARGET_REPO}.git"
 
   log "Checking whether $GRAIN_TARGET_REPO has any commits yet"
-  if [ -n "$(git ls-remote "$url" 2>/dev/null)" ]; then
+  if [ -n "$(image_run --network host --env "GRAIN_TARGET_URL=$url" \
+       --entrypoint sh -- -c 'git ls-remote "$GRAIN_TARGET_URL"' 2>/dev/null)" ]; then
     return
   fi
 
   log "  it's empty -- pushing one empty commit to $GRAIN_TARGET_BRANCH so grain has something to branch from"
-  local tmp
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
-  git init --quiet -b "$GRAIN_TARGET_BRANCH" "$tmp"
-  git -C "$tmp" -c user.name=grain -c user.email=grain@localhost \
-    commit --quiet --allow-empty -m "Initial commit (created by grain setup.sh)"
-  git -C "$tmp" push --quiet "$url" "HEAD:refs/heads/$GRAIN_TARGET_BRANCH"
+  image_run --network host --env "GRAIN_TARGET_URL=$url" --entrypoint sh -- -c '
+    set -e
+    branch="$1"
+    tmp="$(mktemp -d)"
+    git init --quiet -b "$branch" "$tmp"
+    git -C "$tmp" -c user.name=grain -c user.email=grain@localhost \
+      commit --quiet --allow-empty -m "Initial commit (created by grain setup.sh)"
+    git -C "$tmp" push --quiet "$GRAIN_TARGET_URL" "HEAD:refs/heads/$branch"
+  ' format_target_repo "$GRAIN_TARGET_BRANCH"
 }
 
 # --- 8. the systemd unit ---------------------------------------------------
@@ -1811,7 +1892,7 @@ format_target_repo_if_empty() {
 # to report -- and a caller assigns this to a variable, where `set -e`
 # would turn that report into an aborted deploy.
 agent_cli_in_image() {
-  docker run --rm --entrypoint sh "$GRAIN_IMAGE_REF" -c "command -v $1" 2>/dev/null | head -n1 || true
+  image_run --entrypoint sh -- -c "command -v $1" 2>/dev/null | head -n1 || true
 }
 
 # report_agent_cli renders one agent CLI's line for the readiness summary:
@@ -2342,8 +2423,11 @@ print_summary() {
 }
 
 main() {
-  sync_repo
-  reexec_if_updated "$@"
+  # pull_image comes before everything that runs image_run (the kontur
+  # steps, the empty-repo check) and before install_cli_wrappers, which
+  # writes wrappers around the same image: with no checkout and no host
+  # tooling left, this image is where the rest of this run gets both its
+  # `grain` CLI and every tool richer than the shell.
   ensure_user
   grant_docker_group
   pull_image

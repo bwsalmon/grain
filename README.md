@@ -1811,17 +1811,17 @@ defaults to `orchestrator.HostSandboxes` — plain host directories, not a
 VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
 not have either way yet). It *pulls* what it deploys rather than
-building it — see "The deployment is a container" below — so `git` and
-`docker` are the only things it needs of the host, and it installs both
-itself on a vanilla Debian VM that has neither (`ensure_git`,
-`ensure_docker` -- bwsalmon/agents#617: until then, only
-`terraform/gcp/files/deploy.sh` guaranteed them before ever invoking
-this script, which was no help to a host that reaches this script the
-way this section's own opening line describes -- cloning the repo and
-running it directly, no Terraform involved); it also re-runs itself when
-the update it just pulled
-replaced the script mid-run, so a deploy never proceeds with the copy it
-started with (`reexec_if_updated`). There used to be a second service
+building it — see "The deployment is a container" below — so `docker`
+and systemd are the only things it needs of the host, and it installs
+docker itself on a vanilla Debian VM that has none (`ensure_docker` --
+bwsalmon/agents#617: until then, only `terraform/gcp/files/deploy.sh`
+guaranteed it before ever invoking this script, which was no help to a
+host that reaches this script the way this section's own opening line
+describes -- putting it on a bare VM and running it). Everything else it
+uses is either a shell builtin or part of a base system install; the
+handful of steps that want a richer tool — a `git`, a `curl` — run one
+out of the deployment image it is already pulling (`image_run`), which
+is why it needs neither on the host and clones nothing. There used to be a second service
 (`grain-ui.service`) and, before
 bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt sql-server`
 container behind it, needed only because a daemon and a UI writing the
@@ -1901,7 +1901,7 @@ every commit, and `scripts/setup.sh` pulls it.
 
 What that buys is not build speed, though a deploy did stop costing
 several minutes of Go and npm. It is that the set of things that have to
-be true of a deployed host shrank to `git` and `docker`. Before, a host
+be true of a deployed host shrank to `docker` and systemd. Before, a host
 could be running the right commit and still fail every dispatch because
 its `claude` CLI install had 403'd months ago (`install_claude_cli` was
 non-fatal on purpose — refusing to deploy over a blocked download would
@@ -1990,12 +1990,23 @@ published disk would either carry a keypair everyone has or admit nobody
 at all. `kontur_image_bucket` still fetches one built centrally, for a
 fleet sharing a keypair.
 
-What stayed on the host, deliberately: the git checkout. It is no longer
-what grain is built from, but it is still where `setup.sh` itself comes
-from (and re-execs from, mid-run), where `scripts/kontur`'s guest and OCI
-image builds run from, and what the self-debug capability reads grain's
-own source out of — mounted read-only into the container for that last
-one. Both agent CLIs are in the image, not on the host: `claude` and `agy`
+What did not stay on the host: the git checkout, and with it `git` and
+`jq`. `setup.sh` used to clone one, update it on every run, and re-exec
+itself out of it when that update replaced the script mid-run; it now
+needs nothing on a host but `docker` and systemd, and everything it
+wanted a checkout for comes out of the image instead. The source is in
+there (`/usr/local/share/grain/src`), so the guest disk build unpacks
+the source its own binary was built from rather than whatever a branch
+points at today — the same drift the self-debug capability was moved
+into the image to close. The two steps that want a real `git` (a `git
+ls-remote` at `GRAIN_TARGET_REPO`, and the empty commit pushed to it)
+and the two that wanted `curl` and `jq` (the GCP metadata token, and a
+guest disk fetched from a bucket) all run inside that image too —
+`setup.sh`'s own `image_run`. Keeping the copy of `setup.sh` on a host
+current is the job of whatever put it there: on the GCP path,
+`deploy.sh`, which clones and updates that checkout itself.
+
+Both agent CLIs are in the image, not on the host: `claude` and `agy`
 alike, installed from their own installers at build time ("Two agent
 frameworks, either per task", above). `GRAIN_CLAUDE_PATH` and
 `GRAIN_AGY_PATH` still name a copy on the host when a deployment has to
@@ -2065,10 +2076,11 @@ it already pointed.
 it knows about, and the restart it names is a touch of
 `$GRAIN_DATA_DIR/control/restart` rather than `sudo systemctl restart`:
 see "The deployment is a container" above for that channel and why a
-container needs one. `-upgrade-src-dir` is still passed alongside, but no
-longer means "build here" — with `-upgrade-image` set nothing builds, and
-that flag is now only what `grantTools` reads grain's own source out of
-for the self-debug capability.
+container needs one. `-upgrade-src-dir` is not passed at all any more:
+with `-upgrade-image` set nothing builds, and the source `grantTools`
+reads for the self-debug capability is the copy inside the image
+(`cmd/grain/daemon.go`'s `sourceDir`), which cannot disagree with the
+binary next to it.
 
 `GRAIN_ENABLE_UI_UPGRADE` (default `1`) is the escape hatch for a
 deployment shape that already has its own rollout mechanism and cannot
