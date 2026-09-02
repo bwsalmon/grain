@@ -95,6 +95,17 @@ export function knownRepos(config, tasks) {
   return [...repos].sort((a, b) => a.localeCompare(b));
 }
 
+// A task in one of these states is no evidence of where a repo's work
+// currently lives, so lastBaseForRepo below does not suggest its base.
+// The case that matters is a base branch that has been merged and
+// deleted: the run pointed at it fails ("base branch 'x' does not exist
+// on owner/repo", orchestrator's own prepareCheckout), and without this
+// that failed task is then the newest one carrying that base -- so the
+// dead branch is suggested again for the next task, which fails the same
+// way, which makes it the newest again. The suggestion outlives the
+// branch forever, and every task filed from it is dead on arrival.
+const STALE_BASE_STATES = ["failed", "closed"];
+
 // lastBaseForRepo is the branch NewTaskOverlay prefills "Base branch"
 // with once a repo is picked (bwsalmon/agents#641): whatever base the
 // most recently created task targeting that repo used, so a repo whose
@@ -102,11 +113,18 @@ export function knownRepos(config, tasks) {
 // base) doesn't make every new task against it retype that branch name.
 // Empty when nothing on record for that repo ever set a base (the
 // ordinary case of building off the deployment's default branch).
+//
+// It is a suggestion, not a check: nothing here can know whether a
+// branch still exists on GitHub -- that is a fact only GitHub holds, and
+// this package deliberately never asks it. What it can do is not repeat
+// a base that has already failed, which is what STALE_BASE_STATES above
+// is for.
 export function lastBaseForRepo(tasks, repo) {
   if (!repo) return "";
   let latest = null;
   for (const t of tasks || []) {
     if (t.repo !== repo || !t.base) continue;
+    if (STALE_BASE_STATES.includes(t.state)) continue;
     if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0)) latest = t;
   }
   return latest ? latest.base : "";

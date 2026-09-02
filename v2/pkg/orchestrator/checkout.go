@@ -91,9 +91,25 @@ func prepareCheckout(ctx context.Context, tools []mcp.Tool, remoteBase string, t
 	// with the branch already on the remote, its own history is what the
 	// next attempt continues, and re-rooting it on the base is exactly
 	// what would throw the first attempt's commits away.
+	//
+	// Its existence is checked first, and named when it fails. A base
+	// that is simply gone is the ordinary end of a branch's life -- it
+	// merged, and GitHub deleted it -- and a task can easily outlive one:
+	// New task prefills Base from the repo's last task
+	// (bwsalmon/agents#641), so a branch that merges between one task
+	// being filed and the next being dispatched leaves a task pointed at
+	// nothing. What git says about that on its own is "error: pathspec
+	// 'x' did not match any file(s) known to git", which names neither
+	// the base nor the repo it was looked for in, and reads like a
+	// corrupt checkout rather than a branch that no longer exists.
 	base := ""
 	if task.Base != "" {
-		base = fmt.Sprintf("git checkout --quiet '%s'\n", task.Base)
+		base = fmt.Sprintf(`if ! git rev-parse --verify --quiet 'refs/remotes/origin/%[1]s' >/dev/null; then
+    echo "base branch '%[1]s' does not exist on %[2]s -- it may have been merged and deleted; retarget this task at a branch that exists" >&2
+    exit 1
+  fi
+  git checkout --quiet '%[1]s'
+  `, task.Base, task.Target)
 	}
 	script := fmt.Sprintf(`set -e
 rm -rf '%[1]s'

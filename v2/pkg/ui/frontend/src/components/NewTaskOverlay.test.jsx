@@ -170,6 +170,44 @@ describe("NewTaskOverlay", () => {
     expect(payload.base).toBe("release/2.0");
   });
 
+  // The failure this guards against is self-perpetuating: a base branch
+  // that merges and is deleted makes its task fail, that failed task is
+  // then the repo's most recent one carrying that base, so the dead
+  // branch is suggested again, and the next task fails the same way.
+  it("does not prefill Base branch from a task that failed", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Good task", repo: "acme/widgets", base: "release/2.0", state: "completed", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "Died on a deleted base", repo: "acme/widgets", base: "grain/issue-642", state: "failed", createdAt: "2026-06-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("release/2.0");
+  });
+
+  it("prefills nothing when every task carrying a base for that repo failed", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Died", repo: "acme/widgets", base: "grain/issue-642", state: "failed", createdAt: "2026-06-01T00:00:00Z" },
+      { id: "2", title: "Closed too", repo: "acme/widgets", base: "grain/issue-642", state: "closed", createdAt: "2026-06-02T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("");
+  });
+
   it("leaves a manually-typed Base branch alone when the picked repo has no task history", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/fresh"] };
     const tasks = [

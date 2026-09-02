@@ -214,3 +214,31 @@ func TestPrepareCheckoutReportsAFailedClone(t *testing.T) {
 		t.Fatalf("error does not name the repo it failed to clone: %v", err)
 	}
 }
+
+// A base branch that no longer exists on the remote is the ordinary end
+// of a branch's life -- it merged, and GitHub deleted it -- and a task
+// can outlive one, since New task prefills Base from the repo's last
+// task (bwsalmon/agents#641). git's own answer names neither the base
+// nor the repo ("error: pathspec 'x' did not match any file(s) known to
+// git"), and reads like a corrupt checkout rather than a branch that is
+// simply gone, so prepareCheckout says which branch and where itself.
+func TestPrepareCheckoutNamesABaseBranchThatNoLongerExists(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task)
+	if err == nil {
+		t.Fatal("prepareCheckout succeeded against a base branch that does not exist")
+	}
+	for _, want := range []string{"grain/issue-642", "acme/widgets", "does not exist"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v; want it to mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "pathspec") {
+		t.Errorf("error = %v; want grain's own explanation, not git's raw pathspec message", err)
+	}
+}
