@@ -27,13 +27,24 @@ describe("SettingsOverlay", () => {
     api.mockReset();
   });
 
-  it("loads settings and populates the form with them", async () => {
+  it("loads settings and populates the General tab with them", async () => {
     api.mockResolvedValueOnce(settings);
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
     expect(screen.getByDisplayValue("2")).toBeInTheDocument();
+  });
+
+  it("populates the Agents tab with them", async () => {
+    api.mockResolvedValueOnce(settings);
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
+
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("40")).toBeInTheDocument();
   });
 
   it("points to the repos pane instead of editing target repos itself", async () => {
@@ -58,8 +69,10 @@ describe("SettingsOverlay", () => {
   // pane already fetched (no second request).
   it("offers a key field per agent framework, marked set or not", async () => {
     api.mockResolvedValueOnce({ ...settings, agentKeysEnabled: true, claudeOAuthTokenSet: true });
+    const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByLabelText("Gemini API key")).toBeInTheDocument();
     expect(screen.getByLabelText("Claude Code OAuth token")).toBeInTheDocument();
@@ -135,6 +148,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
 
     const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
     await user.clear(cpusInput);
@@ -156,6 +170,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
 
     expect(screen.getByLabelText(/Sandbox vCPUs/)).toHaveValue(4);
     expect(screen.getByLabelText(/Sandbox memory/)).toHaveValue(8192);
@@ -169,8 +184,10 @@ describe("SettingsOverlay", () => {
   // reads as a deliberately zeroed-out sandbox.
   it("shows kontur's default shape as a placeholder, not a literal 0, when unset", async () => {
     api.mockResolvedValueOnce(settings);
+    const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
 
     const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
     const memoryInput = screen.getByLabelText(/Sandbox memory/);
@@ -189,6 +206,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
 
     await user.clear(screen.getByLabelText(/Sandbox vCPUs/));
     await user.clear(screen.getByLabelText(/Sandbox memory/));
@@ -237,6 +255,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Claude" }));
@@ -254,6 +273,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByRole("radio", { name: "Claude" })).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -275,7 +295,19 @@ describe("SettingsOverlay", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("switches to the Capabilities tab and shows its panel", async () => {
+  it("switches to the GitHub tab and shows its fields", async () => {
+    api.mockResolvedValueOnce(settings);
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "GitHub" }));
+
+    expect(screen.getByDisplayValue("github.com")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+  });
+
+  it("switches to the Capabilities tab, offers the GCP fields and shows the panel", async () => {
     const capabilities = [
       { id: "self-debug", name: "Self debug", description: "Read grain's own source", ready: true },
       {
@@ -283,17 +315,34 @@ describe("SettingsOverlay", () => {
         missingConfig: ["GCP project", "GCP service account email"],
       },
     ];
-    api.mockResolvedValueOnce({ ...settings, capabilities });
+    api.mockResolvedValueOnce({ ...settings, capabilities, gcpProject: "acme-proj" });
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("tab", { name: "Capabilities" }));
 
+    expect(screen.getByDisplayValue("acme-proj")).toBeInTheDocument();
     expect(await screen.findByText("Self debug")).toBeInTheDocument();
     expect(screen.getByText("GCP key")).toBeInTheDocument();
     expect(screen.getByText(/Needs: GCP project, GCP service account email/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+  });
+
+  it("only includes changed GCP fields in the Capabilities tab's own payload", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.type(screen.getByLabelText(/GCP project/), "acme-proj");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ gcpProject: "acme-proj" }),
+    });
   });
 
   it("switches to the Secrets tab and shows its panel", async () => {
