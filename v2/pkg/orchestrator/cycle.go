@@ -70,7 +70,12 @@ type Deps struct {
 	// not authorization, which Store.GitScope already handles by
 	// resolving a sandbox through the live run on it.
 	RevokeSandboxToken func(sandbox string) error
-	MaxConcurrent      int
+	// MaxConcurrent is the starting value for a deployment -- cmd/grain
+	// seeds it from cfg.maxConcurrent -- but RunCycle overwrites its own
+	// copy every cycle from deps.Store's grain_config row, so changing it
+	// through the store takes effect on the next tick rather than
+	// requiring a restart. See RunCycle's own doc comment.
+	MaxConcurrent int
 	// Runs, when non-nil, is where a cycle parks the runs it starts:
 	// reconcileDispatch gives each dispatch a goroutine tracked there and
 	// returns without waiting for it, so the cycle -- and the tick after
@@ -204,7 +209,23 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // Cancellation is the one thing that does stop a cycle early, since a
 // cancelled context means the daemon is shutting down rather than that
 // one reconciler has a problem the others might not.
+//
+// deps.MaxConcurrent is refreshed from deps.Store's own grain_config row
+// (if any) before any reconciler runs, so a change made through the
+// store -- `grain settings`, or the UI's Settings page -- takes effect on
+// this cycle rather than needing the daemon restarted the way the rest
+// of model.Config still does (cmd/grain's loadConfig, which only reads
+// grain_config at startup). A store with no row yet -- deps.Store is nil
+// in tests that build Deps by hand, or GetConfig itself returns nil --
+// leaves deps.MaxConcurrent exactly as the caller set it.
 func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
+	if deps.Store != nil {
+		if mc, err := deps.Store.GetConfig(ctx); err != nil {
+			log.Printf("orchestrator: reading stored max-concurrent: %v", err)
+		} else if mc != nil {
+			deps.MaxConcurrent = mc.MaxConcurrent
+		}
+	}
 	var errs []error
 	for _, r := range Reconcilers() {
 		if err := ctx.Err(); err != nil {

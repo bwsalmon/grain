@@ -167,6 +167,55 @@ func TestACycleDoesNotDispatchPastMaxConcurrentWhileARunIsLive(t *testing.T) {
 	finishedRun(t, ctx, store, "t2")
 }
 
+// A change to max-concurrent made through the store -- `grain settings`,
+// or the UI's Settings page, either of which ends in Store.PutConfig --
+// takes effect on the next cycle, with no restart and no change to the
+// Deps a long-lived daemon process already built: RunCycle itself
+// re-reads it (RunCycle's own doc comment).
+func TestACycleAdoptsAMaxConcurrentChangeFromTheStoreWithoutRestart(t *testing.T) {
+	store, ctx := openStore(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	filedTask(t, ctx, store, "t1", repo)
+	filedTask(t, ctx, store, "t2", repo)
+
+	fw := newBlockingFramework()
+	deps, runs := asyncDeps(t, store, fw, 1)
+
+	cycle(t, ctx, deps)
+	enteredRun(t, fw, "t1-1")
+
+	if got, err := store.Runs(ctx, "t2"); err != nil {
+		t.Fatal(err)
+	} else if len(got) != 0 {
+		t.Fatalf("t2 was dispatched (%+v) with the deployment's one run already live", got)
+	}
+
+	if err := store.PutConfig(ctx, model.Config{MaxConcurrent: 2}); err != nil {
+		t.Fatalf("PutConfig: %v", err)
+	}
+
+	// deps itself still says MaxConcurrent: 1 -- exactly what a running
+	// daemon's own copy would say, since nothing restarted it.
+	cycle(t, ctx, deps)
+	enteredRun(t, fw, "t2-1")
+
+	if got, err := store.LiveRunCount(ctx); err != nil {
+		t.Fatal(err)
+	} else if got != 2 {
+		t.Fatalf("live runs = %d, want both t1's and t2's", got)
+	}
+
+	fw.releaseAll()
+	waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err := runs.Wait(waitCtx); err != nil {
+		t.Fatalf("waiting for the dispatched runs: %v", err)
+	}
+	for _, id := range []string{"t1", "t2"} {
+		finishedRun(t, ctx, store, id)
+	}
+}
+
 // Deps with no InFlight keeps the old shape -- the cycle waits for the
 // run it started -- which every one-shot caller in-tree relies on.
 func TestACycleWithNowhereToParkRunsStillWaitsForThem(t *testing.T) {

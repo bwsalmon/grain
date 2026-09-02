@@ -255,6 +255,11 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 // next full restart of the deployment. A fresh deployment with no
 // grain_config row yet (nil) reads as false -- model.Config's own zero
 // value, and the backlog order grain has always defaulted to.
+//
+// MaxConcurrent gets the same "no restart" treatment for the same
+// reason, but earns it elsewhere: orchestrator.RunCycle re-reads it from
+// the store every cycle (that func's own doc comment), since it is
+// RunCycle, not this package, that actually needs the current value.
 func (c *Client) newestFirst(ctx context.Context) (bool, error) {
 	cfg, err := c.Store.GetConfig(ctx)
 	if err != nil {
