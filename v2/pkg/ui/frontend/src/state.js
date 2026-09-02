@@ -111,8 +111,10 @@ const STALE_BASE_STATES = ["failed", "closed"];
 // most recently created task targeting that repo used, so a repo whose
 // work currently lives off a release branch (or any other non-default
 // base) doesn't make every new task against it retype that branch name.
-// Empty when nothing on record for that repo ever set a base (the
-// ordinary case of building off the deployment's default branch).
+// Empty when the most recent task on record for that repo left base
+// unset too -- an empty base is itself a value worth repeating (the
+// deployment's default branch), not a gap to look past for an older
+// task's base.
 //
 // It is a suggestion, not a check: nothing here can know whether a
 // branch still exists on GitHub -- that is a fact only GitHub holds, and
@@ -123,11 +125,11 @@ export function lastBaseForRepo(tasks, repo) {
   if (!repo) return "";
   let latest = null;
   for (const t of tasks || []) {
-    if (t.repo !== repo || !t.base) continue;
+    if (t.repo !== repo) continue;
     if (STALE_BASE_STATES.includes(t.state)) continue;
     if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0)) latest = t;
   }
-  return latest ? latest.base : "";
+  return latest ? latest.base || "" : "";
 }
 
 // frameworkLabel names an agent framework the way the UI talks about it
