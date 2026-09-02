@@ -407,8 +407,61 @@ variable "grain_repo_url" {
 
 variable "grain_ref" {
   type        = string
-  description = "Branch, tag, or commit of grain to deploy. Pin a tag or SHA for a reproducible staging build."
+  description = <<-EOT
+    Branch of grain to deploy. Names two things that move together: the
+    checkout files/deploy.sh keeps on the host (which is where
+    v2/scripts/setup.sh itself, and packer/kontur's own image builds,
+    come from), and -- unless grain_image_tag overrides it -- which
+    published image the daemon runs, since CI tags one per branch.
+
+    A tag or commit SHA still works for the checkout, but has no image
+    published under that name: set grain_image_tag to sha-<short sha>
+    alongside it to pin the running build (see that variable).
+  EOT
   default     = "main"
+}
+
+variable "grain_image" {
+  type        = string
+  description = <<-EOT
+    Image repository, with no tag, that grain-daemon.service runs --
+    grain plus every binary it shells out to, built and pushed on every
+    commit by .github/workflows/build-artifacts.yml (v2/Dockerfile).
+
+    Override it to deploy from a mirror or a private copy; a registry
+    that needs credentials also needs grain_image_pull_user and a token
+    pushed by push-secrets.sh.
+  EOT
+  default     = "ghcr.io/bwsalmon/grain/grain"
+}
+
+variable "grain_image_tag" {
+  type        = string
+  description = <<-EOT
+    Which tag of grain_image to run. Empty (the default) follows
+    grain_ref: the branch tag CI publishes for it, which is that branch
+    name with "/" replaced by "-".
+
+    Set it to sha-<short sha> to pin this deployment to one immutable
+    build, and to roll one back: every commit publishes such a tag, so a
+    rollback is this variable plus a `terraform apply`, with no rebuild
+    anywhere.
+  EOT
+  default     = ""
+}
+
+variable "grain_image_pull_user" {
+  type        = string
+  description = <<-EOT
+    Username for `docker login` against grain_image's registry, for a
+    private package. The token half is a secret and never a Terraform
+    input -- push-secrets.sh puts it in instance metadata, exactly as it
+    does for the GitHub PAT.
+
+    Empty (the default) pulls anonymously, which is what
+    ghcr.io/bwsalmon/grain's own public package needs.
+  EOT
+  default     = ""
 }
 
 variable "test_repos" {

@@ -17,6 +17,9 @@ locals {
   grain_config = {
     grain_repo_url            = var.grain_repo_url
     grain_ref                 = var.grain_ref
+    grain_image               = var.grain_image
+    grain_image_tag           = var.grain_image_tag
+    grain_image_pull_user     = var.grain_image_pull_user
     github_host               = var.github_host
     credential_name           = var.credential_name
     default_target_repo       = var.default_target_repo

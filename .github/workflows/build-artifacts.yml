@@ -1,10 +1,11 @@
-# Builds v2's release artifacts on every checkin to main and stores them
-# in GitHub, so a deployment (or an operator poking around) can fetch a
+# Builds v2's release artifacts on every checkin and stores them in
+# GitHub, so a deployment (or an operator poking around) can fetch a
 # known-good build without having to check out the repo and run a
-# toolchain locally -- bwsalmon/agents#622.
+# toolchain locally -- bwsalmon/agents#622, #645.
 #
-# Three artifacts, matching the three build outputs packer/kontur/README.md
-# already documents as "what a deployment needs published":
+# Three of the four are built on main only, matching the three build
+# outputs packer/kontur/README.md already documents as "what a deployment
+# needs published":
 #   - the grain binary itself (v2/Makefile's `build`)
 #   - the kontur binaries (`kontur`, `konturctl`, `kontur-mem-agent`) that
 #     manage kontur-backed sandbox VMs
@@ -34,15 +35,35 @@
 # free and gives a rollback target the single-release binaries don't
 # have.
 #
-# push-to-main only, not pull_request: publishing needs a GITHUB_TOKEN
-# with contents:write and packages:write, and running that against an
+# The fourth artifact, and the one a deployment now actually runs, is the
+# grain image itself (v2/Dockerfile, bwsalmon/agents#645): `grain` plus
+# every binary it shells out to -- git, the docker CLI, konturctl, the
+# claude CLI -- in one image v2/scripts/setup.sh pulls instead of
+# building a binary on the deployed host. That job runs on *every*
+# branch, not just main: the UI's own Upgrade button targets a branch by
+# name (v2/pkg/upgrade), which in a container deployment means pulling
+# that branch's tag, so a branch with no image published for it is a
+# branch nobody can upgrade onto.
+#
+# push, not pull_request: publishing needs a GITHUB_TOKEN with
+# contents:write and packages:write, and running that against an
 # unreviewed PR branch is exactly what ../tests.yml's own comment on
 # pull_request-vs-push warns against for a job that holds a credential.
+# A `push` event only ever fires for a branch in this repository, which
+# takes write access to create -- a fork's PR branch never triggers one --
+# so extending the image job to every branch does not widen who can make
+# a credentialed job run. The two jobs that publish a *shared* name
+# (build-latest's release assets, kontur-sandbox:latest) stay pinned to
+# main with an `if` of their own, so a branch push cannot move either.
 name: build-artifacts
 
 on:
   push:
-    branches: [main]
+    # Every branch, tags excluded: an image is published per branch (the
+    # grain-container job below), and a tag push would otherwise publish
+    # one under the tag's own name, which nothing here or in
+    # v2/scripts/setup.sh ever resolves.
+    branches: ['**']
 
 permissions:
   contents: read
@@ -59,6 +80,11 @@ concurrency:
 jobs:
   binaries:
     name: binaries (grain, kontur)
+    # main only: this job's single build-latest release is a shared name,
+    # and a branch push overwriting its assets would leave "the latest
+    # build" meaning whichever branch published last. See this file's own
+    # header on which jobs are pinned to main and why.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -138,6 +164,9 @@ jobs:
 
   sandbox-container:
     name: sandbox container (kontur OCI image)
+    # main only, for the same reason as `binaries` above: this job moves
+    # kontur-sandbox:latest, which every kontur deployment resolves.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -170,3 +199,51 @@ jobs:
           latest="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:latest"
           docker tag "${{ steps.build.outputs.image }}" "$latest"
           docker push "$latest"
+
+  grain-container:
+    name: grain container
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Three names for one image, each answering a different question.
+      #
+      #   sha-<short>  what exactly is running -- immutable, and the only
+      #                tag that can never be moved out from under a
+      #                deployment pinned to it
+      #   <branch>     what this branch is at now: the tag
+      #                v2/scripts/setup.sh resolves from GRAIN_REF, and
+      #                the one the UI's Upgrade button pulls when an
+      #                operator names a branch (v2/pkg/upgrade's
+      #                TagForBranch). '/' is not legal in a docker tag,
+      #                so it becomes '-' -- the same substitution
+      #                TagForBranch makes, and the reason it is written
+      #                down in both places rather than derived once
+      #   latest       main's own branch tag under the name a human
+      #                types, published on main alone
+      #
+      # No marketplace build action: `make -C v2 image` is the same
+      # target a laptop runs (see that Makefile's own `image` comment),
+      # so what CI publishes and what a developer builds come from one
+      # copy of the build rules.
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
+          branch_tag="${GITHUB_REF_NAME//\//-}"
+          make -C v2 image IMAGE="${image}:sha-${GITHUB_SHA:0:7}"
+          docker tag "${image}:sha-${GITHUB_SHA:0:7}" "${image}:${branch_tag}"
+          docker push "${image}:sha-${GITHUB_SHA:0:7}"
+          docker push "${image}:${branch_tag}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${image}:sha-${GITHUB_SHA:0:7}" "${image}:latest"
+            docker push "${image}:latest"
+          fi
+          echo "published ${image}:sha-${GITHUB_SHA:0:7} and ${image}:${branch_tag}"

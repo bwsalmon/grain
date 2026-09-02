@@ -137,6 +137,40 @@ The GitHub-side setup (`github-connections.md`, `github-test-repos.md`
 in the same directory) has no Terraform involved at all -- see those
 playbooks for why.
 
+## What actually runs on the host
+
+`grain-daemon.service` runs a container image, not a binary this host
+built (bwsalmon/agents#645): grain plus every binary it shells out to,
+published to GHCR by `.github/workflows/build-artifacts.yml` on every
+commit to grain (`v2/Dockerfile`). Three variables decide which one:
+
+- **`grain_ref`** names the branch. It is still what the on-host
+  checkout tracks -- `files/deploy.sh` clones it, and that checkout is
+  where `v2/scripts/setup.sh` itself and `packer/kontur`'s guest/OCI
+  image builds come from -- and, by default, also which image tag runs:
+  that branch's name with `/` replaced by `-`, which is how CI tags it.
+- **`grain_image_tag`** overrides that. Set it to `sha-<short sha>` --
+  published for every commit -- to pin this deployment to one immutable
+  build. A rollback is that variable plus a `terraform apply`: no
+  rebuild anywhere, and the old image is still in the registry.
+- **`grain_image`** is the repository, for a mirror or a private copy.
+  A registry needing credentials takes `grain_image_pull_user` here and
+  a `GRAIN_IMAGE_PULL_TOKEN` through `push-secrets.sh`;
+  `ghcr.io/bwsalmon/grain`'s own package is public and pulls
+  anonymously.
+
+Two consequences worth knowing before a first deploy. A deploy no longer
+compiles anything on this host, so `grain_ref` pointing at a tag or a
+commit SHA -- fine for the checkout -- has no image published under that
+name, and needs `grain_image_tag` set alongside it. And the host now
+needs to reach the registry: an egress policy that allowed GitHub and a
+Debian mirror also needs `ghcr.io`.
+
+For the container's own shape -- what it is given, what it deliberately
+is not, and the two systemd path units that let it reboot the host and
+restart itself from inside a container -- see grain's own
+`v2/README.md`, "The deployment is a container".
+
 ## Deploying it from CI
 
 Everything above is the by-hand path. To have a config repo's GitHub

@@ -188,10 +188,40 @@ func daemon(args []string) {
 		"where a successful upgrade's binary is installed to (required with -upgrade-src-dir)")
 	var upgradeRestartCmd stringSliceFlag
 	fs.Var(&upgradeRestartCmd, "upgrade-restart-cmd",
-		"one argument of the command run after a successful build+install to bring the new binary up -- repeat for "+
-			"every argument, e.g. -upgrade-restart-cmd=sudo -upgrade-restart-cmd=systemctl -upgrade-restart-cmd=restart "+
-			"-upgrade-restart-cmd=grain-daemon.service. Omitted entirely, the build and install still happen but "+
-			"nothing brings the new binary up on its own. Only used with -upgrade-src-dir.")
+		"one argument of the command run at the end of a successful upgrade to bring the new build up -- "+
+			"repeat for every argument, e.g. -upgrade-restart-cmd=sudo -upgrade-restart-cmd=systemctl "+
+			"-upgrade-restart-cmd=restart -upgrade-restart-cmd=grain-daemon.service. Omitted entirely, the "+
+			"upgrade still happens but nothing brings the new build up on its own. Used by both upgrade "+
+			"paths below.")
+
+	// The container deployment's own upgrade path (bwsalmon/agents#645,
+	// v2/pkg/upgrade/image.go). Set, it replaces the build-a-binary path
+	// above entirely: there is no toolchain on a host that runs grain
+	// from an image, so "upgrade to branch X" means pulling the tag CI
+	// published for X and pointing the unit's own image ref file at it.
+	// -upgrade-src-dir may still be set alongside it -- image mode
+	// ignores it for upgrading, but grantTools reads the checkout it
+	// names for the self-debug capability -- and no -upgrade-install-path
+	// is needed then, since nothing installs a binary.
+	upgradeImage := fs.String("upgrade-image", "",
+		"image repository, with no tag, that CI publishes a tag per branch to (e.g. "+
+			"ghcr.io/bwsalmon/grain/grain); set, the UI's Upgrade button pulls a branch's image instead of "+
+			"building one, and -upgrade-image-ref-file is required")
+	upgradeImageRefFile := fs.String("upgrade-image-ref-file", "",
+		"file a successful -upgrade-image upgrade rewrites with the image the service should run, as one "+
+			"GRAIN_IMAGE=<ref> line for grain-daemon.service to read as an EnvironmentFile "+
+			"(required with -upgrade-image)")
+
+	// How the UI's "reboot host" button reboots (pkg/ui/host.go). The
+	// default is the `sudo systemctl reboot` this always ran, which is
+	// right for a daemon running directly on the host under systemd and
+	// impossible for one running in a container, where there is no host
+	// systemd to talk to -- v2/scripts/setup.sh points this at a file
+	// touch instead, watched by a host-side path unit. See rebootHost.
+	var rebootCmd stringSliceFlag
+	fs.Var(&rebootCmd, "reboot-cmd",
+		"one argument of the command the UI's reboot-host button runs -- repeat for every argument. "+
+			"Defaults to `sudo systemctl reboot`.")
 
 	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
 	// host, no isolation) exactly as it always has -- see run()'s own
@@ -284,8 +314,12 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
 	}
-	if *upgradeSrcDir != "" && *upgradeInstallPath == "" {
+	if *upgradeSrcDir != "" && *upgradeInstallPath == "" && *upgradeImage == "" {
 		fmt.Fprintln(os.Stderr, "grain daemon: -upgrade-install-path is required with -upgrade-src-dir")
+		os.Exit(2)
+	}
+	if *upgradeImage != "" && *upgradeImageRefFile == "" {
+		fmt.Fprintln(os.Stderr, "grain daemon: -upgrade-image-ref-file is required with -upgrade-image")
 		os.Exit(2)
 	}
 	if *konturSandboxes {
@@ -338,6 +372,8 @@ func daemon(args []string) {
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
+		upgradeImage: *upgradeImage, upgradeImageRefFile: *upgradeImageRefFile,
+		rebootCmd:       rebootCmd,
 		konturSandboxes: *konturSandboxes,
 		konturStateDir:  *konturStateDir,
 		konturSSHUser:   *konturSSHUser, konturWorkspace: *konturWorkspace,
@@ -413,6 +449,15 @@ type config struct {
 	upgradeSrcDir      string
 	upgradeInstallPath string
 	upgradeRestartCmd  []string
+	// upgradeImage/upgradeImageRefFile select v2/pkg/upgrade's image path
+	// over the build path above -- what an upgrade means on a host that
+	// runs grain from a container (bwsalmon/agents#645).
+	upgradeImage        string
+	upgradeImageRefFile string
+
+	// rebootCmd is what the UI's reboot-host button runs; empty means
+	// rebootHost's own `sudo systemctl reboot` default.
+	rebootCmd []string
 
 	// konturSandboxes selects orchestrator.KonturSandboxes over the
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
@@ -1362,7 +1407,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		Actor:        ui.DefaultActor(actorID(cfg.actor)),
 		Capabilities: ui.DefaultCapabilities(),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
-		Reboot:       rebootHost,
+		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,
 		Credentials:  uiCredentials,
 		// "daemon" reads back this same process's own journal (it always
@@ -1422,7 +1467,23 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		}
 		uiCfg.DefaultTarget = &repo
 	}
-	if cfg.upgradeSrcDir != "" {
+	switch {
+	case cfg.upgradeImage != "":
+		// The container path: no checkout, no build, no install -- pull
+		// the branch's published image, run it once to prove it works,
+		// and point the unit's EnvironmentFile at it before restarting.
+		// HealthCheckArgs is the same "schema-version" the build path
+		// uses, run inside the pulled image (pkg/upgrade/image.go).
+		uiCfg.Upgrader = upgrade.New(upgrade.Config{
+			Image: &upgrade.ImageConfig{
+				Repository: cfg.upgradeImage,
+				RefFile:    cfg.upgradeImageRefFile,
+			},
+			HealthCheckArgs: []string{"schema-version"},
+			RestartCmd:      cfg.upgradeRestartCmd,
+			StatusFile:      filepath.Join(cfg.dataDir, "upgrade-status.json"),
+		})
+	case cfg.upgradeSrcDir != "":
 		uiCfg.Upgrader = upgrade.New(upgrade.Config{
 			SrcDir:      cfg.upgradeSrcDir,
 			BuildCmd:    []string{"make", "container-build"},
@@ -1458,16 +1519,33 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 	return httpSrv.Shutdown, nil
 }
 
-// rebootHost is startUIServer's ui.Config.Reboot: `sudo systemctl
-// reboot`, the exact command v1's mcp_server.py already ran for its own
-// `reboot_controller` tool (grain/automation/mcp_server.py) and the one
-// line scripts/setup.sh's sudoers drop-in grants $GRAIN_USER passwordless
-// sudo for. Run as the plain, unprivileged user grain-daemon.service
-// already runs as (scripts/setup.sh's own ensure_user), not as root
-// itself, the same "only exactly this one command line" restriction v1
-// gave its own self-repair sudoers file.
-func rebootHost(ctx context.Context) error {
-	return exec.CommandContext(ctx, "sudo", "systemctl", "reboot").Run()
+// defaultRebootCmd is what the UI's reboot-host button runs absent a
+// -reboot-cmd: `sudo systemctl reboot`, the exact command v1's
+// mcp_server.py already ran for its own `reboot_controller` tool
+// (grain/automation/mcp_server.py) and the one line scripts/setup.sh's
+// sudoers drop-in used to grant $GRAIN_USER passwordless sudo for. Run
+// as the plain, unprivileged user the daemon already runs as, not as
+// root itself -- the same "only exactly this one command line"
+// restriction v1 gave its own self-repair sudoers file.
+var defaultRebootCmd = []string{"sudo", "systemctl", "reboot"}
+
+// rebootHost builds startUIServer's ui.Config.Reboot out of -reboot-cmd.
+//
+// It is a flag rather than a constant because a daemon in a container
+// has no host systemd to talk to: `systemctl reboot` inside the
+// container would either fail outright or, worse, reach a systemd that
+// isn't the host's. scripts/setup.sh's container unit points this at a
+// `touch` of a file under the data dir instead, which a host-side
+// systemd path unit watches and turns into the real reboot -- the same
+// job the sudoers drop-in used to do, done by something that works
+// across the container boundary.
+func rebootHost(argv []string) func(context.Context) error {
+	if len(argv) == 0 {
+		argv = defaultRebootCmd
+	}
+	return func(ctx context.Context) error {
+		return exec.CommandContext(ctx, argv[0], argv[1:]...).Run()
+	}
 }
 
 // sandboxHealthAdapter adapts orchestrator's own SandboxHealth (a core

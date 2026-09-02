@@ -19,30 +19,37 @@
 # the installer AND the updater):
 #   1. clones or updates this repo under $GRAIN_SRC_DIR -- and, if that
 #      update replaced this script itself, re-runs the new copy in place
-#      of this one (reexec_if_updated), so a run always builds with the
-#      code it just pulled rather than the code it started with
-#   2. builds bin/grain with `make container-build` (v2/Makefile) -- the
-#      containerised build, not the host toolchain, so nothing beyond
-#      `git`, `docker` and `make` is required of the host, and this
-#      script installs all three itself if a vanilla Debian VM doesn't
-#      already have them (ensure_git, ensure_docker, ensure_make;
-#      bwsalmon/agents#617). grain is pure Go (bwsalmon/agents#366
-#      removed the one dependency that wasn't), so this buys
-#      reproducibility -- one pinned Go toolchain regardless of what is
-#      or isn't installed on this machine -- rather than working around
-#      any host-specific linkage problem.
-#   3. installs it to $GRAIN_DATA_DIR/bin/grain, with a stable
-#      /usr/local/bin/grain symlink to that path for an operator's own
-#      shell
-#   4. creates an unprivileged system user to run it as, and grants it a
-#      narrow NOPASSWD sudo rule for the UI's own reboot host button
-#      (bwsalmon/agents#395) to reboot the machine. If
-#      GRAIN_ENABLE_UI_UPGRADE=1 (the default -- see that variable's own
-#      doc below), also gives it ownership of $GRAIN_SRC_DIR, membership
-#      in the docker group, and one more narrow NOPASSWD sudo rule, for
-#      its Upgrade button (bwsalmon/agents#396, v2/pkg/upgrade) to check
-#      out a different branch, rebuild, install, and restart
-#      grain-daemon.service later, with no further privilege of its own
+#      of this one (reexec_if_updated), so a run always deploys with the
+#      code it just pulled rather than the code it started with. The
+#      checkout is no longer what grain is built from (see 2), but it is
+#      still what this script, packer/kontur's own image builds and the
+#      self-debug capability's read of grain's own source all come from
+#   2. pulls the deployment image -- $GRAIN_IMAGE:$GRAIN_IMAGE_TAG,
+#      published to GHCR by ../../.github/workflows/build-artifacts.yml
+#      on every commit -- instead of building a binary here
+#      (bwsalmon/agents#645). That image carries grain *and* every binary
+#      it shells out to: git, the docker CLI, konturctl and the claude
+#      CLI (v2/Dockerfile). What this host has to have shrinks to `git`
+#      and `docker`, which this script still installs itself if a vanilla
+#      Debian VM doesn't have them (ensure_git, ensure_docker;
+#      bwsalmon/agents#617) -- no `make`, no Go or Node toolchain, no
+#      per-host claude install, and no minutes-long build on every deploy
+#   3. installs /usr/local/bin/grain and /usr/local/bin/konturctl as thin
+#      wrappers that run that same image (install_cli_wrappers), so an
+#      operator's own shell -- and the rest of this script, which uses
+#      `grain schema-version` and `grain secrets` -- reaches the exact
+#      build the service runs, with nothing installed on the host to
+#      drift out of step with it
+#   4. creates an unprivileged system user to run the container as, and
+#      installs the two systemd path units that let it act on the host it
+#      cannot reach from inside a container: the UI's reboot-host button
+#      (bwsalmon/agents#395) and the restart its Upgrade button needs
+#      (bwsalmon/agents#396) each become a touch of a file under
+#      $GRAIN_DATA_DIR/control, watched by a unit out here
+#      (write_control_units). That replaces the two NOPASSWD sudoers
+#      drop-ins this used to install, and grants strictly less: the
+#      daemon can restart its own service and reboot this machine, and
+#      has no sudo at all
 #   5. lays out the rest of $GRAIN_DATA_DIR (secrets, the embedded SQLite
 #      store) and seeds secrets from environment variables -- only if
 #      they are not already there, so a second run never overwrites a
@@ -95,9 +102,20 @@
 # daemon plus a UI on the same store both used to need to write.
 # bwsalmon/agents#363 removed the second writer -- the daemon now serves
 # the UI/API itself, in-process, over the store it already has open (see
-# v2/cmd/grain/daemon.go's own doc comment) -- so this script installs
-# one service, needs no separate store container, and no longer requires
-# `docker` at runtime (only at build time, for `make container-build`).
+# v2/cmd/grain/daemon.go's own doc comment) -- so this script still
+# installs exactly one service and needs no separate store container.
+# What did come back is `docker` at runtime: that one service is now a
+# `docker run` of the deployment image rather than a binary on this
+# host's disk.
+#
+# What the container is given, and what it deliberately is not, is worth
+# reading once (docker_run_args, below). It gets host networking (the
+# UI's port, and the git proxy every sandbox reaches), the data and
+# sandbox directories bind-mounted at the same paths they have out here,
+# and -- only when something actually needs it -- the docker socket. It
+# runs as $GRAIN_USER's own uid:gid, never as root, so every file it
+# writes into those directories comes out owned exactly as it was before
+# any of this ran in a container at all.
 #
 # The UI is bound to 127.0.0.1 on the plain HTTP port (80) and nowhere
 # else -- nothing here opens a firewall hole for it. Reach it by
@@ -129,6 +147,40 @@ GRAIN_DATA_DIR="${GRAIN_DATA_DIR:-/var/lib/grain}"
 GRAIN_SANDBOX_DIR="${GRAIN_SANDBOX_DIR:-/var/lib/grain-sandbox}"
 GRAIN_USER="${GRAIN_USER:-grain}"
 
+# --- the deployment image (bwsalmon/agents#645) ------------------------
+#
+# GRAIN_IMAGE is the repository CI publishes to on every commit, with no
+# tag: ../../.github/workflows/build-artifacts.yml's own grain-container
+# job. GRAIN_IMAGE_TAG picks which one to run, and defaults to the tag
+# published for GRAIN_REF -- the branch this checkout tracks -- so a
+# deployment pinned to a branch stays pinned to that branch's image with
+# nothing extra to set. '/' is not legal in a docker tag and grain's
+# branches routinely contain one, so it becomes '-', the same
+# substitution CI makes when it pushes and v2/pkg/upgrade's TagForBranch
+# makes when the UI's Upgrade button resolves a branch.
+#
+# Set GRAIN_IMAGE_TAG explicitly to pin a deployment to one immutable
+# build -- sha-<short sha>, also published on every commit -- which is
+# what a rollback looks like here: re-run this script with the tag of a
+# build that worked.
+GRAIN_IMAGE="${GRAIN_IMAGE:-ghcr.io/bwsalmon/grain/grain}"
+GRAIN_IMAGE_TAG="${GRAIN_IMAGE_TAG:-${GRAIN_REF//\//-}}"
+# Credentials for `docker login` against the image's registry, needed
+# only if the package is private -- bwsalmon/grain and its packages are
+# public, so an ordinary deployment sets neither and pulls anonymously.
+# A GitHub PAT with read:packages is what these want when they are
+# needed; GRAIN_GITHUB_TOKEN is deliberately *not* reused by default,
+# since the credential grain clones repositories with and the credential
+# it pulls images with are not the same decision.
+GRAIN_IMAGE_PULL_USER="${GRAIN_IMAGE_PULL_USER:-}"
+GRAIN_IMAGE_PULL_TOKEN="${GRAIN_IMAGE_PULL_TOKEN:-}"
+# Extra arguments appended to grain-daemon.service's own `docker run`,
+# word-split as written -- the escape hatch for whatever docker_run_args
+# below does not anticipate. An agy install that needs more of its tree
+# than the directory around the binary, for instance:
+#   GRAIN_EXTRA_DOCKER_ARGS="--volume /opt/gemini:/opt/gemini:ro"
+GRAIN_EXTRA_DOCKER_ARGS="${GRAIN_EXTRA_DOCKER_ARGS:-}"
+
 GRAIN_UI_ADDR="${GRAIN_UI_ADDR:-127.0.0.1:80}"
 GRAIN_MAX_CONCURRENT="${GRAIN_MAX_CONCURRENT:-1}"
 GRAIN_POLL_INTERVAL="${GRAIN_POLL_INTERVAL:-30s}"
@@ -143,13 +195,18 @@ GRAIN_GITHUB_APP_PRIVATE_KEY="${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 
 GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
-# Where the Antigravity CLI (agy) lives. Empty -- the default -- lets the
-# daemon resolve "agy" on $PATH, which is what a host with a normal
-# install wants. Set it when agy is installed somewhere off $PATH (its
-# own installer targets ~/.gemini/bin), the same way GRAIN_CLAUDE_PATH
-# exists for the claude binary. agy is a prerequisite of the default
-# agent framework: verify_agent_cli below says so out loud rather than
-# letting the daemon fail at its first dispatch.
+# Where the Antigravity CLI (agy) lives *on this host*. Unlike the claude
+# CLI, agy is not in the deployment image at all -- this repo has no
+# verified installer URL for it (v2/README.md, "The agent runtime is a
+# CLI now"), so there is nothing to bake in -- which makes this path the
+# only way the default agent framework ever gets a binary to run: what it
+# names is bind-mounted into the container at the same path and passed as
+# -agy-path. Empty falls back to resolving "agy" inside the container,
+# which finds nothing unless an image was built with one.
+#
+# ~/.gemini/bin/agy is where its own installer puts it. verify_agent_cli
+# below says all this out loud, non-fatally, rather than letting the
+# daemon fail at its first dispatch.
 GRAIN_AGY_PATH="${GRAIN_AGY_PATH:-}"
 GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 
@@ -161,26 +218,18 @@ GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 # (Settings -> Agent frameworks), which is the only way to set one on a
 # host an operator cannot get a shell on.
 GRAIN_CLAUDE_CODE_OAUTH_TOKEN="${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
-# Path to the claude CLI agent/claude runs as a subprocess. Empty
-# resolves "claude" against the daemon's own $PATH -- which is where
-# install_claude_cli below puts it.
+# Path to a claude CLI on *this host* to run instead of the one baked
+# into the image. Empty -- the default, and what an ordinary deployment
+# wants -- resolves "claude" inside the container, where v2/Dockerfile
+# already installed it: nothing to download at deploy time and nothing
+# per-host to keep in step with the build.
+#
+# Set, this host's copy is bind-mounted into the container at that same
+# path and the daemon is pointed at it (-claude-path). That is the escape
+# hatch for a deployment that must pin a particular CLI version, and the
+# reason it is a *mount* rather than a $PATH entry: a path that resolves
+# out here has to resolve identically in there.
 GRAIN_CLAUDE_PATH="${GRAIN_CLAUDE_PATH:-}"
-# Whether to install the Claude Code CLI on this host. 1 (the default)
-# installs it on every run; 0 skips it, for an air-gapped host or one
-# whose CLI is managed some other way (name that copy with
-# GRAIN_CLAUDE_PATH). Installed even on a deployment currently running
-# the gemini framework, because which framework a run uses is a live UI
-# choice now (Settings -> Agent frameworks, and a per-task override):
-# switching it takes effect on the very next dispatch, with no restart
-# and no re-run of this script, so the binary has to already be there
-# when that happens.
-GRAIN_INSTALL_CLAUDE_CLI="${GRAIN_INSTALL_CLAUDE_CLI:-1}"
-# Where the CLI's own installer is pointed. It installs under $HOME, and
-# $GRAIN_USER deliberately has no home directory (ensure_user's
-# --no-create-home), so it gets one of its own here rather than a home
-# for the service account; /usr/local/bin/claude is symlinked to what
-# lands in it, which is what puts it on the daemon's $PATH.
-GRAIN_CLAUDE_CLI_DIR="${GRAIN_CLAUDE_CLI_DIR:-/opt/claude-cli}"
 
 GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
@@ -191,7 +240,7 @@ GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
 # See "Kontur sandboxing" below (ensure_kontur_ssh_key/ensure_kontur_images/
-# ensure_konturctl/ensure_kontur_kvm_access) and terraform/gcp-v2/README.md's
+# ensure_kontur_kvm_access) and terraform/gcp-v2/README.md's
 # own section of the same name. GRAIN_KONTUR_ENABLE=1 (off by default here
 # -- terraform/gcp-v2's own enable_kontur_sandboxes variable is what
 # actually turns this on for that deployment shape) needs no manual
@@ -259,11 +308,13 @@ usage() {
   cat <<'EOF'
 Usage: sudo ./setup.sh
 
-Installs or updates a v2 grain deployment on this machine: clones/builds
-the binary, lays out /var/lib/grain (including its embedded SQLite task
-store), and installs grain-daemon.service, which runs the dispatch loop
-and serves the UI/API itself. Every setting is an environment variable;
-all have defaults, so a bare `sudo ./setup.sh` re-run is the update path.
+Installs or updates a v2 grain deployment on this machine: pulls the
+deployment image CI publishes on every commit, lays out /var/lib/grain
+(including its embedded SQLite task store), and installs
+grain-daemon.service, which runs that image -- the dispatch loop, the
+UI/API it serves, and every binary either shells out to. Every setting
+is an environment variable; all have defaults, so a bare
+`sudo ./setup.sh` re-run is the update path.
 Anything marked "Seeded once" below only takes effect the first time this
 deployment's store gets a config row (typically this script's very first
 run); a later run passing a different value has no effect on an existing
@@ -273,7 +324,9 @@ GRAIN_USER) or the UI's Settings pane instead.
 Recognized variables:
 
   GRAIN_REPO_URL           git remote to deploy from (default: bwsalmon/grain on GitHub)
-  GRAIN_REF                branch to build (default: main)
+  GRAIN_REF                branch to deploy (default: main) -- names both the
+                             checkout this script keeps and, via GRAIN_IMAGE_TAG,
+                             which published image it runs
   GRAIN_SRC_DIR             where the checkout lives (default: /opt/grain)
   GRAIN_DATA_DIR            secrets/store root -- state that must survive a redeploy
                              (default: /var/lib/grain)
@@ -329,23 +382,30 @@ Recognized variables:
                              -agent-framework), overridable per task, so a
                              deployment that might use either wants both
                              credentials
-  GRAIN_CLAUDE_PATH         path to the claude CLI (default: resolve
-                             "claude" on the daemon's own PATH, which is
-                             where GRAIN_INSTALL_CLAUDE_CLI puts it).
-                             Setting this also skips that install
-  GRAIN_INSTALL_CLAUDE_CLI  install the Claude Code CLI on this host (default
-                             1). The "claude" agent framework execs it per
-                             dispatch, and it is installed whichever framework
-                             is currently selected, since selecting the other
-                             one is a live UI change that reaches the very next
-                             run. 0 skips it: an air-gapped host, or one whose
-                             CLI is managed elsewhere. A failed download is
-                             never fatal -- the deploy carries on and says so
-  GRAIN_CLAUDE_CLI_DIR      where that install lands (default /opt/claude-cli);
-                             /usr/local/bin/claude is symlinked into it
-  GRAIN_AGY_PATH            path to the Antigravity CLI (agy) the default agent
-                             framework runs as a subprocess. Empty resolves "agy"
-                             on \$PATH
+  GRAIN_IMAGE               image repository the deployment runs, with no tag
+                             (default ghcr.io/bwsalmon/grain/grain -- what CI
+                             publishes on every commit)
+  GRAIN_IMAGE_TAG           which tag of it to run (default: the tag published
+                             for GRAIN_REF, i.e. that branch with "/" replaced
+                             by "-"). Set to sha-<short sha> to pin, or to roll
+                             back to, one exact build
+  GRAIN_IMAGE_PULL_USER     credentials for `docker login` against that
+  GRAIN_IMAGE_PULL_TOKEN     registry -- only needed for a private package;
+                             bwsalmon/grain's is public and pulls anonymously
+  GRAIN_EXTRA_DOCKER_ARGS   extra arguments for grain-daemon.service's own
+                             `docker run`, word-split as written (e.g. another
+                             --volume the deployment needs)
+
+  GRAIN_CLAUDE_PATH         path on THIS HOST to a claude CLI to run instead
+                             of the one the deployment image already carries
+                             (default: empty, use the image's). What it names
+                             is bind-mounted into the container at the same
+                             path
+  GRAIN_AGY_PATH            path on THIS HOST to the Antigravity CLI (agy) the
+                             default agent framework runs as a subprocess.
+                             Bind-mounted in the same way -- and, unlike claude,
+                             the only way to have one at all: agy is not in the
+                             image (no installer to bake in)
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
@@ -466,16 +526,15 @@ fi
 SELF_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 SELF_SUM_BEFORE="$(sha256sum "$SELF_PATH" 2>/dev/null | awk '{print $1}' || true)"
 
-for cmd in systemctl install useradd visudo; do
+for cmd in systemctl install useradd; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "setup.sh: required command not found: $cmd" >&2
     exit 1
   fi
 done
 
-# git and docker are installed rather than only reported missing, same
-# as ensure_make just below -- bwsalmon/agents#617. Until now both were
-# only ever guaranteed by terraform/gcp-v2/files/deploy.sh's own
+# git and docker are installed rather than only reported missing --
+# bwsalmon/agents#617. Until then both were only ever guaranteed by terraform/gcp-v2/files/deploy.sh's own
 # install_prerequisites, which runs *before* this script but is no help
 # to anyone who reaches this script the way its own header comment says
 # it should be reachable: cloning this repo onto a bare Debian VM and
@@ -501,9 +560,14 @@ ensure_git
 # few lines down is what actually gates the rest of the script; this is
 # just the one attempt to make that check pass on its own rather than
 # hand the operator a cryptic failure for a one-line fix.
+#
+# docker is now what grain *runs in*, not merely what it was once built
+# in (bwsalmon/agents#645): grain-daemon.service is a `docker run` of the
+# deployment image, so this is a hard runtime dependency of the service
+# and not just of this script.
 ensure_docker() {
   if ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-    log "installing docker (the build step runs 'make -C v2 container-build' inside it; no Debian cloud image carries it)"
+    log "installing docker (grain-daemon.service runs the deployment image with it; no Debian cloud image carries it)"
     apt-get update -qq || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io || true
   fi
@@ -511,120 +575,19 @@ ensure_docker() {
     echo "setup.sh: required command not found: docker, and it could not be installed automatically -- install it (e.g. 'apt-get install docker.io') and re-run" >&2
     exit 1
   fi
+  # enable, not just start: the daemon has to come back on reboot, or
+  # grain-daemon.service comes up to no container engine at all.
   systemctl enable --now docker >/dev/null 2>&1 || true
+  # Resolved once, here, rather than written as a literal path: the unit
+  # written below is read by systemd, which resolves no $PATH of its own,
+  # and `docker` is /usr/bin/docker on Debian's own package but not
+  # everywhere.
+  DOCKER_BIN="$(command -v docker)"
 }
 ensure_docker
 
-# make is the odd one out, so this installs it rather than only reporting
-# it missing like the loop above. build_and_install runs `make -C v2
-# container-build` and the UI's own Upgrade button runs the same target
-# (v2/cmd/grain/daemon.go's BuildCmd), but the compile itself happens
-# inside Docker -- so make is the only piece of that toolchain the host
-# needs, which is exactly why nobody lists it, and a Debian cloud image
-# carries none.
-#
-# terraform/gcp-v2/files/deploy.sh installs it too, and that was supposed
-# to be enough. It is not, because of how each file reaches a host:
-# deploy.sh arrives in instance metadata, rewritten only by a
-# `terraform apply`, while this script arrives in the git checkout it
-# updates itself (sync_repo). A host whose metadata predates that
-# deploy.sh fix has no make and no way to get one -- every deploy dies
-# here -- until someone runs Terraform, which is not something a machine
-# that only ever pulls from git can do for itself. Installing it here
-# closes that loop: the fix travels the same path as the script that
-# needs it.
-ensure_make() {
-  command -v make >/dev/null 2>&1 && return 0
-  if command -v apt-get >/dev/null 2>&1; then
-    log "installing make (the build step runs 'make -C v2 container-build'; no Debian cloud image carries it)"
-    apt-get update -qq || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends make || true
-  fi
-  if ! command -v make >/dev/null 2>&1; then
-    echo "setup.sh: required command not found: make, and it could not be installed automatically -- install it (e.g. 'apt-get install make') and re-run" >&2
-    exit 1
-  fi
-}
-ensure_make
-
-# The Claude Code CLI agent/claude runs as a subprocess
-# (cmd/grain/daemon.go's buildClaudeFramework, which resolves a bare
-# "claude" against the daemon's own $PATH). Nothing in the v2 path ever
-# installed it: v1's provision/controller.sh did, for the grain-agent
-# account `claude -p` ran as there, and when v2 gained an agent-framework
-# setting (bwsalmon/agents#609) and then made it a live, per-task choice
-# (#615, #485) nothing brought the binary along. The result was a
-# deployment that offers "claude" in Settings, reports its OAuth token as
-# set, and then fails every run it dispatches with "executable file not
-# found in $PATH".
-#
-# Unlike ensure_git/ensure_docker/ensure_make above, a failure here is
-# not fatal: a gemini deployment does not need this binary at all, and
-# refusing to deploy over a blocked download (an air-gapped host, a proxy
-# that denies claude.ai) would be a far worse outcome than deploying
-# without a framework the operator may never select. It logs what it
-# could not do instead, and the daemon's own error names this script when
-# a run does need it.
-install_claude_cli() {
-  [ "$GRAIN_INSTALL_CLAUDE_CLI" = "1" ] || return 0
-  # An operator-named copy is the operator's to manage.
-  [ -n "$GRAIN_CLAUDE_PATH" ] && return 0
-
-  local binary="$GRAIN_CLAUDE_CLI_DIR/.local/bin/claude"
-  local had_it=0
-  [ -x "$binary" ] && had_it=1
-
-  # The installer is fetched to a file and then run, rather than piped
-  # straight into bash: a pipeline's exit status is its *last* command's,
-  # so `curl ... | bash` reports success even when curl got a 403 and bash
-  # merely ran an empty script -- which is precisely the air-gapped case
-  # this has to be able to tell apart from a working install.
-  log "Installing the Claude Code CLI into $GRAIN_CLAUDE_CLI_DIR"
-  install -d -m0755 "$GRAIN_CLAUDE_CLI_DIR"
-  local script
-  script="$(mktemp)"
-  local failure=""
-  if ! curl -fsSL --max-time 120 https://claude.ai/install.sh -o "$script"; then
-    failure="claude.ai could not be reached from this host"
-  elif [ ! -s "$script" ]; then
-    failure="claude.ai returned an empty installer"
-  elif ! HOME="$GRAIN_CLAUDE_CLI_DIR" bash "$script" >/dev/null 2>&1; then
-    failure="the Claude Code installer exited non-zero"
-  elif [ ! -x "$binary" ]; then
-    failure="the Claude Code installer left no binary in $GRAIN_CLAUDE_CLI_DIR/.local/bin"
-  fi
-  rm -f "$script"
-
-  if [ -n "$failure" ]; then
-    # Never fatal: a gemini deployment does not need this binary at all,
-    # and refusing to deploy over a blocked download would be a far worse
-    # outcome than deploying without a framework the operator may never
-    # select. The readiness summary says so again at the end.
-    if [ "$had_it" = "1" ]; then
-      log "  $failure; keeping the copy already installed"
-    else
-      log "  $failure."
-      log "  Runs using the \"gemini\" agent framework are unaffected. To use \"claude\", install"
-      log "  the CLI on this host by hand and re-run, or set GRAIN_CLAUDE_PATH to an existing copy."
-      return 0
-    fi
-  fi
-
-  # Symlinked onto systemd's own default PATH rather than exported into
-  # the unit: /usr/local/bin is already on it, so the daemon's bare
-  # exec.LookPath("claude") finds this with nothing else to configure --
-  # v1's provision/controller.sh made the same symlink, for the same
-  # reason.
-  ln -sf "$binary" /usr/local/bin/claude
-  # World-readable: the daemon runs as $GRAIN_USER, not as whoever ran
-  # this script.
-  chmod -R a+rX "$GRAIN_CLAUDE_CLI_DIR" 2>/dev/null || true
-  log "  claude CLI ready at /usr/local/bin/claude"
-}
-install_claude_cli
-
 if ! docker info >/dev/null 2>&1; then
-  echo "setup.sh: 'docker info' failed -- is the Docker daemon running? (only needed to build, via make container-build)" >&2
+  echo "setup.sh: 'docker info' failed -- is the Docker daemon running? grain-daemon.service runs the deployment image with it, so this is a runtime dependency, not only a deploy-time one" >&2
   exit 1
 fi
 
@@ -632,20 +595,18 @@ fi
 
 sync_repo() {
   # git 2.35.2+ refuses to operate on a repository it does not own
-  # ("detected dubious ownership in repository at ..."). ensure_self_
-  # upgrade (below, GRAIN_ENABLE_UI_UPGRADE=1 by default) chowns
-  # $GRAIN_SRC_DIR to $GRAIN_USER on every run, so every git command this
-  # script itself runs as root *after* that point in the same run --
-  # kontur_image_tag/konturctl_tag, both later in main() -- would
-  # otherwise fail closed with no visible error (both redirect git's
-  # stderr to /dev/null and fall back to the literal string "unknown"),
-  # silently breaking the content-hash caching those tags exist for: a
+  # ("detected dubious ownership in repository at ..."), which this
+  # checkout can easily be: it is root-owned here, and a previous
+  # deployment's chown may have left it owned by $GRAIN_USER instead. A
+  # git command that fails closed is worse than it sounds --
+  # kontur_image_tag, later in main(), redirects git's stderr to
+  # /dev/null and falls back to the literal string "unknown", which
+  # silently breaks the content-hash caching that tag exists for: a
   # packer/kontur edit or third_party/kontur vendor bump would stop
-  # changing the tag at all, so ensure_kontur_images_build/ensure_konturctl
-  # would keep reusing whatever they built the first time, forever. The
-  # same failure hits this function's own git calls below on the second
-  # and every later run, since by then $GRAIN_SRC_DIR is already
-  # $GRAIN_USER-owned from the previous run's chown. Exempting it here,
+  # changing the tag at all, so ensure_kontur_images_build
+  # would keep reusing whatever it built the first time, forever. The
+  # same failure hits this function's own git calls below whenever the
+  # checkout is owned by anyone but root. Exempting it here,
   # before anything else touches the checkout, covers every git
   # invocation for the rest of this run and every run after it -- a
   # global config entry, so guarded against piling up duplicates across
@@ -682,8 +643,8 @@ sync_repo() {
 #
 # That is not hypothetical: it is how the deploy that pulled ff6e818
 # ("Install make on the host, and check for it") still died on a bare
-# `make: command not found` from build_and_install, with the check that
-# exists to name that failure sitting unread on disk a few inches away.
+# `make: command not found`, with the check that exists to name that
+# failure sitting unread on disk a few inches away.
 #
 # So: if the file at $0 is not the one this process is running, hand over
 # to it. Only ever once -- $GRAIN_SETUP_REEXECED is exported across the
@@ -704,26 +665,200 @@ reexec_if_updated() {
   exec "$SELF_PATH" "$@"
 }
 
-# --- 2/3. build and install the binary ----------------------------------
+# --- 2/3. pull the deployment image, and install the CLI wrappers -------
 #
-# The real binary lives at $GRAIN_DATA_DIR/bin/grain -- inside the
-# directory ensure_self_upgrade below gives $GRAIN_USER ownership of --
-# rather than /usr/local/bin/grain directly, so a later upgrade this same
-# unprivileged account drives (v2/pkg/upgrade.Upgrader.install) can
-# overwrite it with no sudo of its own. /usr/local/bin/grain is a
-# symlink to that path instead: an operator's shell still finds `grain`
-# on PATH, and the symlink itself never has to change again once
-# created, so it needs no further privilege past this first run either.
-REAL_BIN="$GRAIN_DATA_DIR/bin/grain"
+# This is where a v2 deploy used to spend its minutes: `make -C v2
+# container-build`, a pinned Go toolchain image, a cold module cache, a
+# `npm ci` for the frontend, and a binary at the end of it. None of that
+# happens on a deployed host any more (bwsalmon/agents#645) -- CI built
+# and published this exact image when the commit landed, so a deploy is a
+# `docker pull` and a service restart.
+#
+# GRAIN_IMAGE_REF is the one name everything below agrees on; the ref
+# *file* is the indirection the service actually reads, so that the UI's
+# Upgrade button can repoint a deployment by writing one line rather than
+# by rewriting a systemd unit (see write_image_ref and
+# v2/pkg/upgrade/image.go).
+GRAIN_IMAGE_REF="${GRAIN_IMAGE}:${GRAIN_IMAGE_TAG}"
+IMAGE_REF_FILE="$GRAIN_DATA_DIR/image.env"
 
-build_and_install() {
-  log "Building bin/grain (make container-build -- needs only docker, not a host Go toolchain)"
-  make -C "$GRAIN_SRC_DIR/v2" container-build
-  mkdir -p "$(dirname "$REAL_BIN")"
-  install -m0755 "$GRAIN_SRC_DIR/v2/bin/grain" "$REAL_BIN"
-  ln -sf "$REAL_BIN" /usr/local/bin/grain
-  log "Installed $REAL_BIN (linked from /usr/local/bin/grain)"
+# registry_login authenticates to the image's registry, if this
+# deployment was given a credential for it. Nothing to do in the ordinary
+# case: bwsalmon/grain's GHCR package is public, and an anonymous pull
+# works. Never fatal on its own -- a failed login is reported here and
+# then simply becomes whatever the pull below reports.
+registry_login() {
+  [ -n "$GRAIN_IMAGE_PULL_TOKEN" ] || return 0
+  local registry="${GRAIN_IMAGE%%/*}"
+  log "Logging in to $registry as ${GRAIN_IMAGE_PULL_USER:-<token>}"
+  if ! printf '%s' "$GRAIN_IMAGE_PULL_TOKEN" \
+     | docker login "$registry" -u "${GRAIN_IMAGE_PULL_USER:-x-access-token}" --password-stdin >/dev/null 2>&1; then
+    log "  docker login against $registry failed -- the pull below will say whether it mattered"
+  fi
+}
+
+# pull_image fetches the build this deploy is meant to run.
+#
+# A pull that fails is fatal *unless* this host already has that exact
+# ref in its local image store: a re-run over a transient network failure
+# (or a registry outage) then converges on the image it was already asked
+# for rather than refusing to deploy at all -- the same "converge with
+# what is ready" trade the kontur steps below make. It is not a fallback
+# to some *other* image: an unknown tag with nothing local still stops
+# here, loudly, instead of leaving grain-daemon.service pointed at
+# something that does not exist.
+pull_image() {
+  registry_login
+  log "Pulling $GRAIN_IMAGE_REF"
+  if docker pull "$GRAIN_IMAGE_REF"; then
+    return 0
+  fi
+  if docker image inspect "$GRAIN_IMAGE_REF" >/dev/null 2>&1; then
+    log "  pull failed, but this host already has $GRAIN_IMAGE_REF locally -- deploying that"
+    return 0
+  fi
+  echo "setup.sh: could not pull $GRAIN_IMAGE_REF and this host has no local copy of it." >&2
+  echo "  Check that the tag exists (CI publishes one per branch and one per commit --" >&2
+  echo "  see .github/workflows/build-artifacts.yml), or set GRAIN_IMAGE_TAG to one that" >&2
+  echo "  does. A private package also needs GRAIN_IMAGE_PULL_USER/GRAIN_IMAGE_PULL_TOKEN." >&2
+  exit 1
+}
+
+# install_cli_wrappers puts `grain` and `konturctl` on this host's PATH
+# without installing either binary on it: each is a one-line script over
+# a shared runner that runs the deployment image, so an operator's
+# `grain list` and
+# v2/scripts/kontur-diag.sh's `konturctl vm list` both reach exactly the
+# build grain-daemon.service is running, and neither can drift from it.
+# This script uses the `grain` one itself, for `grain schema-version`
+# (reformat_store_if_schema_changed) and `grain secrets`
+# (seed_gcp_minter_key, mint_gemini_operating_key, report_readiness).
+#
+# The wrapper decides its own mounts at invocation time rather than
+# baking in what was true when this ran: it is written early (the rest of
+# this script needs it) and the kontur decisions below are not final
+# until much later, so an existence guard per optional path is what keeps
+# one file correct in both cases -- and keeps it correct after a later
+# re-run changes them.
+#
+# It runs the image as $GRAIN_USER, exactly as the service does, so a
+# store or secrets database a CLI invocation creates comes out owned by
+# the account the daemon reads it with rather than by root.
+install_cli_wrappers() {
+  install -d -m0755 /usr/local/lib/grain
+  # The port the daemon serves on, baked into the wrapper as the CLI's
+  # default -server. /etc/profile.d/grain.sh (write_cli_profile, below)
+  # exports the same value for an operator's shell, but that export
+  # cannot reach a process inside a container -- so without this a
+  # `grain list` would fall back to cmd/grain/main.go's own
+  # http://127.0.0.1:8420, which is only ever right by coincidence. A
+  # GRAIN_SERVER already set in the caller's environment still wins.
+  local port="${GRAIN_UI_ADDR##*:}"
+  # Removed, not overwritten: on a host deployed before
+  # bwsalmon/agents#645 both of these are *symlinks* into
+  # $GRAIN_DATA_DIR/bin, and `cat >` follows a symlink -- which would
+  # write this wrapper over the binary at the far end and leave
+  # /usr/local/bin/grain still pointing at it, so `grain` would run a
+  # shell script the kernel was asked to exec as a binary.
+  rm -f /usr/local/bin/grain /usr/local/bin/konturctl
+  local uid gid
+  uid="$(id -u "$GRAIN_USER")"
+  gid="$(id -g "$GRAIN_USER")"
+
+  cat > /usr/local/lib/grain/run-image.sh <<WRAPPER
+#!/usr/bin/env bash
+# Written by v2/scripts/setup.sh (install_cli_wrappers). Runs one command
+# in the deployment image, with the same identity and the same view of
+# this host's directories that grain-daemon.service's own container has.
+# Called by /usr/local/bin/grain and /usr/local/bin/konturctl, which
+# differ only in the entrypoint they ask for.
+#
+# Arguments before "--" are passed to docker run; those after it are the
+# command line for the image itself, which this appends the image ref in
+# front of.
+set -euo pipefail
+
+extra=()
+while [ "\$#" -gt 0 ]; do
+  [ "\$1" = "--" ] && { shift; break; }
+  extra+=("\$1")
+  shift
+done
+
+# The image the service is running right now, not the one this wrapper
+# was written for: an upgrade through the UI rewrites that file (its
+# GRAIN_IMAGE line is what grain-daemon.service reads too), and a CLI
+# that kept answering out of the old image would be reporting on a
+# deployment that no longer exists.
+image="${GRAIN_IMAGE_REF}"
+if [ -s "${IMAGE_REF_FILE}" ]; then
+  . "${IMAGE_REF_FILE}"
+  image="\${GRAIN_IMAGE:-\$image}"
+fi
+
+args=(
+  --rm --interactive
+  --network host
+  --user ${uid}:${gid}
+  --env HOME=${GRAIN_DATA_DIR}/home
+  --env "GRAIN_SERVER=\${GRAIN_SERVER:-http://127.0.0.1:${port}}"
+  --volume ${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}
+)
+[ -d "${GRAIN_SANDBOX_DIR}" ] && args+=(--volume ${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR})
+[ -d "${GRAIN_SRC_DIR}" ] && args+=(--volume ${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro)
+# konturctl talks to this host's docker daemon and keeps its VM records
+# out here; the image paths it hands docker are host paths, so each has
+# to be mounted at the very path it already has.
+if [ -S /var/run/docker.sock ]; then
+  args+=(--volume /var/run/docker.sock:/var/run/docker.sock)
+  docker_gid="\$(getent group docker | cut -d: -f3)"
+  [ -n "\$docker_gid" ] && args+=(--group-add "\$docker_gid")
+fi
+[ -d /var/lib/kontur ] && args+=(--volume /var/lib/kontur:/var/lib/kontur)
+[ -d "${GRAIN_KONTUR_IMAGES_HOSTPATH}" ] && args+=(--volume ${GRAIN_KONTUR_IMAGES_HOSTPATH}:${GRAIN_KONTUR_IMAGES_HOSTPATH}:ro)
+[ -d "${GRAIN_KONTUR_DISK_HOSTPATH}" ] && args+=(--volume ${GRAIN_KONTUR_DISK_HOSTPATH}:${GRAIN_KONTUR_DISK_HOSTPATH})
+
+exec docker run "\${args[@]}" "\${extra[@]}" "\$image" "\$@"
+WRAPPER
+  chmod 0755 /usr/local/lib/grain/run-image.sh
+
+  cat > /usr/local/bin/grain <<'CLI'
+#!/usr/bin/env bash
+# Written by v2/scripts/setup.sh: the grain CLI, out of the deployment
+# image. `grain <args>` reaches the image's own entrypoint.
+exec /usr/local/lib/grain/run-image.sh -- "$@"
+CLI
+  chmod 0755 /usr/local/bin/grain
+
+  cat > /usr/local/bin/konturctl <<'CLI'
+#!/usr/bin/env bash
+# Written by v2/scripts/setup.sh: konturctl, out of the deployment image
+# -- the same copy pkg/kontur runs inside grain-daemon.service's own
+# container, so a diagnostic run out here (v2/scripts/kontur-diag.sh)
+# and the daemon's own calls cannot be different builds.
+exec /usr/local/lib/grain/run-image.sh --entrypoint konturctl -- "$@"
+CLI
+  chmod 0755 /usr/local/bin/konturctl
+
+  log "Installed /usr/local/bin/grain and /usr/local/bin/konturctl (both run $GRAIN_IMAGE_REF)"
   write_cli_profile
+}
+
+# write_image_ref records which image grain-daemon.service should run, in
+# the file the unit reads as an EnvironmentFile. Rewritten on every run of
+# this script, so re-running with a different GRAIN_IMAGE_TAG (or a
+# different GRAIN_REF) is what pins or rolls back a deployment -- and
+# deliberately the same file v2/pkg/upgrade's image path writes, so the
+# UI's Upgrade button and this script are two ways of doing one thing
+# rather than two mechanisms that can disagree.
+# Runs after setup_data_dir, which is what creates the directory this
+# writes into -- deliberately not creating it here, since an `install -d`
+# would also re-apply a mode, and $GRAIN_DATA_DIR's is 0750 for reasons
+# that have nothing to do with this file.
+write_image_ref() {
+  printf 'GRAIN_IMAGE=%s\n' "$GRAIN_IMAGE_REF" > "$IMAGE_REF_FILE"
+  chmod 0644 "$IMAGE_REF_FILE"
+  chown "$GRAIN_USER:$GRAIN_USER" "$IMAGE_REF_FILE"
 }
 
 # write_cli_profile points this host's `grain` CLI at this host's own
@@ -767,7 +902,7 @@ PROFILE
 # of the two -- read access to the journal alone, nothing else adm also
 # carries -- and every distribution this script otherwise assumes (a
 # working systemctl/journalctl) already creates that group by default, so
-# no getent guard is needed the way ensure_self_upgrade's docker one is.
+# no getent guard is needed the way grant_docker_group's own one is.
 ensure_user() {
   if ! id -u "$GRAIN_USER" >/dev/null 2>&1; then
     log "Creating system user $GRAIN_USER"
@@ -776,70 +911,115 @@ ensure_user() {
   usermod -aG systemd-journal "$GRAIN_USER"
 }
 
-# --- 5. sudo to reboot the machine, for the UI's reboot button ----------
+# --- 5. the control channel: acting on the host from inside the container -
 #
-# grant_reboot_sudo lets the UI's "reboot host" button (v2/pkg/ui/host.go,
-# bwsalmon/agents#395) actually reboot the machine: grain-daemon.service
-# runs as the unprivileged $GRAIN_USER (ensure_user, above), which cannot
-# reboot anything on its own. The drop-in grants exactly one command
-# line, matched verbatim by sudoers -- never a blanket NOPASSWD -- the
-# same shape ../../provision/controller.sh already uses for v1's own
-# self-repair sudoers file, and the same command rebootHost
-# (cmd/grain/daemon.go) runs.
-grant_reboot_sudo() {
-  log "Granting $GRAIN_USER passwordless sudo to reboot this machine"
-  cat > /etc/sudoers.d/grain-daemon-reboot <<SUDOERS
-${GRAIN_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
-SUDOERS
-  chmod 0440 /etc/sudoers.d/grain-daemon-reboot
-  visudo -cf /etc/sudoers.d/grain-daemon-reboot
+# Two UI buttons ask grain to do something to the machine it runs on:
+# "reboot host" (v2/pkg/ui/host.go, bwsalmon/agents#395) and the restart
+# at the end of an Upgrade (bwsalmon/agents#396). Both used to be a
+# NOPASSWD sudoers line each, granting $GRAIN_USER exactly one command --
+# and neither can work from inside a container, where `systemctl` reaches
+# no systemd that matters and sudo grants nothing that crosses the
+# boundary.
+#
+# So the container asks instead of acting. The daemon touches a file
+# under $GRAIN_DATA_DIR/control -- a directory it already has mounted --
+# and a systemd .path unit out here notices and runs the real command as
+# root. write_systemd_units points -reboot-cmd and -upgrade-restart-cmd
+# at exactly those two files.
+#
+# What this grants is the same pair of actions the two sudoers files
+# granted, by a mechanism with less reach: there is no sudo rule left at
+# all, so nothing can be widened by editing one, and the only thing the
+# daemon can cause is whichever command these two units name. Anything
+# able to write into $GRAIN_DATA_DIR/control can trigger them -- which is
+# $GRAIN_USER and root, exactly who could invoke the old sudo rules.
+#
+# Each service removes the request file before acting, so a request is
+# consumed once. PathModified (rather than PathExists) is what watches
+# them: a leftover file must not turn into a reboot the next time this
+# host boots.
+CONTROL_DIR="$GRAIN_DATA_DIR/control"
+
+write_control_units() {
+  log "Writing grain-reboot.path/.service and grain-restart.path/.service"
+  install -d -m0770 -o "$GRAIN_USER" -g "$GRAIN_USER" "$CONTROL_DIR"
+  # A host deployed before bwsalmon/agents#645 still carries the two
+  # sudoers drop-ins these units replace. Nothing invokes them any more,
+  # but a standing NOPASSWD grant that no longer has a reason to exist is
+  # exactly the kind of thing nobody notices again -- so a re-run removes
+  # them rather than leaving them behind.
+  rm -f /etc/sudoers.d/grain-daemon-reboot /etc/sudoers.d/grain-daemon-upgrade
+
+  cat > /etc/systemd/system/grain-reboot.path <<UNIT
+[Unit]
+Description=Watch for grain's reboot-host request
+
+[Path]
+PathModified=${CONTROL_DIR}/reboot
+Unit=grain-reboot.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  cat > /etc/systemd/system/grain-reboot.service <<UNIT
+[Unit]
+Description=Reboot this host, at the grain daemon's request
+
+[Service]
+Type=oneshot
+ExecStart=/bin/rm -f ${CONTROL_DIR}/reboot
+ExecStart=/usr/bin/systemctl reboot
+UNIT
+
+  cat > /etc/systemd/system/grain-restart.path <<UNIT
+[Unit]
+Description=Watch for grain's restart request (the UI's Upgrade button)
+
+[Path]
+PathModified=${CONTROL_DIR}/restart
+Unit=grain-restart.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  cat > /etc/systemd/system/grain-restart.service <<UNIT
+[Unit]
+Description=Restart grain-daemon.service, at the grain daemon's request
+
+[Service]
+Type=oneshot
+ExecStart=/bin/rm -f ${CONTROL_DIR}/restart
+ExecStart=/usr/bin/systemctl restart grain-daemon.service
+UNIT
 }
 
-# ensure_self_upgrade gives $GRAIN_USER everything the UI's own Upgrade
-# button (bwsalmon/agents#396) needs and nothing beyond it: ownership of
-# its own checkout (so it can fetch/checkout/build there), membership in
-# the docker group (so `make container-build` needs no sudo of its own),
-# and one exact, NOPASSWD sudoers line to restart its own service --
-# never a wildcard, matching provision/controller.sh's own "software
-# gate, not infra gate" self-repair grant. It cannot restart anything
-# else; rebooting the host outright is grant_reboot_sudo's separate,
-# narrower grant above.
+# ensure_src_dir_readable keeps $GRAIN_SRC_DIR readable by $GRAIN_USER.
 #
-# Skipped entirely when GRAIN_ENABLE_UI_UPGRADE=0: none of this grant is
-# needed if write_systemd_units below never wires up the flags that let
-# the daemon touch its own checkout or restart itself in the first place
-# (bwsalmon/agents#405).
+# The checkout is no longer something the daemon writes to -- it is
+# mounted read-only into the container, and nothing in there builds
+# (bwsalmon/agents#645) -- but it is still what the self-debug capability
+# reads grain's own source out of, and sync_repo runs as root, so a
+# world-unreadable umask on this host would otherwise leave the daemon
+# looking at a tree it cannot open.
+ensure_src_dir_readable() {
+  chmod -R a+rX "$GRAIN_SRC_DIR" 2>/dev/null || true
+}
+
+# grant_docker_group adds $GRAIN_USER to the docker group if it exists.
 #
-# Run after ensure_user (the account has to exist) and again on every
-# re-run: chown -R is cheap against an already-correctly-owned tree, and
-# a previous run's build_and_install (root, via sudo) would otherwise
-# leave $GRAIN_SRC_DIR's freshly fetched/built files root-owned again on
-# every single upgrade.
-# grant_docker_group adds $GRAIN_USER to the docker group if it exists --
-# shared by ensure_self_upgrade (make container-build needs it with no
-# sudo of its own) and ensure_kontur_kvm_access (the docker kontur backend
-# needs it to run each slot's VM container), so either feature alone is
-# enough to grant it rather than each needing its own copy of the
-# getent-guard idiom.
+# Nothing in the *container* needs this: grain-daemon.service's own
+# `docker run` is executed by systemd as root, and the socket the
+# container itself gets is reached through a --group-add of the docker
+# gid (docker_run_args). This is for the account an operator uses on this
+# host -- `grain`/`konturctl` are wrappers around `docker run` now
+# (install_cli_wrappers), so a shell as $GRAIN_USER needs to be able to
+# talk to the daemon for either of them to work at all.
 grant_docker_group() {
   if getent group docker >/dev/null 2>&1; then
     usermod -aG docker "$GRAIN_USER"
   fi
-}
-
-ensure_self_upgrade() {
-  if [ "$GRAIN_ENABLE_UI_UPGRADE" != "1" ]; then
-    log "GRAIN_ENABLE_UI_UPGRADE=$GRAIN_ENABLE_UI_UPGRADE -- skipping the UI Upgrade button's self-upgrade grant"
-    return
-  fi
-  chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_SRC_DIR"
-  grant_docker_group
-
-  cat > /etc/sudoers.d/grain-daemon-upgrade <<SUDOERS
-$GRAIN_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart grain-daemon.service
-SUDOERS
-  chmod 0440 /etc/sudoers.d/grain-daemon-upgrade
-  visudo -cf /etc/sudoers.d/grain-daemon-upgrade
 }
 
 # --- kontur sandboxing ---------------------------------------------------
@@ -1182,93 +1362,37 @@ ensure_kontur_images_build() {
   ln -s "$tag" "$current"
 }
 
-# konturctl_tag names the currently-vendored third_party/kontur tree, the
-# same "the git tree object ID already is the hash" trick kontur_image_tag
-# uses above -- a vendor bump changes this tag, which is exactly what
-# tells ensure_konturctl it has to rebuild rather than reuse whatever is
-# already installed.
-konturctl_tag() {
-  git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:third_party/kontur" 2>/dev/null || echo unknown
-}
-
-# ensure_konturctl builds and installs `konturctl` itself onto this
-# host's PATH.
+# konturctl itself is no longer built or installed here: it ships inside
+# the deployment image (v2/Dockerfile builds it from the same vendored
+# third_party/kontur this checkout carries), which is where pkg/kontur
+# execs it from, and install_cli_wrappers puts a wrapper for that same
+# copy on this host's PATH for kontur-diag.sh and an operator's own use.
 #
-# Every other ensure_kontur_* function above sets up something konturctl
-# *uses* once it runs -- a guest/OCI image pair, KVM/docker access, an
-# SSH keypair -- but nothing ever built or installed the binary itself
-# (bwsalmon/agents#549): v2/pkg/kontur execs the bare command name
-# ("konturctl vm create"/"vm update"/"vm delete", relying on PATH to find
-# it -- see that package's own doc comment), so a host with none of this
-# came up dispatching real tasks into kontur VMs and failing every single
-# one with "exec: \"konturctl\": executable file not found in $PATH".
-#
-# third_party/kontur/README.md's "Operating a node (konturctl CLI)":
-# `cmd/konturctl` builds a single static binary, meant to run on the node
-# itself, not inside a container the way `kontur` (the guest-side image
-# built into the OCI image above) does -- so this builds straight to a
-# host path rather than pulling anything from a registry.
-#
-# Built inside the same grain-builder image build_and_install's own
-# `make container-build` already produced (Makefile's `builder` target),
-# reusing its already-pinned Go toolchain rather than pulling a second
-# one -- third_party/kontur is a separate module (its own go.mod, go
-# 1.22) from v2's, but a newer toolchain building an older-declared
-# module is exactly what Go itself supports, and GOTOOLCHAIN=local in
-# that image only forbids fetching a *different* one mid-build, not using
-# the one already there for a module that asks for less. The container
-# caches -- $GRAIN_SRC_DIR/v2/.container-cache -- are shared with that
-# same build, so this pays its own module-download cost once, not on
-# every run.
-ensure_konturctl() {
-  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
-    return
-  fi
-
-  local tag installed_tag konturctl_bin cache_dir
-  konturctl_bin="$GRAIN_DATA_DIR/bin/konturctl"
-  cache_dir="$GRAIN_SRC_DIR/v2/.container-cache"
-  tag="$(konturctl_tag)"
-  installed_tag=""
-  [ -s "${konturctl_bin}.tag" ] && installed_tag="$(cat "${konturctl_bin}.tag")"
-
-  if [ -x "$konturctl_bin" ] && [ "$installed_tag" = "$tag" ]; then
-    log "konturctl ${tag} already built -- reusing it"
-  else
-    log "Building konturctl ${tag} (third_party/kontur/cmd/konturctl, containerised)"
-    mkdir -p "$(dirname "$konturctl_bin")" "$cache_dir/build" "$cache_dir/mod"
-    if ! docker run --rm \
-        -v "$GRAIN_SRC_DIR/third_party/kontur":/src \
-        -v "$(dirname "$konturctl_bin")":/out \
-        -v "$cache_dir/build":/gocache \
-        -v "$cache_dir/mod":/gomodcache \
-        -e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
-        -e CGO_ENABLED=0 \
-        -w /src grain-builder:bookworm \
-        go build -trimpath -ldflags="-s -w" -o /out/konturctl.tmp ./cmd/konturctl; then
-      log "  building konturctl failed -- leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
-      return
-    fi
-    mv -f "${konturctl_bin}.tmp" "$konturctl_bin"
-    chmod 0755 "$konturctl_bin"
-    printf '%s' "$tag" > "${konturctl_bin}.tag"
-  fi
-  ln -sf "$konturctl_bin" /usr/local/bin/konturctl
-}
+# That is what bwsalmon/agents#645 replaced ensure_konturctl with. It had
+# to build the binary in the grain-builder image `make container-build`
+# left behind, cache it by the vendored tree's git object id, and rebuild
+# it whenever that changed -- all of it work to keep a host-installed
+# binary in step with the vendored source, which an image built from that
+# source in one CI job cannot fall out of step with in the first place.
 
 # ensure_kontur_kvm_access grants $GRAIN_USER /dev/kvm (for the nested
 # cloud-hypervisor guest itself), the docker group (for the docker
 # kontur backend's own `docker run`) -- the same grant
-# ensure_self_upgrade gives for an unrelated reason, and safe to grant
+# grant_docker_group gives an operator's own shell, and safe to grant
 # twice: usermod -aG only ever adds -- and ownership of
-# GRAIN_KONTUR_DISK_HOSTPATH, where konturctl (run directly as
-# $GRAIN_USER, not inside a container) creates each VM's own writable
-# disk overlay (bwsalmon/agents#510). Unlike GRAIN_KONTUR_IMAGES_HOSTPATH
-# (populated by this script, running as root, before grain-daemon ever
-# runs), that directory is created lazily by konturctl itself on a VM's
-# first "vm create" -- $GRAIN_USER needs to own its parent so that
-# mkdir succeeds unprivileged.
+# GRAIN_KONTUR_DISK_HOSTPATH, where konturctl creates each VM's own
+# writable disk overlay (bwsalmon/agents#510). Unlike
+# GRAIN_KONTUR_IMAGES_HOSTPATH (populated by this script, running as
+# root, before grain-daemon ever runs), that directory is created lazily
+# by konturctl itself on a VM's first "vm create" -- $GRAIN_USER needs to
+# own its parent so that mkdir succeeds unprivileged.
+#
+# konturctl runs inside grain-daemon.service's own container now, as this
+# same uid and against this same path: docker_run_args mounts both this
+# directory and /var/lib/kontur/vms below at the very paths they have out
+# here, precisely so that a path konturctl writes, and the identical path
+# it then hands the host's docker daemon as a bind mount for the VM
+# container, mean the same directory.
 ensure_kontur_kvm_access() {
   if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     return
@@ -1455,12 +1579,14 @@ setup_sandbox_dir() {
 setup_data_dir() {
   log "Laying out $GRAIN_DATA_DIR"
   install -d -m0750 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR"
-  # build_and_install (root, above) may have just (re-)created this on a
-  # fresh -data-dir before this function ever ran; re-asserting
-  # ownership here is what lets $GRAIN_USER overwrite its own binary on
-  # every later upgrade with no sudo of its own -- install -d re-applies
-  # -o/-g even against a directory that already exists (this file's own
-  # comment on sync_repo's mkdir-vs-install-d distinction).
+  # bin/ no longer holds a grain binary -- nothing on this host does
+  # (install_cli_wrappers) -- but it is kept, owned by $GRAIN_USER, for
+  # the same reason $GRAIN_DATA_DIR itself is: a deployment upgraded
+  # across bwsalmon/agents#645 already has one, with a previous release's
+  # binary in it, and an operator who put something of their own there
+  # should find it where they left it. install -d re-applies -o/-g even
+  # against a directory that already exists (this file's own comment on
+  # sync_repo's mkdir-vs-install-d distinction).
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/bin"
   # A real, writable HOME for the daemon, exported by grain-daemon.service
   # (write_systemd_units). $GRAIN_USER is created --no-create-home, so the
@@ -1529,8 +1655,20 @@ seed_gcp_minter_key() {
   if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^gcp-key-minter:'; then
     return
   fi
+  # Staged under $GRAIN_DATA_DIR before being handed to the CLI, and
+  # removed straight after: `grain` is a wrapper around `docker run` now
+  # (install_cli_wrappers), and -value-file has to name a path that
+  # resolves *inside* that container. The file this is given is
+  # deliberately somewhere else -- terraform/gcp-v2/files/deploy.sh
+  # writes it into a tmpfs under /run -- and mounting an arbitrary
+  # operator-supplied path into the daemon's own container for the sake
+  # of one read would be a far worse trade than a copy that lives for
+  # one command.
+  local staged="$GRAIN_DATA_DIR/secrets/.minter-key.staged.json"
+  ( umask 077 && cat "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" > "$staged" )
   /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" set \
-    -value-file "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" gcp-key-minter key.json
+    -value-file "$staged" gcp-key-minter key.json
+  rm -f "$staged"
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
 }
 
@@ -1695,14 +1833,15 @@ format_target_repo_if_empty() {
 verify_agent_cli() {
   if [ -n "$GRAIN_AGY_PATH" ]; then
     [ -x "$GRAIN_AGY_PATH" ] && return
-    log "WARNING: GRAIN_AGY_PATH=$GRAIN_AGY_PATH is not an executable file."
-  elif command -v agy >/dev/null 2>&1; then
-    return
+    log "WARNING: GRAIN_AGY_PATH=$GRAIN_AGY_PATH is not an executable file on this host."
   fi
-  log "WARNING: no Antigravity CLI (agy) found. The default agent framework runs it as a"
-  log "         subprocess, so dispatches will fail until it is installed (its own installer"
-  log "         targets ~/.gemini/bin/agy) or GRAIN_AGY_PATH points at it. A deployment"
-  log "         running -agent-framework claude instead can ignore this."
+  log "WARNING: no Antigravity CLI (agy) for this deployment to run. The default agent"
+  log "         framework runs it as a subprocess, so dispatches will fail until there is"
+  log "         one. Unlike the claude CLI, agy is not in the deployment image -- this repo"
+  log "         has no verified installer URL to bake one in with -- so install it on this"
+  log "         host (its own installer targets ~/.gemini/bin/agy) and set GRAIN_AGY_PATH,"
+  log "         which is what mounts it into the container. A deployment running"
+  log "         -agent-framework claude instead can ignore this."
 }
 
 write_systemd_units() {
@@ -1720,23 +1859,44 @@ write_systemd_units() {
     -github-host "$GRAIN_GITHUB_HOST"
     -ui-addr "$GRAIN_UI_ADDR"
   )
-  # bwsalmon/agents#396: the UI's own Upgrade button. Wired up whenever
-  # GRAIN_ENABLE_UI_UPGRADE=1 (the default) -- ensure_self_upgrade
-  # (above) is what actually gives $GRAIN_USER the ownership and the one
-  # sudoers line this needs, run every time this script is, so the
-  # feature works the same whether this is a first install or the
-  # hundredth re-run. Left unset when GRAIN_ENABLE_UI_UPGRADE=0
+  # bwsalmon/agents#396: the UI's own Upgrade button, which on a
+  # container deployment means "pull the image CI published for that
+  # branch and restart onto it" rather than "fetch, build, install"
+  # (bwsalmon/agents#645, v2/pkg/upgrade/image.go). -upgrade-image names
+  # the repository CI publishes a tag per branch to; -upgrade-image-ref-
+  # file is the file this unit itself reads as an EnvironmentFile, so an
+  # upgrade repoints the service by writing one line and restarting, with
+  # no unit to rewrite and no root anywhere in the path.
+  #
+  # -upgrade-src-dir rides along, and no longer means "build here": with
+  # -upgrade-image set the daemon never builds, and this is only what
+  # grantTools (cmd/grain/daemon.go) reads grain's own source out of for
+  # the self-debug capability. It is passed only alongside the Upgrade
+  # button for the same reason it always was -- it is the same read-only
+  # mount either way, and a deployment that turned this feature off has
+  # said it wants nothing here wired up.
+  #
+  # Left unset entirely when GRAIN_ENABLE_UI_UPGRADE=0
   # (terraform/gcp-v2's own deploy.sh sets exactly that): the daemon
   # flags themselves default to empty/disabled (cmd/grain/daemon.go), so
   # simply not passing them is enough -- see this script's own header on
   # GRAIN_ENABLE_UI_UPGRADE (bwsalmon/agents#405).
   if [ "$GRAIN_ENABLE_UI_UPGRADE" = "1" ]; then
     daemon_args+=(
+      -upgrade-image "$GRAIN_IMAGE"
+      -upgrade-image-ref-file "$IMAGE_REF_FILE"
       -upgrade-src-dir "$GRAIN_SRC_DIR"
-      -upgrade-install-path "$REAL_BIN"
-      -upgrade-restart-cmd sudo -upgrade-restart-cmd systemctl -upgrade-restart-cmd restart -upgrade-restart-cmd grain-daemon.service
+      -upgrade-restart-cmd touch -upgrade-restart-cmd "$CONTROL_DIR/restart"
     )
   fi
+
+  # The UI's reboot-host button, through the same control channel: a
+  # touch out of the container, a path unit out here (write_control_units)
+  # that turns it into `systemctl reboot`. Always passed -- unlike the
+  # Upgrade button this has no opt-out, and its default
+  # (`sudo systemctl reboot`, cmd/grain/daemon.go's defaultRebootCmd) is
+  # the one thing that cannot work from inside a container.
+  daemon_args+=(-reboot-cmd touch -reboot-cmd "$CONTROL_DIR/reboot")
   [ -n "$GRAIN_AGY_PATH" ] && daemon_args+=(-agy-path "$GRAIN_AGY_PATH")
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
@@ -1800,46 +1960,187 @@ write_systemd_units() {
     fi
   fi
 
+  docker_run_args
+
+  # The unit runs `docker run` as root, and the container runs as
+  # $GRAIN_USER: `docker run --user` is what makes the daemon
+  # unprivileged, and the client needs to reach a root-owned socket to
+  # ask for that. So the account this service *starts* as is root and the
+  # account grain *is* is unchanged from before any of this ran in a
+  # container -- no User= here, --user in docker_run_args instead.
+  #
+  # --rm plus an ExecStartPre `rm -f` is the pair that makes a restart
+  # deterministic: the container is named (so ExecStop and an operator's
+  # `docker logs grain-daemon` can find it), and a name outliving a hard
+  # kill would otherwise make the next start fail with "name already in
+  # use" forever. The `-` prefix makes that pre-step's failure -- the
+  # ordinary case, where there is nothing to remove -- not a failure of
+  # the unit.
+  #
+  # ExecStop stops the container rather than leaving systemd to kill the
+  # client: `docker run` proxies signals, but a stop that goes through
+  # the daemon is what actually gives the container its full
+  # TimeoutStopSec to shut down instead of racing the client's death.
+  #
+  # Requires=docker.service, not merely After=: this unit is a docker
+  # client, and a boot where the engine never came up should leave
+  # grain-daemon failed and legible rather than restarting forever
+  # against a missing socket.
+  #
+  # ${IMAGE_REF_FILE} carries one GRAIN_IMAGE=<ref> line and is the
+  # indirection an upgrade writes (write_image_ref, pkg/upgrade/
+  # image.go), which is why the image below is a variable and not a
+  # literal: the unit never has to be rewritten to change what runs.
   cat > /etc/systemd/system/grain-daemon.service <<UNIT
 [Unit]
-Description=grain daemon (task orchestrator, UI and API)
-After=network-online.target
+Description=grain daemon (task orchestrator, UI and API), from ${GRAIN_IMAGE}
+After=network-online.target docker.service
 Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
-User=${GRAIN_USER}
-Group=${GRAIN_USER}
-# CAP_NET_BIND_SERVICE, not root, is what lets an unprivileged process
-# bind -ui-addr's port 80 -- see this script's own header on why that's
-# the port and why it's bound to loopback only.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-# systemd would otherwise set HOME from ${GRAIN_USER}'s passwd entry,
-# which names a directory ensure_user never creates -- see setup_data_dir
-# on why the claude CLI needs this to be somewhere that exists and is
-# writable.
-Environment=HOME=${GRAIN_DATA_DIR}/home
-ExecStart=/usr/local/bin/grain ${daemon_args[*]}
+EnvironmentFile=${IMAGE_REF_FILE}
+ExecStartPre=-$DOCKER_BIN rm -f grain-daemon
+ExecStart=$DOCKER_BIN run --name grain-daemon ${DOCKER_ARGS[*]} \${GRAIN_IMAGE} ${daemon_args[*]}
+ExecStop=-$DOCKER_BIN stop --time 30 grain-daemon
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=60
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
+  write_control_units
   systemctl daemon-reload
+}
+
+# docker_run_args fills DOCKER_ARGS with everything grain-daemon.service
+# hands `docker run` before the image name. It is one list, built here
+# rather than written into the unit by hand, because every entry answers
+# the same question: what does a process that used to be a plain systemd
+# service on this host still need to see once it is in a container?
+#
+#   --network host       the UI binds -ui-addr and the git proxy binds an
+#                        address every sandbox (a kontur VM in its own
+#                        netns included) has to reach. A bridged network
+#                        would put both behind a NAT that neither the
+#                        load balancer in front of this host nor a
+#                        sandbox VM knows how to cross.
+#   --user               $GRAIN_USER's own uid:gid, so the store, the
+#                        secrets database and every sandbox working tree
+#                        come out owned exactly as they were before.
+#   --cap-add NET_BIND_SERVICE
+#                        only with a privileged -ui-addr port. The image
+#                        gives the grain binary the matching file
+#                        capability (v2/Dockerfile), which is what turns
+#                        a bounding-set entry into an actual grant for a
+#                        non-root process -- and grants it to that binary
+#                        alone, not to a task's own `bash -c`.
+#   the data/sandbox/src mounts
+#                        the three directories the daemon reads and
+#                        writes, each at the very path it has out here so
+#                        that a path in a log line, a flag or an error
+#                        means the same thing in both places.
+#   the journal mounts   pkg/systemlog.Journalctl shells out to
+#                        journalctl for the UI's Logs pane; it needs the
+#                        journal files and the machine-id that names
+#                        them. Read-only, and whichever of the two
+#                        journal directories this host actually uses
+#                        (/var/log/journal when persistent storage is on,
+#                        /run/log/journal when it is not).
+#   the docker socket    kontur (konturctl, and pkg/mcp's docker-exec
+#                        transport) and the Upgrade button's own `docker
+#                        pull` both talk to this host's engine. Mounted
+#                        only when one of those is actually turned on --
+#                        this is the one entry here that grants the
+#                        container root-equivalent authority over the
+#                        host, so it is not given for free to a
+#                        deployment that has no use for it.
+#   the kontur mounts    konturctl records its VMs in /var/lib/kontur and
+#                        creates each VM's disk overlay under
+#                        GRAIN_KONTUR_DISK_HOSTPATH; the paths it then
+#                        hands the host's docker daemon as bind mounts
+#                        are those same host paths, which is why every
+#                        one of them is mounted at its own path.
+#   GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH
+#                        an operator's own agent CLI, mounted (with the
+#                        directory around it, since a CLI is rarely one
+#                        lone file) at the path they named, because a
+#                        path passed as -claude-path/-agy-path has to
+#                        resolve inside the container.
+#   GRAIN_EXTRA_DOCKER_ARGS
+#                        the escape hatch for whatever this list does not
+#                        anticipate -- another mount, another device,
+#                        another environment variable -- so that needing
+#                        one does not mean editing this script.
+docker_run_args() {
+  local uid gid docker_gid
+  uid="$(id -u "$GRAIN_USER")"
+  gid="$(id -g "$GRAIN_USER")"
+
+  DOCKER_ARGS=(
+    --rm
+    --network host
+    --user "${uid}:${gid}"
+    --env "HOME=${GRAIN_DATA_DIR}/home"
+    --volume "${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}"
+    --volume "${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR}"
+    --volume "${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro"
+  )
+
+  case "${GRAIN_UI_ADDR##*:}" in
+    ''|*[!0-9]*) ;;
+    *) [ "${GRAIN_UI_ADDR##*:}" -lt 1024 ] && DOCKER_ARGS+=(--cap-add NET_BIND_SERVICE) ;;
+  esac
+
+  [ -f /etc/machine-id ] && DOCKER_ARGS+=(--volume /etc/machine-id:/etc/machine-id:ro)
+  [ -d /var/log/journal ] && DOCKER_ARGS+=(--volume /var/log/journal:/var/log/journal:ro)
+  [ -d /run/log/journal ] && DOCKER_ARGS+=(--volume /run/log/journal:/run/log/journal:ro)
+
+  if [ "$GRAIN_KONTUR_ENABLE" = "1" ] || [ "$GRAIN_ENABLE_UI_UPGRADE" = "1" ]; then
+    DOCKER_ARGS+=(--volume /var/run/docker.sock:/var/run/docker.sock)
+    # The socket is root:docker 0660, and the container is not root:
+    # without the group, every docker call from in there is a permission
+    # denied. --group-add is the container-side equivalent of the docker
+    # group membership this used to grant $GRAIN_USER on the host.
+    docker_gid="$(getent group docker | cut -d: -f3)"
+    [ -n "$docker_gid" ] && DOCKER_ARGS+=(--group-add "$docker_gid")
+  fi
+
+  if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
+    DOCKER_ARGS+=(
+      --volume /var/lib/kontur:/var/lib/kontur
+      --volume "${GRAIN_KONTUR_IMAGES_HOSTPATH}:${GRAIN_KONTUR_IMAGES_HOSTPATH}:ro"
+      --volume "${GRAIN_KONTUR_DISK_HOSTPATH}:${GRAIN_KONTUR_DISK_HOSTPATH}"
+    )
+  fi
+
+  [ -n "$GRAIN_CLAUDE_PATH" ] && DOCKER_ARGS+=(--volume "$(dirname "$GRAIN_CLAUDE_PATH"):$(dirname "$GRAIN_CLAUDE_PATH"):ro")
+  [ -n "$GRAIN_AGY_PATH" ] && DOCKER_ARGS+=(--volume "$(dirname "$GRAIN_AGY_PATH"):$(dirname "$GRAIN_AGY_PATH"):ro")
+
+  # Deliberately unquoted: this is a list of arguments an operator wrote,
+  # not one argument.
+  # shellcheck disable=SC2206
+  [ -n "$GRAIN_EXTRA_DOCKER_ARGS" ] && DOCKER_ARGS+=($GRAIN_EXTRA_DOCKER_ARGS)
+  return 0
 }
 
 enable_services() {
   # enable, then restart -- not "enable --now". An already-enabled unit
   # from a previous run of this script needs restarting to pick up a
-  # rebuilt binary or a config change; --now would leave an already-
+  # newly pulled image or a config change; --now would leave an already-
   # running one exactly as it was. v1 hit precisely this bug for its own
   # git-proxy service (docs/next-session.md item 3's "Update"): restarting
   # an already-running unit is always safe, and starting a stopped one is
   # exactly what --now would have done anyway.
   systemctl enable grain-daemon.service >/dev/null
+  # The two watchers the daemon reaches the host through
+  # (write_control_units). --now on these, unlike the service below: a
+  # .path unit holds no state worth restarting, and it has to be actively
+  # watching before the first request lands in $CONTROL_DIR.
+  systemctl enable --now grain-reboot.path grain-restart.path >/dev/null
   # Started unconditionally, even with no agent credential anywhere. It
   # used to be held back until a Gemini key existed, because the daemon
   # built its one agent framework at startup and could not run without
@@ -1879,11 +2180,19 @@ report_readiness() {
   # The binary, not the token: they are independent, and a deployment
   # with the token set and no CLI is exactly the state that fails every
   # claude run with "executable file not found in $PATH".
+  #
+  # Asked of the *image*, not of this host: that is where the CLI lives
+  # now (v2/Dockerfile), so `command -v claude` out here would report a
+  # host that has nothing to do with whether a dispatch can run. The
+  # exception is an operator-named copy, which is a host path by
+  # definition -- docker_run_args mounts it in.
   local claude_cli="MISSING"
   if [ -n "$GRAIN_CLAUDE_PATH" ]; then
-    [ -x "$GRAIN_CLAUDE_PATH" ] && claude_cli="$GRAIN_CLAUDE_PATH" || claude_cli="MISSING (GRAIN_CLAUDE_PATH names nothing executable)"
-  elif command -v claude >/dev/null 2>&1; then
-    claude_cli="$(command -v claude)"
+    [ -x "$GRAIN_CLAUDE_PATH" ] && claude_cli="$GRAIN_CLAUDE_PATH (mounted from this host)" || claude_cli="MISSING (GRAIN_CLAUDE_PATH names nothing executable on this host)"
+  elif claude_cli="$(docker run --rm --entrypoint sh "$GRAIN_IMAGE_REF" -c 'command -v claude' 2>/dev/null)" && [ -n "$claude_cli" ]; then
+    claude_cli="$claude_cli (in $GRAIN_IMAGE_REF)"
+  else
+    claude_cli="MISSING"
   fi
 
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
@@ -1911,6 +2220,7 @@ report_readiness() {
   echo
   log "Readiness:"
   echo "    daemon:            $daemon"
+  echo "    image:             $GRAIN_IMAGE_REF"
   echo "    GitHub credential: $github"
   echo "    Gemini key:        $gemini"
   echo "    Claude token:      $claude"
@@ -1922,7 +2232,7 @@ report_readiness() {
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
     echo "    sandboxing:        kontur VMs (one per run, over SSH as ${GRAIN_KONTUR_SSH_USER})"
   else
-    echo "    sandboxing:        host directories (orchestrator.HostSandboxes)"
+    echo "    sandboxing:        host directories (orchestrator.HostSandboxes, inside the container)"
   fi
 
   if [ "$github" = "MISSING" ]; then
@@ -1941,9 +2251,11 @@ report_readiness() {
       # Not a readiness failure: a gemini deployment neither needs nor
       # misses this. It is still worth a line, because nothing in the UI
       # says the framework it offers cannot run here.
-      echo "    -- no claude CLI on this host: the \"claude\" agent framework cannot run until"
-      echo "       there is one (Settings -> Agent framework, and the per-task override, still"
-      echo "       offer it). Re-run with network access to claude.ai, or set GRAIN_CLAUDE_PATH."
+      echo "    -- no claude CLI in $GRAIN_IMAGE_REF: the \"claude\" agent framework cannot run"
+      echo "       until there is one (Settings -> Agent framework, and the per-task override,"
+      echo "       still offer it). That image was built with INSTALL_CLAUDE_CLI=0 or its"
+      echo "       install failed in CI -- deploy a tag that has one, or point"
+      echo "       GRAIN_CLAUDE_PATH at a copy on this host."
       ;;
   esac
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then
@@ -1973,21 +2285,26 @@ print_summary() {
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
   echo "    CLI:     grain list  (a new shell picks up GRAIN_SERVER from /etc/profile.d/grain.sh;"
   echo "             in this one: export GRAIN_SERVER=http://127.0.0.1:${GRAIN_UI_ADDR##*:})"
-  echo "    Logs:    journalctl -u grain-daemon.service -f"
-  echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls, rebuilds, and restarts the service"
+  echo "    Image:   ${GRAIN_IMAGE_REF} (recorded in ${IMAGE_REF_FILE}; \`docker images\` for what is local)"
+  echo "    Logs:    journalctl -u grain-daemon.service -f  (or: docker logs -f grain-daemon)"
+  echo "    Update:  re-run this script (sudo ./setup.sh) -- it pulls the image for GRAIN_REF and restarts"
+  echo "             the service. Pin or roll back with GRAIN_IMAGE_TAG=sha-<short sha>."
   report_readiness
 }
 
 main() {
   sync_repo
   reexec_if_updated "$@"
-  build_and_install
   ensure_user
-  grant_reboot_sudo
-  ensure_self_upgrade
+  ensure_src_dir_readable
+  grant_docker_group
+  pull_image
+  # After ensure_user (the wrappers run the image as that account) and
+  # before setup_data_dir, which is the first thing here to actually use
+  # the `grain` CLI they install.
+  install_cli_wrappers
   ensure_kontur_ssh_key
   ensure_kontur_images
-  ensure_konturctl
   ensure_kontur_kvm_access
   ensure_kontur_git_proxy_host
   setup_sandbox_dir
@@ -1999,6 +2316,9 @@ main() {
   ensure_kontur_exec_key
   reformat_store_if_schema_changed
   format_target_repo_if_empty
+  # After setup_data_dir: this writes into $GRAIN_DATA_DIR, and it has to
+  # be in place before write_systemd_units' unit reads it.
+  write_image_ref
   write_systemd_units
   enable_services
   print_summary

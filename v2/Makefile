@@ -46,7 +46,22 @@ CONTAINER_CACHE ?= $(CURDIR)/.container-cache
 # does that, and the flag disappears with it.
 CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 
-.PHONY: all build test test-e2e vet fmt clean builder container-build frontend loadtest $(CMDS)
+# --- the deployment image ---------------------------------------------
+#
+# `make image` builds Dockerfile (not Dockerfile.build: that one is the
+# toolchain `container-build` above runs in) -- the runtime image a
+# deployment actually runs, carrying bin/grain and every binary it shells
+# out to. ../.github/workflows/build-artifacts.yml builds the same image
+# the same way on every commit and pushes it to GHCR, so this target is
+# for a local build against a change to the Dockerfile itself, not
+# something a deployment ever needs to run.
+#
+# The context is the repository root, not this directory: konturctl is
+# built from ../third_party/kontur and `go build`'s commit stamp comes
+# from ../.git. GO_VERSION is passed for the same reason `builder` passes
+# it -- one version, read out of go.mod.
+IMAGE ?= grain:dev
+.PHONY: all build test test-e2e vet fmt clean builder container-build image frontend loadtest $(CMDS)
 
 all: vet test build
 
@@ -186,3 +201,10 @@ fmt:
 
 clean:
 	rm -rf $(BIN) $(CONTAINER_CACHE)
+
+image:
+	$(CONTAINER_ENGINE) build \
+		--build-arg GO_IMAGE=$(GO_IMAGE) \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg BUILDVCS=$(BUILDVCS) \
+		-t $(IMAGE) -f Dockerfile ..

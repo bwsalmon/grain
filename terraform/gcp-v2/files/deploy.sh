@@ -4,8 +4,12 @@
 # non-secret configuration (the grain-config metadata attribute) and its
 # two secrets (also metadata, but never Terraform inputs -- see
 # ../push-secrets.sh) into a call to v2/scripts/setup.sh, which does the
-# actual clone/build/install/restart -- including the breaking-schema
+# actual clone/pull/install/restart -- including the breaking-schema
 # reformat (bwsalmon/agents#394; see that script's own step 6).
+#
+# "pull", not "build", since bwsalmon/agents#645: the deployment is a
+# container image CI publishes on every commit, so this host no longer
+# carries a toolchain or spends a deploy's minutes compiling one.
 set -euo pipefail
 
 readonly MD="http://metadata.google.internal/computeMetadata/v1"
@@ -20,23 +24,27 @@ md() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1"; }
 # attributes are optional until push-secrets.sh has run at least once.
 md_optional() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || true; }
 
-# make is here because v2/scripts/setup.sh builds the binary with
-# `make -C v2 container-build`. It is not in a Debian cloud image, and
-# nothing else pulls it in -- the compile happens inside Docker, so make
-# is the only part of that toolchain the host needs, and the easiest to
-# overlook. Missing, the deploy died on `make: command not found`, which
-# config-sync reported as a bare "exit=127".
+# make is gone from this list (bwsalmon/agents#645): nothing on this host
+# builds grain any more -- v2/scripts/setup.sh pulls the image CI
+# published for this commit -- so the Go/Node toolchain, and the `make`
+# that used to drive it, are CI's problem rather than a deployed host's.
+#
+# What is left is what the deployment genuinely runs on: git (the
+# checkout this script keeps, which setup.sh and packer/kontur's image
+# builds come out of), docker (grain-daemon.service *is* a `docker run`
+# now, so this is a runtime dependency, not only a deploy-time one), and
+# python3 (the `cfg` helper below).
 install_prerequisites() {
   local missing=0
-  for cmd in git docker python3 make; do
+  for cmd in git docker python3; do
     command -v "$cmd" >/dev/null 2>&1 || missing=1
   done
   if [ "$missing" -eq 0 ]; then
     return
   fi
-  log "installing git, docker, python3, make (needed once; v2/scripts/setup.sh's own build/install steps need them)"
+  log "installing git, docker, python3 (needed once; the deploy below clones with one, runs grain with the next, and reads its own config with the last)"
   apt-get update
-  apt-get install -y --no-install-recommends git docker.io python3 make ca-certificates
+  apt-get install -y --no-install-recommends git docker.io python3 ca-certificates
 }
 
 # Ship this host's systemd journal to Cloud Logging, so a failed deploy
@@ -116,6 +124,9 @@ cfg() {
 
 GRAIN_REPO_URL="$(cfg grain_repo_url)"
 GRAIN_REF="$(cfg grain_ref)"
+GRAIN_IMAGE="$(cfg grain_image)"
+GRAIN_IMAGE_TAG="$(cfg grain_image_tag)"
+GRAIN_IMAGE_PULL_USER="$(cfg grain_image_pull_user)"
 GITHUB_HOST="$(cfg github_host)"
 CREDENTIAL_NAME="$(cfg credential_name)"
 DEFAULT_TARGET_REPO="$(cfg default_target_repo)"
@@ -160,6 +171,10 @@ GITHUB_APP_INSTALLATION_ID="$(md_optional instance/attributes/grain-github-app-i
 GITHUB_APP_PRIVATE_KEY="$(md_optional instance/attributes/grain-github-app-private-key)"
 GEMINI_API_KEY="$(md_optional instance/attributes/grain-gemini-api-key)"
 CLAUDE_OAUTH_TOKEN="$(md_optional instance/attributes/grain-claude-oauth-token)"
+# Only needed for a private image package; ghcr.io/bwsalmon/grain's is
+# public and pulls anonymously (terraform/gcp-v2/variables.tf's own
+# grain_image_pull_user).
+IMAGE_PULL_TOKEN="$(md_optional instance/attributes/grain-image-pull-token)"
 
 MINTER_KEY_FILE=""
 minter_key_json="$(md_optional instance/attributes/grain-gcp-minter-key)"
@@ -203,6 +218,8 @@ fi
 # it.
 log "config for this generation:"
 log "  grain_ref=$GRAIN_REF ui_port=$UI_PORT slots=$SLOTS poll_interval=$POLL_INTERVAL"
+log "  image=${GRAIN_IMAGE}:${GRAIN_IMAGE_TAG:-<follows grain_ref>}" \
+    "| pull credential: $([ -n "$IMAGE_PULL_TOKEN" ] && echo present || echo 'absent, pulling anonymously')"
 log "  target_repos=${TARGET_REPOS:-<empty: every task parks>}"
 log "  default_target_repo=${DEFAULT_TARGET_REPO:-<empty: a task with no repo parks>}"
 log "  gcp_project=${GCP_PROJECT:-<empty: gcp-key and gemini-key are disabled>}"
@@ -234,6 +251,10 @@ env \
   GRAIN_REPO_URL="$GRAIN_REPO_URL" \
   GRAIN_REF="$GRAIN_REF" \
   GRAIN_SRC_DIR="$SRC_DIR" \
+  GRAIN_IMAGE="$GRAIN_IMAGE" \
+  GRAIN_IMAGE_TAG="$GRAIN_IMAGE_TAG" \
+  GRAIN_IMAGE_PULL_USER="$GRAIN_IMAGE_PULL_USER" \
+  GRAIN_IMAGE_PULL_TOKEN="$IMAGE_PULL_TOKEN" \
   GRAIN_UI_ADDR="0.0.0.0:${UI_PORT}" \
   GRAIN_ENABLE_UI_UPGRADE=0 \
   GRAIN_SLOTS="$SLOTS" \

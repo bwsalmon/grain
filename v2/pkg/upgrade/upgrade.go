@@ -141,6 +141,14 @@ type Config struct {
 	// triggers -- an in-memory field would be lost the moment the new
 	// binary's own process replaces this one. Required.
 	StatusFile string
+	// Image, when non-nil, replaces the checkout/build/install steps
+	// with pulling the image CI published for the branch and pointing
+	// the deployment at it -- what "upgrade" means on a host that runs
+	// grain from a container rather than from a binary it built itself
+	// (image.go, bwsalmon/agents#645). SrcDir, BuildCmd, BuiltBinary and
+	// InstallPath are unused when it is set; every other field means
+	// exactly what it does otherwise.
+	Image *ImageConfig
 }
 
 // defaultTimeout is Config.Timeout's fallback when left at its zero
@@ -296,45 +304,18 @@ func (u *Upgrader) run(branch string, status Status) {
 		_ = writeStatus(u.cfg.StatusFile, status)
 	}
 
-	if err := u.checkout(ctx, branch); err != nil {
-		fail(fmt.Errorf("checkout: %w", err))
-		return
-	}
-	if err := u.build(ctx); err != nil {
-		fail(fmt.Errorf("build: %w", err))
-		return
-	}
-	hadPrevious, err := u.backupInstalled()
+	detail, err := u.stage(ctx, branch)
 	if err != nil {
-		fail(fmt.Errorf("backing up previous binary: %w", err))
+		fail(err)
 		return
 	}
-	if err := u.install(); err != nil {
-		fail(fmt.Errorf("install: %w", err))
-		return
-	}
-	if len(u.cfg.HealthCheckArgs) > 0 {
-		if err := u.healthCheck(ctx); err != nil {
-			if rerr := u.rollbackInstalled(hadPrevious); rerr != nil {
-				fail(fmt.Errorf("health check failed (%w) and rollback also failed: %v", err, rerr))
-				return
-			}
-			if hadPrevious {
-				fail(fmt.Errorf("health check failed on newly installed binary, rolled back to the previous one: %w", err))
-			} else {
-				fail(fmt.Errorf("health check failed on newly installed binary, removed it (no previous binary to roll back to): %w", err))
-			}
-			return
-		}
-	}
-	u.removeBackup()
 
 	finished := time.Now().UTC()
 	status.Phase = PhaseOK
-	status.Detail = "built and installed"
+	status.Detail = detail
 	status.FinishedAt = &finished
 	if len(u.cfg.RestartCmd) > 0 {
-		status.Detail = "built and installed; restarting"
+		status.Detail = detail + "; restarting"
 	}
 	if err := writeStatus(u.cfg.StatusFile, status); err != nil {
 		// Nothing else to do with this error: the upgrade itself
@@ -353,6 +334,75 @@ func (u *Upgrader) run(branch string, status Status) {
 	// not a bug.
 	cmd := exec.CommandContext(ctx, u.cfg.RestartCmd[0], u.cfg.RestartCmd[1:]...)
 	_ = cmd.Run()
+}
+
+// stage does everything an upgrade does short of announcing success and
+// restarting: whichever of the two pipelines this deployment is
+// configured for, run to completion. What it returns is the Detail line
+// Status carries afterwards -- "built and installed", or the image now
+// recorded -- since the two paths leave behind genuinely different
+// things and a status saying "built" on a host that never built
+// anything would be a lie an operator has to decode.
+func (u *Upgrader) stage(ctx context.Context, branch string) (string, error) {
+	if u.cfg.Image != nil {
+		return u.stageImage(ctx, branch)
+	}
+	return u.stageBinary(ctx, branch)
+}
+
+// stageImage is the container path (image.go): pull, health-check, and
+// only then point the deployment's ref file at what was pulled.
+func (u *Upgrader) stageImage(ctx context.Context, branch string) (string, error) {
+	ref, err := u.imageRef(branch)
+	if err != nil {
+		return "", err
+	}
+	if err := u.pullImage(ctx, ref); err != nil {
+		return "", fmt.Errorf("pull: %w", err)
+	}
+	if len(u.cfg.HealthCheckArgs) > 0 {
+		if err := u.healthCheckImage(ctx, ref); err != nil {
+			// Nothing to roll back: the ref file below is still
+			// untouched, so this deployment goes on running exactly the
+			// image it was already running.
+			return "", fmt.Errorf("health check failed on the pulled image, leaving this deployment on the image it already runs: %w", err)
+		}
+	}
+	if err := u.writeImageRef(ref); err != nil {
+		return "", fmt.Errorf("recording %s: %w", u.cfg.Image.RefFile, err)
+	}
+	return "pulled " + ref, nil
+}
+
+// stageBinary is the original path: fetch the branch into a checkout on
+// disk, build it, and install the result over the running binary.
+func (u *Upgrader) stageBinary(ctx context.Context, branch string) (string, error) {
+	if err := u.checkout(ctx, branch); err != nil {
+		return "", fmt.Errorf("checkout: %w", err)
+	}
+	if err := u.build(ctx); err != nil {
+		return "", fmt.Errorf("build: %w", err)
+	}
+	hadPrevious, err := u.backupInstalled()
+	if err != nil {
+		return "", fmt.Errorf("backing up previous binary: %w", err)
+	}
+	if err := u.install(); err != nil {
+		return "", fmt.Errorf("install: %w", err)
+	}
+	if len(u.cfg.HealthCheckArgs) > 0 {
+		if err := u.healthCheck(ctx); err != nil {
+			if rerr := u.rollbackInstalled(hadPrevious); rerr != nil {
+				return "", fmt.Errorf("health check failed (%w) and rollback also failed: %v", err, rerr)
+			}
+			if hadPrevious {
+				return "", fmt.Errorf("health check failed on newly installed binary, rolled back to the previous one: %w", err)
+			}
+			return "", fmt.Errorf("health check failed on newly installed binary, removed it (no previous binary to roll back to): %w", err)
+		}
+	}
+	u.removeBackup()
+	return "built and installed", nil
 }
 
 // checkout fetches branch from origin and hard-resets the checkout onto

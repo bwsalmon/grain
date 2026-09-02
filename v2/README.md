@@ -1608,22 +1608,26 @@ the framework became a stored setting, and then a live per-task choice,
 the binary was never brought along. A deployment could therefore offer
 "claude" in Settings, report its OAuth token as set, and fail every run
 it dispatched with `executable file not found in $PATH`.
-`scripts/setup.sh` installs it now (`install_claude_cli`, on every run
-and whichever framework is currently selected, since selecting the other
-one reaches the very next dispatch), symlinks it onto `/usr/local/bin`
-where systemd's own default `$PATH` finds it, and reports its presence
-in the readiness summary alongside the two credentials. A failed
-download is never fatal, so the error path is real, and says how to
-install the CLI by hand or name an existing copy with
-`GRAIN_CLAUDE_PATH`.
+`scripts/setup.sh` closed that with an `install_claude_cli` that ran the
+CLI's own installer on every deployed host, on every run and whichever
+framework was currently selected (selecting the other one reaches the
+very next dispatch). bwsalmon/agents#645 moved it one step earlier:
+`v2/Dockerfile` installs it into the deployment image, in CI, so its
+presence is settled when the image is built rather than depending on
+every deployed host being able to reach claude.ai at deploy time -- see
+"The deployment is a container" below. The readiness summary still
+reports it alongside the two credentials, asked of the image rather than
+of the host, and `GRAIN_CLAUDE_PATH` still names an operator's own copy,
+which `setup.sh` bind-mounts into the container at that same path.
 
 Replacing the home-grown Gemini runtime with the Antigravity CLI ("The
 agent runtime is a CLI now", above) gave the other framework the same
-requirement: `agy` is a binary too. It is not installed here, because
-this repo has no verified installer URL for it to run -- so
-`scripts/setup.sh` checks for it instead (`verify_agent_cli`) and warns,
-loudly and non-fatally, when neither `agy` is on `$PATH` nor
-`GRAIN_AGY_PATH` names an executable. `buildAntigravityFramework` fails
+requirement: `agy` is a binary too. It is in neither the image nor the
+host install, because this repo has no verified installer URL for it to
+run -- so `scripts/setup.sh` checks for it instead (`verify_agent_cli`)
+and warns, loudly and non-fatally, when `GRAIN_AGY_PATH` does not name an
+executable on the host (which is what a container deployment has to have,
+since that path is what gets mounted in). `buildAntigravityFramework` fails
 the same way `buildClaudeFramework` does when it is missing: naming the
 install, not the `$PATH` lookup, so an operator reads a missing package
 rather than a broken grain.
@@ -1712,25 +1716,25 @@ yet (see "What this does not have yet" above), and its daemon already
 defaults to `orchestrator.HostSandboxes` — plain host directories, not a
 VM — so a controller VM would have bought nothing v1's own shape needed
 for a different reason (isolating a real per-task sandbox, which v2 does
-not have either way yet). It builds with `make container-build`, so
-`git`, `docker` and `make` are the only things it needs of the host,
-and it installs all three itself on a vanilla Debian VM that has none
-of them (`ensure_git`, `ensure_docker`, `ensure_make` --
-bwsalmon/agents#617: until then, only `terraform/gcp-v2/files/deploy.sh`
-guaranteed `git` and `docker` before ever invoking this script, which
-was no help to a host that reaches this script the way this section's
-own opening line describes -- cloning the repo and running it
-directly, no Terraform involved); it also re-runs itself when the
-update it just pulled
-replaced the script mid-run, so a deploy never builds with the copy it
+not have either way yet). It *pulls* what it deploys rather than
+building it — see "The deployment is a container" below — so `git` and
+`docker` are the only things it needs of the host, and it installs both
+itself on a vanilla Debian VM that has neither (`ensure_git`,
+`ensure_docker` -- bwsalmon/agents#617: until then, only
+`terraform/gcp-v2/files/deploy.sh` guaranteed them before ever invoking
+this script, which was no help to a host that reaches this script the
+way this section's own opening line describes -- cloning the repo and
+running it directly, no Terraform involved); it also re-runs itself when
+the update it just pulled
+replaced the script mid-run, so a deploy never proceeds with the copy it
 started with (`reexec_if_updated`). There used to be a second service
 (`grain-ui.service`) and, before
 bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt sql-server`
 container behind it, needed only because a daemon and a UI writing the
 same store used to mean two writers ("The UI and the CLI talk to the
 daemon over REST", above) — bwsalmon/agents#363 folded the UI into the
-daemon itself, so `docker` is no longer needed at runtime either, only to
-build. Safe to re-run: it is the installer and the
+daemon itself, so there is still exactly one service here and no store
+container. Safe to re-run: it is the installer and the
 updater both, seeding a secret or a config value only the first time and
 leaving anything already on disk alone every time after. `./setup.sh
 --help` lists every setting.
@@ -1791,6 +1795,89 @@ manually we may want to invoke an agent" for the option this leaves open,
 should the list of manual steps grow long enough on a real project to be
 worth it.
 
+## The deployment is a container
+
+Everything above described a deployment that a host *built*: clone the
+repo, run `make container-build`, install a binary, run it under systemd
+with whatever else the machine happened to have. bwsalmon/agents#645
+replaced that with one artifact. `v2/Dockerfile` builds an image carrying
+`grain` and every binary it shells out to — `git`, the docker CLI,
+`konturctl`, the `claude` CLI —
+`.github/workflows/build-artifacts.yml` builds and pushes it to GHCR on
+every commit, and `scripts/setup.sh` pulls it.
+
+What that buys is not build speed, though a deploy did stop costing
+several minutes of Go and npm. It is that the set of things that have to
+be true of a deployed host shrank to `git` and `docker`. Before, a host
+could be running the right commit and still fail every dispatch because
+its `claude` CLI install had 403'd months ago (`install_claude_cli` was
+non-fatal on purpose — refusing to deploy over a blocked download would
+have been worse), or because a `konturctl` built from a stale vendored
+tree was still on its `PATH`, or because the deploy died on `make:
+command not found` for a package nobody lists. None of those states can
+exist now: the binaries and the daemon are one thing, versioned together,
+and what CI proved buildable is byte-for-byte what runs.
+
+Three tags per commit, each answering a different question:
+`sha-<short sha>` is exactly what is running and can never move;
+`<branch>` — that branch's name with `/` replaced by `-`, since a docker
+tag may not contain one — is what a deployment tracking a branch follows,
+and what the Upgrade button resolves; `latest` is `main`'s, under the
+name a human types. The image job runs on every branch, not just `main`,
+precisely because of the middle one: a branch with no image published for
+it is a branch nobody can upgrade onto. The two jobs that publish a
+*shared* name (the `build-latest` release, `kontur-sandbox:latest`) stay
+pinned to `main`.
+
+`grain-daemon.service` is a `docker run` of that image. The unit itself
+runs as root, because a docker client has to reach a root-owned socket to
+ask for anything; the *container* runs as `$GRAIN_USER`'s own uid:gid, so
+the store, the secrets database and every sandbox working tree come out
+owned exactly as they were before any of this was containerized.
+`setup.sh`'s `docker_run_args` is the whole list of what the process is
+given, and the reasoning per entry lives there; the shape of it is: host
+networking (the UI's port, and the git proxy every sandbox — a kontur VM
+in its own netns included — has to reach), the data/sandbox/source
+directories bind-mounted **at the paths they have on the host**, the
+journal read-only for the UI's Logs pane, and the docker socket only when
+kontur sandboxing or the Upgrade button actually needs it. Same-path
+mounting is not tidiness: `konturctl` writes a VM's disk overlay at a
+path and then hands that same path to the host's docker daemon as a bind
+mount, so a path that meant two different directories would silently
+produce a VM with the wrong disk.
+
+Two things a container cannot do for itself, and how it asks instead.
+Binding port 80 (`setup.sh`'s own default `-ui-addr`) needs
+`CAP_NET_BIND_SERVICE`, and `--cap-add` alone grants a non-root process
+nothing — so the image gives the `grain` binary the matching *file*
+capability, which turns that bounding-set entry into a grant for that one
+binary and for nothing else in the container, a task's own `bash -c`
+included. And rebooting the host, or restarting the service, reaches a
+systemd that is not there: the daemon touches a file under
+`$GRAIN_DATA_DIR/control` and a `.path` unit on the host turns it into
+the real command (`write_control_units`; `-reboot-cmd` and
+`-upgrade-restart-cmd` are what point it at those files). That replaced
+both `NOPASSWD` sudoers drop-ins this used to install, and grants
+strictly less — there is no sudo rule left to widen, and the only two
+things the daemon can cause are the two those units name.
+
+`grain` and `konturctl` are still on the host's `PATH`, as two-line
+wrappers around the same image (`install_cli_wrappers`), so an operator's
+`grain list` and `kontur-diag.sh`'s `konturctl vm list` reach exactly the
+build the service is running rather than a host copy that can drift from
+it. `setup.sh` uses the `grain` one itself, for `grain schema-version`
+and `grain secrets`.
+
+What stayed on the host, deliberately: the git checkout. It is no longer
+what grain is built from, but it is still where `setup.sh` itself comes
+from (and re-execs from, mid-run), where `packer/kontur`'s guest and OCI
+image builds run from, and what the self-debug capability reads grain's
+own source out of — mounted read-only into the container for that last
+one. `agy` is the other: the Antigravity CLI is not in the image because
+this repo has no verified installer URL to bake one in with ("The agent
+runtime is a CLI now", above), so `GRAIN_AGY_PATH` names a copy on the
+host and `setup.sh` bind-mounts it in at that same path.
+
 ## Upgrading from the UI
 
 bwsalmon/agents#396 (filed "For v2") asked for a specific, narrow thing:
@@ -1824,31 +1911,46 @@ unresponsive docker registry used to leave `GET /api/upgrade` reporting
 `ErrUpgradeInProgress` short of restarting the whole daemon process by
 hand.
 
-All three flags are empty by default, which disables the feature
-entirely (the UI's own Upgrade pane reports itself unavailable, the same
-convention the Secrets pane already uses for its own optional
-`-server-data-dir` wiring). `scripts/setup.sh` wires them up for the one
-deployment shape it knows about: the real binary lives at
-`$GRAIN_DATA_DIR/bin/grain` rather than `/usr/local/bin/grain` directly
-(a stable symlink points there instead, for an operator's own shell), so
-that `$GRAIN_USER` — otherwise unprivileged — can overwrite it on a later
-upgrade with no sudo of its own; `ensure_self_upgrade` gives that same
-account ownership of its own checkout, membership in the `docker` group,
-and one exact, `NOPASSWD` sudoers line to restart
-`grain-daemon.service` — never a wildcard, matching
-`provision/controller.sh`'s own "software gate, not infra gate"
-self-repair grant for v1. That is also why "restart the host" above
-means restarting the service, not `systemctl reboot`ing the machine: the
-binary this pipeline just built is already on disk at the path the
-systemd unit's own `ExecStart` names, unchanged across the upgrade, so
-bringing the service back up is enough.
+Every flag is empty by default, which disables the feature entirely (the
+UI's own Upgrade pane reports itself unavailable, the same convention the
+Secrets pane already uses for its own optional `-server-data-dir`
+wiring).
+
+Since bwsalmon/agents#645 there are two pipelines behind that one button,
+and `Config.Image` picks which (`pkg/upgrade/image.go`). A deployment
+that runs from an image has no checkout to fetch into, no toolchain to
+build with, and a binary at `-upgrade-install-path` that is not what the
+service runs — so "upgrade to branch X" becomes: pull
+`-upgrade-image:<tag for X>` (that branch with `/` replaced by `-`, the
+same substitution CI makes when it pushes — `TagForBranch`), run it once
+with `schema-version` as a health check, and write one
+`GRAIN_IMAGE=<ref>` line into `-upgrade-image-ref-file` before restarting.
+
+The unit reads that file as an `EnvironmentFile` and interpolates it into
+its own `ExecStart`, which is the whole mechanism: an upgrade repoints a
+deployment by writing one line, with no systemd unit to rewrite, no root
+anywhere in the path, and the same file `setup.sh` itself writes on every
+run — so the script and the button are two ways of doing one thing rather
+than two mechanisms that can disagree. It is also strictly simpler than
+the binary path in one way worth naming: there is no rollback, because
+the health check runs against the pulled image *before* the ref file is
+touched at all, so a failure leaves the deployment pointing exactly where
+it already pointed.
+
+`scripts/setup.sh` wires up the image path for the one deployment shape
+it knows about, and the restart it names is a touch of
+`$GRAIN_DATA_DIR/control/restart` rather than `sudo systemctl restart`:
+see "The deployment is a container" above for that channel and why a
+container needs one. `-upgrade-src-dir` is still passed alongside, but no
+longer means "build here" — with `-upgrade-image` set nothing builds, and
+that flag is now only what `grantTools` reads grain's own source out of
+for the self-debug capability.
 
 `GRAIN_ENABLE_UI_UPGRADE` (default `1`) is the escape hatch for a
 deployment shape that already has its own rollout mechanism and cannot
-tolerate a second one racing it: set to `0`, `setup.sh` skips
-`ensure_self_upgrade` and leaves the three upgrade flags off entirely, so
-the daemon starts with the feature disabled, same as if none of this
-section existed. `terraform/gcp-v2`'s own metadata-driven rollout
+tolerate a second one racing it: set to `0`, `setup.sh` leaves the
+upgrade flags off entirely, so the daemon starts with the feature
+disabled, same as if none of this section existed. `terraform/gcp-v2`'s own metadata-driven rollout
 (`config-sync.sh`/`deploy.sh` — which watches the
 `grain-deploy-generation` instance-metadata attribute Terraform writes,
 and re-runs `deploy.sh`, and through it `setup.sh`, from there) sets

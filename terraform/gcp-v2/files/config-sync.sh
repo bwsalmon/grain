@@ -19,9 +19,13 @@ readonly SELF="/opt/grain-deploy/config-sync.sh"
 readonly DEPLOY="/opt/grain-deploy/deploy.sh"
 readonly STATE="/var/lib/grain/.deploy-state"
 readonly WAIT_SECS=300
-# Generous: a cold `make container-build` pulls a Go+Node builder image,
-# downloads every Go module and npm package, and compiles both a Go
-# binary and a Vite frontend, on top of the daemon's own restart.
+# Generous, though less of it is spent on grain itself than it used to
+# be: the deploy no longer builds a binary here at all -- it pulls the
+# image CI published (bwsalmon/agents#645) -- but a kontur deployment's
+# first run still builds its own guest image with debootstrap against a
+# real Debian mirror (v2/scripts/setup.sh's ensure_kontur_images_build),
+# which is minutes, and a first pull of a several-hundred-megabyte image
+# on a slow link is not free either.
 readonly DEPLOY_TIMEOUT_SECS=2700
 
 log() { echo "grain-v2-config-sync: $*"; }

@@ -74,6 +74,14 @@
 #                                      from the same keypair, and rotating one without also
 #                                      rebuilding the guest image with the other leaves them
 #                                      mismatched.
+#   GRAIN_IMAGE_PULL_TOKEN             the password half of a `docker login` against the
+#                                      registry grain_image lives in, for a deployment
+#                                      running a private image (a GitHub PAT with
+#                                      read:packages, for a private GHCR package). Optional
+#                                      and normally unset: ghcr.io/bwsalmon/grain's own
+#                                      package is public, and the host pulls anonymously.
+#                                      The username half is not a secret and is a Terraform
+#                                      input instead (grain_image_pull_user)
 #   MINTER_SERVICE_ACCOUNT             terraform output minter_service_account -- if set,
 #                                      mints a fresh key for it and pushes that too (see below)
 set -euo pipefail
@@ -106,6 +114,12 @@ push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
 push_secret "grain-claude-oauth-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 push_secret "grain-kontur-ssh-key" "${GRAIN_KONTUR_SSH_KEY:-}"
+# Only for a deployment whose grain_image lives in a registry that needs
+# credentials -- ghcr.io/bwsalmon/grain's own package is public and pulls
+# anonymously, so this is empty (and skipped) in the ordinary case. The
+# username half is not a secret and is a Terraform input
+# (grain_image_pull_user); this is the token.
+push_secret "grain-image-pull-token" "${GRAIN_IMAGE_PULL_TOKEN:-}"
 
 # The credential pkg/capability/gcpkey authenticates as to mint (and
 # revoke) the agent account's per-task keys. Minted fresh on every run of
