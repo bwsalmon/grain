@@ -154,8 +154,25 @@ GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 # host an operator cannot get a shell on.
 GRAIN_CLAUDE_CODE_OAUTH_TOKEN="${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 # Path to the claude CLI agent/claude runs as a subprocess. Empty
-# resolves "claude" against the daemon's own $PATH.
+# resolves "claude" against the daemon's own $PATH -- which is where
+# install_claude_cli below puts it.
 GRAIN_CLAUDE_PATH="${GRAIN_CLAUDE_PATH:-}"
+# Whether to install the Claude Code CLI on this host. 1 (the default)
+# installs it on every run; 0 skips it, for an air-gapped host or one
+# whose CLI is managed some other way (name that copy with
+# GRAIN_CLAUDE_PATH). Installed even on a deployment currently running
+# the gemini framework, because which framework a run uses is a live UI
+# choice now (Settings -> Agent frameworks, and a per-task override):
+# switching it takes effect on the very next dispatch, with no restart
+# and no re-run of this script, so the binary has to already be there
+# when that happens.
+GRAIN_INSTALL_CLAUDE_CLI="${GRAIN_INSTALL_CLAUDE_CLI:-1}"
+# Where the CLI's own installer is pointed. It installs under $HOME, and
+# $GRAIN_USER deliberately has no home directory (ensure_user's
+# --no-create-home), so it gets one of its own here rather than a home
+# for the service account; /usr/local/bin/claude is symlinked to what
+# lands in it, which is what puts it on the daemon's $PATH.
+GRAIN_CLAUDE_CLI_DIR="${GRAIN_CLAUDE_CLI_DIR:-/opt/claude-cli}"
 
 GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
@@ -305,7 +322,19 @@ Recognized variables:
                              deployment that might use either wants both
                              credentials
   GRAIN_CLAUDE_PATH         path to the claude CLI (default: resolve
-                             "claude" on the daemon's own PATH)
+                             "claude" on the daemon's own PATH, which is
+                             where GRAIN_INSTALL_CLAUDE_CLI puts it).
+                             Setting this also skips that install
+  GRAIN_INSTALL_CLAUDE_CLI  install the Claude Code CLI on this host (default
+                             1). The "claude" agent framework execs it per
+                             dispatch, and it is installed whichever framework
+                             is currently selected, since selecting the other
+                             one is a live UI change that reaches the very next
+                             run. 0 skips it: an air-gapped host, or one whose
+                             CLI is managed elsewhere. A failed download is
+                             never fatal -- the deploy carries on and says so
+  GRAIN_CLAUDE_CLI_DIR      where that install lands (default /opt/claude-cli);
+                             /usr/local/bin/claude is symlinked into it
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
@@ -506,6 +535,82 @@ ensure_make() {
   fi
 }
 ensure_make
+
+# The Claude Code CLI agent/claude runs as a subprocess
+# (cmd/grain/daemon.go's buildClaudeFramework, which resolves a bare
+# "claude" against the daemon's own $PATH). Nothing in the v2 path ever
+# installed it: v1's provision/controller.sh did, for the grain-agent
+# account `claude -p` ran as there, and when v2 gained an agent-framework
+# setting (bwsalmon/agents#609) and then made it a live, per-task choice
+# (#615, #485) nothing brought the binary along. The result was a
+# deployment that offers "claude" in Settings, reports its OAuth token as
+# set, and then fails every run it dispatches with "executable file not
+# found in $PATH".
+#
+# Unlike ensure_git/ensure_docker/ensure_make above, a failure here is
+# not fatal: a gemini deployment does not need this binary at all, and
+# refusing to deploy over a blocked download (an air-gapped host, a proxy
+# that denies claude.ai) would be a far worse outcome than deploying
+# without a framework the operator may never select. It logs what it
+# could not do instead, and the daemon's own error names this script when
+# a run does need it.
+install_claude_cli() {
+  [ "$GRAIN_INSTALL_CLAUDE_CLI" = "1" ] || return 0
+  # An operator-named copy is the operator's to manage.
+  [ -n "$GRAIN_CLAUDE_PATH" ] && return 0
+
+  local binary="$GRAIN_CLAUDE_CLI_DIR/.local/bin/claude"
+  local had_it=0
+  [ -x "$binary" ] && had_it=1
+
+  # The installer is fetched to a file and then run, rather than piped
+  # straight into bash: a pipeline's exit status is its *last* command's,
+  # so `curl ... | bash` reports success even when curl got a 403 and bash
+  # merely ran an empty script -- which is precisely the air-gapped case
+  # this has to be able to tell apart from a working install.
+  log "Installing the Claude Code CLI into $GRAIN_CLAUDE_CLI_DIR"
+  install -d -m0755 "$GRAIN_CLAUDE_CLI_DIR"
+  local script
+  script="$(mktemp)"
+  local failure=""
+  if ! curl -fsSL --max-time 120 https://claude.ai/install.sh -o "$script"; then
+    failure="claude.ai could not be reached from this host"
+  elif [ ! -s "$script" ]; then
+    failure="claude.ai returned an empty installer"
+  elif ! HOME="$GRAIN_CLAUDE_CLI_DIR" bash "$script" >/dev/null 2>&1; then
+    failure="the Claude Code installer exited non-zero"
+  elif [ ! -x "$binary" ]; then
+    failure="the Claude Code installer left no binary in $GRAIN_CLAUDE_CLI_DIR/.local/bin"
+  fi
+  rm -f "$script"
+
+  if [ -n "$failure" ]; then
+    # Never fatal: a gemini deployment does not need this binary at all,
+    # and refusing to deploy over a blocked download would be a far worse
+    # outcome than deploying without a framework the operator may never
+    # select. The readiness summary says so again at the end.
+    if [ "$had_it" = "1" ]; then
+      log "  $failure; keeping the copy already installed"
+    else
+      log "  $failure."
+      log "  Runs using the \"gemini\" agent framework are unaffected. To use \"claude\", install"
+      log "  the CLI on this host by hand and re-run, or set GRAIN_CLAUDE_PATH to an existing copy."
+      return 0
+    fi
+  fi
+
+  # Symlinked onto systemd's own default PATH rather than exported into
+  # the unit: /usr/local/bin is already on it, so the daemon's bare
+  # exec.LookPath("claude") finds this with nothing else to configure --
+  # v1's provision/controller.sh made the same symlink, for the same
+  # reason.
+  ln -sf "$binary" /usr/local/bin/claude
+  # World-readable: the daemon runs as $GRAIN_USER, not as whoever ran
+  # this script.
+  chmod -R a+rX "$GRAIN_CLAUDE_CLI_DIR" 2>/dev/null || true
+  log "  claude CLI ready at /usr/local/bin/claude"
+}
+install_claude_cli
 
 if ! docker info >/dev/null 2>&1; then
   echo "setup.sh: 'docker info' failed -- is the Docker daemon running? (only needed to build, via make container-build)" >&2
@@ -1346,6 +1451,15 @@ setup_data_dir() {
   # -o/-g even against a directory that already exists (this file's own
   # comment on sync_repo's mkdir-vs-install-d distinction).
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/bin"
+  # A real, writable HOME for the daemon, exported by grain-daemon.service
+  # (write_systemd_units). $GRAIN_USER is created --no-create-home, so the
+  # home its passwd entry names (/home/grain) does not exist -- which is
+  # fine for the daemon itself, and not fine for the claude CLI it now
+  # execs per dispatch: that writes its own state under $HOME, and would
+  # fail on every run against a directory that isn't there. Under the data
+  # dir, not /home, so it lives on the same disk as everything else this
+  # deployment keeps and is backed up with it.
+  install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/home"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
   # grain-daemon.service's own -data-dir/store, embedded SQLite -- the
@@ -1663,6 +1777,11 @@ Group=${GRAIN_USER}
 # the port and why it's bound to loopback only.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# systemd would otherwise set HOME from ${GRAIN_USER}'s passwd entry,
+# which names a directory ensure_user never creates -- see setup_data_dir
+# on why the claude CLI needs this to be somewhere that exists and is
+# writable.
+Environment=HOME=${GRAIN_DATA_DIR}/home
 ExecStart=/usr/local/bin/grain ${daemon_args[*]}
 Restart=on-failure
 RestartSec=5
@@ -1719,6 +1838,15 @@ enable_services() {
 # list` holds to.
 report_readiness() {
   local github="MISSING" gemini="MISSING" claude="MISSING" minter="MISSING" daemon ready=1
+  # The binary, not the token: they are independent, and a deployment
+  # with the token set and no CLI is exactly the state that fails every
+  # claude run with "executable file not found in $PATH".
+  local claude_cli="MISSING"
+  if [ -n "$GRAIN_CLAUDE_PATH" ]; then
+    [ -x "$GRAIN_CLAUDE_PATH" ] && claude_cli="$GRAIN_CLAUDE_PATH" || claude_cli="MISSING (GRAIN_CLAUDE_PATH names nothing executable)"
+  elif command -v claude >/dev/null 2>&1; then
+    claude_cli="$(command -v claude)"
+  fi
 
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
@@ -1748,6 +1876,7 @@ report_readiness() {
   echo "    GitHub credential: $github"
   echo "    Gemini key:        $gemini"
   echo "    Claude token:      $claude"
+  echo "    claude CLI:        $claude_cli"
   echo "    GCP minter key:    $minter"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
@@ -1769,6 +1898,16 @@ report_readiness() {
     echo "       but every dispatched run fails at setup. Set one in the UI (Settings ->"
     echo "       Agent frameworks) or re-run with GRAIN_GEMINI_API_KEY/GRAIN_CLAUDE_CODE_OAUTH_TOKEN."
   fi
+  case "$claude_cli" in
+    MISSING*)
+      # Not a readiness failure: a gemini deployment neither needs nor
+      # misses this. It is still worth a line, because nothing in the UI
+      # says the framework it offers cannot run here.
+      echo "    -- no claude CLI on this host: the \"claude\" agent framework cannot run until"
+      echo "       there is one (Settings -> Agent framework, and the per-task override, still"
+      echo "       offer it). Re-run with network access to claude.ai, or set GRAIN_CLAUDE_PATH."
+      ;;
+  esac
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then
     ready=0
     echo "    !! With no minter credential the gcp-key and gemini-key capabilities cannot"

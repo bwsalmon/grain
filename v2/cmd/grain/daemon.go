@@ -760,7 +760,18 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 	if claudePath == "" {
 		resolved, err := exec.LookPath("claude")
 		if err != nil {
-			return nil, fmt.Errorf("resolving the claude binary (-claude-path is unset, and none found on $PATH): %w", err)
+			// Named as an install, not as a lookup failure. Unlike the
+			// Gemini framework, whose every requirement is a credential
+			// the UI can set, this one needs a binary on the host -- and
+			// an operator who has just switched frameworks in Settings
+			// (where nothing mentions a CLI at all) reads a bare
+			// "executable file not found in $PATH" as grain being broken
+			// rather than as a host that is missing a package.
+			// scripts/setup.sh installs it, so re-running a deploy is
+			// the fix for a deployment that predates it.
+			return nil, fmt.Errorf("the claude CLI is not installed on this host: %w -- "+
+				"re-run scripts/setup.sh (it installs the CLI), install it by hand "+
+				"(https://claude.ai/install.sh), or point -claude-path at an existing copy", err)
 		}
 		claudePath = resolved
 	}
