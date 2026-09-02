@@ -108,8 +108,48 @@ if ! gcloud storage buckets describe "gs://$bucket" >/dev/null 2>&1; then
   fi
 
   echo "--- creating the state bucket gs://$bucket (it does not exist yet)"
-  gcloud storage buckets create "gs://$bucket" \
-    --project="$project" --location="$region" --uniform-bucket-level-access
+  if ! gcloud storage buckets create "gs://$bucket" \
+       --project="$project" --location="$region" --uniform-bucket-level-access; then
+    # Two things this message exists to say, because the 403 above says
+    # neither.
+    #
+    # First, whose permission was refused. GitHub masks the value of
+    # GCP_DEPLOYER_SERVICE_ACCOUNT, so gcloud's "denied for ***" *is*
+    # that secret: the identity being refused is whatever the config repo
+    # holds, which is not necessarily the account a role was granted to.
+    # A deployment whose secrets still name an older deployer
+    # authenticates fine and then fails exactly here.
+    #
+    # Second, and more often the real story: reaching this line at all
+    # means bootstrap-gcp.sh has not run for this project and prefix.
+    # That script creates this bucket itself, so a bootstrapped
+    # deployment never gets here -- if it is missing, bootstrap was run
+    # with a different --prefix, against a different project, or not at
+    # all.
+    echo "::error::could not create gs://$bucket in $project." >&2
+    echo >&2
+    echo "Reaching this line means bootstrap-gcp.sh has not run for this project and" >&2
+    echo "prefix: it creates this bucket itself, so a bootstrapped deployment never" >&2
+    echo "needs storage.buckets.create at deploy time. Check what actually exists:" >&2
+    echo >&2
+    echo "  gcloud storage buckets list --project=$project --format='value(name)' | grep tfstate" >&2
+    echo "  gcloud iam service-accounts list --project=$project --format='value(email)'" >&2
+    echo >&2
+    echo "and which identity holds the role, remembering that the account refused above" >&2
+    echo "is whatever GCP_DEPLOYER_SERVICE_ACCOUNT names, masked:" >&2
+    echo >&2
+    echo "  gcloud projects get-iam-policy $project \\" >&2
+    echo "    --flatten='bindings[].members' \\" >&2
+    echo "    --filter='bindings.role:roles/storage.admin' \\" >&2
+    echo "    --format='value(bindings.members)'" >&2
+    echo >&2
+    echo "The fix is usually to bootstrap with this deployment's own prefix, then set" >&2
+    echo "GCP_WORKLOAD_IDENTITY_PROVIDER and GCP_DEPLOYER_SERVICE_ACCOUNT to the two" >&2
+    echo "values it prints -- both, or the deploy keeps running as the old deployer:" >&2
+    echo >&2
+    echo "  ./terraform/gcp/bootstrap-gcp.sh --project $project --repo OWNER/CONFIG-REPO --prefix $prefix" >&2
+    exit 1
+  fi
 fi
 
 # Outside the `if`, deliberately: a bucket created by an older run of
