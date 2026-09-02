@@ -104,7 +104,7 @@ export function knownRepos(config, tasks) {
 // dead branch is suggested again for the next task, which fails the same
 // way, which makes it the newest again. The suggestion outlives the
 // branch forever, and every task filed from it is dead on arrival.
-const STALE_BASE_STATES = ["failed", "closed"];
+export const STALE_BASE_STATES = ["failed", "closed"];
 
 // lastBaseForRepo is the branch NewTaskOverlay prefills "Base branch"
 // with once a repo is picked (bwsalmon/agents#641): whatever base the
